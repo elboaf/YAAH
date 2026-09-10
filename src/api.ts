@@ -6,13 +6,32 @@ const IS_TAURI =
 const BASE = IS_TAURI ? 'http://127.0.0.1:8765' : ''
 const url = (p: string) => `${BASE}${p}`
 
+// Listen for backend spawn failures reported by the Tauri shell.
+export let backendStartupError: string | null = null
+if (typeof window !== 'undefined') {
+  window.addEventListener('backend-error', (e) => {
+    backendStartupError = (e as CustomEvent<{ message?: string }>).detail?.message ?? 'backend failed to start'
+  })
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url(path), {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`)
-  return res.json()
+  const text = await res.text()
+  // A JSON parse failure here almost always means an HTML page came back
+  // (SPA fallback / static server) because the API backend isn't reachable.
+  const contentType = res.headers.get('content-type') ?? ''
+  if (!contentType.includes('application/json')) {
+    throw new Error(
+      `${res.status}: expected JSON from ${url(path)} but got '${contentType || 'unknown'}'. ` +
+        (backendStartupError ??
+          `Is the API backend running on ${BASE || 'the vite proxy target (localhost:8765)'}?`),
+    )
+  }
+  if (!res.ok) throw new Error(`${res.status}: ${text}`)
+  return JSON.parse(text) as T
 }
 
 export interface ConversationRow {
