@@ -124,3 +124,109 @@ async def test_agent_tool_cycle(fake_model, tmp_path):
     roles = [m["role"] for m in msgs]
     # user, assistant(tool_call), tool, assistant(final)
     assert roles == ["user", "assistant", "tool", "assistant"]
+
+
+# ---------------------------------------------------------------- new tools
+
+@pytest.mark.asyncio
+async def test_create_file_refuses_overwrite(tmp_path):
+    ws = str(tmp_path)
+    r = await execute_tool("create_file", {"path": "n.txt", "content": "abc"}, ws)
+    assert "bytes_written" in r
+    r = await execute_tool("create_file", {"path": "n.txt", "content": "xyz"}, ws)
+    assert "already exists" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_move_and_delete_file(tmp_path):
+    ws = str(tmp_path)
+    await execute_tool("write_file", {"path": "old.txt", "content": "data"}, ws)
+    r = await execute_tool("move_file", {"src": "old.txt", "dst": "sub/new.txt"}, ws)
+    assert r.get("moved") is True
+    assert (tmp_path / "sub" / "new.txt").read_text() == "data"
+    r = await execute_tool("delete_file", {"path": "sub/new.txt"}, ws)
+    assert r.get("deleted") is True
+    assert not (tmp_path / "sub" / "new.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_search_files_content_and_glob(tmp_path):
+    ws = str(tmp_path)
+    (tmp_path / "a.py").write_text("def hello():\n    pass\n")
+    (tmp_path / "b.txt").write_text("hello world\n")
+
+    r = await execute_tool("search_files", {"pattern": "hello", "glob": "*.py"}, ws)
+    assert r["count"] == 1
+    assert r["matches"][0]["path"] == "a.py"
+
+    r = await execute_tool("search_files", {"glob": "*.txt"}, ws)
+    assert [m["path"] for m in r["matches"]] == ["b.txt"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_line_range(tmp_path):
+    ws = str(tmp_path)
+    await execute_tool("write_file", {"path": "big.txt", "content": "\n".join(f"l{i}" for i in range(1, 101))}, ws)
+    r = await execute_tool("read_file", {"path": "big.txt", "start_line": 10, "end_line": 12}, ws)
+    assert r["start_line"] == 10
+    assert "l10" in r["content"] and "l13" not in r["content"]
+    assert r["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_git_tools(tmp_path):
+    ws = str(tmp_path)
+    await execute_tool("bash", {"command": "git init -q && git config user.email t@t && git config user.name t"}, ws)
+    await execute_tool("write_file", {"path": "f.txt", "content": "v1"}, ws)
+    r = await execute_tool("git_status", {}, ws)
+    assert "f.txt" in r["output"]
+    await execute_tool("git_add", {}, ws)
+    r = await execute_tool("git_commit", {"message": "first"}, ws)
+    assert r["exit_code"] == 0
+    r = await execute_tool("git_status", {}, ws)
+    assert "f.txt" not in r["output"]  # clean tree
+
+
+@pytest.mark.asyncio
+async def test_search_escape_blocked(tmp_path):
+    r = await execute_tool("write_file", {"path": "../evil.txt", "content": "x"}, str(tmp_path))
+    assert "error" in r
+
+
+# ---------------------------------------------------------------- loop extras
+
+@pytest.mark.asyncio
+async def test_system_prompt_override(fake_model, tmp_path, monkeypatch):
+    from backend.db.database import create_conversation, update_conversation
+
+    cid = await create_conversation("t3")
+    await update_conversation(cid, system_prompt_override="You are a pirate.")
+    captured = {}
+
+    async def fake_chat(messages, tools=None, stream=True):
+        captured["system"] = messages[0]["content"]
+        return FakeStream([{"type": "content", "text": "arr"}, {"type": "finish"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    assert captured["system"] == "You are a pirate."
+
+
+@pytest.mark.asyncio
+async def test_agent_cancel(fake_model, tmp_path, monkeypatch):
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t4")
+    loop.cancel_agent(cid)  # cancel before start: nothing running, no-op event
+    fake_model.append([{"type": "content", "text": "x"}, {"type": "finish"}])
+
+    # register cancel after the first event by scripting via monkeypatch wrapper
+    async def fake_chat(messages, tools=None, stream=True):
+        loop.cancel_agent(cid)
+        return FakeStream([{"type": "content", "text": "should be cut off"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    events = await collect(loop.run_agent(cid, "go", str(tmp_path)))
+    # The stream starts before cancel takes effect, but the loop must stop
+    # before emitting 'done'
+    assert events[-1]["type"] == "stopped"

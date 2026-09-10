@@ -108,14 +108,3 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                     "type": "tool_calls",
                     "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
                 }
-
-
-def assistant_message_from_response(resp: dict) -> dict:
-    """Extract the assistant message (with optional tool_calls) from a
-    blocking response."""
-    msg = resp["choices"][0]["message"]
-    return {
-        "role": "assistant",
-        "content": msg.get("content") or "",
-        **({"tool_calls": msg["tool_calls"]} if msg.get("tool_calls") else {}),
-    }

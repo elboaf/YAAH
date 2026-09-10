@@ -80,6 +80,38 @@ async def list_conversations():
         await db.close()
 
 
+async def get_conversation(conversation_id: int) -> dict | None:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def update_conversation(conversation_id: int, **fields):
+    """Update allowed conversation fields (title, workspace, system_prompt_override)."""
+    allowed = {"title", "workspace", "system_prompt_override"}
+    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not updates:
+        return False
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    db = await get_db()
+    try:
+        await db.execute(
+            f"UPDATE conversations SET {sets},"
+            " updated_at = datetime('now') WHERE id = ?",
+            (*updates.values(), conversation_id),
+        )
+        await db.commit()
+        return True
+    finally:
+        await db.close()
+
+
 async def add_message(
     conversation_id: int,
     role: str,

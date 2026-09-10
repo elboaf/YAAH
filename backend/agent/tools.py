@@ -5,7 +5,10 @@ the model and an async executor. All paths are resolved against a workspace
 root and validated to prevent escapes.
 """
 import asyncio
+import fnmatch
 import json
+import os
+import re
 import shlex
 from pathlib import Path
 
@@ -50,12 +53,18 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file in the workspace.",
+            "description": (
+                "Read the contents of a file in the workspace. Large files are "
+                "returned in line-range chunks: use start_line/end_line to page "
+                "through, and the truncated/total_lines fields to navigate."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "offset_line": {"type": "integer", "description": "1-based start line"},
+                    "start_line": {"type": "integer", "description": "1-based first line to read"},
+                    "end_line": {"type": "integer", "description": "1-based last line to read"},
+                    "offset_line": {"type": "integer", "description": "Alias for start_line"},
                     "limit_lines": {"type": "integer", "description": "Max lines to return"},
                 },
                 "required": ["path"],
@@ -94,6 +103,133 @@ TOOLS_SCHEMA = [
                 },
                 "required": ["path", "old_text", "new_text"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_file",
+            "description": (
+                "Create a new file with content. Fails if the file already "
+                "exists; use write_file to overwrite."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete a file (or empty directory) inside the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_file",
+            "description": "Move or rename a file/directory within the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "Source path (relative)"},
+                    "dst": {"type": "string", "description": "Destination path (relative)"},
+                },
+                "required": ["src", "dst"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": (
+                "Search the workspace. Provide pattern to regex-search file "
+                "CONTENTS (with optional glob filter on filenames), or glob "
+                "alone to match file PATHS. Returns matches grouped by file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex to match against file contents"},
+                    "glob": {"type": "string", "description": "Filename glob filter, e.g. '*.py'"},
+                    "max_results": {"type": "integer", "description": "Max matching lines (default 100)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Show git working tree status for the workspace.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Show git diff. Set staged=true for staged changes, or pass a path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "staged": {"type": "boolean", "description": "Diff staged changes only"},
+                    "path": {"type": "string", "description": "Limit diff to this path"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_add",
+            "description": "Stage files in git. Omit paths to stage everything.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Commit staged changes with a message.",
+            "parameters": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_push",
+            "description": "Push commits to the remote.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_pull",
+            "description": "Pull and integrate changes from the remote.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
 ]
@@ -140,7 +276,14 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
         return {"exit_code": -1, "output": f"error: {e}", "timed_out": False, "truncated": False}
 
 
-async def read_file(workspace: str, path: str, offset_line: int = None, limit_lines: int = None) -> dict:
+async def read_file(
+    workspace: str,
+    path: str,
+    start_line: int = None,
+    end_line: int = None,
+    offset_line: int = None,
+    limit_lines: int = None,
+) -> dict:
     """Read a file, optionally returning a 1-based line window."""
     p = resolve_path(workspace, path)
     if not p.exists():
@@ -152,10 +295,16 @@ async def read_file(workspace: str, path: str, offset_line: int = None, limit_li
         lines = text.splitlines()
         total = len(lines)
 
-        start = (offset_line - 1) if offset_line and offset_line > 0 else 0
+        start = (start_line or offset_line)
+        start = (start - 1) if start and start > 0 else 0
         if start >= total:
             return {"path": path, "total_lines": total, "lines": [], "content": ""}
-        end = start + limit_lines if limit_lines and limit_lines > 0 else total
+        if end_line and end_line >= start + 1:
+            end = min(end_line, total)
+        elif limit_lines and limit_lines > 0:
+            end = start + limit_lines
+        else:
+            end = total
         window = lines[start:end]
 
         numbered = "\n".join(f"{start + i + 1:6d}\t{line}" for i, line in enumerate(window))
@@ -163,6 +312,7 @@ async def read_file(workspace: str, path: str, offset_line: int = None, limit_li
             "path": path,
             "total_lines": total,
             "start_line": start + 1,
+            "end_line": end,
             "content": numbered,
             "truncated": end < total,
         }
@@ -203,6 +353,166 @@ async def edit_file(workspace: str, path: str, old_text: str, new_text: str) -> 
         return {"error": str(e)}
 
 
+# ---------------------------------------------------------------- new file tools
+
+IGNORED_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "dist",
+    "build", ".pytest_cache", ".mypy_cache", "target", ".next",
+}
+
+
+async def create_file(workspace: str, path: str, content: str) -> dict:
+    """Create a new file; refuses to clobber an existing one."""
+    p = resolve_path(workspace, path)
+    if p.exists():
+        return {"error": f"File already exists: {path}. Use write_file to overwrite."}
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return {"path": path, "bytes_written": p.stat().st_size}
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}
+
+
+async def delete_file(workspace: str, path: str) -> dict:
+    """Delete a file or an empty directory inside the workspace."""
+    p = resolve_path(workspace, path)
+    if p == Path(workspace).resolve():
+        return {"error": "Refusing to delete the workspace root"}
+    if not p.exists():
+        return {"error": f"Not found: {path}"}
+    try:
+        if p.is_dir():
+            p.rmdir()  # only empty dirs; non-empty needs explicit bash rm -rf
+            return {"path": path, "deleted": "directory (empty)"}
+        p.unlink()
+        return {"path": path, "deleted": True}
+    except OSError as e:
+        return {"error": str(e)}
+
+
+async def move_file(workspace: str, src: str, dst: str) -> dict:
+    """Move/rename within the workspace."""
+    s = resolve_path(workspace, src)
+    d = resolve_path(workspace, dst)
+    if not s.exists():
+        return {"error": f"Source not found: {src}"}
+    if d.exists():
+        return {"error": f"Destination already exists: {dst}"}
+    try:
+        d.parent.mkdir(parents=True, exist_ok=True)
+        s.rename(d)
+        return {"src": src, "dst": dst, "moved": True}
+    except OSError as e:
+        return {"error": str(e)}
+
+
+async def search_files(
+    workspace: str,
+    pattern: str = None,
+    glob: str = None,
+    max_results: int = 100,
+) -> dict:
+    """Regex-search file contents (optionally glob-filtered) or match paths."""
+    root = Path(workspace).resolve()
+    max_results = max(1, min(int(max_results or 100), 500))
+    content_re = None
+    if pattern:
+        try:
+            content_re = re.compile(pattern)
+        except re.error as e:
+            return {"error": f"Invalid regex: {e}"}
+
+    import fnmatch
+
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS]
+        for f in filenames:
+            files.append(Path(dirpath) / f)
+
+    matches: list[dict] = []
+    truncated = False
+    for f in sorted(files):
+        rel = f.relative_to(root).as_posix()
+        if glob and not fnmatch.fnmatch(f.name, glob) and not fnmatch.fnmatch(rel, glob):
+            continue
+        if content_re is None:
+            if len(matches) >= max_results:
+                truncated = True
+                break
+            matches.append({"path": rel})
+            continue
+        try:
+            if f.stat().st_size > 1_000_000:
+                continue  # skip huge files
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if content_re.search(line):
+                if len(matches) >= max_results:
+                    truncated = True
+                    break
+                matches.append({"path": rel, "line": lineno, "text": line.strip()[:200]})
+        if truncated:
+            break
+
+    return {"matches": matches, "count": len(matches), "truncated": truncated}
+
+
+# ---------------------------------------------------------------- git tools
+
+async def _git(workspace: str, *args: str) -> dict:
+    """Run a git command in the workspace; return structured result."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args,
+        cwd=workspace,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return {"error": "git timed out"}
+    output = out.decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        return {"error": output.strip()[:2000], "exit_code": proc.returncode}
+    return {"output": output.strip()[:MAX_OUTPUT_CHARS], "exit_code": 0}
+
+
+async def git_status(workspace: str) -> dict:
+    return await _git(workspace, "status", "--short", "--branch")
+
+
+async def git_diff(workspace: str, staged: bool = False, path: str = None) -> dict:
+    args = ["diff"]
+    if staged:
+        args.append("--staged")
+    if path:
+        args += ["--", path]
+    return await _git(workspace, *args)
+
+
+async def git_add(workspace: str, paths: list = None) -> dict:
+    args = ["add", "-A"] if not paths else ["add", *paths]
+    return await _git(workspace, *args)
+
+
+async def git_commit(workspace: str, message: str) -> dict:
+    return await _git(workspace, "commit", "-m", message)
+
+
+async def git_push(workspace: str) -> dict:
+    return await _git(workspace, "push")
+
+
+async def git_pull(workspace: str) -> dict:
+    return await _git(workspace, "pull")
+
+
 # ---------------------------------------------------------------- dispatch
 
 EXECUTORS = {
@@ -210,6 +520,16 @@ EXECUTORS = {
     "read_file": read_file,
     "write_file": write_file,
     "edit_file": edit_file,
+    "create_file": create_file,
+    "delete_file": delete_file,
+    "move_file": move_file,
+    "search_files": search_files,
+    "git_status": git_status,
+    "git_diff": git_diff,
+    "git_add": git_add,
+    "git_commit": git_commit,
+    "git_push": git_push,
+    "git_pull": git_pull,
 }
 
 SCHEMAS = {s["function"]["name"]: s for s in TOOLS_SCHEMA}

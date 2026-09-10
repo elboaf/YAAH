@@ -35,6 +35,9 @@ interface AgentState {
   error: string | null
   workspace: string
   log: LogEntry[]
+  /** File currently open in the preview side panel (Q44). */
+  previewPath: string | null
+  setPreviewPath: (p: string | null) => void
 
   setWorkspace: (ws: string) => void
   newConversation: () => void
@@ -80,6 +83,8 @@ export const useAgent = create<AgentState>((set) => ({
   error: null,
   workspace: '.',
   log: [],
+  previewPath: null,
+  setPreviewPath: (previewPath) => set({ previewPath }),
 
   setWorkspace: (ws) => set({ workspace: ws }),
 

@@ -8,29 +8,49 @@ Emits JSON-line events for the frontend:
   {'type': 'done'}                          - final answer complete
   {'type': 'error', 'message'}              - fatal error
 """
+import asyncio
 import json
 from typing import AsyncIterator
 
 from backend.agent import model_client
 from backend.agent.tools import execute_tool, get_schemas
-from backend.db.database import add_message, get_messages
+from backend.db.database import add_message, get_conversation, get_messages
 
 MAX_STEPS = 25
 MAX_TOOL_RESULT_CHARS = 20_000
 
 SYSTEM_PROMPT = """You are an expert AI coding agent working inside a user's project workspace.
 
-You have tools: bash (shell commands), read_file, write_file, edit_file.
+You have tools: bash (shell commands), read_file, write_file, create_file,
+edit_file, delete_file, move_file, search_files, and git tools
+(git_status, git_diff, git_add, git_commit, git_push, git_pull).
 
 Guidelines:
-- Explore before acting: read files and run discovery commands before editing.
+- Explore before acting: use search_files and read files before editing.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
-- Verify your work: run tests/builds after changes when possible.
+- read_file returns line ranges: page through large files with start_line/end_line.
+- Verify your work: run tests/builds via bash after changes when possible.
+- Commit meaningful work with git_add/git_commit when the user asks for it.
 - Be concise in prose; let tools do the talking.
 - Paths are relative to the workspace root."""
 
+# Per-conversation cancellation flags checked between model/tool steps.
+_cancel_events: dict[int, asyncio.Event] = {}
 
-def _sse(event: dict) -> str:
+
+def cancel_agent(conversation_id: int):
+    """Request cancellation of a running agent turn for this conversation."""
+    ev = _cancel_events.get(conversation_id)
+    if ev is not None:
+        ev.set()
+
+
+def _cancelled(conversation_id: int) -> bool:
+    ev = _cancel_events.get(conversation_id)
+    return bool(ev and ev.is_set())
+
+
+def _ndjson(event: dict) -> str:
     return json.dumps(event) + "\n"
 
 
@@ -86,22 +106,48 @@ async def run_agent(
     # Persist the user message first
     await add_message(conversation_id, "user", user_text)
 
+    # Per-conversation system prompt override (Q17) wins over the global one
+    conv = await get_conversation(conversation_id)
+    system_prompt = (conv or {}).get("system_prompt_override") or SYSTEM_PROMPT
+
     # Full context each turn: system prompt + persisted history
     history = await load_history(conversation_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    messages = [{"role": "system", "content": system_prompt}] + history
 
     tools = get_schemas()
+    cancel_ev = asyncio.Event()
+    _cancel_events[conversation_id] = cancel_ev
 
     try:
         for _step in range(MAX_STEPS):
+            if cancel_ev.is_set():
+                yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
+                return
+
             content_acc: list[str] = []
             tool_calls = None
-            stream = await model_client.chat(messages, tools=tools, stream=True)
+            try:
+                stream = await model_client.chat(messages, tools=tools, stream=True)
+            except model_client.ModelError as e:
+                # Auto-recovery (Q23): retry once with corrective context.
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            f"Your previous request failed with: {e}. "
+                            "Retry with a corrected request."
+                        ),
+                    }
+                )
+                stream = await model_client.chat(messages, tools=tools, stream=True)
 
             async for ev in stream:
+                if cancel_ev.is_set():
+                    yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
+                    return
                 if ev["type"] == "content":
                     content_acc.append(ev["text"])
-                    yield _sse({"type": "text", "text": ev["text"]})
+                    yield _ndjson({"type": "text", "text": ev["text"]})
                 elif ev["type"] == "tool_calls":
                     tool_calls = ev["tool_calls"]
 
@@ -117,7 +163,7 @@ async def run_agent(
 
             # No tool calls => final answer; turn complete
             if not tool_calls:
-                yield _sse({"type": "done"})
+                yield _ndjson({"type": "done"})
                 return
 
             messages.append(
@@ -130,13 +176,16 @@ async def run_agent(
 
             # Execute each requested tool call in order
             for tc in tool_calls:
+                if cancel_ev.is_set():
+                    yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
+                    return
                 name = tc["function"]["name"]
                 try:
                     args = json.loads(tc["function"]["arguments"] or "{}")
                 except json.JSONDecodeError as e:
                     result = {"error": f"Invalid JSON arguments: {e}"}
                 else:
-                    yield _sse(
+                    yield _ndjson(
                         {
                             "type": "tool_start",
                             "name": name,
@@ -147,7 +196,7 @@ async def run_agent(
                     result = await execute_tool(name, args, workspace)
 
                 result_str = json.dumps(result)[:MAX_TOOL_RESULT_CHARS]
-                yield _sse(
+                yield _ndjson(
                     {
                         "type": "tool_result",
                         "name": name,
@@ -172,9 +221,11 @@ async def run_agent(
                     tool_call_id=tc.get("id", ""),
                 )
 
-        yield _sse({"type": "error", "message": f"Step budget ({MAX_STEPS}) exhausted"})
+        yield _ndjson({"type": "error", "message": f"Step budget ({MAX_STEPS}) exhausted"})
 
     except model_client.ModelError as e:
-        yield _sse({"type": "error", "message": str(e)})
+        yield _ndjson({"type": "error", "message": str(e)})
     except Exception as e:  # noqa: BLE001
-        yield _sse({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
+    finally:
+        _cancel_events.pop(conversation_id, None)

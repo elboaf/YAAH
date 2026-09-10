@@ -1,0 +1,56 @@
+name: Release
+
+# Desktop installers (Q34 / plan Step 13): built with tauri-action on tag push.
+# Drafts a GitHub Release with the artifacts attached; publish the draft manually.
+# Apps are unsigned — expect OS security warnings on first run.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-tauri:
+    name: Desktop build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "YAAH ${{ github.ref_name }}"
+          releaseBody: "Desktop installers for YAAH. Unsigned builds — your OS may warn on first launch. Requires Python 3.12+ on PATH for the embedded backend."
+          releaseDraft: true
+          prerelease: false

@@ -13,10 +13,6 @@ export default defineConfig({
         target: 'http://localhost:8765',
         changeOrigin: true,
       },
-      '/events': {
-        target: 'http://localhost:8765',
-        changeOrigin: true,
-      },
     },
   },
   build: {
