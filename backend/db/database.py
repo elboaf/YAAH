@@ -98,6 +98,19 @@ async def get_conversation(conversation_id: int) -> dict | None:
         await db.close()
 
 
+async def delete_conversation(conversation_id: int) -> bool:
+    """Delete a conversation and all its messages (FK cascade)."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
 async def update_conversation(conversation_id: int, **fields):
     """Update allowed conversation fields (title, workspace, system_prompt_override)."""
     allowed = {"title", "workspace", "system_prompt_override"}

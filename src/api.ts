@@ -188,12 +188,31 @@ export const exportConversationUrl = (id: number) =>
 
 export const updateConversation = (
   id: number,
-  patch: { title?: string; workspace?: string; system_prompt_override?: string | null },
+  fields: { title?: string; workspace?: string | null; system_prompt_override?: string | null },
 ) =>
   api<{ ok: boolean }>(`/api/conversations/${id}`, {
     method: 'PATCH',
-    body: JSON.stringify(patch),
+    body: JSON.stringify(fields),
   })
+
+export const deleteConversation = (id: number) =>
+  api<{ ok: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' })
+
+// The export endpoint sets Content-Disposition: attachment, but the `download`
+// attribute on an anchor is ignored cross-origin (tauri.localhost -> 127.0.0.1),
+// so we fetch the body ourselves and trigger the download from a blob URL.
+export async function exportConversationMarkdown(id: number, title: string) {
+  const res = await fetch(url(`/api/conversations/${id}/export`))
+  if (!res.ok) throw new Error(`${res.status}: export failed`)
+  const blob = await res.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `${title.replace(/[^\w -]/g, '').trim() || 'conversation'}.md`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(a.href)
+}
 
 export const cancelAgent = (id: number) =>
   api<{ ok: boolean }>(`/api/agent/${id}/cancel`, { method: 'POST' })

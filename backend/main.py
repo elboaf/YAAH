@@ -47,6 +47,7 @@ from backend.db.database import (
     get_messages,
     list_conversations,
     update_conversation,
+    delete_conversation,
 )
 
 
@@ -98,6 +99,16 @@ async def api_update_conversation(conversation_id: int, body: ConversationUpdate
         system_prompt_override=body.system_prompt_override,
     )
     return {"ok": ok}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def api_delete_conversation(conversation_id: int):
+    ok = await delete_conversation(conversation_id)
+    if not ok:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"ok": True}
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

@@ -14,7 +14,8 @@ import {
   getFileTree,
   previewFile,
   deleteFile,
-  exportConversationUrl,
+  exportConversationMarkdown,
+  deleteConversation,
   updateConversation,
   submitAnswer,
   imageUrl,
@@ -734,14 +735,17 @@ function ConversationList() {
           </button>
           {c.id === conversationId && (
             <>
-              <a
+              <button
                 title="Export as Markdown (Q39)"
-                href={exportConversationUrl(c.id)}
-                download
                 className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-zinc-200 group-hover:opacity-100"
+                onClick={() => {
+                  exportConversationMarkdown(c.id, c.title).catch((e) =>
+                    alert(`Export failed: ${e.message ?? e}`),
+                  )
+                }}
               >
                 md↓
-              </a>
+              </button>
               <button
                 title="System prompt override (Q17)"
                 className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-zinc-200 group-hover:opacity-100"
@@ -753,6 +757,24 @@ function ConversationList() {
                 }}
               >
                 sys
+              </button>
+              <button
+                title="Delete conversation"
+                className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-red-400 group-hover:opacity-100"
+                onClick={() => {
+                  if (!confirm(`Delete "${c.title}" and all its messages? This cannot be undone.`)) return
+                  deleteConversation(c.id)
+                    .then(() => {
+                      if (c.id === conversationId) {
+                        newConversation()
+                      } else {
+                        refresh()
+                      }
+                    })
+                    .catch((e) => alert(`Delete failed: ${e.message ?? e}`))
+                }}
+              >
+                ✕
               </button>
             </>
           )}
