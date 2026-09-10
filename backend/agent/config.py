@@ -32,8 +32,12 @@ DEFAULT_PROVIDER = {
 
 
 def _migrate(raw: dict) -> dict:
-    """Synthesize a providers map from a legacy flat config."""
+    """Synthesize a providers map from a legacy flat config (only when
+    legacy fields actually exist — a fresh install starts with NO
+    providers and the user configures the first one)."""
     if isinstance(raw.get("providers"), dict) and raw["providers"]:
+        return raw
+    if not any(k in raw for k in ("api_base", "api_key", "model")):
         return raw
     providers = {
         "openai": {
@@ -63,18 +67,26 @@ def load_config() -> dict:
             raw = {}
     raw = _migrate(raw or {})
     cfg.update({k: v for k, v in raw.items() if k not in ("api_base", "api_key", "model")})
+    cfg.setdefault("providers", {})
+    cfg.setdefault("active_provider", "")
 
     providers = {
         name: {**DEFAULT_PROVIDER, **(p or {})} for name, p in cfg["providers"].items()
     }
     active = cfg.get("active_provider")
     if active not in providers:
-        active = next(iter(providers))
+        # Empty map = fresh install, nothing configured yet.
+        active = next(iter(providers), "")
     cfg["providers"] = providers
     cfg["active_provider"] = active
 
     # Environment overrides everything (active provider only)
-    ap = providers[active]
+    ap = providers.get(active) if active else None
+    if ap is None:
+        # Derived single-provider view stays blank; model_client turns a
+        # chat attempt into a clear "configure a provider" error.
+        cfg.update({"api_base": "", "api_key": "", "model": ""})
+        return cfg
     ap["api_base"] = os.environ.get("AGENT_API_BASE", ap["api_base"])
     ap["api_key"] = os.environ.get("AGENT_API_KEY", ap["api_key"])
     ap["model"] = os.environ.get("AGENT_MODEL", ap["model"])
@@ -133,12 +145,12 @@ def save_config(updates: dict):
         updates = {k: v for k, v in updates.items() if k != "providers"}
 
     current.update(updates)
-    # Never persist an empty active provider
-    if not current.get("providers"):
-        current["providers"] = {"openai": dict(DEFAULT_PROVIDER)}
-        current["active_provider"] = "openai"
-    if current.get("active_provider") not in current["providers"]:
-        current["active_provider"] = next(iter(current["providers"]))
+    current.setdefault("providers", {})
+    # An empty providers map is legitimate (fresh install, user hasn't
+    # configured anything yet) — persist it as-is rather than re-seeding a
+    # placeholder provider that 401s out of the box.
+    if current.get("active_provider") not in current.get("providers", {}):
+        current["active_provider"] = next(iter(current.get("providers", {})), "")
     # Keep the file in the new shape only
     for k in ("api_base", "api_key", "model"):
         current.pop(k, None)

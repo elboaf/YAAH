@@ -23,6 +23,10 @@ async def chat(
     """Call the model. Returns full response dict, or async iterator of
     streaming deltas if stream=True."""
     cfg = load_config()
+    if not cfg["providers"]:
+        raise ModelError(
+            "No model provider configured. Open Settings and add a provider "
+            "(API base, key, model) to start chatting.")
     if not cfg["api_key"] and "openai.com" in cfg["api_base"]:
         raise ModelError("No API key configured. Set AGENT_API_KEY or edit data/config.json")
 

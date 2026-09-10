@@ -922,7 +922,9 @@ export function Sidebar() {
               <option value={`${activeProvider}::${model}`}>{model}</option>
             )}
             {Object.keys(byProvider).length === 0 && (
-              <option value="">No models available — check Settings</option>
+              <option value={`${activeProvider}::${model}`}>
+                No provider configured — open Settings
+              </option>
             )}
           </select>
           {/* per-provider failure notes (Q10) */}
