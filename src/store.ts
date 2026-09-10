@@ -13,6 +13,8 @@ export interface ChatMessage {
   id: string
   role: Role
   content: string
+  /** Stored image rel paths (backend/data/images/...), rendered via imageUrl(). */
+  images?: string[]
   toolCalls?: ToolCall[]
 }
 
@@ -49,7 +51,7 @@ interface AgentState {
   abortController: AbortController | null
   setAbortController: (c: AbortController | null) => void
 
-  appendUserMessage: (text: string) => void
+  appendUserMessage: (text: string, images?: string[]) => void
   appendAssistantPlaceholder: () => string
   appendTextDelta: (msgId: string, text: string) => void
   startToolCall: (msgId: string, callId: string, name: string, args: unknown) => void
@@ -61,6 +63,7 @@ interface AgentState {
       id: number
       role: string
       content: string
+      images?: string[] | null
       tool_calls: Array<{
         id?: string
         function?: { name?: string; arguments?: string }
@@ -138,9 +141,12 @@ export const useAgent = create<AgentState>((set) => ({
   abortController: null,
   setAbortController: (c) => set({ abortController: c }),
 
-  appendUserMessage: (text) =>
+  appendUserMessage: (text, images) =>
     set((s) => ({
-      messages: [...s.messages, { id: genId(), role: 'user', content: text }],
+      messages: [
+        ...s.messages,
+        { id: genId(), role: 'user', content: text, images },
+      ],
     })),
 
   appendAssistantPlaceholder: () => {
@@ -196,6 +202,7 @@ export const useAgent = create<AgentState>((set) => ({
           id: `db${r.id}`,
           role: r.role as Role,
           content: r.content,
+          images: r.images ?? undefined,
           toolCalls:
             r.role === 'tool' && fn?.name
               ? [

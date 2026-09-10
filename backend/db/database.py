@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL DEFAULT '',
     tool_calls TEXT,          -- JSON array of OpenAI-format tool calls
     tool_call_id TEXT,        -- for role='tool' responses
+    images TEXT,              -- JSON array of image rel paths (bytes on disk)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -46,6 +47,11 @@ async def get_db() -> aiosqlite.Connection:
     await db.execute("PRAGMA busy_timeout = 5000")
     # Idempotent: ensures schema exists even for direct calls outside app lifespan
     await db.executescript(SCHEMA)
+    # Migrations: CREATE TABLE IF NOT EXISTS won't touch an existing table.
+    cur = await db.execute("PRAGMA table_info(messages)")
+    cols = {r[1] for r in await cur.fetchall()}
+    if "images" not in cols:
+        await db.execute("ALTER TABLE messages ADD COLUMN images TEXT")
     return db
 
 
@@ -118,18 +124,20 @@ async def add_message(
     content: str,
     tool_calls: list | None = None,
     tool_call_id: str | None = None,
+    images: list | None = None,
 ):
     db = await get_db()
     try:
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, tool_calls,"
-            " tool_call_id) VALUES (?, ?, ?, ?, ?)",
+            " tool_call_id, images) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
                 content,
                 json.dumps(tool_calls) if tool_calls else None,
                 tool_call_id,
+                json.dumps(images) if images else None,
             ),
         )
         await db.execute(
@@ -153,6 +161,7 @@ async def get_messages(conversation_id: int):
         for r in rows:
             if r["tool_calls"]:
                 r["tool_calls"] = json.loads(r["tool_calls"])
+            r["images"] = json.loads(r["images"]) if r.get("images") else []
         return rows
     finally:
         await db.close()

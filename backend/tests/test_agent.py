@@ -230,3 +230,189 @@ async def test_agent_cancel(fake_model, tmp_path, monkeypatch):
     # The stream starts before cancel takes effect, but the loop must stop
     # before emitting 'done'
     assert events[-1]["type"] == "stopped"
+
+
+# ---------------------------------------------------------------- powershell
+
+@pytest.mark.asyncio
+async def test_powershell_tool(tmp_path):
+    r = await execute_tool("powershell", {"command": "Write-Output hi-ps"}, str(tmp_path))
+    assert r["exit_code"] == 0
+    assert "hi-ps" in r["output"]
+
+
+@pytest.mark.asyncio
+async def test_powershell_timeout(tmp_path):
+    r = await execute_tool(
+        "powershell",
+        {"command": "Start-Sleep -Seconds 30", "timeout_seconds": 2},
+        str(tmp_path),
+    )
+    assert r["timed_out"] is True
+
+
+# ---------------------------------------------------------------- images
+
+def test_image_roundtrip():
+    from backend.agent.imagedata import IMAGES_ROOT, load_data_url, save_data_url
+
+    # 1x1 transparent PNG
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+        "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    rel = save_data_url(data_url, subdir="test")
+    assert rel is not None and rel.startswith("test/")
+    assert (IMAGES_ROOT / rel).is_file()
+    back = load_data_url(rel)
+    assert back is not None and back.startswith("data:image/png;base64,")
+    assert load_data_url("../escape.png") is None
+    assert save_data_url("not a data url") is None
+
+
+@pytest.mark.asyncio
+async def test_db_images_roundtrip(tmp_path):
+    from backend.db.database import add_message, create_conversation, get_messages
+
+    cid = await create_conversation("img")
+    await add_message(cid, "user", "see this", images=["1/a.png", "1/b.jpg"])
+    rows = await get_messages(cid)
+    assert rows[0]["images"] == ["1/a.png", "1/b.jpg"]
+    # messages without images come back as an empty list
+    await add_message(cid, "assistant", "ok")
+    rows = await get_messages(cid)
+    assert rows[1]["images"] == []
+
+
+@pytest.mark.asyncio
+async def test_history_rebuilds_image_parts(fake_model, tmp_path, monkeypatch):
+    """A user message with images replays as a multimodal parts list."""
+    from backend.db.database import add_message, create_conversation
+
+    from backend.agent import imagedata
+
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+        "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    rel = imagedata.save_data_url(data_url, subdir="test")
+    cid = await create_conversation("parts")
+    await add_message(cid, "user", "look", images=[rel])
+
+    captured = {}
+
+    async def fake_chat(messages, tools=None, stream=True):
+        captured["messages"] = messages
+        return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    await collect(loop.run_agent(cid, "next", str(tmp_path)))
+
+    user_msgs = [m for m in captured["messages"] if m["role"] == "user"]
+    assert user_msgs[0]["content"][0] == {"type": "text", "text": "look"}
+    assert user_msgs[0]["content"][1]["type"] == "image_url"
+    # the missing-file case degrades to a text note instead of crashing
+    await add_message(cid, "user", "gone", images=["test/does-not-exist.png"])
+    await collect(loop.run_agent(cid, "next2", str(tmp_path)))
+    user_msgs = [m for m in captured["messages"] if m["role"] == "user"]
+    gone = next(m for m in user_msgs if isinstance(m["content"], list)
+                and m["content"][0].get("text", "").startswith("gone"))
+    assert any(
+        isinstance(p, dict) and "missing" in p.get("text", "") for p in gone["content"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_view_image_tool_result_attaches_image(fake_model, tmp_path, monkeypatch):
+    """A tool result carrying an image becomes a parts list in the live
+    LLM messages and persists the image rel path."""
+    from backend.db.database import create_conversation, get_messages
+
+    from backend.agent import webtools
+
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+        "01f15c4890000000d4944415478da63fccf00f6030003030100c9fe92"
+        "ef0000000049454e44ae426082"
+    )
+
+    async def fake_view_image(url, workspace=None):
+        from backend.agent.imagedata import save_bytes
+
+        return {"image": save_bytes(png, "png", subdir="test"), "url": url,
+                "note": "attached"}
+
+    monkeypatch.setattr(webtools, "view_image", fake_view_image)
+    # the dispatch table holds the function reference itself, so patch it there
+    import backend.agent.tools as tools_mod
+    monkeypatch.setitem(tools_mod.EXECUTORS, "view_image", fake_view_image)
+
+    # script: model calls view_image, then answers
+    call = {"id": "c1", "type": "function", "function": {
+        "name": "view_image", "arguments": '{"url": "https://x/img.png"}'}}
+    fake_model.append([{"type": "tool_calls", "tool_calls": [call]}])
+    fake_model.append([{"type": "content", "text": "I see it"}, {"type": "finish"}])
+
+    cid = await create_conversation("viewimg")
+    events = await collect(loop.run_agent(cid, "look at https://x/img.png", str(tmp_path)))
+    assert any(e["type"] == "tool_result" and e.get("image") for e in events)
+
+    rows = await get_messages(cid)
+    tool_rows = [r for r in rows if r["role"] == "tool"]
+    assert tool_rows and tool_rows[0]["images"]
+
+
+# ---------------------------------------------------------------- web tools (offline bits)
+
+def test_strip_html():
+    from backend.agent.webtools import strip_html
+
+    html = "<head><style>x{}</style></head><p>Hello <b>world</b></p><p>Second</p>"
+    text = strip_html(html)
+    assert "Hello world" in text and "Second" in text
+    assert "<" not in text
+
+
+@pytest.mark.asyncio
+async def test_web_search_ddg_post_fallback(monkeypatch):
+    """When Chrome fails, the direct POST route still parses results."""
+    from backend.agent import webtools
+
+    ddg_html = (
+        '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">'
+        'Example <b>Site</b></a>'
+        '<a class="result__snippet" href="#">The snippet</a>'
+    )
+
+    async def fail_browser(url, timeout=30):
+        raise RuntimeError("no chrome")
+
+    monkeypatch.setattr(webtools, "_browser_get", fail_browser)
+    monkeypatch.setattr(
+        webtools, "_http_get",
+        lambda url, timeout=15, data=None: ddg_html,
+    )
+    out = await webtools.web_search("query")
+    assert "1. Example Site" in out
+    assert "https://example.com" in out
+    assert "The snippet" in out
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_block_marker(monkeypatch):
+    """A bot-wall page from Chrome falls back to direct HTTP."""
+    from backend.agent import webtools
+
+    async def chrome_wall(url, timeout=30):
+        return "<html><body>Just a moment...</body></html>"
+
+    monkeypatch.setattr(webtools, "_browser_get", chrome_wall)
+
+    def direct(url, timeout=15, data=None):
+        return "<html><title>Real</title><p>actual content here</p></html>"
+
+    monkeypatch.setattr(webtools, "_http_get", direct)
+    out = await webtools.web_fetch("https://example.com")
+    assert "actual content" in out and "(via direct" in out

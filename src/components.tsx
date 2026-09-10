@@ -17,6 +17,7 @@ import {
   deleteFile,
   exportConversationUrl,
   updateConversation,
+  imageUrl,
   type FileEntry,
   type ProviderPreset,
 } from './api'
@@ -103,9 +104,12 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
 function toolGlyph(name: string): string {
   if (name === 'read_file') return '▤'
   if (name === 'search_files') return '⌕'
-  if (name === 'bash') return '❯'
+  if (name === 'bash' || name === 'powershell') return '❯'
   if (name === 'edit_file') return '✎'
   if (name === 'write_file') return '✚'
+  if (name === 'web_search') return '⌕'
+  if (name === 'web_fetch') return '☰'
+  if (name === 'view_image') return '▣'
   return '⚙'
 }
 
@@ -113,6 +117,9 @@ function toolGlyphColor(name: string): string {
   if (name === 'read_file') return 'text-sky-400'
   if (name === 'search_files') return 'text-violet-400'
   if (name === 'bash') return 'text-emerald-400'
+  if (name === 'powershell') return 'text-blue-400'
+  if (name === 'web_search' || name === 'web_fetch') return 'text-cyan-400'
+  if (name === 'view_image') return 'text-pink-400'
   if (name === 'edit_file' || name === 'write_file') return 'text-amber-400'
   return 'text-zinc-400'
 }
@@ -220,6 +227,18 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
     if (tc.name === 'edit_file' && typeof args.old_text === 'string' && typeof args.new_text === 'string') {
       return <DiffBlock oldText={args.old_text} newText={args.new_text} />
     }
+    if (tc.name === 'view_image' && tc.result && typeof tc.result === 'object') {
+      const rel = (tc.result as { image?: string }).image
+      if (typeof rel === 'string' && rel) {
+        return (
+          <img
+            src={imageUrl(rel)}
+            alt="view_image result"
+            className="max-h-64 rounded border border-zinc-700"
+          />
+        )
+      }
+    }
     if (tc.name === 'read_file' && tc.result && typeof tc.result === 'object') {
       const content = (tc.result as { content?: string }).content
       const path = (tc.result as { path?: string }).path
@@ -296,6 +315,19 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] rounded border border-zinc-700/70 bg-zinc-800/60 px-3 py-2 text-sm text-zinc-100">
+          {msg.images?.length ? (
+            <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
+              {msg.images.map((rel) => (
+                <a key={rel} href={imageUrl(rel)} target="_blank" rel="noreferrer">
+                  <img
+                    src={imageUrl(rel)}
+                    alt="attachment"
+                    className="max-h-40 rounded border border-zinc-700"
+                  />
+                </a>
+              ))}
+            </div>
+          ) : null}
           <div className="whitespace-pre-wrap break-words">{msg.content}</div>
         </div>
       </div>
@@ -1056,6 +1088,14 @@ interface Attachment {
   content: string
 }
 
+/** Image staged for sending; dataUrl doubles as the thumbnail src. */
+interface ImageAttachment {
+  name: string
+  dataUrl: string
+}
+
+const MAX_IMAGE_BYTES = 5_000_000
+
 function Composer() {
   const {
     conversationId,
@@ -1076,12 +1116,32 @@ function Composer() {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [images, setImages] = useState<ImageAttachment[]>([])
   const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const addImageFile = (f: File) => {
+    if (!f.type.startsWith('image/') || f.size > MAX_IMAGE_BYTES) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result)
+      if (dataUrl.startsWith('data:image/')) {
+        setImages((imgs) =>
+          imgs.length < 4 ? [...imgs, { name: f.name, dataUrl }] : imgs,
+        )
+      }
+    }
+    reader.readAsDataURL(f)
+  }
 
   const readDroppedFiles = (files: FileList) => {
     void (async () => {
       const added: Attachment[] = []
       for (const f of Array.from(files)) {
+        if (f.type.startsWith('image/')) {
+          addImageFile(f)
+          continue
+        }
         // text attachments only (Q33); skip anything that looks binary
         if (f.size > 200_000) continue
         try {
@@ -1098,7 +1158,7 @@ function Composer() {
 
   const send = async () => {
     const text = input.trim()
-    if ((!text && attachments.length === 0) || sending) return
+    if ((!text && attachments.length === 0 && images.length === 0) || sending) return
     setSending(true)
 
     // Inline attachments as fenced blocks (Q33)
@@ -1106,11 +1166,16 @@ function Composer() {
     for (const a of attachments) {
       fullText += `\n\n--- attached file: ${a.name} ---\n\`\`\`\n${a.content}\n\`\`\``
     }
+    if (images.length) {
+      fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
+    }
+    const imageDataUrls = images.map((i) => i.dataUrl)
 
     setInput('')
     setAttachments([])
+    setImages([])
     setError(null)
-    appendUserMessage(fullText)
+    appendUserMessage(fullText, imageDataUrls)
     const asstId = appendAssistantPlaceholder()
     const ac = new AbortController()
     setAbortController(ac)
@@ -1150,6 +1215,7 @@ function Composer() {
           }
         },
         ac.signal,
+        imageDataUrls,
       )
       if (useAgent.getState().status !== 'error') setStatus('idle')
     } catch (e) {
@@ -1186,6 +1252,26 @@ function Composer() {
         if (e.dataTransfer?.files?.length) readDroppedFiles(e.dataTransfer.files)
       }}
     >
+      {images.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {images.map((img, i) => (
+            <span key={i} className="relative">
+              <img
+                src={img.dataUrl}
+                alt={img.name}
+                title={img.name}
+                className="h-16 rounded border border-zinc-700"
+              />
+              <button
+                className="absolute -right-1.5 -top-1.5 h-4 w-4 rounded-full bg-zinc-700 text-[10px] leading-4 text-zinc-300 hover:bg-red-600 hover:text-white"
+                onClick={() => setImages((arr) => arr.filter((_, j) => j !== i))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       {attachments.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-1">
           {attachments.map((a, i) => (
@@ -1210,9 +1296,19 @@ function Composer() {
             dragOver ? 'border-blue-500' : 'border-zinc-700'
           }`}
           rows={2}
-          placeholder="Describe a task... (Enter to send, Shift+Enter for newline, drop text files to attach)"
+          placeholder="Describe a task... (Enter to send, Shift+Enter for newline, drop/paste/attach images or text files)"
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onPaste={(e) => {
+            const files = e.clipboardData?.files
+            if (files?.length) {
+              const imgs = Array.from(files).filter((f) => f.type.startsWith('image/'))
+              if (imgs.length) {
+                e.preventDefault()
+                imgs.forEach(addImageFile)
+              }
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
@@ -1220,10 +1316,28 @@ function Composer() {
             }
           }}
         />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            Array.from(e.target.files ?? []).forEach(addImageFile)
+            e.target.value = ''
+          }}
+        />
+        <button
+          title="Attach images"
+          className="self-end rounded border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          📎
+        </button>
         <button
           className="self-end rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
           onClick={() => void send()}
-          disabled={sending || (!input.trim() && attachments.length === 0)}
+          disabled={sending || (!input.trim() && attachments.length === 0 && images.length === 0)}
         >
           Send
         </button>

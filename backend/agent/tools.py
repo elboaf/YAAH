@@ -52,6 +52,88 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "powershell",
+            "description": (
+                "Execute a command in Windows PowerShell from the workspace "
+                "directory. Use for Windows-native tasks the shell can't do "
+                "well: registry, services, WMI/CIM, ACLs, scheduled tasks, "
+                "structured object pipelines. Long-running commands will "
+                "time out."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The PowerShell command to run"},
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default 60, max 300)",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web with DuckDuckGo (free, no API key). Returns "
+                "a numbered list of title / URL / snippet. Use web_fetch to "
+                "read a result in full."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "description": "Max results (default 8)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch a URL and return the page's readable text (HTML "
+                "stripped to plain text), via a real headless browser so "
+                "JS-heavy and bot-guarded sites usually work. Use after "
+                "web_search to read a result, or directly for a known URL. "
+                "If blocked, fall back to web_search snippets rather than "
+                "retrying the same URL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "max_chars": {"type": "integer", "description": "Max text chars (default 20000)"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_image",
+            "description": (
+                "Download an image from a URL and attach it so you can see "
+                "it (requires a vision-capable model). Use after "
+                "web_search or web_fetch — web_fetch lists the page's "
+                "image URLs under 'IMAGES ON PAGE'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
                 "Read the contents of a file in the workspace. Large files are "
@@ -247,6 +329,43 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
+            cwd=workspace,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            output = out.decode("utf-8", errors="replace")
+            timed_out = False
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            output = f"[timed out after {timeout}s]"
+            timed_out = True
+
+        truncated = False
+        if len(output) > MAX_OUTPUT_CHARS:
+            output = output[:MAX_OUTPUT_CHARS]
+            truncated = True
+
+        return {
+            "exit_code": proc.returncode,
+            "output": output,
+            "timed_out": timed_out,
+            "truncated": truncated,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"exit_code": -1, "output": f"error: {e}", "timed_out": False, "truncated": False}
+
+
+async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60) -> dict:
+    """Run a Windows PowerShell command in the workspace; same structured
+    result shape as run_bash."""
+    timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "powershell.exe", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-Command", command,
             cwd=workspace,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -515,8 +634,14 @@ async def git_pull(workspace: str) -> dict:
 
 # ---------------------------------------------------------------- dispatch
 
+from backend.agent.webtools import view_image, web_fetch, web_search
+
 EXECUTORS = {
     "bash": run_bash,
+    "powershell": run_powershell,
+    "web_search": web_search,
+    "web_fetch": web_fetch,
+    "view_image": view_image,
     "read_file": read_file,
     "write_file": write_file,
     "edit_file": edit_file,

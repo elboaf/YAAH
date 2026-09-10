@@ -57,6 +57,7 @@ export const getMessages = (id: number) =>
       id: number
       role: string
       content: string
+      images?: string[] | null
       tool_calls: Array<{
         id?: string
         type?: string
@@ -64,6 +65,9 @@ export const getMessages = (id: number) =>
       }> | null
     }>
   >(`/api/conversations/${id}/messages`)
+
+/** URL for a stored image (rel path under backend/data/images/). */
+export const imageUrl = (rel: string) => `${BASE}/api/images/${rel}`
 
 // ---------------------------------------------------------------- config
 
@@ -221,11 +225,12 @@ export async function streamAgentTurn(
   workspace: string,
   onEvent: AgentEventHandler,
   signal?: AbortSignal,
+  images: string[] = [],
 ): Promise<void> {
   const res = await fetch(url(`/api/agent/${conversationId}`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, workspace }),
+    body: JSON.stringify({ message, workspace, images }),
     signal,
   })
   if (!res.ok || !res.body) {

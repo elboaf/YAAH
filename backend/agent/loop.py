@@ -15,6 +15,7 @@ from typing import AsyncIterator
 
 from backend.agent import model_client
 from backend.agent.config import load_config
+from backend.agent.imagedata import load_data_url
 from backend.agent.tools import execute_tool, get_schemas
 from backend.db.database import add_message, get_conversation, get_messages
 
@@ -23,7 +24,8 @@ MAX_TOOL_RESULT_CHARS = 20_000
 
 SYSTEM_PROMPT = """You are an expert AI coding agent working inside a user's project workspace.
 
-You have tools: bash (shell commands), read_file, write_file, create_file,
+You have tools: bash (shell commands), powershell (Windows PowerShell),
+web_search, web_fetch, view_image, read_file, write_file, create_file,
 edit_file, delete_file, move_file, search_files, and git tools
 (git_status, git_diff, git_add, git_commit, git_push, git_pull).
 
@@ -31,7 +33,10 @@ Guidelines:
 - Explore before acting: use search_files and read files before editing.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
-- Verify your work: run tests/builds via bash after changes when possible.
+- Verify your work: run tests/builds via bash (or powershell for Windows-native
+  tasks: registry, services, WMI) after changes when possible.
+- For web research, start with web_search and read pages with web_fetch;
+  use view_image on an image URL you actually need to see.
 - Commit meaningful work with git_add/git_commit when the user asks for it.
 - Be concise in prose; let tools do the talking.
 - Paths are relative to the workspace root."""
@@ -56,6 +61,26 @@ def _ndjson(event: dict) -> str:
     return json.dumps(event) + "\n"
 
 
+def _image_part(data_url: str) -> dict:
+    return {"type": "image_url", "image_url": {"url": data_url}}
+
+
+def _parts_with_images(text: str, image_rels: list) -> list | str:
+    """Build an OpenAI multimodal parts list (text + image_url parts) from
+    stored image rel paths. Falls back to plain text when none of the
+    files can be read (deleted/moved)."""
+    parts: list = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for rel in image_rels:
+        data_url = load_data_url(rel)
+        if data_url:
+            parts.append(_image_part(data_url))
+        else:
+            parts.append({"type": "text", "text": f"[image file missing: {rel}]"})
+    return parts or text
+
+
 async def load_history(conversation_id: int) -> list:
     """Load persisted messages back into OpenAI chat format."""
     rows = await get_messages(conversation_id)
@@ -68,7 +93,10 @@ async def load_history(conversation_id: int) -> list:
     for r in rows:
         role = r["role"]
         if role == "user":
-            out.append({"role": "user", "content": r["content"]})
+            content = r["content"]
+            if r.get("images"):
+                content = _parts_with_images(content, r["images"])
+            out.append({"role": "user", "content": content})
         elif role == "assistant":
             m = {"role": "assistant", "content": r["content"]}
             tcs = r.get("tool_calls")
@@ -88,11 +116,22 @@ async def load_history(conversation_id: int) -> list:
                 tc_id = meta.get("id", "")
             if tc_id and tc_id not in valid_call_ids:
                 continue  # orphaned tool result; skip to keep history valid
+            content = r["content"]
+            if r.get("images"):
+                # tool-attached image (view_image): replay as parts so a
+                # vision model still sees it on resume
+                try:
+                    text = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    text = content
+                if not isinstance(text, str):
+                    text = json.dumps(text.get("note", "[image]"))
+                content = _parts_with_images(text, r["images"])
             out.append(
                 {
                     "role": "tool",
                     "tool_call_id": tc_id or "",
-                    "content": r["content"],
+                    "content": content,
                 }
             )
         # system rows skipped; we inject our own system prompt fresh each turn
@@ -103,10 +142,16 @@ async def run_agent(
     conversation_id: int,
     user_text: str,
     workspace: str,
+    image_paths: list | None = None,
 ) -> AsyncIterator[str]:
-    """Execute one user turn. Yields JSON-line event strings."""
+    """Execute one user turn. Yields JSON-line event strings.
+
+    image_paths: rel paths (under backend/data/images/) of images the user
+    attached; already saved to disk by the API layer."""
     # Persist the user message first
-    await add_message(conversation_id, "user", user_text)
+    await add_message(
+        conversation_id, "user", user_text, images=image_paths or None
+    )
 
     # Per-conversation system prompt override (Q17) wins over the global one
     conv = await get_conversation(conversation_id)
@@ -205,11 +250,22 @@ async def run_agent(
                     result = await execute_tool(name, args, workspace)
 
                 result_str = json.dumps(result)[:MAX_TOOL_RESULT_CHARS]
+                # A tool that attached an image (view_image) becomes a
+                # multimodal parts list for the live LLM call.
+                image_rel = result.get("image") if isinstance(result, dict) else None
+                tool_content = result_str
+                image_data_url = load_data_url(image_rel) if image_rel else None
+                if image_data_url:
+                    tool_content = [
+                        {"type": "text", "text": result_str},
+                        _image_part(image_data_url),
+                    ]
                 yield _ndjson(
                     {
                         "type": "tool_result",
                         "name": name,
                         "result": result,
+                        "image": image_rel,
                         "call_id": tc.get("id", ""),
                     }
                 )
@@ -218,7 +274,7 @@ async def run_agent(
                     {
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
-                        "content": result_str,
+                        "content": tool_content,
                     }
                 )
                 # Persist tool result; store call id + name in tool_calls column
@@ -228,6 +284,7 @@ async def run_agent(
                     result_str,
                     tool_calls=[{"id": tc.get("id", ""), "name": name}],
                     tool_call_id=tc.get("id", ""),
+                    images=[image_rel] if image_rel else None,
                 )
 
         yield _ndjson({

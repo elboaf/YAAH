@@ -124,6 +124,7 @@ from backend.agent.loop import run_agent
 class AgentTurn(BaseModel):
     message: str
     workspace: str
+    images: list[str] = []  # image data URLs attached by the user
 
 
 class ProviderEntry(BaseModel):
@@ -146,11 +147,34 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
     # Every turn runs in the workspace the UI has selected: remember it so the
     # sidebar restores the same folder after an app restart.
     set_last_workspace(body.workspace)
+    # Attached images: decode data URLs to files on disk up front; only the
+    # rel paths travel into the agent loop and the database.
+    from backend.agent.imagedata import save_data_url
+
+    image_paths = []
+    for data_url in body.images[:4]:  # cap at 4 images per message
+        rel = save_data_url(data_url, subdir=str(conversation_id))
+        if rel:
+            image_paths.append(rel)
     return StreamingResponse(
-        run_agent(conversation_id, body.message, body.workspace),
+        run_agent(conversation_id, body.message, body.workspace,
+                  image_paths=image_paths),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/images/{rel:path}")
+async def api_image(rel: str):
+    """Serve a stored image (chat attachments and view_image downloads)."""
+    from fastapi.responses import FileResponse
+
+    from backend.agent.imagedata import IMAGES_ROOT
+
+    path = (IMAGES_ROOT / rel).resolve()
+    if IMAGES_ROOT.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(path)
 
 
 @app.post("/api/agent/{conversation_id}/cancel")
