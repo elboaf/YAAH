@@ -4,11 +4,17 @@ Works with OpenAI, OpenRouter, Ollama, LM Studio, or any compatible endpoint.
 Supports both blocking and streaming responses.
 """
 import json
+import logging
 from typing import AsyncIterator
 
 import httpx
 
 from backend.agent.config import load_config
+
+# Diagnostics go to stderr → %TEMP%/yaah-backend.log (tee'd by the Tauri
+# shell), so "model ignored the tools" vs "tools never sent" vs "server
+# dropped them" is answerable from the log on any machine.
+log = logging.getLogger("yaah.model")
 
 
 class ModelError(Exception):
@@ -41,6 +47,8 @@ async def chat(
         payload["max_tokens"] = cfg["max_tokens"]
     if tools:
         payload["tools"] = tools
+    log.info("model call: base=%s model=%s tools_sent=%d stream=%s",
+             cfg["api_base"], cfg["model"], len(tools or []), stream)
 
     headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
 
@@ -53,7 +61,11 @@ async def chat(
             )
             if r.status_code != 200:
                 raise ModelError(f"Model API error {r.status_code}: {r.text[:500]}")
-            return r.json()
+            data = r.json()
+            log.info("model reply: finish=%s tool_calls=%d",
+                     (data.get("choices") or [{}])[0].get("finish_reason"),
+                     len((data.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []))
+            return data
 
     return _stream_response(payload, headers)
 
@@ -73,6 +85,8 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                 raise ModelError(f"Model API error {r.status_code}: {body[:500]}")
 
             tool_calls: dict[int, dict] = {}
+            finish_reason = None
+            n_content_chars = 0
             async for line in r.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -89,6 +103,7 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                 delta = choices[0].get("delta") or {}
 
                 if delta.get("content"):
+                    n_content_chars += len(delta["content"])
                     yield {"type": "content", "text": delta["content"]}
 
                 for tc in delta.get("tool_calls") or []:
@@ -107,8 +122,14 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
 
                 finish = choices[0].get("finish_reason")
                 if finish:
+                    finish_reason = finish
                     yield {"type": "finish", "reason": finish}
 
+            log.info(
+                "model reply: finish=%s content_chars=%d tool_calls=%d (%s)",
+                finish_reason, n_content_chars, len(tool_calls),
+                ", ".join(t["function"]["name"] for t in tool_calls.values()) or "-",
+            )
             if tool_calls:
                 yield {
                     "type": "tool_calls",
