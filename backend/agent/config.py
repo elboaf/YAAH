@@ -106,10 +106,14 @@ def save_config(updates: dict):
 
     incoming_providers = updates.get("providers")
     if isinstance(incoming_providers, dict):
-        # Merge keys: an absent/blank key never wipes a saved one
-        merged = {**current.get("providers", {})}
+        # The incoming map is authoritative for membership: a provider absent
+        # from it was deleted in the UI and must not be resurrected here.
+        # Merge keys only for providers still present — an absent/blank key
+        # never wipes a saved one.
+        saved = current.get("providers", {})
+        merged = {}
         for name, p in incoming_providers.items():
-            base = merged.get(name, {})
+            base = saved.get(name, {})
             new = {**base, **{k: v for k, v in (p or {}).items() if v not in (None, "")}}
             # explicit removal of a key is not supported via merge; blank keeps old
             merged[name] = new
