@@ -1,6 +1,6 @@
 name: Release
 
-# Desktop installers (Q34 / plan Step 13): built with tauri-action on tag push.
+# Desktop installers (Q34 / plan Step 13): built with the Tauri CLI on tag push.
 # Drafts a GitHub Release with the artifacts attached; publish the draft manually.
 # Apps are unsigned — expect OS security warnings on first run.
 
@@ -45,12 +45,42 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (verbose, logged)
+        shell: bash
+        run: npx tauri build --verbose 2>&1 | tee build.log
+
+      - name: Report failure cause
+        if: failure()
+        shell: bash
+        run: |
+          grep -inE "error(\[E[0-9]+\])?:|error:|failed to|panicked" build.log | head -20 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+
+      - name: Upload Windows artifacts
+        if: success() && matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "YAAH ${{ github.ref_name }}"
-          releaseBody: "Desktop installers for YAAH. Unsigned builds — your OS may warn on first launch. Requires Python 3.12+ on PATH for the embedded backend."
-          releaseDraft: true
-          prerelease: false
+          draft: true
+          files: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+
+      - name: Upload macOS artifacts
+        if: success() && matrix.os == 'macos-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.app.tar.gz
+
+      - name: Upload Linux artifacts
+        if: success() && matrix.os == 'ubuntu-22.04'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
