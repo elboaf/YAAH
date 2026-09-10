@@ -56,6 +56,10 @@ jobs:
           grep -inE "error(\[E[0-9]+\])?:|error:|failed to|panicked" build.log | head -20 | while IFS= read -r line; do
             echo "::error::$line"
           done
+          # Dump the raw tail (annotations are capped; keep it short)
+          tail -30 build.log | while IFS= read -r line; do
+            echo "::error::TAIL $line"
+          done
 
       - name: Upload Windows artifacts
         if: success() && matrix.os == 'windows-latest'
