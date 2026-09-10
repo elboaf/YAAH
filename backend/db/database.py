@@ -1,0 +1,120 @@
+"""SQLite persistence layer (hybrid schema).
+
+conversations: one row per task.
+messages: chat messages; tool calls stored as a JSON column on the row.
+"""
+import json
+from pathlib import Path
+
+import aiosqlite
+
+DB_PATH = Path(__file__).parent.parent / "data" / "agent.db"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL DEFAULT 'New Task',
+    workspace TEXT,
+    system_prompt_override TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
+    content TEXT NOT NULL DEFAULT '',
+    tool_calls TEXT,          -- JSON array of OpenAI-format tool calls
+    tool_call_id TEXT,        -- for role='tool' responses
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation
+    ON messages(conversation_id, id);
+"""
+
+
+async def get_db() -> aiosqlite.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    db = await aiosqlite.connect(DB_PATH)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA foreign_keys = ON")
+    # Idempotent: ensures schema exists even for direct calls outside app lifespan
+    await db.executescript(SCHEMA)
+    return db
+
+
+async def init_db():
+    db = await get_db()
+    await db.close()
+
+
+# ---- Conversation CRUD ----
+
+async def create_conversation(title: str = "New Task", workspace: str | None = None):
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT INTO conversations (title, workspace) VALUES (?, ?)",
+            (title, workspace),
+        )
+        await db.commit()
+        return cur.lastrowid
+    finally:
+        await db.close()
+
+
+async def list_conversations():
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM conversations ORDER BY updated_at DESC"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def add_message(
+    conversation_id: int,
+    role: str,
+    content: str,
+    tool_calls: list | None = None,
+):
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT INTO messages (conversation_id, role, content, tool_calls) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                conversation_id,
+                role,
+                content,
+                json.dumps(tool_calls) if tool_calls else None,
+            ),
+        )
+        await db.execute(
+            "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",
+            (conversation_id,),
+        )
+        await db.commit()
+        return cur.lastrowid
+    finally:
+        await db.close()
+
+
+async def get_messages(conversation_id: int):
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id",
+            (conversation_id,),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        for r in rows:
+            if r["tool_calls"]:
+                r["tool_calls"] = json.loads(r["tool_calls"])
+        return rows
+    finally:
+        await db.close()
