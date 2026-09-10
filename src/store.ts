@@ -76,17 +76,50 @@ let nextLogId = 1
 const now = () =>
   new Date().toLocaleTimeString([], { hour12: false })
 
+// The workspace is remembered across restarts: seeded synchronously from
+// localStorage so the field is correct on first paint, then mirrored to the
+// backend's config.json (the durable copy) whenever it changes.
+const WORKSPACE_KEY = 'agent.workspace'
+const DEFAULT_WORKSPACE = '.'
+
+function loadStoredWorkspace(): string {
+  if (typeof localStorage === 'undefined') return DEFAULT_WORKSPACE
+  try {
+    const ws = localStorage.getItem(WORKSPACE_KEY)
+    return ws && ws !== DEFAULT_WORKSPACE ? ws : DEFAULT_WORKSPACE
+  } catch {
+    return DEFAULT_WORKSPACE
+  }
+}
+
+/** Persist the workspace: localStorage immediately, backend config.json async. */
+export function persistWorkspace(ws: string): void {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(WORKSPACE_KEY, ws)
+    } catch {
+      /* storage unavailable (private mode etc.): backend copy still saves */
+    }
+  }
+  void import('./api').then(({ updateLastWorkspace }) =>
+    updateLastWorkspace(ws).catch(() => {}),
+  )
+}
+
 export const useAgent = create<AgentState>((set) => ({
   conversationId: null,
   messages: [],
   status: 'idle',
   error: null,
-  workspace: '.',
+  workspace: loadStoredWorkspace(),
   log: [],
   previewPath: null,
   setPreviewPath: (previewPath) => set({ previewPath }),
 
-  setWorkspace: (ws) => set({ workspace: ws }),
+  setWorkspace: (ws) => {
+    set({ workspace: ws })
+    if (ws && ws !== DEFAULT_WORKSPACE) persistWorkspace(ws)
+  },
 
   newConversation: () =>
     set({ conversationId: null, messages: [], status: 'idle', error: null }),
