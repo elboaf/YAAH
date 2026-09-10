@@ -553,6 +553,13 @@ export function FilesPanel() {
   const [tree, setTree] = useState<FileEntry[]>([])
   const [menu, setMenu] = useState<{ entry: FileEntry; x: number; y: number } | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('filesPanelCollapsed') === '1')
+
+  const toggleCollapsed = () =>
+    setCollapsed((c) => {
+      localStorage.setItem('filesPanelCollapsed', c ? '0' : '1')
+      return !c
+    })
 
   const refresh = useCallback(() => {
     if (!workspace || workspace === '.') {
@@ -566,10 +573,38 @@ export function FilesPanel() {
 
   const openPreview = (entry: FileEntry) => setPreviewPath(entry.path)
 
+  if (collapsed) {
+    return (
+      <aside className="hidden w-7 min-w-[28px] flex-col items-center border-r border-zinc-800 bg-zinc-900/40 py-2 xl:flex">
+        <button
+          className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          title="Show files"
+          onClick={toggleCollapsed}
+        >
+          ▸
+        </button>
+        <button
+          className="mt-2 flex-1 text-[10px] font-semibold tracking-wide text-zinc-500 hover:text-zinc-300"
+          style={{ writingMode: 'vertical-rl' }}
+          onClick={toggleCollapsed}
+        >
+          FILES
+        </button>
+      </aside>
+    )
+  }
+
   return (
     <aside className="hidden w-60 min-w-[200px] flex-col border-r border-zinc-800 bg-zinc-900/40 xl:flex">
       <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-        <h2 className="text-xs font-semibold tracking-wide text-zinc-400">FILES</h2>
+        <button
+          className="rounded p-0.5 text-zinc-500 hover:text-zinc-300"
+          title="Hide files"
+          onClick={toggleCollapsed}
+        >
+          ▾
+        </button>
+        <h2 className="flex-1 text-xs font-semibold tracking-wide text-zinc-400">FILES</h2>
         <button className="text-[10px] text-zinc-500 hover:text-zinc-300" onClick={refresh}>
           refresh
         </button>
