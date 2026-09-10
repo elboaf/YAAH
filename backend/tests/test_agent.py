@@ -234,6 +234,10 @@ async def test_agent_cancel(fake_model, tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- powershell
 
+import os
+
+
+@pytest.mark.skipif(os.name != "nt", reason="powershell.exe is Windows-only")
 @pytest.mark.asyncio
 async def test_powershell_tool(tmp_path):
     r = await execute_tool("powershell", {"command": "Write-Output hi-ps"}, str(tmp_path))
@@ -241,6 +245,7 @@ async def test_powershell_tool(tmp_path):
     assert "hi-ps" in r["output"]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="powershell.exe is Windows-only")
 @pytest.mark.asyncio
 async def test_powershell_timeout(tmp_path):
     r = await execute_tool(
