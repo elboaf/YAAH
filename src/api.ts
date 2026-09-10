@@ -1,8 +1,8 @@
-// In a browser, relative URLs go through the Vite dev proxy. Inside the
-// Tauri webview (tauri:// origin) there is no proxy, so hit the embedded
-// backend directly.
+// Detect the Tauri webview via its IPC internals — the origin alone is not
+// reliable: macOS uses tauri:// but Windows/Linux use http://tauri.localhost,
+// which looks like a normal http origin to a naive protocol check.
 const IS_TAURI =
-  typeof window !== 'undefined' && !window.location.protocol.startsWith('http')
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const BASE = IS_TAURI ? 'http://127.0.0.1:8765' : ''
 const url = (p: string) => `${BASE}${p}`
 

@@ -14,18 +14,37 @@ fn python_cmd() -> &'static str {
     }
 }
 
+fn find_backend_cwd(app: &tauri::AppHandle) -> std::path::PathBuf {
+    // `tauri dev` runs with cwd = src-tauri/, so check that dir's parent too;
+    // packaged builds carry the backend in the resources dir.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.clone());
+        if let Some(parent) = cwd.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(res) = app.path().resource_dir() {
+        candidates.push(res);
+    }
+    candidates
+        .into_iter()
+        .find(|d| d.join("backend").join("main.py").exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 fn spawn_backend(app: &tauri::AppHandle) -> Option<Child> {
-    // Run uvicorn from the project root. In dev this is the repo root; for
-    // packaged builds the resources dir carries the backend sources.
-    let cwd = app
-        .path()
-        .resource_dir()
-        .ok()
-        .filter(|p| p.join("backend").exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let cwd = find_backend_cwd(app);
+    // Tee backend output to a log file so startup failures are diagnosable.
+    let log_path = std::env::temp_dir().join("yaah-backend.log");
+    let log_file = std::fs::File::create(&log_path).ok();
+    let log_file_err = log_file.try_clone().ok();
+    eprintln!("backend cwd: {} (log: {})", cwd.display(), log_path.display());
     match Command::new(python_cmd())
         .args(["-m", "uvicorn", "backend.main:app", "--port", "8765"])
         .current_dir(&cwd)
+        .stdout(log_file)
+        .stderr(log_file_err)
         .spawn()
     {
         Ok(child) => Some(child),
@@ -84,6 +103,15 @@ pub fn run() {
             // webview, so early API calls don't race server startup.
             if !wait_for_backend(std::time::Duration::from_secs(15)) {
                 eprintln!("backend did not become ready within 15s");
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.eval(&format!(
+                        "window.dispatchEvent(new CustomEvent('backend-error', {{detail: {}}}))",
+                        serde_json::json!({ "message": format!(
+                            "Backend did not start within 15s. Check {} for its output.",
+                            std::env::temp_dir().join("yaah-backend.log").display()
+                        ) })
+                    ));
+                }
             }
             Ok(())
         })
