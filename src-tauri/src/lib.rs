@@ -41,7 +41,10 @@ async fn pick_workspace(app: tauri::AppHandle) -> Result<String, String> {
         .pick_folder(move |path| {
             let _ = tx.send(path.map(|p| p.to_string()));
         });
-    rx.recv().map_err(|e| e.to_string())
+    rx.recv()
+        .ok()
+        .flatten()
+        .ok_or_else(|| "no folder selected".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
