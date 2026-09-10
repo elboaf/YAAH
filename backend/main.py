@@ -22,7 +22,10 @@ app = FastAPI(title="AI Coding Agent", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:1420", "tauri://localhost"],
+    # The Tauri webview origin differs per platform: tauri://localhost on
+    # macOS, http(s)://tauri.localhost on Windows/Linux. Cover vite dev and
+    # any tauri origin; the server only ever listens on localhost.
+    allow_origin_regex=r"^https?://(localhost|tauri\.localhost)(:\d+)?$|^tauri://localhost$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
