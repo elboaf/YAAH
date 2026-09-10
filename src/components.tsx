@@ -99,7 +99,112 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
 
 // ---------------------------------------------------------------- tool calls
 
-function ToolCallBlock({ tc }: { tc: ToolCall }) {
+/** Icon + color identity per tool, so rows read at a glance. */
+function toolGlyph(name: string): string {
+  if (name === 'read_file') return '▤'
+  if (name === 'search_files') return '⌕'
+  if (name === 'bash') return '❯'
+  if (name === 'edit_file') return '✎'
+  if (name === 'write_file') return '✚'
+  return '⚙'
+}
+
+function toolGlyphColor(name: string): string {
+  if (name === 'read_file') return 'text-sky-400'
+  if (name === 'search_files') return 'text-violet-400'
+  if (name === 'bash') return 'text-emerald-400'
+  if (name === 'edit_file' || name === 'write_file') return 'text-amber-400'
+  return 'text-zinc-400'
+}
+
+/** Short human target for a call: the file, query, or command it acts on. */
+function toolTarget(tc: ToolCall): string {
+  const a = (tc.args ?? {}) as Record<string, unknown>
+  const pick = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = a[k]
+      if (typeof v === 'string' && v) return v
+    }
+    return undefined
+  }
+  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url') ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return t.length > 48 ? t.slice(0, 48) + '…' : t
+}
+
+/** One compact chip: glyph + name + target, pulsing while the call runs. */
+function ToolChip({ tc }: { tc: ToolCall }) {
+  const done = tc.result !== undefined
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
+        done ? 'bg-zinc-800/70 text-zinc-400' : 'bg-zinc-700/60 text-zinc-200'
+      }`}
+    >
+      <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
+      <span>{tc.name}</span>
+      {toolTarget(tc) && <span className="text-zinc-500">{toolTarget(tc)}</span>}
+      {!done && <span className="run-pulse text-amber-300">●</span>}
+    </span>
+  )
+}
+
+/** Live, ephemeral stream of calls while the agent works (newest slides in). */
+function ToolTicker({ calls }: { calls: ToolCall[] }) {
+  const recent = calls.slice(-10)
+  return (
+    <div className="my-1 flex flex-row-reverse items-center gap-1.5 overflow-hidden">
+      {[...recent].reverse().map((tc, i) => (
+        <span key={tc.id} className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}>
+          <ToolChip tc={tc} />
+        </span>
+      ))}
+      <span className="shrink-0 font-mono text-[10px] text-zinc-600">
+        {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
+      </span>
+    </div>
+  )
+}
+
+/** Finished turn's collapsed trace: one line, expandable to full detail. */
+function TraceLine({ calls }: { calls: ToolCall[] }) {
+  const [open, setOpen] = useState(false)
+  const byName = new Map<string, number>()
+  for (const tc of calls) byName.set(tc.name, (byName.get(tc.name) ?? 0) + 1)
+  return (
+    <div className="my-1">
+      <button
+        className="flex max-w-full items-center gap-2 font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-zinc-600">{open ? '▾' : '▸'}</span>
+        <span className="shrink-0">
+          {calls.length} call{calls.length === 1 ? '' : 's'}
+        </span>
+        <span className="truncate">
+          {[...byName].map(([n, c], i) => (
+            <span key={n}>
+              {i > 0 && <span className="text-zinc-700"> · </span>}
+              <span className={toolGlyphColor(n)}>{toolGlyph(n)}</span> {n}
+              {c > 1 ? ` ×${c}` : ''}
+            </span>
+          ))}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-1 space-y-0.5 border-l border-zinc-800 pl-2">
+          {calls.map((tc) => (
+            <ToolCallRow key={tc.id} tc={tc} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** A single call: chip row, expandable to args/result detail. */
+function ToolCallRow({ tc }: { tc: ToolCall }) {
   const [open, setOpen] = useState(false)
   const args = (tc.args ?? {}) as Record<string, unknown>
 
@@ -123,17 +228,16 @@ function ToolCallBlock({ tc }: { tc: ToolCall }) {
   })()
 
   return (
-    <div className="my-1 rounded border border-zinc-700 bg-zinc-800/60 text-xs">
+    <div className="font-mono text-[11px]">
       <button
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-zinc-300 hover:bg-zinc-700/40"
+        className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-zinc-800/60"
         onClick={() => setOpen((o) => !o)}
       >
-        <span>{tc.result !== undefined ? 'OK' : 'RUN'}</span>
-        <span className="font-mono font-semibold text-amber-300">{tc.name}</span>
-        <span className="ml-auto text-zinc-500">{open ? '[-]' : '[+]'}</span>
+        <ToolChip tc={tc} />
+        <span className="ml-auto shrink-0 text-zinc-600">{open ? '[-]' : '[+]'}</span>
       </button>
       {open && (
-        <div className="border-t border-zinc-700 px-2 py-1.5 font-mono text-[11px] text-zinc-400">
+        <div className="border-l border-zinc-800 px-2 py-1 text-zinc-400">
           <div className="whitespace-pre-wrap break-all text-zinc-300">
             args: {JSON.stringify(tc.args ?? {}, null, 2)}
           </div>
@@ -168,36 +272,48 @@ function MessageBody({ content }: { content: string }) {
   )
 }
 
-function MessageView({ msg }: { msg: ChatMessage }) {
-  const isUser = msg.role === 'user'
-  return (
-    <div className={`flex gap-2 ${isUser ? 'justify-end' : ''}`}>
-      {!isUser && (
-        <span className="mt-1 select-none font-mono text-[10px] text-zinc-500">
-          [{msg.role}]
-        </span>
-      )}
-      <div
-        className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-          isUser ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-100'
-        }`}
-      >
-        {msg.content ? (
-          isUser ? (
-            <div className="whitespace-pre-wrap break-words">{msg.content}</div>
-          ) : (
-            <MessageBody content={msg.content} />
-          )
-        ) : null}
-        {msg.toolCalls?.map((tc) => <ToolCallBlock key={tc.id} tc={tc} />)}
-        {!msg.content && !msg.toolCalls?.length && (
-          <span className="animate-pulse text-zinc-500">...</span>
-        )}
+function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
+  // Persisted tool-role messages (history load) render as one slim call row.
+  if (msg.role === 'tool') {
+    const tc = msg.toolCalls?.[0]
+    if (!tc) return null
+    return (
+      <div className="pl-3">
+        <ToolCallRow tc={tc} />
       </div>
-      {isUser && (
-        <span className="mt-1 select-none font-mono text-[10px] text-zinc-500">
-          [you]
-        </span>
+    )
+  }
+
+  const isUser = msg.role === 'user'
+  if (isUser) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded border border-zinc-700/70 bg-zinc-800/60 px-3 py-2 text-sm text-zinc-100">
+          <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="border-l-2 border-zinc-700/70 pl-3">
+      <div className="mb-0.5 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-600">
+        agent
+      </div>
+      {msg.content ? (
+        <div className="text-sm leading-relaxed text-zinc-200">
+          <MessageBody content={msg.content} />
+        </div>
+      ) : null}
+      {msg.toolCalls?.length ? (
+        live ? (
+          <ToolTicker calls={msg.toolCalls} />
+        ) : (
+          <TraceLine calls={msg.toolCalls} />
+        )
+      ) : null}
+      {!msg.content && !msg.toolCalls?.length && (
+        <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
       )}
     </div>
   )
@@ -330,9 +446,10 @@ export function FilesPanel() {
   )
 }
 
-// ---------------------------------------------------------------- right panel: activity + preview (Q44)
+// ---------------------------------------------------------------- preview modal (Q44)
 
-function PreviewPane() {
+/** File preview as a modal overlay over the chat; Esc or backdrop closes. */
+export function PreviewModal() {
   const { workspace, previewPath, setPreviewPath } = useAgent()
   const [file, setFile] = useState<{
     path: string
@@ -348,81 +465,55 @@ function PreviewPane() {
       setFile(null)
       return
     }
+    setErr(null)
     previewFile(workspace, previewPath)
       .then(setFile)
       .catch((e) => setErr(String(e)))
   }, [workspace, previewPath])
 
+  useEffect(() => {
+    if (!previewPath) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPreviewPath(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [previewPath, setPreviewPath])
+
   if (!previewPath) return null
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-        <h2 className="truncate font-mono text-xs text-zinc-300">{previewPath}</h2>
-        <button className="ml-2 text-[10px] text-zinc-500 hover:text-zinc-300" onClick={() => setPreviewPath(null)}>
-          close
-        </button>
-      </div>
-      {err && <p className="p-2 text-[10px] text-red-400">{err}</p>}
-      {file && (
-        <div className="flex-1 overflow-auto">
-          <CodeBlock code={file.content} lang={langOf(file.path)} />
-          {file.truncated && (
-            <p className="px-2 pb-2 text-[10px] text-zinc-500">
-              Showing lines 1-{file.end_line} of {file.total_lines}.
-            </p>
-          )}
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8"
+      onClick={() => setPreviewPath(null)}
+    >
+      <div
+        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+          <h2 className="truncate font-mono text-xs text-zinc-300">{previewPath}</h2>
+          <button
+            className="ml-2 text-[10px] text-zinc-500 hover:text-zinc-300"
+            onClick={() => setPreviewPath(null)}
+          >
+            close
+          </button>
         </div>
-      )}
+        {err && <p className="p-2 text-[10px] text-red-400">{err}</p>}
+        {file && (
+          <div className="flex-1 overflow-auto">
+            <CodeBlock code={file.content} lang={langOf(file.path)} />
+            {file.truncated && (
+              <p className="px-2 pb-2 text-[10px] text-zinc-500">
+                Showing lines 1-{file.end_line} of {file.total_lines}.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
-
-function ActivityPanel() {
-  const { log, clearLog, previewPath } = useAgent()
-  return (
-    <aside className="hidden w-[22rem] min-w-[260px] flex-col border-l border-zinc-800 bg-zinc-900/60 lg:flex">
-      <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-        <h2 className="text-xs font-semibold tracking-wide text-zinc-400">
-          {previewPath ? 'PREVIEW' : 'ACTIVITY'}
-        </h2>
-        {!previewPath && (
-          <button onClick={clearLog} className="text-[10px] text-zinc-500 hover:text-zinc-300">
-            clear
-          </button>
-        )}
-      </div>
-      {previewPath ? (
-        <PreviewPane />
-      ) : (
-        <div className="flex-1 overflow-y-auto p-2 font-mono text-[11px]">
-          {log.length === 0 && (
-            <p className="mt-6 text-center text-zinc-600">No tool activity yet.</p>
-          )}
-          {log.map((e) => (
-            <div key={e.id} className="mb-2 rounded border border-zinc-800 bg-zinc-900 p-1.5">
-              <div className="flex justify-between text-zinc-500">
-                <span className="text-amber-300">{e.name ?? 'system'}</span>
-                <span>{e.time}</span>
-              </div>
-              {e.args !== undefined && (
-                <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all text-zinc-300">
-                  {typeof e.args === 'string' ? e.args : JSON.stringify(e.args, null, 2)}
-                </pre>
-              )}
-              {e.result !== undefined && (
-                <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all text-emerald-300/80">
-                  {typeof e.result === 'string' ? e.result : JSON.stringify(e.result, null, 2)}
-                </pre>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </aside>
-  )
-}
-
-export { ActivityPanel }
 
 // ---------------------------------------------------------------- sidebar
 
@@ -878,6 +969,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 export function ChatPanel() {
   const { messages, status, error } = useAgent()
   const bottomRef = useRef<HTMLDivElement>(null)
+  const streaming = status === 'thinking' || status === 'running-tool'
+  // Only the in-flight assistant message shows the ephemeral ticker; every
+  // finished turn collapses to the one-line trace.
+  const liveId = streaming && messages.length > 0 ? messages[messages.length - 1].id : null
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -885,14 +980,15 @@ export function ChatPanel() {
 
   return (
     <main className="flex flex-1 flex-col">
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="flex-1 space-y-4 overflow-y-auto p-4">
         {messages.length === 0 && (
           <p className="mt-10 text-center text-sm text-zinc-600">
-            Start a conversation. Tool calls will appear inline.
+            Start a conversation. Work in progress streams as a live ticker, then
+            collapses to a one-line trace.
           </p>
         )}
         {messages.map((m) => (
-          <MessageView key={m.id} msg={m} />
+          <MessageView key={m.id} msg={m} live={m.id === liveId} />
         ))}
         <div ref={bottomRef} />
       </div>
@@ -902,7 +998,14 @@ export function ChatPanel() {
         </div>
       )}
       <Composer />
-      <div className="px-4 pb-1 text-[10px] text-zinc-600">status: {status}</div>
+      <div className="flex items-center gap-2 px-4 pb-1 pt-0.5 font-mono text-[10px] text-zinc-600">
+        <span
+          className={`inline-block h-1.5 w-1.5 rounded-full ${
+            streaming ? 'run-pulse bg-amber-400' : status === 'error' ? 'bg-red-500' : 'bg-emerald-600'
+          }`}
+        />
+        {streaming ? 'working' : status}
+      </div>
     </main>
   )
 }

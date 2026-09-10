@@ -1,4 +1,4 @@
-import { ActivityPanel, ChatPanel, FilesPanel, Sidebar } from './components'
+import { ChatPanel, FilesPanel, PreviewModal, Sidebar } from './components'
 
 export default function App() {
   return (
@@ -6,7 +6,7 @@ export default function App() {
       <Sidebar />
       <FilesPanel />
       <ChatPanel />
-      <ActivityPanel />
+      <PreviewModal />
     </div>
   )
 }
