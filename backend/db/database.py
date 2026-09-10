@@ -40,6 +40,10 @@ async def get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys = ON")
+    # WAL allows concurrent readers during writes; busy_timeout avoids
+    # spurious "database is locked" errors under overlapping requests.
+    await db.execute("PRAGMA journal_mode = WAL")
+    await db.execute("PRAGMA busy_timeout = 5000")
     # Idempotent: ensures schema exists even for direct calls outside app lifespan
     await db.executescript(SCHEMA)
     return db
@@ -81,17 +85,19 @@ async def add_message(
     role: str,
     content: str,
     tool_calls: list | None = None,
+    tool_call_id: str | None = None,
 ):
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_calls) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO messages (conversation_id, role, content, tool_calls,"
+            " tool_call_id) VALUES (?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
                 content,
                 json.dumps(tool_calls) if tool_calls else None,
+                tool_call_id,
             ),
         )
         await db.execute(

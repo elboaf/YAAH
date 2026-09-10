@@ -54,6 +54,7 @@ class NewMessage(BaseModel):
     role: str
     content: str
     tool_calls: list | None = None
+    tool_call_id: str | None = None
 
 
 @app.post("/api/conversations")
@@ -74,7 +75,9 @@ async def api_get_messages(conversation_id: int):
 
 @app.post("/api/conversations/{conversation_id}/messages")
 async def api_add_message(conversation_id: int, body: NewMessage):
-    mid = await add_message(conversation_id, body.role, body.content, body.tool_calls)
+    mid = await add_message(
+        conversation_id, body.role, body.content, body.tool_calls, body.tool_call_id
+    )
     return {"id": mid}
 
 
@@ -110,9 +113,8 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
 @app.get("/api/config")
 async def api_get_config():
     cfg = load_config()
-    # Mask the key
-    key = cfg.get("api_key", "")
-    return {**cfg, "api_key": (key[:4] + "..." if key else "")}
+    # Only reveal whether a key is set — never any part of it
+    return {**cfg, "api_key": "set" if cfg.get("api_key") else ""}
 
 
 @app.put("/api/config")

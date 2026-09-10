@@ -18,30 +18,60 @@ export interface ChatMessage {
 
 export type AgentStatus = 'idle' | 'thinking' | 'running-tool' | 'error'
 
+/** One line in the right-panel activity log. */
+export interface LogEntry {
+  id: number
+  kind: 'tool' | 'system'
+  time: string
+  name?: string
+  args?: unknown
+  result?: unknown
+}
+
 interface AgentState {
   conversationId: number | null
   messages: ChatMessage[]
   status: AgentStatus
   error: string | null
   workspace: string
+  log: LogEntry[]
 
   setWorkspace: (ws: string) => void
   newConversation: () => void
   setConversationId: (id: number) => void
   setStatus: (s: AgentStatus) => void
   setError: (e: string | null) => void
+  pushLog: (e: Omit<LogEntry, 'id' | 'time'>) => void
+  clearLog: () => void
+  abortController: AbortController | null
+  setAbortController: (c: AbortController | null) => void
 
   appendUserMessage: (text: string) => void
   appendAssistantPlaceholder: () => string
   appendTextDelta: (msgId: string, text: string) => void
-  startToolCall: (msgId: string, name: string, args: unknown) => void
-  finishToolCall: (msgId: string, name: string, result: unknown) => void
+  startToolCall: (msgId: string, callId: string, name: string, args: unknown) => void
+  finishToolCall: (msgId: string, callId: string, result: unknown) => void
 
-  loadHistoryFromApi: (conversationId: number) => Promise<void>
+  /** Load a conversation's persisted history into the UI. */
+  loadHistory: (
+    rows: Array<{
+      id: number
+      role: string
+      content: string
+      tool_calls: Array<{
+        id?: string
+        function?: { name?: string; arguments?: string }
+      }> | null
+    }>,
+  ) => void
 }
 
 let nextId = 1
 const genId = () => `m${nextId++}`
+let nextLogId = 1
+
+const now = () =>
+  new Date().toLocaleTimeString([], { hour12: false })
 
 export const useAgent = create<AgentState>((set) => ({
   conversationId: null,
@@ -49,6 +79,7 @@ export const useAgent = create<AgentState>((set) => ({
   status: 'idle',
   error: null,
   workspace: '.',
+  log: [],
 
   setWorkspace: (ws) => set({ workspace: ws }),
 
@@ -58,6 +89,16 @@ export const useAgent = create<AgentState>((set) => ({
   setConversationId: (id) => set({ conversationId: id }),
   setStatus: (status) => set({ status }),
   setError: (error) => set({ error }),
+
+  pushLog: (e) =>
+    set((s) => ({
+      log: [...s.log, { ...e, id: nextLogId++, time: now() }].slice(-200),
+    })),
+
+  clearLog: () => set({ log: [] }),
+
+  abortController: null,
+  setAbortController: (c) => set({ abortController: c }),
 
   appendUserMessage: (text) =>
     set((s) => ({
@@ -79,7 +120,7 @@ export const useAgent = create<AgentState>((set) => ({
       ),
     })),
 
-  startToolCall: (msgId, name, args) =>
+  startToolCall: (msgId, callId, name, args) =>
     set((s) => ({
       messages: s.messages.map((m) =>
         m.id === msgId
@@ -87,20 +128,20 @@ export const useAgent = create<AgentState>((set) => ({
               ...m,
               toolCalls: [
                 ...(m.toolCalls ?? []),
-                { id: `t${(m.toolCalls?.length ?? 0) + 1}`, name, args },
+                { id: callId || `t${(m.toolCalls?.length ?? 0) + 1}`, name, args },
               ],
             }
           : m,
       ),
     })),
 
-  finishToolCall: (msgId, name, result) =>
+  finishToolCall: (msgId, callId, result) =>
     set((s) => ({
       messages: s.messages.map((m) => {
         if (m.id !== msgId || !m.toolCalls?.length) return m
         const tcs = [...m.toolCalls]
         for (let i = tcs.length - 1; i >= 0; i--) {
-          if (tcs[i].name === name && tcs[i].result === undefined) {
+          if (tcs[i].id === callId && tcs[i].result === undefined) {
             tcs[i] = { ...tcs[i], result }
             break
           }
@@ -109,24 +150,37 @@ export const useAgent = create<AgentState>((set) => ({
       }),
     })),
 
-  loadHistoryFromApi: async (conversationId) => {
-    const res = await fetch(`/api/conversations/${conversationId}/messages`)
-    if (!res.ok) return
-    const rows: Array<{
-      id: number
-      role: Role
-      content: string
-      tool_calls: Array<{ id?: string; name?: string }> | null
-    }> = await res.json()
-    const messages: ChatMessage[] = rows.map((r) => ({
-      id: `db${r.id}`,
-      role: r.role,
-      content: r.content,
-      toolCalls:
-        r.role === 'tool' && r.tool_calls?.[0]?.name
-          ? [{ id: r.tool_calls[0].id ?? '', name: r.tool_calls[0].name! }]
-          : undefined,
-    }))
-    set({ messages })
-  },
+  loadHistory: (rows) =>
+    set({
+      messages: rows.map((r) => {
+        const fn = r.tool_calls?.[0]?.function
+        return {
+          id: `db${r.id}`,
+          role: r.role as Role,
+          content: r.content,
+          toolCalls:
+            r.role === 'tool' && fn?.name
+              ? [
+                  {
+                    id: r.tool_calls![0].id ?? '',
+                    name: fn.name,
+                    args: safeParse(fn.arguments),
+                    result: safeParse(r.content),
+                  },
+                ]
+              : undefined,
+        }
+      }),
+      status: 'idle',
+      error: null,
+    }),
 }))
+
+function safeParse(s?: string): unknown {
+  if (!s) return undefined
+  try {
+    return JSON.parse(s)
+  } catch {
+    return s
+  }
+}

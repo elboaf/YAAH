@@ -38,6 +38,11 @@ async def load_history(conversation_id: int) -> list:
     """Load persisted messages back into OpenAI chat format."""
     rows = await get_messages(conversation_id)
     out = []
+    # Track which assistant tool_call ids actually made it into the replayed
+    # history, so we can drop orphaned 'tool' rows (e.g. when a malformed
+    # assistant tool_calls payload was stripped above). Most OpenAI-compatible
+    # APIs reject tool messages with no preceding assistant tool_calls.
+    valid_call_ids: set[str] = set()
     for r in rows:
         role = r["role"]
         if role == "user":
@@ -48,13 +53,23 @@ async def load_history(conversation_id: int) -> list:
             # Only replay well-formed OpenAI tool calls (id + function.name)
             if tcs and isinstance(tcs[0], dict) and tcs[0].get("id") and tcs[0].get("function"):
                 m["tool_calls"] = tcs
+                valid_call_ids.update(
+                    tc.get("id", "") for tc in tcs if tc.get("id")
+                )
             out.append(m)
         elif role == "tool":
-            meta = (r.get("tool_calls") or [{}])[0]
+            # Prefer the dedicated tool_call_id column; fall back to the
+            # legacy convention of stashing the id in the tool_calls column.
+            tc_id = r.get("tool_call_id")
+            if not tc_id:
+                meta = (r.get("tool_calls") or [{}])[0]
+                tc_id = meta.get("id", "")
+            if tc_id and tc_id not in valid_call_ids:
+                continue  # orphaned tool result; skip to keep history valid
             out.append(
                 {
                     "role": "tool",
-                    "tool_call_id": meta.get("id", ""),
+                    "tool_call_id": tc_id or "",
                     "content": r["content"],
                 }
             )
@@ -121,11 +136,25 @@ async def run_agent(
                 except json.JSONDecodeError as e:
                     result = {"error": f"Invalid JSON arguments: {e}"}
                 else:
-                    yield _sse({"type": "tool_start", "name": name, "args": args})
+                    yield _sse(
+                        {
+                            "type": "tool_start",
+                            "name": name,
+                            "args": args,
+                            "call_id": tc.get("id", ""),
+                        }
+                    )
                     result = await execute_tool(name, args, workspace)
 
                 result_str = json.dumps(result)[:MAX_TOOL_RESULT_CHARS]
-                yield _sse({"type": "tool_result", "name": name, "result": result})
+                yield _sse(
+                    {
+                        "type": "tool_result",
+                        "name": name,
+                        "result": result,
+                        "call_id": tc.get("id", ""),
+                    }
+                )
 
                 messages.append(
                     {
@@ -140,6 +169,7 @@ async def run_agent(
                     "tool",
                     result_str,
                     tool_calls=[{"id": tc.get("id", ""), "name": name}],
+                    tool_call_id=tc.get("id", ""),
                 )
 
         yield _sse({"type": "error", "message": f"Step budget ({MAX_STEPS}) exhausted"})
