@@ -597,6 +597,22 @@ export function Sidebar() {
   const [savingModel, setSavingModel] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
 
+  // Keep the input in sync with the store (conversation switch, restore below).
+  useEffect(() => setWsInput(workspace), [workspace])
+
+  // The workspace is remembered across restarts: the store seeds itself from
+  // localStorage, and config.json is the durable fallback for a fresh install,
+  // cleared storage, or a first run on a new machine.
+  useEffect(() => {
+    if (workspace && workspace !== '.') return
+    getConfig()
+      .then((c) => {
+        if (c.last_workspace) setWorkspace(c.last_workspace)
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Merged model list: every configured provider, queried in parallel by the
   // backend (keys never reach the browser). Grouped per provider in the dropdown.
   const refreshModels = useCallback(() => {
@@ -668,6 +684,7 @@ export function Sidebar() {
           onChange={(e) => setWsInput(e.target.value)}
           onBlur={() => setWorkspace(wsInput || '.')}
           placeholder="/path/to/project"
+          title="Remembered across app restarts"
         />
         <button
           className="mb-3 self-start rounded px-1 text-[10px] text-zinc-500 hover:text-zinc-300"
@@ -744,6 +761,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [newName, setNewName] = useState('')
   const [temperature, setTemperature] = useState<number | ''>('')
   const [maxTokens, setMaxTokens] = useState<number | ''>('')
+  const [maxSteps, setMaxSteps] = useState<number | ''>('')
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -765,6 +783,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         setActive(c.active_provider)
         setTemperature(c.temperature ?? '')
         setMaxTokens(c.max_tokens ? c.max_tokens : '')
+        setMaxSteps(c.max_steps ?? '')
       })
       .catch((e) => setErr(String(e)))
     getProviders().then(setPresets).catch(() => {})
@@ -825,6 +844,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         active_provider: active || undefined,
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
+        max_steps: maxSteps === '' ? undefined : Number(maxSteps),
       })
       setSaved(true)
       setTimeout(onClose, 600)
@@ -947,6 +967,20 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             />
             <p className="mt-1 text-[10px] text-zinc-600">0 or blank = no limit (provider default)</p>
           </div>
+        </div>
+
+        <div className="mb-3">
+          <label className="mb-1 block text-xs text-zinc-500">Max steps</label>
+          <input
+            type="number"
+            min="0"
+            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+            value={maxSteps}
+            onChange={(e) => setMaxSteps(e.target.value === '' ? '' : Number(e.target.value))}
+          />
+          <p className="mt-1 text-[10px] text-zinc-600">
+            Tool-call rounds per turn before the agent gives up; 0 = unlimited (Stop still works)
+          </p>
         </div>
 
         {err && <p className="mb-2 text-xs text-red-400">{err}</p>}

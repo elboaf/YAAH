@@ -81,15 +81,26 @@ export interface AgentConfig {
   model: string // derived
   temperature?: number
   max_tokens?: number
+  max_steps?: number
+  /** Workspace used last, restored into the sidebar on startup. */
+  last_workspace?: string
 }
 
 export const getConfig = () => api<AgentConfig>('/api/config')
+
+/** Remember the workspace for the next app launch (stored in config.json). */
+export const updateLastWorkspace = (workspace: string) =>
+  api<{ ok: boolean }>('/api/config/last-workspace', {
+    method: 'POST',
+    body: JSON.stringify({ workspace }),
+  })
 export const updateConfig = (
   patch: Partial<{
     providers: Record<string, Partial<ProviderConfig>>
     active_provider: string
     temperature: number
     max_tokens: number
+    max_steps: number
   }>,
 ) =>
   api<{ ok: boolean }>('/api/config', {

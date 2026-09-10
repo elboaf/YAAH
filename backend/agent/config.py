@@ -18,6 +18,10 @@ CONFIG_PATH = Path(__file__).parent.parent / "data" / "config.json"
 DEFAULTS = {
     "temperature": 0.2,
     "max_tokens": 0,
+    # Agent loop tool-call rounds per turn (Settings → Max steps).
+    "max_steps": 200,
+    # Last workspace chosen in the sidebar, so it survives app restarts.
+    "last_workspace": "",
 }
 
 DEFAULT_PROVIDER = {
@@ -92,6 +96,14 @@ def set_active_model(provider: str, model: str):
         **{n: p for n, p in cfg["providers"].items() if n != provider},
         provider: {**cfg["providers"][provider], "model": model},
     }})
+
+
+def set_last_workspace(workspace: str):
+    """Remember the workspace the UI last used (Q: persist across restarts)."""
+    ws = (workspace or "").strip()
+    if not ws or ws == ".":
+        return
+    save_config({"last_workspace": ws})
 
 
 def save_config(updates: dict):

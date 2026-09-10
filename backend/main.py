@@ -117,7 +117,7 @@ async def api_add_message(conversation_id: int, body: NewMessage):
 
 from fastapi.responses import StreamingResponse
 
-from backend.agent.config import load_config, save_config, set_active_model
+from backend.agent.config import load_config, save_config, set_active_model, set_last_workspace
 from backend.agent.loop import run_agent
 
 
@@ -137,11 +137,15 @@ class ConfigUpdate(BaseModel):
     active_provider: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    max_steps: int | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
 async def api_agent_turn(conversation_id: int, body: AgentTurn):
     """Run one agent turn; stream JSON-line events."""
+    # Every turn runs in the workspace the UI has selected: remember it so the
+    # sidebar restores the same folder after an app restart.
+    set_last_workspace(body.workspace)
     return StreamingResponse(
         run_agent(conversation_id, body.message, body.workspace),
         media_type="application/x-ndjson",
@@ -320,6 +324,8 @@ async def api_get_config():
         "model": cfg["model"],
         "temperature": cfg.get("temperature"),
         "max_tokens": cfg.get("max_tokens"),
+        "max_steps": cfg.get("max_steps"),
+        "last_workspace": cfg.get("last_workspace") or "",
     }
 
 
@@ -335,9 +341,20 @@ class ModelPick(BaseModel):
     model: str
 
 
+class LastWorkspace(BaseModel):
+    workspace: str
+
+
 @app.post("/api/config/active-model")
 async def api_set_active_model(body: ModelPick):
     """Selecting a model from a provider's dropdown group makes that
     provider active and remembers the model it was last used with."""
     set_active_model(body.provider, body.model)
+    return {"ok": True}
+
+
+@app.post("/api/config/last-workspace")
+async def api_set_last_workspace(body: LastWorkspace):
+    """Remember the workspace so the sidebar restores it after a restart."""
+    set_last_workspace(body.workspace)
     return {"ok": True}

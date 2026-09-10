@@ -9,14 +9,16 @@ Emits JSON-line events for the frontend:
   {'type': 'error', 'message'}              - fatal error
 """
 import asyncio
+import itertools
 import json
 from typing import AsyncIterator
 
 from backend.agent import model_client
+from backend.agent.config import load_config
 from backend.agent.tools import execute_tool, get_schemas
 from backend.db.database import add_message, get_conversation, get_messages
 
-MAX_STEPS = 25
+DEFAULT_MAX_STEPS = 200
 MAX_TOOL_RESULT_CHARS = 20_000
 
 SYSTEM_PROMPT = """You are an expert AI coding agent working inside a user's project workspace.
@@ -118,8 +120,15 @@ async def run_agent(
     cancel_ev = asyncio.Event()
     _cancel_events[conversation_id] = cancel_ev
 
+    # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
+    # the turn). Configured in Settings → Max steps or config.json `max_steps`.
     try:
-        for _step in range(MAX_STEPS):
+        max_steps = int(load_config().get("max_steps") or 0)
+    except (TypeError, ValueError):
+        max_steps = DEFAULT_MAX_STEPS
+
+    try:
+        for _step in range(max_steps) if max_steps > 0 else itertools.count():
             if cancel_ev.is_set():
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
@@ -221,7 +230,13 @@ async def run_agent(
                     tool_call_id=tc.get("id", ""),
                 )
 
-        yield _ndjson({"type": "error", "message": f"Step budget ({MAX_STEPS}) exhausted"})
+        yield _ndjson({
+            "type": "error",
+            "message": (
+                f"Step budget ({max_steps}) exhausted — raise it in "
+                "Settings → Max steps (or config.json `max_steps`; 0 = unlimited)"
+            ),
+        })
 
     except model_client.ModelError as e:
         yield _ndjson({"type": "error", "message": str(e)})
