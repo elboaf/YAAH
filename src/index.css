@@ -2,11 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
-/* New tool chips slide in from the right of the live ticker. */
+/* New tool chips slide in from the left edge of the live ticker, matching the
+   left-to-right flow that pushes older chips toward the fade-out zone. */
 @keyframes chip-in {
   from {
     opacity: 0;
-    transform: translateX(24px);
+    transform: translateX(-24px);
   }
   to {
     opacity: 1;

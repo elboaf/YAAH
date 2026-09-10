@@ -150,19 +150,26 @@ function ToolChip({ tc }: { tc: ToolCall }) {
   )
 }
 
-/** Live, ephemeral stream of calls while the agent works (newest slides in). */
+/** Live, ephemeral stream of calls while the agent works. Newest chip appears
+ *  at the left edge and older ones are pushed right, fading out at the right
+ *  edge; the row never grows past the chat panel's width. */
 function ToolTicker({ calls }: { calls: ToolCall[] }) {
-  const recent = calls.slice(-10)
+  const recent = calls.slice(-12)
+  const fade =
+    'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
   return (
-    <div className="my-1 flex flex-row-reverse items-center gap-1.5 overflow-hidden">
+    <div
+      className="my-1 flex w-full min-w-0 items-center gap-1.5 overflow-hidden"
+      style={{ maskImage: fade, WebkitMaskImage: fade }}
+    >
+      <span className="shrink-0 font-mono text-[10px] text-zinc-600">
+        {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
+      </span>
       {[...recent].reverse().map((tc, i) => (
         <span key={tc.id} className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}>
           <ToolChip tc={tc} />
         </span>
       ))}
-      <span className="shrink-0 font-mono text-[10px] text-zinc-600">
-        {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
-      </span>
     </div>
   )
 }
@@ -979,8 +986,8 @@ export function ChatPanel() {
   }, [messages])
 
   return (
-    <main className="flex flex-1 flex-col">
-      <div className="flex-1 space-y-4 overflow-y-auto p-4">
+    <main className="flex min-w-0 flex-1 flex-col">
+      <div className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
         {messages.length === 0 && (
           <p className="mt-10 text-center text-sm text-zinc-600">
             Start a conversation. Work in progress streams as a live ticker, then
