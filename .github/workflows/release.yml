@@ -56,10 +56,21 @@ jobs:
           grep -inE "error(\[E[0-9]+\])?:|error:|failed to|panicked" build.log | head -20 | while IFS= read -r line; do
             echo "::error::$line"
           done
-          # Dump the raw tail (annotations are capped; keep it short)
-          tail -30 build.log | while IFS= read -r line; do
-            echo "::error::TAIL $line"
-          done
+          echo "=== memory/disk ==="
+          (free -h || true) 2>/dev/null
+          (df -h . || true)
+          npx tauri info 2>&1 | tail -40 || true
+
+      - name: Attach full build log to release
+        if: failure()
+        shell: bash
+        run: cp build.log "build-${RUNNER_OS,,}.log"
+      - if: failure()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0
+          files: build-*.log
+          overwrite_files: true
 
       - name: Upload Windows artifacts
         if: success() && matrix.os == 'windows-latest'
