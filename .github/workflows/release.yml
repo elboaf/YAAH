@@ -45,6 +45,13 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # Standalone backend executable (PyInstaller) so the installer needs
+      # no system Python. externalBin makes this file mandatory for the
+      # Tauri CLI, so it must exist before `tauri build`.
+      - name: Build backend sidecar
+        shell: bash
+        run: bash scripts/build_sidecar.sh
+
       - name: Build (verbose, logged)
         shell: bash
         run: npx tauri build --verbose 2>&1 | tee build.log

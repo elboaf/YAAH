@@ -1,0 +1,3 @@
+# Build-time only: packages the backend into the standalone sidecar
+# executable that Tauri bundles via externalBin (see release.yml).
+pyinstaller>=6.10.0

@@ -396,6 +396,11 @@ async def test_web_search_ddg_post_fallback(monkeypatch):
 
     monkeypatch.setattr(webtools, "_browser_get", fail_browser)
     monkeypatch.setattr(
+        webtools, "_curl_get",
+        lambda url, timeout=15, data=None: (_ for _ in ()).throw(
+            RuntimeError("no curl_cffi")),
+    )
+    monkeypatch.setattr(
         webtools, "_http_get",
         lambda url, timeout=15, data=None: ddg_html,
     )
@@ -414,6 +419,11 @@ async def test_web_fetch_block_marker(monkeypatch):
         return "<html><body>Just a moment...</body></html>"
 
     monkeypatch.setattr(webtools, "_browser_get", chrome_wall)
+    monkeypatch.setattr(
+        webtools, "_curl_get",
+        lambda url, timeout=15, data=None: (_ for _ in ()).throw(
+            RuntimeError("no curl_cffi")),
+    )
 
     def direct(url, timeout=15, data=None):
         return "<html><title>Real</title><p>actual content here</p></html>"

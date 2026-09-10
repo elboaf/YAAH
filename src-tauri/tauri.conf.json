@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "yaah",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "identifier": "com.elboaf.yaah",
   "build": {
     "frontendDist": "../dist",
@@ -33,6 +33,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["../backend/**/*.py"]
+    "resources": ["../backend/**/*.py"],
+    "externalBin": ["binaries/backend"]
   }
 }

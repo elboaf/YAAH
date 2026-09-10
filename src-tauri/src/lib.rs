@@ -55,15 +55,56 @@ fn find_backend_cwd(app: &tauri::AppHandle) -> std::path::PathBuf {
 }
 
 fn spawn_backend(app: &tauri::AppHandle) -> Option<Child> {
+    // Prefer the bundled PyInstaller sidecar (no Python needed); fall back
+    // to system python for dev runs, where no sidecar exists.
+    if let Some(sidecar) = find_sidecar() {
+        eprintln!("using bundled backend: {}", sidecar.display());
+        return spawn_with_output(&mut Command::new(sidecar), app);
+    }
     let cwd = find_backend_cwd(app);
     // Tee backend output to a log file so startup failures are diagnosable.
     let log_path = std::env::temp_dir().join("yaah-backend.log");
     eprintln!("backend cwd: {} (log: {})", cwd.display(), log_path.display());
-    let log_file = std::fs::File::create(&log_path).ok();
-    let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
     let mut cmd = Command::new(python_cmd());
     cmd.args(["-m", "uvicorn", "backend.main:app", "--port", "8765"])
         .current_dir(&cwd);
+    spawn_with_output(&mut cmd, app)
+}
+
+/// Path to the bundled backend sidecar, if this is a packaged build.
+/// Tauri's externalBin copies `binaries/backend-<target-triple>[.exe]`
+/// next to the main executable; accept the plain name too.
+fn find_sidecar() -> Option<std::path::PathBuf> {
+    // Env override for testing a locally built sidecar.
+    if let Ok(p) = std::env::var("YAAH_BACKEND_EXE") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let mut names = vec!["backend".to_string()];
+    if let Some(triple) = option_env!("TAURI_ENV_TARGET_TRIPLE") {
+        names.push(format!("backend-{}", triple.replace('-', "_")));
+        names.push(format!("backend-{}", triple));
+    }
+    #[cfg(windows)]
+    let names: Vec<String> = names.iter().map(|n| format!("{}.exe", n)).collect();
+    names.iter().map(|n| dir.join(n)).find(|p| p.is_file())
+}
+
+/// Spawn the backend command, teeing stdout/stderr to the log file,
+/// hiding the console window on Windows, and surfacing spawn failures
+/// in the UI.
+fn spawn_with_output(cmd: &mut Command, app: &tauri::AppHandle) -> Option<Child> {
+    let log_path = std::env::temp_dir().join("yaah-backend.log");
+    let log_file = std::fs::File::create(&log_path).ok();
+    let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     if let (Some(out), Some(err)) = (log_file, log_file_err) {
         use std::process::Stdio;
         cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));

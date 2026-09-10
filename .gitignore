@@ -15,3 +15,7 @@ src-tauri/target/
 # Env / local
 .env
 *.db
+# PyInstaller sidecar build artifacts
+build/
+*.spec
+src-tauri/binaries/

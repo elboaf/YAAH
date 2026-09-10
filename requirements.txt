@@ -4,5 +4,9 @@ uvicorn[standard]>=0.32.0
 aiosqlite>=0.20.0
 httpx>=0.28.0
 pydantic>=2.10.0
+# Chrome TLS-fingerprint HTTP client; soft dep for the web tools' middle
+# fallback route (headless Chrome -> curl_cffi -> urllib). Optional at
+# runtime, but bundled with the PyInstaller sidecar.
+curl_cffi>=0.7.0
 pytest>=8.3.0
 pytest-asyncio>=0.24.0

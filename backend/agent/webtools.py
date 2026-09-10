@@ -6,7 +6,8 @@ Chrome/Edge route: a real browser TLS fingerprint that executes JS, with a
 persistent cookie profile at LOCALAPPDATA/YAAH/chrome-profile so repeat
 visits look like a returning user and bot challenges (DuckDuckGo anomaly
 modal, Cloudflare interstitials) are usually defeated on the built-in
-retry. Direct HTTP is the fallback route.
+retry. Second route is curl_cffi (Chrome TLS fingerprint, no JS) when the
+package is installed; plain direct HTTP is the last fallback.
 """
 import asyncio
 import os
@@ -42,6 +43,23 @@ def _http_get(url, timeout=15, data=None):
         except zlib.error:
             pass
     return raw.decode(charset, errors="replace")
+
+
+def _curl_get(url, timeout=15, data=None):
+    """Fetch via curl_cffi with a Chrome TLS fingerprint. No JS execution,
+    but it defeats passive TLS/HTTP2 fingerprinting that flags urllib as a
+    bot — the main reason direct HTTP gets challenged. Raises if the
+    package isn't installed."""
+    from curl_cffi import requests as creq
+    if data is not None:
+        resp = creq.post(url, data=data, timeout=timeout,
+                         impersonate="chrome", headers={"User-Agent": _WEB_UA})
+    else:
+        resp = creq.get(url, timeout=timeout, impersonate="chrome",
+                        headers={"User-Agent": _WEB_UA})
+    if resp.status_code >= 400:
+        raise RuntimeError(f"curl route got HTTP {resp.status_code}")
+    return resp.text
 
 
 def strip_html(html):
@@ -141,7 +159,15 @@ async def web_search(query, max_results=8, workspace=None):
             + urllib.parse.quote(query))
     except Exception:
         html = None
-    # Fallback: direct POST request (original route).
+    # Second route: curl_cffi (Chrome TLS fingerprint without a browser).
+    if not html or "anomaly-modal" in html:
+        body = urllib.parse.urlencode({"q": query, "kl": "wt-wt"}).encode()
+        try:
+            html = await asyncio.to_thread(
+                _curl_get, "https://html.duckduckgo.com/html/", 15, body)
+        except Exception:
+            html = None
+    # Last resort: plain direct POST request (original route).
     if not html or "anomaly-modal" in html:
         body = urllib.parse.urlencode({"q": query, "kl": "wt-wt"}).encode()
         try:
@@ -183,7 +209,8 @@ async def web_search(query, max_results=8, workspace=None):
 async def web_fetch(url, max_chars=20000, workspace=None):
     """Fetch a URL and return its readable text (HTML stripped). Primary
     route is headless Chrome (real browser fingerprint, renders JS) so
-    bot-blocked sites usually just work; direct HTTP is the fallback. If
+    bot-blocked sites usually just work; curl_cffi and then plain direct
+    HTTP are the fallbacks. If
     both fail, returns a hint to use web_search snippets."""
     import re
     if not re.match(r"^https?://", url):
@@ -198,6 +225,15 @@ async def web_fetch(url, max_chars=20000, workspace=None):
             text = None  # bot-wall page; try the next route
     except Exception:
         pass
+    if text is None:
+        try:
+            html = await asyncio.to_thread(_curl_get, url)
+            text = strip_html(html)
+            via = "curl"
+            if text and any(m in text[:600].lower() for m in _BLOCK_MARKERS):
+                text = None  # still bot-walled; try plain HTTP
+        except Exception:
+            text = None
     if text is None:
         try:
             html = await asyncio.to_thread(_http_get, url)
