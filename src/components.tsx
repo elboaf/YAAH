@@ -317,10 +317,10 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
         <div className="max-w-[85%] rounded border border-zinc-700/70 bg-zinc-800/60 px-3 py-2 text-sm text-zinc-100">
           {msg.images?.length ? (
             <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
-              {msg.images.map((rel) => (
-                <a key={rel} href={imageUrl(rel)} target="_blank" rel="noreferrer">
+              {msg.images.map((rel, i) => (
+                <a key={i} href={imageSrc(rel)} target="_blank" rel="noreferrer">
                   <img
-                    src={imageUrl(rel)}
+                    src={imageSrc(rel)}
                     alt="attachment"
                     className="max-h-40 rounded border border-zinc-700"
                   />
@@ -1038,6 +1038,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 }
 
 // ---------------------------------------------------------------- chat
+
+/** Message images are data URLs while live (just sent) and backend rel
+ *  paths once loaded from history — render either. */
+const imageSrc = (img: string) => (img.startsWith('data:') ? img : imageUrl(img))
 
 export function ChatPanel() {
   const { messages, status, error } = useAgent()
