@@ -37,15 +37,17 @@ fn spawn_backend(app: &tauri::AppHandle) -> Option<Child> {
     let cwd = find_backend_cwd(app);
     // Tee backend output to a log file so startup failures are diagnosable.
     let log_path = std::env::temp_dir().join("yaah-backend.log");
-    let log_file = std::fs::File::create(&log_path).ok();
-    let log_file_err = log_file.try_clone().ok();
     eprintln!("backend cwd: {} (log: {})", cwd.display(), log_path.display());
-    match Command::new(python_cmd())
-        .args(["-m", "uvicorn", "backend.main:app", "--port", "8765"])
-        .current_dir(&cwd)
-        .stdout(log_file)
-        .stderr(log_file_err)
-        .spawn()
+    let log_file = std::fs::File::create(&log_path).ok();
+    let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
+    let mut cmd = Command::new(python_cmd());
+    cmd.args(["-m", "uvicorn", "backend.main:app", "--port", "8765"])
+        .current_dir(&cwd);
+    if let (Some(out), Some(err)) = (log_file, log_file_err) {
+        use std::process::Stdio;
+        cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    }
+    match cmd.spawn()
     {
         Ok(child) => Some(child),
         Err(e) => {
