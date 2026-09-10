@@ -7,8 +7,7 @@ import {
   getConfig,
   updateConfig,
   getProviders,
-  listModels,
-  probeTools,
+  listAvailableModels,
   streamAgentTurn,
   cancelAgent,
   getFileTree,
@@ -492,11 +491,37 @@ export function Sidebar() {
   const { newConversation, workspace, setWorkspace, clearLog, conversationId } = useAgent()
   const [wsInput, setWsInput] = useState(workspace)
   const [model, setModel] = useState('...')
+  const [models, setModels] = useState<string[]>([])
+  const [modelErr, setModelErr] = useState<string | null>(null)
+  const [savingModel, setSavingModel] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+
+  // Current model plus the list served by the configured endpoint. The key
+  // never reaches the browser, so the backend fills it in from saved config.
+  const refreshModels = useCallback(() => {
+    setModelErr(null)
+    listAvailableModels()
+      .then((r) => {
+        if (r.error) setModelErr(r.error)
+        setModels(r.models)
+      })
+      .catch((e) => setModelErr(String(e)))
+  }, [])
 
   useEffect(() => {
     getConfig().then((c) => setModel(c.model)).catch(() => {})
-  }, [conversationId])
+    refreshModels()
+  }, [conversationId, refreshModels])
+
+  const pickModel = (m: string) => {
+    if (!m || m === model) return
+    setSavingModel(true)
+    setModel(m)
+    updateConfig({ model: m })
+      .then(refreshModels)
+      .catch((e) => setModelErr(String(e)))
+      .finally(() => setSavingModel(false))
+  }
 
   const browseWorkspace = async () => {
     // Native folder picker when running inside Tauri (Q28)
@@ -539,18 +564,46 @@ export function Sidebar() {
         >
           browse...
         </button>
+        <div className="mb-3">
+          <label className="mb-1 block text-xs text-zinc-500">
+            Model{savingModel ? ' (saving...)' : ''}
+          </label>
+          <select
+            className="w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200"
+            value={models.includes(model) ? model : ''}
+            onChange={(e) => pickModel(e.target.value)}
+            disabled={models.length === 0}
+            title={models.length === 0 ? 'No models available — check Settings' : model}
+          >
+            {/* placeholder row unless the active model is one of the options */}
+            {!models.includes(model) && (
+              <option value="">{model || 'Select a model'}</option>
+            )}
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          {modelErr && <p className="mt-1 text-[10px] text-amber-400">{modelErr}</p>}
+        </div>
         <button
           className="mb-3 rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
           onClick={() => setShowSettings(true)}
         >
           Settings
         </button>
-        <div className="mb-3 truncate text-xs text-zinc-500">
-          Model: <span className="font-mono text-zinc-300">{model}</span>
-        </div>
         <ConversationList />
       </aside>
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => {
+            setShowSettings(false)
+            getConfig().then((c) => setModel(c.model)).catch(() => {})
+            refreshModels()
+          }}
+        />
+      )}
     </>
   )
 }
@@ -560,14 +613,10 @@ export function Sidebar() {
 function SettingsModal({ onClose }: { onClose: () => void }) {
   const [apiKey, setApiKey] = useState('')
   const [apiBase, setApiBase] = useState('')
-  const [model, setModel] = useState('')
   const [maskedKey, setMaskedKey] = useState('')
   const [temperature, setTemperature] = useState<number | ''>('')
   const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
-  const [models, setModels] = useState<string[]>([])
-  const [modelErr, setModelErr] = useState<string | null>(null)
-  const [toolSupport, setToolSupport] = useState<boolean | null | 'probing'>()
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -576,7 +625,6 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     getConfig()
       .then((c) => {
         setApiBase(c.api_base ?? '')
-        setModel(c.model ?? '')
         setMaskedKey(c.api_key ?? '')
         setTemperature(c.temperature ?? '')
         setMaxTokens(c.max_tokens ?? '')
@@ -585,52 +633,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     getProviders().then(setPresets).catch(() => {})
   }, [])
 
-  const fetchModels = (base: string, key: string) => {
-    setModelErr(null)
-    setModels([])
-    listModels(base, key)
-      .then((r) => {
-        if (r.error) setModelErr(r.error)
-        setModels(r.models)
-      })
-      .catch((e) => setModelErr(String(e)))
-  }
-
   const applyPreset = (name: string) => {
     const p = presets[name]
     if (!p) return
     setApiBase(p.api_base)
-    setModel(p.model)
-    setToolSupport(p.supports_tools)
-    fetchModels(p.api_base, apiKey)
-  }
-
-  const detectLocal = () => {
-    // Probe each local preset; first one serving models wins (Q10)
-    const localNames = ['ollama', 'lmstudio', 'llamacpp']
-    void (async () => {
-      for (const name of localNames) {
-        const p = presets[name]
-        if (!p) continue
-        const r = await listModels(p.api_base).catch(() => null)
-        if (r && !r.error && r.models.length > 0) {
-          setApiBase(p.api_base)
-          setModels(r.models)
-          setModel(r.models[0])
-          setToolSupport(p.supports_tools)
-          return
-        }
-      }
-      setModelErr('No local server detected (Ollama :11434, LM Studio :1234, llama.cpp :8080)')
-    })()
-  }
-
-  const probe = () => {
-    if (!apiBase || !model) return
-    setToolSupport('probing')
-    probeTools(apiBase, model, apiKey)
-      .then((r) => setToolSupport(r.supports_tools))
-      .catch(() => setToolSupport(false))
   }
 
   const save = async () => {
@@ -640,7 +646,6 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       await updateConfig({
         api_key: apiKey || undefined,
         api_base: apiBase || undefined,
-        model: model || undefined,
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? undefined : Number(maxTokens),
       })
@@ -680,29 +685,15 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               {name}
             </button>
           ))}
-          <button
-            className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-            onClick={detectLocal}
-          >
-            detect local
-          </button>
         </div>
 
         <label className="mb-1 block text-xs text-zinc-500">API base URL</label>
-        <div className="mb-3 flex gap-1">
-          <input
-            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-            value={apiBase}
-            onChange={(e) => setApiBase(e.target.value)}
-            placeholder="https://api.openai.com/v1"
-          />
-          <button
-            className="shrink-0 rounded border border-zinc-700 px-2 text-[10px] text-zinc-300 hover:bg-zinc-800"
-            onClick={() => fetchModels(apiBase, apiKey)}
-          >
-            list models
-          </button>
-        </div>
+        <input
+          className="mb-3 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+          value={apiBase}
+          onChange={(e) => setApiBase(e.target.value)}
+          placeholder="https://api.openai.com/v1"
+        />
 
         <label className="mb-1 block text-xs text-zinc-500">API key</label>
         <input
@@ -712,41 +703,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
         />
-        <p className="mb-3 text-[10px] text-zinc-600">Leave blank to keep the existing key.</p>
-
-        {/* searchable model dropdown (Q41): input + datalist */}
-        <label className="mb-1 block text-xs text-zinc-500">Model</label>
-        <div className="mb-1 flex gap-1">
-          <input
-            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-            list="model-options"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="gpt-4o-mini"
-          />
-          <datalist id="model-options">
-            {models.map((m) => (
-              <option key={m} value={m} />
-            ))}
-          </datalist>
-          <button
-            className="shrink-0 rounded border border-zinc-700 px-2 text-[10px] text-zinc-300 hover:bg-zinc-800"
-            onClick={probe}
-            title="Check whether this endpoint/model accepts tool calls (Q35)"
-          >
-            probe tools
-          </button>
-        </div>
-        {models.length > 0 && (
-          <p className="mb-1 text-[10px] text-zinc-500">{models.length} models found — type to filter.</p>
-        )}
-        {toolSupport === 'probing' && <p className="mb-1 text-[10px] text-zinc-500">probing tool support...</p>}
-        {typeof toolSupport === 'boolean' && (
-          <p className={`mb-1 text-[10px] ${toolSupport ? 'text-emerald-400' : 'text-red-400'}`}>
-            {toolSupport ? '✓ tool calling supported' : '✗ tool calls rejected by this endpoint/model'}
-          </p>
-        )}
-        {modelErr && <p className="mb-1 text-[10px] text-amber-400">{modelErr}</p>}
+        <p className="mb-3 text-[10px] text-zinc-600">
+          Leave blank to keep the existing key. Models are chosen from the dropdown in the sidebar.
+        </p>
 
         <div className="mb-3 mt-2 flex gap-2">
           <div className="flex-1">

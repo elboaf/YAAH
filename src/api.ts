@@ -92,17 +92,12 @@ export interface ProviderPreset {
 export const getProviders = () =>
   api<Record<string, ProviderPreset>>('/api/providers')
 
-export const listModels = (api_base: string, api_key?: string) =>
-  api<{ models: string[]; error?: string }>('/api/models', {
-    method: 'POST',
-    body: JSON.stringify({ api_base, api_key: api_key || null }),
-  })
-
-export const probeTools = (api_base: string, model: string, api_key?: string) =>
-  api<{ supports_tools: boolean }>('/api/models/probe-tools', {
-    method: 'POST',
-    body: JSON.stringify({ api_base, model, api_key: api_key || null }),
-  })
+/**
+ * Models offered by the configured endpoint. Uses the API key from saved
+ * config server-side; the browser never sees it.
+ */
+export const listAvailableModels = () =>
+  api<{ models: string[]; error?: string }>('/api/models/available')
 
 // ---------------------------------------------------------------- files
 

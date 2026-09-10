@@ -180,19 +180,13 @@ async def api_list_models(body: ModelsRequest):
     return await providers.list_models(body.api_base, body.api_key or "")
 
 
-class ProbeRequest(BaseModel):
-    api_base: str
-    model: str
-    api_key: str | None = None
-
-
-@app.post("/api/models/probe-tools")
-async def api_probe_tools(body: ProbeRequest):
-    """Probe whether an endpoint/model accepts tool calls."""
-    supported = await providers.probe_tool_support(
-        body.api_base, body.model, body.api_key or ""
-    )
-    return {"supports_tools": supported}
+@app.get("/api/models/available")
+async def api_available_models():
+    """Models served by the configured endpoint, using the saved API key."""
+    cfg = load_config()
+    result = await providers.list_models(cfg["api_base"], cfg["api_key"])
+    result["model"] = cfg["model"]
+    return result
 
 
 # ---- File tree / preview (for the left panel) ----
