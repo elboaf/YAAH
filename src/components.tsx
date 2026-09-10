@@ -627,7 +627,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         setApiBase(c.api_base ?? '')
         setMaskedKey(c.api_key ?? '')
         setTemperature(c.temperature ?? '')
-        setMaxTokens(c.max_tokens ?? '')
+        setMaxTokens(c.max_tokens ? c.max_tokens : '')
       })
       .catch((e) => setErr(String(e)))
     getProviders().then(setPresets).catch(() => {})
@@ -647,7 +647,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         api_key: apiKey || undefined,
         api_base: apiBase || undefined,
         temperature: temperature === '' ? undefined : Number(temperature),
-        max_tokens: maxTokens === '' ? undefined : Number(maxTokens),
+        max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
       })
       setSaved(true)
       setTimeout(onClose, 600)
@@ -724,11 +724,12 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             <label className="mb-1 block text-xs text-zinc-500">Max tokens</label>
             <input
               type="number"
-              min="1"
+              min="0"
               className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
               value={maxTokens}
               onChange={(e) => setMaxTokens(e.target.value === '' ? '' : Number(e.target.value))}
             />
+            <p className="mt-1 text-[10px] text-zinc-600">0 or blank = no limit (provider default)</p>
           </div>
         </div>
 

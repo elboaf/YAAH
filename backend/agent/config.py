@@ -14,7 +14,7 @@ DEFAULTS = {
     "api_key": "",
     "model": "gpt-4o",
     "temperature": 0.2,
-    "max_tokens": 4096,
+    "max_tokens": 0,
 }
 
 

@@ -30,9 +30,11 @@ async def chat(
         "model": cfg["model"],
         "messages": messages,
         "temperature": cfg["temperature"],
-        "max_tokens": cfg["max_tokens"],
         "stream": stream,
     }
+    # 0/blank = no limit: let the provider use the model's full output cap
+    if cfg["max_tokens"] and cfg["max_tokens"] > 0:
+        payload["max_tokens"] = cfg["max_tokens"]
     if tools:
         payload["tools"] = tools
 
