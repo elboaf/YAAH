@@ -198,6 +198,13 @@ export const updateConversation = (
 export const cancelAgent = (id: number) =>
   api<{ ok: boolean }>(`/api/agent/${id}/cancel`, { method: 'POST' })
 
+/** Answer a pending ask_user question; the blocked agent loop resumes. */
+export const submitAnswer = (id: number, callId: string, answer: string) =>
+  api<{ ok: boolean }>(`/api/conversations/${id}/answer`, {
+    method: 'POST',
+    body: JSON.stringify({ call_id: callId, answer }),
+  })
+
 export const deleteFile = (workspace: string, path: string) =>
   api<{ ok: boolean }>(
     `/api/files?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,

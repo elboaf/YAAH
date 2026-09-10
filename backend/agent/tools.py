@@ -134,6 +134,48 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "ask_user",
+            "description": (
+                "Put a decision to the user and wait for their answer. One "
+                "question per call. Provide 2-4 concrete answer options, "
+                "each with a short description of what the choice means. "
+                "The user can pick an option or answer with free text. Use "
+                "this for decisions, preferences, and ambiguities only — "
+                "never for facts you can look up yourself with tools."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to put to the user",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "Short answer text",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "What this choice means / its trade-offs",
+                                },
+                            },
+                            "required": ["label"],
+                        },
+                        "description": "2-4 concrete answer options",
+                    },
+                },
+                "required": ["question", "options"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
                 "Read the contents of a file in the workspace. Large files are "

@@ -20,6 +20,13 @@ export interface ChatMessage {
 
 export type AgentStatus = 'idle' | 'thinking' | 'running-tool' | 'error'
 
+/** A live ask_user question waiting for the user's answer. */
+export interface PendingQuestion {
+  callId: string
+  question: string
+  options: Array<{ label: string; description?: string }>
+}
+
 /** One line in the right-panel activity log. */
 export interface LogEntry {
   id: number
@@ -40,6 +47,10 @@ interface AgentState {
   /** File currently open in the preview side panel (Q44). */
   previewPath: string | null
   setPreviewPath: (p: string | null) => void
+
+  /** Question the agent is currently waiting on (null = none). */
+  pendingQuestion: PendingQuestion | null
+  setPendingQuestion: (q: PendingQuestion | null) => void
 
   setWorkspace: (ws: string) => void
   newConversation: () => void
@@ -118,6 +129,8 @@ export const useAgent = create<AgentState>((set) => ({
   log: [],
   previewPath: null,
   setPreviewPath: (previewPath) => set({ previewPath }),
+  pendingQuestion: null,
+  setPendingQuestion: (pendingQuestion) => set({ pendingQuestion }),
 
   setWorkspace: (ws) => {
     set({ workspace: ws })
@@ -125,7 +138,13 @@ export const useAgent = create<AgentState>((set) => ({
   },
 
   newConversation: () =>
-    set({ conversationId: null, messages: [], status: 'idle', error: null }),
+    set({
+      conversationId: null,
+      messages: [],
+      status: 'idle',
+      error: null,
+      pendingQuestion: null,
+    }),
 
   setConversationId: (id) => set({ conversationId: id }),
   setStatus: (status) => set({ status }),
@@ -218,6 +237,7 @@ export const useAgent = create<AgentState>((set) => ({
       }),
       status: 'idle',
       error: null,
+      pendingQuestion: null,
     }),
 }))
 

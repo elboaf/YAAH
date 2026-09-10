@@ -421,3 +421,115 @@ async def test_web_fetch_block_marker(monkeypatch):
     monkeypatch.setattr(webtools, "_http_get", direct)
     out = await webtools.web_fetch("https://example.com")
     assert "actual content" in out and "(via direct" in out
+
+
+# ---------------------------------------------------------------- ask_user
+
+@pytest.mark.asyncio
+async def test_ask_user_answer_resumes_loop(fake_model, tmp_path):
+    """The loop blocks at ask_user until resolve_answer delivers the answer."""
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("t3")
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "q1",
+                "type": "function",
+                "function": {
+                    "name": "ask_user",
+                    "arguments": json.dumps({
+                        "question": "Which framework?",
+                        "options": [{"label": "React"}, {"label": "Svelte"}],
+                    }),
+                },
+            }],
+        },
+    ])
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+
+    import asyncio
+    agent = loop.run_agent(cid, "go", str(tmp_path))
+
+    async def answer_when_asked():
+        for _ in range(200):
+            if loop.resolve_answer(cid, "q1", "React"):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("question never became pending")
+
+    results = await asyncio.gather(collect(agent), answer_when_asked())
+    events = results[0]
+    types = [e["type"] for e in events]
+    assert types == ["tool_start", "tool_result", "text", "done"]
+    assert events[1]["name"] == "ask_user"
+    assert events[1]["result"] == {"answer": "React"}
+
+    msgs = await get_messages(cid)
+    tool_row = [m for m in msgs if m["role"] == "tool"][0]
+    assert json.loads(tool_row["content"]) == {"answer": "React"}
+
+
+@pytest.mark.asyncio
+async def test_ask_user_cancel_records_no_answer(fake_model, tmp_path):
+    """Stopping the run while a question is pending records 'not answered'."""
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("t4")
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "q2",
+                "type": "function",
+                "function": {
+                    "name": "ask_user",
+                    "arguments": json.dumps({"question": "?", "options": []}),
+                },
+            }],
+        },
+    ])
+
+    import asyncio
+    agent = loop.run_agent(cid, "go", str(tmp_path))
+
+    async def cancel_when_asked():
+        for _ in range(200):
+            key = f"{cid}:q2"
+            if key in loop._pending_answers:
+                loop.cancel_agent(cid)
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("question never became pending")
+
+    results = await asyncio.gather(collect(agent), cancel_when_asked())
+    events = results[0]
+    result = next(e for e in events if e["type"] == "tool_result")["result"]
+    assert result["answer"] is None
+    assert "did not answer" in result["note"]
+    # and the turn ends as stopped, with the tool result persisted
+    assert events[-1]["type"] == "stopped"
+    msgs = await get_messages(cid)
+    tool_row = [m for m in msgs if m["role"] == "tool"][0]
+    assert json.loads(tool_row["content"])["answer"] is None
+
+
+@pytest.mark.asyncio
+async def test_load_history_fills_unanswered_tool_call(fake_model, tmp_path):
+    """A tool call with no persisted result (crash mid-question) gets a
+    synthetic 'not answered' tool message on replay."""
+    from backend.db.database import add_message, create_conversation
+
+    cid = await create_conversation("t5")
+    await add_message(cid, "user", "go")
+    await add_message(
+        cid, "assistant", "",
+        tool_calls=[{"id": "qx", "type": "function",
+                     "function": {"name": "ask_user", "arguments": "{}"}}],
+    )
+    history = await loop.load_history(cid)
+    tool_msgs = [m for m in history if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "qx"
+    assert "not answered" in tool_msgs[0]["content"]

@@ -39,10 +39,58 @@ Guidelines:
   use view_image on an image URL you actually need to see.
 - Commit meaningful work with git_add/git_commit when the user asks for it.
 - Be concise in prose; let tools do the talking.
-- Paths are relative to the workspace root."""
+- Paths are relative to the workspace root.
+
+Interview the user (ask_user tool):
+- Do not make assumptions about a plan, decision, or idea. Put each
+  decision to the user with ask_user and wait for the answer.
+- Finding facts is your job, never the user's: never ask for anything
+  you could look up yourself with tools.
+- Don't block on unsettled exploration: a running exploration is an
+  unsettled prerequisite, so only the questions downstream of it wait
+  for the exploration to report. Decisions wait; facts don't.
+- The session is done when nothing is left silently assumed. Do not
+  act on a decision until the user has confirmed shared understanding."""
 
 # Per-conversation cancellation flags checked between model/tool steps.
 _cancel_events: dict[int, asyncio.Event] = {}
+
+# Pending ask_user calls: "conversation_id:call_id" -> Future carrying the
+# user's answer text. Resolved by the /answer API endpoint.
+_pending_answers: dict[str, asyncio.Future] = {}
+
+
+def resolve_answer(conversation_id: int, call_id: str, answer: str) -> bool:
+    """Deliver a user answer to a pending ask_user call. Returns False when
+    no question is waiting (e.g. the run already ended or was stopped)."""
+    fut = _pending_answers.get(f"{conversation_id}:{call_id}")
+    if fut is None or fut.done():
+        return False
+    fut.set_result(answer)
+    return True
+
+
+async def _ask_user(
+    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event
+) -> dict:
+    """Block the loop until the user answers (or the run is cancelled).
+    The stream stays open and other conversations keep running."""
+    key = f"{conversation_id}:{call_id}"
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    _pending_answers[key] = fut
+    cancel_task = asyncio.create_task(cancel_ev.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {fut, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if fut in done:
+            return {"answer": fut.result()}
+        return {"answer": None, "note": "user did not answer (run stopped)"}
+    finally:
+        cancel_task.cancel()
+        _pending_answers.pop(key, None)
+        if not fut.done():
+            fut.cancel()
 
 
 def cancel_agent(conversation_id: int):
@@ -90,6 +138,7 @@ async def load_history(conversation_id: int) -> list:
     # assistant tool_calls payload was stripped above). Most OpenAI-compatible
     # APIs reject tool messages with no preceding assistant tool_calls.
     valid_call_ids: set[str] = set()
+    answered_call_ids: set[str] = set()
     for r in rows:
         role = r["role"]
         if role == "user":
@@ -116,6 +165,7 @@ async def load_history(conversation_id: int) -> list:
                 tc_id = meta.get("id", "")
             if tc_id and tc_id not in valid_call_ids:
                 continue  # orphaned tool result; skip to keep history valid
+            answered_call_ids.add(tc_id)
             content = r["content"]
             if r.get("images"):
                 # tool-attached image (view_image): replay as parts so a
@@ -135,6 +185,19 @@ async def load_history(conversation_id: int) -> list:
                 }
             )
         # system rows skipped; we inject our own system prompt fresh each turn
+    # Tool calls that never got a result (e.g. the app closed while an
+    # ask_user question was pending) must still be answered or most
+    # OpenAI-compatible APIs reject the replayed history.
+    for tc_id in valid_call_ids - answered_call_ids:
+        out.append(
+            {
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": json.dumps(
+                    {"answer": None, "note": "not answered (session ended)"}
+                ),
+            }
+        )
     return out
 
 
@@ -247,7 +310,12 @@ async def run_agent(
                             "call_id": tc.get("id", ""),
                         }
                     )
-                    result = await execute_tool(name, args, workspace)
+                    if name == "ask_user":
+                        result = await _ask_user(
+                            conversation_id, tc.get("id", ""), args, cancel_ev
+                        )
+                    else:
+                        result = await execute_tool(name, args, workspace)
 
                 result_str = json.dumps(result)[:MAX_TOOL_RESULT_CHARS]
                 # A tool that attached an image (view_image) becomes a

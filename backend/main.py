@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="AI Coding Agent", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AI Coding Agent", version="0.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -183,6 +183,24 @@ async def api_agent_cancel(conversation_id: int):
     from backend.agent.loop import cancel_agent
 
     cancel_agent(conversation_id)
+    return {"ok": True}
+
+
+class AnswerBody(BaseModel):
+    call_id: str
+    answer: str
+
+
+@app.post("/api/conversations/{conversation_id}/answer")
+async def api_answer_question(conversation_id: int, body: AnswerBody):
+    """Deliver the user's answer to a pending ask_user tool call; the
+    blocked agent loop resumes with it as the tool result."""
+    from backend.agent.loop import resolve_answer
+
+    if not resolve_answer(conversation_id, body.call_id, body.answer):
+        raise HTTPException(
+            status_code=409, detail="no pending question for this conversation"
+        )
     return {"ok": True}
 
 

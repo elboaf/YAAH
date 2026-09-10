@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useAgent, type ChatMessage, type ToolCall } from './store'
 import {
   listConversations,
   createConversation,
@@ -17,10 +16,12 @@ import {
   deleteFile,
   exportConversationUrl,
   updateConversation,
+  submitAnswer,
   imageUrl,
   type FileEntry,
   type ProviderPreset,
 } from './api'
+import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
 
 // ---------------------------------------------------------------- code views
@@ -100,8 +101,152 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
 
 // ---------------------------------------------------------------- tool calls
 
+/** One option row of an ask_user card: label + trade-off description. */
+function AskOptionRow({
+  label,
+  description,
+  chosen,
+  disabled,
+  onClick,
+}: {
+  label: string
+  description?: string
+  chosen?: boolean
+  disabled?: boolean
+  onClick?: () => void
+}) {
+  return (
+    <button
+      className={`block w-full rounded border px-2.5 py-1.5 text-left text-xs ${
+        chosen
+          ? 'border-orange-500 bg-orange-950/40 text-orange-200'
+          : 'border-zinc-700 bg-zinc-800/60 text-zinc-200 enabled:hover:border-orange-500/60 enabled:hover:bg-zinc-800'
+      } disabled:cursor-default`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span className="font-medium">{label}</span>
+      {description && <span className="block text-[11px] text-zinc-400">{description}</span>}
+    </button>
+  )
+}
+
+/** Live question waiting for the user's answer; rendered above the composer
+ *  while the agent blocks on ask_user. Options submit directly; 'Something
+ *  else…' reveals a free-text field. */
+function AskUserCard({ pending }: { pending: PendingQuestion }) {
+  const conversationId = useAgent((s) => s.conversationId)
+  const setPendingQuestion = useAgent((s) => s.setPendingQuestion)
+  const [customOpen, setCustomOpen] = useState(false)
+  const [custom, setCustom] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const answer = (text: string) => {
+    if (conversationId === null || submitting) return
+    setSubmitting(true)
+    setErr(null)
+    submitAnswer(conversationId, pending.callId, text)
+      .then(() => setPendingQuestion(null))
+      .catch((e) => {
+        setErr(String(e))
+        setSubmitting(false)
+      })
+  }
+
+  return (
+    <div className="rounded-lg border border-orange-700/60 bg-zinc-900 p-3 shadow-lg">
+      <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
+        <span className="run-pulse">?</span> agent asks — pick an answer
+      </div>
+      <p className="mb-2.5 whitespace-pre-wrap text-sm text-zinc-100">{pending.question}</p>
+      <div className="space-y-1.5">
+        {pending.options.map((o, i) => (
+          <AskOptionRow
+            key={i}
+            label={o.label}
+            description={o.description}
+            disabled={submitting}
+            onClick={() => answer(o.label)}
+          />
+        ))}
+        {!customOpen ? (
+          <button
+            className="block w-full rounded border border-dashed border-zinc-600 px-2.5 py-1.5 text-left text-xs text-zinc-400 hover:border-orange-500/60 hover:text-zinc-200"
+            disabled={submitting}
+            onClick={() => setCustomOpen(true)}
+          >
+            Something else…
+          </button>
+        ) : (
+          <div className="flex gap-1.5">
+            <input
+              autoFocus
+              className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-orange-500 focus:outline-none"
+              placeholder="Type your own answer…"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && custom.trim()) {
+                  e.preventDefault()
+                  answer(custom.trim())
+                }
+              }}
+            />
+            <button
+              className="rounded bg-orange-600 px-3 py-1.5 text-xs text-white hover:bg-orange-500 disabled:opacity-50"
+              disabled={submitting || !custom.trim()}
+              onClick={() => answer(custom.trim())}
+            >
+              {submitting ? '…' : 'Send'}
+            </button>
+          </div>
+        )}
+      </div>
+      {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
+    </div>
+  )
+}
+
+/** Answered ask_user call as it appears in the trace/history. */
+function AskUserTrace({ tc }: { tc: ToolCall }) {
+  const args = (tc.args ?? {}) as {
+    question?: string
+    options?: Array<{ label: string; description?: string }>
+  }
+  const result = (tc.result ?? {}) as { answer?: string | null; note?: string }
+  const answer = typeof result.answer === 'string' && result.answer ? result.answer : null
+  return (
+    <div className="rounded border border-zinc-700 bg-zinc-900/60 p-2">
+      <p className="mb-1.5 whitespace-pre-wrap font-sans text-xs text-zinc-200">
+        {args.question ?? ''}
+      </p>
+      <div className="space-y-1">
+        {(args.options ?? []).map((o, i) => (
+          <AskOptionRow
+            key={i}
+            label={o.label}
+            description={o.description}
+            chosen={answer !== null && o.label === answer}
+            disabled
+          />
+        ))}
+        {answer !== null && !(args.options ?? []).some((o) => o.label === answer) && (
+          <AskOptionRow label={answer} chosen disabled />
+        )}
+      </div>
+      {answer === null && (
+        <p className="mt-1 font-sans text-[11px] text-zinc-500">
+          {result.note ?? 'not answered'}
+        </p>
+      )}
+    </div>
+  )
+}
+
 /** Icon + color identity per tool, so rows read at a glance. */
 function toolGlyph(name: string): string {
+  if (name === 'ask_user') return '?'
   if (name === 'read_file') return '▤'
   if (name === 'search_files') return '⌕'
   if (name === 'bash' || name === 'powershell') return '❯'
@@ -114,6 +259,7 @@ function toolGlyph(name: string): string {
 }
 
 function toolGlyphColor(name: string): string {
+  if (name === 'ask_user') return 'text-orange-400'
   if (name === 'read_file') return 'text-sky-400'
   if (name === 'search_files') return 'text-violet-400'
   if (name === 'bash') return 'text-emerald-400'
@@ -134,7 +280,7 @@ function toolTarget(tc: ToolCall): string {
     }
     return undefined
   }
-  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url') ?? '')
+  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url', 'question') ?? '')
     .replace(/\s+/g, ' ')
     .trim()
   return t.length > 48 ? t.slice(0, 48) + '…' : t
@@ -224,6 +370,9 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
 
   // Rich rendering per tool (Q43)
   const body = (() => {
+    if (tc.name === 'ask_user') {
+      return <AskUserTrace tc={tc} />
+    }
     if (tc.name === 'edit_file' && typeof args.old_text === 'string' && typeof args.new_text === 'string') {
       return <DiffBlock oldText={args.old_text} newText={args.new_text} />
     }
@@ -1044,7 +1193,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 const imageSrc = (img: string) => (img.startsWith('data:') ? img : imageUrl(img))
 
 export function ChatPanel() {
-  const { messages, status, error } = useAgent()
+  const { messages, status, error, pendingQuestion } = useAgent()
   const bottomRef = useRef<HTMLDivElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
   // Only the in-flight assistant message shows the ephemeral ticker; every
@@ -1072,6 +1221,11 @@ export function ChatPanel() {
       {error && (
         <div className="border-t border-red-900 bg-red-950/60 px-4 py-2 text-xs text-red-300">
           {error}
+        </div>
+      )}
+      {pendingQuestion && (
+        <div className="border-t border-orange-800/60 px-4 pb-3 pt-3">
+          <AskUserCard pending={pendingQuestion} />
         </div>
       )}
       <Composer />
@@ -1113,6 +1267,7 @@ function Composer() {
     setStatus,
     setError,
     setConversationId,
+    setPendingQuestion,
     pushLog,
     setAbortController,
   } = useAgent()
@@ -1205,17 +1360,32 @@ function Composer() {
             setStatus('running-tool')
             startToolCall(asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
             pushLog({ kind: 'tool', name: ev.name, args: ev.args })
+            if (ev.name === 'ask_user') {
+              const a = (ev.args ?? {}) as {
+                question?: string
+                options?: Array<{ label: string; description?: string }>
+              }
+              setPendingQuestion({
+                callId: ev.call_id ?? '',
+                question: a.question ?? '',
+                options: a.options ?? [],
+              })
+            }
           } else if (ev.type === 'tool_result') {
             finishToolCall(asstId, ev.call_id ?? '', ev.result)
             pushLog({ kind: 'tool', name: ev.name, result: ev.result })
+            if (ev.name === 'ask_user') setPendingQuestion(null)
           } else if (ev.type === 'error') {
             setStatus('error')
             setError(ev.message ?? 'Unknown agent error')
+            setPendingQuestion(null)
           } else if (ev.type === 'stopped') {
             setStatus('idle')
             appendTextDelta(asstId, '\n[stopped]')
+            setPendingQuestion(null)
           } else if (ev.type === 'done') {
             setStatus('idle')
+            setPendingQuestion(null)
           }
         },
         ac.signal,
@@ -1223,6 +1393,7 @@ function Composer() {
       )
       if (useAgent.getState().status !== 'error') setStatus('idle')
     } catch (e) {
+      setPendingQuestion(null)
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
         appendTextDelta(asstId, '\n[stopped]')
