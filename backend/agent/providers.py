@@ -50,6 +50,40 @@ def detect_preset(api_base: str) -> str | None:
     return None
 
 
+LIST_TIMEOUT = 4.0  # seconds per provider (Q8 lean)
+
+
+async def list_all_models(providers: dict) -> dict:
+    """Query every configured provider in parallel.
+
+    Returns {'providers': {name: {'models': [...], 'error'?: str}},
+    'model': active_model}. Keys never leave the backend.
+    """
+    import asyncio
+
+    async def one(api_base: str, api_key: str) -> dict:
+        try:
+            async with httpx.AsyncClient(timeout=LIST_TIMEOUT) as client:
+                r = await client.get(
+                    f"{api_base.rstrip('/')}/models",
+                    headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+                )
+            if r.status_code != 200:
+                return {"models": [], "error": f"HTTP {r.status_code}"}
+            data = r.json().get("data", [])
+            models = [
+                m.get("id", "") for m in data if isinstance(m, dict) and m.get("id")
+            ]
+            return {"models": sorted(models)}
+        except (httpx.HTTPError, ValueError) as e:
+            return {"models": [], "error": str(e)}
+
+    results = await asyncio.gather(
+        *(one(p["api_base"], p.get("api_key") or "") for p in providers.values())
+    )
+    return {"providers": dict(zip(providers.keys(), results))}
+
+
 async def list_models(api_base: str, api_key: str = "") -> dict:
     """Query {api_base}/models. Returns {'models': [id...]} or {'error'}."""
     url = f"{api_base.rstrip('/')}/models"

@@ -67,19 +67,41 @@ export const getMessages = (id: number) =>
 
 // ---------------------------------------------------------------- config
 
-export interface AgentConfig {
+export interface ProviderConfig {
   api_base: string
-  api_key: string // masked from server
+  api_key: string // masked from server: 'set' or ''
   model: string
+}
+
+export interface AgentConfig {
+  providers: Record<string, ProviderConfig>
+  active_provider: string
+  api_base: string // derived from active provider
+  api_key: string // masked, derived
+  model: string // derived
   temperature?: number
   max_tokens?: number
 }
 
 export const getConfig = () => api<AgentConfig>('/api/config')
-export const updateConfig = (patch: Partial<AgentConfig>) =>
+export const updateConfig = (
+  patch: Partial<{
+    providers: Record<string, Partial<ProviderConfig>>
+    active_provider: string
+    temperature: number
+    max_tokens: number
+  }>,
+) =>
   api<{ ok: boolean }>('/api/config', {
     method: 'PUT',
     body: JSON.stringify(patch),
+  })
+
+/** Pick a model from a provider's group: activates that provider. */
+export const setActiveModel = (provider: string, model: string) =>
+  api<{ ok: boolean }>('/api/config/active-model', {
+    method: 'POST',
+    body: JSON.stringify({ provider, model }),
   })
 
 export interface ProviderPreset {
@@ -92,12 +114,22 @@ export interface ProviderPreset {
 export const getProviders = () =>
   api<Record<string, ProviderPreset>>('/api/providers')
 
+/** Per-provider model listing, with the error when a provider is unreachable. */
+export interface ProviderModels {
+  models: string[]
+  error?: string
+}
+
 /**
- * Models offered by the configured endpoint. Uses the API key from saved
- * config server-side; the browser never sees it.
+ * Models offered by every configured provider, queried in parallel
+ * server-side. API keys never leave the backend.
  */
 export const listAvailableModels = () =>
-  api<{ models: string[]; error?: string }>('/api/models/available')
+  api<{
+    providers: Record<string, ProviderModels>
+    active_provider: string
+    model: string
+  }>('/api/models/available')
 
 // ---------------------------------------------------------------- files
 

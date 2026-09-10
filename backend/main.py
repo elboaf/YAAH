@@ -117,7 +117,7 @@ async def api_add_message(conversation_id: int, body: NewMessage):
 
 from fastapi.responses import StreamingResponse
 
-from backend.agent.config import load_config, save_config
+from backend.agent.config import load_config, save_config, set_active_model
 from backend.agent.loop import run_agent
 
 
@@ -126,10 +126,15 @@ class AgentTurn(BaseModel):
     workspace: str
 
 
-class ConfigUpdate(BaseModel):
+class ProviderEntry(BaseModel):
     api_base: str | None = None
     api_key: str | None = None
     model: str | None = None
+
+
+class ConfigUpdate(BaseModel):
+    providers: dict[str, ProviderEntry] | None = None
+    active_provider: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
 
@@ -182,9 +187,14 @@ async def api_list_models(body: ModelsRequest):
 
 @app.get("/api/models/available")
 async def api_available_models():
-    """Models served by the configured endpoint, using the saved API key."""
+    """Models offered by every configured provider, queried in parallel.
+
+    Returns {'providers': {name: {models|error}}, 'active_provider',
+    'model'}. API keys stay server-side.
+    """
     cfg = load_config()
-    result = await providers.list_models(cfg["api_base"], cfg["api_key"])
+    result = await providers.list_all_models(cfg["providers"])
+    result["active_provider"] = cfg["active_provider"]
     result["model"] = cfg["model"]
     return result
 
@@ -298,11 +308,36 @@ async def api_export_conversation(conversation_id: int):
 async def api_get_config():
     cfg = load_config()
     # Only reveal whether a key is set — never any part of it
-    return {**cfg, "api_key": "set" if cfg.get("api_key") else ""}
+    masked = {
+        name: {**p, "api_key": "set" if p.get("api_key") else ""}
+        for name, p in cfg["providers"].items()
+    }
+    return {
+        "providers": masked,
+        "active_provider": cfg["active_provider"],
+        "api_base": cfg["api_base"],
+        "api_key": "set" if cfg.get("api_key") else "",
+        "model": cfg["model"],
+        "temperature": cfg.get("temperature"),
+        "max_tokens": cfg.get("max_tokens"),
+    }
 
 
 @app.put("/api/config")
 async def api_set_config(body: ConfigUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     save_config(updates)
+    return {"ok": True}
+
+
+class ModelPick(BaseModel):
+    provider: str
+    model: str
+
+
+@app.post("/api/config/active-model")
+async def api_set_active_model(body: ModelPick):
+    """Selecting a model from a provider's dropdown group makes that
+    provider active and remembers the model it was last used with."""
+    set_active_model(body.provider, body.model)
     return {"ok": True}

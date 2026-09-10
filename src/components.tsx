@@ -6,8 +6,10 @@ import {
   getMessages,
   getConfig,
   updateConfig,
+  setActiveModel,
   getProviders,
   listAvailableModels,
+  type ProviderModels,
   streamAgentTurn,
   cancelAgent,
   getFileTree,
@@ -491,35 +493,46 @@ export function Sidebar() {
   const { newConversation, workspace, setWorkspace, clearLog, conversationId } = useAgent()
   const [wsInput, setWsInput] = useState(workspace)
   const [model, setModel] = useState('...')
-  const [models, setModels] = useState<string[]>([])
-  const [modelErr, setModelErr] = useState<string | null>(null)
+  const [activeProvider, setActiveProvider] = useState('')
+  // name -> {models, error?} for every configured provider
+  const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
   const [savingModel, setSavingModel] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
 
-  // Current model plus the list served by the configured endpoint. The key
-  // never reaches the browser, so the backend fills it in from saved config.
+  // Merged model list: every configured provider, queried in parallel by the
+  // backend (keys never reach the browser). Grouped per provider in the dropdown.
   const refreshModels = useCallback(() => {
-    setModelErr(null)
     listAvailableModels()
       .then((r) => {
-        if (r.error) setModelErr(r.error)
-        setModels(r.models)
+        setByProvider(r.providers)
+        setActiveProvider(r.active_provider)
+        setModel(r.model)
       })
-      .catch((e) => setModelErr(String(e)))
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
-    getConfig().then((c) => setModel(c.model)).catch(() => {})
+    getConfig()
+      .then((c) => {
+        setModel(c.model)
+        setActiveProvider(c.active_provider)
+      })
+      .catch(() => {})
     refreshModels()
   }, [conversationId, refreshModels])
 
-  const pickModel = (m: string) => {
-    if (!m || m === model) return
+  // value encoding "provider::model" keeps providers with clashing ids apart
+  const pickModel = (value: string) => {
+    const idx = value.indexOf('::')
+    if (idx < 0) return
+    const provider = value.slice(0, idx)
+    const m = value.slice(idx + 2)
+    if (!m || (m === model && provider === activeProvider)) return
     setSavingModel(true)
     setModel(m)
-    updateConfig({ model: m })
+    setActiveProvider(provider)
+    setActiveModel(provider, m)
       .then(refreshModels)
-      .catch((e) => setModelErr(String(e)))
       .finally(() => setSavingModel(false))
   }
 
@@ -570,22 +583,38 @@ export function Sidebar() {
           </label>
           <select
             className="w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200"
-            value={models.includes(model) ? model : ''}
+            value={`${activeProvider}::${model}`}
             onChange={(e) => pickModel(e.target.value)}
-            disabled={models.length === 0}
-            title={models.length === 0 ? 'No models available — check Settings' : model}
+            title={model}
           >
-            {/* placeholder row unless the active model is one of the options */}
-            {!models.includes(model) && (
-              <option value="">{model || 'Select a model'}</option>
-            )}
-            {models.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
+            {Object.entries(byProvider).map(([name, pm]) => (
+              <optgroup
+                key={name}
+                label={pm.error ? `${name} (${pm.error})` : name}
+              >
+                {pm.models.map((m) => (
+                  <option key={`${name}::${m}`} value={`${name}::${m}`}>
+                    {m}
+                  </option>
+                ))}
+              </optgroup>
             ))}
+            {/* active model isn't in any group (e.g. its provider is down) */}
+            {!Object.values(byProvider).some((pm) => pm.models.includes(model)) && (
+              <option value={`${activeProvider}::${model}`}>{model}</option>
+            )}
+            {Object.keys(byProvider).length === 0 && (
+              <option value="">No models available — check Settings</option>
+            )}
           </select>
-          {modelErr && <p className="mt-1 text-[10px] text-amber-400">{modelErr}</p>}
+          {/* per-provider failure notes (Q10) */}
+          {Object.entries(byProvider)
+            .filter(([, pm]) => pm.error)
+            .map(([name, pm]) => (
+              <p key={name} className="mt-1 text-[10px] text-amber-400">
+                {name}: {pm.error}
+              </p>
+            ))}
         </div>
         <button
           className="mb-3 rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
@@ -599,7 +628,7 @@ export function Sidebar() {
         <SettingsModal
           onClose={() => {
             setShowSettings(false)
-            getConfig().then((c) => setModel(c.model)).catch(() => {})
+            getConfig().then((c) => { setModel(c.model); setActiveProvider(c.active_provider) }).catch(() => {})
             refreshModels()
           }}
         />
@@ -611,9 +640,10 @@ export function Sidebar() {
 // ---------------------------------------------------------------- settings (Q4/Q10/Q31/Q35/Q41)
 
 function SettingsModal({ onClose }: { onClose: () => void }) {
-  const [apiKey, setApiKey] = useState('')
-  const [apiBase, setApiBase] = useState('')
-  const [maskedKey, setMaskedKey] = useState('')
+  // Local working copy of the providers map: blank key field = keep saved key
+  const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
+  const [active, setActive] = useState('')
+  const [newName, setNewName] = useState('')
   const [temperature, setTemperature] = useState<number | ''>('')
   const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
@@ -624,8 +654,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     getConfig()
       .then((c) => {
-        setApiBase(c.api_base ?? '')
-        setMaskedKey(c.api_key ?? '')
+        const next: typeof providers = {}
+        for (const [name, p] of Object.entries(c.providers)) {
+          next[name] = {
+            api_base: p.api_base,
+            model: p.model,
+            apiKeyInput: '',
+            savedKey: p.api_key === 'set',
+          }
+        }
+        setProviders(next)
+        setActive(c.active_provider)
         setTemperature(c.temperature ?? '')
         setMaxTokens(c.max_tokens ? c.max_tokens : '')
       })
@@ -633,19 +672,59 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     getProviders().then(setPresets).catch(() => {})
   }, [])
 
-  const applyPreset = (name: string) => {
-    const p = presets[name]
+  const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string }>) =>
+    setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
+
+  const applyPreset = (target: string, presetName: string) => {
+    const p = presets[presetName]
     if (!p) return
-    setApiBase(p.api_base)
+    patchProvider(target, { api_base: p.api_base })
+  }
+
+  const addProvider = (name: string, fromPreset?: string) => {
+    const key = name.trim()
+    if (!key || providers[key]) return
+    const p = fromPreset ? presets[fromPreset] : undefined
+    setProviders((ps) => ({
+      ...ps,
+      [key]: {
+        api_base: p?.api_base ?? '',
+        model: p?.model ?? '',
+        apiKeyInput: '',
+        savedKey: false,
+      },
+    }))
+    setNewName('')
+  }
+
+  const removeProvider = (name: string) => {
+    setProviders((ps) => {
+      const next = { ...ps }
+      delete next[name]
+      return next
+    })
+    if (active === name) {
+      const rest = Object.keys(providers).filter((n) => n !== name)
+      setActive(rest[0] ?? '')
+    }
   }
 
   const save = async () => {
     setSaving(true)
     setErr(null)
     try {
+      // Send only providers that still exist; blank key fields keep saved keys
+      const out: Record<string, { api_base: string; model: string; api_key?: string }> = {}
+      for (const [name, p] of Object.entries(providers)) {
+        out[name] = {
+          api_base: p.api_base,
+          model: p.model,
+          ...(p.apiKeyInput ? { api_key: p.apiKeyInput } : {}),
+        }
+      }
       await updateConfig({
-        api_key: apiKey || undefined,
-        api_base: apiBase || undefined,
+        providers: out,
+        active_provider: active || undefined,
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
       })
@@ -669,43 +748,82 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       >
         <h2 className="mb-3 font-semibold">Settings</h2>
 
-        {/* provider presets (Q31) */}
-        <label className="mb-1 block text-xs text-zinc-500">Provider preset</label>
-        <div className="mb-2 flex flex-wrap gap-1">
-          {Object.keys(presets).map((name) => (
+        {/* configured providers: add / edit / remove (Q9) */}
+        <label className="mb-1 block text-xs text-zinc-500">Providers</label>
+        {Object.entries(providers).map(([name, p]) => (
+          <div key={name} className="mb-3 rounded border border-zinc-700 p-2">
+            <div className="mb-1 flex items-center gap-2">
+              <input
+                type="radio"
+                name="active-provider"
+                checked={active === name}
+                onChange={() => setActive(name)}
+                title="Make active"
+              />
+              <span className="font-mono text-xs text-zinc-200">{name}</span>
+              <button
+                className="ml-auto text-[10px] text-red-400 hover:text-red-300"
+                onClick={() => removeProvider(name)}
+              >
+                remove
+              </button>
+            </div>
+            <input
+              className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={p.api_base}
+              onChange={(e) => patchProvider(name, { api_base: e.target.value })}
+              placeholder="https://api.openai.com/v1"
+            />
+            <div className="mb-1 flex gap-1">
+              <select
+                className="w-full rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-[10px] text-zinc-300"
+                value=""
+                onChange={(e) => applyPreset(name, e.target.value)}
+              >
+                <option value="">use preset…</option>
+                {Object.keys(presets).map((preset) => (
+                  <option key={preset} value={preset}>
+                    {preset}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <input
+              type="password"
+              className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              placeholder={p.savedKey ? 'key saved' : 'sk-... (optional for local)'}
+              value={p.apiKeyInput}
+              onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
+            />
+          </div>
+        ))}
+
+        {/* add a provider: preset templates or a custom OpenAI-compatible URL */}
+        <div className="mb-3 flex gap-1">
+          <input
+            className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+            placeholder="new provider name (or 'custom')"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+          />
+          <button
+            className="rounded border border-zinc-700 px-2 text-[11px] text-zinc-300 hover:bg-zinc-800"
+            onClick={() => addProvider(newName)}
+          >
+            + custom
+          </button>
+        </div>
+        <div className="mb-3 flex flex-wrap gap-1">
+          {Object.keys(presets).map((preset) => (
             <button
-              key={name}
-              className={`rounded px-2 py-1 text-[11px] ${
-                presets[name].api_base === apiBase
-                  ? 'bg-blue-600 text-white'
-                  : 'border border-zinc-700 text-zinc-300 hover:bg-zinc-800'
-              }`}
-              onClick={() => applyPreset(name)}
+              key={preset}
+              className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              onClick={() => addProvider(providers[preset] ? `${preset}-2` : preset, preset)}
             >
-              {name}
+              + {preset}
             </button>
           ))}
         </div>
-
-        <label className="mb-1 block text-xs text-zinc-500">API base URL</label>
-        <input
-          className="mb-3 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-          value={apiBase}
-          onChange={(e) => setApiBase(e.target.value)}
-          placeholder="https://api.openai.com/v1"
-        />
-
-        <label className="mb-1 block text-xs text-zinc-500">API key</label>
-        <input
-          type="password"
-          className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-          placeholder={maskedKey ? 'key saved' : 'sk-...'}
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
-        <p className="mb-3 text-[10px] text-zinc-600">
-          Leave blank to keep the existing key. Models are chosen from the dropdown in the sidebar.
-        </p>
 
         <div className="mb-3 mt-2 flex gap-2">
           <div className="flex-1">
