@@ -13,7 +13,12 @@ import json
 import os
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).parent.parent / "data" / "config.json"
+# YAAH_CONFIG_PATH lets the test suite redirect this (default path is the
+# user's real config).
+CONFIG_PATH = Path(
+    os.environ.get("YAAH_CONFIG_PATH")
+    or Path(__file__).parent.parent / "data" / "config.json"
+)
 
 DEFAULTS = {
     "temperature": 0.2,

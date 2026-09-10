@@ -4,11 +4,17 @@ conversations: one row per task.
 messages: chat messages; tool calls stored as a JSON column on the row.
 """
 import json
+import os
 from pathlib import Path
 
 import aiosqlite
 
-DB_PATH = Path(__file__).parent.parent / "data" / "agent.db"
+# YAAH_DB_PATH lets the test suite redirect this to a throwaway file —
+# the default path is the user's real database.
+DB_PATH = Path(
+    os.environ.get("YAAH_DB_PATH")
+    or Path(__file__).parent.parent / "data" / "agent.db"
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
