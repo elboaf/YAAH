@@ -49,30 +49,37 @@ TOOLS_SCHEMA = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "powershell",
-            "description": (
-                "Execute a command in Windows PowerShell from the workspace "
-                "directory. Use for Windows-native tasks the shell can't do "
-                "well: registry, services, WMI/CIM, ACLs, scheduled tasks, "
-                "structured object pipelines. Long-running commands will "
-                "time out."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The PowerShell command to run"},
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (default 60, max 300)",
-                    },
+]
+
+# Windows-only: not in TOOLS_SCHEMA (which must stay platform-neutral);
+# get_schemas() appends it when running on Windows so non-Windows models
+# never see a tool they can't use.
+POWERSHELL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "powershell",
+        "description": (
+            "Execute a command in Windows PowerShell from the workspace "
+            "directory. Use for Windows-native tasks the shell can't do "
+            "well: registry, services, WMI/CIM, ACLs, scheduled tasks, "
+            "structured object pipelines. Long-running commands will "
+            "time out."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The PowerShell command to run"},
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default 60, max 300)",
                 },
-                "required": ["command"],
             },
+            "required": ["command"],
         },
     },
+}
+
+TOOLS_SCHEMA += [
     {
         "type": "function",
         "function": {
@@ -716,4 +723,8 @@ async def execute_tool(name: str, arguments: dict, workspace: str) -> dict:
 
 
 def get_schemas() -> list:
+    # powershell only exists on Windows (powershell.exe); exposing it
+    # elsewhere just invites the model to attempt Windows commands.
+    if os.name == "nt":
+        return TOOLS_SCHEMA + [POWERSHELL_SCHEMA]
     return TOOLS_SCHEMA

@@ -11,6 +11,7 @@ Emits JSON-line events for the frontend:
 import asyncio
 import itertools
 import json
+import os
 from typing import AsyncIterator
 
 from backend.agent import model_client
@@ -22,12 +23,34 @@ from backend.db.database import add_message, get_conversation, get_messages
 DEFAULT_MAX_STEPS = 200
 MAX_TOOL_RESULT_CHARS = 20_000
 
-SYSTEM_PROMPT = """You are an expert AI coding agent working inside a user's project workspace.
+def _default_system_prompt() -> str:
+    """SYSTEM_PROMPT adapted to the current OS: the tool list and the
+    runtime-environment line must match what execute_tool can actually
+    do here, or the model attempts commands for the wrong platform
+    (e.g. PowerShell registry queries on Linux)."""
+    import platform
 
-You have tools: bash (shell commands), powershell (Windows PowerShell),
-web_search, web_fetch, view_image, read_file, write_file, create_file,
-edit_file, delete_file, move_file, search_files, and git tools
-(git_status, git_diff, git_add, git_commit, git_push, git_pull).
+    windows = os.name == "nt"
+    tools = ["bash (shell commands)"]
+    if windows:
+        tools.append("powershell (Windows PowerShell)")
+    tools += [
+        "web_search", "web_fetch", "view_image", "read_file", "write_file",
+        "create_file", "edit_file", "delete_file", "move_file",
+        "search_files",
+        "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull)",
+    ]
+    env = (
+        f"Runtime environment: {platform.system()} {platform.release()} "
+        f"({platform.machine()}). The bash tool runs commands through the "
+        f"system shell ({'cmd.exe' if windows else 'bash/sh'}); use "
+        f"commands and paths valid for THIS operating system."
+    )
+    return f"""You are an expert AI coding agent working inside a user's project workspace.
+
+{env}
+
+You have tools: {", ".join(tools)}.
 
 Guidelines:
 - Explore before acting: use search_files and read files before editing.
@@ -218,7 +241,7 @@ async def run_agent(
 
     # Per-conversation system prompt override (Q17) wins over the global one
     conv = await get_conversation(conversation_id)
-    system_prompt = (conv or {}).get("system_prompt_override") or SYSTEM_PROMPT
+    system_prompt = (conv or {}).get("system_prompt_override") or _default_system_prompt()
 
     # Full context each turn: system prompt + persisted history
     history = await load_history(conversation_id)
