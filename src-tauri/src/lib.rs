@@ -14,22 +14,43 @@ fn python_cmd() -> &'static str {
     }
 }
 
+fn has_backend(dir: &std::path::Path) -> bool {
+    dir.join("backend").join("main.py").is_file()
+}
+
 fn find_backend_cwd(app: &tauri::AppHandle) -> std::path::PathBuf {
     // `tauri dev` runs with cwd = src-tauri/, so check that dir's parent too;
-    // packaged builds carry the backend in the resources dir.
+    // packaged builds carry the backend somewhere under the resources dir,
+    // but the exact layout depends on the bundler, so scan for it.
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.clone());
-        if let Some(parent) = cwd.parent() {
+        candidates.push(cwd);
+        if let Some(parent) = candidates[0].parent() {
             candidates.push(parent.to_path_buf());
         }
     }
     if let Ok(res) = app.path().resource_dir() {
-        candidates.push(res);
+        candidates.push(res.clone());
+        let mut stack = vec![(res, 0usize)];
+        while let Some((dir, depth)) = stack.pop() {
+            if depth < 4 {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for e in entries.flatten() {
+                        if e.path().is_dir() {
+                            stack.push((e.path(), depth + 1));
+                        }
+                    }
+                }
+            }
+            if has_backend(&dir) {
+                candidates.push(dir);
+                break;
+            }
+        }
     }
     candidates
         .into_iter()
-        .find(|d| d.join("backend").join("main.py").exists())
+        .find(|c| has_backend(c))
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
