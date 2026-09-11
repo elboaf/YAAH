@@ -5,6 +5,7 @@ messages: chat messages; tool calls stored as a JSON column on the row.
 """
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -36,10 +37,13 @@ DB_PATH = Path(
 
 
 def basename(path: str) -> str:
-    """Display label for a workspace path (its final segment)."""
-    p = Path(path)
-    name = p.name or str(p)
-    return name
+    """Display label for a workspace path (its final segment).
+
+    Splits on both separators: the registry may hold Windows-style paths
+    while the app itself runs on POSIX (Path.name wouldn't split '\\').
+    """
+    parts = [p for p in re.split(r"[\\/]", path) if p]
+    return parts[-1] if parts else path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (

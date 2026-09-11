@@ -67,15 +67,10 @@ async def test_upsert_dedupes_case_and_slashes(tmp_path):
     real = tmp_path / "Repo"
     real.mkdir()
     a = await upsert_workspace(str(real))
-    # Case-insensitive dedupe only makes sense where the filesystem is
-    # case-insensitive (Windows); POSIX keeps both spellings as real,
-    # distinct folders, so a lowercase variant must NOT dedupe there.
+    # Case-folded dedupe is universal by design (the registry can hold
+    # Windows-style paths while running anywhere), as is slash redundancy.
     b = await upsert_workspace(str(real).lower())
-    if os.name == "nt":
-        assert a["id"] == b["id"], "case variants must dedupe on Windows"
-    else:
-        assert a["id"] != b["id"], "POSIX paths are case-sensitive"
-    # A trailing slash + redundant segment always resolves to the same dir.
+    assert a["id"] == b["id"], "case variants must dedupe"
     c = await upsert_workspace(str(real) + os.sep + ".." + os.sep + real.name)
     assert a["id"] == c["id"], "slash variants must dedupe to one row"
     rows = await list_workspaces()
