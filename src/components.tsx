@@ -565,10 +565,11 @@ function TreeRow({
 }
 
 export function FilesPanel() {
-  const { workspace, previewPath, setPreviewPath } = useAgent()
+  const { workspace, previewPath, setPreviewPath, status } = useAgent()
   const [tree, setTree] = useState<FileEntry[]>([])
   const [menu, setMenu] = useState<{ entry: FileEntry; x: number; y: number } | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('filesPanelCollapsed') === '1')
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null)
 
@@ -581,12 +582,39 @@ export function FilesPanel() {
   const refresh = useCallback(() => {
     if (!workspace || workspace === '.') {
       setTree([])
+      setErr(null)
       return
     }
-    getFileTree(workspace).then((r) => setTree(r.tree)).catch((e) => setErr(String(e)))
+    setLoading(true)
+    getFileTree(workspace)
+      .then((r) => {
+        setTree(r.tree)
+        setErr(null)
+      })
+      .catch((e) => setErr(String(e)))
+      .finally(() => setLoading(false))
   }, [workspace])
 
   useEffect(refresh, [refresh])
+
+  // The panel exists to watch the agent's workspace: refetch when a turn
+  // ends (running-tool -> idle), so files it wrote appear without a manual
+  // refresh. Collapsed while the workspace is empty still skips the fetch.
+  const prevStatus = useRef(status)
+  useEffect(() => {
+    if (prevStatus.current === 'running-tool' && status === 'idle') refresh()
+    prevStatus.current = status
+  }, [status, refresh])
+
+  // Esc closes the context menu, matching every other floating surface.
+  useEffect(() => {
+    if (!menu) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [menu])
 
   const openPreview = (entry: FileEntry) => setPreviewPath(entry.path)
 
@@ -596,6 +624,7 @@ export function FilesPanel() {
         <button
           className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
           title="Show files"
+          aria-label="Show files panel"
           onClick={toggleCollapsed}
         >
           ▸
@@ -603,6 +632,7 @@ export function FilesPanel() {
         <button
           className="mt-2 flex-1 text-[10px] font-semibold tracking-wide text-zinc-500 hover:text-zinc-300"
           style={{ writingMode: 'vertical-rl' }}
+          aria-label="Show files panel"
           onClick={toggleCollapsed}
         >
           FILES
@@ -617,31 +647,50 @@ export function FilesPanel() {
         <button
           className="rounded p-0.5 text-zinc-500 hover:text-zinc-300"
           title="Hide files"
+          aria-label="Hide files panel"
           onClick={toggleCollapsed}
         >
           ▾
         </button>
         <h2 className="flex-1 text-xs font-semibold tracking-wide text-zinc-400">FILES</h2>
-        <button className="text-[10px] text-zinc-500 hover:text-zinc-300" onClick={refresh}>
+        <button
+          className="text-[10px] text-zinc-500 hover:text-zinc-300"
+          aria-label="Refresh file tree"
+          onClick={refresh}
+        >
           refresh
         </button>
       </div>
       <div className="flex-1 overflow-y-auto p-1">
-        {err && <p className="p-2 text-[10px] text-red-400">{err}</p>}
-        {!err && tree.length === 0 && (
+        {err ? (
+          <div className="p-2">
+            <p className="text-[10px] leading-relaxed text-red-400">{err}</p>
+            <button
+              className="mt-1 text-[10px] text-zinc-500 hover:text-zinc-300"
+              onClick={refresh}
+            >
+              retry
+            </button>
+          </div>
+        ) : loading ? (
+          <p className="mt-4 px-2 text-center font-mono text-[11px] text-zinc-600">
+            loading…
+          </p>
+        ) : tree.length === 0 ? (
           <p className="mt-4 px-2 text-center text-[11px] text-zinc-600">
             Set a workspace to browse files.
           </p>
+        ) : (
+          tree.map((e) => (
+            <TreeRow
+              key={e.path}
+              entry={e}
+              depth={0}
+              onOpen={openPreview}
+              onContext={(entry, x, y) => setMenu({ entry, x, y })}
+            />
+          ))
         )}
-        {tree.map((e) => (
-          <TreeRow
-            key={e.path}
-            entry={e}
-            depth={0}
-            onOpen={openPreview}
-            onContext={(entry, x, y) => setMenu({ entry, x, y })}
-          />
-        ))}
       </div>
 
       {/* context menu (Q40) */}
@@ -650,11 +699,14 @@ export function FilesPanel() {
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null) }} />
           <div
             className="fixed z-50 w-40 rounded border border-zinc-700 bg-zinc-900 py-1 text-xs shadow-xl"
+            role="menu"
+            aria-label={`Actions for ${menu.entry.path}`}
             style={{ left: Math.min(menu.x, window.innerWidth - 170), top: Math.min(menu.y, window.innerHeight - 120) }}
           >
             {menu.entry.type === 'file' && (
               <button
                 className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
+                role="menuitem"
                 onClick={() => {
                   openPreview(menu.entry)
                   setMenu(null)
@@ -665,6 +717,7 @@ export function FilesPanel() {
             )}
             <button
               className="block w-full px-3 py-1 text-left text-red-400 hover:bg-zinc-800"
+              role="menuitem"
               onClick={() => {
                 setDeleteTarget(menu.entry)
                 setMenu(null)
@@ -690,10 +743,6 @@ export function FilesPanel() {
           }}
         />
       )}
-
-      {/* click a file row also previews; highlight the open one */}
-      <style>{`button[style] { cursor: default; }`}</style>
-      {previewPath === null && tree.length > 0 && null}
     </aside>
   )
 }
