@@ -16,9 +16,11 @@ from backend.db.database import init_db
 async def lifespan(app: FastAPI):
     await init_db()
     # Skills are scanned once at startup; the UI can force a rescan via
-    # POST /api/skills/refresh.
+    # POST /api/skills/refresh. The directory is created on first run so
+    # there is an obvious place to drop skills.
     from backend.agent import skills as skills_registry
 
+    skills_registry.ensure_dir()
     skills_registry.ensure_scanned()
     yield
 

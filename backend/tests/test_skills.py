@@ -112,3 +112,26 @@ def test_load_skill_schema_registered():
 
     names = [s["function"]["name"] for s in get_schemas()]
     assert "load_skill" in names
+
+
+def test_ensure_dir_creates_dir_and_sample(tmp_path, monkeypatch):
+    d = tmp_path / "fresh" / "skills"
+    monkeypatch.setattr(skill_registry, "SKILLS_DIR", d)
+    assert skill_registry.ensure_dir() is True
+    assert d.is_dir()
+    sample = d / "example" / "SKILL.md"
+    assert sample.is_file()
+    # the seeded sample must itself parse as a valid skill
+    skill = skill_registry.parse_skill_md(sample)
+    assert skill is not None
+    assert skill.name == "example"
+    # a pre-existing dir is left alone (no second sample write)
+    mtime = sample.stat().st_mtime_ns
+    assert skill_registry.ensure_dir() is False
+    assert sample.stat().st_mtime_ns == mtime
+
+
+def test_ensure_dir_existing_dir_noop(skills_dir):
+    before = sorted(p.name for p in skills_dir.iterdir())
+    assert skill_registry.ensure_dir() is False
+    assert sorted(p.name for p in skills_dir.iterdir()) == before

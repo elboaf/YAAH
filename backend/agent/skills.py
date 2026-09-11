@@ -46,6 +46,48 @@ _skills: dict[str, Skill] = {}
 _scanned = False
 
 
+SAMPLE_SKILL_MD = """---
+name: example
+description: Sample skill showing the format — edit or delete me.
+disable-model-invocation: true
+---
+
+This file demonstrates the skill format. A skill is a folder under
+{dir} containing a SKILL.md like this one.
+
+- The YAML frontmatter gives the skill a `name` and a `description`
+  (the description is what the model sees when deciding to load it).
+- `disable-model-invocation: true` keeps the model from auto-loading
+  the skill; remove it to let the model load it on its own.
+- Everything below the frontmatter is the instruction body, injected
+  into the system prompt when the skill is invoked.
+
+Users invoke skills by typing /s <name> in the chat; the model loads
+them itself with the load_skill tool when the task matches.
+"""
+
+
+def ensure_dir() -> bool:
+    """Create SKILLS_DIR (plus a sample skill) when it doesn't exist, so a
+    fresh install has somewhere to put skills and can see the format.
+    Returns True if the directory was just created."""
+    if SKILLS_DIR.is_dir():
+        return False
+    try:
+        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        sample = SKILLS_DIR / "example"
+        sample.mkdir(exist_ok=True)
+        (sample / "SKILL.md").write_text(
+            SAMPLE_SKILL_MD.format(dir=SKILLS_DIR), encoding="utf-8"
+        )
+    except OSError:
+        pass  # dir exists, that's the part that matters
+    return True
+
+
 def parse_skill_md(path: Path) -> Skill | None:
     """Parse one SKILL.md. Returns None when the file is not a valid skill
     (missing/blank name) so a broken file never breaks the whole scan."""
