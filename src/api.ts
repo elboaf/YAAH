@@ -106,6 +106,13 @@ export interface AgentConfig {
   max_steps?: number
   /** Workspace used last, restored into the sidebar on startup. */
   last_workspace?: string
+  /** Voice dictation; cloud_api_key arrives masked ("set" | ""). */
+  voice?: {
+    engine: 'local' | 'cloud'
+    cloud_endpoint: string
+    cloud_api_key: string
+    cloud_model: string
+  }
 }
 
 export const getConfig = () => api<AgentConfig>('/api/config')
@@ -123,6 +130,12 @@ export const updateConfig = (
     temperature: number
     max_tokens: number
     max_steps: number
+    voice: {
+      engine: 'local' | 'cloud'
+      cloud_endpoint: string
+      cloud_api_key?: string
+      cloud_model: string
+    }
   }>,
 ) =>
   api<{ ok: boolean }>('/api/config', {
@@ -280,6 +293,43 @@ export const listSkills = () => api<{ skills: SkillInfo[] }>('/api/skills')
 
 export const refreshSkills = () =>
   api<{ skills: SkillInfo[] }>('/api/skills/refresh', { method: 'POST' })
+
+/** Stage an attached text file inside the workspace; returns the
+ *  workspace-relative path the agent's read_file tool can open. */
+export const uploadAttachment = (workspace: string, name: string, content: string) =>
+  api<{ path: string }>('/api/attachments', {
+    method: 'POST',
+    body: JSON.stringify({ workspace, name, content }),
+  })
+
+export interface TranscribeStatus {
+  engine: 'local' | 'cloud'
+  local_available: boolean
+  local_model: string | null
+  cloud_configured: boolean
+}
+
+export const transcribeStatus = () => api<TranscribeStatus>('/api/transcribe/status')
+
+/** Transcribe a WAV blob (raw body — keeps the sidecar multipart-free). */
+export async function transcribeAudio(wav: Blob): Promise<string> {
+  let res: Response
+  try {
+    res = await fetch(url('/api/transcribe'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'audio/wav' },
+      body: wav,
+    })
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e
+    signalBackendDown()
+    throw new Error('Backend is unreachable (restarting)')
+  }
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.detail || `transcription failed (${res.status})`)
+  return body.text ?? ''
+}
+
 
 export const deleteFile = (workspace: string, path: string) =>
   api<{ ok: boolean }>(

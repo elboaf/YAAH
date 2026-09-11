@@ -19,3 +19,11 @@ src-tauri/target/
 build/
 *.spec
 src-tauri/binaries/
+
+# user-attached files staged for the agent to read
+.yaah-attachments/
+
+# whisper.cpp engine + model staged by scripts/build_sidecar.sh (CI bundles them)
+backend/whisper/
+backend/bin/
+backend/data/models/

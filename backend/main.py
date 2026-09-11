@@ -6,7 +6,7 @@ flow through this server.
 """
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.db.database import init_db
@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="AI Coding Agent", version="0.6.7", lifespan=lifespan)
+app = FastAPI(title="AI Coding Agent", version="0.6.9", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -203,6 +203,7 @@ class ConfigUpdate(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     max_steps: int | None = None
+    voice: dict | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -242,6 +243,40 @@ async def api_image(rel: str):
     if IMAGES_ROOT.resolve() not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail="image not found")
     return FileResponse(path)
+
+
+class NewAttachment(BaseModel):
+    workspace: str
+    name: str
+    content: str
+
+
+@app.post("/api/attachments")
+async def api_save_attachment(body: NewAttachment):
+    """Stage a user-attached text file inside the workspace so the agent's
+    workspace-sandboxed read_file tool can open it on demand."""
+    import os
+
+    from backend.agent.tools import resolve_path
+
+    if "\u0000" in body.content:
+        raise HTTPException(status_code=415, detail="binary file content rejected")
+    if len(body.content.encode("utf-8")) > 2_000_000:
+        raise HTTPException(status_code=413, detail="attachment exceeds the 2 MB limit")
+    name = os.path.basename(body.name.replace("\\", "/")) or "attachment"
+    try:
+        folder = resolve_path(body.workspace, ".yaah-attachments", for_write=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    folder.mkdir(parents=True, exist_ok=True)
+    stem, dot, ext = name.rpartition(".")
+    candidate = folder / name
+    n = 1
+    while candidate.exists():
+        candidate = folder / f"{stem or name}-{n}{dot + ext if dot else ''}"
+        n += 1
+    candidate.write_text(body.content, encoding="utf-8")
+    return {"path": f".yaah-attachments/{candidate.name}"}
 
 
 @app.post("/api/agent/{conversation_id}/cancel")
@@ -452,12 +487,25 @@ async def api_get_config():
         "max_tokens": cfg.get("max_tokens"),
         "max_steps": cfg.get("max_steps"),
         "last_workspace": cfg.get("last_workspace") or "",
+        # Voice settings; the cloud key is masked like provider keys.
+        "voice": {
+            **(cfg.get("voice") or {}),
+            "cloud_api_key": "set" if (cfg.get("voice") or {}).get("cloud_api_key") else "",
+        },
     }
 
 
 @app.put("/api/config")
 async def api_set_config(body: ConfigUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    voice = updates.get("voice")
+    if isinstance(voice, dict):
+        # Voice updates merge over the stored voice block: the GET view masks
+        # the cloud key as "set", so a settings round-trip must never wipe it.
+        existing = load_config().get("voice") or {}
+        if voice.get("cloud_api_key") in ("set", ""):
+            voice.pop("cloud_api_key", None)
+        updates["voice"] = {**existing, **voice}
     save_config(updates)
     return {"ok": True}
 
@@ -484,3 +532,70 @@ async def api_set_last_workspace(body: LastWorkspace):
     """Remember the workspace so the sidebar restores it after a restart."""
     set_last_workspace(body.workspace)
     return {"ok": True}
+
+
+# ---- Voice transcription (local whisper.cpp or BYOK cloud) ----
+
+# Raw-bytes upload (audio/wav) instead of multipart on purpose: the client
+# is always our own webview, and raw bodies keep python-multipart out of
+# the sidecar dependency set.
+MAX_AUDIO_BYTES = 25_000_000
+
+
+@app.get("/api/transcribe/status")
+async def api_transcribe_status():
+    """What the mic button can use right now, and with which engine."""
+    from backend.agent import transcribe
+
+    voice = load_config().get("voice") or {}
+    model = transcribe.find_model()
+    return {
+        "engine": voice.get("engine") or "local",
+        "local_available": transcribe.local_available(),
+        "local_model": model.name if model else None,
+        "cloud_configured": bool(voice.get("cloud_endpoint") and voice.get("cloud_api_key")),
+    }
+
+
+@app.post("/api/transcribe")
+async def api_transcribe(request: Request):
+    """Transcribe a 16 kHz mono WAV body; engine per config (fallback:
+    local if configured, else cloud if configured, else 503)."""
+    from fastapi.responses import JSONResponse
+
+    from backend.agent import transcribe
+
+    import asyncio
+    import os
+
+    pcm = await request.body()
+    if len(pcm) > MAX_AUDIO_BYTES:
+        return JSONResponse({"detail": "recording too large"}, status_code=413)
+    if not pcm:
+        return JSONResponse({"detail": "empty recording"}, status_code=400)
+    voice = load_config().get("voice") or {}
+    engine = voice.get("engine") or "local"
+    if engine == "local" and not transcribe.local_available():
+        engine = "cloud"
+    try:
+        wav_path = transcribe.save_wav(pcm)
+    except ValueError as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    try:
+        if engine == "cloud":
+            text = await transcribe.transcribe_cloud(
+                wav_path,
+                voice.get("cloud_endpoint") or "",
+                voice.get("cloud_api_key") or "",
+                voice.get("cloud_model") or "whisper-1",
+            )
+        else:
+            text = await asyncio.to_thread(transcribe.transcribe_local, wav_path)
+    except Exception as e:  # noqa: BLE001 — surfaced to the composer as a banner
+        return JSONResponse({"detail": str(e)}, status_code=502)
+    finally:
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+    return {"text": text}

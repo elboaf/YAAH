@@ -21,6 +21,9 @@ import {
   submitAnswer,
   listSkills,
   refreshSkills,
+  uploadAttachment,
+  transcribeStatus,
+  transcribeAudio,
   imageUrl,
   listWorkspaces,
   addWorkspace,
@@ -32,6 +35,7 @@ import {
 } from './api'
 import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
+import { VoiceRecorder } from './voice'
 
 // ---------------------------------------------------------------- code views
 
@@ -1614,6 +1618,14 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [expanded, setExpanded] = useState<string | null>(null)
   // Provider awaiting removal confirmation (its saved key dies with it).
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
+  // Voice dictation: engine choice + cloud (BYOK) credentials.
+  const [voiceEngine, setVoiceEngine] = useState<'local' | 'cloud'>('local')
+  const [voiceLocalReady, setVoiceLocalReady] = useState(false)
+  const [voiceLocalModel, setVoiceLocalModel] = useState<string | null>(null)
+  const [cloudEndpoint, setCloudEndpoint] = useState('')
+  const [cloudKey, setCloudKey] = useState('')
+  const [cloudKeySaved, setCloudKeySaved] = useState(false)
+  const [cloudModel, setCloudModel] = useState('whisper-1')
 
   // Esc closes, matching PreviewModal and the dialog shells — but the
   // removal confirm consumes Esc first, so it never dismisses two layers.
@@ -1645,9 +1657,20 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         setTemperature(c.temperature ?? '')
         setMaxTokens(c.max_tokens ? c.max_tokens : '')
         setMaxSteps(c.max_steps ?? '')
+        const v = c.voice
+        setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
+        setCloudEndpoint(v?.cloud_endpoint ?? '')
+        setCloudKeySaved(v?.cloud_api_key === 'set')
+        setCloudModel(v?.cloud_model || 'whisper-1')
       })
       .catch((e) => setErr(String(e)))
     getProviders().then(setPresets).catch(() => {})
+    transcribeStatus()
+      .then((s) => {
+        setVoiceLocalReady(s.local_available)
+        setVoiceLocalModel(s.local_model)
+      })
+      .catch(() => {})
   }, [])
 
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string }>) =>
@@ -1715,6 +1738,14 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
+        voice: {
+          engine: voiceEngine,
+          cloud_endpoint: cloudEndpoint,
+          // Typed key replaces; empty/kept field is dropped server-side so
+          // the saved key survives.
+          ...(cloudKey ? { cloud_api_key: cloudKey } : {}),
+          cloud_model: cloudModel,
+        },
       })
       setSaved(true)
       setTimeout(onClose, 600)
@@ -1892,6 +1923,74 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </p>
         </div>
 
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Voice dictation
+        </h3>
+        <div className="mb-2 flex gap-2" role="radiogroup" aria-label="Transcription engine">
+          {(['local', 'cloud'] as const).map((engine) => (
+            <button
+              key={engine}
+              role="radio"
+              aria-checked={voiceEngine === engine}
+              className={`flex-1 rounded border px-2 py-1.5 font-mono text-xs ${
+                voiceEngine === engine
+                  ? 'border-blue-600 bg-blue-950/40 text-blue-200'
+                  : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+              }`}
+              onClick={() => setVoiceEngine(engine)}
+            >
+              {engine === 'local' ? 'local whisper' : 'cloud (BYOK)'}
+            </button>
+          ))}
+        </div>
+        {voiceEngine === 'local' ? (
+          <p className="mb-3 text-[10px] text-zinc-600">
+            {voiceLocalReady ? (
+              <>
+                On-device engine ready — model{' '}
+                <span className="font-mono text-zinc-500">{voiceLocalModel}</span>. Audio never
+                leaves this machine.
+              </>
+            ) : (
+              <>
+                No local whisper engine found (packaged installs bundle one; this looks like a dev
+                run). Use cloud, or place a whisper.cpp CLI + ggml model under backend/.
+              </>
+            )}
+          </p>
+        ) : (
+          <div className="mb-3 space-y-1.5">
+            <input
+              className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={cloudEndpoint}
+              onChange={(e) => setCloudEndpoint(e.target.value)}
+              placeholder="https://api.openai.com/v1 (base URL of the provider)"
+              aria-label="Cloud transcription endpoint"
+            />
+            <div className="flex gap-1.5">
+              <input
+                type="password"
+                className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={cloudKey}
+                onChange={(e) => setCloudKey(e.target.value)}
+                placeholder={cloudKeySaved ? 'key saved' : 'API key'}
+                aria-label="Cloud transcription API key"
+              />
+              <input
+                className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={cloudModel}
+                onChange={(e) => setCloudModel(e.target.value)}
+                placeholder="whisper-1"
+                aria-label="Cloud transcription model"
+              />
+            </div>
+            <p className="text-[10px] text-zinc-600">
+              Any OpenAI-compatible /audio/transcriptions endpoint (OpenAI whisper-1, Groq
+              whisper-large-v3, …). Recordings are sent to that provider.
+            </p>
+          </div>
+        )}
+
         {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
 
         <div className="flex justify-end gap-2">
@@ -2011,9 +2110,14 @@ export function ChatPanel() {
   )
 }
 
+/** A staged text file. Small files ride inline (`content`); larger ones are
+ *  copied into <workspace>/.yaah-attachments and referenced by `savedPath`,
+ *  which the agent's workspace-sandboxed read_file tool can open on demand. */
 interface Attachment {
   name: string
-  content: string
+  content?: string
+  savedPath?: string
+  size: number
 }
 
 /** Image staged for sending; dataUrl doubles as the thumbnail src. */
@@ -2023,6 +2127,21 @@ interface ImageAttachment {
 }
 
 const MAX_IMAGE_BYTES = 5_000_000
+// Files at or under this ride inline in the message as a fenced block;
+// anything bigger is staged in the workspace and referenced by path.
+const INLINE_LIMIT_BYTES = 100_000
+const MAX_TEXT_BYTES = 2_000_000
+
+/** The text an attachment contributes to the outgoing message: small files
+ *  inline so the model sees them with no tool call; large ones as a path
+ *  pointer it can read_file (possibly in chunks) across turns. */
+const attachmentText = (a: Attachment): string => {
+  if (a.content !== undefined) {
+    return `\n\n--- attached file: ${a.name} ---\n\`\`\`\n${a.content}\n\`\`\``
+  }
+  const kb = Math.max(1, Math.round(a.size / 1_000))
+  return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
+}
 
 function Composer() {
   const {
@@ -2071,6 +2190,50 @@ function Composer() {
   const [skillNavigated, setSkillNavigated] = useState(false)
   const [pickedSkills, setPickedSkills] = useState<SkillInfo[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // ---- voice dictation (click-to-toggle; text lands in the input) ----
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
+  const [micAvailable, setMicAvailable] = useState<boolean | null>(null) // null = checking
+  const recorderRef = useRef<VoiceRecorder | null>(null)
+
+  useEffect(() => {
+    transcribeStatus()
+      .then((s) => setMicAvailable(s.engine === 'cloud' ? s.cloud_configured : s.local_available))
+      .catch(() => setMicAvailable(false))
+  }, [])
+
+  const toggleDictation = async () => {
+    if (voiceState === 'transcribing') return
+    if (voiceState === 'recording') {
+      setVoiceState('transcribing')
+      try {
+        const blob = await recorderRef.current!.stop()
+        const text = await transcribeAudio(blob)
+        if (text) {
+          setInput((cur) => (cur ? `${cur.trimEnd()} ${text}` : text))
+        } else {
+          pushReject('Heard nothing — try speaking closer to the mic')
+        }
+      } catch (e) {
+        pushReject(`Dictation failed: ${(e as Error).message}`)
+      } finally {
+        recorderRef.current = null
+        setVoiceState('idle')
+        textareaRef.current?.focus()
+      }
+      return
+    }
+    // idle → recording
+    const rec = new VoiceRecorder()
+    try {
+      await rec.start()
+    } catch {
+      pushReject('Microphone unavailable — check permission for this app')
+      return
+    }
+    recorderRef.current = rec
+    setVoiceState('recording')
+  }
 
   // ---- attachment rejection feedback (harden: silent drops are a trust bug) ----
   const [rejects, setRejects] = useState<string[]>([])
@@ -2159,7 +2322,12 @@ function Composer() {
     reader.readAsDataURL(f)
   }
 
-  const readDroppedFiles = (files: FileList) => {
+  /** Unified entry for every file that enters the composer — picker, drag,
+   *  or paste. Images go to the vision path; everything else is read as
+   *  text: small files stage inline, large ones are copied into the
+   *  workspace so the agent can read_file them. Binary content is rejected
+   *  with an explanation, never silently dropped. */
+  const addFiles = (files: FileList | File[]) => {
     void (async () => {
       const added: Attachment[] = []
       for (const f of Array.from(files)) {
@@ -2167,22 +2335,42 @@ function Composer() {
           addImageFile(f)
           continue
         }
-        // text attachments only (Q33); skip anything that looks binary
-        if (f.size > 200_000) {
+        if (f.size > MAX_TEXT_BYTES) {
           pushReject(
-            `"${f.name}" skipped — ${(f.size / 1_000).toFixed(0)} KB exceeds the 200 KB text limit`,
+            `"${f.name}" skipped — ${(f.size / 1_000_000).toFixed(1)} MB exceeds the 2 MB text limit`,
+          )
+          continue
+        }
+        let content: string
+        try {
+          content = await f.text()
+        } catch {
+          pushReject(`"${f.name}" skipped — could not be read`)
+          continue
+        }
+        if (content.includes('\u0000')) {
+          pushReject(
+            `"${f.name}" skipped — binary file (only images and text/code files are supported)`,
+          )
+          continue
+        }
+        if (f.size <= INLINE_LIMIT_BYTES) {
+          added.push({ name: f.name, content, size: f.size })
+          continue
+        }
+        // Large file: stage a copy in the workspace for read_file. Without a
+        // workspace there is nowhere sandboxed to put it, so refuse clearly.
+        if (!workspace) {
+          pushReject(
+            `"${f.name}" skipped — files over 100 KB need a workspace selected (they are copied to .yaah-attachments/)`,
           )
           continue
         }
         try {
-          const content = await f.text()
-          if (content.includes('\u0000')) {
-            pushReject(`"${f.name}" skipped — binary file`)
-            continue
-          }
-          added.push({ name: f.name, content })
-        } catch {
-          pushReject(`"${f.name}" skipped — could not be read`)
+          const { path } = await uploadAttachment(workspace, f.name, content)
+          added.push({ name: f.name, savedPath: path, size: f.size })
+        } catch (e) {
+          pushReject(`"${f.name}" skipped — could not stage file: ${(e as Error).message}`)
         }
       }
       if (added.length) setAttachments((a) => [...a, ...added])
@@ -2239,10 +2427,11 @@ function Composer() {
     setSending(true)
     setSendError(null)
 
-    // Inline attachments as fenced blocks (Q33)
+    // Inline small attachments as fenced blocks; large staged files as
+    // workspace path pointers the agent can read_file.
     let fullText = text
     for (const a of attachments) {
-      fullText += `\n\n--- attached file: ${a.name} ---\n\`\`\`\n${a.content}\n\`\`\``
+      fullText += attachmentText(a)
     }
     if (images.length) {
       fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
@@ -2375,7 +2564,7 @@ function Composer() {
       onDrop={(e) => {
         e.preventDefault()
         setDragOver(false)
-        if (e.dataTransfer?.files?.length) readDroppedFiles(e.dataTransfer.files)
+        if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files)
       }}
     >
       {images.length > 0 && (
@@ -2403,9 +2592,15 @@ function Composer() {
           {attachments.map((a, i) => (
             <span
               key={i}
+              title={a.savedPath ?? a.name}
               className="flex items-center gap-1 rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300"
             >
               {a.name}
+              {a.savedPath && (
+                <span className="text-zinc-500">
+                  · {Math.max(1, Math.round(a.size / 1_000))} KB · staged
+                </span>
+              )}
               <button
                 className="text-zinc-500 hover:text-red-400"
                 onClick={() => setAttachments((arr) => arr.filter((_, j) => j !== i))}
@@ -2539,8 +2734,7 @@ function Composer() {
           }`}
           rows={2}
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
-          placeholder="Describe a task... (drop/paste/attach images or text files; type /s to load a skill)"
-          aria-label="Message the agent"
+          placeholder="Describe a task... (drop/paste/attach images or text files; type /s to load a skill)"          aria-label="Message the agent"
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
@@ -2552,11 +2746,8 @@ function Composer() {
           onPaste={(e) => {
             const files = e.clipboardData?.files
             if (files?.length) {
-              const imgs = Array.from(files).filter((f) => f.type.startsWith('image/'))
-              if (imgs.length) {
-                e.preventDefault()
-                imgs.forEach(addImageFile)
-              }
+              e.preventDefault()
+              addFiles(files)
             }
           }}
           onKeyDown={(e) => {
@@ -2609,22 +2800,73 @@ function Composer() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
           multiple
           className="hidden"
           onChange={(e) => {
-            Array.from(e.target.files ?? []).forEach(addImageFile)
+            addFiles(e.target.files ?? [])
             e.target.value = ''
           }}
         />
         <button
-          title="Attach images"
-          aria-label="Attach images"
-          className="self-end rounded border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+          title="Attach files"
+          aria-label="Attach files"
+          className="self-end rounded border border-zinc-700 px-3 py-2 text-zinc-300 hover:bg-zinc-800"
           onClick={() => fileInputRef.current?.click()}
         >
-          📎
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
+            <path d="M7 2v10M2 7h10" />
+          </svg>
         </button>
+        {micAvailable !== false && (
+          <button
+            title={
+              voiceState === 'recording'
+                ? 'Stop and transcribe'
+                : voiceState === 'transcribing'
+                  ? 'Transcribing…'
+                  : 'Dictate (voice to text)'
+            }
+            aria-label={
+              voiceState === 'recording' ? 'Stop and transcribe' : 'Dictate (voice to text)'
+            }
+            aria-pressed={voiceState === 'recording'}
+            className={`self-end rounded border px-3 py-2 ${
+              voiceState === 'recording'
+                ? 'border-red-600 text-red-400'
+                : voiceState === 'transcribing'
+                  ? 'border-amber-600/70 text-amber-300'
+                  : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+            }`}
+            onClick={() => void toggleDictation()}
+          >
+            {voiceState === 'transcribing' ? (
+              <span className="run-pulse inline-block text-[10px] leading-[14px]">●</span>
+            ) : (
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 14 14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                aria-hidden="true"
+              >
+                <rect x="5" y="1.25" width="4" height="7" rx="2" />
+                <path d="M2.75 6.5a4.25 4.25 0 0 0 8.5 0M7 10.75v2" />
+              </svg>
+            )}
+          </button>
+        )}
         {sending ? (
           <button
             className="self-end rounded border border-red-700 px-3 py-2 text-sm text-red-300 hover:bg-red-950"
