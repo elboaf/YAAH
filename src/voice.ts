@@ -9,6 +9,13 @@
 
 const TARGET_RATE = 16000
 
+export interface VoiceMetrics {
+  /** True once the input has exceeded the speech threshold at least once. */
+  speechStarted: boolean
+  /** Milliseconds since the last above-threshold frame; 0 until speech started. */
+  silenceMs: number
+}
+
 export class VoiceRecorder {
   private ctx: AudioContext | null = null
   private stream: MediaStream | null = null
@@ -17,6 +24,10 @@ export class VoiceRecorder {
   private mute: GainNode | null = null
   private chunks: Float32Array[] = []
   private captureRate = TARGET_RATE
+  // --- voice activity tracking (adaptive noise floor) ---
+  private ambient = 0.01 // rolling estimate of the room's loudness
+  private speechStarted = false
+  private lastLoudAt = 0
 
   async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -29,13 +40,40 @@ export class VoiceRecorder {
     this.processor = this.ctx.createScriptProcessor(4096, 1, 1)
     this.chunks = []
     this.processor.onaudioprocess = (e) => {
-      this.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+      const frame = e.inputBuffer.getChannelData(0)
+      this.chunks.push(new Float32Array(frame))
+      this.trackActivity(frame)
     }
     this.mute = this.ctx.createGain()
     this.mute.gain.value = 0 // keep the graph pulling without monitoring
     this.source.connect(this.processor)
     this.processor.connect(this.mute)
     this.mute.connect(this.ctx.destination)
+  }
+
+  /** VAD state for the composer's auto-stop poll. */
+  metrics(): VoiceMetrics {
+    return {
+      speechStarted: this.speechStarted,
+      silenceMs: this.speechStarted ? performance.now() - this.lastLoudAt : 0,
+    }
+  }
+
+  /** RMS-based activity: the noise floor rises slowly and drops instantly,
+   *  so a fan/AC baseline never reads as speech, and speech is any frame
+   *  clearly above that floor (with hysteresis on the floor's adaptation). */
+  private trackActivity(frame: Float32Array): void {
+    let sum = 0
+    for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i]
+    const rms = Math.sqrt(sum / frame.length)
+    const threshold = Math.max(0.02, this.ambient * 4)
+    if (rms > threshold) {
+      this.speechStarted = true
+      this.lastLoudAt = performance.now()
+    } else {
+      // Only adapt the floor below the speech threshold, and slowly.
+      this.ambient = Math.min(this.ambient * 1.02 + rms * 0.02, threshold / 2)
+    }
   }
 
   /** Stop capture and encode everything recorded so far. */
