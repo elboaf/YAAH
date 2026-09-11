@@ -557,6 +557,7 @@ export function FilesPanel() {
   const [menu, setMenu] = useState<{ entry: FileEntry; x: number; y: number } | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('filesPanelCollapsed') === '1')
+  const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null)
 
   const toggleCollapsed = () =>
     setCollapsed((c) => {
@@ -652,11 +653,7 @@ export function FilesPanel() {
             <button
               className="block w-full px-3 py-1 text-left text-red-400 hover:bg-zinc-800"
               onClick={() => {
-                if (confirm(`Delete ${menu.entry.path}?`)) {
-                  deleteFile(workspace, menu.entry.path)
-                    .then(refresh)
-                    .catch((e) => setErr(String(e)))
-                }
+                setDeleteTarget(menu.entry)
                 setMenu(null)
               }}
             >
@@ -664,6 +661,21 @@ export function FilesPanel() {
             </button>
           </div>
         </>
+      )}
+
+      {/* in-app delete confirmation (replaces native confirm) */}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Delete file?"
+          body={`${deleteTarget.path} will be removed from disk. This cannot be undone.`}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => {
+            deleteFile(workspace, deleteTarget.path)
+              .then(refresh)
+              .catch((e) => setErr(String(e)))
+            setDeleteTarget(null)
+          }}
+        />
       )}
 
       {/* click a file row also previews; highlight the open one */}
@@ -742,11 +754,165 @@ export function PreviewModal() {
   )
 }
 
+// ---------------------------------------------------------------- dialogs
+
+/** Shared modal chrome: scrim, Esc, backdrop click. All in-app dialogs
+ *  build on this so Esc/backdrop behavior matches PreviewModal. */
+function DialogShell({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+/** Destructive confirmation, replacing native confirm(). */
+function ConfirmDialog({
+  title,
+  body,
+  confirmLabel = 'Delete',
+  onConfirm,
+  onCancel,
+}: {
+  title: string
+  body: string
+  confirmLabel?: string
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  return (
+    <DialogShell onClose={onCancel}>
+      <div className="p-4">
+        <h2 className="mb-1 text-sm font-semibold text-zinc-100">{title}</h2>
+        <p className="mb-4 break-words text-xs leading-relaxed text-zinc-400">{body}</p>
+        <div className="flex justify-end gap-2">
+          <button
+            className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            autoFocus
+            className="rounded border border-red-700 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950"
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+/** Single-value input dialog, replacing native prompt() — multi-line, since
+ *  a system prompt is prose, not one line. */
+function PromptDialog({
+  title,
+  label,
+  initial,
+  placeholder,
+  onOK,
+  onCancel,
+}: {
+  title: string
+  label: string
+  initial: string
+  placeholder?: string
+  onOK: (value: string) => void
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState(initial)
+  return (
+    <DialogShell onClose={onCancel}>
+      <div className="p-4">
+        <h2 className="mb-1 text-sm font-semibold text-zinc-100">{title}</h2>
+        <label className="mb-1 block text-[10px] text-zinc-500">{label}</label>
+        <textarea
+          rows={5}
+          autoFocus
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault()
+              onOK(value)
+            }
+          }}
+          className="w-full resize-y rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 font-mono text-xs text-zinc-100 focus:border-blue-500 focus:outline-none"
+        />
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
+            onClick={() => onOK(value)}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
+/** Failure notice, replacing native alert(). */
+function NoticeDialog({
+  title,
+  message,
+  onClose,
+}: {
+  title: string
+  message: string
+  onClose: () => void
+}) {
+  return (
+    <DialogShell onClose={onClose}>
+      <div className="p-4">
+        <h2 className="mb-1 text-sm font-semibold text-red-300">{title}</h2>
+        <p className="mb-4 break-all text-xs leading-relaxed text-zinc-400">{message}</p>
+        <div className="flex justify-end">
+          <button
+            autoFocus
+            className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            onClick={onClose}
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
 // ---------------------------------------------------------------- sidebar
 
 function ConversationList() {
   const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation } = useAgent()
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null }>>([])
+  const [notice, setNotice] = useState<{ title: string; message: string } | null>(null)
+  const [sysTarget, setSysTarget] = useState<{ id: number; title: string } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null)
 
   const refresh = useCallback(() => {
     listConversations().then(setConvs).catch(() => setConvs([]))
@@ -778,7 +944,7 @@ function ConversationList() {
                 className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-zinc-200 group-hover:opacity-100"
                 onClick={() => {
                   exportConversationMarkdown(c.id, c.title).catch((e) =>
-                    alert(`Export failed: ${e.message ?? e}`),
+                    setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
                   )
                 }}
               >
@@ -787,30 +953,16 @@ function ConversationList() {
               <button
                 title="System prompt override (Q17)"
                 className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-zinc-200 group-hover:opacity-100"
-                onClick={() => {
-                  const p = prompt('System prompt override for this conversation (empty = default):')
-                  if (p !== null) {
-                    updateConversation(c.id, { system_prompt_override: p || null }).catch(() => {})
-                  }
-                }}
+                onClick={() =>
+                  setSysTarget({ id: c.id, title: c.title })
+                }
               >
                 sys
               </button>
               <button
                 title="Delete conversation"
                 className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-red-400 group-hover:opacity-100"
-                onClick={() => {
-                  if (!confirm(`Delete "${c.title}" and all its messages? This cannot be undone.`)) return
-                  deleteConversation(c.id)
-                    .then(() => {
-                      if (c.id === conversationId) {
-                        newConversation()
-                      } else {
-                        refresh()
-                      }
-                    })
-                    .catch((e) => alert(`Delete failed: ${e.message ?? e}`))
-                }}
+                onClick={() => setDeleteTarget({ id: c.id, title: c.title })}
               >
                 ✕
               </button>
@@ -824,6 +976,51 @@ function ConversationList() {
       <button className="mt-2 w-full rounded px-2 py-1 text-left text-[10px] text-zinc-600 hover:text-zinc-400" onClick={refresh}>
         refresh
       </button>
+
+      {/* in-app dialogs (replace native confirm/prompt/alert) */}
+      {notice && (
+        <NoticeDialog
+          title={notice.title}
+          message={notice.message}
+          onClose={() => setNotice(null)}
+        />
+      )}
+      {sysTarget && (
+        <PromptDialog
+          title="System prompt override"
+          label={`Applies to "${sysTarget.title}" only. Empty saves the default.`}
+          initial=""
+          placeholder="Leave empty to use the default system prompt…"
+          onCancel={() => setSysTarget(null)}
+          onOK={(value) => {
+            updateConversation(sysTarget.id, { system_prompt_override: value || null }).catch(
+              (e) => setNotice({ title: 'Save failed', message: String(e?.message ?? e) }),
+            )
+            setSysTarget(null)
+          }}
+        />
+      )}
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Delete conversation?"
+          body={`"${deleteTarget.title}" and all its messages will be removed. This cannot be undone.`}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => {
+            deleteConversation(deleteTarget.id)
+              .then(() => {
+                if (deleteTarget.id === conversationId) {
+                  newConversation()
+                } else {
+                  refresh()
+                }
+              })
+              .catch((e) =>
+                setNotice({ title: 'Delete failed', message: String(e?.message ?? e) }),
+              )
+            setDeleteTarget(null)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -926,6 +1123,7 @@ export function Sidebar() {
           onBlur={() => setWorkspace(wsInput || '.')}
           placeholder="/path/to/project"
           title="Remembered across app restarts"
+          aria-label="Workspace folder path"
         />
         <button
           className="mb-3 self-start rounded px-1 text-[10px] text-zinc-500 hover:text-zinc-300"
@@ -933,6 +1131,12 @@ export function Sidebar() {
         >
           browse...
         </button>
+        {workspace === '.' && (
+          <p className="mb-3 text-[10px] leading-relaxed text-amber-400/90">
+            No workspace set — the agent can't see your files yet. Enter a folder
+            path above, or browse.
+          </p>
+        )}
         <div className="mb-3">
           <label className="mb-1 block text-xs text-zinc-500">
             Model{savingModel ? ' (saving...)' : ''}
@@ -965,6 +1169,14 @@ export function Sidebar() {
               </option>
             )}
           </select>
+          {Object.keys(byProvider).length === 0 && (
+            <button
+              className="mt-1 w-full rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 text-left text-[10px] leading-relaxed text-amber-300 hover:border-amber-500"
+              onClick={() => setShowSettings(true)}
+            >
+              No model provider configured — add one in Settings to start.
+            </button>
+          )}
           {/* per-provider failure notes (Q10) */}
           {Object.entries(byProvider)
             .filter(([, pm]) => pm.error)
@@ -1009,6 +1221,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // The one provider whose fields are open; collapsed rows show a summary.
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  // Esc closes, matching PreviewModal and the dialog shells.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
 
   useEffect(() => {
     getConfig()
@@ -1067,7 +1290,16 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       const rest = Object.keys(providers).filter((n) => n !== name)
       setActive(rest[0] ?? '')
     }
+    if (expanded === name) setExpanded(null)
   }
+
+  // Active provider first, then the rest alphabetically — the row the user
+  // needs to verify is always the first thing they see.
+  const providerOrder = (Object.keys(providers) as string[]).sort((a, b) => {
+    if (a === active) return -1
+    if (b === active) return 1
+    return a.localeCompare(b)
+  })
 
   const save = async () => {
     setSaving(true)
@@ -1109,63 +1341,99 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       >
         <h2 className="mb-3 font-semibold">Settings</h2>
 
-        {/* configured providers: add / edit / remove (Q9) */}
-        <label className="mb-1 block text-xs text-zinc-500">Providers</label>
-        {Object.entries(providers).map(([name, p]) => (
-          <div key={name} className="mb-3 rounded border border-zinc-700 p-2">
-            <div className="mb-1 flex items-center gap-2">
-              <input
-                type="radio"
-                name="active-provider"
-                checked={active === name}
-                onChange={() => setActive(name)}
-                title="Make active"
-              />
-              <span className="font-mono text-xs text-zinc-200">{name}</span>
+        {/* providers: collapsed rows, active first; fields behind one open row */}
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Providers
+        </h3>
+        {providerOrder.length === 0 && (
+          <p className="mb-2 text-[11px] text-zinc-600">
+            No providers yet — add one below to start using the agent.
+          </p>
+        )}
+        {providerOrder.map((name) => {
+          const p = providers[name]
+          const isOpen = expanded === name
+          const summary = p.savedKey
+            ? 'key saved'
+            : p.apiKeyInput
+              ? 'key entered'
+              : 'no key'
+          return (
+            <div key={name} className="mb-1.5 rounded border border-zinc-700">
               <button
-                className="ml-auto text-[10px] text-red-400 hover:text-red-300"
-                onClick={() => removeProvider(name)}
+                className="flex w-full items-center gap-2 px-2 py-1.5 text-left"
+                onClick={() => setExpanded(isOpen ? null : name)}
+                aria-expanded={isOpen}
               >
-                remove
+                <input
+                  type="radio"
+                  name="active-provider"
+                  checked={active === name}
+                  onChange={() => setActive(name)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="Make active"
+                  aria-label={`Make ${name} the active provider`}
+                />
+                <span className="font-mono text-xs text-zinc-200">{name}</span>
+                {!isOpen && (
+                  <span className="truncate text-[10px] text-zinc-600">{summary}</span>
+                )}
+                <span className="ml-auto text-[10px] text-zinc-600">
+                  {isOpen ? '▾' : '▸'}
+                </span>
               </button>
+              {isOpen && (
+                <div className="border-t border-zinc-800 p-2">
+                  <input
+                    className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                    value={p.api_base}
+                    onChange={(e) => patchProvider(name, { api_base: e.target.value })}
+                    placeholder="https://api.openai.com/v1"
+                    aria-label={`${name} API base URL`}
+                  />
+                  <div className="mb-1 flex gap-1">
+                    <select
+                      className="w-full rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-[10px] text-zinc-300"
+                      value=""
+                      onChange={(e) => applyPreset(name, e.target.value)}
+                      aria-label={`Apply a preset to ${name}`}
+                    >
+                      <option value="">use preset…</option>
+                      {Object.keys(presets).map((preset) => (
+                        <option key={preset} value={preset}>
+                          {preset}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <input
+                    type="password"
+                    className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                    placeholder={p.savedKey ? 'key saved' : 'sk-... (optional for local)'}
+                    value={p.apiKeyInput}
+                    onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
+                    aria-label={`${name} API key`}
+                  />
+                  <button
+                    className="mt-1.5 text-[10px] text-red-400 hover:text-red-300"
+                    onClick={() => removeProvider(name)}
+                  >
+                    remove provider
+                  </button>
+                </div>
+              )}
             </div>
-            <input
-              className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={p.api_base}
-              onChange={(e) => patchProvider(name, { api_base: e.target.value })}
-              placeholder="https://api.openai.com/v1"
-            />
-            <div className="mb-1 flex gap-1">
-              <select
-                className="w-full rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-[10px] text-zinc-300"
-                value=""
-                onChange={(e) => applyPreset(name, e.target.value)}
-              >
-                <option value="">use preset…</option>
-                {Object.keys(presets).map((preset) => (
-                  <option key={preset} value={preset}>
-                    {preset}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <input
-              type="password"
-              className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              placeholder={p.savedKey ? 'key saved' : 'sk-... (optional for local)'}
-              value={p.apiKeyInput}
-              onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
-            />
-          </div>
-        ))}
+          )
+        })}
 
         {/* add a provider: preset templates or a custom OpenAI-compatible URL */}
-        <div className="mb-3 flex gap-1">
+        <div className="mb-1 flex gap-1">
           <input
             className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
             placeholder="new provider name (or 'custom')"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
+            aria-label="New provider name"
           />
           <button
             className="rounded border border-zinc-700 px-2 text-[11px] text-zinc-300 hover:bg-zinc-800"
@@ -1174,7 +1442,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             + custom
           </button>
         </div>
-        <div className="mb-3 flex flex-wrap gap-1">
+        <div className="mb-4 flex flex-wrap gap-1">
           {Object.keys(presets).map((preset) => (
             <button
               key={preset}
@@ -1186,7 +1454,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           ))}
         </div>
 
-        <div className="mb-3 mt-2 flex gap-2">
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Generation
+        </h3>
+        <div className="mb-3 flex gap-2">
           <div className="flex-1">
             <label className="mb-1 block text-xs text-zinc-500">Temperature</label>
             <input
@@ -1270,10 +1541,29 @@ export function ChatPanel() {
     <main className="flex min-w-0 flex-1 flex-col">
       <div className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
         {messages.length === 0 && (
-          <p className="mt-10 text-center text-sm text-zinc-600">
-            Start a conversation. Work in progress streams as a live ticker, then
-            collapses to a one-line trace.
-          </p>
+          <div className="mt-12 text-center">
+            <p className="text-sm text-zinc-300">
+              Point me at a project and describe a task.
+            </p>
+            <ol className="mt-4 inline-block space-y-1.5 text-left text-xs text-zinc-500">
+              <li>
+                <span className="mr-1.5 text-zinc-700">1.</span>
+                Set the workspace folder in the sidebar — type a path or browse.
+              </li>
+              <li>
+                <span className="mr-1.5 text-zinc-700">2.</span>
+                Add a model provider in Settings (your own API key), if you haven't.
+              </li>
+              <li>
+                <span className="mr-1.5 text-zinc-700">3.</span>
+                Describe your task below — type{' '}
+                <span className="font-mono text-indigo-300">/s</span> to load a skill's instructions.
+              </li>
+            </ol>
+            <p className="mt-5 text-[11px] text-zinc-600">
+              Tool calls stream live as chips, then collapse to an expandable trace.
+            </p>
+          </div>
         )}
         {messages.map((m) => (
           <MessageView key={m.id} msg={m} live={m.id === liveId} />
