@@ -45,7 +45,12 @@ TOOLS_SCHEMA = [
             "description": (
                 "Execute a shell command in the workspace directory. Use for "
                 "builds, tests, git, file discovery (ls, grep, find), and text "
-                "processing. Long-running commands will time out."
+                "processing. Long-running commands will time out. Never shell-"
+                "background a long-running process (trailing &, start /b): the "
+                "child outlives the tool call, keeps the output pipe open, and "
+                "wedges the session. Servers and watchers need a detached spawn "
+                "instead (e.g. Start-Process with redirect, or nohup with "
+                "stdout/stderr redirected to a file)."
             ),
             "parameters": {
                 "type": "object",
@@ -74,7 +79,10 @@ POWERSHELL_SCHEMA = {
             "directory. Use for Windows-native tasks the shell can't do "
             "well: registry, services, WMI/CIM, ACLs, scheduled tasks, "
             "structured object pipelines. Long-running commands will "
-            "time out."
+            "time out. Never shell-background a long-running process "
+            "(trailing &): the child outlives the tool call, keeps the "
+            "output pipe open, and wedges the session. Servers and watchers "
+            "need Start-Process (optionally -WindowStyle Hidden) instead."
         ),
         "parameters": {
             "type": "object",

@@ -1,0 +1,8 @@
+::1 - - [11/Sep/2026 08:08:25] "GET /crit2-01-empty-1440.png HTTP/1.1" 200 -
+::1 - - [11/Sep/2026 08:30:55] "GET /crit2-01-empty-1440.png HTTP/1.1" 200 -
+::1 - - [11/Sep/2026 08:31:27] "GET /crit2-02-skill-menu.png HTTP/1.1" 200 -
+::1 - - [11/Sep/2026 08:31:39] "GET /crit2-03-settings.png HTTP/1.1" 200 -
+::1 - - [11/Sep/2026 08:31:53] "GET /crit2-04-settings-expanded.png HTTP/1.1" 200 -
+::1 - - [11/Sep/2026 08:32:04] "GET /crit2-05-history-collapsed.png HTTP/1.1" 200 -
+::1 - - [11/Sep/2026 08:32:25] "GET /crit2-06-history-expanded.png HTTP/1.1" 200 -
+::1 - - [11/Sep/2026 08:32:32] "GET /crit2-07-narrow-760.png HTTP/1.1" 200 -
