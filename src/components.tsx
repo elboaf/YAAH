@@ -1332,6 +1332,7 @@ function Composer() {
     setPendingQuestion,
     pushLog,
     setAbortController,
+    removeMessage,
   } = useAgent()
   const abortController = useAgent((s) => s.abortController)
   const [input, setInput] = useState('')
@@ -1340,14 +1341,38 @@ function Composer() {
   const [images, setImages] = useState<ImageAttachment[]>([])
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const streaming = status === 'thinking' || status === 'running-tool'
+
+  // Collapse the auto-grown textarea back to its resting height whenever the
+  // draft empties (send, skill pick, restore-on-error keeps content so no reset).
+  useEffect(() => {
+    if (input === '' && textareaRef.current) {
+      textareaRef.current.style.height = ''
+    }
+  }, [input])
 
   // ---- skills (/s autocomplete + chips) ----
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [skillMenuOpen, setSkillMenuOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
   const [skillIndex, setSkillIndex] = useState(0)
+  // True only after the user points at a row (arrows or hover). Enter commits
+  // a skill solely on this explicit selection; otherwise Enter sends the
+  // literal text — typing a message that starts with "/s" stays possible.
+  const [skillNavigated, setSkillNavigated] = useState(false)
   const [pickedSkills, setPickedSkills] = useState<SkillInfo[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // ---- attachment rejection feedback (harden: silent drops are a trust bug) ----
+  const [rejects, setRejects] = useState<string[]>([])
+  const [sendError, setSendError] = useState<string | null>(null)
+  const pushReject = useCallback((msg: string) => {
+    setRejects((r) => [...r.slice(-3), msg])
+    // Auto-clear after 6s; each new rejection resets the timer.
+    window.setTimeout(() => {
+      setRejects((r) => (r.includes(msg) ? r.filter((x) => x !== msg) : r))
+    }, 6000)
+  }, [])
 
   const loadSkills = useCallback(() => {
     listSkills()
@@ -1364,12 +1389,14 @@ function Composer() {
       setSkillMenuOpen(true)
       setSkillQuery('')
       setSkillIndex(0)
+      setSkillNavigated(false)
       return
     }
     if (input.startsWith('/s ')) {
       setSkillMenuOpen(true)
       setSkillQuery(input.slice(3))
       setSkillIndex(0)
+      setSkillNavigated(false)
       return
     }
     setSkillMenuOpen(false)
@@ -1382,6 +1409,7 @@ function Composer() {
   const pickSkill = (s: SkillInfo) => {
     setPickedSkills((p) => (p.some((x) => x.name === s.name) ? p : [...p, s]))
     setSkillMenuOpen(false)
+    setSkillNavigated(false)
     setInput('')
     textareaRef.current?.focus()
   }
@@ -1390,16 +1418,32 @@ function Composer() {
     setPickedSkills((p) => p.filter((s) => s.name !== name))
 
   const addImageFile = (f: File) => {
-    if (!f.type.startsWith('image/') || f.size > MAX_IMAGE_BYTES) return
+    if (!f.type.startsWith('image/')) {
+      pushReject(`"${f.name}" skipped — not an image file`)
+      return
+    }
+    if (f.size > MAX_IMAGE_BYTES) {
+      pushReject(
+        `"${f.name}" skipped — ${(f.size / 1_000_000).toFixed(1)} MB exceeds the 5 MB limit`,
+      )
+      return
+    }
     const reader = new FileReader()
     reader.onload = () => {
       const dataUrl = String(reader.result)
       if (dataUrl.startsWith('data:image/')) {
-        setImages((imgs) =>
-          imgs.length < 4 ? [...imgs, { name: f.name, dataUrl }] : imgs,
-        )
+        setImages((imgs) => {
+          if (imgs.length >= 4) {
+            pushReject(`"${f.name}" skipped — 4 images max per message`)
+            return imgs
+          }
+          return [...imgs, { name: f.name, dataUrl }]
+        })
+      } else {
+        pushReject(`"${f.name}" skipped — unreadable image data`)
       }
     }
+    reader.onerror = () => pushReject(`"${f.name}" skipped — could not be read`)
     reader.readAsDataURL(f)
   }
 
@@ -1412,13 +1456,21 @@ function Composer() {
           continue
         }
         // text attachments only (Q33); skip anything that looks binary
-        if (f.size > 200_000) continue
+        if (f.size > 200_000) {
+          pushReject(
+            `"${f.name}" skipped — ${(f.size / 1_000).toFixed(0)} KB exceeds the 200 KB text limit`,
+          )
+          continue
+        }
         try {
           const content = await f.text()
-          if (content.includes('\u0000')) continue
+          if (content.includes('\u0000')) {
+            pushReject(`"${f.name}" skipped — binary file`)
+            continue
+          }
           added.push({ name: f.name, content })
         } catch {
-          /* unreadable file: skip */
+          pushReject(`"${f.name}" skipped — could not be read`)
         }
       }
       if (added.length) setAttachments((a) => [...a, ...added])
@@ -1429,6 +1481,7 @@ function Composer() {
     const text = input.trim()
     if ((!text && attachments.length === 0 && images.length === 0) || sending) return
     setSending(true)
+    setSendError(null)
 
     // Inline attachments as fenced blocks (Q33)
     let fullText = text
@@ -1440,13 +1493,16 @@ function Composer() {
     }
     const imageDataUrls = images.map((i) => i.dataUrl)
     const invokedSkills = pickedSkills.map((s) => s.name)
+    // Captured draft: if the turn fails before the agent answers, the
+    // composer gets it back — a failed send must not cost the prompt.
+    const draft = { input, attachments, images, pickedSkills }
 
     setInput('')
     setAttachments([])
     setImages([])
     setPickedSkills([])
     setError(null)
-    appendUserMessage(fullText, imageDataUrls)
+    const userId = appendUserMessage(fullText, imageDataUrls)
     const asstId = appendAssistantPlaceholder()
     const ac = new AbortController()
     setAbortController(ac)
@@ -1511,8 +1567,19 @@ function Composer() {
         setStatus('idle')
         appendTextDelta(asstId, '\n[stopped]')
       } else {
+        // The turn never started (network, bad key, server down): roll back
+        // the optimistic messages and restore the draft so nothing is lost.
+        removeMessage(asstId)
+        removeMessage(userId)
+        setInput(draft.input)
+        setAttachments(draft.attachments)
+        setImages(draft.images)
+        setPickedSkills(draft.pickedSkills)
         setStatus('error')
-        setError(String(e))
+        setSendError(
+          `Message not sent — the agent could not be reached. Your draft was restored.`,
+        )
+        textareaRef.current?.focus()
       }
     } finally {
       setSending(false)
@@ -1597,6 +1664,32 @@ function Composer() {
           ))}
         </div>
       )}
+      {rejects.length > 0 && (
+        <div className="mb-2 space-y-1" aria-live="polite">
+          {rejects.map((msg, i) => (
+            <p
+              key={`${msg}-${i}`}
+              className="rounded border border-amber-800/60 bg-amber-950/40 px-2 py-1 text-[11px] text-amber-300"
+            >
+              {msg}
+            </p>
+          ))}
+        </div>
+      )}
+      {sendError && (
+        <div
+          className="mb-2 flex items-center justify-between gap-2 rounded border border-red-800/60 bg-red-950/40 px-2 py-1.5"
+          role="alert"
+        >
+          <p className="text-[11px] text-red-300">{sendError}</p>
+          <button
+            className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
+            onClick={() => setSendError(null)}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
       {skillMenuOpen && (
         <div className="relative">
           <div className="absolute bottom-1 left-0 z-10 max-h-56 w-80 overflow-y-auto rounded border border-zinc-700 bg-zinc-900 shadow-lg">
@@ -1609,7 +1702,10 @@ function Composer() {
                   className={`block w-full px-3 py-1.5 text-left ${
                     i === skillIndex ? 'bg-zinc-800' : 'hover:bg-zinc-800/60'
                   }`}
-                  onMouseEnter={() => setSkillIndex(i)}
+                  onMouseEnter={() => {
+                    setSkillIndex(i)
+                    setSkillNavigated(true)
+                  }}
                   onMouseDown={(e) => {
                     e.preventDefault() // keep textarea focus
                     pickSkill(s)
@@ -1622,8 +1718,11 @@ function Composer() {
                 </button>
               ))
             )}
+            <div className="border-t border-zinc-800 px-3 py-1 text-[10px] text-zinc-600">
+              ↑↓ navigate · Tab adds · Esc closes — Enter sends your text
+            </div>
             <button
-              className="block w-full border-t border-zinc-800 px-3 py-1.5 text-left text-[10px] text-zinc-500 hover:text-zinc-300"
+              className="block w-full px-3 py-1.5 text-left text-[10px] text-zinc-500 hover:text-zinc-300"
               onMouseDown={(e) => {
                 e.preventDefault()
                 refreshSkills().then(loadSkills)
@@ -1637,13 +1736,25 @@ function Composer() {
       <div className="flex gap-2">
         <textarea
           ref={textareaRef}
-          className={`flex-1 resize-none rounded border bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-blue-500 focus:outline-none ${
-            dragOver ? 'border-blue-500' : 'border-zinc-700'
+          className={`flex-1 resize-none rounded border bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none ${
+            dragOver
+              ? 'border-blue-500'
+              : streaming
+                ? 'border-amber-600/70 focus:border-amber-500'
+                : 'border-zinc-700 focus:border-blue-500'
           }`}
           rows={2}
-          placeholder="Describe a task... (Enter to send, Shift+Enter for newline, drop/paste/attach images or text files)"
+          style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
+          placeholder="Describe a task... (drop/paste/attach images or text files; type /s to load a skill)"
+          aria-label="Message the agent"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value)
+            // Auto-grow with content, capped at ~8 rows; resets on send.
+            const el = e.target
+            el.style.height = 'auto'
+            el.style.height = `${Math.min(el.scrollHeight, 256)}px`
+          }}
           onPaste={(e) => {
             const files = e.clipboardData?.files
             if (files?.length) {
@@ -1655,20 +1766,38 @@ function Composer() {
             }
           }}
           onKeyDown={(e) => {
+            // IME safety: Enter confirming a CJK composition must never send
+            // or pick a skill (isComposing is true for the whole composition).
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return
             if (skillMenuOpen && filteredSkills.length > 0) {
               if (e.key === 'ArrowDown') {
                 e.preventDefault()
                 setSkillIndex((i) => (i + 1) % filteredSkills.length)
+                setSkillNavigated(true)
                 return
               }
               if (e.key === 'ArrowUp') {
                 e.preventDefault()
                 setSkillIndex((i) => (i - 1 + filteredSkills.length) % filteredSkills.length)
+                setSkillNavigated(true)
                 return
               }
-              if (e.key === 'Enter' || e.key === 'Tab') {
+              if (e.key === 'Tab') {
+                // Tab completes the highlighted skill but never sends.
                 e.preventDefault()
                 pickSkill(filteredSkills[skillIndex] ?? filteredSkills[0])
+                return
+              }
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                // Enter commits only an explicitly selected row; with no
+                // selection it closes the menu so the literal text sends.
+                if (skillNavigated) {
+                  pickSkill(filteredSkills[skillIndex] ?? filteredSkills[0])
+                } else {
+                  setSkillMenuOpen(false)
+                  void send()
+                }
                 return
               }
               if (e.key === 'Escape') {
@@ -1696,24 +1825,26 @@ function Composer() {
         />
         <button
           title="Attach images"
+          aria-label="Attach images"
           className="self-end rounded border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
           onClick={() => fileInputRef.current?.click()}
         >
           📎
         </button>
-        <button
-          className="self-end rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
-          onClick={() => void send()}
-          disabled={sending || (!input.trim() && attachments.length === 0 && images.length === 0)}
-        >
-          Send
-        </button>
-        {sending && (
+        {sending ? (
           <button
             className="self-end rounded border border-red-700 px-3 py-2 text-sm text-red-300 hover:bg-red-950"
             onClick={stop}
           >
             Stop
+          </button>
+        ) : (
+          <button
+            className="self-end rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
+            onClick={() => void send()}
+            disabled={!input.trim() && attachments.length === 0 && images.length === 0}
+          >
+            Send
           </button>
         )}
       </div>

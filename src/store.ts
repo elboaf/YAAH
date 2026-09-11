@@ -62,9 +62,11 @@ interface AgentState {
   abortController: AbortController | null
   setAbortController: (c: AbortController | null) => void
 
-  appendUserMessage: (text: string, images?: string[]) => void
+  appendUserMessage: (text: string, images?: string[]) => string
   appendAssistantPlaceholder: () => string
   appendTextDelta: (msgId: string, text: string) => void
+  /** Remove one optimistic message (failed-send rollback). */
+  removeMessage: (msgId: string) => void
   startToolCall: (msgId: string, callId: string, name: string, args: unknown) => void
   finishToolCall: (msgId: string, callId: string, result: unknown) => void
 
@@ -160,12 +162,20 @@ export const useAgent = create<AgentState>((set) => ({
   abortController: null,
   setAbortController: (c) => set({ abortController: c }),
 
-  appendUserMessage: (text, images) =>
+  appendUserMessage: (text, images) => {
+    const id = genId()
     set((s) => ({
       messages: [
         ...s.messages,
-        { id: genId(), role: 'user', content: text, images },
+        { id, role: 'user', content: text, images },
       ],
+    }))
+    return id
+  },
+
+  removeMessage: (msgId) =>
+    set((s) => ({
+      messages: s.messages.filter((m) => m.id !== msgId),
     })),
 
   appendAssistantPlaceholder: () => {
