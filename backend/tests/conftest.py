@@ -10,3 +10,4 @@ import tempfile
 _TMP = tempfile.mkdtemp(prefix="yaah-test-")
 os.environ["YAAH_DB_PATH"] = os.path.join(_TMP, "agent.db")
 os.environ["YAAH_CONFIG_PATH"] = os.path.join(_TMP, "config.json")
+os.environ["YAAH_SKILLS_PATH"] = os.path.join(_TMP, "skills")

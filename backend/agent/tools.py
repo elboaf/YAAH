@@ -363,6 +363,29 @@ TOOLS_SCHEMA += [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": (
+                "Load a skill's full instructions into this conversation. "
+                "Use when the user's task matches an available skill's "
+                "description (see the skills list in your system prompt). "
+                "The skill's instructions are added to your system prompt "
+                "for the rest of this turn; follow them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The skill's name, exactly as listed",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 

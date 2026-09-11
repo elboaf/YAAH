@@ -18,9 +18,12 @@ import {
   deleteConversation,
   updateConversation,
   submitAnswer,
+  listSkills,
+  refreshSkills,
   imageUrl,
   type FileEntry,
   type ProviderPreset,
+  type SkillInfo,
 } from './api'
 import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
@@ -1338,6 +1341,54 @@ function Composer() {
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // ---- skills (/s autocomplete + chips) ----
+  const [skills, setSkills] = useState<SkillInfo[]>([])
+  const [skillMenuOpen, setSkillMenuOpen] = useState(false)
+  const [skillQuery, setSkillQuery] = useState('')
+  const [skillIndex, setSkillIndex] = useState(0)
+  const [pickedSkills, setPickedSkills] = useState<SkillInfo[]>([])
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const loadSkills = useCallback(() => {
+    listSkills()
+      .then((r) => setSkills(r.skills))
+      .catch(() => setSkills([]))
+  }, [])
+
+  useEffect(loadSkills, [loadSkills])
+
+  // The menu opens when the input is exactly "/s" or starts with "/s " —
+  // the query is whatever follows, and the list narrows as it grows.
+  useEffect(() => {
+    if (input === '/s') {
+      setSkillMenuOpen(true)
+      setSkillQuery('')
+      setSkillIndex(0)
+      return
+    }
+    if (input.startsWith('/s ')) {
+      setSkillMenuOpen(true)
+      setSkillQuery(input.slice(3))
+      setSkillIndex(0)
+      return
+    }
+    setSkillMenuOpen(false)
+  }, [input])
+
+  const filteredSkills = skills.filter((s) =>
+    skillQuery ? s.name.toLowerCase().startsWith(skillQuery.toLowerCase()) : true,
+  )
+
+  const pickSkill = (s: SkillInfo) => {
+    setPickedSkills((p) => (p.some((x) => x.name === s.name) ? p : [...p, s]))
+    setSkillMenuOpen(false)
+    setInput('')
+    textareaRef.current?.focus()
+  }
+
+  const removeSkill = (name: string) =>
+    setPickedSkills((p) => p.filter((s) => s.name !== name))
+
   const addImageFile = (f: File) => {
     if (!f.type.startsWith('image/') || f.size > MAX_IMAGE_BYTES) return
     const reader = new FileReader()
@@ -1388,10 +1439,12 @@ function Composer() {
       fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
     }
     const imageDataUrls = images.map((i) => i.dataUrl)
+    const invokedSkills = pickedSkills.map((s) => s.name)
 
     setInput('')
     setAttachments([])
     setImages([])
+    setPickedSkills([])
     setError(null)
     appendUserMessage(fullText, imageDataUrls)
     const asstId = appendAssistantPlaceholder()
@@ -1449,6 +1502,7 @@ function Composer() {
         },
         ac.signal,
         imageDataUrls,
+        invokedSkills,
       )
       if (useAgent.getState().status !== 'error') setStatus('idle')
     } catch (e) {
@@ -1524,8 +1578,65 @@ function Composer() {
           ))}
         </div>
       )}
+      {pickedSkills.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1">
+          {pickedSkills.map((s) => (
+            <span
+              key={s.name}
+              title={s.description || s.path}
+              className="flex items-center gap-1 rounded bg-indigo-900/60 px-2 py-0.5 font-mono text-[10px] text-indigo-200"
+            >
+              /s {s.name}
+              <button
+                className="text-indigo-400 hover:text-red-400"
+                onClick={() => removeSkill(s.name)}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {skillMenuOpen && (
+        <div className="relative">
+          <div className="absolute bottom-1 left-0 z-10 max-h-56 w-80 overflow-y-auto rounded border border-zinc-700 bg-zinc-900 shadow-lg">
+            {filteredSkills.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-zinc-500">No matching skills</div>
+            ) : (
+              filteredSkills.map((s, i) => (
+                <button
+                  key={s.name}
+                  className={`block w-full px-3 py-1.5 text-left ${
+                    i === skillIndex ? 'bg-zinc-800' : 'hover:bg-zinc-800/60'
+                  }`}
+                  onMouseEnter={() => setSkillIndex(i)}
+                  onMouseDown={(e) => {
+                    e.preventDefault() // keep textarea focus
+                    pickSkill(s)
+                  }}
+                >
+                  <div className="font-mono text-xs text-indigo-300">/s {s.name}</div>
+                  {s.description && (
+                    <div className="truncate text-[10px] text-zinc-500">{s.description}</div>
+                  )}
+                </button>
+              ))
+            )}
+            <button
+              className="block w-full border-t border-zinc-800 px-3 py-1.5 text-left text-[10px] text-zinc-500 hover:text-zinc-300"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                refreshSkills().then(loadSkills)
+              }}
+            >
+              ↻ Rescan skills folder
+            </button>
+          </div>
+        </div>
+      )}
       <div className="flex gap-2">
         <textarea
+          ref={textareaRef}
           className={`flex-1 resize-none rounded border bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:border-blue-500 focus:outline-none ${
             dragOver ? 'border-blue-500' : 'border-zinc-700'
           }`}
@@ -1544,6 +1655,28 @@ function Composer() {
             }
           }}
           onKeyDown={(e) => {
+            if (skillMenuOpen && filteredSkills.length > 0) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setSkillIndex((i) => (i + 1) % filteredSkills.length)
+                return
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setSkillIndex((i) => (i - 1 + filteredSkills.length) % filteredSkills.length)
+                return
+              }
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault()
+                pickSkill(filteredSkills[skillIndex] ?? filteredSkills[0])
+                return
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                setSkillMenuOpen(false)
+                return
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               void send()

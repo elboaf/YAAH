@@ -17,6 +17,7 @@ from typing import AsyncIterator
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent.imagedata import load_data_url
+from backend.agent import skills as skill_registry
 from backend.agent.tools import execute_tool, get_schemas
 from backend.db.database import add_message, get_conversation, get_messages
 
@@ -46,7 +47,7 @@ def _default_system_prompt() -> str:
         f"system shell ({'cmd.exe' if windows else 'bash/sh'}); use "
         f"commands and paths valid for THIS operating system."
     )
-    return f"""You are an expert AI coding agent working inside a user's project workspace.
+    prompt = f"""You are an expert AI coding agent working inside a user's project workspace.
 
 {env}
 
@@ -74,6 +75,13 @@ Interview the user (ask_user tool):
   for the exploration to report. Decisions wait; facts don't.
 - The session is done when nothing is left silently assumed. Do not
   act on a decision until the user has confirmed shared understanding."""
+
+    # Skills index: only added when at least one model-invocable skill
+    # exists, so a fresh install with no skills sees no extra noise.
+    skill_index = skill_registry.index_for_prompt()
+    if skill_index:
+        prompt += "\n\n" + skill_index
+    return prompt
 
 # Per-conversation cancellation flags checked between model/tool steps.
 _cancel_events: dict[int, asyncio.Event] = {}
@@ -123,6 +131,39 @@ def cancel_agent(conversation_id: int):
         ev.set()
 
 
+async def _load_skill(
+    args: dict,
+    loaded_skills: list[str],
+    messages: list,
+) -> dict:
+    """Handle the model's load_skill call: append the skill's body to the
+    system prompt message so the rest of the turn follows it. Returns the
+    tool result dict. Never raises."""
+    name = str(args.get("name") or "").strip()
+    skill = skill_registry.get_skill(name)
+    if skill is None:
+        available = ", ".join(
+            s.name for s in skill_registry.model_invocable()
+        ) or "none available"
+        return {
+            "error": f"Unknown skill: {name}",
+            "available": available,
+        }
+    if skill.name in loaded_skills:
+        return {
+            "loaded": skill.name,
+            "note": "already loaded this turn",
+        }
+    loaded_skills.append(skill.name)
+    # messages[0] is the system prompt; extend it in place so every later
+    # model call in this turn sees the skill's instructions.
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = (
+            f"{messages[0]['content']}\n\n---\n\n# Loaded skill: {skill.name}\n\n{skill.body}"
+        )
+    return {"loaded": skill.name, "description": skill.description}
+
+
 def _cancelled(conversation_id: int) -> bool:
     ev = _cancel_events.get(conversation_id)
     return bool(ev and ev.is_set())
@@ -130,6 +171,26 @@ def _cancelled(conversation_id: int) -> bool:
 
 def _ndjson(event: dict) -> str:
     return json.dumps(event) + "\n"
+
+
+def _clip_result_str(result, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Serialize a tool result, staying under `limit` WITHOUT producing
+    invalid JSON: the longest string field is clipped instead of slicing
+    the whole dump mid-token (a hard slice feeds the model garbage)."""
+    s = json.dumps(result)
+    if len(s) <= limit:
+        return s
+    if isinstance(result, dict):
+        clipped = dict(result)
+        str_keys = [k for k, v in clipped.items() if isinstance(v, str)]
+        if str_keys:
+            key = max(str_keys, key=lambda k: len(clipped[k]))
+            clipped[key] = clipped[key][: max(limit - 200, 0)] + "…[truncated]"
+            clipped["note"] = "output truncated to fit the context window"
+            out = json.dumps(clipped)
+            if len(out) <= limit:
+                return out
+    return json.dumps({"note": "output truncated", "head": s[:limit]})
 
 
 def _image_part(data_url: str) -> dict:
@@ -229,11 +290,14 @@ async def run_agent(
     user_text: str,
     workspace: str,
     image_paths: list | None = None,
+    skill_names: list | None = None,
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
     image_paths: rel paths (under backend/data/images/) of images the user
-    attached; already saved to disk by the API layer."""
+    attached; already saved to disk by the API layer.
+    skill_names: skills the user invoked with /s or a chip; their bodies
+    are injected into the system prompt for this turn only."""
     # Persist the user message first
     await add_message(
         conversation_id, "user", user_text, images=image_paths or None
@@ -243,6 +307,15 @@ async def run_agent(
     conv = await get_conversation(conversation_id)
     system_prompt = (conv or {}).get("system_prompt_override") or _default_system_prompt()
 
+    # Explicitly invoked skills (/s name or a chip): their instruction
+    # bodies are appended to the system prompt for THIS turn only — never
+    # persisted, so later turns don't replay them.
+    invoked = [n for n in (skill_names or []) if isinstance(n, str) and n.strip()]
+    if invoked:
+        skill_block = skill_registry.bodies_for_prompt(invoked)
+        if skill_block:
+            system_prompt = f"{system_prompt}\n\n---\n\n# Invoked skills\n\n{skill_block}"
+
     # Full context each turn: system prompt + persisted history
     history = await load_history(conversation_id)
     messages = [{"role": "system", "content": system_prompt}] + history
@@ -250,6 +323,11 @@ async def run_agent(
     tools = get_schemas()
     cancel_ev = asyncio.Event()
     _cancel_events[conversation_id] = cancel_ev
+
+    # Skills the model has loaded mid-turn via load_skill (deduped, order
+    # preserved). Their bodies are appended to the system prompt so every
+    # subsequent model call in this turn sees them.
+    loaded_skills: list[str] = []
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
     # the turn). Configured in Settings → Max steps or config.json `max_steps`.
@@ -264,34 +342,61 @@ async def run_agent(
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
-            content_acc: list[str] = []
-            tool_calls = None
-            try:
-                stream = await model_client.chat(messages, tools=tools, stream=True)
-            except model_client.ModelError as e:
-                # Auto-recovery (Q23): retry once with corrective context.
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            f"Your previous request failed with: {e}. "
-                            "Retry with a corrected request."
-                        ),
-                    }
-                )
-                stream = await model_client.chat(messages, tools=tools, stream=True)
+            # The retry must wrap the whole stream consumption, not just the
+            # chat() call: with stream=True the HTTP request only fires when
+            # iteration starts, so a ModelError surfaces at the first chunk.
+            state: dict = {"content": "", "tool_calls": None, "finish": None}
 
-            async for ev in stream:
-                if cancel_ev.is_set():
-                    yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
-                    return
-                if ev["type"] == "content":
-                    content_acc.append(ev["text"])
-                    yield _ndjson({"type": "text", "text": ev["text"]})
-                elif ev["type"] == "tool_calls":
-                    tool_calls = ev["tool_calls"]
+            async def _model_step() -> AsyncIterator[str]:
+                """One chat call, consumed to completion, yielding UI event
+                lines. Results land in `state`; raises ModelError on API
+                failure (including mid-stream drops)."""
+                state["content"] = ""
+                state["tool_calls"] = None
+                state["finish"] = None
+                acc: list[str] = []
+                stream = await model_client.chat(messages, tools=tools, stream=True)
+                async for ev in stream:
+                    if cancel_ev.is_set():
+                        return
+                    if ev["type"] == "content":
+                        acc.append(ev["text"])
+                        yield _ndjson({"type": "text", "text": ev["text"]})
+                    elif ev["type"] == "tool_calls":
+                        state["tool_calls"] = ev["tool_calls"]
+                    elif ev["type"] == "finish":
+                        state["finish"] = ev.get("reason")
+                state["content"] = "".join(acc)
 
-            assistant_content = "".join(content_acc)
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    async for line in _model_step():
+                        yield line
+                    break
+                except model_client.ModelError as e:
+                    if attempt >= 2 or cancel_ev.is_set():
+                        raise
+                    # Auto-recovery (Q23): retry once with corrective context.
+                    # Text already streamed before the failure may repeat in
+                    # the UI — cosmetic next to losing the whole turn.
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                f"Your previous request failed with: {e}. "
+                                "Retry with a corrected request."
+                            ),
+                        }
+                    )
+
+            if cancel_ev.is_set():
+                yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
+                return
+            assistant_content = state["content"]
+            tool_calls = state["tool_calls"]
+            finish_reason = state["finish"]
 
             # Persist assistant message (with tool calls if any)
             await add_message(
@@ -303,6 +408,14 @@ async def run_agent(
 
             # No tool calls => final answer; turn complete
             if not tool_calls:
+                if finish_reason == "length":
+                    yield _ndjson(
+                        {
+                            "type": "text",
+                            "text": "\n\n[output truncated: the model hit its "
+                            "max output tokens — raise max_tokens in Settings]",
+                        }
+                    )
                 yield _ndjson({"type": "done"})
                 return
 
@@ -323,7 +436,21 @@ async def run_agent(
                 try:
                     args = json.loads(tc["function"]["arguments"] or "{}")
                 except json.JSONDecodeError as e:
-                    result = {"error": f"Invalid JSON arguments: {e}"}
+                    if finish_reason == "length":
+                        # The model hit its output cap mid-arguments; telling
+                        # it "invalid JSON" makes it retry the identical call
+                        # and truncate again (the reread-same-file loop).
+                        result = {
+                            "error": (
+                                "Tool arguments were cut off because the model "
+                                "reached its max output tokens (finish_reason="
+                                "length). Retry with a much shorter call — e.g. "
+                                "smaller arguments or a narrower file range — "
+                                "or ask the user to raise max_tokens in Settings."
+                            )
+                        }
+                    else:
+                        result = {"error": f"Invalid JSON arguments: {e}"}
                 else:
                     yield _ndjson(
                         {
@@ -337,10 +464,12 @@ async def run_agent(
                         result = await _ask_user(
                             conversation_id, tc.get("id", ""), args, cancel_ev
                         )
+                    elif name == "load_skill":
+                        result = await _load_skill(args, loaded_skills, messages)
                     else:
                         result = await execute_tool(name, args, workspace)
 
-                result_str = json.dumps(result)[:MAX_TOOL_RESULT_CHARS]
+                result_str = _clip_result_str(result)
                 # A tool that attached an image (view_image) becomes a
                 # multimodal parts list for the live LLM call.
                 image_rel = result.get("image") if isinstance(result, dict) else None

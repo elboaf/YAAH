@@ -8,5 +8,7 @@ pydantic>=2.10.0
 # fallback route (headless Chrome -> curl_cffi -> urllib). Optional at
 # runtime, but bundled with the PyInstaller sidecar.
 curl_cffi>=0.7.0
+# SKILL.md frontmatter parsing (skills feature)
+pyyaml>=6.0
 pytest>=8.3.0
 pytest-asyncio>=0.24.0

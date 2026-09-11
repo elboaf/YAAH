@@ -224,6 +224,20 @@ export const submitAnswer = (id: number, callId: string, answer: string) =>
     body: JSON.stringify({ call_id: callId, answer }),
   })
 
+// ---------------------------------------------------------------- skills
+
+export interface SkillInfo {
+  name: string
+  description: string
+  disable_model_invocation: boolean
+  path: string
+}
+
+export const listSkills = () => api<{ skills: SkillInfo[] }>('/api/skills')
+
+export const refreshSkills = () =>
+  api<{ skills: SkillInfo[] }>('/api/skills/refresh', { method: 'POST' })
+
 export const deleteFile = (workspace: string, path: string) =>
   api<{ ok: boolean }>(
     `/api/files?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,
@@ -252,11 +266,12 @@ export async function streamAgentTurn(
   onEvent: AgentEventHandler,
   signal?: AbortSignal,
   images: string[] = [],
+  skills: string[] = [],
 ): Promise<void> {
   const res = await fetch(url(`/api/agent/${conversationId}`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, workspace, images }),
+    body: JSON.stringify({ message, workspace, images, skills }),
     signal,
   })
   if (!res.ok || !res.body) {

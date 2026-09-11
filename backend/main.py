@@ -15,6 +15,11 @@ from backend.db.database import init_db
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Skills are scanned once at startup; the UI can force a rescan via
+    # POST /api/skills/refresh.
+    from backend.agent import skills as skills_registry
+
+    skills_registry.ensure_scanned()
     yield
 
 
@@ -136,6 +141,7 @@ class AgentTurn(BaseModel):
     message: str
     workspace: str
     images: list[str] = []  # image data URLs attached by the user
+    skills: list[str] = []  # skill names invoked via /s or chips
 
 
 class ProviderEntry(BaseModel):
@@ -169,7 +175,7 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
             image_paths.append(rel)
     return StreamingResponse(
         run_agent(conversation_id, body.message, body.workspace,
-                  image_paths=image_paths),
+                  image_paths=image_paths, skill_names=body.skills),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -213,6 +219,23 @@ async def api_answer_question(conversation_id: int, body: AnswerBody):
             status_code=409, detail="no pending question for this conversation"
         )
     return {"ok": True}
+
+
+# ---- Skills ----
+
+from backend.agent import skills as skills_registry
+
+
+@app.get("/api/skills")
+async def api_list_skills():
+    """All loaded skills (name, description, manual-only flag, path)."""
+    return {"skills": skills_registry.list_skills()}
+
+
+@app.post("/api/skills/refresh")
+async def api_refresh_skills():
+    """Rescan the skills directory (Settings / UI refresh)."""
+    return {"skills": skills_registry.refresh()}
 
 
 # ---- Provider / model discovery ----

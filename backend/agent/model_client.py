@@ -87,11 +87,13 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
             tool_calls: dict[int, dict] = {}
             finish_reason = None
             n_content_chars = 0
+            saw_done = False
             async for line in r.aiter_lines():
                 if not line.startswith("data: "):
                     continue
                 data = line[6:]
                 if data.strip() == "[DONE]":
+                    saw_done = True
                     break
                 try:
                     chunk = json.loads(data)
@@ -130,6 +132,15 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                 finish_reason, n_content_chars, len(tool_calls),
                 ", ".join(t["function"]["name"] for t in tool_calls.values()) or "-",
             )
+            if not saw_done and finish_reason is None:
+                # The connection closed before the model finished (no [DONE],
+                # no finish_reason). Treating this as a completed answer used
+                # to end the turn silently with whatever partial content
+                # arrived; surface it as a retryable error instead.
+                raise ModelError(
+                    "model stream ended without a finish reason — the "
+                    "connection was likely dropped mid-response"
+                )
             if tool_calls:
                 yield {
                     "type": "tool_calls",
