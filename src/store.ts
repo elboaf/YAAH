@@ -77,6 +77,7 @@ interface AgentState {
       role: string
       content: string
       images?: string[] | null
+      tool_call_id?: string | null
       tool_calls: Array<{
         id?: string
         function?: { name?: string; arguments?: string }
@@ -226,23 +227,38 @@ export const useAgent = create<AgentState>((set) => ({
   loadHistory: (rows) =>
     set({
       messages: rows.map((r) => {
+        // Assistant rows carry the calls the model made (OpenAI format with
+        // function.name/arguments); tool rows carry one result each, linked
+        // back by tool_call_id, with the call name duplicated in tool_calls.
         const fn = r.tool_calls?.[0]?.function
+        const callId = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
         return {
           id: `db${r.id}`,
           role: r.role as Role,
           content: r.content,
           images: r.images ?? undefined,
           toolCalls:
-            r.role === 'tool' && fn?.name
-              ? [
-                  {
-                    id: r.tool_calls![0].id ?? '',
-                    name: fn.name,
-                    args: safeParse(fn.arguments),
-                    result: safeParse(r.content),
-                  },
-                ]
-              : undefined,
+            r.role === 'assistant' && r.tool_calls?.length
+              ? r.tool_calls.map((c, i) => ({
+                  id: c.id ?? `t${r.id}-${i}`,
+                  name: c.function?.name ?? 'tool',
+                  args: safeParse(c.function?.arguments),
+                }))
+              : r.role === 'tool' && (fn?.name || r.tool_call_id)
+                ? [
+                    {
+                      id: r.tool_call_id ?? r.tool_calls![0].id ?? '',
+                      // Tool rows persist the call name in tool_calls[0].name
+                      // (no function wrapper) — fall back to it before giving up.
+                      name:
+                        fn?.name ??
+                        (r.tool_calls![0] as { name?: string } | undefined)?.name ??
+                        'tool',
+                      args: undefined,
+                      result: safeParse(r.content),
+                    },
+                  ]
+                : undefined,
         }
       }),
       status: 'idle',
