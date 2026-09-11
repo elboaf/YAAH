@@ -48,4 +48,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests
-        run: pytest backend/tests -v
+        run: |
+          pytest backend/tests -v 2>&1 | tee test-output.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      # Logs are auth-gated on GitHub; surface failures via annotations,
+      # which are readable through the public API.
+      - name: Report failures
+        if: failure()
+        run: |
+          grep -E "^(FAILED|ERROR)" test-output.log | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+          tail -50 test-output.log | while IFS= read -r line; do echo "::error::$line"; done
