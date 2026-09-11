@@ -1,5 +1,6 @@
 """Workspace registry: migration, CRUD, relocation, API shape."""
 import os
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -66,13 +67,26 @@ async def test_upsert_dedupes_case_and_slashes(tmp_path):
     real = tmp_path / "Repo"
     real.mkdir()
     a = await upsert_workspace(str(real))
-    # Same folder, different case + trailing slash + redundant segment.
-    b = await upsert_workspace(
-        str(real).lower() + "\\" + ".." + "\\" + real.name
-    )
-    assert a["id"] == b["id"], "case/slash variants must dedupe to one row"
+    # Case-insensitive dedupe only makes sense where the filesystem is
+    # case-insensitive (Windows); POSIX keeps both spellings as real,
+    # distinct folders, so a lowercase variant must NOT dedupe there.
+    b = await upsert_workspace(str(real).lower())
+    if os.name == "nt":
+        assert a["id"] == b["id"], "case variants must dedupe on Windows"
+    else:
+        assert a["id"] != b["id"], "POSIX paths are case-sensitive"
+    # A trailing slash + redundant segment always resolves to the same dir.
+    c = await upsert_workspace(str(real) + os.sep + ".." + os.sep + real.name)
+    assert a["id"] == c["id"], "slash variants must dedupe to one row"
     rows = await list_workspaces()
-    assert sum(1 for r in rows if r["path"] and r["path"].lower() == str(real).lower()) == 1
+    assert (
+        sum(
+            1
+            for r in rows
+            if r["path"] and str(Path(r["path"]).resolve()) == str(real.resolve())
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio

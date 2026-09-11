@@ -265,7 +265,8 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 let shared = window.app_handle().state::<Arc<BackendShared>>();
                 shared.shutdown.store(true, Ordering::SeqCst);
-                if let Some(child) = shared.child.lock().unwrap().as_mut() {
+                let mut guard = shared.child.lock().unwrap();
+                if let Some(child) = guard.as_mut() {
                     let _ = child.kill();
                 }
             }

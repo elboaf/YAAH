@@ -11,13 +11,26 @@ provider's fields.
 """
 import json
 import os
+import sys
 from pathlib import Path
+
+
+def _default_config_dir() -> Path:
+    """Mirrors database._default_data_dir: the packaged app is a PyInstaller
+    --onefile bundle, so __file__ points into a throwaway temp extraction
+    that vanishes on exit — config written there never persisted."""
+    if getattr(sys, "frozen", False):
+        home = Path.home() / ".yaah"
+        home.mkdir(parents=True, exist_ok=True)
+        return home
+    return Path(__file__).parent.parent / "data"
+
 
 # YAAH_CONFIG_PATH lets the test suite redirect this (default path is the
 # user's real config).
 CONFIG_PATH = Path(
     os.environ.get("YAAH_CONFIG_PATH")
-    or Path(__file__).parent.parent / "data" / "config.json"
+    or _default_config_dir() / "config.json"
 )
 
 DEFAULTS = {

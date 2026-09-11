@@ -5,15 +5,33 @@ messages: chat messages; tool calls stored as a JSON column on the row.
 """
 import json
 import os
+import sys
 from pathlib import Path
 
 import aiosqlite
+
+
+def _default_data_dir() -> Path:
+    """Data dir for the real database/config.
+
+    Dev runs keep everything in the repo's backend/data/. The packaged app
+    runs from a PyInstaller --onefile bundle, where __file__ points into a
+    throwaway temp extraction that is deleted on exit — writing there meant
+    every launch started from an empty database (user history loss,
+    2026-09-11). Frozen builds persist under ~/.yaah instead.
+    """
+    if getattr(sys, "frozen", False):
+        home = Path.home() / ".yaah"
+        home.mkdir(parents=True, exist_ok=True)
+        return home
+    return Path(__file__).parent.parent / "data"
+
 
 # YAAH_DB_PATH lets the test suite redirect this to a throwaway file —
 # the default path is the user's real database.
 DB_PATH = Path(
     os.environ.get("YAAH_DB_PATH")
-    or Path(__file__).parent.parent / "data" / "agent.db"
+    or _default_data_dir() / "agent.db"
 )
 
 
