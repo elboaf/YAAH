@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-10T22:13:19Z",
+  "title": "Design System: YAAH",
+  "extensions": {
+    "colorMeta": {
+      "console-bg": { "role": "neutral", "displayName": "Console Background", "canonical": "#18181b" },
+      "console-deep": { "role": "neutral", "displayName": "Console Deep", "canonical": "#09090b" },
+      "surface-raised": { "role": "neutral", "displayName": "Raised Surface", "canonical": "#27272a" },
+      "hairline-soft": { "role": "neutral", "displayName": "Hairline Soft", "canonical": "#27272a" },
+      "hairline-strong": { "border": true, "role": "neutral", "displayName": "Strong Hairline", "canonical": "#3f3f46" },
+      "ink-primary": { "role": "neutral", "displayName": "Ink Primary", "canonical": "#f4f4f5" },
+      "ink-secondary": { "role": "neutral", "displayName": "Ink Secondary", "canonical": "#d4d4d8" },
+      "ink-muted": { "role": "neutral", "displayName": " Ink Muted", "canonical": "#a1a1aa" },
+      "ink-faint": { "role": "neutral", "displayName": "Ink Faint", "canonical": "#71717a" },
+      "ink-ghost": { "role": "neutral", "displayName": "Ink Ghost", "canonical": "#52525b" },
+      "action-blue": { "role": "primary", "displayName": "Action Blue", "canonical": "#2563eb" },
+      "action-blue-hover": { "role": "primary", "displayName": "Action Blue Hover", "canonical": "#3b82f6" },
+      "working-amber": { "role": "secondary", "displayName": "Working Amber", "canonical": "#fbbf24" },
+      "ask-orange": { "role": "secondary", "displayName": "Ask Orange", "canonical": "#f97316" },
+      "ask-orange-deep": { "role": "secondary", "displayName": "Ask Orange Deep", "canonical": "#c2410c" },
+      "done-emerald": { "role": "tertiary", "displayName": "Done Emerald", "canonical": "#059669" },
+      "error-red": { "role": "tertiary", "displayName": "Error Red", "canonical": "#ef4444" },
+      "skill-indigo": { "role": "tertiary", "displayName": "Skill Indigo", "canonical": "#312e81" },
+      "skill-indigo-text": { "role": "tertiary", "displayName": "Skill Indigo Text", "canonical": "#c7d2fe" },
+      "tool-read": { "role": "tertiary", "displayName": "Tool Read", "canonical": "#38bdf8" },
+      "tool-search": { "role": "tertiary", "displayName": "Tool Search", "canonical": "#a78bfa" },
+      "tool-shell": { "role": "tertiary", "displayName": "Tool Shell", "canonical": "#34d399" },
+      "tool-web": { "role": "tertiary", "displayName": "Tool Web", "canonical": "#22d3ee" },
+      "tool-image": { "role": "tertiary", "displayName": "Tool Image", "canonical": "#f472b6" }
+    },
+    "typographyMeta": {
+      "label": { "displayName": "Label", "purpose": "Uppercase 10px mono section markers and the status line." },
+      "mono-body": { "displayName": "Mono Body", "purpose": "All machine output: chips, traces, code, paths." },
+      "body": { "displayName": "Body", "purpose": "Human prose in the chat column." },
+      "title": { "displayName": "Title", "purpose": "Panel headings and modal titles." }
+    },
+    "shadows": [
+      { "name": "ask-card", "value": "0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1)", "purpose": "The live ask_user card floating above the composer." },
+      { "name": "context-menu", "value": "0 20px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1)", "purpose": "File-tree context menu." },
+      { "name": "modal", "value": "0 25px 50px -12px rgba(0,0,0,0.25)", "purpose": "Preview and settings dialogs over the black/60 scrim." }
+    ],
+    "motion": [
+      { "name": "chip-in", "value": "0.25s ease-out, translateX(-24px) to 0", "purpose": "Newest tool chip sliding into the live ticker." },
+      { "name": "run-pulse", "value": "1s ease-in-out infinite, opacity 1 to 0.3", "purpose": "Running tool dot and the ask-card question mark." }
+    ],
+    "breakpoints": [
+      { "name": "xl", "value": "1280px", "purpose": "Files panel appears (or collapses to a 28px rail below it)." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Human-initiated actions: Send, New chat, Save. The only blue control.",
+      "html": "<button class=\"ds-btn-primary\">Send</button>",
+      "css": ".ds-btn-primary { background: #2563eb; color: #ffffff; border: none; border-radius: 4px; padding: 6px 12px; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 14px; transition: background 0.15s; } .ds-btn-primary:hover { background: #3b82f6; } .ds-btn-primary:disabled { opacity: 0.5; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Quiet bordered action: Settings, Cancel, Stop.",
+      "html": "<button class=\"ds-btn-secondary\">Settings</button>",
+      "css": ".ds-btn-secondary { background: transparent; color: #d4d4d8; border: 1px solid #3f3f46; border-radius: 4px; padding: 6px 12px; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 12px; transition: background 0.15s; } .ds-btn-secondary:hover { background: #27272a; }"
+    },
+    {
+      "name": "Input Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Raised fill with hairline border; focus shifts the border, never a glow.",
+      "html": "<input class=\"ds-input\" placeholder=\"/path/to/project\" />",
+      "css": ".ds-input { background: #27272a; color: #f4f4f5; border: 1px solid #3f3f46; border-radius: 4px; padding: 8px 12px; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 14px; outline: none; transition: border-color 0.15s; } .ds-input:focus { border-color: #3b82f6; } .ds-input::placeholder { color: #71717a; }"
+    },
+    {
+      "name": "Tool Chip",
+      "kind": "chip",
+      "refersTo": "tool-chip",
+      "description": "One agent tool call: colored glyph, mono name, target, pulse while running.",
+      "html": "<span class=\"ds-chip-tool\"><span class=\"ds-chip-glyph\">❯</span> bash <span class=\"ds-chip-target\">npm test</span><span class=\"ds-chip-dot\"></span></span>",
+      "css": ".ds-chip-tool { display: inline-flex; align-items: center; gap: 6px; background: rgba(39,39,42,0.7); color: #a1a1aa; border-radius: 4px; padding: 2px 6px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px; } .ds-chip-glyph { color: #34d399; } .ds-chip-target { color: #71717a; } .ds-chip-dot { width: 6px; height: 6px; border-radius: 50%; background: #fbbf24; animation: ds-pulse 1s ease-in-out infinite; } @keyframes ds-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }"
+    },
+    {
+      "name": "Skill Chip",
+      "kind": "chip",
+      "refersTo": "skill-chip",
+      "description": "An invoked /s skill; the indigo family appears nowhere else.",
+      "html": "<span class=\"ds-chip-skill\">/s impeccable <span class=\"ds-chip-x\">×</span></span>",
+      "css": ".ds-chip-skill { display: inline-flex; align-items: center; gap: 4px; background: rgba(49,46,129,0.6); color: #c7d2fe; border-radius: 4px; padding: 2px 8px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; } .ds-chip-x { color: #818cf8; cursor: pointer; } .ds-chip-x:hover { color: #ef4444; }"
+    },
+    {
+      "name": "Conversation Nav Item",
+      "kind": "nav",
+      "refersTo": "nav-item-active",
+      "description": "Sidebar conversation row; active row is the only blue fill in navigation.",
+      "html": "<div class=\"ds-nav-item ds-nav-active\">Fix the login bug</div>",
+      "css": ".ds-nav-item { padding: 6px 8px; border-radius: 4px; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 12px; color: #d4d4d8; transition: background 0.15s; } .ds-nav-item:hover { background: #27272a; } .ds-nav-active { background: #2563eb; color: #ffffff; }"
+    },
+    {
+      "name": "Code Block",
+      "kind": "card",
+      "refersTo": "code-block",
+      "description": "Machine output on the console floor: header strip, line numbers, hairline frame.",
+      "html": "<div class=\"ds-code\"><div class=\"ds-code-head\"><span>ts</span><span class=\"ds-code-copy\">copy</span></div><pre><span class=\"ds-code-ln\">1</span><span class=\"ds-code-line\">const x = 1</span></pre></div>",
+      "css": ".ds-code { background: #09090b; border: 1px solid #3f3f46; border-radius: 4px; overflow: hidden; } .ds-code-head { display: flex; justify-content: space-between; background: #18181b; border-bottom: 1px solid #27272a; padding: 4px 8px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; color: #71717a; } .ds-code-copy { color: #a1a1aa; } .ds-code-copy:hover { color: #d4d4d8; } .ds-code pre { margin: 0; padding: 4px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px; line-height: 16px; color: #d4d4d8; } .ds-code-ln { display: inline-block; width: 40px; padding-right: 8px; text-align: right; color: #52525b; user-select: none; }"
+    },
+    {
+      "name": "Ask Card",
+      "kind": "custom",
+      "refersTo": "modal",
+      "description": "The agent's live question: orange channel, floating shadow, option rows.",
+      "html": "<div class=\"ds-ask\"><div class=\"ds-ask-label\">? agent asks — pick an answer</div><p class=\"ds-ask-q\">Which approach?</p><button class=\"ds-ask-option\">Option A</button><button class=\"ds-ask-option ds-ask-chosen\">Option B</button></div>",
+      "css": ".ds-ask { background: #18181b; border: 1px solid rgba(194,65,12,0.6); border-radius: 8px; padding: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1); } .ds-ask-label { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: #fb923c; margin-bottom: 8px; } .ds-ask-q { margin: 0 0 10px; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 14px; color: #f4f4f5; } .ds-ask-option { display: block; width: 100%; text-align: left; background: rgba(39,39,42,0.6); color: #e4e4e7; border: 1px solid #3f3f46; border-radius: 4px; padding: 6px 10px; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 12px; margin-bottom: 6px; cursor: pointer; } .ds-ask-option:hover { border-color: rgba(249,115,22,0.6); background: #27272a; } .ds-ask-chosen { background: rgba(67,20,7,0.4); color: #fed7aa; border-color: #f97316; }"
+    },
+    {
+      "name": "Modal",
+      "kind": "card",
+      "refersTo": "modal",
+      "description": "Preview and settings dialogs: console surface over a black scrim.",
+      "html": "<div class=\"ds-modal\"><h2 class=\"ds-modal-title\">Settings</h2><p class=\"ds-modal-body\">Modal content lives here.</p></div>",
+      "css": ".ds-modal { background: #18181b; border: 1px solid #3f3f46; border-radius: 8px; padding: 16px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); color: #f4f4f5; font-family: ui-sans-serif, system-ui, sans-serif; } .ds-modal h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; } .ds-modal-body { margin: 0; font-size: 14px; color: #d4d4d8; }"
+    },
+    {
+      "name": "Status Line",
+      "kind": "custom",
+      "refersTo": "nav-item-active",
+      "description": "The app's pulse: state dot plus mono label, last row of the chat panel.",
+      "html": "<div class=\"ds-status\"><span class=\"ds-status-dot\"></span>working</div>",
+      "css": ".ds-status { display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; color: #52525b; } .ds-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #fbbf24; animation: ds-pulse 1s ease-in-out infinite; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Mission Control",
+    "overview": "YAAH's interface is a dark instrument panel for supervising a machine at work. Every agent action is a readable signal: tool calls arrive as labeled chips with colored glyphs, state is a status light, and the human's own actions are the single strong blue voice in the room. The aesthetic is a terminal that grew awareness — dense, mono-led, unhurried — not a consumer chat app and not a marketing surface. Density is high but never ambiguous: compact rows, 10–12px secondary text, and hairline zinc borders do the separating, so color is freed to carry meaning only. Machine output is monospace; human prose is the only place the sans voice breathes. Motion exists solely to report state — a chip sliding in, a pulse while a tool runs — never to decorate.",
+    "keyCharacteristics": [
+      "Near-monochrome zinc world; color is information, not decoration",
+      "Monospace is the voice of the machine; sans is the voice of the human",
+      "Flat surfaces separated by 1px hairlines, never shadows",
+      "Shadows reserved for layers that float above the app (modals, menus, live question card)",
+      "Compact, instrument-grade spacing throughout"
+    ],
+    "rules": [
+      { "name": "The Color Is State Rule", "body": "Color never decorates; it reports. Blue = human action, amber = machine working, orange = agent asking, emerald/red = done/error. Tool glyph colors are the single sanctioned exception, and only where a tool is named.", "section": "colors" },
+      { "name": "The One Voice Rule", "body": "Action Blue is the only accent permitted on interactive controls. State colors may appear on indicators, never on buttons.", "section": "colors" },
+      { "name": "The Machine Speaks Mono Rule", "body": "Anything the machine produced — tool names, paths, commands, code, traces, status — is monospace. Sans is reserved for human language: prose, questions, button labels.", "section": "typography" },
+      { "name": "The Floating Layer Rule", "body": "Shadows belong only to layers that float above the app — modals, menus, the live question card. In-flow surfaces never carry a shadow.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do separate in-flow surfaces with 1px hairlines (#27272a; #3f3f46 on raised fills).",
+      "Do set machine output in JetBrains Mono at 10–11px; labels uppercase with 0.1em tracking.",
+      "Do keep Action Blue (#2563eb) exclusively on human-initiated controls.",
+      "Do report state with the status colors: amber working, orange asking, emerald done, red error.",
+      "Do keep controls compact: 4px radius, 6–8px vertical padding, 10–12px secondary text."
+    ],
+    "donts": [
+      "Don't put shadows on in-flow surfaces — shadows are for modals, menus, and the ask card only.",
+      "Don't use pure black (#000) as a surface; the floor is #09090b, and only for code.",
+      "Don't introduce new accent hues; the tool spectrum colors appear only where a tool is named, indigo only for skills.",
+      "Don't animate for delight — motion is chip-in (0.25s ease-out) and run-pulse (1s ease-in-out) or nothing; no bounce or elastic easing.",
+      "Don't render a button in a state color (amber/orange/emerald/red); state colors are indicators, not actions."
+    ]
+  }
+}

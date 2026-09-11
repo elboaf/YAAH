@@ -135,3 +135,43 @@ def test_ensure_dir_existing_dir_noop(skills_dir):
     before = sorted(p.name for p in skills_dir.iterdir())
     assert skill_registry.ensure_dir() is False
     assert sorted(p.name for p in skills_dir.iterdir()) == before
+
+
+def test_bodies_include_skill_folder(skills_dir):
+    skill_registry.scan_skills()
+    bodies = skill_registry.bodies_for_prompt(["review"])
+    assert "# Skill: review" in bodies
+    assert str(skills_dir / "review") in bodies
+
+
+def test_load_skill_result_includes_folder(skills_dir):
+    skill_registry.scan_skills()
+    messages = [{"role": "system", "content": "base"}]
+    result = asyncio.run(_load_skill({"name": "review"}, [], messages))
+    assert result["folder"] == str(skills_dir / "review")
+    assert str(skills_dir / "review") in messages[0]["content"]
+
+
+def test_resolve_path_allows_skill_reads_but_not_writes(tmp_path, monkeypatch):
+    from backend.agent.tools import resolve_path
+
+    skills_root = tmp_path / "sk"
+    (skills_root / "review").mkdir(parents=True)
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills_root))
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    # read: inside workspace fine, inside skills root fine, outside both no
+    assert resolve_path(str(workspace), "src/a.py") == (workspace / "src" / "a.py").resolve()
+    p = resolve_path(str(workspace), str(skills_root / "review" / "SKILL.md"))
+    assert p == (skills_root / "review" / "SKILL.md").resolve()
+    with pytest.raises(ValueError):
+        resolve_path(str(workspace), str(tmp_path / "elsewhere" / "x.txt"))
+
+    # write: skills root is blocked like anywhere else outside the workspace
+    assert resolve_path(str(workspace), "src/a.py", for_write=True) == (
+        workspace / "src" / "a.py"
+    ).resolve()
+    with pytest.raises(ValueError):
+        resolve_path(str(workspace), str(skills_root / "review" / "SKILL.md"), for_write=True)

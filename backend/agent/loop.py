@@ -12,6 +12,7 @@ import asyncio
 import itertools
 import json
 import os
+from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
@@ -156,12 +157,20 @@ async def _load_skill(
         }
     loaded_skills.append(skill.name)
     # messages[0] is the system prompt; extend it in place so every later
-    # model call in this turn sees the skill's instructions.
+    # model call in this turn sees the skill's instructions. The folder
+    # path lets the model read the skill's own supporting files.
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = (
-            f"{messages[0]['content']}\n\n---\n\n# Loaded skill: {skill.name}\n\n{skill.body}"
+            f"{messages[0]['content']}\n\n---\n\n"
+            f"# Loaded skill: {skill.name}\n\n"
+            f"The skill's folder (any supporting files it references live "
+            f"here) is: {Path(skill.path).parent}\n\n{skill.body}"
         )
-    return {"loaded": skill.name, "description": skill.description}
+    return {
+        "loaded": skill.name,
+        "description": skill.description,
+        "folder": str(Path(skill.path).parent),
+    }
 
 
 def _cancelled(conversation_id: int) -> bool:

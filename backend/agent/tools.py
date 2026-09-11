@@ -15,13 +15,24 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- path safety
 
-def resolve_path(workspace: str, rel_path: str) -> Path:
-    """Resolve rel_path inside workspace; raise ValueError on escape."""
+def resolve_path(workspace: str, rel_path: str, for_write: bool = False) -> Path:
+    """Resolve rel_path inside workspace; raise ValueError on escape.
+
+    Read-only exception: paths under the skills root (~/.yaah/skills) are
+    allowed, so multi-file skills can have the model read their own
+    supporting files. Writes there stay blocked — skills are user-authored.
+    """
     root = Path(workspace).resolve()
     p = (root / rel_path).resolve()
-    if not (p == root or root in p.parents):
-        raise ValueError(f"Path escapes workspace: {rel_path}")
-    return p
+    if p == root or root in p.parents:
+        return p
+    if not for_write:
+        skills_root = Path(
+            os.environ.get("YAAH_SKILLS_PATH") or Path.home() / ".yaah" / "skills"
+        ).resolve()
+        if p == skills_root or skills_root in p.parents:
+            return p
+    raise ValueError(f"Path escapes workspace: {rel_path}")
 
 
 # ---------------------------------------------------------------- schemas
@@ -513,7 +524,7 @@ async def read_file(
 
 async def write_file(workspace: str, path: str, content: str) -> dict:
     """Write content to a file (create parent dirs); full overwrite."""
-    p = resolve_path(workspace, path)
+    p = resolve_path(workspace, path, for_write=True)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -528,7 +539,7 @@ async def write_file(workspace: str, path: str, content: str) -> dict:
 
 async def edit_file(workspace: str, path: str, old_text: str, new_text: str) -> dict:
     """Exact-match single replacement; fails loudly on ambiguity or no match."""
-    p = resolve_path(workspace, path)
+    p = resolve_path(workspace, path, for_write=True)
     if not p.exists():
         return {"error": f"File not found: {path}"}
     try:
@@ -554,7 +565,7 @@ IGNORED_DIRS = {
 
 async def create_file(workspace: str, path: str, content: str) -> dict:
     """Create a new file; refuses to clobber an existing one."""
-    p = resolve_path(workspace, path)
+    p = resolve_path(workspace, path, for_write=True)
     if p.exists():
         return {"error": f"File already exists: {path}. Use write_file to overwrite."}
     try:
@@ -567,7 +578,7 @@ async def create_file(workspace: str, path: str, content: str) -> dict:
 
 async def delete_file(workspace: str, path: str) -> dict:
     """Delete a file or an empty directory inside the workspace."""
-    p = resolve_path(workspace, path)
+    p = resolve_path(workspace, path, for_write=True)
     if p == Path(workspace).resolve():
         return {"error": "Refusing to delete the workspace root"}
     if not p.exists():
@@ -584,8 +595,8 @@ async def delete_file(workspace: str, path: str) -> dict:
 
 async def move_file(workspace: str, src: str, dst: str) -> dict:
     """Move/rename within the workspace."""
-    s = resolve_path(workspace, src)
-    d = resolve_path(workspace, dst)
+    s = resolve_path(workspace, src, for_write=True)
+    d = resolve_path(workspace, dst, for_write=True)
     if not s.exists():
         return {"error": f"Source not found: {src}"}
     if d.exists():

@@ -225,7 +225,11 @@ def bodies_for_prompt(names: list[str]) -> str:
         if s is None:
             parts.append(f"# Skill not found: {name}")
             continue
-        parts.append(f"# Skill: {s.name}\n\n{s.body}")
+        parts.append(
+            f"# Skill: {s.name}\n\n"
+            f"The skill's folder (any supporting files it references live "
+            f"here) is: {Path(s.path).parent}\n\n{s.body}"
+        )
     return "\n\n---\n\n".join(parts)
 
 
