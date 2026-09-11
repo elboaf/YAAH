@@ -22,9 +22,13 @@ import {
   listSkills,
   refreshSkills,
   imageUrl,
+  listWorkspaces,
+  addWorkspace,
+  deleteWorkspace,
   type FileEntry,
   type ProviderPreset,
   type SkillInfo,
+  type WorkspaceRow,
 } from './api'
 import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
@@ -152,7 +156,11 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
     setSubmitting(true)
     setErr(null)
     submitAnswer(conversationId, pending.callId, text)
-      .then(() => setPendingQuestion(null))
+      .then(() => {
+        // Clear only if this is still the same question (a newer ask in
+        // another conversation may have replaced it meanwhile).
+        setPendingQuestion((q) => (q && q.callId === pending.callId ? null : q))
+      })
       .catch((e) => {
         setErr(String(e))
         setSubmitting(false)
@@ -977,75 +985,205 @@ function NoticeDialog({
 
 // ---------------------------------------------------------------- sidebar
 
+/** Relative timestamp for a conversation row ("2h", "3d", "May 2"). */
+function relTime(iso: string | null): string {
+  if (!iso) return ''
+  const t = new Date(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z').getTime()
+  if (Number.isNaN(t)) return ''
+  const mins = Math.round((Date.now() - t) / 60000)
+  if (mins < 1) return 'now'
+  if (mins < 60) return `${mins}m`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `${hours}h`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days}d`
+  return new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+/** Basename of a workspace path for group headers. */
+const wsBasename = (path: string) => {
+  const norm = path.replace(/[\\/]+$/, '')
+  const idx = Math.max(norm.lastIndexOf('\\'), norm.lastIndexOf('/'))
+  return idx >= 0 ? norm.slice(idx + 1) : norm
+}
+
+/** localStorage key for a group's collapsed state. */
+const collapseKey = (path: string | null) =>
+  `yaah.group.collapsed.${path ?? 'default'}`
+
 function ConversationList() {
   const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation } = useAgent()
-  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null }>>([])
+  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
+  const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [notice, setNotice] = useState<{ title: string; message: string } | null>(null)
   const [sysTarget, setSysTarget] = useState<{ id: number; title: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null)
+  const [removeWsTarget, setRemoveWsTarget] = useState<WorkspaceRow | null>(null)
+  const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
 
   const refresh = useCallback(() => {
     listConversations().then(setConvs).catch(() => setConvs([]))
+    listWorkspaces()
+      .then(setWorkspaces)
+      .catch(() => setWorkspaces([]))
   }, [])
   useEffect(() => {
     refresh()
   }, [conversationId, refresh])
 
+  // Collapse state persists per workspace (Q14); groups start expanded.
+  useEffect(() => {
+    const next: Record<string, boolean> = {}
+    for (const w of workspaces) {
+      const key = collapseKey(w.path ?? '')
+      try {
+        next[key] = localStorage.getItem(key) === '1'
+      } catch {
+        next[key] = false
+      }
+    }
+    setCollapsed(next)
+  }, [workspaces])
+
+  const toggleCollapsed = (path: string | null) => {
+    const key = collapseKey(path ?? '')
+    setCollapsed((c) => {
+      const v = !c[key]
+      try {
+        localStorage.setItem(key, v ? '1' : '0')
+      } catch {
+        /* non-persistent collapse is fine */
+      }
+      return { ...c, [key]: v }
+    })
+  }
+
+  /** Open a conversation and adopt its workspace (the core invariant: the
+   *  open conversation's workspace IS the active workspace, both ways). */
+  const openConversation = (c: { id: number; workspace: string | null }) => {
+    setConversationId(c.id)
+    setWorkspace(c.workspace ?? '')
+    getMessages(c.id)
+      .then((rows) => loadHistory(c.id, rows))
+      .catch(() => {})
+  }
+
+  /** Header body click = open that workspace's most recent conversation,
+   *  or a fresh chat in it when the group is empty (same as the dropdown). */
+  const openWorkspace = (w: WorkspaceRow) => {
+    const latest = convs.find((c) => (c.workspace ?? null) === w.path)
+    if (latest) {
+      openConversation(latest)
+    } else {
+      setWorkspace(w.path ?? '')
+      newConversation()
+    }
+  }
+
+  // Group rows by workspace; Default (null path) first, then by the most
+  // recent conversation activity in each group.
+  const groups: Array<{ ws: WorkspaceRow; items: typeof convs }> = []
+  for (const w of workspaces) {
+    groups.push({ ws: w, items: convs.filter((c) => (c.workspace ?? null) === w.path) })
+  }
+  const knownPaths = new Set(workspaces.map((w) => w.path))
+  for (const c of convs) {
+    const p = c.workspace ?? null
+    if (!knownPaths.has(p)) {
+      // A conversation filed under a path the registry doesn't know yet
+      // (created between registry refreshes) still gets its group.
+      groups.push({
+        ws: {
+          id: -1,
+          path: p,
+          label: p === null ? 'Default' : wsBasename(p),
+          last_opened_at: null,
+          exists: p === null || true,
+          conversation_count: 0,
+        },
+        items: [],
+      })
+      knownPaths.add(p)
+    }
+  }
+  groups.sort((a, b) => {
+    if ((a.ws.path ?? null) === null) return -1
+    if ((b.ws.path ?? null) === null) return 1
+    const at = a.items[0]?.updated_at ?? a.ws.last_opened_at ?? ''
+    const bt = b.items[0]?.updated_at ?? b.ws.last_opened_at ?? ''
+    return bt.localeCompare(at)
+  })
+  for (const g of groups) {
+    g.items.sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+  }
+
   return (
     <div className="flex-1 overflow-y-auto">
-      {convs.map((c) => (
-        <div key={c.id} className="group flex items-center gap-1">
-          <button
-            className={`min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-xs ${
-              c.id === conversationId ? 'bg-blue-600 text-white' : 'text-zinc-300 hover:bg-zinc-800'
-            }`}
-            onClick={() => {
-              setConversationId(c.id)
-              if (c.workspace) setWorkspace(c.workspace)
-              getMessages(c.id).then(loadHistory).catch(() => {})
-            }}
-          >
-            {c.title}
-          </button>
-          {c.id === conversationId && (
-            <>
+      {groups.map(({ ws, items }) => {
+        const key = collapseKey(ws.path ?? '')
+        const isCollapsed = collapsed[key] ?? false
+        return (
+          <div key={ws.path ?? 'default'} className="mb-1">
+            <div className="group flex items-center gap-0.5 rounded px-1 py-1 hover:bg-zinc-800/60">
               <button
-                title="Export as Markdown (Q39)"
-                className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-zinc-200 group-hover:opacity-100"
-                onClick={() => {
-                  exportConversationMarkdown(c.id, c.title).catch((e) =>
-                    setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
-                  )
-                }}
+                className="rounded px-0.5 text-[10px] text-zinc-500 hover:text-zinc-200"
+                aria-label={isCollapsed ? 'Expand group' : 'Collapse group'}
+                aria-expanded={!isCollapsed}
+                onClick={() => toggleCollapsed(ws.path)}
               >
-                md↓
+                {isCollapsed ? '▸' : '▾'}
               </button>
               <button
-                title="System prompt override (Q17)"
-                className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-zinc-200 group-hover:opacity-100"
-                onClick={() =>
-                  setSysTarget({ id: c.id, title: c.title })
-                }
+                className="min-w-0 flex-1 truncate text-left font-mono text-[10px] uppercase tracking-wider text-zinc-400 hover:text-zinc-200"
+                title={ws.path ?? 'No root directory — conversations without a workspace'}
+                onClick={() => openWorkspace(ws)}
               >
-                sys
+                {ws.label}
+                {ws.path !== null && !ws.exists && (
+                  <span className="ml-1 text-amber-500" title="Folder not found on disk">
+                    ⚠
+                  </span>
+                )}
               </button>
-              <button
-                title="Delete conversation"
-                className="rounded px-1 py-1.5 text-[10px] text-zinc-400 opacity-0 hover:text-red-400 group-hover:opacity-100"
-                onClick={() => setDeleteTarget({ id: c.id, title: c.title })}
-              >
-                ✕
-              </button>
-            </>
-          )}
-        </div>
-      ))}
-      {convs.length === 0 && (
+              {ws.path !== null && (
+                <button
+                  className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover:opacity-100"
+                  title="Remove this workspace (its conversations move to Default)"
+                  onClick={() => setRemoveWsTarget(ws)}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            {!isCollapsed &&
+              (items.length > 0 ? (
+                items.map((c) => (
+                  <ConversationRow
+                    key={c.id}
+                    conv={c}
+                    active={c.id === conversationId}
+                    menuOpen={menuOpenId === c.id}
+                    setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
+                    onOpen={() => openConversation(c)}
+                    onExport={() =>
+                      exportConversationMarkdown(c.id, c.title).catch((e) =>
+                        setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
+                      )
+                    }
+                    onSys={() => setSysTarget({ id: c.id, title: c.title })}
+                    onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
+                  />
+                ))
+              ) : (
+                <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
+              ))}
+          </div>
+        )
+      })}
+      {convs.length === 0 && groups.length === 0 && (
         <p className="px-2 py-3 text-center text-[11px] text-zinc-600">No conversations yet.</p>
       )}
-      <button className="mt-2 w-full rounded px-2 py-1 text-left text-[10px] text-zinc-600 hover:text-zinc-400" onClick={refresh}>
-        refresh
-      </button>
 
       {/* in-app dialogs (replace native confirm/prompt/alert) */}
       {notice && (
@@ -1091,22 +1229,135 @@ function ConversationList() {
           }}
         />
       )}
+      {removeWsTarget && (
+        <ConfirmDialog
+          title={`Remove workspace "${removeWsTarget.label}"?`}
+          body={
+            removeWsTarget.conversation_count > 0
+              ? `${removeWsTarget.conversation_count} conversation${removeWsTarget.conversation_count === 1 ? '' : 's'} will move to Default. The folder on disk is not touched.`
+              : 'The folder on disk is not touched.'
+          }
+          confirmLabel="Remove"
+          onCancel={() => setRemoveWsTarget(null)}
+          onConfirm={() => {
+            deleteWorkspace(removeWsTarget.id)
+              .then((r) => {
+                // If the open conversation was relocated, follow it to Default.
+                if (conversationId !== null) {
+                  getMessages(conversationId)
+                    .then((rows) => loadHistory(conversationId, rows))
+                    .catch(() => {})
+                  const moved = convs.find(
+                    (c) => c.id === conversationId && c.workspace === removeWsTarget.path,
+                  )
+                  if (moved) setWorkspace('')
+                }
+                refresh()
+              })
+              .catch((e) =>
+                setNotice({ title: 'Remove failed', message: String(e?.message ?? e) }),
+              )
+            setRemoveWsTarget(null)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** One conversation row: title + relative timestamp, hover-revealed ⋯ menu
+ *  with labeled actions (replaces the bare md↓/sys/✕ glyph strip). */
+function ConversationRow({
+  conv,
+  active,
+  menuOpen,
+  setMenuOpen,
+  onOpen,
+  onExport,
+  onSys,
+  onDelete,
+}: {
+  conv: { id: number; title: string; updated_at: string }
+  active: boolean
+  menuOpen: boolean
+  setMenuOpen: (open: boolean) => void
+  onOpen: () => void
+  onExport: () => void
+  onSys: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="group relative flex items-center">
+      <button
+        className={`min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-xs ${
+          active ? 'bg-blue-600 text-white' : 'text-zinc-300 hover:bg-zinc-800'
+        }`}
+        onClick={onOpen}
+        title={conv.title}
+      >
+        {conv.title}
+        <span
+          className={`ml-1.5 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
+        >
+          {relTime(conv.updated_at)}
+        </span>
+      </button>
+      <div className={`absolute right-1 ${menuOpen ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+        <button
+          className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-700"
+          aria-label="Conversation actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen(!menuOpen)}
+        >
+          ⋯
+        </button>
+        {menuOpen && (
+          <div className="absolute right-0 top-6 z-20 w-44 rounded border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+            <button
+              className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+              onClick={() => {
+                setMenuOpen(false)
+                onExport()
+              }}
+            >
+              Export as Markdown
+            </button>
+            <button
+              className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+              onClick={() => {
+                setMenuOpen(false)
+                onSys()
+              }}
+            >
+              System prompt override
+            </button>
+            <button
+              className="block w-full px-3 py-1.5 text-left text-xs text-red-400 hover:bg-zinc-800"
+              onClick={() => {
+                setMenuOpen(false)
+                onDelete()
+              }}
+            >
+              Delete conversation
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
 export function Sidebar() {
-  const { newConversation, workspace, setWorkspace, clearLog, conversationId } = useAgent()
-  const [wsInput, setWsInput] = useState(workspace)
+  const { newConversation, workspace, setWorkspace, clearLog, conversationId, setConversationId, loadHistory } = useAgent()
+  const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   const [model, setModel] = useState('...')
   const [activeProvider, setActiveProvider] = useState('')
   // name -> {models, error?} for every configured provider
   const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
   const [savingModel, setSavingModel] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
-
-  // Keep the input in sync with the store (conversation switch, restore below).
-  useEffect(() => setWsInput(workspace), [workspace])
+  const [notice, setNotice] = useState<{ title: string; message: string } | null>(null)
 
   // The workspace is remembered across restarts: the store seeds itself from
   // localStorage, and config.json is the durable fallback for a fresh install,
@@ -1120,6 +1371,15 @@ export function Sidebar() {
       .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Registry rows for the dropdown; refreshed when the conversation changes
+  // (a new conversation may have filed a workspace the list hasn't seen).
+  const refreshWorkspaces = useCallback(() => {
+    listWorkspaces()
+      .then(setWorkspaces)
+      .catch(() => setWorkspaces([]))
+  }, [])
+  useEffect(refreshWorkspaces, [refreshWorkspaces, conversationId])
 
   // Merged model list: every configured provider, queried in parallel by the
   // backend (keys never reach the browser). Grouped per provider in the dropdown.
@@ -1158,17 +1418,69 @@ export function Sidebar() {
       .finally(() => setSavingModel(false))
   }
 
+  /** Open a workspace from the dropdown: its most recent conversation, or a
+   *  fresh chat when it has none (Q2: the dropdown is a conversation switcher). */
+  const pickWorkspace = (value: string) => {
+    if (value === '__add__') {
+      void browseWorkspace()
+      return
+    }
+    const ws = workspaces.find((w) => (w.path ?? '') === value)
+    if (!ws) return
+    setWorkspace(ws.path ?? '')
+    if (conversationId !== null) {
+      // Is the open conversation filed in the newly selected workspace?
+      listConversations()
+        .then((convs) => {
+          const open = convs.find((c) => c.id === conversationId)
+          if (open && (open.workspace ?? null) !== ws.path) {
+            // Different workspace: switch to its most recent conversation.
+            const latest = convs.find((c) => (c.workspace ?? null) === ws.path)
+            if (latest) {
+              setConversationId(latest.id)
+              getMessages(latest.id)
+                .then((rows) => loadHistory(latest.id, rows))
+                .catch(() => {})
+            } else {
+              newConversation()
+            }
+          }
+        })
+        .catch(() => {})
+    } else {
+      // Fresh draft: jump to the workspace's most recent conversation if any.
+      listConversations()
+        .then((convs) => {
+          const latest = convs.find((c) => (c.workspace ?? null) === ws.path)
+          if (latest) {
+            setConversationId(latest.id)
+            getMessages(latest.id)
+              .then((rows) => loadHistory(latest.id, rows))
+              .catch(() => {})
+          }
+        })
+        .catch(() => {})
+    }
+  }
+
   const browseWorkspace = async () => {
     // Native folder picker when running inside Tauri (Q28)
     try {
       const { invoke } = await import('@tauri-apps/api/core')
       const picked = await invoke<string | null>('pick_workspace')
       if (picked) {
-        setWsInput(picked)
-        setWorkspace(picked)
+        const ws = await addWorkspace(picked).catch(() => null)
+        setWorkspaces((list) =>
+          ws && !list.some((w) => w.id === ws.id) ? [...list, ws] : list,
+        )
+        setWorkspace(ws?.path ?? picked)
+        newConversation()
       }
     } catch {
-      /* not running in Tauri; keep manual input */
+      setNotice({
+        title: 'Add workspace unavailable',
+        message: 'Folder picking needs the desktop app. Run YAAH via its installer to add workspaces.',
+      })
     }
   }
 
@@ -1186,27 +1498,27 @@ export function Sidebar() {
           + New chat
         </button>
         <label className="mb-1 block text-xs text-zinc-500">Workspace</label>
-        <input
-          className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200"
-          value={wsInput}
-          onChange={(e) => setWsInput(e.target.value)}
-          onBlur={() => setWorkspace(wsInput || '.')}
-          placeholder="/path/to/project"
-          title="Remembered across app restarts"
-          aria-label="Workspace folder path"
-        />
-        <button
-          className="mb-3 self-start rounded px-1 text-[10px] text-zinc-500 hover:text-zinc-300"
-          onClick={() => void browseWorkspace()}
+        <select
+          className="mb-3 w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200"
+          value={workspace || ''}
+          onChange={(e) => pickWorkspace(e.target.value)}
+          aria-label="Workspace"
+          title={
+            workspaces.find((w) => (w.path ?? '') === (workspace || ''))?.path ??
+            'No root directory — conversations without a workspace'
+          }
         >
-          browse...
-        </button>
-        {workspace === '.' && (
-          <p className="mb-3 text-[10px] leading-relaxed text-amber-400/90">
-            No workspace set — the agent can't see your files yet. Enter a folder
-            path above, or browse.
-          </p>
-        )}
+          <option value="">Default</option>
+          {workspaces
+            .filter((w) => w.path !== null)
+            .map((w) => (
+              <option key={w.id} value={w.path ?? ''}>
+                {w.label}
+                {w.exists ? '' : '  (missing)'}
+              </option>
+            ))}
+          <option value="__add__">+ Add workspace…</option>
+        </select>
         <div className="mb-3">
           <label className="mb-1 block text-xs text-zinc-500">
             Model{savingModel ? ' (saving...)' : ''}
@@ -1271,6 +1583,13 @@ export function Sidebar() {
             getConfig().then((c) => { setModel(c.model); setActiveProvider(c.active_provider) }).catch(() => {})
             refreshModels()
           }}
+        />
+      )}
+      {notice && (
+        <NoticeDialog
+          title={notice.title}
+          message={notice.message}
+          onClose={() => setNotice(null)}
         />
       )}
     </>
@@ -1614,7 +1933,18 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 const imageSrc = (img: string) => (img.startsWith('data:') ? img : imageUrl(img))
 
 export function ChatPanel() {
-  const { messages, status, error, pendingQuestion } = useAgent()
+  const conversationId = useAgent((s) => s.conversationId)
+  const messages = useAgent(
+    (s) => s.messagesByConv[s.conversationId === null ? 'draft' : String(s.conversationId)] ?? [],
+  )
+  const { status, error } = useAgent()
+  const pendingQuestion = useAgent((s) => {
+    if (s.pendingQuestion === null) return null
+    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    // A question belongs to the turn that asked it: only render when its
+    // conversation is on screen (a hidden turn's ask must not leak here).
+    return s.pendingQuestion.convKey === key ? s.pendingQuestion : null
+  })
   const bottomRef = useRef<HTMLDivElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
   // Only the in-flight assistant message shows the ephemeral ticker; every
@@ -1636,7 +1966,7 @@ export function ChatPanel() {
             <ol className="mt-4 inline-block space-y-1.5 text-left text-xs text-zinc-500">
               <li>
                 <span className="mr-1.5 text-zinc-700">1.</span>
-                Set the workspace folder in the sidebar — type a path or browse.
+                Pick a workspace in the sidebar — choose one or add a folder.
               </li>
               <li>
                 <span className="mr-1.5 text-zinc-700">2.</span>
@@ -1711,7 +2041,6 @@ function Composer() {
     pushLog,
     setAbortController,
     removeMessage,
-    loadHistory,
   } = useAgent()
   const abortController = useAgent((s) => s.abortController)
   const [input, setInput] = useState('')
@@ -1860,14 +2189,15 @@ function Composer() {
   }
 
   /** One shared stream-event handler for both a fresh send and a resume:
-   *  everything keys off the in-flight assistant message id. */
-  const handleStreamEvent = (asstId: string) => (ev: AgentEvent) => {
+   *  everything keys off the in-flight assistant message id and the buffer
+   *  captured at send time — a stream never writes to "what's on screen". */
+  const handleStreamEvent = (bufKey: string, asstId: string) => (ev: AgentEvent) => {
     if (ev.type === 'text') {
       setStatus('thinking')
-      if (ev.text) appendTextDelta(asstId, ev.text)
+      if (ev.text) appendTextDelta(bufKey, asstId, ev.text)
     } else if (ev.type === 'tool_start') {
       setStatus('running-tool')
-      startToolCall(asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+      startToolCall(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       if (ev.name === 'ask_user') {
         const a = (ev.args ?? {}) as {
@@ -1878,24 +2208,27 @@ function Composer() {
           callId: ev.call_id ?? '',
           question: a.question ?? '',
           options: a.options ?? [],
+          convKey: bufKey,
         })
       }
     } else if (ev.type === 'tool_result') {
-      finishToolCall(asstId, ev.call_id ?? '', ev.result)
+      finishToolCall(bufKey, asstId, ev.call_id ?? '', ev.result)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
-      if (ev.name === 'ask_user') setPendingQuestion(null)
+      if (ev.name === 'ask_user') {
+        setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
+      }
     } else if (ev.type === 'error') {
       setStatus('error')
       setError(ev.message ?? 'Unknown agent error')
       setTurnError(ev.message ?? 'Unknown agent error')
-      setPendingQuestion(null)
+      setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     } else if (ev.type === 'stopped') {
       setStatus('idle')
-      appendTextDelta(asstId, '\n[stopped]')
-      setPendingQuestion(null)
+      appendTextDelta(bufKey, asstId, '\n[stopped]')
+      setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     } else if (ev.type === 'done') {
       setStatus('idle')
-      setPendingQuestion(null)
+      setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     }
   }
 
@@ -1924,8 +2257,12 @@ function Composer() {
     setImages([])
     setPickedSkills([])
     setError(null)
-    const userId = appendUserMessage(fullText, imageDataUrls)
-    const asstId = appendAssistantPlaceholder()
+    // Capture the turn's target buffer now: everything this turn writes —
+    // optimistic messages, stream deltas, tool traces — goes there, even if
+    // the user switches to another conversation mid-stream (Q11: free).
+    const bufKey = conversationId === null ? 'draft' : String(conversationId)
+    const userId = appendUserMessage(bufKey, fullText, imageDataUrls)
+    const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
     setAbortController(ac)
     try {
@@ -1942,22 +2279,22 @@ function Composer() {
         cid,
         fullText,
         workspace,
-        handleStreamEvent(asstId),
+        handleStreamEvent(bufKey, asstId),
         ac.signal,
         imageDataUrls,
         invokedSkills,
       )
       if (useAgent.getState().status !== 'error') setStatus('idle')
     } catch (e) {
-      setPendingQuestion(null)
+      setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
-        appendTextDelta(asstId, '\n[stopped]')
+        appendTextDelta(bufKey, asstId, '\n[stopped]')
       } else {
         // The turn never started (network, bad key, server down): roll back
         // the optimistic messages and restore the draft so nothing is lost.
-        removeMessage(asstId)
-        removeMessage(userId)
+        removeMessage(bufKey, asstId)
+        removeMessage(bufKey, userId)
         setInput(draft.input)
         setAttachments(draft.attachments)
         setImages(draft.images)
@@ -1982,7 +2319,8 @@ function Composer() {
     setSendError(null)
     setTurnError(null)
     setError(null)
-    const asstId = appendAssistantPlaceholder()
+    const bufKey = String(conversationId)
+    const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
     setAbortController(ac)
     try {
@@ -1991,7 +2329,7 @@ function Composer() {
         conversationId,
         'resume',
         workspace,
-        handleStreamEvent(asstId),
+        handleStreamEvent(bufKey, asstId),
         ac.signal,
         [],
         [],
@@ -1999,10 +2337,10 @@ function Composer() {
       )
       if (useAgent.getState().status !== 'error') setStatus('idle')
     } catch (e) {
-      setPendingQuestion(null)
+      setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
-        appendTextDelta(asstId, '\n[stopped]')
+        appendTextDelta(bufKey, asstId, '\n[stopped]')
       } else {
         setStatus('error')
         setTurnError(String((e as Error).message ?? e))

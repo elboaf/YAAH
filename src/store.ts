@@ -25,6 +25,9 @@ export interface PendingQuestion {
   callId: string
   question: string
   options: Array<{ label: string; description?: string }>
+  /** Buffer the asking turn streams into; the card renders only when that
+   *  conversation is on screen (a hidden turn's question must not leak). */
+  convKey: string
 }
 
 /** One line in the right-panel activity log. */
@@ -39,7 +42,15 @@ export interface LogEntry {
 
 interface AgentState {
   conversationId: number | null
-  messages: ChatMessage[]
+  /**
+   * Per-conversation message buffers, keyed by conversation id with 'draft'
+   * for the unsaved new chat. A stream in flight writes into the buffer it
+   * captured at send time, so switching conversations mid-turn is safe:
+   * the hidden turn keeps streaming into its own buffer (Q11: free switching).
+   */
+  messagesByConv: Record<string, ChatMessage[]>
+  /** Key of the buffer on screen: conversationId ?? 'draft'. */
+  bufferKey: () => string
   status: AgentStatus
   error: string | null
   workspace: string
@@ -50,7 +61,7 @@ interface AgentState {
 
   /** Question the agent is currently waiting on (null = none). */
   pendingQuestion: PendingQuestion | null
-  setPendingQuestion: (q: PendingQuestion | null) => void
+  setPendingQuestion: (q: PendingQuestion | null | ((prev: PendingQuestion | null) => PendingQuestion | null)) => void
 
   setWorkspace: (ws: string) => void
   newConversation: () => void
@@ -62,16 +73,17 @@ interface AgentState {
   abortController: AbortController | null
   setAbortController: (c: AbortController | null) => void
 
-  appendUserMessage: (text: string, images?: string[]) => string
-  appendAssistantPlaceholder: () => string
-  appendTextDelta: (msgId: string, text: string) => void
+  appendUserMessage: (key: string, text: string, images?: string[]) => string
+  appendAssistantPlaceholder: (key: string) => string
+  appendTextDelta: (key: string, msgId: string, text: string) => void
   /** Remove one optimistic message (failed-send rollback). */
-  removeMessage: (msgId: string) => void
-  startToolCall: (msgId: string, callId: string, name: string, args: unknown) => void
-  finishToolCall: (msgId: string, callId: string, result: unknown) => void
+  removeMessage: (key: string, msgId: string) => void
+  startToolCall: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
+  finishToolCall: (key: string, msgId: string, callId: string, result: unknown) => void
 
-  /** Load a conversation's persisted history into the UI. */
+  /** Load a conversation's persisted history into its buffer. */
   loadHistory: (
+    convId: number,
     rows: Array<{
       id: number
       role: string
@@ -123,9 +135,13 @@ export function persistWorkspace(ws: string): void {
   )
 }
 
-export const useAgent = create<AgentState>((set) => ({
+export const useAgent = create<AgentState>((set, get) => ({
   conversationId: null,
-  messages: [],
+  messagesByConv: { draft: [] },
+  bufferKey: () => {
+    const id = get().conversationId
+    return id === null ? 'draft' : String(id)
+  },
   status: 'idle',
   error: null,
   workspace: loadStoredWorkspace(),
@@ -133,21 +149,24 @@ export const useAgent = create<AgentState>((set) => ({
   previewPath: null,
   setPreviewPath: (previewPath) => set({ previewPath }),
   pendingQuestion: null,
-  setPendingQuestion: (pendingQuestion) => set({ pendingQuestion }),
-
+  setPendingQuestion: (q) =>
+    set((s) => ({
+      pendingQuestion:
+        typeof q === 'function' ? q(s.pendingQuestion) : q,
+    })),
   setWorkspace: (ws) => {
     set({ workspace: ws })
     if (ws && ws !== DEFAULT_WORKSPACE) persistWorkspace(ws)
   },
 
   newConversation: () =>
-    set({
+    set((s) => ({
       conversationId: null,
-      messages: [],
+      messagesByConv: { ...s.messagesByConv, draft: [] },
       status: 'idle',
       error: null,
       pendingQuestion: null,
-    }),
+    })),
 
   setConversationId: (id) => set({ conversationId: id }),
   setStatus: (status) => set({ status }),
@@ -163,139 +182,173 @@ export const useAgent = create<AgentState>((set) => ({
   abortController: null,
   setAbortController: (c) => set({ abortController: c }),
 
-  appendUserMessage: (text, images) => {
+  // ---- buffer mutation helpers ----
+  // Every mutation takes an explicit buffer key: the send path captures its
+  // target at send time, so a turn streams into its own conversation's
+  // buffer even when the user is looking at another one.
+
+  appendUserMessage: (key, text, images) => {
     const id = genId()
     set((s) => ({
-      messages: [
-        ...s.messages,
-        { id, role: 'user', content: text, images },
-      ],
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: [
+          ...(s.messagesByConv[key] ?? []),
+          { id, role: 'user', content: text, images },
+        ],
+      },
     }))
     return id
   },
 
-  removeMessage: (msgId) =>
+  removeMessage: (key, msgId) => {
     set((s) => ({
-      messages: s.messages.filter((m) => m.id !== msgId),
-    })),
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).filter((m) => m.id !== msgId),
+      },
+    }))
+  },
 
-  appendAssistantPlaceholder: () => {
+  appendAssistantPlaceholder: (key) => {
     const id = genId()
     set((s) => ({
-      messages: [...s.messages, { id, role: 'assistant', content: '' }],
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: [...(s.messagesByConv[key] ?? []), { id, role: 'assistant', content: '' }],
+      },
     }))
     return id
   },
 
-  appendTextDelta: (msgId, text) =>
+  appendTextDelta: (key, msgId, text) => {
     set((s) => ({
-      messages: s.messages.map((m) =>
-        m.id === msgId ? { ...m, content: m.content + text } : m,
-      ),
-    })),
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) =>
+          m.id === msgId ? { ...m, content: m.content + text } : m,
+        ),
+      },
+    }))
+  },
 
-  startToolCall: (msgId, callId, name, args) =>
+  startToolCall: (key, msgId, callId, name, args) => {
     set((s) => ({
-      messages: s.messages.map((m) =>
-        m.id === msgId
-          ? {
-              ...m,
-              toolCalls: [
-                ...(m.toolCalls ?? []),
-                { id: callId || `t${(m.toolCalls?.length ?? 0) + 1}`, name, args },
-              ],
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) =>
+          m.id === msgId
+            ? {
+                ...m,
+                toolCalls: [
+                  ...(m.toolCalls ?? []),
+                  { id: callId || `t${(m.toolCalls?.length ?? 0) + 1}`, name, args },
+                ],
+              }
+            : m,
+        ),
+      },
+    }))
+  },
+
+  finishToolCall: (key, msgId, callId, result) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].result === undefined) {
+              tcs[i] = { ...tcs[i], result }
+              break
             }
-          : m,
-      ),
-    })),
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
 
-  finishToolCall: (msgId, callId, result) =>
+  loadHistory: (convId, rows) =>
     set((s) => ({
-      messages: s.messages.map((m) => {
-        if (m.id !== msgId || !m.toolCalls?.length) return m
-        const tcs = [...m.toolCalls]
-        for (let i = tcs.length - 1; i >= 0; i--) {
-          if (tcs[i].id === callId && tcs[i].result === undefined) {
-            tcs[i] = { ...tcs[i], result }
-            break
-          }
-        }
-        return { ...m, toolCalls: tcs }
-      }),
+      messagesByConv: {
+        ...s.messagesByConv,
+        [String(convId)]: buildMessages(rows),
+      },
     })),
-
-  loadHistory: (rows) =>
-    set({
-      messages: (() => {
-        // Tool rows carry one result each, linked to their call by
-        // tool_call_id (the call name is duplicated in tool_calls[0].name).
-        // Results merge into the owning assistant turn's calls so a reloaded
-        // turn renders exactly like a finished live turn: one collapsed
-        // trace, results inside it — not a second wall of tool blocks.
-        const resultById = new Map<string, unknown>()
-        const nameById = new Map<string, string>()
-        for (const r of rows) {
-          if (r.role !== 'tool') continue
-          const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
-          if (!id) continue
-          resultById.set(id, safeParse(r.content))
-          const tc = r.tool_calls?.[0]
-          const name =
-            tc?.function?.name ?? (tc as { name?: string } | undefined)?.name
-          if (name) nameById.set(id, name)
-        }
-
-        const out: ChatMessage[] = []
-        for (const r of rows) {
-          if (r.role === 'tool') {
-            const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
-            // Already absorbed into the assistant turn's trace; render
-            // standalone only when orphaned (no matching call row).
-            if (id && resultById.has(id)) continue
-            out.push({
-              id: `db${r.id}`,
-              role: 'tool',
-              content: r.content,
-              images: r.images ?? undefined,
-              toolCalls: [
-                {
-                  id,
-                  name: nameById.get(id) ?? 'tool',
-                  args: undefined,
-                  result: safeParse(r.content),
-                },
-              ],
-            })
-            continue
-          }
-          if (r.role === 'assistant' && r.tool_calls?.length) {
-            out.push({
-              id: `db${r.id}`,
-              role: 'assistant',
-              content: r.content,
-              images: r.images ?? undefined,
-              toolCalls: r.tool_calls.map((c, i) => ({
-                id: c.id ?? `t${r.id}-${i}`,
-                name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
-                args: safeParse(c.function?.arguments),
-                result: c.id ? resultById.get(c.id) : undefined,
-              })),
-            })
-            continue
-          }
-          out.push({
-            id: `db${r.id}`,
-            role: r.role as Role,
-            content: r.content,
-            images: r.images ?? undefined,
-          })        }
-        return out
-      })(),
-      status: 'idle',
-      error: null,
-      pendingQuestion: null,
-    }),
 }))
+
+/**
+ * Build a rendered message list from persisted rows. Tool rows carry one
+ * result each, linked to their call by tool_call_id (the call name is
+ * duplicated in tool_calls[0].name). Results merge into the owning assistant
+ * turn's calls so a reloaded turn renders exactly like a finished live turn:
+ * one collapsed trace, results inside it - not a second wall of tool blocks.
+ */
+function buildMessages(
+  rows: Parameters<AgentState['loadHistory']>[1],
+): ChatMessage[] {
+  const resultById = new Map<string, unknown>()
+  const nameById = new Map<string, string>()
+  for (const r of rows) {
+    if (r.role !== 'tool') continue
+    const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
+    if (!id) continue
+    resultById.set(id, safeParse(r.content))
+    const tc = r.tool_calls?.[0]
+    const name =
+      tc?.function?.name ?? (tc as { name?: string } | undefined)?.name
+    if (name) nameById.set(id, name)
+  }
+
+  const out: ChatMessage[] = []
+  for (const r of rows) {
+    if (r.role === 'tool') {
+      const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
+      // Already absorbed into the assistant turn's trace; render
+      // standalone only when orphaned (no matching call row).
+      if (id && resultById.has(id)) continue
+      out.push({
+        id: `db${r.id}`,
+        role: 'tool',
+        content: r.content,
+        images: r.images ?? undefined,
+        toolCalls: [
+          {
+            id,
+            name: nameById.get(id) ?? 'tool',
+            args: undefined,
+            result: safeParse(r.content),
+          },
+        ],
+      })
+      continue
+    }
+    if (r.role === 'assistant' && r.tool_calls?.length) {
+      out.push({
+        id: `db${r.id}`,
+        role: 'assistant',
+        content: r.content,
+        images: r.images ?? undefined,
+        toolCalls: r.tool_calls.map((c, i) => ({
+          id: c.id ?? `t${r.id}-${i}`,
+          name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
+          args: safeParse(c.function?.arguments),
+          result: c.id ? resultById.get(c.id) : undefined,
+        })),
+      })
+      continue
+    }
+    out.push({
+      id: `db${r.id}`,
+      role: r.role as Role,
+      content: r.content,
+      images: r.images ?? undefined,
+    })
+  }
+  return out
+}
 
 function safeParse(s?: string): unknown {
   if (!s) return undefined

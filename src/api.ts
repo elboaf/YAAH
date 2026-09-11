@@ -45,7 +45,7 @@ export interface ConversationRow {
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
 
-export const createConversation = (title: string, workspace?: string) =>
+export const createConversation = (title: string, workspace?: string | null) =>
   api<{ id: number }>('/api/conversations', {
     method: 'POST',
     body: JSON.stringify({ title, workspace: workspace ?? null }),
@@ -197,6 +197,31 @@ export const updateConversation = (
 
 export const deleteConversation = (id: number) =>
   api<{ ok: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' })
+
+// ---------------------------------------------------------------- workspaces
+
+export interface WorkspaceRow {
+  id: number
+  /** null = the Default pseudo-workspace (no root directory). */
+  path: string | null
+  label: string
+  last_opened_at: string | null
+  exists: boolean
+  conversation_count: number
+}
+
+export const listWorkspaces = () => api<WorkspaceRow[]>('/api/workspaces')
+
+export const addWorkspace = (path: string) =>
+  api<WorkspaceRow>('/api/workspaces', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  })
+
+export const deleteWorkspace = (id: number) =>
+  api<{ ok: boolean; relocated: number }>(`/api/workspaces/${id}`, {
+    method: 'DELETE',
+  })
 
 // The export endpoint sets Content-Disposition: attachment, but the `download`
 // attribute on an anchor is ignored cross-origin (tauri.localhost -> 127.0.0.1),
