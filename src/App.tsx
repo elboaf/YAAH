@@ -26,10 +26,11 @@ function BackendRecoveryBanner() {
         throw new Error(String(res.status))
       } catch {
         failures += 1
-        // ~3s of continued darkness means the process is alive but wedged
-        // (the supervisor would already be respawning a crashed one): poke
-        // the shell's restart command, which force-kills and respawns.
-        if (failures === 4 && !restarting) {
+        // The shell's supervisor auto-respawns crashes, parks itself if the
+        // backend dies instantly several times in a row, and needs a poke
+        // (restart_backend) both for the hung case and to leave the parked
+        // state. Pokes are throttled so a stuck situation can't ping-pong.
+        if (failures === 4 || (failures > 4 && (failures - 4) % 15 === 0)) {
           setRestarting(true)
           if (IS_TAURI) {
             import('@tauri-apps/api/core')
@@ -49,7 +50,9 @@ function BackendRecoveryBanner() {
     const onDown = () => start()
     const onStatus = (e: Event) => {
       const detail = (e as CustomEvent<{ status?: string }>).detail
-      if (detail?.status === 'down') start()
+      // 'down' = process exited (supervisor handles respawn); 'error' =
+      // startup failure or parked crash-loop — the banner watches either.
+      if (detail?.status === 'down' || detail?.status === 'error') start()
     }
     window.addEventListener('backend-down', onDown)
     window.addEventListener('backend-status', onStatus)

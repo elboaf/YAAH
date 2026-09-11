@@ -119,7 +119,13 @@ fn emit_backend_status(app: &tauri::AppHandle, status: &str, message: &str) {
 /// in the UI.
 fn spawn_with_output(cmd: &mut Command, app: &tauri::AppHandle) -> Option<Child> {
     let log_path = std::env::temp_dir().join("yaah-backend.log");
-    let log_file = std::fs::File::create(&log_path).ok();
+    // Append, not truncate: a respawn sequence is only diagnosable if the
+    // previous attempts' output is still there.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
     let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
     #[cfg(windows)]
     {
@@ -142,6 +148,51 @@ fn spawn_with_output(cmd: &mut Command, app: &tauri::AppHandle) -> Option<Child>
     }
 }
 
+/// Kill the backend and its whole process tree. A bare `child.kill()` is
+/// not enough for the PyInstaller --onefile sidecar: the spawned exe is a
+/// bootloader that runs the real server as a child process, so killing the
+/// bootloader orphans the actual backend (which keeps port 8765 busy and
+/// turns the next launch into a respawn loop).
+fn kill_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000)
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+/// Best-effort clear a stale backend left holding port 8765 by an earlier
+/// app instance (see kill_tree: a bare kill used to orphan it). Only safe
+/// because `backend.exe` is our own sidecar's image name.
+fn clear_stale_port_holder() {
+    if !std::net::TcpStream::connect("127.0.0.1:8765").is_ok() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/IM", "backend.exe", "/T", "/F"])
+            .creation_flags(0x0800_0000)
+            .output();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !std::net::TcpStream::connect("127.0.0.1:8765").is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Block until the embedded backend answers /api/health (or timeout).
 fn wait_for_backend(timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
@@ -158,10 +209,18 @@ fn wait_for_backend(timeout: std::time::Duration) -> bool {
 /// or is restarted on request. Runs on its own thread; emits backend-status
 /// events so the UI can show a banner and reload once the backend is back.
 fn supervise_backend(app: tauri::AppHandle, shared: Arc<BackendShared>) {
+    // A previous app instance may have left an orphaned backend holding
+    // the port (onefile bootloader kill bug); clear it before first spawn.
+    clear_stale_port_holder();
+    // Consecutive exits within 5s of spawn: a backend that dies instantly
+    // (port taken, bad config, missing module) would otherwise be respawned
+    // forever, flapping the UI. After 3 we park until restart_backend.
+    let mut fast_deaths = 0u32;
     loop {
         if shared.shutdown.load(Ordering::SeqCst) {
             return;
         }
+        let spawned_at = std::time::Instant::now();
         let child = spawn_backend(&app);
         *shared.child.lock().unwrap() = child;
         let ready = wait_for_backend(std::time::Duration::from_secs(15));
@@ -185,15 +244,14 @@ fn supervise_backend(app: tauri::AppHandle, shared: Arc<BackendShared>) {
         loop {
             if shared.shutdown.load(Ordering::SeqCst) {
                 if let Some(c) = shared.child.lock().unwrap().as_mut() {
-                    let _ = c.kill();
+                    kill_tree(c);
                 }
                 return;
             }
             if shared.restart_requested.swap(false, Ordering::SeqCst) {
                 eprintln!("restart_backend requested; killing backend");
                 if let Some(mut c) = shared.child.lock().unwrap().take() {
-                    let _ = c.kill();
-                    let _ = c.wait();
+                    kill_tree(&mut c);
                 }
                 break;
             }
@@ -207,9 +265,40 @@ fn supervise_backend(app: tauri::AppHandle, shared: Arc<BackendShared>) {
                 if shared.shutdown.load(Ordering::SeqCst) {
                     return;
                 }
-                eprintln!("backend exited ({status}); respawning in 1s");
+                fast_deaths = if spawned_at.elapsed() < std::time::Duration::from_secs(5) {
+                    fast_deaths + 1
+                } else {
+                    0
+                };
                 emit_backend_status(&app, "down", "Backend crashed — restarting…");
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                if fast_deaths >= 3 {
+                    // Stop the respawn loop: flapping "crashed/recovered"
+                    // reloads is worse than an honest error. Park until the
+                    // UI (or a config fix) requests a restart.
+                    eprintln!("backend exited instantly {fast_deaths}x ({status}); parking");
+                    emit_backend_status(
+                        &app,
+                        "error",
+                        "Backend keeps crashing on startup. Its output is in yaah-backend.log in your TEMP folder.",
+                    );
+                    loop {
+                        if shared.shutdown.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if shared.restart_requested.swap(false, Ordering::SeqCst) {
+                            fast_deaths = 0;
+                            // A common cause of instant deaths is a stale
+                            // backend from another app instance holding the
+                            // port; give it one clear attempt.
+                            clear_stale_port_holder();
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                } else {
+                    eprintln!("backend exited ({status}); respawning in 1s");
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
