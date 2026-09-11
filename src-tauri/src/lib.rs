@@ -1,10 +1,20 @@
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
-/// Handle to the embedded FastAPI backend subprocess (Q26).
-struct BackendHandle(Mutex<Option<Child>>);
+/// Shared control flags for the embedded FastAPI backend subprocess (Q26).
+/// The child itself lives behind a Mutex so the supervisor thread owns the
+/// wait/respawn loop while the window handler and `restart_backend` can
+/// reach it.
+struct BackendShared {
+    child: Mutex<Option<Child>>,
+    /// Set by the `restart_backend` command: supervisor kills + respawns.
+    restart_requested: AtomicBool,
+    /// Set on window destroy: supervisor stops respawning and exits.
+    shutdown: AtomicBool,
+}
 
 fn python_cmd() -> &'static str {
     if cfg!(windows) {
@@ -93,6 +103,17 @@ fn find_sidecar() -> Option<std::path::PathBuf> {
     names.iter().map(|n| dir.join(n)).find(|p| p.is_file())
 }
 
+/// Push a backend lifecycle event into the webview so the UI can show a
+/// banner and recover (backend-status: down | up | error).
+fn emit_backend_status(app: &tauri::AppHandle, status: &str, message: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.eval(&format!(
+            "window.dispatchEvent(new CustomEvent('backend-status', {{detail: {}}}))",
+            serde_json::json!({ "status": status, "message": message })
+        ));
+    }
+}
+
 /// Spawn the backend command, teeing stdout/stderr to the log file,
 /// hiding the console window on Windows, and surfacing spawn failures
 /// in the UI.
@@ -115,12 +136,7 @@ fn spawn_with_output(cmd: &mut Command, app: &tauri::AppHandle) -> Option<Child>
         Err(e) => {
             eprintln!("failed to spawn backend: {e}");
             // Surface the failure in the UI instead of failing silently.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.eval(&format!(
-                    "window.dispatchEvent(new CustomEvent('backend-error', {{detail: {}}}))",
-                    serde_json::json!({ "message": format!("Failed to start backend: {e}") })
-                ));
-            }
+            emit_backend_status(app, "error", &format!("Failed to start backend: {e}"));
             None
         }
     }
@@ -136,6 +152,77 @@ fn wait_for_backend(timeout: std::time::Duration) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     false
+}
+
+/// Run the backend for the lifetime of the app, respawning it if it crashes
+/// or is restarted on request. Runs on its own thread; emits backend-status
+/// events so the UI can show a banner and reload once the backend is back.
+fn supervise_backend(app: tauri::AppHandle, shared: Arc<BackendShared>) {
+    loop {
+        if shared.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        let child = spawn_backend(&app);
+        *shared.child.lock().unwrap() = child;
+        let ready = wait_for_backend(std::time::Duration::from_secs(15));
+        if ready {
+            eprintln!("backend is up on 127.0.0.1:8765");
+            emit_backend_status(&app, "up", "Backend is running.");
+        } else {
+            eprintln!("backend did not become ready within 15s");
+            emit_backend_status(
+                &app,
+                "error",
+                &format!(
+                    "Backend did not start within 15s. Check {} for its output.",
+                    std::env::temp_dir().join("yaah-backend.log").display()
+                ),
+            );
+        }
+        // Monitor until the process exits, a restart is requested, or the
+        // app shuts down. A hung-but-alive backend is caught by the UI,
+        // which calls `restart_backend` when /api/health stays unreachable.
+        loop {
+            if shared.shutdown.load(Ordering::SeqCst) {
+                if let Some(c) = shared.child.lock().unwrap().as_mut() {
+                    let _ = c.kill();
+                }
+                return;
+            }
+            if shared.restart_requested.swap(false, Ordering::SeqCst) {
+                eprintln!("restart_backend requested; killing backend");
+                if let Some(mut c) = shared.child.lock().unwrap().take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                break;
+            }
+            let exited = shared
+                .child
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|c| c.try_wait().ok().flatten());
+            if let Some(status) = exited {
+                if shared.shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                eprintln!("backend exited ({status}); respawning in 1s");
+                emit_backend_status(&app, "down", "Backend crashed — restarting…");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+}
+
+/// Kill and respawn the backend (used by the UI when it finds the backend
+/// unreachable but wants recovery without an app restart).
+#[tauri::command]
+fn restart_backend(shared: tauri::State<'_, Arc<BackendShared>>) -> Result<(), String> {
+    shared.restart_requested.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 /// Native folder picker used by the UI to set the workspace (Q28).
@@ -158,38 +245,27 @@ async fn pick_workspace(app: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(BackendHandle(Mutex::new(None)))
+        .manage(Arc::new(BackendShared {
+            child: Mutex::new(None),
+            restart_requested: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
+        }))
         .setup(|app| {
             let handle = app.handle().clone();
-            let child = spawn_backend(&handle);
-            *app.state::<BackendHandle>().0.lock().unwrap() = child;
+            let shared = app.state::<Arc<BackendShared>>().inner().clone();
+            std::thread::spawn(move || supervise_backend(handle, shared));
             // Wait for the backend to accept connections before showing the
-            // webview, so early API calls don't race server startup.
-            if !wait_for_backend(std::time::Duration::from_secs(15)) {
-                eprintln!("backend did not become ready within 15s");
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.eval(&format!(
-                        "window.dispatchEvent(new CustomEvent('backend-error', {{detail: {}}}))",
-                        serde_json::json!({ "message": format!(
-                            "Backend did not start within 15s. Check {} for its output.",
-                            std::env::temp_dir().join("yaah-backend.log").display()
-                        ) })
-                    ));
-                }
-            }
+            // webview, so early API calls don't race server startup. The
+            // supervisor emits backend-status events either way.
+            wait_for_backend(std::time::Duration::from_secs(15));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pick_workspace])
+        .invoke_handler(tauri::generate_handler![pick_workspace, restart_backend])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                if let Some(child) = window
-                    .app_handle()
-                    .state::<BackendHandle>()
-                    .0
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                {
+                let shared = window.app_handle().state::<Arc<BackendShared>>();
+                shared.shutdown.store(true, Ordering::SeqCst);
+                if let Some(child) = shared.child.lock().unwrap().as_mut() {
                     let _ = child.kill();
                 }
             }

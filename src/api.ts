@@ -1,29 +1,47 @@
 // Detect the Tauri webview via its IPC internals — the origin alone is not
 // reliable: macOS uses tauri:// but Windows/Linux use http://tauri.localhost,
 // which looks like a normal http origin to a naive protocol check.
-const IS_TAURI =
+export const IS_TAURI =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-const BASE = IS_TAURI ? 'http://127.0.0.1:8765' : ''
+export const BASE = IS_TAURI ? 'http://127.0.0.1:8765' : ''
 const url = (p: string) => `${BASE}${p}`
 
-// Listen for backend spawn failures reported by the Tauri shell.
+// Listen for backend lifecycle events reported by the Tauri shell
+// (supervisor thread: down | up | error).
 export let backendStartupError: string | null = null
 if (typeof window !== 'undefined') {
-  window.addEventListener('backend-error', (e) => {
-    backendStartupError = (e as CustomEvent<{ message?: string }>).detail?.message ?? 'backend failed to start'
+  window.addEventListener('backend-status', (e) => {
+    const { status, message } = (e as CustomEvent<{ status?: string; message?: string }>).detail
+    if (status === 'error') backendStartupError = message ?? 'backend failed to start'
   })
 }
 
+/** Fire the UI-wide "backend unreachable" signal used by the recovery banner. */
+export function signalBackendDown() {
+  window.dispatchEvent(new CustomEvent('backend-down'))
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url(path), {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  })
+  let res: Response
+  try {
+    res = await fetch(url(path), {
+      headers: { 'Content-Type': 'application/json' },
+      ...init,
+    })
+  } catch (e) {
+    // Network-level failure (ECONNREFUSED etc.) means the backend process
+    // is down; the Tauri supervisor respawns it and the banner reloads the
+    // app once /api/health answers again.
+    if ((e as Error).name === 'AbortError') throw e
+    signalBackendDown()
+    throw new Error(`Backend is unreachable (restarting): ${url(path)}`)
+  }
   const text = await res.text()
   // A JSON parse failure here almost always means an HTML page came back
   // (SPA fallback / static server) because the API backend isn't reachable.
   const contentType = res.headers.get('content-type') ?? ''
   if (!contentType.includes('application/json')) {
+    signalBackendDown()
     throw new Error(
       `${res.status}: expected JSON from ${url(path)} but got '${contentType || 'unknown'}'. ` +
         (backendStartupError ??
@@ -294,12 +312,19 @@ export async function streamAgentTurn(
   skills: string[] = [],
   resume = false,
 ): Promise<void> {
-  const res = await fetch(url(`/api/agent/${conversationId}`), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, workspace, images, skills, resume }),
-    signal,
-  })
+  let res: Response
+  try {
+    res = await fetch(url(`/api/agent/${conversationId}`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, workspace, images, skills, resume }),
+      signal,
+    })
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e
+    signalBackendDown()
+    throw e
+  }
   if (!res.ok || !res.body) {
     throw new Error(`Agent error ${res.status}: ${await res.text()}`)
   }
