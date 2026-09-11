@@ -413,7 +413,7 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
         onClick={() => setOpen((o) => !o)}
       >
         <ToolChip tc={tc} />
-        <span className="ml-auto shrink-0 text-zinc-600">{open ? '[-]' : '[+]'}</span>
+        <span className="shrink-0 text-zinc-600">{open ? '[-]' : '[+]'}</span>
       </button>
       {open && (
         <div className="border-l border-zinc-800 px-2 py-1 text-zinc-400">
@@ -493,7 +493,7 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
         agent
       </div>
       {msg.content ? (
-        <div className="text-sm leading-relaxed text-zinc-200">
+        <div className="max-w-prose text-sm leading-relaxed text-zinc-200">
           <MessageBody content={msg.content} />
         </div>
       ) : null}

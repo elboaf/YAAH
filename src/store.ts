@@ -226,41 +226,72 @@ export const useAgent = create<AgentState>((set) => ({
 
   loadHistory: (rows) =>
     set({
-      messages: rows.map((r) => {
-        // Assistant rows carry the calls the model made (OpenAI format with
-        // function.name/arguments); tool rows carry one result each, linked
-        // back by tool_call_id, with the call name duplicated in tool_calls.
-        const fn = r.tool_calls?.[0]?.function
-        const callId = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
-        return {
-          id: `db${r.id}`,
-          role: r.role as Role,
-          content: r.content,
-          images: r.images ?? undefined,
-          toolCalls:
-            r.role === 'assistant' && r.tool_calls?.length
-              ? r.tool_calls.map((c, i) => ({
-                  id: c.id ?? `t${r.id}-${i}`,
-                  name: c.function?.name ?? 'tool',
-                  args: safeParse(c.function?.arguments),
-                }))
-              : r.role === 'tool' && (fn?.name || r.tool_call_id)
-                ? [
-                    {
-                      id: r.tool_call_id ?? r.tool_calls![0].id ?? '',
-                      // Tool rows persist the call name in tool_calls[0].name
-                      // (no function wrapper) — fall back to it before giving up.
-                      name:
-                        fn?.name ??
-                        (r.tool_calls![0] as { name?: string } | undefined)?.name ??
-                        'tool',
-                      args: undefined,
-                      result: safeParse(r.content),
-                    },
-                  ]
-                : undefined,
+      messages: (() => {
+        // Tool rows carry one result each, linked to their call by
+        // tool_call_id (the call name is duplicated in tool_calls[0].name).
+        // Results merge into the owning assistant turn's calls so a reloaded
+        // turn renders exactly like a finished live turn: one collapsed
+        // trace, results inside it — not a second wall of tool blocks.
+        const resultById = new Map<string, unknown>()
+        const nameById = new Map<string, string>()
+        for (const r of rows) {
+          if (r.role !== 'tool') continue
+          const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
+          if (!id) continue
+          resultById.set(id, safeParse(r.content))
+          const tc = r.tool_calls?.[0]
+          const name =
+            tc?.function?.name ?? (tc as { name?: string } | undefined)?.name
+          if (name) nameById.set(id, name)
         }
-      }),
+
+        const out: ChatMessage[] = []
+        for (const r of rows) {
+          if (r.role === 'tool') {
+            const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
+            // Already absorbed into the assistant turn's trace; render
+            // standalone only when orphaned (no matching call row).
+            if (id && resultById.has(id)) continue
+            out.push({
+              id: `db${r.id}`,
+              role: 'tool',
+              content: r.content,
+              images: r.images ?? undefined,
+              toolCalls: [
+                {
+                  id,
+                  name: nameById.get(id) ?? 'tool',
+                  args: undefined,
+                  result: safeParse(r.content),
+                },
+              ],
+            })
+            continue
+          }
+          if (r.role === 'assistant' && r.tool_calls?.length) {
+            out.push({
+              id: `db${r.id}`,
+              role: 'assistant',
+              content: r.content,
+              images: r.images ?? undefined,
+              toolCalls: r.tool_calls.map((c, i) => ({
+                id: c.id ?? `t${r.id}-${i}`,
+                name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
+                args: safeParse(c.function?.arguments),
+                result: c.id ? resultById.get(c.id) : undefined,
+              })),
+            })
+            continue
+          }
+          out.push({
+            id: `db${r.id}`,
+            role: r.role as Role,
+            content: r.content,
+            images: r.images ?? undefined,
+          })
+        }
+        return out
+      })(),
       status: 'idle',
       error: null,
       pendingQuestion: null,

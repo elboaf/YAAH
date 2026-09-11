@@ -16,8 +16,14 @@ const toolRows = rows.filter((r) => r.role === 'tool')
 const expectedCalls = asst.reduce((n, r) => n + (r.tool_calls?.length ?? 0), 0)
 const expectedResults = toolRows.length
 const asstTurnsWithCalls = asst.filter((r) => r.tool_calls?.length).length
+// Tool rows whose call_id matches no assistant call cannot merge into a
+// trace; they render standalone and are legitimate.
+const callIds = new Set(asst.flatMap((r) => (r.tool_calls ?? []).map((c) => c.id ?? '')))
+const orphanResults = toolRows.filter(
+  (r) => !callIds.has(r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''),
+).length
 console.log(
-  `db: ${rows.length} rows | assistant ${asst.length} (${asstTurnsWithCalls} turns with ${expectedCalls} calls) | tool ${toolRows.length} (results: ${expectedResults})`,
+  `db: ${rows.length} rows | assistant ${asst.length} (${asstTurnsWithCalls} turns with ${expectedCalls} calls) | tool ${toolRows.length} (results: ${expectedResults}, orphan: ${orphanResults})`,
 )
 
 const browser = await puppeteer.launch({
@@ -84,9 +90,9 @@ check(
   `ui ${stats.traceLines} vs db ${asstTurnsWithCalls}`,
 )
 check(
-  'every call + result rendered as an expandable row',
-  stats.expanders === expectedCalls + expectedResults,
-  `ui ${stats.expanders} vs db ${expectedCalls + expectedResults}`,
+  'every call rendered once, results merged inside calls',
+  stats.expanders === expectedCalls + orphanResults,
+  `ui ${stats.expanders} vs db ${expectedCalls} calls + ${orphanResults} orphan results`,
 )
 
 await page.screenshot({ path: '.impeccable/shots/regress-history.png' })
