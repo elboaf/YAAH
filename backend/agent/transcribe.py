@@ -39,16 +39,24 @@ def _exe_dir() -> Path:
     return Path(__file__).parent.parent  # backend/
 
 
+def _bundle_dirs(sub: str) -> list[Path]:
+    """whisper/<sub> under packaged layouts. Tauri turns the `../` resource
+    glob prefix into a literal `_up_` dir next to the exe, so the installed
+    layout is <exe>/_up_/backend/whisper/<sub>; the sidecar's cwd varies with
+    how the app was launched, so anchor on the exe dir, never just cwd."""
+    exe = _exe_dir()
+    out: list[Path] = []
+    for base in (exe, exe / "_up_", Path.cwd()):
+        out += [base / "whisper" / sub, base / "backend" / "whisper" / sub]
+    return out
+
+
 def _binary_dirs() -> list[Path]:
     dirs = []
     if os.environ.get("YAAH_WHISPER_BIN"):
         dirs.append(Path(os.environ["YAAH_WHISPER_BIN"]))
+    dirs += _bundle_dirs("bin")
     dirs += [
-        _exe_dir() / "whisper" / "bin",  # packaged: next to backend.exe
-        # packaged: Tauri resources land under the spawn cwd (lib.rs picks
-        # the dir containing backend/main.py), so whisper rides along there.
-        Path.cwd() / "backend" / "whisper" / "bin",
-        Path.cwd() / "whisper" / "bin",
         Path(__file__).parent.parent / "whisper" / "bin",  # repo checkout
         Path(__file__).parent.parent / "bin" / "Release",  # dev: windows zip
         Path(__file__).parent.parent / "bin",  # dev: linux/macos build
@@ -60,10 +68,8 @@ def _model_dirs() -> list[Path]:
     dirs = []
     if os.environ.get("YAAH_WHISPER_MODEL"):
         dirs.append(Path(os.environ["YAAH_WHISPER_MODEL"]).parent)
+    dirs += _bundle_dirs("models")
     dirs += [
-        _exe_dir() / "whisper" / "models",  # packaged: next to backend.exe
-        Path.cwd() / "backend" / "whisper" / "models",  # packaged: resources
-        Path.cwd() / "whisper" / "models",
         Path(__file__).parent.parent / "whisper" / "models",  # repo checkout
         Path(__file__).parent.parent / "data" / "models",  # dev
     ]
