@@ -50,11 +50,16 @@ from pydantic import BaseModel
 from backend.db.database import (
     add_message,
     create_conversation,
+    delete_workspace,
     get_conversation,
     get_messages,
+    get_workspace_by_path,
     list_conversations,
+    list_workspaces,
+    touch_workspace,
     update_conversation,
     delete_conversation,
+    upsert_workspace,
 )
 
 
@@ -80,6 +85,43 @@ class NewMessage(BaseModel):
 async def api_create_conversation(body: NewConversation):
     cid = await create_conversation(body.title, body.workspace)
     return {"id": cid}
+
+
+# ---- Workspace registry ----
+
+
+class NewWorkspace(BaseModel):
+    path: str
+
+
+@app.get("/api/workspaces")
+async def api_list_workspaces():
+    """Registry rows for the sidebar dropdown and grouped list."""
+    return await list_workspaces()
+
+
+@app.post("/api/workspaces")
+async def api_add_workspace(body: NewWorkspace):
+    """Register a folder (resolved + deduped) and select it implicitly."""
+    import os
+
+    ws = await upsert_workspace(body.path)
+    ws["exists"] = True if ws["path"] is None else os.path.isdir(ws["path"])
+    return ws
+
+
+@app.delete("/api/workspaces/{workspace_id}")
+async def api_delete_workspace(workspace_id: int):
+    """Remove a workspace; its conversations relocate to Default."""
+    from fastapi import HTTPException
+
+    try:
+        result = await delete_workspace(workspace_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return {"ok": True, **result}
 
 
 @app.get("/api/conversations")
@@ -167,8 +209,10 @@ class ConfigUpdate(BaseModel):
 async def api_agent_turn(conversation_id: int, body: AgentTurn):
     """Run one agent turn; stream JSON-line events."""
     # Every turn runs in the workspace the UI has selected: remember it so the
-    # sidebar restores the same folder after an app restart.
+    # sidebar restores the same folder after an app restart, and touch the
+    # registry row so the dropdown/group order reflects recent activity.
     set_last_workspace(body.workspace)
+    await touch_workspace(body.workspace or None)
     # Attached images: decode data URLs to files on disk up front; only the
     # rel paths travel into the agent loop and the database.
     from backend.agent.imagedata import save_data_url
