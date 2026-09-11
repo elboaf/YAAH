@@ -1,6 +1,6 @@
 [package]
 name = "yaah"
-version = "0.6.3"
+version = "0.6.4"
 description = "YAAH - AI Coding Agent"
 authors = ["elboaf"]
 license = ""
