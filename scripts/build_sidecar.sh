@@ -48,13 +48,27 @@ if [ ! -f "backend/whisper/bin/whisper-cli$EXE" ]; then
   # resolve target vcxproj files from the top dir). Examples=ON is required
   # — whisper-cli IS an example; tests stay off, server defaults off.
   cmake --build /tmp/whisper-build --config Release
-  CLI=$(/usr/bin/find /tmp/whisper-build -name "whisper-cli${EXE}" -type f | head -1)
+  # Multi-config generators (MSVC/Xcode) emit into bin/Release; single-config
+  # (Make/Ninja) into bin/. Check both explicitly — a find-based lookup
+  # proved flaky under Git Bash on the Windows runner.
+  CLI=""
+  for c in "/tmp/whisper-build/bin/Release/whisper-cli$EXE" \
+           "/tmp/whisper-build/bin/whisper-cli$EXE"; do
+    if [ -f "$c" ]; then CLI="$c"; break; fi
+  done
+  if [ -z "$CLI" ]; then
+    echo "ERROR: whisper-cli$EXE not found after build; bin tree:"
+    find /tmp/whisper-build -name "whisper-cli*" -print || true
+    ls -R /tmp/whisper-build/bin 2>/dev/null || true
+    exit 1
+  fi
+  echo "whisper-cli: $CLI"
   mkdir -p backend/whisper/bin
   cp "$CLI" backend/whisper/bin/
-  # Windows builds link ggml CPU-variant DLLs; ship the whole set.
-  case "$(uname -s)" in
-    MINGW*|Windows_NT) cp "$(/usr/bin/dirname "$CLI")"/*.dll backend/whisper/bin/ ;;
-  esac
+  # Shared ggml DLLs, if this configuration produced any (static builds make
+  # none — an empty glob must not kill the script).
+  BIN_DIR=$(dirname "$CLI")
+  cp "$BIN_DIR"/*.dll backend/whisper/bin/ 2>/dev/null || true
 fi
 if [ ! -f "backend/whisper/models/$WHISPER_MODEL" ]; then
   echo "downloading $WHISPER_MODEL"
