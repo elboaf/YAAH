@@ -205,6 +205,42 @@ fn wait_for_backend(timeout: std::time::Duration) -> bool {
     false
 }
 
+/// Wait for OUR child to be the thing serving the port. A bare port check
+/// is not enough: a foreign/stale backend holding 8765 makes connect()
+/// succeed while our freshly spawned child dies with a bind error — that
+/// false "up" once flapped the supervisor for a dozen spawns. Returns
+/// Ok(true) only while the child is alive AND the port answers; Ok(false)
+/// when the child exited (foreign holder) or the deadline passed. Locks are
+/// taken per poll so a shutdown during startup is never blocked out.
+fn wait_for_own_backend(
+    shared: &BackendShared,
+    timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if shared.shutdown.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let exited = shared
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|c| c.try_wait().ok().flatten());
+        let port_up = std::net::TcpStream::connect("127.0.0.1:8765").is_ok();
+        if port_up {
+            return Ok(exited.is_none());
+        }
+        if exited.is_some() {
+            return Ok(false);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Run the backend for the lifetime of the app, respawning it if it crashes
 /// or is restarted on request. Runs on its own thread; emits backend-status
 /// events so the UI can show a banner and reload once the backend is back.
@@ -212,46 +248,64 @@ fn supervise_backend(app: tauri::AppHandle, shared: Arc<BackendShared>) {
     // A previous app instance may have left an orphaned backend holding
     // the port (onefile bootloader kill bug); clear it before first spawn.
     clear_stale_port_holder();
-    // Consecutive exits within 5s of spawn: a backend that dies instantly
+    // Consecutive exits within 30s of spawn: a backend that dies instantly
     // (port taken, bad config, missing module) would otherwise be respawned
-    // forever, flapping the UI. After 3 we park until restart_backend.
+    // forever, flapping the UI. 30s because a cold PyInstaller onefile start
+    // (AV scan + extraction) can easily outlive a 5s window and still be a
+    // failure. After 3 we park until restart_backend.
     let mut fast_deaths = 0u32;
     loop {
         if shared.shutdown.load(Ordering::SeqCst) {
             return;
         }
         let spawned_at = std::time::Instant::now();
-        let child = spawn_backend(&app);
-        *shared.child.lock().unwrap() = child;
-        let ready = wait_for_backend(std::time::Duration::from_secs(15));
-        if ready {
-            eprintln!("backend is up on 127.0.0.1:8765");
-            emit_backend_status(&app, "up", "Backend is running.");
-        } else {
-            eprintln!("backend did not become ready within 15s");
-            emit_backend_status(
-                &app,
-                "error",
-                &format!(
-                    "Backend did not start within 15s. Check {} for its output.",
-                    std::env::temp_dir().join("yaah-backend.log").display()
-                ),
-            );
+        *shared.child.lock().unwrap() = spawn_backend(&app);
+        // Wait for OUR child to serve the port. A bare port check is not
+        // enough: a foreign/stale backend on 8765 makes connect() succeed
+        // while our child dies with a bind error — that false "up" once
+        // flapped this loop for a dozen spawns.
+        let ready = wait_for_own_backend(&shared, std::time::Duration::from_secs(15));
+        match ready {
+            Ok(true) => {
+                eprintln!("backend is up on 127.0.0.1:8765");
+                emit_backend_status(&app, "up", "Backend is running.");
+            }
+            Ok(false) if std::net::TcpStream::connect("127.0.0.1:8765").is_ok() => {
+                // The port answers but our child is gone: a foreign/stale
+                // backend owns 8765. Clear it before respawning, or every
+                // respawn dies on the bind error.
+                eprintln!("backend died while port 8765 stayed up; clearing stale holder");
+                emit_backend_status(&app, "down", "Stale backend found on port — clearing…");
+                clear_stale_port_holder();
+            }
+            _ => {
+                eprintln!("backend did not become ready within 15s");
+                emit_backend_status(
+                    &app,
+                    "error",
+                    &format!(
+                        "Backend did not start within 15s. Check {} for its output.",
+                        std::env::temp_dir().join("yaah-backend.log").display()
+                    ),
+                );
+            }
         }
         // Monitor until the process exits, a restart is requested, or the
         // app shuts down. A hung-but-alive backend is caught by the UI,
         // which calls `restart_backend` when /api/health stays unreachable.
         loop {
             if shared.shutdown.load(Ordering::SeqCst) {
-                if let Some(c) = shared.child.lock().unwrap().as_mut() {
+                let mut guard = shared.child.lock().unwrap();
+                if let Some(c) = guard.as_mut() {
                     kill_tree(c);
                 }
                 return;
             }
             if shared.restart_requested.swap(false, Ordering::SeqCst) {
                 eprintln!("restart_backend requested; killing backend");
-                if let Some(mut c) = shared.child.lock().unwrap().take() {
-                    kill_tree(&mut c);
+                let mut guard = shared.child.lock().unwrap();
+                if let Some(c) = guard.as_mut() {
+                    kill_tree(c);
                 }
                 break;
             }
@@ -265,7 +319,7 @@ fn supervise_backend(app: tauri::AppHandle, shared: Arc<BackendShared>) {
                 if shared.shutdown.load(Ordering::SeqCst) {
                     return;
                 }
-                fast_deaths = if spawned_at.elapsed() < std::time::Duration::from_secs(5) {
+                fast_deaths = if spawned_at.elapsed() < std::time::Duration::from_secs(30) {
                     fast_deaths + 1
                 } else {
                     0
@@ -354,9 +408,13 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 let shared = window.app_handle().state::<Arc<BackendShared>>();
                 shared.shutdown.store(true, Ordering::SeqCst);
+                // kill_tree, not child.kill(): the PyInstaller onefile
+                // bootloader runs the real server as a child, and a bare
+                // kill orphans it — the next launch then starts with a
+                // stale port holder and a respawn cascade.
                 let mut guard = shared.child.lock().unwrap();
                 if let Some(child) = guard.as_mut() {
-                    let _ = child.kill();
+                    kill_tree(child);
                 }
             }
         })

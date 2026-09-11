@@ -2197,9 +2197,28 @@ function Composer() {
   const recorderRef = useRef<VoiceRecorder | null>(null)
 
   useEffect(() => {
-    transcribeStatus()
-      .then((s) => setMicAvailable(s.engine === 'cloud' ? s.cloud_configured : s.local_available))
-      .catch(() => setMicAvailable(false))
+    // Retry: on a fresh launch this request races backend startup (the
+    // supervisor may still be cycling), and giving up on the first failure
+    // hid the mic button for the whole session. Re-check whenever the
+    // backend reports it's back up.
+    let cancelled = false
+    const check = (attempt = 0) => {
+      transcribeStatus()
+        .then((s) => {
+          if (!cancelled) setMicAvailable(s.engine === 'cloud' ? s.cloud_configured : s.local_available)
+        })
+        .catch(() => {
+          if (cancelled || attempt >= 8) return
+          window.setTimeout(() => check(attempt + 1), 1500 * (attempt + 1))
+        })
+    }
+    check()
+    const onBackendStatus = () => check()
+    window.addEventListener('backend-status', onBackendStatus)
+    return () => {
+      cancelled = true
+      window.removeEventListener('backend-status', onBackendStatus)
+    }
   }, [])
 
   const toggleDictation = async () => {
@@ -2234,6 +2253,19 @@ function Composer() {
     recorderRef.current = rec
     setVoiceState('recording')
   }
+
+  // Auto-stop on silence (VAD): once you've spoken and stayed quiet for
+  // ~1.6s, finish the recording and transcribe. Manual click still wins.
+  useEffect(() => {
+    if (voiceState !== 'recording') return
+    const id = window.setInterval(() => {
+      const rec = recorderRef.current
+      if (!rec) return
+      const m = rec.metrics()
+      if (m.speechStarted && m.silenceMs >= 1600) void toggleDictation()
+    }, 200)
+    return () => window.clearInterval(id)
+  }, [voiceState])
 
   // ---- attachment rejection feedback (harden: silent drops are a trust bug) ----
   const [rejects, setRejects] = useState<string[]>([])
@@ -2826,14 +2858,16 @@ function Composer() {
             <path d="M7 2v10M2 7h10" />
           </svg>
         </button>
-        {micAvailable !== false && (
+        {/* Only render once confirmed available: an optimistic show/hide
+            flashed the button before the backend could answer. */}
+        {micAvailable === true && (
           <button
             title={
               voiceState === 'recording'
-                ? 'Stop and transcribe'
+                ? 'Stop and transcribe (auto-stops ~1.5s after you stop talking)'
                 : voiceState === 'transcribing'
                   ? 'Transcribing…'
-                  : 'Dictate (voice to text)'
+                  : 'Dictate (voice to text; stops automatically on silence)'
             }
             aria-label={
               voiceState === 'recording' ? 'Stop and transcribe' : 'Dictate (voice to text)'
