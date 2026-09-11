@@ -108,14 +108,16 @@ const now = () =>
 // The workspace is remembered across restarts: seeded synchronously from
 // localStorage so the field is correct on first paint, then mirrored to the
 // backend's config.json (the durable copy) whenever it changes.
+// '' is the Default pseudo-workspace (no root directory).
 const WORKSPACE_KEY = 'agent.workspace'
-const DEFAULT_WORKSPACE = '.'
+const DEFAULT_WORKSPACE = ''
 
 function loadStoredWorkspace(): string {
   if (typeof localStorage === 'undefined') return DEFAULT_WORKSPACE
   try {
     const ws = localStorage.getItem(WORKSPACE_KEY)
-    return ws && ws !== DEFAULT_WORKSPACE ? ws : DEFAULT_WORKSPACE
+    // Legacy value '.' meant "no workspace" too.
+    return ws && ws !== '.' ? ws : ''
   } catch {
     return DEFAULT_WORKSPACE
   }
@@ -132,6 +134,20 @@ export function persistWorkspace(ws: string): void {
   }
   void import('./api').then(({ updateLastWorkspace }) =>
     updateLastWorkspace(ws).catch(() => {}),
+  )
+}
+
+/** Forget the stored workspace (the user switched to Default). */
+function clearStoredWorkspace(): void {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(WORKSPACE_KEY)
+    } catch {
+      /* nothing to clear */
+    }
+  }
+  void import('./api').then(({ updateLastWorkspace }) =>
+    updateLastWorkspace('').catch(() => {}),
   )
 }
 
@@ -155,8 +171,10 @@ export const useAgent = create<AgentState>((set, get) => ({
         typeof q === 'function' ? q(s.pendingQuestion) : q,
     })),
   setWorkspace: (ws) => {
-    set({ workspace: ws })
-    if (ws && ws !== DEFAULT_WORKSPACE) persistWorkspace(ws)
+    const norm = ws === '.' ? '' : ws
+    set({ workspace: norm })
+    if (norm) persistWorkspace(norm)
+    else clearStoredWorkspace()
   },
 
   newConversation: () =>
