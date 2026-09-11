@@ -66,6 +66,9 @@ interface AgentState {
   setWorkspace: (ws: string) => void
   newConversation: () => void
   setConversationId: (id: number) => void
+  /** First send of a new chat: re-key the live 'draft' buffer to the real
+   * conversation id and follow it on screen, in one atomic update. */
+  adoptDraft: (id: number) => void
   setStatus: (s: AgentStatus) => void
   setError: (e: string | null) => void
   pushLog: (e: Omit<LogEntry, 'id' | 'time'>) => void
@@ -187,6 +190,24 @@ export const useAgent = create<AgentState>((set, get) => ({
     })),
 
   setConversationId: (id) => set({ conversationId: id }),
+
+  adoptDraft: (id) =>
+    set((s) => {
+      const draft = s.messagesByConv.draft ?? []
+      const rest = { ...s.messagesByConv }
+      delete rest.draft
+      return {
+        conversationId: id,
+        messagesByConv: {
+          ...rest,
+          // Merge rather than stomp: nothing should be under a fresh id,
+          // but a rematch must never drop messages either way.
+          [String(id)]: [...(rest[String(id)] ?? []), ...draft],
+          draft: [],
+        },
+      }
+    }),
+
   setStatus: (status) => set({ status }),
   setError: (error) => set({ error }),
 

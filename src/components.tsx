@@ -2037,6 +2037,7 @@ function Composer() {
     setStatus,
     setError,
     setConversationId,
+    adoptDraft,
     setPendingQuestion,
     pushLog,
     setAbortController,
@@ -2260,7 +2261,9 @@ function Composer() {
     // Capture the turn's target buffer now: everything this turn writes —
     // optimistic messages, stream deltas, tool traces — goes there, even if
     // the user switches to another conversation mid-stream (Q11: free).
-    const bufKey = conversationId === null ? 'draft' : String(conversationId)
+    // `let` because adopting a newly created conversation re-keys the
+    // buffer: events before adoption target 'draft', after it the real id.
+    let bufKey = conversationId === null ? 'draft' : String(conversationId)
     const userId = appendUserMessage(bufKey, fullText, imageDataUrls)
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
@@ -2270,7 +2273,11 @@ function Composer() {
       if (conversationId === null) {
         const created = await createConversation(fullText.slice(0, 40) || 'New chat', workspace)
         cid = created.id
-        setConversationId(cid)
+        // Atomic: re-key the draft buffer (optimistic messages included)
+        // to the new id and move the panel onto it. bufKey follows so the
+        // stream keeps writing where the panel is now looking.
+        adoptDraft(cid)
+        bufKey = String(cid)
       } else {
         cid = conversationId
       }
