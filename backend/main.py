@@ -576,7 +576,14 @@ async def api_transcribe(request: Request):
     voice = load_config().get("voice") or {}
     engine = voice.get("engine") or "local"
     if engine == "local" and not transcribe.local_available():
-        engine = "cloud"
+        # No silent cloud fallback: shipping a voice recording off-machine
+        # because the local engine is missing is a local-first violation.
+        # The mic button hides itself in this state; if a recording arrives
+        # anyway (engine switched after mount), say so plainly.
+        return JSONResponse(
+            {"detail": "Local transcription engine not found — pick cloud under Settings > Voice dictation, or reinstall."},
+            status_code=503,
+        )
     try:
         wav_path = transcribe.save_wav(pcm)
     except ValueError as e:

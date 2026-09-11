@@ -65,13 +65,24 @@ fn find_backend_cwd(app: &tauri::AppHandle) -> std::path::PathBuf {
 }
 
 fn spawn_backend(app: &tauri::AppHandle) -> Option<Child> {
+    // The resource dir (marker: backend/main.py) is the cwd for BOTH spawn
+    // paths: the sidecar resolves bundled assets relative to it (whisper
+    // engine/model live under backend/whisper/), and without it a Start
+    // Menu launch inherits something like C:\Windows\System32 and finds
+    // nothing.
+    let cwd = find_backend_cwd(app);
     // Prefer the bundled PyInstaller sidecar (no Python needed); fall back
     // to system python for dev runs, where no sidecar exists.
     if let Some(sidecar) = find_sidecar() {
-        eprintln!("using bundled backend: {}", sidecar.display());
-        return spawn_with_output(&mut Command::new(sidecar), app);
+        eprintln!(
+            "using bundled backend: {} (cwd: {})",
+            sidecar.display(),
+            cwd.display()
+        );
+        let mut cmd = Command::new(sidecar);
+        cmd.current_dir(&cwd);
+        return spawn_with_output(&mut cmd, app);
     }
-    let cwd = find_backend_cwd(app);
     // Tee backend output to a log file so startup failures are diagnosable.
     let log_path = std::env::temp_dir().join("yaah-backend.log");
     eprintln!("backend cwd: {} (log: {})", cwd.display(), log_path.display());
