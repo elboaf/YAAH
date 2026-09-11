@@ -551,6 +551,14 @@ function TreeRow({
           e.preventDefault()
           onContext(entry, e.clientX, e.clientY)
         }}
+        onKeyDown={(e) => {
+          // Keyboard equivalent of right-click (Windows convention).
+          if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+            e.preventDefault()
+            const r = e.currentTarget.getBoundingClientRect()
+            onContext(entry, r.left + 8, r.bottom + 4)
+          }
+        }}
       >
         <span className="mr-1 text-zinc-500">{entry.type === 'dir' ? (openDir ? '▾' : '▸') : '•'}</span>
         <span className={entry.type === 'dir' ? 'text-zinc-300' : 'text-zinc-400'}>{entry.name}</span>
