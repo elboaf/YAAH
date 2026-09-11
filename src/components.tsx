@@ -10,6 +10,7 @@ import {
   listAvailableModels,
   type ProviderModels,
   streamAgentTurn,
+  type AgentEvent,
   cancelAgent,
   getFileTree,
   previewFile,
@@ -452,6 +453,18 @@ function MessageBody({ content }: { content: string }) {
 }
 
 function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
+  // Persisted failure markers (backend writes role='system' when a turn
+  // dies): a slim machine line, not a fake agent message.
+  if (msg.role === 'system') {
+    if (!msg.content) return null
+    return (
+      <div className="font-mono text-[11px] text-red-400/90">
+        <span className="mr-1.5 text-zinc-600">⚠</span>
+        {msg.content}
+      </div>
+    )
+  }
+
   // Persisted tool-role messages (history load) render as one slim call row.
   if (msg.role === 'tool') {
     const tc = msg.toolCalls?.[0]
@@ -1223,15 +1236,21 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [err, setErr] = useState<string | null>(null)
   // The one provider whose fields are open; collapsed rows show a summary.
   const [expanded, setExpanded] = useState<string | null>(null)
+  // Provider awaiting removal confirmation (its saved key dies with it).
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null)
 
-  // Esc closes, matching PreviewModal and the dialog shells.
+  // Esc closes, matching PreviewModal and the dialog shells — but the
+  // removal confirm consumes Esc first, so it never dismisses two layers.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        if (removeTarget) setRemoveTarget(null)
+        else onClose()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, removeTarget])
 
   useEffect(() => {
     getConfig()
@@ -1416,7 +1435,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                   />
                   <button
                     className="mt-1.5 text-[10px] text-red-400 hover:text-red-300"
-                    onClick={() => removeProvider(name)}
+                    onClick={() => setRemoveTarget(name)}
                   >
                     remove provider
                   </button>
@@ -1515,6 +1534,18 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+      {removeTarget && (
+        <ConfirmDialog
+          title="Remove provider?"
+          body={`"${removeTarget}" will be removed when you Save, and its saved API key will be deleted from config.json. You would need to re-enter the key to use it again.`}
+          confirmLabel="Remove"
+          onCancel={() => setRemoveTarget(null)}
+          onConfirm={() => {
+            removeProvider(removeTarget)
+            setRemoveTarget(null)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1623,6 +1654,7 @@ function Composer() {
     pushLog,
     setAbortController,
     removeMessage,
+    loadHistory,
   } = useAgent()
   const abortController = useAgent((s) => s.abortController)
   const [input, setInput] = useState('')
@@ -1656,6 +1688,9 @@ function Composer() {
   // ---- attachment rejection feedback (harden: silent drops are a trust bug) ----
   const [rejects, setRejects] = useState<string[]>([])
   const [sendError, setSendError] = useState<string | null>(null)
+  // A turn that died mid-stream: the banner offers Resume (continue the same
+  // turn server-side, no duplicate user message) and dismiss.
+  const [turnError, setTurnError] = useState<string | null>(null)
   const pushReject = useCallback((msg: string) => {
     setRejects((r) => [...r.slice(-3), msg])
     // Auto-clear after 6s; each new rejection resets the timer.
@@ -1767,6 +1802,46 @@ function Composer() {
     })()
   }
 
+  /** One shared stream-event handler for both a fresh send and a resume:
+   *  everything keys off the in-flight assistant message id. */
+  const handleStreamEvent = (asstId: string) => (ev: AgentEvent) => {
+    if (ev.type === 'text') {
+      setStatus('thinking')
+      if (ev.text) appendTextDelta(asstId, ev.text)
+    } else if (ev.type === 'tool_start') {
+      setStatus('running-tool')
+      startToolCall(asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+      pushLog({ kind: 'tool', name: ev.name, args: ev.args })
+      if (ev.name === 'ask_user') {
+        const a = (ev.args ?? {}) as {
+          question?: string
+          options?: Array<{ label: string; description?: string }>
+        }
+        setPendingQuestion({
+          callId: ev.call_id ?? '',
+          question: a.question ?? '',
+          options: a.options ?? [],
+        })
+      }
+    } else if (ev.type === 'tool_result') {
+      finishToolCall(asstId, ev.call_id ?? '', ev.result)
+      pushLog({ kind: 'tool', name: ev.name, result: ev.result })
+      if (ev.name === 'ask_user') setPendingQuestion(null)
+    } else if (ev.type === 'error') {
+      setStatus('error')
+      setError(ev.message ?? 'Unknown agent error')
+      setTurnError(ev.message ?? 'Unknown agent error')
+      setPendingQuestion(null)
+    } else if (ev.type === 'stopped') {
+      setStatus('idle')
+      appendTextDelta(asstId, '\n[stopped]')
+      setPendingQuestion(null)
+    } else if (ev.type === 'done') {
+      setStatus('idle')
+      setPendingQuestion(null)
+    }
+  }
+
   const send = async () => {
     const text = input.trim()
     if ((!text && attachments.length === 0 && images.length === 0) || sending) return
@@ -1810,42 +1885,7 @@ function Composer() {
         cid,
         fullText,
         workspace,
-        (ev) => {
-          if (ev.type === 'text') {
-            setStatus('thinking')
-            if (ev.text) appendTextDelta(asstId, ev.text)
-          } else if (ev.type === 'tool_start') {
-            setStatus('running-tool')
-            startToolCall(asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
-            pushLog({ kind: 'tool', name: ev.name, args: ev.args })
-            if (ev.name === 'ask_user') {
-              const a = (ev.args ?? {}) as {
-                question?: string
-                options?: Array<{ label: string; description?: string }>
-              }
-              setPendingQuestion({
-                callId: ev.call_id ?? '',
-                question: a.question ?? '',
-                options: a.options ?? [],
-              })
-            }
-          } else if (ev.type === 'tool_result') {
-            finishToolCall(asstId, ev.call_id ?? '', ev.result)
-            pushLog({ kind: 'tool', name: ev.name, result: ev.result })
-            if (ev.name === 'ask_user') setPendingQuestion(null)
-          } else if (ev.type === 'error') {
-            setStatus('error')
-            setError(ev.message ?? 'Unknown agent error')
-            setPendingQuestion(null)
-          } else if (ev.type === 'stopped') {
-            setStatus('idle')
-            appendTextDelta(asstId, '\n[stopped]')
-            setPendingQuestion(null)
-          } else if (ev.type === 'done') {
-            setStatus('idle')
-            setPendingQuestion(null)
-          }
-        },
+        handleStreamEvent(asstId),
         ac.signal,
         imageDataUrls,
         invokedSkills,
@@ -1870,6 +1910,45 @@ function Composer() {
           `Message not sent — the agent could not be reached. Your draft was restored.`,
         )
         textareaRef.current?.focus()
+      }
+    } finally {
+      setSending(false)
+      setAbortController(null)
+    }
+  }
+
+  /** Continue a turn that died mid-stream: same conversation, same prompt,
+   *  no duplicate user message (backend resume flag). */
+  const resumeTurn = async () => {
+    if (conversationId === null || sending) return
+    setSending(true)
+    setSendError(null)
+    setTurnError(null)
+    setError(null)
+    const asstId = appendAssistantPlaceholder()
+    const ac = new AbortController()
+    setAbortController(ac)
+    try {
+      setStatus('thinking')
+      await streamAgentTurn(
+        conversationId,
+        'resume',
+        workspace,
+        handleStreamEvent(asstId),
+        ac.signal,
+        [],
+        [],
+        true,
+      )
+      if (useAgent.getState().status !== 'error') setStatus('idle')
+    } catch (e) {
+      setPendingQuestion(null)
+      if ((e as Error).name === 'AbortError') {
+        setStatus('idle')
+        appendTextDelta(asstId, '\n[stopped]')
+      } else {
+        setStatus('error')
+        setTurnError(String((e as Error).message ?? e))
       }
     } finally {
       setSending(false)
@@ -1975,6 +2054,29 @@ function Composer() {
           <button
             className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
             onClick={() => setSendError(null)}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+      {turnError && (
+        <div
+          className="mb-2 flex items-center justify-between gap-2 rounded border border-red-800/60 bg-red-950/40 px-2 py-1.5"
+          role="alert"
+        >
+          <p className="min-w-0 flex-1 truncate text-[11px] text-red-300" title={turnError}>
+            The turn failed mid-stream — {turnError}
+          </p>
+          <button
+            className="shrink-0 rounded border border-red-700 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-950"
+            disabled={sending}
+            onClick={() => void resumeTurn()}
+          >
+            Resume turn
+          </button>
+          <button
+            className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
+            onClick={() => setTurnError(null)}
           >
             dismiss
           </button>

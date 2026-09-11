@@ -144,6 +144,9 @@ class AgentTurn(BaseModel):
     workspace: str
     images: list[str] = []  # image data URLs attached by the user
     skills: list[str] = []  # skill names invoked via /s or chips
+    # True when continuing an interrupted turn: the user message is already
+    # stored, so the loop must not persist it again.
+    resume: bool = False
 
 
 class ProviderEntry(BaseModel):
@@ -177,7 +180,8 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
             image_paths.append(rel)
     return StreamingResponse(
         run_agent(conversation_id, body.message, body.workspace,
-                  image_paths=image_paths, skill_names=body.skills),
+                  image_paths=image_paths, skill_names=body.skills,
+                  persist_user=not body.resume),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

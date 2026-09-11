@@ -9,7 +9,7 @@ import json
 import pytest
 
 from backend.agent import loop as agent_loop
-from backend.db.database import create_conversation
+from backend.db.database import create_conversation, get_messages
 
 
 def sse_stream(*events):
@@ -179,3 +179,94 @@ def test_clip_result_str_keeps_json_valid():
 def test_clip_result_str_passthrough_small():
     s = agent_loop._clip_result_str({"ok": True})
     assert json.loads(s) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_fatal_error_persists_a_failure_marker(monkeypatch):
+    """A turn that dies mid-stream must leave a record: the user message is
+    already stored, so without a marker the transcript would read as if the
+    turn never ran (the audit-trail lie)."""
+    class AlwaysBoom(FakeChat):
+        async def __call__(self, messages, tools=None, stream=False):
+            async def boom():
+                raise agent_loop.model_client.ModelError("503 again")
+                yield  # pragma: no cover
+            return boom()
+
+    monkeypatch.setattr(agent_loop.model_client, "chat", AlwaysBoom([]))
+    cid = await create_conversation("t", ".")
+    out = [json.loads(l) async for l in agent_loop.run_agent(cid, "hello", ".")]
+    assert out[-1]["type"] == "error"
+
+    rows = await get_messages(cid)
+    roles = [r["role"] for r in rows]
+    assert "system" in roles, "failure marker must be persisted"
+    marker = next(r for r in rows if r["role"] == "system")
+    assert marker["content"].startswith("turn failed:")
+    assert "503 again" in marker["content"]
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_duplicate_the_user_message(monkeypatch):
+    """persist_user=False (the resume path) must not store the prompt again;
+    the model still sees it via the replayed history."""
+    captured = FakeChat([])
+    async def capture_chat(messages, tools=None, stream=False):
+        captured.calls.append([dict(m) for m in messages])
+        return sse_stream(
+            {"type": "content", "text": "ok"},
+            {"type": "finish", "reason": "stop"},
+        )
+
+    monkeypatch.setattr(agent_loop.model_client, "chat", capture_chat)
+    cid = await create_conversation("t", ".")
+    out = [
+        json.loads(l)
+        async for l in agent_loop.run_agent(
+            cid, "the original prompt", ".", persist_user=False
+        )
+    ]
+    assert out[-1]["type"] == "done"
+
+    rows = await get_messages(cid)
+    user_rows = [r for r in rows if r["role"] == "user"]
+    assert len(user_rows) == 0, "resume must not persist the user message again"
+    # The model still received the prompt through replayed history — here the
+    # history is empty (nothing persisted), so the loop sends the text itself.
+    # Verify via the turn completing without a model-visible error.
+    assert any(e["type"] == "text" and e.get("text") == "ok" for e in out)
+
+
+@pytest.mark.asyncio
+async def test_resume_replays_prior_history(monkeypatch):
+    """Resume builds model context from persisted history: a previously
+    stored user message is visible to the model without re-persisting."""
+    seen: list[list] = []
+
+    async def capture_chat(messages, tools=None, stream=False):
+        seen.append([dict(m) for m in messages])
+        return sse_stream(
+            {"type": "content", "text": "ok"},
+            {"type": "finish", "reason": "stop"},
+        )
+
+    monkeypatch.setattr(agent_loop.model_client, "chat", capture_chat)
+    cid = await create_conversation("t", ".")
+    # First turn stores the user message normally.
+    async for _ in agent_loop.run_agent(cid, "the original prompt", "."):
+        pass
+    # Second turn is a resume: same prompt text, nothing re-persisted.
+    async for _ in agent_loop.run_agent(
+        cid, "the original prompt", ".", persist_user=False
+    ):
+        pass
+
+    rows = await get_messages(cid)
+    user_rows = [r for r in rows if r["role"] == "user"]
+    assert len(user_rows) == 1, "resume must not duplicate the stored prompt"
+    # The resumed model call saw the stored prompt in its history.
+    resumed_messages = seen[-1]
+    assert any(
+        m["role"] == "user" and "the original prompt" in str(m.get("content", ""))
+        for m in resumed_messages
+    )

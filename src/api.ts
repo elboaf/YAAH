@@ -267,11 +267,12 @@ export async function streamAgentTurn(
   signal?: AbortSignal,
   images: string[] = [],
   skills: string[] = [],
+  resume = false,
 ): Promise<void> {
   const res = await fetch(url(`/api/agent/${conversationId}`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, workspace, images, skills }),
+    body: JSON.stringify({ message, workspace, images, skills, resume }),
     signal,
   })
   if (!res.ok || !res.body) {

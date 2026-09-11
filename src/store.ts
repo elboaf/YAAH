@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type Role = 'user' | 'assistant' | 'tool'
+export type Role = 'user' | 'assistant' | 'tool' | 'system'
 
 export interface ToolCall {
   id: string
@@ -288,8 +288,7 @@ export const useAgent = create<AgentState>((set) => ({
             role: r.role as Role,
             content: r.content,
             images: r.images ?? undefined,
-          })
-        }
+          })        }
         return out
       })(),
       status: 'idle',

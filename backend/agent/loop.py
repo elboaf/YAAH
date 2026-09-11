@@ -300,17 +300,22 @@ async def run_agent(
     workspace: str,
     image_paths: list | None = None,
     skill_names: list | None = None,
+    persist_user: bool = True,
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
     image_paths: rel paths (under backend/data/images/) of images the user
     attached; already saved to disk by the API layer.
     skill_names: skills the user invoked with /s or a chip; their bodies
-    are injected into the system prompt for this turn only."""
-    # Persist the user message first
-    await add_message(
-        conversation_id, "user", user_text, images=image_paths or None
-    )
+    are injected into the system prompt for this turn only.
+    persist_user: False when resuming an interrupted turn — the user
+    message is already stored and must not be duplicated."""
+    # Persist the user message first (skipped on resume; the text still
+    # reaches the model through the replayed history below).
+    if persist_user:
+        await add_message(
+            conversation_id, "user", user_text, images=image_paths or None
+        )
 
     # Per-conversation system prompt override (Q17) wins over the global one
     conv = await get_conversation(conversation_id)
@@ -516,17 +521,25 @@ async def run_agent(
                     images=[image_rel] if image_rel else None,
                 )
 
+        budget_msg = (
+            f"Step budget ({max_steps}) exhausted — raise it in "
+            "Settings → Max steps (or config.json `max_steps`; 0 = unlimited)"
+        )
+        await add_message(conversation_id, "system", f"turn failed: {budget_msg}")
         yield _ndjson({
             "type": "error",
-            "message": (
-                f"Step budget ({max_steps}) exhausted — raise it in "
-                "Settings → Max steps (or config.json `max_steps`; 0 = unlimited)"
-            ),
+            "message": budget_msg,
         })
 
     except model_client.ModelError as e:
+        # The user message is already stored; without a record of the
+        # failure the transcript would read as if the turn never happened.
+        await add_message(conversation_id, "system", f"turn failed: {e}")
         yield _ndjson({"type": "error", "message": str(e)})
     except Exception as e:  # noqa: BLE001
+        await add_message(
+            conversation_id, "system", f"turn failed: {type(e).__name__}: {e}"
+        )
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
         _cancel_events.pop(conversation_id, None)
