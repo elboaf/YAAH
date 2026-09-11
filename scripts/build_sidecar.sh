@@ -42,9 +42,12 @@ if [ ! -f "backend/whisper/bin/whisper-cli$EXE" ]; then
   cmake -S /tmp/whisper-src -B /tmp/whisper-build \
     -DCMAKE_BUILD_TYPE=Release \
     -DWHISPER_BUILD_TESTS=OFF \
-    -DWHISPER_BUILD_EXAMPLES=OFF \
+    -DWHISPER_BUILD_EXAMPLES=ON \
     -DGGML_OPENMP=OFF
-  cmake --build /tmp/whisper-build --target whisper-cli -j
+  # Build all (no --target: multi-config MSBuild/Xcode generators can't
+  # resolve target vcxproj files from the top dir). Examples=ON is required
+  # — whisper-cli IS an example; tests stay off, server defaults off.
+  cmake --build /tmp/whisper-build --config Release
   CLI=$(/usr/bin/find /tmp/whisper-build -name "whisper-cli${EXE}" -type f | head -1)
   mkdir -p backend/whisper/bin
   cp "$CLI" backend/whisper/bin/
