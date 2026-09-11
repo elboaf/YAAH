@@ -40,6 +40,14 @@ DEFAULTS = {
     "max_steps": 200,
     # Last workspace chosen in the sidebar, so it survives app restarts.
     "last_workspace": "",
+    # Voice dictation: local whisper.cpp by default; cloud = BYOK
+    # OpenAI-compatible /audio/transcriptions endpoint.
+    "voice": {
+        "engine": "local",
+        "cloud_endpoint": "",
+        "cloud_api_key": "",
+        "cloud_model": "whisper-1",
+    },
 }
 
 DEFAULT_PROVIDER = {
