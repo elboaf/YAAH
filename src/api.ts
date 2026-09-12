@@ -113,6 +113,12 @@ export interface AgentConfig {
     cloud_api_key: string
     cloud_model: string
   }
+  /** LAN hosting (this instance as a host). */
+  remote?: {
+    hosting_enabled: boolean
+    passphrase: string
+    display_name: string
+  }
 }
 
 export const getConfig = () => api<AgentConfig>('/api/config')
@@ -135,6 +141,11 @@ export const updateConfig = (
       cloud_endpoint: string
       cloud_api_key?: string
       cloud_model: string
+    }
+    remote?: {
+      hosting_enabled?: boolean
+      passphrase?: string
+      display_name?: string
     }
   }>,
 ) =>
@@ -184,11 +195,19 @@ export interface FileEntry {
   path: string
   type: 'file' | 'dir'
   children?: FileEntry[]
+  /** True when children were not loaded yet (fetch via getFileChildren). */
+  lazy?: boolean
 }
 
 export const getFileTree = (workspace: string) =>
   api<{ root: string; tree: FileEntry[] }>(
     `/api/files?workspace=${encodeURIComponent(workspace)}`,
+  )
+
+/** Children of one directory (lazy tree expansion; dirs come back lazy). */
+export const getFileChildren = (workspace: string, path: string) =>
+  api<{ entries: FileEntry[] }>(
+    `/api/files/children?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,
   )
 
 export const previewFile = (
@@ -242,6 +261,10 @@ export interface WorkspaceRow {
 }
 
 export const listWorkspaces = () => api<WorkspaceRow[]>('/api/workspaces')
+
+/** This machine's registry only (the sidebar greys it while connected). */
+export const listLocalWorkspaces = () =>
+  api<WorkspaceRow[]>('/api/workspaces/local')
 
 export const addWorkspace = (path: string) =>
   api<WorkspaceRow>('/api/workspaces', {
@@ -336,6 +359,51 @@ export const deleteFile = (workspace: string, path: string) =>
     `/api/files?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,
     { method: 'DELETE' },
   )
+
+// ---------------------------------------------------------------- remote hosting
+
+export interface RemoteHostFound {
+  name: string
+  host: string
+  port: number
+  protocol: number
+  /** Per-process instance id — used to hide this machine itself. */
+  iid: string
+  /** Stable per-host id — scopes conversations across restarts. */
+  hid?: string
+  os: string
+  /** Host requires a passphrase. */
+  auth: boolean
+}
+
+export interface RemoteStatus {
+  connected: boolean
+  url?: string
+  name?: string
+  host_id?: string
+  os?: string
+  app_version?: string
+  workspace_root?: string
+}
+
+/** mDNS sweep (~2.5s) for YAAH hosts on this LAN. */
+export const discoverHosts = () =>
+  api<{ hosts: RemoteHostFound[] }>('/api/remote/discover')
+
+/** This instance's own handshake info (instance id, hostname, …). */
+export const localInstanceInfo = () =>
+  api<{ instance_id: string; hostname: string }>('/api/remote/info')
+
+export const remoteStatus = () => api<RemoteStatus>('/api/remote/status')
+
+export const connectRemote = (url: string, passphrase: string) =>
+  api<RemoteStatus>('/api/remote/connect', {
+    method: 'POST',
+    body: JSON.stringify({ url, passphrase }),
+  })
+
+export const disconnectRemote = () =>
+  api<{ ok: boolean }>('/api/remote/disconnect', { method: 'POST' })
 
 // ---------------------------------------------------------------- agent stream
 

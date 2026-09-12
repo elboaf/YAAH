@@ -13,6 +13,7 @@ import {
   type AgentEvent,
   cancelAgent,
   getFileTree,
+  getFileChildren,
   previewFile,
   deleteFile,
   exportConversationMarkdown,
@@ -26,14 +27,23 @@ import {
   transcribeAudio,
   imageUrl,
   listWorkspaces,
+  listLocalWorkspaces,
   addWorkspace,
   deleteWorkspace,
+  discoverHosts,
+  localInstanceInfo,
+  remoteStatus,
+  connectRemote,
+  disconnectRemote,
+  type RemoteHostFound,
+  type RemoteStatus,
   type FileEntry,
   type ProviderPreset,
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
 import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
+import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
 import { VoiceRecorder } from './voice'
 
@@ -543,20 +553,35 @@ function TreeRow({
   depth,
   onOpen,
   onContext,
+  loadChildren,
 }: {
   entry: FileEntry
   depth: number
   onOpen: (e: FileEntry) => void
   onContext: (e: FileEntry, x: number, y: number) => void
+  loadChildren: (e: FileEntry) => Promise<FileEntry[]>
 }) {
   const [openDir, setOpenDir] = useState(depth < 1)
+  // Eager entries carry children; lazy ones fetch on first expand.
+  const [kids, setKids] = useState<FileEntry[] | null>(entry.children ?? null)
+  const [loadingKids, setLoadingKids] = useState(false)
+  const toggleDir = () => {
+    if (!openDir && kids === null) {
+      setLoadingKids(true)
+      loadChildren(entry)
+        .then((entries) => setKids(entries))
+        .catch(() => setKids([]))
+        .finally(() => setLoadingKids(false))
+    }
+    setOpenDir((o) => !o)
+  }
   return (
     <>
       <button
         className="block w-full truncate rounded px-1 py-0.5 text-left text-[11px] hover:bg-zinc-800"
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
         onClick={() => {
-          if (entry.type === 'dir') setOpenDir((o) => !o)
+          if (entry.type === 'dir') toggleDir()
           else onOpen(entry)
         }}
         onContextMenu={(e) => {
@@ -575,23 +600,58 @@ function TreeRow({
         <span className="mr-1 text-zinc-500">{entry.type === 'dir' ? (openDir ? '▾' : '▸') : '•'}</span>
         <span className={entry.type === 'dir' ? 'text-zinc-300' : 'text-zinc-400'}>{entry.name}</span>
       </button>
-      {entry.type === 'dir' &&
-        openDir &&
-        entry.children?.map((c) => (
-          <TreeRow key={c.path} entry={c} depth={depth + 1} onOpen={onOpen} onContext={onContext} />
-        ))}
+      {entry.type === 'dir' && openDir && (
+        <>
+          {loadingKids ? (
+            <p
+              className="py-0.5 font-mono text-[10px] text-zinc-600"
+              style={{ paddingLeft: `${(depth + 1) * 12 + 4}px` }}
+            >
+              loading…
+            </p>
+          ) : (
+            (kids ?? []).map((c) => (
+              <TreeRow
+                key={c.path}
+                entry={c}
+                depth={depth + 1}
+                onOpen={onOpen}
+                onContext={onContext}
+                loadChildren={loadChildren}
+              />
+            ))
+          )}
+        </>
+      )}
     </>
   )
 }
 
+// Session cache of fetched trees, keyed by scope+workspace: flipping between
+// This device and a host repaints instantly from here instead of refetching.
+// The backend now returns a depth-limited tree, so a fetch is cheap anyway.
+const treeCache = new Map<string, FileEntry[]>()
+
+/** Replace one entry's children in a tree (lazy expansion patch), returning
+ *  the new tree. Depth-first by path — paths are unique in a workspace. */
+function patchChildren(tree: FileEntry[], path: string, entries: FileEntry[]): FileEntry[] {
+  return tree.map((e) => {
+    if (e.path === path) return { ...e, children: entries, lazy: false }
+    if (e.children) return { ...e, children: patchChildren(e.children, path, entries) }
+    return e
+  })
+}
+
 export function FilesPanel() {
   const { workspace, previewPath, setPreviewPath, status } = useAgent()
+  const scope = useRemote((s) => s.scope)
   const [tree, setTree] = useState<FileEntry[]>([])
   const [menu, setMenu] = useState<{ entry: FileEntry; x: number; y: number } | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('filesPanelCollapsed') === '1')
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null)
+  const cacheKey = `${scope.connected ? scope.url : 'local'}|${workspace}`
 
   const toggleCollapsed = () =>
     setCollapsed((c) => {
@@ -605,17 +665,37 @@ export function FilesPanel() {
       setErr(null)
       return
     }
-    setLoading(true)
+    // Paint the cached tree immediately when we have one — a scope flip or a
+    // turn-end refresh must not blank the panel while the (cheap, shallow)
+    // fetch is in flight.
+    const cached = treeCache.get(cacheKey)
+    if (cached) setTree(cached)
+    setLoading(!cached)
     getFileTree(workspace)
       .then((r) => {
+        treeCache.set(cacheKey, r.tree)
         setTree(r.tree)
         setErr(null)
       })
       .catch((e) => setErr(String(e)))
       .finally(() => setLoading(false))
-  }, [workspace])
+  }, [cacheKey, workspace])
 
   useEffect(refresh, [refresh])
+
+  /** Fetch one directory's children (lazy tree) and patch tree + cache. */
+  const loadChildren = useCallback(
+    (entry: FileEntry) =>
+      getFileChildren(workspace, entry.path).then((r) => {
+        setTree((cur) => {
+          const next = patchChildren(cur, entry.path, r.entries)
+          treeCache.set(cacheKey, next)
+          return next
+        })
+        return r.entries
+      }),
+    [cacheKey, workspace],
+  )
 
   // The panel exists to watch the agent's workspace: refetch when a turn
   // ends (running-tool -> idle), so files it wrote appear without a manual
@@ -708,6 +788,7 @@ export function FilesPanel() {
               depth={0}
               onOpen={openPreview}
               onContext={(entry, x, y) => setMenu({ entry, x, y })}
+              loadChildren={loadChildren}
             />
           ))
         )}
@@ -1015,6 +1096,33 @@ const wsBasename = (path: string) => {
 const collapseKey = (path: string | null) =>
   `yaah.group.collapsed.${path ?? 'default'}`
 
+/** Groups for the greyed "This device" section shown while connected. */
+function buildLocalGroups(
+  localWorkspaces: WorkspaceRow[],
+  localConvs: Array<{ id: number; title: string; workspace: string | null }>,
+) {
+  const groups: Array<{ ws: WorkspaceRow; items: typeof localConvs }> = localWorkspaces.map(
+    (ws) => ({ ws, items: localConvs.filter((c) => (c.workspace ?? null) === ws.path) }),
+  )
+  const known = new Set(localWorkspaces.map((w) => w.path))
+  for (const c of localConvs) {
+    if (!known.has(c.workspace ?? null)) {
+      groups.push({
+        ws: {
+          id: -1,
+          path: c.workspace ?? null,
+          label: c.workspace === null ? 'Default (Home)' : wsBasename(c.workspace),
+          last_opened_at: null,
+          exists: true,
+          conversation_count: 0,
+        },
+        items: [],
+      })
+    }
+  }
+  return groups.filter((g) => g.items.length > 0 || g.ws.path === null)
+}
+
 function ConversationList() {
   const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation } = useAgent()
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
@@ -1025,13 +1133,24 @@ function ConversationList() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null)
   const [removeWsTarget, setRemoveWsTarget] = useState<WorkspaceRow | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
+  // Active connection scope decides which registry/chats are shown; local
+  // rows render greyed while a host is connected.
+  const scope = useRemote((s) => s.scope)
+  const [localWorkspaces, setLocalWorkspaces] = useState<WorkspaceRow[]>([])
 
   const refresh = useCallback(() => {
     listConversations().then(setConvs).catch(() => setConvs([]))
+    // Scope-aware: the backend returns the HOST's registry (namespaced)
+    // while connected, this machine's otherwise.
     listWorkspaces()
       .then(setWorkspaces)
       .catch(() => setWorkspaces([]))
-  }, [])
+    if (scope.connected) {
+      listLocalWorkspaces().then(setLocalWorkspaces).catch(() => setLocalWorkspaces([]))
+    } else {
+      setLocalWorkspaces([])
+    }
+  }, [scope.connected, scope.hostId])
   useEffect(() => {
     refresh()
   }, [conversationId, refresh])
@@ -1063,9 +1182,21 @@ function ConversationList() {
     })
   }
 
+  // Chats visible in the active scope: while connected, only conversations
+  // namespaced to THIS host; otherwise only non-remote ones. A chat from a
+  // different host stays hidden entirely (it would be unopenable anyway).
+  const inScope = (ws: string | null) => {
+    const ns = parseNsWorkspace(ws)
+    return scope.connected ? ns?.hostId === scope.hostId : ns === null
+  }
+  const visibleConvs = convs.filter((c) => inScope(c.workspace))
+  const localConvs = convs.filter((c) => parseNsWorkspace(c.workspace) === null)
+
   /** Open a conversation and adopt its workspace (the core invariant: the
-   *  open conversation's workspace IS the active workspace, both ways). */
+   *  open conversation's workspace IS the active workspace, both ways).
+   *  Scope guard: a local chat must never open while connected. */
   const openConversation = (c: { id: number; workspace: string | null }) => {
+    if (!inScope(c.workspace)) return
     setConversationId(c.id)
     setWorkspace(c.workspace ?? '')
     getMessages(c.id)
@@ -1089,10 +1220,10 @@ function ConversationList() {
   // recent conversation activity in each group.
   const groups: Array<{ ws: WorkspaceRow; items: typeof convs }> = []
   for (const w of workspaces) {
-    groups.push({ ws: w, items: convs.filter((c) => (c.workspace ?? null) === w.path) })
+    groups.push({ ws: w, items: visibleConvs.filter((c) => (c.workspace ?? null) === w.path) })
   }
   const knownPaths = new Set(workspaces.map((w) => w.path))
-  for (const c of convs) {
+  for (const c of visibleConvs) {
     const p = c.workspace ?? null
     if (!knownPaths.has(p)) {
       // A conversation filed under a path the registry doesn't know yet
@@ -1187,6 +1318,29 @@ function ConversationList() {
       })}
       {convs.length === 0 && groups.length === 0 && (
         <p className="px-2 py-3 text-center text-[11px] text-zinc-600">No conversations yet.</p>
+      )}
+      {scope.connected && (
+        <div
+          className="mt-3 border-t border-zinc-800 pt-2 opacity-40 select-none"
+          title="Local chats — switch back to “This device” to open them"
+          aria-disabled="true"
+        >
+          <p className="px-2 pb-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+            💻 This device — view only
+          </p>
+          {buildLocalGroups(localWorkspaces, localConvs).map(({ ws, items }) => (
+            <div key={ws.path ?? 'default'} className="mb-1 px-1">
+              <p className="truncate py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+                {ws.label}
+              </p>
+              {items.map((c) => (
+                <p key={c.id} className="truncate rounded px-2 py-1 text-xs text-zinc-600">
+                  {c.title}
+                </p>
+              ))}
+            </div>
+          ))}
+        </div>
       )}
 
       {/* in-app dialogs (replace native confirm/prompt/alert) */}
@@ -1365,24 +1519,32 @@ export function Sidebar() {
 
   // The workspace is remembered across restarts: the store seeds itself from
   // localStorage, and config.json is the durable fallback for a fresh install,
-  // cleared storage, or a first run on a new machine.
+  // cleared storage, or a first run on a new machine. A remote-namespaced
+  // last workspace is meaningless locally — the store already rejects it.
   useEffect(() => {
     if (workspace && workspace !== '.') return
     getConfig()
       .then((c) => {
-        if (c.last_workspace) setWorkspace(c.last_workspace)
+        if (c.last_workspace && !parseNsWorkspace(c.last_workspace)) setWorkspace(c.last_workspace)
       })
       .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Registry rows for the dropdown; refreshed when the conversation changes
-  // (a new conversation may have filed a workspace the list hasn't seen).
+  // Registry rows for the dropdown — scope-aware (host registry while
+  // connected); refreshed when the conversation changes or the scope flips.
+  const scope = useRemote((s) => s.scope)
+  const [localWorkspaces, setLocalWorkspaces] = useState<WorkspaceRow[]>([])
   const refreshWorkspaces = useCallback(() => {
     listWorkspaces()
       .then(setWorkspaces)
       .catch(() => setWorkspaces([]))
-  }, [])
+    if (scope.connected) {
+      listLocalWorkspaces().then(setLocalWorkspaces).catch(() => setLocalWorkspaces([]))
+    } else {
+      setLocalWorkspaces([])
+    }
+  }, [scope.connected, scope.hostId])
   useEffect(refreshWorkspaces, [refreshWorkspaces, conversationId])
 
   // Merged model list: every configured provider, queried in parallel by the
@@ -1422,11 +1584,37 @@ export function Sidebar() {
       .finally(() => setSavingModel(false))
   }
 
+  // While connected there is no client-side folder picker for host paths:
+  // the folder dialog can only open on the machine running the UI. Adding a
+  // host workspace is a free-text path, validated by the host on register.
+  const [showRemoteAdd, setShowRemoteAdd] = useState(false)
+  const [remoteAddPath, setRemoteAddPath] = useState('')
+
+  const addRemoteWorkspace = async () => {
+    const path = remoteAddPath.trim()
+    if (!path) return
+    try {
+      const ws = await addWorkspace(path)
+      setWorkspaces((list) => (list.some((w) => w.id === ws.id) ? list : [...list, ws]))
+      setWorkspace(ws.path ?? '')
+      newConversation()
+      setShowRemoteAdd(false)
+      setRemoteAddPath('')
+    } catch (e) {
+      setNotice({
+        title: 'Could not add folder on host',
+        message: String((e as Error).message ?? e).replace(/^\d+:\s*/, ''),
+      })
+    }
+  }
+
   /** Open a workspace from the dropdown: its most recent conversation, or a
    *  fresh chat when it has none (Q2: the dropdown is a conversation switcher). */
   const pickWorkspace = (value: string) => {
+    if (value.startsWith('__local_')) return // greyed local entry
     if (value === '__add__') {
-      void browseWorkspace()
+      if (scope.connected) setShowRemoteAdd(true)
+      else void browseWorkspace()
       return
     }
     const ws = workspaces.find((w) => (w.path ?? '') === value)
@@ -1511,7 +1699,11 @@ export function Sidebar() {
             'No root directory — conversations without a workspace'
           }
         >
-          <option value="">Default (Home)</option>
+          {scope.connected ? (
+            <option value="">{scope.name} — Default (Home)</option>
+          ) : (
+            <option value="">Default (Home)</option>
+          )}
           {workspaces
             .filter((w) => w.path !== null)
             .map((w) => (
@@ -1520,8 +1712,45 @@ export function Sidebar() {
                 {w.exists ? '' : '  (missing)'}
               </option>
             ))}
-          <option value="__add__">+ Add workspace…</option>
+          {scope.connected &&
+            localWorkspaces
+              .filter((w) => w.path !== null)
+              .map((w) => (
+                <option key={`local-${w.id}`} value={`__local_${w.id}`} disabled>
+                  {w.label} — this device
+                </option>
+              ))}
+          <option value="__add__">
+            {scope.connected ? '+ Add folder on host…' : '+ Add workspace…'}
+          </option>
         </select>
+        {scope.connected && showRemoteAdd && (
+          <div className="mb-3 rounded border border-zinc-700 bg-zinc-800 p-2">
+            <input
+              autoFocus
+              className="mb-1.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs"
+              placeholder="folder path on the host, e.g. C:/repos/proj"
+              value={remoteAddPath}
+              onChange={(e) => setRemoteAddPath(e.target.value)}
+              onKeyDown={(e) => e.key === 'Escape' && setShowRemoteAdd(false)}
+              aria-label="Folder path on the host"
+            />
+            <div className="flex justify-end gap-1.5">
+              <button
+                className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-900"
+                onClick={() => setShowRemoteAdd(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500"
+                onClick={() => void addRemoteWorkspace()}
+              >
+                Add on host
+              </button>
+            </div>
+          </div>
+        )}
         <div className="mb-3">
           <label className="mb-1 block text-xs text-zinc-500">
             Model{savingModel ? ' (saving...)' : ''}
@@ -1625,6 +1854,14 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [cloudKey, setCloudKey] = useState('')
   const [cloudKeySaved, setCloudKeySaved] = useState(false)
   const [cloudModel, setCloudModel] = useState('')
+  // LAN hosting: on by default; passphrase gates remote tool execution.
+  const [remoteHost, setRemoteHost] = useState(true)
+  const [remotePass, setRemotePass] = useState('')
+  const [remoteName, setRemoteName] = useState('')
+  // Config load state: Save stays disabled until a load SUCCEEDED — saving
+  // the empty initial copy would wipe every stored provider (the merge
+  // treats an absent provider as deleted).
+  const [loaded, setLoaded] = useState(false)
 
   // Esc closes, matching PreviewModal and the dialog shells — but the
   // removal confirm consumes Esc first, so it never dismisses two layers.
@@ -1640,29 +1877,52 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   }, [onClose, removeTarget])
 
   useEffect(() => {
-    getConfig()
-      .then((c) => {
-        const next: typeof providers = {}
-        for (const [name, p] of Object.entries(c.providers)) {
-          next[name] = {
-            api_base: p.api_base,
-            model: p.model,
-            apiKeyInput: '',
-            savedKey: p.api_key === 'set',
+    // Retry the config load: the backend can be momentarily busy (or still
+    // starting), and a failed load that looks like "no providers" is a
+    // wipe-in-waiting.
+    const loadConfig = async () => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const c = await getConfig()
+          const next: typeof providers = {}
+          for (const [name, p] of Object.entries(c.providers)) {
+            next[name] = {
+              api_base: p.api_base,
+              model: p.model,
+              apiKeyInput: '',
+              savedKey: p.api_key === 'set',
+            }
+          }
+          setProviders(next)
+          setActive(c.active_provider)
+          setTemperature(c.temperature ?? '')
+          setMaxTokens(c.max_tokens ? c.max_tokens : '')
+          setMaxSteps(c.max_steps ?? '')
+          const v = c.voice
+          setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
+          setCloudEndpoint(v?.cloud_endpoint ?? '')
+          setCloudKeySaved(v?.cloud_api_key === 'set')
+          setCloudModel(v?.cloud_model || '')
+          // Passphrase is stored plaintext by design (like provider keys),
+          // so Settings can show and edit it directly.
+          setRemoteHost(c.remote?.hosting_enabled ?? true)
+          setRemotePass(c.remote?.passphrase ?? '')
+          setRemoteName(c.remote?.display_name ?? '')
+          setLoaded(true)
+          setErr(null)
+          return
+        } catch (e) {
+          if (attempt === 3) {
+            setErr(
+              `Could not load settings: ${(e as Error).message}. Save is disabled so your saved providers cannot be wiped by accident.`,
+            )
+          } else {
+            await new Promise((r) => setTimeout(r, 800 * (attempt + 1)))
           }
         }
-        setProviders(next)
-        setActive(c.active_provider)
-        setTemperature(c.temperature ?? '')
-        setMaxTokens(c.max_tokens ? c.max_tokens : '')
-        setMaxSteps(c.max_steps ?? '')
-        const v = c.voice
-        setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
-        setCloudEndpoint(v?.cloud_endpoint ?? '')
-        setCloudKeySaved(v?.cloud_api_key === 'set')
-        setCloudModel(v?.cloud_model || '')
-      })
-      .catch((e) => setErr(String(e)))
+      }
+    }
+    void loadConfig()
     getProviders().then(setPresets).catch(() => {})
     transcribeStatus()
       .then((s) => {
@@ -1744,6 +2004,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           // the saved key survives.
           ...(cloudKey ? { cloud_api_key: cloudKey } : {}),
           cloud_model: cloudModel,
+        },
+        remote: {
+          hosting_enabled: remoteHost,
+          passphrase: remotePass,
+          display_name: remoteName,
         },
       })
       setSaved(true)
@@ -1991,6 +2256,42 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Remote hosting
+        </h3>
+        <div className="mb-2 space-y-1.5">
+          <label className="flex items-center gap-2 text-xs text-zinc-300">
+            <input
+              type="checkbox"
+              checked={remoteHost}
+              onChange={(e) => setRemoteHost(e.target.checked)}
+            />
+            Let other YAAH instances on this network use this machine
+          </label>
+          <div className="flex gap-1.5">
+            <input
+              className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              type="password"
+              value={remotePass}
+              onChange={(e) => setRemotePass(e.target.value)}
+              placeholder="passphrase (required to accept remote tools)"
+              aria-label="Hosting passphrase"
+            />
+            <input
+              className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={remoteName}
+              onChange={(e) => setRemoteName(e.target.value)}
+              placeholder="display name (optional)"
+              aria-label="Host display name"
+            />
+          </div>
+          <p className="text-[10px] text-zinc-600">
+            Workspace tools (shell, files, git) of a connected client run on this machine's home
+            directory — set a passphrase before the Windows firewall prompt is accepted. Other
+            devices appear next to the chatbox automatically.
+          </p>
+        </div>
+
         {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
 
         <div className="flex justify-end gap-2">
@@ -2002,7 +2303,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </button>
           <button
             className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
-            disabled={saving}
+            disabled={saving || !loaded}
+            title={loaded ? undefined : 'Settings are still loading'}
             onClick={save}
           >
             {saved ? 'Saved!' : saving ? 'Saving...' : 'Save'}
@@ -2141,6 +2443,287 @@ const attachmentText = (a: Attachment): string => {
   }
   const kb = Math.max(1, Math.round(a.size / 1_000))
   return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
+}
+
+/** Remembered passphrases per host URL, and the last-connected URL for
+ *  auto-reconnect on launch. localStorage only — the backend keeps the
+ *  session in memory alone, so a restart reconnects from here. */
+const REMOTE_PASS_KEY = 'yaah.remote.pass'
+const REMOTE_LAST_KEY = 'yaah.remote.last'
+
+function loadPassMap(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(REMOTE_PASS_KEY) ?? '{}')
+  } catch {
+    return {}
+  }
+}
+
+function savePassMap(map: Record<string, string>) {
+  try {
+    localStorage.setItem(REMOTE_PASS_KEY, JSON.stringify(map))
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/**
+ * Host switcher: sits left of the chatbox. "This device" is the local
+ * backend; any discovered YAAH host on the LAN can be selected instead —
+ * the agent's workspace tools then execute over there (conversations and
+ * provider keys stay here). Switching is locked while a turn is running.
+ */
+function HostSwitcher({ disabled }: { disabled: boolean }) {
+  const [status, setStatus] = useState<RemoteStatus | null>(null)
+  const [open, setOpen] = useState(false)
+  const [hosts, setHosts] = useState<RemoteHostFound[] | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [askingPass, setAskingPass] = useState<RemoteHostFound | null>(null)
+  const [pass, setPass] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const remember = (url: string, passphrase: string) => {
+    const map = loadPassMap()
+    if (passphrase) map[url] = passphrase
+    else delete map[url]
+    savePassMap(map)
+    try {
+      if (url) localStorage.setItem(REMOTE_LAST_KEY, url)
+      else localStorage.removeItem(REMOTE_LAST_KEY)
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  const connect = async (url: string, passphrase: string) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      const s = await connectRemote(url, passphrase)
+      setStatus(s)
+      remember(url, passphrase)
+      setAskingPass(null)
+      setOpen(false)
+      // Scope switch: stash the local workspace so disconnect restores it,
+      // and land on the host's Default workspace.
+      if (s.host_id) {
+        const st = useAgent.getState()
+        if (!parseNsWorkspace(st.workspace)) {
+          try {
+            localStorage.setItem('yaah.ws.stash', st.workspace)
+          } catch {
+            /* storage unavailable */
+          }
+        }
+        st.setWorkspace(nsWorkspace(s.host_id, null))
+        useRemote.setState({
+          scope: { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os },
+        })
+      }
+    } catch (e) {
+      setErr(String((e as Error).message).replace(/^\d+:\s*/, ''))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const goLocal = async () => {
+    setBusy(true)
+    try {
+      await disconnectRemote()
+      remember('', '')
+      setStatus({ connected: false })
+      setOpen(false)
+      // Restore the stashed local workspace (stashed at connect time).
+      let stash = ''
+      try {
+        stash = localStorage.getItem('yaah.ws.stash') ?? ''
+        localStorage.removeItem('yaah.ws.stash')
+      } catch {
+        /* storage unavailable */
+      }
+      useAgent.getState().setWorkspace(stash)
+      useRemote.setState({ scope: { connected: false } })
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const scan = () => {
+    setScanning(true)
+    setErr(null)
+    // Hide this machine itself from the list (its beacon arrives like any
+    // other host's, seen via its LAN IP) and match by instance id.
+    Promise.all([discoverHosts(), localInstanceInfo()])
+      .then(([r, me]) =>
+        setHosts(r.hosts.filter((h) => h.iid && h.iid !== me.instance_id)),
+      )
+      .catch((e) => setErr(String(e)))
+      .finally(() => setScanning(false))
+  }
+
+  // Restore the last host on launch; silent failure just means local mode.
+  useEffect(() => {
+    remoteStatus()
+      .then((s) => {
+        if (s.connected) {
+          setStatus(s)
+          useRemote.setState({
+            scope: { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os },
+          })
+          return
+        }
+        let last = ''
+        try {
+          last = localStorage.getItem(REMOTE_LAST_KEY) ?? ''
+        } catch {
+          /* storage unavailable */
+        }
+        const passMap = loadPassMap()
+        if (last && passMap[last] !== undefined) void connect(last, passMap[last])
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const pickHost = (h: RemoteHostFound) => {
+    const url = `http://${h.host}:${h.port}`
+    const known = loadPassMap()[url]
+    if (h.auth && known === undefined) {
+      setAskingPass(h)
+      setPass('')
+      return
+    }
+    void connect(url, known ?? '')
+  }
+
+  const connected = status?.connected === true
+
+  return (
+    <div className="relative self-end">
+      <button
+        title={
+          connected
+            ? `Connected to ${status?.name} — tools run there (click to switch)`
+            : 'Running on this device (click to pick a remote host)'
+        }
+        aria-label="Host switcher"
+        aria-expanded={open}
+        disabled={disabled}
+        className={`flex items-center gap-1.5 whitespace-nowrap rounded border px-2.5 py-2 text-xs ${
+          connected
+            ? 'border-emerald-700 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-950'
+            : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+        } disabled:opacity-50`}
+        onClick={() => {
+          setOpen(!open)
+          if (!open && hosts === null) scan()
+        }}
+      >
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 14 14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          aria-hidden="true"
+        >
+          <rect x="2" y="2.5" width="10" height="4" rx="1" />
+          <rect x="2" y="8.5" width="10" height="4" rx="1" />
+        </svg>
+        {connected ? status?.name : 'This device'}
+      </button>
+      {open && (
+        <div className="absolute bottom-12 left-0 z-20 w-80 rounded border border-zinc-700 bg-zinc-900 shadow-lg">
+          {askingPass ? (
+            <form
+              className="p-3"
+              onSubmit={(e) => {
+                e.preventDefault()
+                if (askingPass) void connect(`http://${askingPass.host}:${askingPass.port}`, pass)
+              }}
+            >
+              <p className="mb-2 text-xs text-zinc-300">
+                Passphrase for <span className="font-mono text-zinc-100">{askingPass.name}</span>
+              </p>
+              <input
+                type="password"
+                autoFocus
+                className="mb-2 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                aria-label="Host passphrase"
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                  onClick={() => setAskingPass(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="rounded bg-blue-600 px-2 py-1 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50"
+                >
+                  Connect
+                </button>
+              </div>
+            </form>
+          ) : (
+            <>
+              <button
+                className={`block w-full px-3 py-2 text-left text-xs ${
+                  connected ? 'hover:bg-zinc-800/60' : 'bg-zinc-800/80 text-zinc-400'
+                }`}
+                disabled={busy}
+                onClick={() => void goLocal()}
+              >
+                💻 This device
+                {!connected && <span className="ml-1 text-[10px] text-zinc-500">(current)</span>}
+              </button>
+              <div className="border-t border-zinc-800" />
+              {(hosts ?? []).map((h) => (
+                <button
+                  key={`${h.host}:${h.port}`}
+                  className="block w-full px-3 py-2 text-left text-xs hover:bg-zinc-800/60"
+                  disabled={busy}
+                  onClick={() => pickHost(h)}
+                >
+                  <span className="text-zinc-200">
+                    {h.auth ? '🔒' : '🌐'} {h.name}
+                  </span>
+                  <span className="ml-1 text-[10px] text-zinc-500">
+                    {h.host}:{h.port} · {h.os}
+                  </span>
+                </button>
+              ))}
+              {hosts !== null && hosts.length === 0 && (
+                <p className="px-3 py-2 text-[11px] text-zinc-500">
+                  No hosts found on this network. Install YAAH on the other machine (hosting is on
+                  by default) — first launches may need the Windows firewall prompt accepted.
+                </p>
+              )}
+              <button
+                className="block w-full border-t border-zinc-800 px-3 py-1.5 text-left text-[10px] text-zinc-500 hover:text-zinc-300"
+                disabled={scanning || busy}
+                onClick={scan}
+              >
+                {scanning ? 'Scanning…' : '↻ Scan network'}
+              </button>
+            </>
+          )}
+          {err && <p className="border-t border-red-900 px-3 py-1.5 text-[10px] text-red-300">{err}</p>}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function Composer() {
@@ -2750,6 +3333,7 @@ function Composer() {
         </div>
       )}
       <div className="flex gap-2">
+        <HostSwitcher disabled={streaming || sending} />
         <textarea
           ref={textareaRef}
           className={`flex-1 resize-none rounded border bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none ${

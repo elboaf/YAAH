@@ -26,13 +26,27 @@ DEFAULT_MAX_STEPS = 200
 MAX_TOOL_RESULT_CHARS = 20_000
 
 def _default_system_prompt() -> str:
-    """SYSTEM_PROMPT adapted to the current OS: the tool list and the
-    runtime-environment line must match what execute_tool can actually
-    do here, or the model attempts commands for the wrong platform
-    (e.g. PowerShell registry queries on Linux)."""
+    """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
+    and the runtime-environment line must match what execute_tool can
+    actually do where tools run — the remote host while one is connected,
+    otherwise this machine — or the model attempts commands for the wrong
+    platform (e.g. PowerShell registry queries on Linux)."""
     import platform
 
-    windows = os.name == "nt"
+    from backend.agent import remote as remote_mod
+
+    host = remote_mod.get_remote()
+    if host is not None:
+        env = host.env_line()
+        windows = host.windows
+    else:
+        windows = os.name == "nt"
+        env = (
+            f"Runtime environment: {platform.system()} {platform.release()} "
+            f"({platform.machine()}). The bash tool runs commands through the "
+            f"system shell ({'cmd.exe' if windows else 'bash/sh'}); use "
+            f"commands and paths valid for THIS operating system."
+        )
     tools = ["bash (shell commands)"]
     if windows:
         tools.append("powershell (Windows PowerShell)")

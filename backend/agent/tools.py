@@ -905,7 +905,16 @@ SCHEMAS = {s["function"]["name"]: s for s in TOOLS_SCHEMA}
 
 
 async def execute_tool(name: str, arguments: dict, workspace: str) -> dict:
-    """Execute a tool by name with a dict of arguments. Never raises."""
+    """Execute a tool by name with a dict of arguments. Never raises.
+
+    While a remote session is active, workspace-touching tools are
+    forwarded to the host (see backend/agent/remote.py); everything else
+    runs locally."""
+    from backend.agent import remote as remote_mod
+
+    host = remote_mod.get_remote()
+    if host is not None and name in remote_mod.REMOTE_TOOLS:
+        return await host.exec_tool(name, arguments)
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
@@ -918,8 +927,13 @@ async def execute_tool(name: str, arguments: dict, workspace: str) -> dict:
 
 
 def get_schemas() -> list:
-    # powershell only exists on Windows (powershell.exe); exposing it
-    # elsewhere just invites the model to attempt Windows commands.
-    if os.name == "nt":
-        return TOOLS_SCHEMA + [POWERSHELL_SCHEMA]
-    return TOOLS_SCHEMA
+    """Schemas matching the EXECUTION TARGET's platform: a remote host that
+    is Linux must never see `powershell`, and a Linux client driving a
+    Windows host must. Same rule as the local case (powershell exists only
+    on Windows), just evaluated against the connected host when there is
+    one."""
+    from backend.agent import remote as remote_mod
+
+    host = remote_mod.get_remote()
+    windows = host.windows if host is not None else os.name == "nt"
+    return TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA

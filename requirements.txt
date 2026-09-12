@@ -10,5 +10,7 @@ pydantic>=2.10.0
 curl_cffi>=0.7.0
 # SKILL.md frontmatter parsing (skills feature)
 pyyaml>=6.0
+# LAN host discovery for remote hosting (mDNS advertise + browse)
+zeroconf>=0.136.0
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
