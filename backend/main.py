@@ -6,6 +6,8 @@ flow through this server.
 """
 from contextlib import asynccontextmanager
 
+import httpx
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,8 +24,20 @@ async def lifespan(app: FastAPI):
 
     skills_registry.ensure_dir()
     skills_registry.ensure_scanned()
-    yield
+    # LAN hosting (on by default): advertise this backend over mDNS so
+    # other YAAH instances can discover it. A host that can't advertise
+    # is still reachable by direct IP; failures are logged, never fatal.
+    from backend.agent import discovery
+    from backend.agent.config import load_config
 
+    if (load_config().get("remote") or {}).get("hosting_enabled", True):
+        discovery.start_advertising(API_PORT)
+    yield
+    discovery.stop_advertising()
+
+
+# The sidecar always serves on this port (backend_entry.py, lib.rs spawn).
+API_PORT = 8765
 
 app = FastAPI(title="AI Coding Agent", version="0.6.10", lifespan=lifespan)
 
@@ -36,6 +50,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def remote_auth_guard(request, call_next):
+    """Remote-request gate: any request carrying X-Yaah-Remote (i.e. coming
+    from another YAAH instance's client proxy) must present the host's
+    passphrase. The local UI never sets the marker and is unaffected —
+    localhost stays trust-based. A host with no passphrase set refuses
+    remote access outright, so hosting on by default exposes nothing."""
+    from fastapi.responses import JSONResponse
+
+    from backend.agent.config import load_config
+
+    if request.headers.get("x-yaah-remote"):
+        expected = (load_config().get("remote") or {}).get("passphrase") or ""
+        got = request.headers.get("x-yaah-passphrase") or ""
+        if not expected or got != expected:
+            detail = (
+                "remote access refused: no passphrase set on this host (set one under Settings)"
+                if not expected
+                else "remote access refused: wrong passphrase"
+            )
+            return JSONResponse({"detail": detail}, status_code=401)
+    return await call_next(request)
 
 
 @app.get("/api/health")
@@ -204,6 +242,7 @@ class ConfigUpdate(BaseModel):
     max_tokens: int | None = None
     max_steps: int | None = None
     voice: dict | None = None
+    remote: dict | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -254,8 +293,15 @@ class NewAttachment(BaseModel):
 @app.post("/api/attachments")
 async def api_save_attachment(body: NewAttachment):
     """Stage a user-attached text file inside the workspace so the agent's
-    workspace-sandboxed read_file tool can open it on demand."""
+    workspace-sandboxed read_file tool can open it on demand. Proxied to
+    the host while a remote session is active (the file lands in the
+    host's workspace, where its read_file will look)."""
     import os
+
+    host = remote_mod.get_remote()
+    if host is not None:
+        res = await host.proxy("POST", "/api/attachments", json_body=body.model_dump())
+        return _proxy_result(res)
 
     from backend.agent.tools import resolve_path
 
@@ -368,12 +414,21 @@ async def api_available_models():
 
 from pathlib import Path as _Path
 
+from backend.agent import remote as remote_mod
 from backend.agent.tools import IGNORED_DIRS, read_file, resolve_path, workspace_root
 
 
 @app.get("/api/files")
 async def api_file_tree(workspace: str):
-    """Recursive file tree of the workspace (ignored dirs skipped)."""
+    """Recursive file tree of the workspace (ignored dirs skipped).
+
+    While a remote session is active the call is proxied to the host, so
+    the FilesPanel transparently shows the host's workspace."""
+    host = remote_mod.get_remote()
+    if host is not None:
+        res = await host.proxy("GET", "/api/files", params={"workspace": workspace})
+        return _proxy_result(res)
+
     root = workspace_root(workspace)
     if not root.exists():
         raise HTTPException(status_code=400, detail="workspace does not exist")
@@ -406,6 +461,12 @@ class PreviewRequest(BaseModel):
 
 @app.post("/api/files/preview")
 async def api_file_preview(body: PreviewRequest):
+    host = remote_mod.get_remote()
+    if host is not None:
+        res = await host.proxy(
+            "POST", "/api/files/preview", json_body=body.model_dump()
+        )
+        return _proxy_result(res)
     result = await read_file(
         body.workspace, body.path, start_line=body.start_line, end_line=body.end_line
     )
@@ -417,12 +478,32 @@ async def api_file_preview(body: PreviewRequest):
 @app.delete("/api/files")
 async def api_delete_file(workspace: str, path: str):
     """Delete a file from the workspace (file-tree context menu)."""
+    host = remote_mod.get_remote()
+    if host is not None:
+        res = await host.proxy(
+            "DELETE",
+            "/api/files",
+            params={"workspace": workspace, "path": path},
+        )
+        return _proxy_result(res)
+
     from backend.agent.tools import delete_file
 
     result = await delete_file(workspace, path)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+def _proxy_result(res):
+    """Unwrap a proxied host response; surface host errors as HTTP errors."""
+    if res.status_code != 200:
+        try:
+            detail = res.json().get("detail") or res.text[:200]
+        except ValueError:
+            detail = res.text[:200]
+        raise HTTPException(status_code=res.status_code or 502, detail=detail)
+    return res.json()
 
 
 # ---- Markdown export ----
@@ -492,6 +573,9 @@ async def api_get_config():
             **(cfg.get("voice") or {}),
             "cloud_api_key": "set" if (cfg.get("voice") or {}).get("cloud_api_key") else "",
         },
+        # LAN hosting block. The passphrase is stored plaintext by design
+        # (same posture as provider keys) and shown only in this app's UI.
+        "remote": cfg.get("remote") or {},
     }
 
 
@@ -506,7 +590,22 @@ async def api_set_config(body: ConfigUpdate):
         if voice.get("cloud_api_key") in ("set", ""):
             voice.pop("cloud_api_key", None)
         updates["voice"] = {**existing, **voice}
+    # Remote block merges the same way: a Settings save that only touches
+    # hosting_enabled must not wipe the passphrase.
+    remote = updates.get("remote")
+    if isinstance(remote, dict):
+        existing = load_config().get("remote") or {}
+        merged = {**existing, **remote}
+        updates["remote"] = merged
     save_config(updates)
+    # Hosting toggles need the mDNS advertiser to follow.
+    if isinstance(remote, dict):
+        from backend.agent import discovery
+
+        if merged.get("hosting_enabled"):
+            discovery.start_advertising(API_PORT)
+        else:
+            discovery.stop_advertising()
     return {"ok": True}
 
 
@@ -606,3 +705,115 @@ async def api_transcribe(request: Request):
         except OSError:
             pass
     return {"text": text}
+
+# ---- Remote hosting: host role (serve other YAAH instances) + client role ----
+
+from backend.agent import discovery, remote as remote_mod
+from backend.agent.remote import PROTOCOL_VERSION
+from backend.agent import tools as tools_mod
+
+
+class RemoteExec(BaseModel):
+    name: str
+    args: dict = {}
+
+
+@app.get("/api/remote/info")
+async def api_remote_info():
+    """Handshake for a connecting client: identity + protocol + target OS."""
+    info = remote_mod.host_info()
+    info["app_version"] = app.version
+    info["display_name"] = discovery._display_name()
+    return info
+
+
+@app.post("/api/remote/exec")
+async def api_remote_exec(body: RemoteExec):
+    """Execute one workspace tool in THIS host's default workspace. Only
+    reachable with the passphrase (the X-Yaah-Remote middleware above
+    enforces it for every marker-carrying request), and only for tools
+    in REMOTE_TOOLS — the host never runs anything else on behalf of a
+    remote peer. Dispatches through EXECUTORS directly, NOT execute_tool:
+    the host-side executor must never consult this host's own remote
+    session, or a host that is also connected out would forward the call
+    in a loop."""
+    fn = tools_mod.EXECUTORS.get(body.name)
+    if body.name not in remote_mod.REMOTE_TOOLS or fn is None:
+        raise HTTPException(status_code=400, detail=f"{body.name} is not a remote-capable tool")
+    try:
+        return await fn(workspace="", **body.args)
+    except TypeError as e:
+        return {"error": f"Bad arguments for {body.name}: {e}"}
+    except Exception as e:  # noqa: BLE001 — mirror execute_tool's never-raise
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+class RemoteConnect(BaseModel):
+    url: str  # e.g. http://192.168.1.10:8765 (or a tailscale https URL)
+    passphrase: str = ""
+
+
+@app.get("/api/remote/discover")
+async def api_remote_discover():
+    """mDNS sweep for hosts on this LAN (blocking sweep, ~2.5s)."""
+    import asyncio
+
+    hosts = await asyncio.to_thread(discovery.browse)
+    return {"hosts": hosts}
+
+
+@app.post("/api/remote/connect")
+async def api_remote_connect(body: RemoteConnect):
+    """Handshake with a host, refuse protocol mismatches, and make it the
+    active session (workspace tools + files proxy route there)."""
+    url = body.url.strip()
+    if url and not url.startswith(("http://", "https://")):
+        url = f"http://{url}"
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            res = await client.get(f"{url}/api/remote/info")
+        res.raise_for_status()
+        info = res.json()
+    except (httpx.HTTPError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"host unreachable: {e}")
+    if info.get("protocol") != PROTOCOL_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Incompatible YAAH versions: this app speaks protocol "
+                f"{PROTOCOL_VERSION}, the host reports {info.get('protocol')}. "
+                "Update both instances to matching versions."
+            ),
+        )
+    # Connecting this instance to itself would send every workspace tool
+    # and files call in an endless loop back through its own endpoints.
+    if info.get("instance_id") == remote_mod.INSTANCE_ID:
+        raise HTTPException(status_code=400, detail="refusing to connect to this same instance")
+    host = remote_mod.RemoteSession(url, body.passphrase, info, app_version=info.get("app_version", ""))
+    remote_mod.set_remote(host)
+    return remote_status_dict(host)
+
+
+@app.post("/api/remote/disconnect")
+async def api_remote_disconnect():
+    remote_mod.clear_remote()
+    return {"ok": True}
+
+
+def remote_status_dict(host: remote_mod.RemoteSession | None = None):
+    host = host if host is not None else remote_mod.get_remote()
+    if host is None:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "url": host.url,
+        "name": host.name,
+        "os": host.info.get("os"),
+        "app_version": host.app_version,
+        "workspace_root": host.info.get("workspace_root"),
+    }
+
+
+@app.get("/api/remote/status")
+async def api_remote_status():
+    return remote_status_dict()

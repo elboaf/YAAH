@@ -48,6 +48,13 @@ DEFAULTS = {
         "cloud_api_key": "",
         "cloud_model": "whisper-1",
     },
+    # LAN hosting (see backend/agent/remote.py + discovery.py). Hosting is
+    # on by default; a host with no passphrase refuses remote exec.
+    "remote": {
+        "hosting_enabled": True,
+        "passphrase": "",
+        "display_name": "",
+    },
 }
 
 DEFAULT_PROVIDER = {

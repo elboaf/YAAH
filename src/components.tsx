@@ -28,6 +28,12 @@ import {
   listWorkspaces,
   addWorkspace,
   deleteWorkspace,
+  discoverHosts,
+  remoteStatus,
+  connectRemote,
+  disconnectRemote,
+  type RemoteHostFound,
+  type RemoteStatus,
   type FileEntry,
   type ProviderPreset,
   type SkillInfo,
@@ -1625,6 +1631,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [cloudKey, setCloudKey] = useState('')
   const [cloudKeySaved, setCloudKeySaved] = useState(false)
   const [cloudModel, setCloudModel] = useState('')
+  // LAN hosting: on by default; passphrase gates remote tool execution.
+  const [remoteHost, setRemoteHost] = useState(true)
+  const [remotePass, setRemotePass] = useState('')
+  const [remoteName, setRemoteName] = useState('')
 
   // Esc closes, matching PreviewModal and the dialog shells — but the
   // removal confirm consumes Esc first, so it never dismisses two layers.
@@ -1661,6 +1671,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         setCloudEndpoint(v?.cloud_endpoint ?? '')
         setCloudKeySaved(v?.cloud_api_key === 'set')
         setCloudModel(v?.cloud_model || '')
+        // Passphrase is stored plaintext by design (like provider keys),
+        // so Settings can show and edit it directly.
+        setRemoteHost(c.remote?.hosting_enabled ?? true)
+        setRemotePass(c.remote?.passphrase ?? '')
+        setRemoteName(c.remote?.display_name ?? '')
       })
       .catch((e) => setErr(String(e)))
     getProviders().then(setPresets).catch(() => {})
@@ -1744,6 +1759,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           // the saved key survives.
           ...(cloudKey ? { cloud_api_key: cloudKey } : {}),
           cloud_model: cloudModel,
+        },
+        remote: {
+          hosting_enabled: remoteHost,
+          passphrase: remotePass,
+          display_name: remoteName,
         },
       })
       setSaved(true)
@@ -1991,6 +2011,42 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Remote hosting
+        </h3>
+        <div className="mb-2 space-y-1.5">
+          <label className="flex items-center gap-2 text-xs text-zinc-300">
+            <input
+              type="checkbox"
+              checked={remoteHost}
+              onChange={(e) => setRemoteHost(e.target.checked)}
+            />
+            Let other YAAH instances on this network use this machine
+          </label>
+          <div className="flex gap-1.5">
+            <input
+              className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              type="password"
+              value={remotePass}
+              onChange={(e) => setRemotePass(e.target.value)}
+              placeholder="passphrase (required to accept remote tools)"
+              aria-label="Hosting passphrase"
+            />
+            <input
+              className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={remoteName}
+              onChange={(e) => setRemoteName(e.target.value)}
+              placeholder="display name (optional)"
+              aria-label="Host display name"
+            />
+          </div>
+          <p className="text-[10px] text-zinc-600">
+            Workspace tools (shell, files, git) of a connected client run on this machine's home
+            directory — set a passphrase before the Windows firewall prompt is accepted. Other
+            devices appear next to the chatbox automatically.
+          </p>
+        </div>
+
         {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
 
         <div className="flex justify-end gap-2">
@@ -2141,6 +2197,254 @@ const attachmentText = (a: Attachment): string => {
   }
   const kb = Math.max(1, Math.round(a.size / 1_000))
   return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
+}
+
+/** Remembered passphrases per host URL, and the last-connected URL for
+ *  auto-reconnect on launch. localStorage only — the backend keeps the
+ *  session in memory alone, so a restart reconnects from here. */
+const REMOTE_PASS_KEY = 'yaah.remote.pass'
+const REMOTE_LAST_KEY = 'yaah.remote.last'
+
+function loadPassMap(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(REMOTE_PASS_KEY) ?? '{}')
+  } catch {
+    return {}
+  }
+}
+
+function savePassMap(map: Record<string, string>) {
+  try {
+    localStorage.setItem(REMOTE_PASS_KEY, JSON.stringify(map))
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/**
+ * Host switcher: sits left of the chatbox. "This device" is the local
+ * backend; any discovered YAAH host on the LAN can be selected instead —
+ * the agent's workspace tools then execute over there (conversations and
+ * provider keys stay here). Switching is locked while a turn is running.
+ */
+function HostSwitcher({ disabled }: { disabled: boolean }) {
+  const [status, setStatus] = useState<RemoteStatus | null>(null)
+  const [open, setOpen] = useState(false)
+  const [hosts, setHosts] = useState<RemoteHostFound[] | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [askingPass, setAskingPass] = useState<RemoteHostFound | null>(null)
+  const [pass, setPass] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const remember = (url: string, passphrase: string) => {
+    const map = loadPassMap()
+    if (passphrase) map[url] = passphrase
+    else delete map[url]
+    savePassMap(map)
+    try {
+      if (url) localStorage.setItem(REMOTE_LAST_KEY, url)
+      else localStorage.removeItem(REMOTE_LAST_KEY)
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  const connect = async (url: string, passphrase: string) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      const s = await connectRemote(url, passphrase)
+      setStatus(s)
+      remember(url, passphrase)
+      setAskingPass(null)
+      setOpen(false)
+    } catch (e) {
+      setErr(String((e as Error).message).replace(/^\d+:\s*/, ''))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const goLocal = async () => {
+    setBusy(true)
+    try {
+      await disconnectRemote()
+      remember('', '')
+      setStatus({ connected: false })
+      setOpen(false)
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const scan = () => {
+    setScanning(true)
+    setErr(null)
+    discoverHosts()
+      .then((r) => setHosts(r.hosts))
+      .catch((e) => setErr(String(e)))
+      .finally(() => setScanning(false))
+  }
+
+  // Restore the last host on launch; silent failure just means local mode.
+  useEffect(() => {
+    remoteStatus()
+      .then((s) => {
+        if (s.connected) {
+          setStatus(s)
+          return
+        }
+        let last = ''
+        try {
+          last = localStorage.getItem(REMOTE_LAST_KEY) ?? ''
+        } catch {
+          /* storage unavailable */
+        }
+        const passMap = loadPassMap()
+        if (last && passMap[last] !== undefined) void connect(last, passMap[last])
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const pickHost = (h: RemoteHostFound) => {
+    const url = `http://${h.host}:${h.port}`
+    const known = loadPassMap()[url]
+    if (h.auth && known === undefined) {
+      setAskingPass(h)
+      setPass('')
+      return
+    }
+    void connect(url, known ?? '')
+  }
+
+  const connected = status?.connected === true
+
+  return (
+    <div className="relative self-end">
+      <button
+        title={
+          connected
+            ? `Connected to ${status?.name} — tools run there (click to switch)`
+            : 'Running on this device (click to pick a remote host)'
+        }
+        aria-label="Host switcher"
+        aria-expanded={open}
+        disabled={disabled}
+        className={`flex items-center gap-1.5 whitespace-nowrap rounded border px-2.5 py-2 text-xs ${
+          connected
+            ? 'border-emerald-700 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-950'
+            : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+        } disabled:opacity-50`}
+        onClick={() => {
+          setOpen(!open)
+          if (!open && hosts === null) scan()
+        }}
+      >
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 14 14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          aria-hidden="true"
+        >
+          <rect x="2" y="2.5" width="10" height="4" rx="1" />
+          <rect x="2" y="8.5" width="10" height="4" rx="1" />
+        </svg>
+        {connected ? status?.name : 'This device'}
+      </button>
+      {open && (
+        <div className="absolute bottom-12 left-0 z-20 w-80 rounded border border-zinc-700 bg-zinc-900 shadow-lg">
+          {askingPass ? (
+            <form
+              className="p-3"
+              onSubmit={(e) => {
+                e.preventDefault()
+                if (askingPass) void connect(`http://${askingPass.host}:${askingPass.port}`, pass)
+              }}
+            >
+              <p className="mb-2 text-xs text-zinc-300">
+                Passphrase for <span className="font-mono text-zinc-100">{askingPass.name}</span>
+              </p>
+              <input
+                type="password"
+                autoFocus
+                className="mb-2 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                aria-label="Host passphrase"
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                  onClick={() => setAskingPass(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="rounded bg-blue-600 px-2 py-1 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50"
+                >
+                  Connect
+                </button>
+              </div>
+            </form>
+          ) : (
+            <>
+              <button
+                className={`block w-full px-3 py-2 text-left text-xs ${
+                  connected ? 'hover:bg-zinc-800/60' : 'bg-zinc-800/80 text-zinc-400'
+                }`}
+                disabled={busy}
+                onClick={() => void goLocal()}
+              >
+                💻 This device
+                {!connected && <span className="ml-1 text-[10px] text-zinc-500">(current)</span>}
+              </button>
+              <div className="border-t border-zinc-800" />
+              {(hosts ?? []).map((h) => (
+                <button
+                  key={`${h.host}:${h.port}`}
+                  className="block w-full px-3 py-2 text-left text-xs hover:bg-zinc-800/60"
+                  disabled={busy}
+                  onClick={() => pickHost(h)}
+                >
+                  <span className="text-zinc-200">
+                    {h.auth ? '🔒' : '🌐'} {h.name}
+                  </span>
+                  <span className="ml-1 text-[10px] text-zinc-500">
+                    {h.host}:{h.port} · {h.os}
+                  </span>
+                </button>
+              ))}
+              {hosts !== null && hosts.length === 0 && (
+                <p className="px-3 py-2 text-[11px] text-zinc-500">
+                  No hosts found on this network. Install YAAH on the other machine (hosting is on
+                  by default) — first launches may need the Windows firewall prompt accepted.
+                </p>
+              )}
+              <button
+                className="block w-full border-t border-zinc-800 px-3 py-1.5 text-left text-[10px] text-zinc-500 hover:text-zinc-300"
+                disabled={scanning || busy}
+                onClick={scan}
+              >
+                {scanning ? 'Scanning…' : '↻ Scan network'}
+              </button>
+            </>
+          )}
+          {err && <p className="border-t border-red-900 px-3 py-1.5 text-[10px] text-red-300">{err}</p>}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function Composer() {
@@ -2750,6 +3054,7 @@ function Composer() {
         </div>
       )}
       <div className="flex gap-2">
+        <HostSwitcher disabled={streaming || sending} />
         <textarea
           ref={textareaRef}
           className={`flex-1 resize-none rounded border bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none ${

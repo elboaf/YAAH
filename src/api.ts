@@ -113,6 +113,12 @@ export interface AgentConfig {
     cloud_api_key: string
     cloud_model: string
   }
+  /** LAN hosting (this instance as a host). */
+  remote?: {
+    hosting_enabled: boolean
+    passphrase: string
+    display_name: string
+  }
 }
 
 export const getConfig = () => api<AgentConfig>('/api/config')
@@ -135,6 +141,11 @@ export const updateConfig = (
       cloud_endpoint: string
       cloud_api_key?: string
       cloud_model: string
+    }
+    remote?: {
+      hosting_enabled?: boolean
+      passphrase?: string
+      display_name?: string
     }
   }>,
 ) =>
@@ -336,6 +347,42 @@ export const deleteFile = (workspace: string, path: string) =>
     `/api/files?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,
     { method: 'DELETE' },
   )
+
+// ---------------------------------------------------------------- remote hosting
+
+export interface RemoteHostFound {
+  name: string
+  host: string
+  port: number
+  protocol: number
+  os: string
+  /** Host requires a passphrase. */
+  auth: boolean
+}
+
+export interface RemoteStatus {
+  connected: boolean
+  url?: string
+  name?: string
+  os?: string
+  app_version?: string
+  workspace_root?: string
+}
+
+/** mDNS sweep (~2.5s) for YAAH hosts on this LAN. */
+export const discoverHosts = () =>
+  api<{ hosts: RemoteHostFound[] }>('/api/remote/discover')
+
+export const remoteStatus = () => api<RemoteStatus>('/api/remote/status')
+
+export const connectRemote = (url: string, passphrase: string) =>
+  api<RemoteStatus>('/api/remote/connect', {
+    method: 'POST',
+    body: JSON.stringify({ url, passphrase }),
+  })
+
+export const disconnectRemote = () =>
+  api<{ ok: boolean }>('/api/remote/disconnect', { method: 'POST' })
 
 // ---------------------------------------------------------------- agent stream
 
