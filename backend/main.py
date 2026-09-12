@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
 # The sidecar always serves on this port (backend_entry.py, lib.rs spawn).
 API_PORT = 8765
 
-app = FastAPI(title="AI Coding Agent", version="0.7.3", lifespan=lifespan)
+app = FastAPI(title="AI Coding Agent", version="0.7.4", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -208,6 +208,15 @@ async def api_add_workspace(body: NewWorkspace):
         return row
     ws = await upsert_workspace(body.path)
     ws["exists"] = True if ws["path"] is None else os.path.isdir(ws["path"])
+    if ws["path"] is not None and not ws["exists"]:
+        # Registering a folder that doesn't exist yet (the remote "add folder
+        # on host" flow has no native picker, so paths are typed): create it
+        # instead of leaving a permanent "missing" ghost entry.
+        try:
+            os.makedirs(ws["path"], exist_ok=True)
+            ws["exists"] = True
+        except OSError:
+            pass
     return ws
 
 

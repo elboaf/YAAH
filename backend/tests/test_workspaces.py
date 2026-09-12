@@ -147,3 +147,19 @@ async def test_dead_path_listed_with_missing_marker():
     rows = await list_workspaces()
     dead = next(r for r in rows if r["path"] and "xyz" in r["path"])
     assert dead["exists"] is False
+
+
+@pytest.mark.asyncio
+async def test_add_workspace_creates_missing_folder(tmp_path):
+    """Typed-in paths (remote 'add folder on host') get created, not
+    registered as permanent missing ghosts."""
+    target = tmp_path / "new" / "deep" / "proj"
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.main import app
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/workspaces", json={"path": str(target)})
+    body = res.json()
+    assert target.is_dir()
+    assert body["exists"] is True
