@@ -10,6 +10,8 @@ import json
 import os
 import re
 import shlex
+import signal
+import subprocess
 from pathlib import Path
 
 
@@ -18,6 +20,81 @@ from pathlib import Path
 # Windows: suppress the console window a console child of the windowed app
 # would pop up. POSIX subprocess has no creationflags parameter.
 _NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
+# POSIX: run children in their own process group so a timeout can kill the
+# whole tree. Windows uses a kill-on-terminate Job Object instead (taskkill
+# /T fails when the shell root has already exited, e.g. after `start /b`).
+_NEW_SESSION = {} if os.name == "nt" else {"start_new_session": True}
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class _JOB_BASIC_LIMITS(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _JOB_EXTENDED_LIMITS(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _JOB_BASIC_LIMITS),
+            ("IoInfo", _IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _PROCESS_SET_QUOTA = 0x0100
+    _PROCESS_TERMINATE = 0x0001
+
+    def _job_create():
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPWSTR, wintypes.LPWSTR]
+        job = kernel32.CreateJobObjectW(None, None)
+        info = _JOB_EXTENDED_LIMITS()
+        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        kernel32.SetInformationJobObject(
+            job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(info), ctypes.sizeof(info))
+        return job
+
+    def _job_assign(job, pid):
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        handle = kernel32.OpenProcess(
+            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        if not handle:
+            return
+        try:
+            kernel32.AssignProcessToJobObject(job, handle)
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def _job_kill(job):
+        ctypes.windll.kernel32.TerminateJobObject(job, 1)
+
+    def _job_close(job):
+        ctypes.windll.kernel32.CloseHandle(job)
+else:
+    _job_create = _job_assign = _job_kill = _job_close = (lambda *a: None)
 
 
 def workspace_root(workspace: str | None) -> Path:
@@ -432,6 +509,31 @@ MAX_BASH_TIMEOUT = 300
 MAX_OUTPUT_CHARS = 20_000
 
 
+def _kill_tree(proc: asyncio.subprocess.Process, job=None) -> None:
+    """Kill a timed-out process and its children. Children matter: a
+    backgrounded server (``cmd &``) inherits the output pipe, so killing
+    only the shell leaks an orphan that wedges later calls. On Windows the
+    job handle (assigned at spawn) is the only reliable way — the shell
+    root may already be dead, so taskkill /T finds no tree."""
+    try:
+        if job:
+            _job_kill(job)
+        elif os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, **_NO_WINDOW,
+            )
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:  # noqa: BLE001 — process may already be gone
+        pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> dict:
     """Run a shell command in the workspace; return structured result."""
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
@@ -441,17 +543,23 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
             cwd=workspace_root(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            **_NO_WINDOW,
+            **_NO_WINDOW, **_NEW_SESSION,
         )
+        job = _job_create()
+        if job:
+            _job_assign(job, proc.pid)
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = out.decode("utf-8", errors="replace")
-            timed_out = False
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            output = f"[timed out after {timeout}s]"
-            timed_out = True
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                output = out.decode("utf-8", errors="replace")
+                timed_out = False
+            except asyncio.TimeoutError:
+                _kill_tree(proc, job)
+                await proc.communicate()
+                output = f"[timed out after {timeout}s]"
+                timed_out = True
+        finally:
+            _job_close(job)
 
         truncated = False
         if len(output) > MAX_OUTPUT_CHARS:
@@ -479,17 +587,23 @@ async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60
             cwd=workspace_root(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            **_NO_WINDOW,
+            **_NO_WINDOW, **_NEW_SESSION,
         )
+        job = _job_create()
+        if job:
+            _job_assign(job, proc.pid)
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = out.decode("utf-8", errors="replace")
-            timed_out = False
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            output = f"[timed out after {timeout}s]"
-            timed_out = True
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                output = out.decode("utf-8", errors="replace")
+                timed_out = False
+            except asyncio.TimeoutError:
+                _kill_tree(proc, job)
+                await proc.communicate()
+                output = f"[timed out after {timeout}s]"
+                timed_out = True
+        finally:
+            _job_close(job)
 
         truncated = False
         if len(output) > MAX_OUTPUT_CHARS:
@@ -700,14 +814,20 @@ async def _git(workspace: str, *args: str) -> dict:
         cwd=workspace_root(workspace),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        **_NO_WINDOW,
+        **_NO_WINDOW, **_NEW_SESSION,
     )
+    job = _job_create()
+    if job:
+        _job_assign(job, proc.pid)
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return {"error": "git timed out"}
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            _kill_tree(proc, job)
+            await proc.communicate()
+            return {"error": "git timed out"}
+    finally:
+        _job_close(job)
     output = out.decode("utf-8", errors="replace")
     if proc.returncode != 0:
         return {"error": output.strip()[:2000], "exit_code": proc.returncode}

@@ -1,4 +1,5 @@
 """Tests for the agent loop and tools (model is faked)."""
+import asyncio
 import json
 
 import pytest
@@ -14,6 +15,24 @@ async def test_bash_tool(tmp_path):
     r = await execute_tool("bash", {"command": "echo hi"}, str(tmp_path))
     assert r["exit_code"] == 0
     assert "hi" in r["output"]
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_kills_backgrounded_child(tmp_path):
+    """A backgrounded child inherits the output pipe; the timeout path must
+    kill the whole tree or run_bash hangs in the post-kill communicate()
+    (and leaks an orphan server)."""
+    import sys
+
+    if sys.platform == "win32":
+        command = 'start /b ping -n 30 127.0.0.1 >nul'
+    else:
+        command = "sleep 30 &"
+    r = await asyncio.wait_for(
+        execute_tool("bash", {"command": command, "timeout_seconds": 2}, str(tmp_path)),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
 
 
 @pytest.mark.asyncio
