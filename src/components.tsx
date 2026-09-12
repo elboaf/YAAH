@@ -2522,7 +2522,31 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
         })
       }
     } catch (e) {
-      setErr(String((e as Error).message).replace(/^\d+:\s*/, ''))
+      const msg = String((e as Error).message).replace(/^\d+:\s*/, '')
+      // A rejected passphrase must never be a permanent dead end: forget
+      // the remembered value for this host so the next pick prompts fresh.
+      if (/wrong passphrase|no passphrase set/i.test(msg)) {
+        remember(url, '')
+        // Re-prompt with the real host/port parsed from the URL, so the
+        // form's submit rebuilds the same address.
+        try {
+          const u = new URL(url)
+          setAskingPass({
+            name: u.hostname,
+            host: u.hostname,
+            port: Number(u.port) || 80,
+            protocol: 0,
+            iid: '',
+            os: '',
+            auth: true,
+          })
+        } catch {
+          setAskingPass(null)
+        }
+        setErr('The host rejected the remembered passphrase — enter the current one.')
+      } else {
+        setErr(msg)
+      }
     } finally {
       setBusy(false)
     }
@@ -2645,7 +2669,9 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
               className="p-3"
               onSubmit={(e) => {
                 e.preventDefault()
-                if (askingPass) void connect(`http://${askingPass.host}:${askingPass.port}`, pass)
+                if (askingPass && askingPass.port > 0) {
+                  void connect(`http://${askingPass.host}:${askingPass.port}`, pass)
+                }
               }}
             >
               <p className="mb-2 text-xs text-zinc-300">
