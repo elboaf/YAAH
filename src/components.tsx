@@ -1491,7 +1491,6 @@ export function Sidebar() {
   return (
     <>
       <aside className="flex w-64 min-w-[220px] flex-col border-r border-zinc-800 bg-zinc-900 p-3 text-sm">
-        <h1 className="mb-3 font-semibold text-zinc-200">AI Coding Agent</h1>
         <button
           className="mb-3 rounded bg-blue-600 px-3 py-1.5 text-white hover:bg-blue-500"
           onClick={() => {
@@ -1503,7 +1502,7 @@ export function Sidebar() {
         </button>
         <label className="mb-1 block text-xs text-zinc-500">Workspace</label>
         <select
-          className="mb-3 w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200"
+          className="mb-3 w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none"
           value={workspace || ''}
           onChange={(e) => pickWorkspace(e.target.value)}
           aria-label="Workspace"
@@ -1528,7 +1527,7 @@ export function Sidebar() {
             Model{savingModel ? ' (saving...)' : ''}
           </label>
           <select
-            className="w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200"
+            className="w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none"
             value={`${activeProvider}::${model}`}
             onChange={(e) => pickModel(e.target.value)}
             title={model}

@@ -27,3 +27,6 @@ src-tauri/binaries/
 backend/whisper/
 backend/bin/
 backend/data/models/
+
+# impeccable live-mode local config
+.impeccable/

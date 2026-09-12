@@ -153,7 +153,7 @@ A near-monochrome zinc console where one blue accent marks human intent and a sm
 **Character:** A two-voice pairing — the sans voice is plain and quiet so the mono voice reads as the machine speaking. There is no display face; hierarchy is size and case, not family contrast.
 
 ### Hierarchy
-- **Title** (600, 14px, 1.625): panel headings ("AI Coding Agent", "FILES", "Settings").
+- **Title** (600, 14px, 1.625): panel headings ("FILES", "Settings").
 - **Body** (400, 14px, 1.625): user and agent prose, max ~70ch in the chat column.
 - **Secondary** (400, 12px, 1.5): option descriptions, settings help, conversation rows.
 - **Mono Body** (400, 11px/16px): tool chips, traces, file tree, code, args/results.
