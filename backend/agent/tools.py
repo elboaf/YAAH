@@ -15,6 +15,11 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- path safety
 
+# Windows: suppress the console window a console child of the windowed app
+# would pop up. POSIX subprocess has no creationflags parameter.
+_NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
+
+
 def workspace_root(workspace: str | None) -> Path:
     """Resolve the workspace root directory.
 
@@ -436,6 +441,7 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
             cwd=workspace_root(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            **_NO_WINDOW,
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -473,6 +479,7 @@ async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60
             cwd=workspace_root(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            **_NO_WINDOW,
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -693,6 +700,7 @@ async def _git(workspace: str, *args: str) -> dict:
         cwd=workspace_root(workspace),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        **_NO_WINDOW,
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)

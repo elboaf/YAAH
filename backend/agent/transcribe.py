@@ -19,6 +19,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# Windows: console children of the windowed app pop up a visible console
+# window; suppress it. POSIX subprocess has no creationflags parameter.
+_NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
+
 # Model file names we know how to prefer, best bundled candidate first.
 PREFERRED_MODELS = (
     "ggml-base-q5_1.bin",  # pre-packaged in installers
@@ -127,7 +131,7 @@ def transcribe_local(wav_path: str) -> str:
         "-np",  # no progress prints on stderr
     ]
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=_LOCAL_TIMEOUT
+        cmd, capture_output=True, text=True, timeout=_LOCAL_TIMEOUT, **_NO_WINDOW
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
