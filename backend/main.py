@@ -160,15 +160,52 @@ class NewWorkspace(BaseModel):
 
 @app.get("/api/workspaces")
 async def api_list_workspaces():
-    """Registry rows for the sidebar dropdown and grouped list."""
-    return await list_workspaces()
+    """Registry rows for the sidebar dropdown and grouped list.
+
+    While a remote session is active this mirrors the HOST's registry;
+    every path comes back namespaced ('remote:<hid>:<path>') so remote
+    groups can never collide with same-named local paths on this machine.
+    """
+    host = remote_mod.get_remote()
+    if host is not None:
+        res = await host.proxy("GET", "/api/workspaces")
+        rows = _proxy_result(res)
+        for r in rows:
+            r["path"] = remote_mod.ns_path(host.host_id, r.get("path"))
+        return rows
+    return [
+        r for r in await list_workspaces()
+        if remote_mod.parse_ns(r["path"]) is None
+    ]
+
+
+@app.get("/api/workspaces/local")
+async def api_list_local_workspaces():
+    """This machine's registry only — the sidebar greys these out while a
+    remote host is connected."""
+    return [
+        r for r in await list_workspaces()
+        if remote_mod.parse_ns(r["path"]) is None
+    ]
 
 
 @app.post("/api/workspaces")
 async def api_add_workspace(body: NewWorkspace):
-    """Register a folder (resolved + deduped) and select it implicitly."""
+    """Register a folder (resolved + deduped) and select it implicitly.
+    While connected, the folder is registered on the HOST: a namespaced
+    path is stripped, a raw path is taken as-is (the host validates that
+    it exists)."""
     import os
 
+    host = remote_mod.get_remote()
+    if host is not None:
+        raw = remote_mod.parse_ns(body.path)
+        res = await host.proxy(
+            "POST", "/api/workspaces", json_body={"path": raw[1] if raw else body.path}
+        )
+        row = _proxy_result(res)
+        row["path"] = remote_mod.ns_path(host.host_id, row.get("path"))
+        return row
     ws = await upsert_workspace(body.path)
     ws["exists"] = True if ws["path"] is None else os.path.isdir(ws["path"])
     return ws
@@ -176,8 +213,14 @@ async def api_add_workspace(body: NewWorkspace):
 
 @app.delete("/api/workspaces/{workspace_id}")
 async def api_delete_workspace(workspace_id: int):
-    """Remove a workspace; its conversations relocate to Default."""
+    """Remove a workspace; its conversations relocate to Default (host-side
+    registry and host-side relocation while connected)."""
     from fastapi import HTTPException
+
+    host = remote_mod.get_remote()
+    if host is not None:
+        res = await host.proxy("DELETE", f"/api/workspaces/{workspace_id}")
+        return _proxy_result(res)
 
     try:
         result = await delete_workspace(workspace_id)
@@ -326,7 +369,11 @@ async def api_save_attachment(body: NewAttachment):
 
     host = remote_mod.get_remote()
     if host is not None:
-        res = await host.proxy("POST", "/api/attachments", json_body=body.model_dump())
+        res = await host.proxy(
+            "POST",
+            "/api/attachments",
+            json_body={**body.model_dump(), "workspace": _host_ws(host, body.workspace)},
+        )
         return _proxy_result(res)
 
     from backend.agent.tools import resolve_path
@@ -452,7 +499,9 @@ async def api_file_tree(workspace: str):
     the FilesPanel transparently shows the host's workspace."""
     host = remote_mod.get_remote()
     if host is not None:
-        res = await host.proxy("GET", "/api/files", params={"workspace": workspace})
+        res = await host.proxy(
+            "GET", "/api/files", params={"workspace": _host_ws(host, workspace)}
+        )
         return _proxy_result(res)
 
     root = workspace_root(workspace)
@@ -490,7 +539,9 @@ async def api_file_preview(body: PreviewRequest):
     host = remote_mod.get_remote()
     if host is not None:
         res = await host.proxy(
-            "POST", "/api/files/preview", json_body=body.model_dump()
+            "POST",
+            "/api/files/preview",
+            json_body={**body.model_dump(), "workspace": _host_ws(host, body.workspace)},
         )
         return _proxy_result(res)
     result = await read_file(
@@ -509,7 +560,7 @@ async def api_delete_file(workspace: str, path: str):
         res = await host.proxy(
             "DELETE",
             "/api/files",
-            params={"workspace": workspace, "path": path},
+            params={"workspace": _host_ws(host, workspace), "path": path},
         )
         return _proxy_result(res)
 
@@ -519,6 +570,23 @@ async def api_delete_file(workspace: str, path: str):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+def _host_ws(host, workspace: str) -> str:
+    """Translate a client-side workspace string into a raw host path for
+    proxying: a namespaced workspace must belong to the CONNECTED host
+    (defends against chatting into one host while a stale path points at
+    another); anything else passes through (empty = host default)."""
+    ns = remote_mod.parse_ns(workspace)
+    if ns is None:
+        return workspace
+    hid, path = ns
+    if hid != host.host_id:
+        raise HTTPException(
+            status_code=400,
+            detail="that workspace belongs to a different remote host",
+        )
+    return path
 
 
 def _proxy_result(res):
@@ -834,6 +902,7 @@ def remote_status_dict(host: remote_mod.RemoteSession | None = None):
         "connected": True,
         "url": host.url,
         "name": host.name,
+        "host_id": host.host_id,
         "os": host.info.get("os"),
         "app_version": host.app_version,
         "workspace_root": host.info.get("workspace_root"),

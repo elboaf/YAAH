@@ -119,8 +119,11 @@ function loadStoredWorkspace(): string {
   if (typeof localStorage === 'undefined') return DEFAULT_WORKSPACE
   try {
     const ws = localStorage.getItem(WORKSPACE_KEY)
-    // Legacy value '.' meant "no workspace" too.
-    return ws && ws !== '.' ? ws : ''
+    // Legacy value '.' meant "no workspace" too. A remote-namespaced value
+    // is only meaningful while connected to that host; a fresh launch
+    // starts local.
+    if (!ws || ws === '.' || ws.startsWith('remote:')) return DEFAULT_WORKSPACE
+    return ws
   } catch {
     return DEFAULT_WORKSPACE
   }

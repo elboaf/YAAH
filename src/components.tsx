@@ -26,6 +26,7 @@ import {
   transcribeAudio,
   imageUrl,
   listWorkspaces,
+  listLocalWorkspaces,
   addWorkspace,
   deleteWorkspace,
   discoverHosts,
@@ -41,6 +42,7 @@ import {
   type WorkspaceRow,
 } from './api'
 import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
+import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
 import { VoiceRecorder } from './voice'
 
@@ -1022,6 +1024,33 @@ const wsBasename = (path: string) => {
 const collapseKey = (path: string | null) =>
   `yaah.group.collapsed.${path ?? 'default'}`
 
+/** Groups for the greyed "This device" section shown while connected. */
+function buildLocalGroups(
+  localWorkspaces: WorkspaceRow[],
+  localConvs: Array<{ id: number; title: string; workspace: string | null }>,
+) {
+  const groups: Array<{ ws: WorkspaceRow; items: typeof localConvs }> = localWorkspaces.map(
+    (ws) => ({ ws, items: localConvs.filter((c) => (c.workspace ?? null) === ws.path) }),
+  )
+  const known = new Set(localWorkspaces.map((w) => w.path))
+  for (const c of localConvs) {
+    if (!known.has(c.workspace ?? null)) {
+      groups.push({
+        ws: {
+          id: -1,
+          path: c.workspace ?? null,
+          label: c.workspace === null ? 'Default (Home)' : wsBasename(c.workspace),
+          last_opened_at: null,
+          exists: true,
+          conversation_count: 0,
+        },
+        items: [],
+      })
+    }
+  }
+  return groups.filter((g) => g.items.length > 0 || g.ws.path === null)
+}
+
 function ConversationList() {
   const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation } = useAgent()
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
@@ -1032,13 +1061,24 @@ function ConversationList() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null)
   const [removeWsTarget, setRemoveWsTarget] = useState<WorkspaceRow | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
+  // Active connection scope decides which registry/chats are shown; local
+  // rows render greyed while a host is connected.
+  const scope = useRemote((s) => s.scope)
+  const [localWorkspaces, setLocalWorkspaces] = useState<WorkspaceRow[]>([])
 
   const refresh = useCallback(() => {
     listConversations().then(setConvs).catch(() => setConvs([]))
+    // Scope-aware: the backend returns the HOST's registry (namespaced)
+    // while connected, this machine's otherwise.
     listWorkspaces()
       .then(setWorkspaces)
       .catch(() => setWorkspaces([]))
-  }, [])
+    if (scope.connected) {
+      listLocalWorkspaces().then(setLocalWorkspaces).catch(() => setLocalWorkspaces([]))
+    } else {
+      setLocalWorkspaces([])
+    }
+  }, [scope.connected, scope.hostId])
   useEffect(() => {
     refresh()
   }, [conversationId, refresh])
@@ -1070,9 +1110,21 @@ function ConversationList() {
     })
   }
 
+  // Chats visible in the active scope: while connected, only conversations
+  // namespaced to THIS host; otherwise only non-remote ones. A chat from a
+  // different host stays hidden entirely (it would be unopenable anyway).
+  const inScope = (ws: string | null) => {
+    const ns = parseNsWorkspace(ws)
+    return scope.connected ? ns?.hostId === scope.hostId : ns === null
+  }
+  const visibleConvs = convs.filter((c) => inScope(c.workspace))
+  const localConvs = convs.filter((c) => parseNsWorkspace(c.workspace) === null)
+
   /** Open a conversation and adopt its workspace (the core invariant: the
-   *  open conversation's workspace IS the active workspace, both ways). */
+   *  open conversation's workspace IS the active workspace, both ways).
+   *  Scope guard: a local chat must never open while connected. */
   const openConversation = (c: { id: number; workspace: string | null }) => {
+    if (!inScope(c.workspace)) return
     setConversationId(c.id)
     setWorkspace(c.workspace ?? '')
     getMessages(c.id)
@@ -1096,10 +1148,10 @@ function ConversationList() {
   // recent conversation activity in each group.
   const groups: Array<{ ws: WorkspaceRow; items: typeof convs }> = []
   for (const w of workspaces) {
-    groups.push({ ws: w, items: convs.filter((c) => (c.workspace ?? null) === w.path) })
+    groups.push({ ws: w, items: visibleConvs.filter((c) => (c.workspace ?? null) === w.path) })
   }
   const knownPaths = new Set(workspaces.map((w) => w.path))
-  for (const c of convs) {
+  for (const c of visibleConvs) {
     const p = c.workspace ?? null
     if (!knownPaths.has(p)) {
       // A conversation filed under a path the registry doesn't know yet
@@ -1194,6 +1246,29 @@ function ConversationList() {
       })}
       {convs.length === 0 && groups.length === 0 && (
         <p className="px-2 py-3 text-center text-[11px] text-zinc-600">No conversations yet.</p>
+      )}
+      {scope.connected && (
+        <div
+          className="mt-3 border-t border-zinc-800 pt-2 opacity-40 select-none"
+          title="Local chats — switch back to “This device” to open them"
+          aria-disabled="true"
+        >
+          <p className="px-2 pb-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+            💻 This device — view only
+          </p>
+          {buildLocalGroups(localWorkspaces, localConvs).map(({ ws, items }) => (
+            <div key={ws.path ?? 'default'} className="mb-1 px-1">
+              <p className="truncate py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+                {ws.label}
+              </p>
+              {items.map((c) => (
+                <p key={c.id} className="truncate rounded px-2 py-1 text-xs text-zinc-600">
+                  {c.title}
+                </p>
+              ))}
+            </div>
+          ))}
+        </div>
       )}
 
       {/* in-app dialogs (replace native confirm/prompt/alert) */}
@@ -1372,24 +1447,32 @@ export function Sidebar() {
 
   // The workspace is remembered across restarts: the store seeds itself from
   // localStorage, and config.json is the durable fallback for a fresh install,
-  // cleared storage, or a first run on a new machine.
+  // cleared storage, or a first run on a new machine. A remote-namespaced
+  // last workspace is meaningless locally — the store already rejects it.
   useEffect(() => {
     if (workspace && workspace !== '.') return
     getConfig()
       .then((c) => {
-        if (c.last_workspace) setWorkspace(c.last_workspace)
+        if (c.last_workspace && !parseNsWorkspace(c.last_workspace)) setWorkspace(c.last_workspace)
       })
       .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Registry rows for the dropdown; refreshed when the conversation changes
-  // (a new conversation may have filed a workspace the list hasn't seen).
+  // Registry rows for the dropdown — scope-aware (host registry while
+  // connected); refreshed when the conversation changes or the scope flips.
+  const scope = useRemote((s) => s.scope)
+  const [localWorkspaces, setLocalWorkspaces] = useState<WorkspaceRow[]>([])
   const refreshWorkspaces = useCallback(() => {
     listWorkspaces()
       .then(setWorkspaces)
       .catch(() => setWorkspaces([]))
-  }, [])
+    if (scope.connected) {
+      listLocalWorkspaces().then(setLocalWorkspaces).catch(() => setLocalWorkspaces([]))
+    } else {
+      setLocalWorkspaces([])
+    }
+  }, [scope.connected, scope.hostId])
   useEffect(refreshWorkspaces, [refreshWorkspaces, conversationId])
 
   // Merged model list: every configured provider, queried in parallel by the
@@ -1429,11 +1512,37 @@ export function Sidebar() {
       .finally(() => setSavingModel(false))
   }
 
+  // While connected there is no client-side folder picker for host paths:
+  // the folder dialog can only open on the machine running the UI. Adding a
+  // host workspace is a free-text path, validated by the host on register.
+  const [showRemoteAdd, setShowRemoteAdd] = useState(false)
+  const [remoteAddPath, setRemoteAddPath] = useState('')
+
+  const addRemoteWorkspace = async () => {
+    const path = remoteAddPath.trim()
+    if (!path) return
+    try {
+      const ws = await addWorkspace(path)
+      setWorkspaces((list) => (list.some((w) => w.id === ws.id) ? list : [...list, ws]))
+      setWorkspace(ws.path ?? '')
+      newConversation()
+      setShowRemoteAdd(false)
+      setRemoteAddPath('')
+    } catch (e) {
+      setNotice({
+        title: 'Could not add folder on host',
+        message: String((e as Error).message ?? e).replace(/^\d+:\s*/, ''),
+      })
+    }
+  }
+
   /** Open a workspace from the dropdown: its most recent conversation, or a
    *  fresh chat when it has none (Q2: the dropdown is a conversation switcher). */
   const pickWorkspace = (value: string) => {
+    if (value.startsWith('__local_')) return // greyed local entry
     if (value === '__add__') {
-      void browseWorkspace()
+      if (scope.connected) setShowRemoteAdd(true)
+      else void browseWorkspace()
       return
     }
     const ws = workspaces.find((w) => (w.path ?? '') === value)
@@ -1518,7 +1627,11 @@ export function Sidebar() {
             'No root directory — conversations without a workspace'
           }
         >
-          <option value="">Default (Home)</option>
+          {scope.connected ? (
+            <option value="">{scope.name} — Default (Home)</option>
+          ) : (
+            <option value="">Default (Home)</option>
+          )}
           {workspaces
             .filter((w) => w.path !== null)
             .map((w) => (
@@ -1527,8 +1640,45 @@ export function Sidebar() {
                 {w.exists ? '' : '  (missing)'}
               </option>
             ))}
-          <option value="__add__">+ Add workspace…</option>
+          {scope.connected &&
+            localWorkspaces
+              .filter((w) => w.path !== null)
+              .map((w) => (
+                <option key={`local-${w.id}`} value={`__local_${w.id}`} disabled>
+                  {w.label} — this device
+                </option>
+              ))}
+          <option value="__add__">
+            {scope.connected ? '+ Add folder on host…' : '+ Add workspace…'}
+          </option>
         </select>
+        {scope.connected && showRemoteAdd && (
+          <div className="mb-3 rounded border border-zinc-700 bg-zinc-800 p-2">
+            <input
+              autoFocus
+              className="mb-1.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs"
+              placeholder="folder path on the host, e.g. C:/repos/proj"
+              value={remoteAddPath}
+              onChange={(e) => setRemoteAddPath(e.target.value)}
+              onKeyDown={(e) => e.key === 'Escape' && setShowRemoteAdd(false)}
+              aria-label="Folder path on the host"
+            />
+            <div className="flex justify-end gap-1.5">
+              <button
+                className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-900"
+                onClick={() => setShowRemoteAdd(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500"
+                onClick={() => void addRemoteWorkspace()}
+              >
+                Add on host
+              </button>
+            </div>
+          </div>
+        )}
         <div className="mb-3">
           <label className="mb-1 block text-xs text-zinc-500">
             Model{savingModel ? ' (saving...)' : ''}
@@ -2260,6 +2410,22 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
       remember(url, passphrase)
       setAskingPass(null)
       setOpen(false)
+      // Scope switch: stash the local workspace so disconnect restores it,
+      // and land on the host's Default workspace.
+      if (s.host_id) {
+        const st = useAgent.getState()
+        if (!parseNsWorkspace(st.workspace)) {
+          try {
+            localStorage.setItem('yaah.ws.stash', st.workspace)
+          } catch {
+            /* storage unavailable */
+          }
+        }
+        st.setWorkspace(nsWorkspace(s.host_id, null))
+        useRemote.setState({
+          scope: { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os },
+        })
+      }
     } catch (e) {
       setErr(String((e as Error).message).replace(/^\d+:\s*/, ''))
     } finally {
@@ -2274,6 +2440,16 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
       remember('', '')
       setStatus({ connected: false })
       setOpen(false)
+      // Restore the stashed local workspace (stashed at connect time).
+      let stash = ''
+      try {
+        stash = localStorage.getItem('yaah.ws.stash') ?? ''
+        localStorage.removeItem('yaah.ws.stash')
+      } catch {
+        /* storage unavailable */
+      }
+      useAgent.getState().setWorkspace(stash)
+      useRemote.setState({ scope: { connected: false } })
     } catch (e) {
       setErr(String(e))
     } finally {
@@ -2300,6 +2476,9 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
       .then((s) => {
         if (s.connected) {
           setStatus(s)
+          useRemote.setState({
+            scope: { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os },
+          })
           return
         }
         let last = ''

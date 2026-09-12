@@ -55,12 +55,13 @@ def beacon_props() -> dict:
     import platform
 
     from backend.agent.config import load_config
-    from backend.agent.remote import INSTANCE_ID, PROTOCOL_VERSION
+    from backend.agent.remote import INSTANCE_ID, PROTOCOL_VERSION, ensure_host_id
 
     passphrase_set = bool((load_config().get("remote") or {}).get("passphrase"))
     return {
         "proto": str(PROTOCOL_VERSION),
         "iid": INSTANCE_ID,
+        "hid": ensure_host_id(),
         "os": platform.system() or "?",
         "auth": "1" if passphrase_set else "0",
     }
@@ -136,6 +137,7 @@ class _Collector:
             "port": info.port,
             "protocol": int(props.get("proto") or 0),
             "iid": props.get("iid") or "",
+            "hid": props.get("hid") or "",
             "os": props.get("os") or "?",
             "auth": props.get("auth") == "1",
         }

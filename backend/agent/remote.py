@@ -28,6 +28,35 @@ PROTOCOL_VERSION = 1
 # otherwise loop every tool/files call back through its own proxy).
 INSTANCE_ID = secrets.token_hex(8)
 
+
+def ensure_host_id() -> str:
+    """Stable per-host identity, generated once and kept in config. Unlike
+    INSTANCE_ID this survives restarts, so clients can scope their
+    conversations to a host across reboots of either machine."""
+    from backend.agent.config import load_config, save_config
+
+    cfg = load_config().get("remote") or {}
+    hid = cfg.get("host_id") or ""
+    if not hid:
+        hid = secrets.token_hex(8)
+        save_config({"remote": {**cfg, "host_id": hid}})
+    return hid
+
+
+def ns_path(host_id: str, path: str | None) -> str:
+    """Namespace a host workspace path so it can never collide with a local
+    path on the client ('remote:<hid>:C:/repo'; host Default = 'remote:<hid>:' )."""
+    return f"remote:{host_id}:{path or ''}"
+
+
+def parse_ns(ws: str | None) -> tuple[str, str] | None:
+    """Split a namespaced workspace back into (host_id, raw host path).
+    None when the string isn't a remote workspace."""
+    if ws and ws.startswith("remote:"):
+        hid, _, path = ws[len("remote:"):].partition(":")
+        return hid, path
+    return None
+
 # Workspace-touching tools: the only ones that execute remotely. Everything
 # else (web tools, ask_user, load_skill, view_image) stays client-local.
 REMOTE_TOOLS = {
@@ -58,6 +87,7 @@ def host_info() -> dict:
     return {
         "protocol": PROTOCOL_VERSION,
         "instance_id": INSTANCE_ID,
+        "host_id": ensure_host_id(),
         "hostname": socket.gethostname(),
         "os": platform.system(),
         "os_version": platform.release(),
@@ -78,6 +108,11 @@ class RemoteSession:
         self.passphrase = passphrase
         self.info = info
         self.app_version = app_version
+        # Older peers (pre-host_id builds) still need a stable scope key;
+        # derive one from the hostname so namespaces stay consistent.
+        self.host_id = info.get("host_id") or (
+            "h-" + (info.get("hostname") or self.url).lower().replace(" ", "-")
+        )
         self.name = info.get("hostname") or self.url
 
     @property

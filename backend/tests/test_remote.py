@@ -387,3 +387,68 @@ def test_loopback_classification():
     assert _is_loopback_client("testclient")  # ASGI test transport
     assert not _is_loopback_client("192.168.1.38")
     assert not _is_loopback_client("10.0.0.5")
+
+
+# ---------------------------------------------------------------- host id + namespacing
+
+def test_host_id_is_stable_and_namespacing_roundtrips():
+    from backend.agent import remote as rm
+
+    hid = rm.ensure_host_id()
+    assert hid and rm.ensure_host_id() == hid
+    assert rm.host_info()["host_id"] == hid
+
+    ns = rm.ns_path(hid, "C:/repo")
+    assert ns == f"remote:{hid}:C:/repo"
+    assert rm.parse_ns(ns) == (hid, "C:/repo")
+    # Host Default (empty path) and local strings
+    assert rm.parse_ns(rm.ns_path(hid, "")) == (hid, "")
+    assert rm.parse_ns("C:/repo") is None
+    assert rm.parse_ns(None) is None
+    assert "hid" in __import__("backend.agent.discovery", fromlist=["beacon_props"]).beacon_props()
+
+
+@pytest.mark.asyncio
+async def test_workspaces_mirror_host_registry_namespaced(monkeypatch):
+    from backend.agent import remote as rm
+
+    host = _StubSession()
+    host.info["host_id"] = host.host_id = "abc123"
+    _FakeProxyClient.response_body = [
+        {"id": 1, "path": None, "label": "Default (Home)", "exists": True,
+         "last_opened_at": None, "conversation_count": 0},
+        {"id": 2, "path": "/home/host/proj", "label": "proj", "exists": True,
+         "last_opened_at": None, "conversation_count": 0},
+    ]
+    monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
+    remote_mod.set_remote(host)
+    async with await _client() as c:
+        rows = (await c.get("/api/workspaces")).json()
+    assert rows[0]["path"] == "remote:abc123:"
+    assert rows[1]["path"] == "remote:abc123:/home/host/proj"
+    # Raw host paths must never leak to the client UI as-is
+    assert all(r["path"].startswith("remote:abc123:") for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_local_workspaces_view_hides_remote_rows():
+    from backend.db.database import upsert_workspace
+
+    await upsert_workspace("remote:deadbeef:/fake")
+    async with await _client() as c:
+        rows = (await c.get("/api/workspaces")).json()
+        local = (await c.get("/api/workspaces/local")).json()
+    assert all(remote_mod.parse_ns(r["path"]) is None for r in rows + local)
+
+
+@pytest.mark.asyncio
+async def test_files_proxy_rejects_foreign_host_namespace(monkeypatch):
+    from backend.agent import remote as rm
+
+    host = _StubSession()
+    host.info["host_id"] = host.host_id = "abc123"
+    remote_mod.set_remote(host)
+    async with await _client() as c:
+        res = await c.get("/api/files", params={"workspace": "remote:deadbeef:/x"})
+    assert res.status_code == 400
+    assert "different remote host" in res.json()["detail"]

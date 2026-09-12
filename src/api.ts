@@ -254,6 +254,10 @@ export interface WorkspaceRow {
 
 export const listWorkspaces = () => api<WorkspaceRow[]>('/api/workspaces')
 
+/** This machine's registry only (the sidebar greys it while connected). */
+export const listLocalWorkspaces = () =>
+  api<WorkspaceRow[]>('/api/workspaces/local')
+
 export const addWorkspace = (path: string) =>
   api<WorkspaceRow>('/api/workspaces', {
     method: 'POST',
@@ -357,6 +361,8 @@ export interface RemoteHostFound {
   protocol: number
   /** Per-process instance id — used to hide this machine itself. */
   iid: string
+  /** Stable per-host id — scopes conversations across restarts. */
+  hid?: string
   os: string
   /** Host requires a passphrase. */
   auth: boolean
@@ -366,6 +372,7 @@ export interface RemoteStatus {
   connected: boolean
   url?: string
   name?: string
+  host_id?: string
   os?: string
   app_version?: string
   workspace_root?: string
