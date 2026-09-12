@@ -13,6 +13,7 @@ import {
   type AgentEvent,
   cancelAgent,
   getFileTree,
+  getFileChildren,
   previewFile,
   deleteFile,
   exportConversationMarkdown,
@@ -552,20 +553,35 @@ function TreeRow({
   depth,
   onOpen,
   onContext,
+  loadChildren,
 }: {
   entry: FileEntry
   depth: number
   onOpen: (e: FileEntry) => void
   onContext: (e: FileEntry, x: number, y: number) => void
+  loadChildren: (e: FileEntry) => Promise<FileEntry[]>
 }) {
   const [openDir, setOpenDir] = useState(depth < 1)
+  // Eager entries carry children; lazy ones fetch on first expand.
+  const [kids, setKids] = useState<FileEntry[] | null>(entry.children ?? null)
+  const [loadingKids, setLoadingKids] = useState(false)
+  const toggleDir = () => {
+    if (!openDir && kids === null) {
+      setLoadingKids(true)
+      loadChildren(entry)
+        .then((entries) => setKids(entries))
+        .catch(() => setKids([]))
+        .finally(() => setLoadingKids(false))
+    }
+    setOpenDir((o) => !o)
+  }
   return (
     <>
       <button
         className="block w-full truncate rounded px-1 py-0.5 text-left text-[11px] hover:bg-zinc-800"
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
         onClick={() => {
-          if (entry.type === 'dir') setOpenDir((o) => !o)
+          if (entry.type === 'dir') toggleDir()
           else onOpen(entry)
         }}
         onContextMenu={(e) => {
@@ -584,23 +600,58 @@ function TreeRow({
         <span className="mr-1 text-zinc-500">{entry.type === 'dir' ? (openDir ? '▾' : '▸') : '•'}</span>
         <span className={entry.type === 'dir' ? 'text-zinc-300' : 'text-zinc-400'}>{entry.name}</span>
       </button>
-      {entry.type === 'dir' &&
-        openDir &&
-        entry.children?.map((c) => (
-          <TreeRow key={c.path} entry={c} depth={depth + 1} onOpen={onOpen} onContext={onContext} />
-        ))}
+      {entry.type === 'dir' && openDir && (
+        <>
+          {loadingKids ? (
+            <p
+              className="py-0.5 font-mono text-[10px] text-zinc-600"
+              style={{ paddingLeft: `${(depth + 1) * 12 + 4}px` }}
+            >
+              loading…
+            </p>
+          ) : (
+            (kids ?? []).map((c) => (
+              <TreeRow
+                key={c.path}
+                entry={c}
+                depth={depth + 1}
+                onOpen={onOpen}
+                onContext={onContext}
+                loadChildren={loadChildren}
+              />
+            ))
+          )}
+        </>
+      )}
     </>
   )
 }
 
+// Session cache of fetched trees, keyed by scope+workspace: flipping between
+// This device and a host repaints instantly from here instead of refetching.
+// The backend now returns a depth-limited tree, so a fetch is cheap anyway.
+const treeCache = new Map<string, FileEntry[]>()
+
+/** Replace one entry's children in a tree (lazy expansion patch), returning
+ *  the new tree. Depth-first by path — paths are unique in a workspace. */
+function patchChildren(tree: FileEntry[], path: string, entries: FileEntry[]): FileEntry[] {
+  return tree.map((e) => {
+    if (e.path === path) return { ...e, children: entries, lazy: false }
+    if (e.children) return { ...e, children: patchChildren(e.children, path, entries) }
+    return e
+  })
+}
+
 export function FilesPanel() {
   const { workspace, previewPath, setPreviewPath, status } = useAgent()
+  const scope = useRemote((s) => s.scope)
   const [tree, setTree] = useState<FileEntry[]>([])
   const [menu, setMenu] = useState<{ entry: FileEntry; x: number; y: number } | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('filesPanelCollapsed') === '1')
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null)
+  const cacheKey = `${scope.connected ? scope.url : 'local'}|${workspace}`
 
   const toggleCollapsed = () =>
     setCollapsed((c) => {
@@ -614,17 +665,37 @@ export function FilesPanel() {
       setErr(null)
       return
     }
-    setLoading(true)
+    // Paint the cached tree immediately when we have one — a scope flip or a
+    // turn-end refresh must not blank the panel while the (cheap, shallow)
+    // fetch is in flight.
+    const cached = treeCache.get(cacheKey)
+    if (cached) setTree(cached)
+    setLoading(!cached)
     getFileTree(workspace)
       .then((r) => {
+        treeCache.set(cacheKey, r.tree)
         setTree(r.tree)
         setErr(null)
       })
       .catch((e) => setErr(String(e)))
       .finally(() => setLoading(false))
-  }, [workspace])
+  }, [cacheKey, workspace])
 
   useEffect(refresh, [refresh])
+
+  /** Fetch one directory's children (lazy tree) and patch tree + cache. */
+  const loadChildren = useCallback(
+    (entry: FileEntry) =>
+      getFileChildren(workspace, entry.path).then((r) => {
+        setTree((cur) => {
+          const next = patchChildren(cur, entry.path, r.entries)
+          treeCache.set(cacheKey, next)
+          return next
+        })
+        return r.entries
+      }),
+    [cacheKey, workspace],
+  )
 
   // The panel exists to watch the agent's workspace: refetch when a turn
   // ends (running-tool -> idle), so files it wrote appear without a manual
@@ -717,6 +788,7 @@ export function FilesPanel() {
               depth={0}
               onOpen={openPreview}
               onContext={(entry, x, y) => setMenu({ entry, x, y })}
+              loadChildren={loadChildren}
             />
           ))
         )}
@@ -1786,6 +1858,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [remoteHost, setRemoteHost] = useState(true)
   const [remotePass, setRemotePass] = useState('')
   const [remoteName, setRemoteName] = useState('')
+  // Config load state: Save stays disabled until a load SUCCEEDED — saving
+  // the empty initial copy would wipe every stored provider (the merge
+  // treats an absent provider as deleted).
+  const [loaded, setLoaded] = useState(false)
 
   // Esc closes, matching PreviewModal and the dialog shells — but the
   // removal confirm consumes Esc first, so it never dismisses two layers.
@@ -1801,34 +1877,52 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   }, [onClose, removeTarget])
 
   useEffect(() => {
-    getConfig()
-      .then((c) => {
-        const next: typeof providers = {}
-        for (const [name, p] of Object.entries(c.providers)) {
-          next[name] = {
-            api_base: p.api_base,
-            model: p.model,
-            apiKeyInput: '',
-            savedKey: p.api_key === 'set',
+    // Retry the config load: the backend can be momentarily busy (or still
+    // starting), and a failed load that looks like "no providers" is a
+    // wipe-in-waiting.
+    const loadConfig = async () => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const c = await getConfig()
+          const next: typeof providers = {}
+          for (const [name, p] of Object.entries(c.providers)) {
+            next[name] = {
+              api_base: p.api_base,
+              model: p.model,
+              apiKeyInput: '',
+              savedKey: p.api_key === 'set',
+            }
+          }
+          setProviders(next)
+          setActive(c.active_provider)
+          setTemperature(c.temperature ?? '')
+          setMaxTokens(c.max_tokens ? c.max_tokens : '')
+          setMaxSteps(c.max_steps ?? '')
+          const v = c.voice
+          setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
+          setCloudEndpoint(v?.cloud_endpoint ?? '')
+          setCloudKeySaved(v?.cloud_api_key === 'set')
+          setCloudModel(v?.cloud_model || '')
+          // Passphrase is stored plaintext by design (like provider keys),
+          // so Settings can show and edit it directly.
+          setRemoteHost(c.remote?.hosting_enabled ?? true)
+          setRemotePass(c.remote?.passphrase ?? '')
+          setRemoteName(c.remote?.display_name ?? '')
+          setLoaded(true)
+          setErr(null)
+          return
+        } catch (e) {
+          if (attempt === 3) {
+            setErr(
+              `Could not load settings: ${(e as Error).message}. Save is disabled so your saved providers cannot be wiped by accident.`,
+            )
+          } else {
+            await new Promise((r) => setTimeout(r, 800 * (attempt + 1)))
           }
         }
-        setProviders(next)
-        setActive(c.active_provider)
-        setTemperature(c.temperature ?? '')
-        setMaxTokens(c.max_tokens ? c.max_tokens : '')
-        setMaxSteps(c.max_steps ?? '')
-        const v = c.voice
-        setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
-        setCloudEndpoint(v?.cloud_endpoint ?? '')
-        setCloudKeySaved(v?.cloud_api_key === 'set')
-        setCloudModel(v?.cloud_model || '')
-        // Passphrase is stored plaintext by design (like provider keys),
-        // so Settings can show and edit it directly.
-        setRemoteHost(c.remote?.hosting_enabled ?? true)
-        setRemotePass(c.remote?.passphrase ?? '')
-        setRemoteName(c.remote?.display_name ?? '')
-      })
-      .catch((e) => setErr(String(e)))
+      }
+    }
+    void loadConfig()
     getProviders().then(setPresets).catch(() => {})
     transcribeStatus()
       .then((s) => {
@@ -2209,7 +2303,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </button>
           <button
             className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
-            disabled={saving}
+            disabled={saving || !loaded}
+            title={loaded ? undefined : 'Settings are still loading'}
             onClick={save}
           >
             {saved ? 'Saved!' : saving ? 'Saving...' : 'Save'}

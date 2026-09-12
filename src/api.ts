@@ -195,11 +195,19 @@ export interface FileEntry {
   path: string
   type: 'file' | 'dir'
   children?: FileEntry[]
+  /** True when children were not loaded yet (fetch via getFileChildren). */
+  lazy?: boolean
 }
 
 export const getFileTree = (workspace: string) =>
   api<{ root: string; tree: FileEntry[] }>(
     `/api/files?workspace=${encodeURIComponent(workspace)}`,
+  )
+
+/** Children of one directory (lazy tree expansion; dirs come back lazy). */
+export const getFileChildren = (workspace: string, path: string) =>
+  api<{ entries: FileEntry[] }>(
+    `/api/files/children?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,
   )
 
 export const previewFile = (

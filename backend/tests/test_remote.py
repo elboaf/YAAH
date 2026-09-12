@@ -452,3 +452,66 @@ async def test_files_proxy_rejects_foreign_host_namespace(monkeypatch):
         res = await c.get("/api/files", params={"workspace": "remote:deadbeef:/x"})
     assert res.status_code == 400
     assert "different remote host" in res.json()["detail"]
+
+
+# ---------------------------------------------------------------- lazy file tree
+
+@pytest.mark.asyncio
+async def test_file_tree_is_depth_limited_and_lazy(tmp_path):
+    import os
+
+    from backend.agent import tools as tools_mod
+
+    (tmp_path / "a" / "b" / "c").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "deep.txt").write_text("x")
+    (tmp_path / "top.txt").write_text("x")
+    from httpx import ASGITransport, AsyncClient as _AC
+
+    async with _AC(transport=ASGITransport(app=app), base_url="http://test") as c:
+        res = await c.get("/api/files", params={"workspace": str(tmp_path)})
+    tree = {e["name"]: e for e in res.json()["tree"]}
+    assert "top.txt" in tree
+    # Level 2 dir is returned lazy: no children of a/b appear
+    a = tree["a"]
+    assert a["children"][0]["name"] == "b"
+    assert all("children" not in k or not k["children"] for k in a["children"])
+    assert a["children"][0].get("lazy") is True or a["children"][0]["type"] == "dir"
+
+    # children endpoint returns one level, marking deeper dirs lazy
+    async with _AC(transport=ASGITransport(app=app), base_url="http://test") as c:
+        res = await c.get(
+            "/api/files/children",
+            params={"workspace": str(tmp_path), "path": "a/b"},
+        )
+    entries = res.json()["entries"]
+    assert {e["name"] for e in entries} == {"c", "deep.txt"}
+    cdir = next(e for e in entries if e["name"] == "c")
+    assert cdir.get("lazy") is True and "children" not in cdir
+
+    # escape attempt refused
+    async with _AC(transport=ASGITransport(app=app), base_url="http://test") as c:
+        res = await c.get(
+            "/api/files/children",
+            params={"workspace": str(tmp_path), "path": "../../etc"},
+        )
+    assert res.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_children_proxied_with_namespace(monkeypatch):
+    from backend.agent import remote as rm
+
+    host = _StubSession()
+    host.info["host_id"] = host.host_id = "abc123"
+    _FakeProxyClient.response_body = {"entries": []}
+    monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
+    remote_mod.set_remote(host)
+    async with await _client() as c:
+        res = await c.get(
+            "/api/files/children",
+            params={"workspace": "remote:abc123:sub", "path": "sub/dir"},
+        )
+    assert res.status_code == 200
+    sent = _FakeProxyClient.last_request
+    assert sent["params"]["workspace"] == "sub"  # namespace stripped
+    assert sent["params"]["path"] == "sub/dir"

@@ -491,9 +491,43 @@ from backend.agent import remote as remote_mod
 from backend.agent.tools import IGNORED_DIRS, read_file, resolve_path, workspace_root
 
 
+TREE_DEPTH = 2  # levels returned eagerly; deeper levels load on expand
+
+
+def _list_dir(dirpath: _Path, root: _Path, depth: int) -> list:
+    """One directory's entries, recursing to `depth` more levels. Dirs at the
+    cutoff come back with lazy=True (no children) — the UI fetches those on
+    expand via /api/files/children. Runs in a worker thread: a synchronous
+    walk of a big tree would otherwise freeze the event loop (it did —
+    config reads queued behind whole-home-dir walks)."""
+    entries = []
+    try:
+        children = sorted(dirpath.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    except OSError:
+        return entries
+    for child in children[:500]:
+        if child.name in IGNORED_DIRS or child.name.startswith("."):
+            continue
+        rel = child.relative_to(root).as_posix()
+        if child.is_dir():
+            if depth > 1:
+                entries.append({"name": child.name, "path": rel, "type": "dir", "children": _list_dir(child, root, depth - 1)})
+            else:
+                entries.append({"name": child.name, "path": rel, "type": "dir", "lazy": True})
+        else:
+            entries.append({"name": child.name, "path": rel, "type": "file"})
+    return entries
+
+
+def _walk_in_thread(fn, *args):
+    import asyncio
+
+    return asyncio.to_thread(fn, *args)
+
+
 @app.get("/api/files")
 async def api_file_tree(workspace: str):
-    """Recursive file tree of the workspace (ignored dirs skipped).
+    """Workspace file tree, TREE_DEPTH levels eager (lazy beyond).
 
     While a remote session is active the call is proxied to the host, so
     the FilesPanel transparently shows the host's workspace."""
@@ -507,24 +541,29 @@ async def api_file_tree(workspace: str):
     root = workspace_root(workspace)
     if not root.exists():
         raise HTTPException(status_code=400, detail="workspace does not exist")
+    tree = await _walk_in_thread(_list_dir, root, root, TREE_DEPTH)
+    return {"root": str(root), "tree": tree}
 
-    def build(dirpath: _Path) -> list:
-        entries = []
-        try:
-            children = sorted(dirpath.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-        except OSError:
-            return entries
-        for child in children[:500]:
-            if child.name in IGNORED_DIRS or child.name.startswith("."):
-                continue
-            rel = child.relative_to(root).as_posix()
-            if child.is_dir():
-                entries.append({"name": child.name, "path": rel, "type": "dir", "children": build(child)})
-            else:
-                entries.append({"name": child.name, "path": rel, "type": "file"})
-        return entries
 
-    return {"root": str(root), "tree": build(root)}
+@app.get("/api/files/children")
+async def api_file_children(workspace: str, path: str):
+    """Children of a single directory (lazy tree expansion). One level;
+    nested dirs come back lazy. Proxied like the rest while connected."""
+    host = remote_mod.get_remote()
+    if host is not None:
+        res = await host.proxy(
+            "GET",
+            "/api/files/children",
+            params={"workspace": _host_ws(host, workspace), "path": path},
+        )
+        return _proxy_result(res)
+
+    root = workspace_root(workspace)
+    dirpath = (root / path).resolve()
+    if dirpath != root and root not in dirpath.parents:
+        raise HTTPException(status_code=400, detail="path escapes workspace")
+    entries = await _walk_in_thread(_list_dir, dirpath, root, 1)
+    return {"entries": entries}
 
 
 class PreviewRequest(BaseModel):
