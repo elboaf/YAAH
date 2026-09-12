@@ -199,6 +199,14 @@ fn clear_stale_port_holder() {
             .creation_flags(0x0800_0000)
             .output();
     }
+    // Linux/macOS: the sidecar's process name is "backend". Without this,
+    // an orphaned backend from a previous app run (e.g. right after a deb
+    // upgrade) keeps serving 8765 forever and every relaunch silently
+    // reuses the OLD version — upgrades appeared to do nothing.
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("pkill").args(["-x", "backend"]).output();
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if !std::net::TcpStream::connect("127.0.0.1:8765").is_ok() {
