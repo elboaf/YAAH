@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
 # The sidecar always serves on this port (backend_entry.py, lib.rs spawn).
 API_PORT = 8765
 
-app = FastAPI(title="AI Coding Agent", version="0.7.1", lifespan=lifespan)
+app = FastAPI(title="AI Coding Agent", version="0.7.2", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -895,10 +895,21 @@ async def api_remote_discover():
     return {"hosts": hosts}
 
 
+@app.get("/api/remote/verify")
+async def api_remote_verify():
+    """Authenticated probe for connecting clients: carries no data - it
+    exists so /api/remote/connect can confirm the passphrase BEFORE the
+    session is accepted (the info handshake is deliberately open, so
+    without this a wrong passphrase would "connect" green and only 401
+    later on every proxied call)."""
+    return {"ok": True}
+
+
 @app.post("/api/remote/connect")
 async def api_remote_connect(body: RemoteConnect):
-    """Handshake with a host, refuse protocol mismatches, and make it the
-    active session (workspace tools + files proxy route there)."""
+    """Handshake with a host, refuse protocol mismatches and wrong
+    passphrases, then make it the active session (workspace tools + files
+    proxy route there)."""
     url = body.url.strip()
     if url and not url.startswith(("http://", "https://")):
         url = f"http://{url}"
@@ -922,6 +933,21 @@ async def api_remote_connect(body: RemoteConnect):
     # and files call in an endless loop back through its own endpoints.
     if info.get("instance_id") == remote_mod.INSTANCE_ID:
         raise HTTPException(status_code=400, detail="refusing to connect to this same instance")
+    # Auth check before accepting the session (see /api/remote/verify):
+    # the info handshake is open, so without this probe a wrong passphrase
+    # would "connect" green and only 401 later on every proxied call.
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            vres = await client.get(
+                f"{url}/api/remote/verify",
+                headers={"X-Yaah-Remote": "1", "X-Yaah-Passphrase": body.passphrase},
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"host unreachable: {e}")
+    if vres.status_code == 401:
+        raise HTTPException(status_code=401, detail="wrong passphrase")
+    if vres.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"host verify failed ({vres.status_code})")
     host = remote_mod.RemoteSession(url, body.passphrase, info, app_version=info.get("app_version", ""))
     remote_mod.set_remote(host)
     return remote_status_dict(host)

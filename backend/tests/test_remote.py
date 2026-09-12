@@ -226,7 +226,9 @@ class _FakeAsyncClient:
     async def __aexit__(self, *a):
         return False
 
-    async def get(self, url):
+    async def get(self, url, headers=None):
+        if url.endswith("/api/remote/verify"):
+            return _FakeResponse({"ok": True}, getattr(self, "verify_status", 200))
         return _FakeResponse(self.body, self.status)
 
 
@@ -515,3 +517,23 @@ async def test_children_proxied_with_namespace(monkeypatch):
     sent = _FakeProxyClient.last_request
     assert sent["params"]["workspace"] == "sub"  # namespace stripped
     assert sent["params"]["path"] == "sub/dir"
+
+@pytest.mark.asyncio
+async def test_connect_refuses_wrong_passphrase(monkeypatch):
+    import backend.main as main_mod
+
+    body = remote_mod.host_info()
+    body["protocol"] = remote_mod.PROTOCOL_VERSION
+    body["instance_id"] = "other"
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.body = body
+    _FakeAsyncClient.verify_status = 401
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/connect",
+            json={"url": "http://10.0.0.5:8765", "passphrase": "stale"},
+        )
+    assert res.status_code == 401
+    assert "wrong passphrase" in res.json()["detail"]
+    assert remote_mod.get_remote() is None
+    _FakeAsyncClient.verify_status = 200
