@@ -29,6 +29,7 @@ import {
   addWorkspace,
   deleteWorkspace,
   discoverHosts,
+  localInstanceInfo,
   remoteStatus,
   connectRemote,
   disconnectRemote,
@@ -2283,8 +2284,12 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
   const scan = () => {
     setScanning(true)
     setErr(null)
-    discoverHosts()
-      .then((r) => setHosts(r.hosts))
+    // Hide this machine itself from the list (its beacon arrives like any
+    // other host's, seen via its LAN IP) and match by instance id.
+    Promise.all([discoverHosts(), localInstanceInfo()])
+      .then(([r, me]) =>
+        setHosts(r.hosts.filter((h) => h.iid && h.iid !== me.instance_id)),
+      )
       .catch((e) => setErr(String(e)))
       .finally(() => setScanning(false))
   }

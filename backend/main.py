@@ -52,18 +52,44 @@ app.add_middleware(
 )
 
 
+def _is_loopback_client(client_host: str) -> bool:
+    """True for the local UI's connections. Non-IP clients (the ASGI test
+    transport's 'testclient') count as local tooling, not remote."""
+    import ipaddress
+
+    if not client_host:
+        return True
+    try:
+        return ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        return True
+
+
 @app.middleware("http")
 async def remote_auth_guard(request, call_next):
-    """Remote-request gate: any request carrying X-Yaah-Remote (i.e. coming
-    from another YAAH instance's client proxy) must present the host's
-    passphrase. The local UI never sets the marker and is unaffected —
-    localhost stays trust-based. A host with no passphrase set refuses
-    remote access outright, so hosting on by default exposes nothing."""
+    """Network gate: localhost stays trust-based (the local UI never sends
+    secrets or headers), but every request from beyond loopback — and every
+    loopback request carrying the X-Yaah-Remote marker (the client proxy) —
+    must present the host's passphrase. A host with no passphrase set
+    refuses all remote access, so binding 0.0.0.0 with hosting on exposes
+    nothing unauthenticated."""
+    import ipaddress
+
     from fastapi.responses import JSONResponse
 
     from backend.agent.config import load_config
 
-    if request.headers.get("x-yaah-remote"):
+    client_host = (request.client.host if request.client else "") or ""
+    try:
+        is_local = not client_host or ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_local = True  # non-IP client (ASGI test transport) = local tooling
+    marked = bool(request.headers.get("x-yaah-remote"))
+    # The handshake and health probes stay open from anywhere: they carry no
+    # secrets and are how a client learns the protocol/instance id before it
+    # can know the passphrase.
+    path_open = request.url.path in ("/api/health", "/api/remote/info")
+    if (marked or not is_local) and not path_open:
         expected = (load_config().get("remote") or {}).get("passphrase") or ""
         got = request.headers.get("x-yaah-passphrase") or ""
         if not expected or got != expected:

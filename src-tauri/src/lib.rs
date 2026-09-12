@@ -87,7 +87,11 @@ fn spawn_backend(app: &tauri::AppHandle) -> Option<Child> {
     let log_path = std::env::temp_dir().join("yaah-backend.log");
     eprintln!("backend cwd: {} (log: {})", cwd.display(), log_path.display());
     let mut cmd = Command::new(python_cmd());
-    cmd.args(["-m", "uvicorn", "backend.main:app", "--port", "8765"])
+    // Dev runs stay loopback-bound unless YAAH_BIND_HOST overrides (the
+    // packaged sidecar binds 0.0.0.0; non-loopback requests are gated by
+    // the backend's passphrase middleware either way).
+    let host = std::env::var("YAAH_BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    cmd.args(["-m", "uvicorn", "backend.main:app", "--port", "8765", "--host", &host])
         .current_dir(&cwd);
     spawn_with_output(&mut cmd, app)
 }

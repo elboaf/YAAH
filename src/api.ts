@@ -355,6 +355,8 @@ export interface RemoteHostFound {
   host: string
   port: number
   protocol: number
+  /** Per-process instance id — used to hide this machine itself. */
+  iid: string
   os: string
   /** Host requires a passphrase. */
   auth: boolean
@@ -372,6 +374,10 @@ export interface RemoteStatus {
 /** mDNS sweep (~2.5s) for YAAH hosts on this LAN. */
 export const discoverHosts = () =>
   api<{ hosts: RemoteHostFound[] }>('/api/remote/discover')
+
+/** This instance's own handshake info (instance id, hostname, …). */
+export const localInstanceInfo = () =>
+  api<{ instance_id: string; hostname: string }>('/api/remote/info')
 
 export const remoteStatus = () => api<RemoteStatus>('/api/remote/status')
 

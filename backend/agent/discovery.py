@@ -55,11 +55,12 @@ def beacon_props() -> dict:
     import platform
 
     from backend.agent.config import load_config
-    from backend.agent.remote import PROTOCOL_VERSION
+    from backend.agent.remote import INSTANCE_ID, PROTOCOL_VERSION
 
     passphrase_set = bool((load_config().get("remote") or {}).get("passphrase"))
     return {
         "proto": str(PROTOCOL_VERSION),
+        "iid": INSTANCE_ID,
         "os": platform.system() or "?",
         "auth": "1" if passphrase_set else "0",
     }
@@ -134,6 +135,7 @@ class _Collector:
             "host": ip,
             "port": info.port,
             "protocol": int(props.get("proto") or 0),
+            "iid": props.get("iid") or "",
             "os": props.get("os") or "?",
             "auth": props.get("auth") == "1",
         }
@@ -167,4 +169,15 @@ def browse(seconds: float = 2.5) -> list[dict]:
                 zc.close()
             except Exception:  # noqa: BLE001
                 pass
-    return sorted(collector.found.values(), key=lambda h: h["name"])
+    # Dedupe by instance id: a machine with several NICs (or a transient
+    # double registration) must appear once in the switcher. Entries with
+    # no iid fall back to name+port dedupe.
+    seen: set = set()
+    out = []
+    for h in sorted(collector.found.values(), key=lambda h: h["name"]):
+        key = h.get("iid") or f'{h["name"]}:{h["host"]}:{h["port"]}'
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out

@@ -374,3 +374,16 @@ async def test_connect_refuses_this_same_instance(monkeypatch):
     assert res.status_code == 400
     assert "same instance" in res.json()["detail"]
     assert remote_mod.get_remote() is None
+
+
+# ---------------------------------------------------------------- loopback gate
+
+def test_loopback_classification():
+    from backend.main import _is_loopback_client
+
+    assert _is_loopback_client("127.0.0.1")
+    assert _is_loopback_client("::1")
+    assert _is_loopback_client("")
+    assert _is_loopback_client("testclient")  # ASGI test transport
+    assert not _is_loopback_client("192.168.1.38")
+    assert not _is_loopback_client("10.0.0.5")
