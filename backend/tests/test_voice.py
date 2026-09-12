@@ -92,3 +92,32 @@ async def test_cloud_key_survives_config_roundtrip(tmp_path, monkeypatch):
                                                               "cloud_api_key": "set"}})
         assert res.status_code == 200
     assert load_config()["voice"]["cloud_api_key"] == "sk-real"
+
+
+@pytest.mark.asyncio
+async def test_cloud_optional_key_and_inference_endpoint(tmp_path, monkeypatch):
+    """whisper.cpp server style: /inference URL kept as-is, no key, no model."""
+    import httpx
+
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"text": " hello "})
+
+    real_client = httpx.AsyncClient
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+
+    wav = transcribe.save_wav(b"\x00\x01" * 160)
+    try:
+        text = await transcribe.transcribe_cloud(wav, "http://192.168.1.10:8080/inference", "", "")
+    finally:
+        import os
+        os.unlink(wav)
+    assert text == "hello"
+    assert captured["url"] == "http://192.168.1.10:8080/inference"
+    assert captured["auth"] is None

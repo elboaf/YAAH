@@ -4,7 +4,7 @@ import json
 import pytest
 
 from backend.agent import loop
-from backend.agent.tools import execute_tool, resolve_path
+from backend.agent.tools import execute_tool, resolve_path, workspace_root
 
 
 # ---------------------------------------------------------------- tools
@@ -39,6 +39,17 @@ async def test_edit_requires_unique_match(tmp_path):
 def test_path_escape_blocked(tmp_path):
     with pytest.raises(ValueError):
         resolve_path(str(tmp_path), "../outside.txt")
+
+
+def test_default_workspace_is_home():
+    from pathlib import Path
+
+    for ws in ("", ".", None):
+        assert workspace_root(ws) == Path.home().resolve()
+    # File tools resolve against home and still block escapes outside it.
+    assert str(resolve_path("", "notes.txt")).startswith(str(Path.home().resolve()))
+    with pytest.raises(ValueError):
+        resolve_path("", "../outside.txt")
 
 
 # ---------------------------------------------------------------- loop

@@ -368,13 +368,13 @@ async def api_available_models():
 
 from pathlib import Path as _Path
 
-from backend.agent.tools import IGNORED_DIRS, read_file, resolve_path
+from backend.agent.tools import IGNORED_DIRS, read_file, resolve_path, workspace_root
 
 
 @app.get("/api/files")
 async def api_file_tree(workspace: str):
     """Recursive file tree of the workspace (ignored dirs skipped)."""
-    root = _Path(workspace).resolve()
+    root = workspace_root(workspace)
     if not root.exists():
         raise HTTPException(status_code=400, detail="workspace does not exist")
 
@@ -553,7 +553,7 @@ async def api_transcribe_status():
         "engine": voice.get("engine") or "local",
         "local_available": transcribe.local_available(),
         "local_model": model.name if model else None,
-        "cloud_configured": bool(voice.get("cloud_endpoint") and voice.get("cloud_api_key")),
+        "cloud_configured": bool(voice.get("cloud_endpoint")),
     }
 
 
@@ -594,7 +594,7 @@ async def api_transcribe(request: Request):
                 wav_path,
                 voice.get("cloud_endpoint") or "",
                 voice.get("cloud_api_key") or "",
-                voice.get("cloud_model") or "whisper-1",
+                voice.get("cloud_model") or "",
             )
         else:
             text = await asyncio.to_thread(transcribe.transcribe_local, wav_path)

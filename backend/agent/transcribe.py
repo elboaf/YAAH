@@ -138,22 +138,26 @@ def transcribe_local(wav_path: str) -> str:
 
 
 async def transcribe_cloud(wav_path: str, endpoint: str, api_key: str, model: str) -> str:
-    """POST the WAV to an OpenAI-compatible /audio/transcriptions endpoint."""
+    """POST the WAV to a cloud transcription endpoint.
+
+    Two shapes are supported: an OpenAI-compatible /audio/transcriptions
+    endpoint (base URL is fine, the suffix is appended), or a whisper.cpp
+    server /inference URL used as-is. API key and model are optional —
+    local model servers (whisper.cpp server, faster-whisper servers, …)
+    typically need neither.
+    """
     import httpx
 
-    if not endpoint or not api_key:
-        raise RuntimeError("Cloud transcription needs an endpoint and API key in Settings")
+    if not endpoint:
+        raise RuntimeError("Cloud transcription needs an endpoint in Settings")
     url = endpoint.rstrip("/")
-    if not url.endswith("/audio/transcriptions"):
+    if not url.endswith(("/audio/transcriptions", "/inference")):
         url += "/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    data = {"model": model} if model else {}
     async with httpx.AsyncClient(timeout=120) as client:
         with open(wav_path, "rb") as f:
-            res = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                files={"file": ("audio.wav", f, "audio/wav")},
-                data={"model": model or "whisper-1"},
-            )
+            res = await client.post(url, headers=headers, files={"file": ("audio.wav", f, "audio/wav")}, data=data)
     if res.status_code != 200:
         raise RuntimeError(f"Cloud transcription failed ({res.status_code}): {res.text[:200]}")
     return (res.json().get("text") or "").strip()

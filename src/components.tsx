@@ -600,7 +600,7 @@ export function FilesPanel() {
     })
 
   const refresh = useCallback(() => {
-    if (!workspace || workspace === '.') {
+    if (workspace === '.') {
       setTree([])
       setErr(null)
       return
@@ -698,7 +698,7 @@ export function FilesPanel() {
           </p>
         ) : tree.length === 0 ? (
           <p className="mt-4 px-2 text-center text-[11px] text-zinc-600">
-            Set a workspace to browse files.
+            No files in the workspace.
           </p>
         ) : (
           tree.map((e) => (
@@ -1101,7 +1101,7 @@ function ConversationList() {
         ws: {
           id: -1,
           path: p,
-          label: p === null ? 'Default' : wsBasename(p),
+          label: p === null ? 'Default (Home)' : wsBasename(p),
           last_opened_at: null,
           exists: p === null || true,
           conversation_count: 0,
@@ -1512,7 +1512,7 @@ export function Sidebar() {
             'No root directory — conversations without a workspace'
           }
         >
-          <option value="">Default</option>
+          <option value="">Default (Home)</option>
           {workspaces
             .filter((w) => w.path !== null)
             .map((w) => (
@@ -1625,7 +1625,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [cloudEndpoint, setCloudEndpoint] = useState('')
   const [cloudKey, setCloudKey] = useState('')
   const [cloudKeySaved, setCloudKeySaved] = useState(false)
-  const [cloudModel, setCloudModel] = useState('whisper-1')
+  const [cloudModel, setCloudModel] = useState('')
 
   // Esc closes, matching PreviewModal and the dialog shells — but the
   // removal confirm consumes Esc first, so it never dismisses two layers.
@@ -1661,7 +1661,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
         setCloudEndpoint(v?.cloud_endpoint ?? '')
         setCloudKeySaved(v?.cloud_api_key === 'set')
-        setCloudModel(v?.cloud_model || 'whisper-1')
+        setCloudModel(v?.cloud_model || '')
       })
       .catch((e) => setErr(String(e)))
     getProviders().then(setPresets).catch(() => {})
@@ -1964,7 +1964,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
               value={cloudEndpoint}
               onChange={(e) => setCloudEndpoint(e.target.value)}
-              placeholder="https://api.openai.com/v1 (base URL of the provider)"
+              placeholder="https://api.openai.com/v1  or  http://192.168.1.10:8080/inference"
               aria-label="Cloud transcription endpoint"
             />
             <div className="flex gap-1.5">
@@ -1973,20 +1973,21 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
                 value={cloudKey}
                 onChange={(e) => setCloudKey(e.target.value)}
-                placeholder={cloudKeySaved ? 'key saved' : 'API key'}
+                placeholder={cloudKeySaved ? 'key saved (optional)' : 'API key (optional)'}
                 aria-label="Cloud transcription API key"
               />
               <input
                 className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
                 value={cloudModel}
                 onChange={(e) => setCloudModel(e.target.value)}
-                placeholder="whisper-1"
+                placeholder="model (optional)"
                 aria-label="Cloud transcription model"
               />
             </div>
             <p className="text-[10px] text-zinc-600">
-              Any OpenAI-compatible /audio/transcriptions endpoint (OpenAI whisper-1, Groq
-              whisper-large-v3, …). Recordings are sent to that provider.
+              OpenAI-compatible /audio/transcriptions endpoint (base URL is fine) or a whisper.cpp
+              server /inference URL. API key and model are optional — local model servers usually
+              need neither. Recordings are sent to that server.
             </p>
           </div>
         )}
@@ -2390,14 +2391,9 @@ function Composer() {
           added.push({ name: f.name, content, size: f.size })
           continue
         }
-        // Large file: stage a copy in the workspace for read_file. Without a
-        // workspace there is nowhere sandboxed to put it, so refuse clearly.
-        if (!workspace) {
-          pushReject(
-            `"${f.name}" skipped — files over 100 KB need a workspace selected (they are copied to .yaah-attachments/)`,
-          )
-          continue
-        }
+        // Large file: stage a copy in the workspace for read_file. The Default
+        // workspace resolves to the home directory, so staging always has a
+        // sandboxed target.
         try {
           const { path } = await uploadAttachment(workspace, f.name, content)
           added.push({ name: f.name, savedPath: path, size: f.size })

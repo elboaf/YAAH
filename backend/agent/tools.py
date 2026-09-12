@@ -15,6 +15,19 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- path safety
 
+def workspace_root(workspace: str | None) -> Path:
+    """Resolve the workspace root directory.
+
+    The Default pseudo-workspace (empty or legacy '.') has no stored root;
+    it points at the user's home directory so file tools and the file tree
+    work out of the box.
+    """
+    ws = (workspace or "").strip()
+    if not ws or ws == ".":
+        return Path.home().resolve()
+    return Path(ws).resolve()
+
+
 def resolve_path(workspace: str, rel_path: str, for_write: bool = False) -> Path:
     """Resolve rel_path inside workspace; raise ValueError on escape.
 
@@ -22,7 +35,7 @@ def resolve_path(workspace: str, rel_path: str, for_write: bool = False) -> Path
     allowed, so multi-file skills can have the model read their own
     supporting files. Writes there stay blocked — skills are user-authored.
     """
-    root = Path(workspace).resolve()
+    root = workspace_root(workspace)
     p = (root / rel_path).resolve()
     if p == root or root in p.parents:
         return p
@@ -420,7 +433,7 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
-            cwd=workspace,
+            cwd=workspace_root(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -457,7 +470,7 @@ async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60
         proc = await asyncio.create_subprocess_exec(
             "powershell.exe", "-NoProfile", "-NonInteractive",
             "-ExecutionPolicy", "Bypass", "-Command", command,
-            cwd=workspace,
+            cwd=workspace_root(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -587,7 +600,7 @@ async def create_file(workspace: str, path: str, content: str) -> dict:
 async def delete_file(workspace: str, path: str) -> dict:
     """Delete a file or an empty directory inside the workspace."""
     p = resolve_path(workspace, path, for_write=True)
-    if p == Path(workspace).resolve():
+    if p == workspace_root(workspace):
         return {"error": "Refusing to delete the workspace root"}
     if not p.exists():
         return {"error": f"Not found: {path}"}
@@ -624,7 +637,7 @@ async def search_files(
     max_results: int = 100,
 ) -> dict:
     """Regex-search file contents (optionally glob-filtered) or match paths."""
-    root = Path(workspace).resolve()
+    root = workspace_root(workspace)
     max_results = max(1, min(int(max_results or 100), 500))
     content_re = None
     if pattern:
@@ -677,7 +690,7 @@ async def _git(workspace: str, *args: str) -> dict:
     """Run a git command in the workspace; return structured result."""
     proc = await asyncio.create_subprocess_exec(
         "git", *args,
-        cwd=workspace,
+        cwd=workspace_root(workspace),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
