@@ -534,6 +534,16 @@ def _kill_tree(proc: asyncio.subprocess.Process, job=None) -> None:
             pass
 
 
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Wait out a killed process. The prior communicate() was cancelled
+    mid-read, so a second communicate() is unsupported and can hang even
+    after the tree is dead; wait() just needs the exit."""
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> dict:
     """Run a shell command in the workspace; return structured result."""
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
@@ -555,7 +565,9 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
                 timed_out = False
             except asyncio.TimeoutError:
                 _kill_tree(proc, job)
-                await proc.communicate()
+                # communicate() was cancelled mid-read; calling it again is
+                # unsupported and can hang forever. wait() only needs the exit.
+                await _reap(proc)
                 output = f"[timed out after {timeout}s]"
                 timed_out = True
         finally:
@@ -599,7 +611,7 @@ async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60
                 timed_out = False
             except asyncio.TimeoutError:
                 _kill_tree(proc, job)
-                await proc.communicate()
+                await _reap(proc)
                 output = f"[timed out after {timeout}s]"
                 timed_out = True
         finally:
@@ -824,7 +836,7 @@ async def _git(workspace: str, *args: str) -> dict:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
         except asyncio.TimeoutError:
             _kill_tree(proc, job)
-            await proc.communicate()
+            await _reap(proc)
             return {"error": "git timed out"}
     finally:
         _job_close(job)
