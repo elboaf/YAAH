@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
 # The sidecar always serves on this port (backend_entry.py, lib.rs spawn).
 API_PORT = 8765
 
-app = FastAPI(title="AI Coding Agent", version="0.7.4", lifespan=lifespan)
+app = FastAPI(title="AI Coding Agent", version="0.7.5", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -196,6 +196,13 @@ async def api_add_workspace(body: NewWorkspace):
     path is stripped, a raw path is taken as-is (the host validates that
     it exists)."""
     import os
+
+    # Typed paths need normalizing before anything resolves them: `~` does
+    # not expand itself, and a bare name must anchor to the home directory
+    # (the Default workspace), not the backend's root-owned install cwd.
+    body.path = os.path.expanduser(body.path.strip())
+    if body.path and not os.path.isabs(body.path):
+        body.path = str(workspace_root("") / body.path)
 
     host = remote_mod.get_remote()
     if host is not None:

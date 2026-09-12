@@ -163,3 +163,29 @@ async def test_add_workspace_creates_missing_folder(tmp_path):
     body = res.json()
     assert target.is_dir()
     assert body["exists"] is True
+
+@pytest.mark.asyncio
+async def test_typed_paths_normalize_against_home(monkeypatch, tmp_path):
+    """`~` expands and bare names anchor to the home directory — a typed
+    `test` must not try to create a folder in the backend's root-owned
+    install cwd (the remote 'add folder on host' failure)."""
+    import os
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.main import app
+
+    real_home = os.path.expanduser("~")
+    monkeypatch.setattr(
+        os.path, "expanduser",
+        lambda p: str(tmp_path) + p[1:] if p == "~" or p.startswith("~/") else p,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/workspaces", json={"path": "typedproj"})
+        row = res.json()
+        assert (tmp_path / "typedproj").is_dir()
+        assert row["exists"] is True
+
+        res2 = await client.post("/api/workspaces", json={"path": "~/typedtilde"})
+        assert (tmp_path / "typedtilde").is_dir()
+        assert res2.json()["path"] == str(tmp_path / "typedtilde")
