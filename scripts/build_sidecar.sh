@@ -43,7 +43,12 @@ if [ ! -f "backend/whisper/bin/whisper-cli$EXE" ]; then
     -DCMAKE_BUILD_TYPE=Release \
     -DWHISPER_BUILD_TESTS=OFF \
     -DWHISPER_BUILD_EXAMPLES=ON \
-    -DGGML_OPENMP=OFF
+    -DGGML_OPENMP=OFF \
+    -DGGML_NATIVE=OFF
+  # GGML_NATIVE=OFF: CI CPUs are newer than our users'. With native on,
+  # the binary hard-codes the build host's ISA (e.g. AVX2/FMA) and dies
+  # with 0xC000001D (ILLEGAL_INSTRUCTION) on pre-Haswell machines like an
+  # i5-3470. Baseline x86-64 keeps old CPUs alive everywhere.
   # Build all (no --target: multi-config MSBuild/Xcode generators can't
   # resolve target vcxproj files from the top dir). Examples=ON is required
   # — whisper-cli IS an example; tests stay off, server defaults off.
