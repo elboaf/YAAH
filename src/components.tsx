@@ -3036,6 +3036,10 @@ function Composer() {
   // by Settings via the 'ptt-hotkey-changed' event. Pressed/Released are also
   // bridged onto window events so tests (and the capture UI) can drive the
   // handlers without the Tauri plugin.
+  // Tauri invoke rejections are plain strings, not Errors — `(e as Error)
+  // .message` would print "undefined" and hide the real (permission) cause.
+  const pttErrMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
+
   const registeredHotkeyRef = useRef<string | null>(null)
   const pttHandlerRef = useRef<(e: { state: string }) => void>(() => {})
   pttHandlerRef.current = (event) => {
@@ -3072,7 +3076,7 @@ function Composer() {
       } catch (e) {
         if (!disposed) {
           pushReject(
-            `Push-to-talk hotkey could not be registered (${(e as Error).message}) — pick another in Settings`,
+            `Push-to-talk hotkey could not be registered (${pttErrMsg(e)}) — pick another in Settings`,
           )
         }
       }
@@ -3085,7 +3089,7 @@ function Composer() {
         })
         .catch((err) => {
           pushReject(
-            `Hotkey ${hk || '(disabled)'} could not be registered (${(err as Error).message})`,
+            `Hotkey ${hk || '(disabled)'} could not be registered (${pttErrMsg(err)})`,
           )
         })
     }
