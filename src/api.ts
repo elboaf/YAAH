@@ -112,6 +112,8 @@ export interface AgentConfig {
     cloud_endpoint: string
     cloud_api_key: string
     cloud_model: string
+    /** System-wide push-to-talk hotkey (Tauri accelerator, "" disables). */
+    ptt_hotkey: string
   }
   /** LAN hosting (this instance as a host). */
   remote?: {
@@ -141,6 +143,7 @@ export const updateConfig = (
       cloud_endpoint: string
       cloud_api_key?: string
       cloud_model: string
+      ptt_hotkey?: string
     }
     remote?: {
       hosting_enabled?: boolean

@@ -121,3 +121,23 @@ async def test_cloud_optional_key_and_inference_endpoint(tmp_path, monkeypatch):
     assert text == "hello"
     assert captured["url"] == "http://192.168.1.10:8080/inference"
     assert captured["auth"] is None
+
+
+@pytest.mark.asyncio
+async def test_ptt_hotkey_roundtrip(tmp_path, monkeypatch):
+    """The push-to-talk hotkey has a default, round-trips through PUT, and
+    an empty string (disable) is preserved — a Settings save must not
+    resurrect it."""
+    from backend.agent.config import load_config, save_config
+
+    save_config({"voice": {"engine": "local", "ptt_hotkey": ""}})
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        got = (await client.get("/api/config")).json()
+        assert got["voice"]["ptt_hotkey"] == ""
+        res = await client.put(
+            "/api/config", json={"voice": {"ptt_hotkey": "Ctrl+Space"}}
+        )
+        assert res.status_code == 200
+    assert load_config()["voice"]["ptt_hotkey"] == "Ctrl+Space"
