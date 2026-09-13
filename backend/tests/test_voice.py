@@ -1,4 +1,5 @@
 """Voice transcription: local engine resolution, endpoint, key masking."""
+import os
 import wave
 
 import pytest
@@ -141,3 +142,19 @@ async def test_ptt_hotkey_roundtrip(tmp_path, monkeypatch):
         )
         assert res.status_code == 200
     assert load_config()["voice"]["ptt_hotkey"] == "Ctrl+Space"
+
+
+def test_child_env_puts_binary_dir_on_loader_path(whisper_env, monkeypatch):
+    # Linux: the dynamic linker doesn't search the exe's own dir, so the
+    # staged libwhisper.so / ggml-cpu-*.so next to whisper-cli need
+    # LD_LIBRARY_PATH or transcription dies with exit 127.
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.delenv("DYLD_LIBRARY_PATH", raising=False)
+    binary = transcribe.find_binary()
+    env = transcribe._child_env(binary)
+    assert str(binary.parent) in env["LD_LIBRARY_PATH"].split(os.pathsep)
+    assert str(binary.parent) in env["DYLD_LIBRARY_PATH"].split(os.pathsep)
+
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/keep")
+    env = transcribe._child_env(binary)
+    assert env["LD_LIBRARY_PATH"] == f"{binary.parent}{os.pathsep}/opt/keep"

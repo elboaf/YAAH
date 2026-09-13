@@ -113,6 +113,19 @@ def local_available() -> bool:
     return find_binary() is not None and find_model() is not None
 
 
+def _child_env(binary: Path) -> dict:
+    """Environment for the whisper subprocess with the binary's own dir on
+    the loader search path. Unlike Windows DLL search, the Linux dynamic
+    linker never searches the executable's directory, so the staged
+    libwhisper.so / ggml-cpu-*.so next to whisper-cli are missed without
+    this (exit 127, "cannot open shared object file")."""
+    env = os.environ.copy()
+    bdir = str(binary.parent)
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        env[var] = f"{bdir}{os.pathsep}{env[var]}" if env.get(var) else bdir
+    return env
+
+
 def transcribe_local(wav_path: str) -> str:
     """Run whisper.cpp on a 16 kHz mono WAV; return the transcript text."""
     binary = find_binary()
@@ -131,7 +144,12 @@ def transcribe_local(wav_path: str) -> str:
         "-np",  # no progress prints on stderr
     ]
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=_LOCAL_TIMEOUT, **_NO_WINDOW
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=_LOCAL_TIMEOUT,
+        env=_child_env(binary),
+        **_NO_WINDOW,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
