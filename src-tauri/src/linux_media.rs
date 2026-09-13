@@ -13,13 +13,15 @@ pub fn enable_microphone_access(app: &AppHandle) {
         return;
     };
     let result = window.with_webview(|webview| {
+        use webkit2gtk::{SettingsExt as _, WebViewExt as _};
         let wv = webview.inner();
         if let Some(settings) = wv.settings() {
             settings.set_enable_media_stream(true);
         }
         wv.connect_permission_request(|_, request| {
-            use webkit2gtk::prelude::*;
-            if request.is::<webkit2gtk::UserMediaPermissionRequest>() {
+            use webkit2gtk::glib::object::ObjectExt as _;
+            use webkit2gtk::{PermissionRequestExt as _, UserMediaPermissionRequest};
+            if request.is::<UserMediaPermissionRequest>() {
                 request.allow();
             } else {
                 request.deny();
