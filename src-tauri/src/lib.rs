@@ -407,6 +407,9 @@ async fn pick_workspace(app: tauri::AppHandle) -> Result<String, String> {
         .ok_or_else(|| "no folder selected".to_string())
 }
 
+#[cfg(target_os = "linux")]
+mod linux_media;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -425,6 +428,10 @@ pub fn run() {
             // webview, so early API calls don't race server startup. The
             // supervisor emits backend-status events either way.
             wait_for_backend(std::time::Duration::from_secs(15));
+            // WebKitGTK denies mic capture by default; grant it to our own
+            // webview so getUserMedia dictation works (no-op elsewhere).
+            #[cfg(target_os = "linux")]
+            linux_media::enable_microphone_access(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![pick_workspace, restart_backend])

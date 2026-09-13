@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "yaah",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "identifier": "com.elboaf.yaah",
   "build": {
     "frontendDist": "../dist",
@@ -39,6 +39,14 @@
     ],
     "externalBin": [
       "binaries/backend"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "gstreamer1.0-plugins-base",
+          "gstreamer1.0-plugins-good"
+        ]
+      }
+    }
   }
 }

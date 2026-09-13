@@ -2925,8 +2925,15 @@ function Composer() {
     const rec = new VoiceRecorder()
     try {
       await rec.start()
-    } catch {
-      pushReject('Microphone unavailable — check permission for this app')
+    } catch (e) {
+      const err = e as DOMException
+      const reason =
+        err?.name === 'NotAllowedError'
+          ? 'permission denied'
+          : err?.name === 'NotFoundError'
+            ? 'no microphone found'
+            : err?.message || 'unknown error'
+      pushReject(`Microphone unavailable — ${reason}`)
       return
     }
     recorderRef.current = rec
@@ -2992,8 +2999,15 @@ function Composer() {
     const rec = new VoiceRecorder()
     try {
       await rec.start()
-    } catch {
-      pushReject('Microphone unavailable — check permission for this app')
+    } catch (e) {
+      const err = e as DOMException
+      const reason =
+        err?.name === 'NotAllowedError'
+          ? 'permission denied'
+          : err?.name === 'NotFoundError'
+            ? 'no microphone found'
+            : err?.message || 'unknown error'
+      pushReject(`Microphone unavailable — ${reason}`)
       return
     }
     recorderRef.current = rec
