@@ -44,11 +44,18 @@ if [ ! -f "backend/whisper/bin/whisper-cli$EXE" ]; then
     -DWHISPER_BUILD_TESTS=OFF \
     -DWHISPER_BUILD_EXAMPLES=ON \
     -DGGML_OPENMP=OFF \
-    -DGGML_NATIVE=OFF
+    -DGGML_NATIVE=OFF \
+    -DGGML_AVX2=OFF \
+    -DGGML_FMA=OFF \
+    -DGGML_F16C=OFF \
+    -DGGML_AVX=ON
   # GGML_NATIVE=OFF: CI CPUs are newer than our users'. With native on,
   # the binary hard-codes the build host's ISA (e.g. AVX2/FMA) and dies
   # with 0xC000001D (ILLEGAL_INSTRUCTION) on pre-Haswell machines like an
-  # i5-3470. Baseline x86-64 keeps old CPUs alive everywhere.
+  # i5-3470. But NATIVE=OFF alone isn't enough: ggml's AVX2/FMA/F16C
+  # options default to ON, and its MSVC flag chain (AVX512 > AVX2 > AVX)
+  # then still emits /arch:AVX2. Pin AVX2/FMA/F16C off so the chain lands
+  # on /arch:AVX (Ivy Bridge and later) everywhere.
   # Build all (no --target: multi-config MSBuild/Xcode generators can't
   # resolve target vcxproj files from the top dir). Examples=ON is required
   # — whisper-cli IS an example; tests stay off, server defaults off.
