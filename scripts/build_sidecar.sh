@@ -43,7 +43,19 @@ if [ ! -f "backend/whisper/bin/whisper-cli$EXE" ]; then
     -DCMAKE_BUILD_TYPE=Release \
     -DWHISPER_BUILD_TESTS=OFF \
     -DWHISPER_BUILD_EXAMPLES=ON \
-    -DGGML_OPENMP=OFF
+    -DGGML_OPENMP=OFF \
+    -DGGML_NATIVE=OFF \
+    -DGGML_CPU_ALL_VARIANTS=ON
+  # GGML_CPU_ALL_VARIANTS: CI CPUs are newer than our users'. With native
+  # on (or AVX2 left at its default), the binary hard-codes the build
+  # host's ISA (e.g. AVX2/FMA) and dies with 0xC000001D
+  # (ILLEGAL_INSTRUCTION) on pre-Haswell machines like an i5-3470.
+  # ALL_VARIANTS compiles one ggml-cpu variant per ISA tier (sse42,
+  # sandybridge, haswell, skylakex, ...) into a single binary and the
+  # runtime dispatch picks the best one the CPU actually supports —
+  # fast on new PCs, alive on old ones. The feature-scoring object is
+  # compiled without arch flags, so the dispatch itself never executes
+  # instructions the CPU lacks.
   # Build all (no --target: multi-config MSBuild/Xcode generators can't
   # resolve target vcxproj files from the top dir). Examples=ON is required
   # — whisper-cli IS an example; tests stay off, server defaults off.
