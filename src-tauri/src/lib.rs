@@ -147,6 +147,13 @@ fn spawn_with_output(cmd: &mut Command, app: &tauri::AppHandle) -> Option<Child>
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
+    #[cfg(unix)]
+    {
+        // Own process group so kill_tree can SIGKILL the whole tree
+        // (bootloader + the server it forks) with one killpg.
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     if let (Some(out), Some(err)) = (log_file, log_file_err) {
         use std::process::Stdio;
         cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
@@ -179,7 +186,14 @@ fn kill_tree(child: &mut Child) {
     }
     #[cfg(not(windows))]
     {
-        let _ = child.kill();
+        // The sidecar was spawned with process_group(0), so the group id
+        // equals the bootloader's pid and the signal reaches the real
+        // server it forked too — the POSIX equivalent of taskkill /T.
+        // Fall back to a bare kill in case the group is somehow gone.
+        let pid = child.id() as i32;
+        if unsafe { libc::killpg(pid, libc::SIGKILL) } != 0 {
+            let _ = child.kill();
+        }
     }
     let _ = child.wait();
 }
