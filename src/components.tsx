@@ -1854,6 +1854,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [cloudKey, setCloudKey] = useState('')
   const [cloudKeySaved, setCloudKeySaved] = useState(false)
   const [cloudModel, setCloudModel] = useState('')
+  // Push-to-talk hotkey (Tauri accelerator string); captured live from the
+  // keyboard when the user clicks "record".
+  const [pttHotkeyDraft, setPttHotkeyDraft] = useState('')
+  const [capturingHotkey, setCapturingHotkey] = useState(false)
   // LAN hosting: on by default; passphrase gates remote tool execution.
   const [remoteHost, setRemoteHost] = useState(true)
   const [remotePass, setRemotePass] = useState('')
@@ -1903,6 +1907,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setCloudEndpoint(v?.cloud_endpoint ?? '')
           setCloudKeySaved(v?.cloud_api_key === 'set')
           setCloudModel(v?.cloud_model || '')
+          setPttHotkeyDraft(v?.ptt_hotkey ?? '')
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
           setRemoteHost(c.remote?.hosting_enabled ?? true)
@@ -1934,6 +1939,40 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
+
+  // Live hotkey capture: the next non-modifier keydown becomes the
+  // accelerator. Capture-phase listener so Esc cancels the capture instead
+  // of closing Settings.
+  useEffect(() => {
+    if (!capturingHotkey) return
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const key = e.key
+      if (key === 'Escape') {
+        setCapturingHotkey(false)
+        return
+      }
+      if (['Control', 'Shift', 'Alt', 'Meta'].includes(key)) return // modifier alone
+      const parts: string[] = []
+      if (e.ctrlKey) parts.push('Ctrl')
+      if (e.altKey) parts.push('Alt')
+      if (e.shiftKey) parts.push('Shift')
+      if (e.metaKey) parts.push('Super')
+      let main: string | null = null
+      if (/^[a-z0-9]$/i.test(key)) main = key.toUpperCase()
+      else if (/^F\d{1,2}$/.test(key)) main = key
+      else if (key === ' ') main = 'Space'
+      else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) main = key
+      else if (/^[`\-=[\];'",./\\]$/.test(key)) main = key.toUpperCase()
+      if (!main) return // unrepresentable key — wait for another
+      parts.push(main)
+      setPttHotkeyDraft(parts.join('+'))
+      setCapturingHotkey(false)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [capturingHotkey])
 
   const applyPreset = (target: string, presetName: string) => {
     const p = presets[presetName]
@@ -2004,6 +2043,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           // the saved key survives.
           ...(cloudKey ? { cloud_api_key: cloudKey } : {}),
           cloud_model: cloudModel,
+          ptt_hotkey: pttHotkeyDraft,
         },
         remote: {
           hosting_enabled: remoteHost,
@@ -2011,6 +2051,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           display_name: remoteName,
         },
       })
+      // Hot-swap the live registration in the Composer; it reports failure
+      // (combo taken by another app) through the same reject toast system.
+      window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
       setSaved(true)
       setTimeout(onClose, 600)
     } catch (e) {
@@ -2255,6 +2298,33 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             </p>
           </div>
         )}
+        <div className="mb-3">
+          <div className="flex items-center gap-1.5">
+            <button
+              className={`shrink-0 rounded border px-2 py-1 font-mono text-xs ${
+                capturingHotkey
+                  ? 'border-amber-600 bg-amber-950/40 text-amber-200'
+                  : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+              }`}
+              onClick={() => setCapturingHotkey(true)}
+              aria-label="Record push-to-talk hotkey"
+            >
+              {capturingHotkey ? 'press keys…' : pttHotkeyDraft || 'set hotkey'}
+            </button>
+            <button
+              className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800"
+              onClick={() => setPttHotkeyDraft('')}
+              aria-label="Disable push-to-talk hotkey"
+            >
+              off
+            </button>
+          </div>
+          <p className="mt-1 text-[10px] text-zinc-600">
+            System-wide push-to-talk: hold the key to record, release to transcribe and send
+            immediately (works even when YAAH is in the background). Esc cancels capture; "off"
+            disables push-to-talk.
+          </p>
+        </div>
 
         <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
           Remote hosting
@@ -2865,8 +2935,9 @@ function Composer() {
 
   // Auto-stop on silence (VAD): once you've spoken and stayed quiet for
   // ~1.6s, finish the recording and transcribe. Manual click still wins.
+  // Never fires for push-to-talk: the hotkey release is the only stop.
   useEffect(() => {
-    if (voiceState !== 'recording') return
+    if (voiceState !== 'recording' || pttHeldRef.current) return
     const id = window.setInterval(() => {
       const rec = recorderRef.current
       if (!rec) return
@@ -2875,6 +2946,167 @@ function Composer() {
     }, 200)
     return () => window.clearInterval(id)
   }, [voiceState])
+
+  // ---- push-to-talk: system-wide hotkey, hold = record, release = send ----
+  // Spec (2026-09-13): global accelerator via tauri-plugin-global-shortcut;
+  // release transcribes and sends as its own message (same path as Enter,
+  // from the background, no focus steal). Empty/silent recordings are a
+  // silent no-op. PTT takes the mic from click-dictation (which is
+  // cancelled and discarded). Registration failure → warning toast, PTT
+  // stays off until re-picked in Settings.
+  const [pttHotkey, setPttHotkey] = useState('') // currently registered accelerator
+  const pttHeldRef = useRef(false)
+  const pttBusyRef = useRef(false) // a release is still transcribing/sending
+  const prevTitleRef = useRef('')
+  const voiceStateRef = useRef<'idle' | 'recording' | 'transcribing'>('idle')
+  // Assigned after `send` is declared below (TDZ-safe via declaration here).
+  const sendRef = useRef<(text?: string) => Promise<void>>(async () => {})
+
+  useEffect(() => {
+    voiceStateRef.current = voiceState
+  }, [voiceState])
+
+  const setPttTitle = (on: boolean) => {
+    if (on) {
+      prevTitleRef.current = document.title
+      document.title = '● Recording — release to dictate'
+    } else if (prevTitleRef.current) {
+      document.title = prevTitleRef.current
+      prevTitleRef.current = ''
+    }
+  }
+
+  const pttPress = async () => {
+    if (pttBusyRef.current) return // previous release is still in flight
+    if (voiceStateRef.current === 'transcribing') return
+    if (voiceStateRef.current === 'recording') {
+      // Take the mic over from click-dictation; discard its audio.
+      try {
+        await recorderRef.current?.stop()
+      } catch {
+        /* already dead — proceed */
+      }
+      recorderRef.current = null
+      setVoiceState('idle')
+    }
+    const rec = new VoiceRecorder()
+    try {
+      await rec.start()
+    } catch {
+      pushReject('Microphone unavailable — check permission for this app')
+      return
+    }
+    recorderRef.current = rec
+    pttHeldRef.current = true
+    setVoiceState('recording')
+    setPttTitle(true)
+  }
+
+  const pttRelease = async () => {
+    pttHeldRef.current = false
+    setPttTitle(false)
+    const rec = recorderRef.current
+    if (voiceStateRef.current !== 'recording' || !rec) return
+    // No speech at all (accidental tap): silently stop, send nothing.
+    if (!rec.metrics().speechStarted) {
+      recorderRef.current = null
+      setVoiceState('idle')
+      void rec.stop().catch(() => {})
+      return
+    }
+    setVoiceState('transcribing')
+    pttBusyRef.current = true
+    try {
+      const blob = await rec.stop()
+      const text = await transcribeAudio(blob)
+      if (text) {
+        void sendRef.current(text)
+      }
+      // Empty transcript after real speech: whisper heard noise — stay quiet.
+    } catch (e) {
+      pushReject(`Dictation failed: ${(e as Error).message}`)
+    } finally {
+      recorderRef.current = null
+      pttBusyRef.current = false
+      setVoiceState('idle')
+    }
+  }
+
+  // Register the configured accelerator once at startup; re-registered live
+  // by Settings via the 'ptt-hotkey-changed' event. Pressed/Released are also
+  // bridged onto window events so tests (and the capture UI) can drive the
+  // handlers without the Tauri plugin.
+  const registeredHotkeyRef = useRef<string | null>(null)
+  const pttHandlerRef = useRef<(e: { state: string }) => void>(() => {})
+  pttHandlerRef.current = (event) => {
+    if (event.state === 'Pressed') void pttPress()
+    else if (event.state === 'Released') void pttRelease()
+  }
+
+  const applyPttHotkey = async (hk: string): Promise<void> => {
+    const gss = await import('@tauri-apps/plugin-global-shortcut')
+    if (registeredHotkeyRef.current) {
+      const old = registeredHotkeyRef.current
+      registeredHotkeyRef.current = null
+      setPttHotkey('')
+      await gss.unregister(old).catch(() => {})
+    }
+    if (!hk) return
+    // Handlers are read through pttHandlerRef, so re-registration never
+    // goes stale on press/release closures.
+    await gss.register(hk, (e) => pttHandlerRef.current(e as { state: string }))
+    registeredHotkeyRef.current = hk
+    setPttHotkey(hk)
+  }
+
+  useEffect(() => {
+    let disposed = false
+    const press = () => void pttPress()
+    const release = () => void pttRelease()
+    ;(async () => {
+      try {
+        const cfg = await getConfig()
+        const hk = cfg.voice?.ptt_hotkey ?? ''
+        if (!hk || disposed) return
+        await applyPttHotkey(hk)
+      } catch (e) {
+        if (!disposed) {
+          pushReject(
+            `Push-to-talk hotkey could not be registered (${(e as Error).message}) — pick another in Settings`,
+          )
+        }
+      }
+    })()
+    const onHotkeyChanged = (e: Event) => {
+      const hk = (e as CustomEvent<string>).detail ?? ''
+      applyPttHotkey(hk)
+        .then(() => {
+          if (hk) pushReject(`Push-to-talk bound to ${hk}`)
+        })
+        .catch((err) => {
+          pushReject(
+            `Hotkey ${hk || '(disabled)'} could not be registered (${(err as Error).message})`,
+          )
+        })
+    }
+    window.addEventListener('ptt-press', press)
+    window.addEventListener('ptt-release', release)
+    window.addEventListener('ptt-hotkey-changed', onHotkeyChanged)
+    return () => {
+      disposed = true
+      window.removeEventListener('ptt-press', press)
+      window.removeEventListener('ptt-release', release)
+      window.removeEventListener('ptt-hotkey-changed', onHotkeyChanged)
+      setPttTitle(false)
+      if (registeredHotkeyRef.current) {
+        void import('@tauri-apps/plugin-global-shortcut').then((m) =>
+          m.unregister(registeredHotkeyRef.current!).catch(() => {}),
+        )
+      }
+    }
+    // Handlers read state through refs; register once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ---- attachment rejection feedback (harden: silent drops are a trust bug) ----
   const [rejects, setRejects] = useState<string[]>([])
@@ -3057,20 +3289,26 @@ function Composer() {
     }
   }
 
-  const send = async () => {
-    const text = input.trim()
-    if ((!text && attachments.length === 0 && images.length === 0) || sending) return
+  const send = async (pttText?: string) => {
+    // Push-to-talk passes explicit text: it sends as its own message and
+    // must not touch (or clear) whatever draft is sitting in the composer.
+    const isPtt = pttText !== undefined
+    const text = (pttText ?? input).trim()
+    if ((!text && (isPtt || (attachments.length === 0 && images.length === 0))) || sending) return
     setSending(true)
     setSendError(null)
 
     // Inline small attachments as fenced blocks; large staged files as
-    // workspace path pointers the agent can read_file.
+    // workspace path pointers the agent can read_file. PTT skips this —
+    // the attachments belong to the untouched draft.
     let fullText = text
-    for (const a of attachments) {
-      fullText += attachmentText(a)
-    }
-    if (images.length) {
-      fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
+    if (!isPtt) {
+      for (const a of attachments) {
+        fullText += attachmentText(a)
+      }
+      if (images.length) {
+        fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
+      }
     }
     const imageDataUrls = images.map((i) => i.dataUrl)
     const invokedSkills = pickedSkills.map((s) => s.name)
@@ -3078,10 +3316,12 @@ function Composer() {
     // composer gets it back — a failed send must not cost the prompt.
     const draft = { input, attachments, images, pickedSkills }
 
-    setInput('')
-    setAttachments([])
-    setImages([])
-    setPickedSkills([])
+    if (!isPtt) {
+      setInput('')
+      setAttachments([])
+      setImages([])
+      setPickedSkills([])
+    }
     setError(null)
     // Capture the turn's target buffer now: everything this turn writes —
     // optimistic messages, stream deltas, tool traces — goes there, even if
@@ -3127,7 +3367,9 @@ function Composer() {
         // the optimistic messages and restore the draft so nothing is lost.
         removeMessage(bufKey, asstId)
         removeMessage(bufKey, userId)
-        setInput(draft.input)
+        // PTT has no input to clear, so its dictated text must come back
+        // too — a failed send must not cost the dictation either.
+        setInput(isPtt ? (draft.input ? `${draft.input.trimEnd()} ${text}` : text) : draft.input)
         setAttachments(draft.attachments)
         setImages(draft.images)
         setPickedSkills(draft.pickedSkills)
@@ -3142,6 +3384,8 @@ function Composer() {
       setAbortController(null)
     }
   }
+  // Keep the PTT handlers pointed at the latest send (stale-closure shield).
+  sendRef.current = send
 
   /** Continue a turn that died mid-stream: same conversation, same prompt,
    *  no duplicate user message (backend resume flag). */
