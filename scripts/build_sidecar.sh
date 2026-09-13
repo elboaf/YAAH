@@ -45,17 +45,21 @@ if [ ! -f "backend/whisper/bin/whisper-cli$EXE" ]; then
     -DWHISPER_BUILD_EXAMPLES=ON \
     -DGGML_OPENMP=OFF \
     -DGGML_NATIVE=OFF \
-    -DGGML_CPU_ALL_VARIANTS=ON
+    -DGGML_CPU_ALL_VARIANTS=ON \
+    -DGGML_BACKEND_DL=ON \
+    -DBUILD_SHARED_LIBS=ON
   # GGML_CPU_ALL_VARIANTS: CI CPUs are newer than our users'. With native
   # on (or AVX2 left at its default), the binary hard-codes the build
   # host's ISA (e.g. AVX2/FMA) and dies with 0xC000001D
   # (ILLEGAL_INSTRUCTION) on pre-Haswell machines like an i5-3470.
-  # ALL_VARIANTS compiles one ggml-cpu variant per ISA tier (sse42,
-  # sandybridge, haswell, skylakex, ...) into a single binary and the
-  # runtime dispatch picks the best one the CPU actually supports —
-  # fast on new PCs, alive on old ones. The feature-scoring object is
-  # compiled without arch flags, so the dispatch itself never executes
-  # instructions the CPU lacks.
+  # ALL_VARIANTS compiles one ggml-cpu backend variant per ISA tier
+  # (sse42, sandybridge, haswell, skylakex, ...) and the runtime dispatch
+  # picks the best one the CPU actually supports — fast on new PCs,
+  # alive on old ones. The feature-scoring object is compiled without
+  # arch flags, so the dispatch itself never executes instructions the
+  # CPU lacks. ALL_VARIANTS hard-requires GGML_BACKEND_DL, which
+  # requires BUILD_SHARED_LIBS: the variants (plus ggml/whisper cores)
+  # are shared libraries next to whisper-cli, loaded at runtime.
   # Build all (no --target: multi-config MSBuild/Xcode generators can't
   # resolve target vcxproj files from the top dir). Examples=ON is required
   # — whisper-cli IS an example; tests stay off, server defaults off.
@@ -77,10 +81,14 @@ if [ ! -f "backend/whisper/bin/whisper-cli$EXE" ]; then
   echo "whisper-cli: $CLI"
   mkdir -p backend/whisper/bin
   cp "$CLI" backend/whisper/bin/
-  # Shared ggml DLLs, if this configuration produced any (static builds make
-  # none — an empty glob must not kill the script).
+  # GGML_BACKEND_DL builds: whisper-cli needs its shared cores and the
+  # per-ISA backend variants (ggml.dll, whisper.dll, ggml-cpu-haswell.dll,
+  # ...) sitting next to it — the backend loader searches the exe dir.
+  # Copy every shared lib the build produced (dll/so/dylib); an empty
+  # glob must not kill the script.
   BIN_DIR=$(dirname "$CLI")
-  cp "$BIN_DIR"/*.dll backend/whisper/bin/ 2>/dev/null || true
+  cp "$BIN_DIR"/*.dll "$BIN_DIR"/*.so* "$BIN_DIR"/*.dylib backend/whisper/bin/ 2>/dev/null || true
+  echo "whisper shared libs staged:"; ls backend/whisper/bin/
 fi
 if [ ! -f "backend/whisper/models/$WHISPER_MODEL" ]; then
   echo "downloading $WHISPER_MODEL"
