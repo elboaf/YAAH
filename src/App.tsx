@@ -84,9 +84,15 @@ function BackendRecoveryBanner() {
 function UiScale() {
   useEffect(() => {
     const apply = (scale: number) => {
-      // index.css zooms #root by var(--ui-scale) and pre-divides its box by
-      // the same factor, so the zoomed app lands exactly on the viewport.
-      document.documentElement.style.setProperty('--ui-scale', String(scale))
+      // Inline styles only: WebView2's legacy zoom rejects var() in
+      // stylesheets, but honors element.style.zoom. Zoom on #root with a
+      // full-size box lands exactly on the visual viewport — no box
+      // compensation wanted (zoom scales laid-out content, not the box's
+      // own percentage-resolved size). Viewport units inside the zoomed
+      // subtree get zoomed a second time, so overlays use percentages.
+      const rootEl = document.getElementById('root')
+      if (!rootEl) return
+      rootEl.style.zoom = String(scale)
     }
     // Restore the persisted scale (backend config; blank = 1.0 default).
     getConfig()

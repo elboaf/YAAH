@@ -2077,7 +2077,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="max-h-[90vh] w-96 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-4 text-sm text-zinc-200"
+        className="max-h-[90%] w-96 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-4 text-sm text-zinc-200"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="mb-3 font-semibold">Settings</h2>
