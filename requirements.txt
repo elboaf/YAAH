@@ -12,5 +12,14 @@ curl_cffi>=0.7.0
 pyyaml>=6.0
 # LAN host discovery for remote hosting (mDNS advertise + browse)
 zeroconf>=0.136.0
+# TTS read-aloud engine (Kokoro-82M via sherpa-onnx; cp314 Windows wheels,
+# bundles its own ONNX Runtime — no torch). The model itself is downloaded
+# on demand from Settings, never bundled.
+sherpa-onnx>=1.13.8
+# sherpa-onnx imports numpy lazily inside OfflineTts.generate only when a
+# callback is passed (our synthesis-abort path). Invisible to PyInstaller's
+# static scan and to code that never exercises the callback — without it the
+# frozen sidecar fails synthesis with a bare ModuleNotFoundError.
+numpy>=2.0
 pytest>=8.3.0
 pytest-asyncio>=0.24.0

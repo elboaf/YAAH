@@ -16,6 +16,8 @@ invocable by the user.
 """
 import os
 import re
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,30 +64,72 @@ This file demonstrates the skill format. A skill is a folder under
 - Everything below the frontmatter is the instruction body, injected
   into the system prompt when the skill is invoked.
 
-Users invoke skills by typing /s <name> in the chat; the model loads
+Users invoke skills by typing /<name> in the chat; the model loads
 them itself with the load_skill tool when the task matches.
 """
 
 
+def bundled_source_dir() -> Path | None:
+    """Directory holding the skills shipped with the app
+    (backend/bundled_skills in the repo; <exe>/_up_/backend/bundled_skills
+    in the installed layout — Tauri turns the `../` resource glob prefix
+    into a literal `_up_` dir next to the exe, mirroring whisper)."""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).parent
+        candidates += [exe / "_up_" / "backend" / "bundled_skills",
+                       exe / "bundled_skills",
+                       Path.cwd() / "backend" / "bundled_skills"]
+    candidates.append(Path(__file__).parent.parent / "bundled_skills")  # repo
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
 def ensure_dir() -> bool:
-    """Create SKILLS_DIR (plus a sample skill) when it doesn't exist, so a
-    fresh install has somewhere to put skills and can see the format.
-    Returns True if the directory was just created."""
-    if SKILLS_DIR.is_dir():
-        return False
-    try:
-        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return False
-    try:
-        sample = SKILLS_DIR / "example"
-        sample.mkdir(exist_ok=True)
-        (sample / "SKILL.md").write_text(
-            SAMPLE_SKILL_MD.format(dir=SKILLS_DIR), encoding="utf-8"
-        )
-    except OSError:
-        pass  # dir exists, that's the part that matters
-    return True
+    """Create SKILLS_DIR when it doesn't exist and seed the example skill
+    plus every bundled skill shipped under backend/bundled_skills, so a
+    fresh install has somewhere to put skills and works out of the box.
+    Seeding never overwrites an existing SKILL.md, so user edits survive
+    upgrades. Returns True if the directory was just created."""
+    just_created = False
+    if not SKILLS_DIR.is_dir():
+        try:
+            SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return False
+        just_created = True
+
+    seeds: dict[str, Path] = {}
+    src = bundled_source_dir()
+    if src is not None:
+        try:
+            seeds.update(
+                {d.name: d for d in sorted(src.iterdir()) if d.is_dir()}
+            )
+        except OSError:
+            pass
+    if just_created:
+        try:
+            sample = SKILLS_DIR / "example"
+            sample.mkdir(exist_ok=True)
+            (sample / "SKILL.md").write_text(
+                SAMPLE_SKILL_MD.format(dir=SKILLS_DIR), encoding="utf-8"
+            )
+        except OSError:
+            pass  # dir exists, that's the part that matters
+
+    for name, folder in seeds.items():
+        try:
+            target = SKILLS_DIR / name
+            if (target / "SKILL.md").exists():
+                continue
+            target.mkdir(exist_ok=True)
+            shutil.copytree(folder, target, dirs_exist_ok=True)
+        except OSError:
+            pass  # best-effort seeding; never block startup
+    return just_created
 
 
 def parse_skill_md(path: Path) -> Skill | None:

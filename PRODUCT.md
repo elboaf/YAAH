@@ -28,7 +28,7 @@ Explicitly undecided — no deliberate differentiation has been chosen (user-con
 
 ## Capabilities and Constraints
 
-Confirmed functionality: streaming agent turns with live tool ticker and collapsed per-turn trace; inline ask_user question cards with option chips and free-text fallback; multi-conversation sidebar with export/delete and per-conversation system-prompt override; model picker across configured providers with per-provider error notes; file tree with context menu (preview/delete); file preview modal with syntax highlighting and line numbers; diff rendering for edit_file calls; image and text-file attachments (drag/drop/paste); stop/cancel mid-turn; settings for temperature/max tokens/max steps.
+Confirmed functionality: streaming agent turns with live tool ticker and collapsed per-turn trace; inline ask_user question cards with option chips and free-text fallback; multi-conversation sidebar with export/delete and per-conversation system-prompt override; model picker across configured providers with per-provider error notes; file tree with context menu (preview/delete); file preview modal with syntax highlighting and line numbers; diff rendering for edit_file calls; image and text-file attachments (drag/drop/paste); stop/cancel mid-turn; settings for temperature/max tokens/max steps; voice dictation (local whisper.cpp or BYOK cloud) with push-to-talk hotkey; read-aloud of agent responses (Kokoro-82M via sherpa-onnx, on-device, model downloaded on demand from Settings, 28 English voices + speed control, header mute toggle, per-message stop, ask_user questions spoken).
 
 Constraints:
 

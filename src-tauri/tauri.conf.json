@@ -35,7 +35,8 @@
     ],
     "resources": [
       "../backend/**/*.py",
-      "../backend/whisper/**/*"
+      "../backend/whisper/**/*",
+      "../backend/bundled_skills/**/*"
     ],
     "externalBin": [
       "binaries/backend"

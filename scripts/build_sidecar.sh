@@ -21,6 +21,8 @@ pyinstaller --noconfirm --clean --onefile --noconsole \
   --collect-all anyio --collect-all aiosqlite \
   --collect-all httpx --collect-all httpcore \
   --collect-all curl_cffi \
+  --collect-all sherpa_onnx \
+  --hidden-import numpy \
   scripts/backend_entry.py
 
 mkdir -p src-tauri/binaries

@@ -117,6 +117,15 @@ def test_load_skill_schema_registered():
 def test_ensure_dir_creates_dir_and_sample(tmp_path, monkeypatch):
     d = tmp_path / "fresh" / "skills"
     monkeypatch.setattr(skill_registry, "SKILLS_DIR", d)
+    # a fake bundled-source dir with one shippable skill (multi-file)
+    src = tmp_path / "bundled"
+    (src / "grill-me").mkdir(parents=True)
+    (src / "grill-me" / "SKILL.md").write_text(
+        "---\nname: grill-me\ndescription: interview\ndisable-model-invocation: true\n---\n\nCall the Skill tool with \"grilling\".\n",
+        encoding="utf-8",
+    )
+    (src / "grill-me" / "extra.md").write_text("supporting file", encoding="utf-8")
+    monkeypatch.setattr(skill_registry, "bundled_source_dir", lambda: src)
     assert skill_registry.ensure_dir() is True
     assert d.is_dir()
     sample = d / "example" / "SKILL.md"
@@ -125,16 +134,61 @@ def test_ensure_dir_creates_dir_and_sample(tmp_path, monkeypatch):
     skill = skill_registry.parse_skill_md(sample)
     assert skill is not None
     assert skill.name == "example"
+    # bundled skills are seeded whole — SKILL.md plus supporting files
+    seeded = d / "grill-me"
+    assert (seeded / "SKILL.md").is_file()
+    assert (seeded / "extra.md").is_file()
+    skill = skill_registry.parse_skill_md(seeded / "SKILL.md")
+    assert skill is not None
+    assert skill.name == "grill-me"
     # a pre-existing dir is left alone (no second sample write)
     mtime = sample.stat().st_mtime_ns
     assert skill_registry.ensure_dir() is False
     assert sample.stat().st_mtime_ns == mtime
 
 
-def test_ensure_dir_existing_dir_noop(skills_dir):
+def test_bundled_shipped_skills_parse():
+    """Every skill actually shipped in backend/bundled_skills is valid."""
+    src = skill_registry.bundled_source_dir()
+    assert src is not None, "bundled skills missing from the repo"
+    names = sorted(d.name for d in src.iterdir() if d.is_dir())
+    assert len(names) >= 25
+    for name in names:
+        skill = skill_registry.parse_skill_md(src / name / "SKILL.md")
+        assert skill is not None, f"{name}/SKILL.md does not parse"
+        assert skill.name == name
+
+
+def test_ensure_dir_existing_dir_only_adds_bundled(skills_dir, monkeypatch):
+    """An existing dir is not reseeded wholesale — the only change allowed
+    is adding bundled skills that are missing."""
+    src = skills_dir / "_bundled_src"
+    src.mkdir()
+    make_skill(src, "grill-me", description="interview")
+    monkeypatch.setattr(skill_registry, "bundled_source_dir", lambda: src)
     before = sorted(p.name for p in skills_dir.iterdir())
     assert skill_registry.ensure_dir() is False
-    assert sorted(p.name for p in skills_dir.iterdir()) == before
+    after = sorted(p.name for p in skills_dir.iterdir())
+    assert after == sorted(set(before) | {"grill-me"})
+
+
+def test_ensure_dir_seeds_bundled_into_existing_dir(skills_dir, monkeypatch):
+    """An upgraded install gets the bundled skills; user edits survive."""
+    (skills_dir / "grilling").mkdir()
+    (skills_dir / "grilling" / "SKILL.md").write_text(
+        "---\nname: grilling\ndescription: mine\n---\n\nmy edit\n",
+        encoding="utf-8",
+    )
+    src = skills_dir / "_bundled_src"
+    src.mkdir()
+    make_skill(src, "grill-me", description="interview")
+    make_skill(src, "grilling", description="shipped version")
+    monkeypatch.setattr(skill_registry, "bundled_source_dir", lambda: src)
+    assert skill_registry.ensure_dir() is False
+    assert (skills_dir / "grill-me" / "SKILL.md").is_file()
+    assert "my edit" in (skills_dir / "grilling" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_bodies_include_skill_folder(skills_dir):

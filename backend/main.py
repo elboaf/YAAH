@@ -855,6 +855,145 @@ async def api_transcribe(request: Request):
             pass
     return {"text": text}
 
+
+# ---- Text-to-speech: read-aloud of agent responses (Kokoro via sherpa-onnx) ----
+
+class TtsBody(BaseModel):
+    text: str
+    voice: str | None = None
+    speed: float | None = None
+    # The utterance's generation, assigned by the frontend and sent with
+    # EVERY chunk of that utterance (concurrent prefetch shares it — see
+    # /api/tts/stop). Omit it only in hand-made requests (curl/tests).
+    epoch: int | None = None
+
+
+class TtsStopBody(BaseModel):
+    """Optional body for the stop handshake: raise the supersede floor only
+    up to this utterance generation (0/absent = invalidate everything)."""
+    floor: int = 0
+
+
+@app.get("/api/tts/status")
+async def api_tts_status():
+    """What the speaker toggle can use right now: model presence, the voice
+    list, and the stored read-aloud settings."""
+    from backend.agent import speak
+
+    voice = load_config().get("voice") or {}
+    return {
+        "available": speak.model_available(),
+        "model": speak.MODEL_NAME,
+        "model_bytes": speak.MODEL_BYTES,
+        "voices": speak.ENGLISH_VOICES,
+        "default_voice": speak.DEFAULT_VOICE,
+        "tts_enabled": bool(voice.get("tts_enabled")),
+        "tts_voice": voice.get("tts_voice") or speak.DEFAULT_VOICE,
+        "tts_speed": voice.get("tts_speed", 1.0),
+        "downloading": speak.download_in_progress(),
+    }
+
+
+@app.post("/api/tts/stop")
+async def api_tts_stop(body: TtsStopBody | None = None):
+    """Client-side playback stop handshake. The browser owns the audio
+    queue; this endpoint raises the supersede floor so any in-flight
+    synthesis for the stopped (or older) utterances aborts at their next
+    sentence boundary instead of holding the engine for a full chunk.
+    floor = the frontend's current utterance generation (in-flight chunks
+    always belong to that generation or an older one). floor 0/absent is a
+    no-op — nothing can be in flight below the first generation."""
+    from backend.agent import speak
+
+    floor = body.floor if body else 0
+    if floor > 0:
+        speak.ensure_epoch(floor)
+    return {"ok": True}
+
+
+@app.post("/api/tts/download")
+async def api_tts_download():
+    """Download + unpack the TTS model; streams progress as JSON lines
+    ({"stage": "download"|"extract"|"done"|"error", ...}). One download at
+    a time — a second concurrent request is refused with 409."""
+    import asyncio
+    import json
+
+    from backend.agent import speak
+    from fastapi.responses import StreamingResponse
+
+    if speak.download_in_progress():
+        raise HTTPException(status_code=409, detail="a download is already running")
+    if speak.model_available():
+        return {"ok": True, "stage": "done"}
+
+    async def gen():
+        q: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def progress(p: dict):
+            loop.call_soon_threadsafe(q.put_nowait, p)
+
+        task = loop.run_in_executor(None, speak.download_model, progress)
+        while True:
+            try:
+                p = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                if task.done():
+                    break
+                continue
+            yield json.dumps(p) + "\n"
+            if p.get("stage") in ("done", "error"):
+                break
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except Exception:  # noqa: BLE001 — the thread reports via progress events
+            pass
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/tts/synthesize")
+async def api_tts_synthesize(body: TtsBody):
+    """One prose chunk in, one WAV out (24 kHz 16-bit mono). Voice/speed
+    default to the stored settings. 409 = model not downloaded yet (the
+    UI offers the Settings download); 503 = engine failed to start."""
+    import asyncio
+
+    from backend.agent import speak
+    from fastapi.responses import JSONResponse, Response
+
+    if not speak.model_available():
+        return JSONResponse({"detail": "TTS model not downloaded"}, status_code=409)
+    text = (body.text or "").strip()
+    if not text:
+        return JSONResponse({"detail": "empty text"}, status_code=400)
+    if len(text) > 5000:
+        return JSONResponse({"detail": "text too long — split into sentences"}, status_code=413)
+    voice_cfg = load_config().get("voice") or {}
+    voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
+    speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
+    # The utterance's generation comes from the frontend (body.epoch); a
+    # hand-made request without one gets epoch 0, which any stop invalidates.
+    epoch = body.epoch if body.epoch is not None else 0
+    try:
+        pcm, rate = await asyncio.to_thread(
+            speak.synthesize, text, voice, float(speed), epoch
+        )
+    except speak.SupersededError:
+        # A newer utterance replaced this one; nothing to send.
+        return JSONResponse({"detail": "superseded"}, status_code=409)
+    except RuntimeError as e:
+        return JSONResponse({"detail": str(e)}, status_code=503)
+    except Exception as e:  # noqa: BLE001 — surfaced as a spoken-output error
+        return JSONResponse({"detail": f"{type(e).__name__}: {e}"}, status_code=500)
+    return Response(content=speak.wav_bytes(pcm, rate), media_type="audio/wav")
+
+
 # ---- Remote hosting: host role (serve other YAAH instances) + client role ----
 
 from backend.agent import discovery, remote as remote_mod

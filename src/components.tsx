@@ -25,6 +25,8 @@ import {
   uploadAttachment,
   transcribeStatus,
   transcribeAudio,
+  ttsStatus,
+  ttsDownload,
   imageUrl,
   listWorkspaces,
   listLocalWorkspaces,
@@ -43,6 +45,7 @@ import {
   type WorkspaceRow,
 } from './api'
 import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
+import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
 import { VoiceRecorder } from './voice'
@@ -524,8 +527,10 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
 
   return (
     <div className="border-l-2 border-zinc-700/70 pl-3">
-      <div className="mb-0.5 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-600">
+      <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-600">
         agent
+        {/* Stop control on the message currently being read aloud. */}
+        <MessageStopButton msgId={msg.id} />
       </div>
       {msg.content ? (
         <div className="max-w-prose text-sm leading-relaxed text-zinc-200">
@@ -543,6 +548,26 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
         <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
       )}
     </div>
+  )
+}
+
+/** Stop control for the message currently being read aloud: a small square
+ *  next to the "agent" label while that message's audio plays. */
+function MessageStopButton({ msgId }: { msgId: string }) {
+  const speakingMsgId = useTts((s) => s.speakingMsgId)
+  const stop = useTts((s) => s.stop)
+  if (speakingMsgId !== msgId) return null
+  return (
+    <button
+      className="rounded border border-amber-600/70 px-1 leading-none text-amber-300 hover:bg-zinc-800"
+      title="Stop reading aloud"
+      aria-label="Stop reading aloud"
+      onClick={stop}
+    >
+      <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">
+        <rect x="1" y="1" width="6" height="6" rx="1" />
+      </svg>
+    </button>
   )
 }
 
@@ -1858,6 +1883,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   // keyboard when the user clicks "record".
   const [pttHotkeyDraft, setPttHotkeyDraft] = useState('')
   const [capturingHotkey, setCapturingHotkey] = useState(false)
+  // Read-aloud (TTS): voice + speed drafts; model download state.
+  const [ttsVoiceDraft, setTtsVoiceDraft] = useState('af_heart')
+  const [ttsSpeedDraft, setTtsSpeedDraft] = useState(1.0)
+  const [ttsModelReady, setTtsModelReady] = useState(false)
+  const [ttsDownloading, setTtsDownloading] = useState(false)
+  const [ttsDlPct, setTtsDlPct] = useState<number | null>(null)
+  const [ttsDlErr, setTtsDlErr] = useState<string | null>(null)
+  const previewVoice = useTts((s) => s.previewVoice)
+  // Playback failures (preview or chat) surface here too — the toggle
+  // tooltip is invisible when the user is inside Settings.
+  const ttsUiError = useTts((s) => s.error)
   // LAN hosting: on by default; passphrase gates remote tool execution.
   const [remoteHost, setRemoteHost] = useState(true)
   const [remotePass, setRemotePass] = useState('')
@@ -1908,6 +1944,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setCloudKeySaved(v?.cloud_api_key === 'set')
           setCloudModel(v?.cloud_model || '')
           setPttHotkeyDraft(v?.ptt_hotkey ?? '')
+          setTtsVoiceDraft(v?.tts_voice || 'af_heart')
+          setTtsSpeedDraft(v?.tts_speed ?? 1.0)
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
           setRemoteHost(c.remote?.hosting_enabled ?? true)
@@ -1933,6 +1971,13 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       .then((s) => {
         setVoiceLocalReady(s.local_available)
         setVoiceLocalModel(s.local_model)
+      })
+      .catch(() => {})
+    ttsStatus()
+      .then((s) => {
+        setTtsModelReady(s.available)
+        setTtsDownloading(s.downloading)
+        if (s.available) setTtsVoiceDraft(s.tts_voice || s.default_voice)
       })
       .catch(() => {})
   }, [])
@@ -2044,6 +2089,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           ...(cloudKey ? { cloud_api_key: cloudKey } : {}),
           cloud_model: cloudModel,
           ptt_hotkey: pttHotkeyDraft,
+          tts_voice: ttsVoiceDraft,
+          tts_speed: ttsSpeedDraft,
         },
         remote: {
           hosting_enabled: remoteHost,
@@ -2327,6 +2374,126 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Read aloud
+        </h3>
+        {!ttsModelReady ? (
+          <div className="mb-3">
+            <p className="mb-1.5 text-[10px] text-zinc-600">
+              The agent can read its responses aloud with an on-device voice (Kokoro, 54 voices,
+              nothing leaves this machine). One-time download:
+            </p>
+            {ttsDownloading ? (
+              <div className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5">
+                <div className="mb-1 flex justify-between font-mono text-[10px] text-zinc-400">
+                  <span>downloading voice model…</span>
+                  <span>{ttsDlPct !== null ? `${ttsDlPct}%` : ''}</span>
+                </div>
+                <div className="h-1 overflow-hidden rounded bg-zinc-700">
+                  <div
+                    className="h-full bg-blue-500 transition-all"
+                    style={{ width: `${ttsDlPct ?? 0}%` }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <button
+                className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => {
+                  setTtsDownloading(true)
+                  setTtsDlErr(null)
+                  ttsDownload((p) => {
+                    if (p.stage === 'download' && p.total) {
+                      setTtsDlPct(Math.round(((p.received ?? 0) / p.total) * 100))
+                    } else if (p.stage === 'extract') {
+                      setTtsDlPct(null)
+                    } else if (p.stage === 'done') {
+                      setTtsModelReady(true)
+                      setTtsDownloading(false)
+                      useTts.getState().setReady(true) // un-hide the header toggle
+                    } else if (p.stage === 'error') {
+                      setTtsDownloading(false)
+                      setTtsDlErr(p.detail || 'download failed')
+                    }
+                  })
+                    .then(() => setTtsDownloading(false))
+                    .catch((e) => {
+                      setTtsDownloading(false)
+                      setTtsDlErr(String((e as Error).message ?? e))
+                    })
+                }}
+              >
+                Download voice model (~126 MB)
+              </button>
+            )}
+            {ttsDlErr && <p className="mt-1 text-[10px] text-red-400">{ttsDlErr}</p>}
+          </div>
+        ) : (
+          <div className="mb-3 space-y-1.5">
+            <div className="flex gap-1.5">
+              <select
+                className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={ttsVoiceDraft}
+                onChange={(e) => setTtsVoiceDraft(e.target.value)}
+                aria-label="Read-aloud voice"
+              >
+                <optgroup label="American English — female">
+                  {['af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky'].map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="American English — male">
+                  {['am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa'].map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="British English — female">
+                  {['bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily'].map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="British English — male">
+                  {['bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis'].map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </optgroup>
+              </select>
+              <button
+                className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                title="Preview this voice"
+                aria-label="Preview voice"
+                onClick={() => previewVoice(ttsVoiceDraft, ttsSpeedDraft)}
+              >
+                ▶
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="shrink-0 text-[10px] text-zinc-500">speed</span>
+              <input
+                type="range"
+                min="0.5"
+                max="2"
+                step="0.05"
+                value={ttsSpeedDraft}
+                onChange={(e) => setTtsSpeedDraft(Number(e.target.value))}
+                className="flex-1 accent-blue-500"
+                aria-label="Speaking rate"
+              />
+              <span className="w-10 shrink-0 text-right font-mono text-[10px] text-zinc-400">
+                {ttsSpeedDraft.toFixed(2)}×
+              </span>
+            </div>
+            <p className="text-[10px] text-zinc-600">
+              Reads each finished response aloud (prose only — code blocks are skipped). Toggle it
+              any time with the speaker button under the chat. 28 English voices; the model stays on
+              this machine.
+            </p>
+          </div>
+        )}
+        {ttsUiError && (
+          <p className="mb-3 text-[10px] text-red-400">Read-aloud error: {ttsUiError}</p>
+        )}
+
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
           Remote hosting
         </h3>
         <div className="mb-2 space-y-1.5">
@@ -2422,6 +2589,62 @@ export function ChatPanel() {
   // finished turn collapses to the one-line trace.
   const liveId = streaming && messages.length > 0 ? messages[messages.length - 1].id : null
 
+  // ---- read-aloud (TTS) ----
+  const ttsEnabled = useTts((s) => s.enabled)
+  const ttsReady = useTts((s) => s.ready)
+  const ttsSpeaking = useTts((s) => s.speaking)
+  const ttsError = useTts((s) => s.error)
+  const speakMessage = useTts((s) => s.speakMessage)
+  const speakQuestion = useTts((s) => s.speakQuestion)
+  const ttsStop = useTts((s) => s.stop)
+  const ttsSetEnabled = useTts((s) => s.setEnabled)
+  const ttsSync = useTts((s) => s.syncFromServer)
+  // Hydrate readiness + persisted enabled flag once at mount.
+  useEffect(() => {
+    ttsStatus()
+      .then((s) => ttsSync({ available: s.available, tts_enabled: s.tts_enabled }))
+      .catch(() => {})
+  }, [ttsSync])
+  // Turn finished → speak its prose. Fires on the streaming→idle transition
+  // only (a history load or conversation switch also lands here with
+  // streaming=false, but lastSpokenRef guards against re-speaking anything
+  // that already played). A turn that ended in an ask_user speaks the
+  // question instead — the answer text is still streaming when the card
+  // appears, and the question is what the user is waiting on.
+  const lastMsg = messages.length ? messages[messages.length - 1] : null
+  const lastAssistantId = lastMsg && lastMsg.role === 'assistant' ? lastMsg.id : null
+  const lastAssistantContent = lastMsg && lastMsg.role === 'assistant' ? lastMsg.content : ''
+  const wasStreamingRef = useRef(false)
+  const lastSpokenRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (streaming) {
+      wasStreamingRef.current = true
+      return
+    }
+    if (!wasStreamingRef.current) return // idle at mount / history load: stay silent
+    wasStreamingRef.current = false
+    if (!ttsEnabled || !ttsReady || !lastAssistantId) return
+    if (lastSpokenRef.current === lastAssistantId) return
+    lastSpokenRef.current = lastAssistantId
+    speakMessage(lastAssistantId, lastAssistantContent)
+  }, [streaming, lastAssistantId, lastAssistantContent, ttsEnabled, ttsReady, speakMessage])
+  // ask_user appears → speak the question (options stay visual).
+  const spokenQuestionRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (pendingQuestion && ttsEnabled && ttsReady) {
+      if (spokenQuestionRef.current !== pendingQuestion.callId) {
+        spokenQuestionRef.current = pendingQuestion.callId
+        speakQuestion(pendingQuestion.callId, pendingQuestion.question)
+      }
+    }
+  }, [pendingQuestion, ttsEnabled, ttsReady, speakQuestion])
+  // Persist the toggle; the backend merges it into voice.tts_enabled.
+  const toggleTts = () => {
+    const next = !ttsEnabled
+    ttsSetEnabled(next)
+    updateConfig({ voice: { tts_enabled: next } }).catch(() => {})
+  }
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
@@ -2446,7 +2669,7 @@ export function ChatPanel() {
               <li>
                 <span className="mr-1.5 text-zinc-700">3.</span>
                 Describe your task below — type{' '}
-                <span className="font-mono text-indigo-300">/s</span> to load a skill's instructions.
+                <span className="font-mono text-indigo-300">/</span> to load a skill's instructions.
               </li>
             </ol>
             <p className="mt-5 text-[11px] text-zinc-600">
@@ -2477,6 +2700,40 @@ export function ChatPanel() {
           }`}
         />
         {streaming ? 'working' : status}
+        {/* Read-aloud toggle: one click to mute/unmute the agent's voice.
+            Hidden while the model isn't downloaded — Settings owns that. */}
+        {ttsReady && (
+          <button
+            className={`ml-auto rounded border px-1.5 py-0.5 ${
+              ttsError
+                ? 'border-red-700 text-red-300'
+                : ttsSpeaking
+                  ? 'border-amber-600/70 text-amber-300'
+                  : ttsEnabled
+                    ? 'border-zinc-600 text-zinc-200 hover:bg-zinc-800'
+                    : 'border-zinc-800 text-zinc-600 hover:text-zinc-400'
+            }`}
+            title={
+              ttsError
+                ? `Read-aloud error: ${ttsError}`
+                : ttsEnabled
+                  ? 'Read-aloud on — click to mute'
+                  : 'Read-aloud off — click to hear responses'
+            }
+            aria-pressed={ttsEnabled}
+            aria-label={ttsEnabled ? 'Mute read-aloud' : 'Unmute read-aloud'}
+            onClick={toggleTts}
+          >
+            {ttsSpeaking ? (
+              <span className="run-pulse inline-block text-[10px] leading-[12px]">●</span>
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                <path d="M2 5.5h2L7 3v8L4 8.5H2z" />
+                <path d="M9.5 5a3 3 0 0 1 0 4" />
+              </svg>
+            )}
+          </button>
+        )}
       </div>
     </main>
   )
@@ -2858,14 +3115,14 @@ function Composer() {
     }
   }, [input])
 
-  // ---- skills (/s autocomplete + chips) ----
+  // ---- skills (/ autocomplete + chips) ----
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [skillMenuOpen, setSkillMenuOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
   const [skillIndex, setSkillIndex] = useState(0)
   // True only after the user points at a row (arrows or hover). Enter commits
   // a skill solely on this explicit selection; otherwise Enter sends the
-  // literal text — typing a message that starts with "/s" stays possible.
+  // literal text — typing a message that starts with "/" stays possible.
   const [skillNavigated, setSkillNavigated] = useState(false)
   const [pickedSkills, setPickedSkills] = useState<SkillInfo[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -3148,19 +3405,19 @@ function Composer() {
 
   useEffect(loadSkills, [loadSkills])
 
-  // The menu opens when the input is exactly "/s" or starts with "/s " —
+  // The menu opens when the input is exactly "/" or starts with "/" —
   // the query is whatever follows, and the list narrows as it grows.
   useEffect(() => {
-    if (input === '/s') {
+    if (input === '/') {
       setSkillMenuOpen(true)
       setSkillQuery('')
       setSkillIndex(0)
       setSkillNavigated(false)
       return
     }
-    if (input.startsWith('/s ')) {
+    if (input.startsWith('/')) {
       setSkillMenuOpen(true)
-      setSkillQuery(input.slice(3))
+      setSkillQuery(input.slice(1))
       setSkillIndex(0)
       setSkillNavigated(false)
       return
@@ -3517,7 +3774,7 @@ function Composer() {
               title={s.description || s.path}
               className="flex items-center gap-1 rounded bg-indigo-900/60 px-2 py-0.5 font-mono text-[10px] text-indigo-200"
             >
-              /s {s.name}
+              /{s.name}
               <button
                 className="text-indigo-400 hover:text-red-400"
                 onClick={() => removeSkill(s.name)}
@@ -3598,7 +3855,7 @@ function Composer() {
                     pickSkill(s)
                   }}
                 >
-                  <div className="font-mono text-xs text-indigo-300">/s {s.name}</div>
+                  <div className="font-mono text-xs text-indigo-300">/{s.name}</div>
                   {s.description && (
                     <div className="truncate text-[10px] text-zinc-500">{s.description}</div>
                   )}
@@ -3633,7 +3890,7 @@ function Composer() {
           }`}
           rows={2}
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
-          placeholder="Describe a task... (drop/paste/attach images or text files; type /s to load a skill)"          aria-label="Message the agent"
+          placeholder="Describe a task... (drop/paste/attach images or text files; type / to load a skill)"          aria-label="Message the agent"
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
