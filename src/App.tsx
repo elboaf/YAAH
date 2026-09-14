@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BASE, IS_TAURI } from './api'
+import { BASE, IS_TAURI, getConfig } from './api'
 import { ChatPanel, FilesPanel, PreviewModal, Sidebar } from './components'
 
 /**
@@ -74,9 +74,43 @@ function BackendRecoveryBanner() {
   )
 }
 
+/**
+ * Interface scale: applies the persisted `ui_scale` config value as CSS zoom
+ * on the app root and re-applies it live when Settings saves a new one.
+ * Zoom keeps the terminal-grade density identity intact at 1.0 while letting
+ * the user choose a larger, crisper reading size (100–150%). Layout is
+ * computed in device pixels, so panes reflow instead of clipping.
+ */
+function UiScale() {
+  useEffect(() => {
+    const apply = (scale: number) => {
+      // Inline styles only: WebView2's legacy zoom rejects var() in
+      // stylesheets, but honors element.style.zoom. Zoom on #root with a
+      // full-size box lands exactly on the visual viewport — no box
+      // compensation wanted (zoom scales laid-out content, not the box's
+      // own percentage-resolved size). Viewport units inside the zoomed
+      // subtree get zoomed a second time, so overlays use percentages.
+      const rootEl = document.getElementById('root')
+      if (!rootEl) return
+      rootEl.style.zoom = String(scale)
+    }
+    // Restore the persisted scale (backend config; blank = 1.0 default).
+    getConfig()
+      .then((c) => apply(Number(c.ui_scale) || 1.0))
+      .catch(() => {})
+    // Settings saved: apply immediately, no reload needed.
+    const onChange = (e: Event) =>
+      apply(Number((e as CustomEvent<{ scale?: number }>).detail?.scale) || 1.0)
+    window.addEventListener('ui-scale-changed', onChange)
+    return () => window.removeEventListener('ui-scale-changed', onChange)
+  }, [])
+  return null
+}
+
 export default function App() {
   return (
-    <div className="relative flex h-screen w-screen bg-zinc-900 text-zinc-100">
+    <div className="relative flex h-full w-full bg-zinc-900 text-zinc-100">
+      <UiScale />
       <BackendRecoveryBanner />
       <Sidebar />
       <FilesPanel />

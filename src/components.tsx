@@ -1149,7 +1149,7 @@ function buildLocalGroups(
 }
 
 function ConversationList() {
-  const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation } = useAgent()
+  const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation, workspace } = useAgent()
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
@@ -1178,7 +1178,9 @@ function ConversationList() {
   }, [scope.connected, scope.hostId])
   useEffect(() => {
     refresh()
-  }, [conversationId, refresh])
+    // workspace too: adding a workspace (Sidebar) flips the active workspace,
+    // and the new registry row must appear without any other refresh trigger.
+  }, [conversationId, workspace, refresh])
 
   // Collapse state persists per workspace (Q14); groups start expanded.
   useEffect(() => {
@@ -1206,6 +1208,17 @@ function ConversationList() {
       return { ...c, [key]: v }
     })
   }
+
+  // Esc closes an open row menu — the app-wide dialog contract (dialogs,
+  // settings, preview all dismiss on Escape; the row menu is no exception).
+  useEffect(() => {
+    if (menuOpenId === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpenId(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [menuOpenId])
 
   // Chats visible in the active scope: while connected, only conversations
   // namespaced to THIS host; otherwise only non-remote ones. A chat from a
@@ -1283,8 +1296,14 @@ function ConversationList() {
       {groups.map(({ ws, items }) => {
         const key = collapseKey(ws.path ?? '')
         const isCollapsed = collapsed[key] ?? false
+        const isActiveWs = (ws.path ?? '') === (workspace || '')
         return (
-          <div key={ws.path ?? 'default'} className="mb-1">
+          <div key={ws.path ?? 'default'} className="mb-3">
+            {/* Workspace section: a loud, unmistakable block — bold header,
+                hairline top rule, chat count, collapse, remove menu. The
+                active workspace (the open conversation's workspace) carries
+                the state marker. */}
+            <div className="border-t border-zinc-800 pt-2 first:border-t-0 first:pt-0">
             <div className="group flex items-center gap-0.5 rounded px-1 py-1 hover:bg-zinc-800/60">
               <button
                 className="rounded px-0.5 text-[10px] text-zinc-500 hover:text-zinc-200"
@@ -1295,7 +1314,9 @@ function ConversationList() {
                 {isCollapsed ? '▸' : '▾'}
               </button>
               <button
-                className="min-w-0 flex-1 truncate text-left font-mono text-[10px] uppercase tracking-wider text-zinc-400 hover:text-zinc-200"
+                className={`min-w-0 flex-1 truncate text-left font-mono text-[11px] font-semibold uppercase tracking-wider ${
+                  isActiveWs ? 'text-zinc-100' : 'text-zinc-400'
+                } hover:text-zinc-200`}
                 title={ws.path ?? 'No root directory — conversations without a workspace'}
                 onClick={() => openWorkspace(ws)}
               >
@@ -1306,14 +1327,28 @@ function ConversationList() {
                   </span>
                 )}
               </button>
+              <span
+                className="mr-1 font-mono text-[10px] text-zinc-600"
+                title={`${items.length} conversation${items.length === 1 ? '' : 's'} in this workspace`}
+              >
+                {items.length}
+              </span>
               {ws.path !== null && (
                 <button
-                  className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover:opacity-100"
+                  className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover:opacity-100 focus:opacity-100"
+                  aria-label={`Remove workspace ${ws.label}`}
                   title="Remove this workspace (its conversations move to Default)"
                   onClick={() => setRemoveWsTarget(ws)}
                 >
                   ✕
                 </button>
+              )}
+              {isActiveWs && (
+                <span
+                  aria-hidden="true"
+                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500"
+                  title="Active workspace"
+                />
               )}
             </div>
             {!isCollapsed &&
@@ -1338,6 +1373,7 @@ function ConversationList() {
               ) : (
                 <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
               ))}
+            </div>
           </div>
         )
       })}
@@ -1346,7 +1382,7 @@ function ConversationList() {
       )}
       {scope.connected && (
         <div
-          className="mt-3 border-t border-zinc-800 pt-2 opacity-40 select-none"
+          className="mb-3 border-t border-zinc-800 pt-2 opacity-40 select-none"
           title="Local chats — switch back to “This device” to open them"
           aria-disabled="true"
         >
@@ -1532,8 +1568,7 @@ function ConversationRow({
 }
 
 export function Sidebar() {
-  const { newConversation, workspace, setWorkspace, clearLog, conversationId, setConversationId, loadHistory } = useAgent()
-  const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
+  const { newConversation, workspace, setWorkspace, clearLog } = useAgent()
   const [model, setModel] = useState('...')
   const [activeProvider, setActiveProvider] = useState('')
   // name -> {models, error?} for every configured provider
@@ -1556,21 +1591,9 @@ export function Sidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Registry rows for the dropdown — scope-aware (host registry while
-  // connected); refreshed when the conversation changes or the scope flips.
+  // Registry refresh is owned by ConversationList; the Sidebar only needs
+  // model/config state for the footer plus the add-workspace flows.
   const scope = useRemote((s) => s.scope)
-  const [localWorkspaces, setLocalWorkspaces] = useState<WorkspaceRow[]>([])
-  const refreshWorkspaces = useCallback(() => {
-    listWorkspaces()
-      .then(setWorkspaces)
-      .catch(() => setWorkspaces([]))
-    if (scope.connected) {
-      listLocalWorkspaces().then(setLocalWorkspaces).catch(() => setLocalWorkspaces([]))
-    } else {
-      setLocalWorkspaces([])
-    }
-  }, [scope.connected, scope.hostId])
-  useEffect(refreshWorkspaces, [refreshWorkspaces, conversationId])
 
   // Merged model list: every configured provider, queried in parallel by the
   // backend (keys never reach the browser). Grouped per provider in the dropdown.
@@ -1592,7 +1615,7 @@ export function Sidebar() {
       })
       .catch(() => {})
     refreshModels()
-  }, [conversationId, refreshModels])
+  }, [refreshModels])
 
   // value encoding "provider::model" keeps providers with clashing ids apart
   const pickModel = (value: string) => {
@@ -1619,9 +1642,8 @@ export function Sidebar() {
     const path = remoteAddPath.trim()
     if (!path) return
     try {
-      const ws = await addWorkspace(path)
-      setWorkspaces((list) => (list.some((w) => w.id === ws.id) ? list : [...list, ws]))
-      setWorkspace(ws.path ?? '')
+      await addWorkspace(path)
+      setWorkspace(path)
       newConversation()
       setShowRemoteAdd(false)
       setRemoteAddPath('')
@@ -1633,64 +1655,16 @@ export function Sidebar() {
     }
   }
 
-  /** Open a workspace from the dropdown: its most recent conversation, or a
-   *  fresh chat when it has none (Q2: the dropdown is a conversation switcher). */
-  const pickWorkspace = (value: string) => {
-    if (value.startsWith('__local_')) return // greyed local entry
-    if (value === '__add__') {
-      if (scope.connected) setShowRemoteAdd(true)
-      else void browseWorkspace()
-      return
-    }
-    const ws = workspaces.find((w) => (w.path ?? '') === value)
-    if (!ws) return
-    setWorkspace(ws.path ?? '')
-    if (conversationId !== null) {
-      // Is the open conversation filed in the newly selected workspace?
-      listConversations()
-        .then((convs) => {
-          const open = convs.find((c) => c.id === conversationId)
-          if (open && (open.workspace ?? null) !== ws.path) {
-            // Different workspace: switch to its most recent conversation.
-            const latest = convs.find((c) => (c.workspace ?? null) === ws.path)
-            if (latest) {
-              setConversationId(latest.id)
-              getMessages(latest.id)
-                .then((rows) => loadHistory(latest.id, rows))
-                .catch(() => {})
-            } else {
-              newConversation()
-            }
-          }
-        })
-        .catch(() => {})
-    } else {
-      // Fresh draft: jump to the workspace's most recent conversation if any.
-      listConversations()
-        .then((convs) => {
-          const latest = convs.find((c) => (c.workspace ?? null) === ws.path)
-          if (latest) {
-            setConversationId(latest.id)
-            getMessages(latest.id)
-              .then((rows) => loadHistory(latest.id, rows))
-              .catch(() => {})
-          }
-        })
-        .catch(() => {})
-    }
-  }
-
+  /** Open a workspace from the list: its most recent conversation, or a
+   *  fresh chat when it has none (Q2: the list is the conversation switcher). */
   const browseWorkspace = async () => {
     // Native folder picker when running inside Tauri (Q28)
     try {
       const { invoke } = await import('@tauri-apps/api/core')
       const picked = await invoke<string | null>('pick_workspace')
       if (picked) {
-        const ws = await addWorkspace(picked).catch(() => null)
-        setWorkspaces((list) =>
-          ws && !list.some((w) => w.id === ws.id) ? [...list, ws] : list,
-        )
-        setWorkspace(ws?.path ?? picked)
+        await addWorkspace(picked).catch(() => null)
+        setWorkspace(picked)
         newConversation()
       }
     } catch {
@@ -1713,42 +1687,16 @@ export function Sidebar() {
         >
           + New chat
         </button>
-        <label className="mb-1 block text-xs text-zinc-500">Workspace</label>
-        <select
-          className="mb-3 w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none"
-          value={workspace || ''}
-          onChange={(e) => pickWorkspace(e.target.value)}
-          aria-label="Workspace"
-          title={
-            workspaces.find((w) => (w.path ?? '') === (workspace || ''))?.path ??
-            'No root directory — conversations without a workspace'
-          }
+        <ConversationList />
+        {/* Add workspace: a persistent, labeled action row — the affordance
+            the old dropdown buried as a pseudo-option. */}
+        <button
+          className="mb-2 flex w-full items-center gap-1.5 rounded border border-dashed border-zinc-700 px-2 py-1.5 text-left text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+          onClick={scope.connected ? () => setShowRemoteAdd(true) : () => void browseWorkspace()}
         >
-          {scope.connected ? (
-            <option value="">{scope.name} — Default (Home)</option>
-          ) : (
-            <option value="">Default (Home)</option>
-          )}
-          {workspaces
-            .filter((w) => w.path !== null)
-            .map((w) => (
-              <option key={w.id} value={w.path ?? ''}>
-                {w.label}
-                {w.exists ? '' : '  (missing)'}
-              </option>
-            ))}
-          {scope.connected &&
-            localWorkspaces
-              .filter((w) => w.path !== null)
-              .map((w) => (
-                <option key={`local-${w.id}`} value={`__local_${w.id}`} disabled>
-                  {w.label} — this device
-                </option>
-              ))}
-          <option value="__add__">
-            {scope.connected ? '+ Add folder on host…' : '+ Add workspace…'}
-          </option>
-        </select>
+          <span aria-hidden="true" className="text-sm leading-none text-zinc-500">+</span>
+          {scope.connected ? 'Add folder on host…' : 'Add workspace…'}
+        </button>
         {scope.connected && showRemoteAdd && (
           <div className="mb-3 rounded border border-zinc-700 bg-zinc-800 p-2">
             <input
@@ -1776,16 +1724,18 @@ export function Sidebar() {
             </div>
           </div>
         )}
-        <div className="mb-3">
-          <label className="mb-1 block text-xs text-zinc-500">
-            Model{savingModel ? ' (saving...)' : ''}
-          </label>
-          <select
-            className="w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none"
-            value={`${activeProvider}::${model}`}
-            onChange={(e) => pickModel(e.target.value)}
-            title={model}
-          >
+        {/* Footer strip: configuration lives at the bottom, pinned — the
+            conversation list owns the column. Model readout in mono (the
+            machine's voice), gear for Settings. */}
+        <div className="mt-auto border-t border-zinc-800 pt-2">
+          <div className="flex items-center gap-1">
+            <select
+              className="min-w-0 flex-1 truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none"
+              value={`${activeProvider}::${model}`}
+              onChange={(e) => pickModel(e.target.value)}
+              aria-label="Model"
+              title={model}
+            >
             {Object.entries(byProvider).map(([name, pm]) => (
               <optgroup
                 key={name}
@@ -1808,9 +1758,21 @@ export function Sidebar() {
               </option>
             )}
           </select>
+            <button
+              className="shrink-0 rounded border border-zinc-700 p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              aria-label="Settings"
+              title="Settings"
+              onClick={() => setShowSettings(true)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
+          </div>
           {Object.keys(byProvider).length === 0 && (
             <button
-              className="mt-1 w-full rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 text-left text-[10px] leading-relaxed text-amber-300 hover:border-amber-500"
+              className="mt-1.5 w-full rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 text-left text-[10px] leading-relaxed text-amber-300 hover:border-amber-500"
               onClick={() => setShowSettings(true)}
             >
               No model provider configured — add one in Settings to start.
@@ -1825,13 +1787,6 @@ export function Sidebar() {
               </p>
             ))}
         </div>
-        <button
-          className="mb-3 rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
-          onClick={() => setShowSettings(true)}
-        >
-          Settings
-        </button>
-        <ConversationList />
       </aside>
       {showSettings && (
         <SettingsModal
@@ -1863,6 +1818,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [temperature, setTemperature] = useState<number | ''>('')
   const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
+  // Interface scale draft (1.0 / 1.1 / 1.25 / 1.5) — applied live on save.
+  const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -1938,6 +1895,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setTemperature(c.temperature ?? '')
           setMaxTokens(c.max_tokens ? c.max_tokens : '')
           setMaxSteps(c.max_steps ?? '')
+          setUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
           setCloudEndpoint(v?.cloud_endpoint ?? '')
@@ -2081,6 +2039,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
+        ui_scale: uiScale,
         voice: {
           engine: voiceEngine,
           cloud_endpoint: cloudEndpoint,
@@ -2101,6 +2060,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       // Hot-swap the live registration in the Composer; it reports failure
       // (combo taken by another app) through the same reject toast system.
       window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
+      // Live-apply the interface scale (App's UiScale listens and re-zooms).
+      window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: uiScale } }))
       setSaved(true)
       setTimeout(onClose, 600)
     } catch (e) {
@@ -2116,7 +2077,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="max-h-[90vh] w-96 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-4 text-sm text-zinc-200"
+        className="max-h-[90%] w-96 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-4 text-sm text-zinc-200"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="mb-3 font-semibold">Settings</h2>
@@ -2275,6 +2236,33 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           <p className="mt-1 text-[10px] text-zinc-600">
             Tool-call rounds per turn before the agent gives up; 0 = unlimited (Stop still works)
           </p>
+        </div>
+
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Interface
+        </h3>
+        <div className="mb-3" role="radiogroup" aria-label="Interface scale">
+          <p className="mb-1 text-[10px] text-zinc-600">
+            Zoom for the whole app — larger text at the same layout, applied live
+          </p>
+          <div className="flex gap-1.5">
+            {([1.0, 1.1, 1.25, 1.5] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                role="radio"
+                aria-checked={uiScale === s}
+                className={`flex-1 rounded border px-2 py-1.5 font-mono text-xs ${
+                  uiScale === s
+                    ? 'border-blue-600 bg-blue-600/20 text-zinc-100'
+                    : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                }`}
+                onClick={() => setUiScale(s)}
+              >
+                {s === 1.0 ? '100%' : s === 1.1 ? '110%' : s === 1.25 ? '125%' : '150%'}
+              </button>
+            ))}
+          </div>
         </div>
 
         <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">

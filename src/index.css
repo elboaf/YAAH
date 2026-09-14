@@ -2,6 +2,18 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Interface scale: App.tsx applies inline zoom to #root (inline styles only —
+   legacy WebView2 zoom rejects var() in stylesheets). With a full-size box the
+   zoomed app lands exactly on the visual viewport. Viewport units inside the
+   zoomed subtree get zoomed a second time — overlays must use percentages. */
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
 /* New tool chips slide in from the left edge of the live ticker, matching the
    left-to-right flow that pushes older chips toward the fade-out zone. */
 @keyframes chip-in {

@@ -40,6 +40,10 @@ DEFAULTS = {
     "max_steps": 200,
     # Last workspace chosen in the sidebar, so it survives app restarts.
     "last_workspace": "",
+    # Interface scale for the whole UI (CSS zoom on the app root). The
+    # terminal-grade type ramp stays the 1.0 default; this is the user's
+    # personal readability range (100/110/125/150%).
+    "ui_scale": 1.0,
     # Voice dictation: local whisper.cpp by default; cloud = BYOK
     # OpenAI-compatible /audio/transcriptions endpoint.
     "voice": {

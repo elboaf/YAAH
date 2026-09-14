@@ -106,6 +106,8 @@ export interface AgentConfig {
   max_steps?: number
   /** Workspace used last, restored into the sidebar on startup. */
   last_workspace?: string
+  /** Interface scale (CSS zoom on the app root); 1.0 = default ramp. */
+  ui_scale?: number
   /** Voice dictation; cloud_api_key arrives masked ("set" | ""). */
   voice?: {
     engine: 'local' | 'cloud'
@@ -142,6 +144,7 @@ export const updateConfig = (
     temperature: number
     max_tokens: number
     max_steps: number
+    ui_scale: number
     voice: {
       engine?: 'local' | 'cloud'
       cloud_endpoint?: string
