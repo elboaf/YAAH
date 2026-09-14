@@ -114,6 +114,10 @@ export interface AgentConfig {
     cloud_model: string
     /** System-wide push-to-talk hotkey (Tauri accelerator, "" disables). */
     ptt_hotkey: string
+    /** Read-aloud (TTS): on/off, voice name, speaking rate. */
+    tts_enabled?: boolean
+    tts_voice?: string
+    tts_speed?: number
   }
   /** LAN hosting (this instance as a host). */
   remote?: {
@@ -139,11 +143,14 @@ export const updateConfig = (
     max_tokens: number
     max_steps: number
     voice: {
-      engine: 'local' | 'cloud'
-      cloud_endpoint: string
+      engine?: 'local' | 'cloud'
+      cloud_endpoint?: string
       cloud_api_key?: string
-      cloud_model: string
+      cloud_model?: string
       ptt_hotkey?: string
+      tts_enabled?: boolean
+      tts_voice?: string
+      tts_speed?: number
     }
     remote?: {
       hosting_enabled?: boolean
@@ -354,6 +361,88 @@ export async function transcribeAudio(wav: Blob): Promise<string> {
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(body.detail || `transcription failed (${res.status})`)
   return body.text ?? ''
+}
+
+// ---------------------------------------------------------------- tts (read-aloud)
+
+export interface TtsStatus {
+  available: boolean
+  model: string
+  model_bytes: number
+  voices: string[]
+  default_voice: string
+  tts_enabled: boolean
+  tts_voice: string
+  tts_speed: number
+  downloading: boolean
+}
+
+export const ttsStatus = () => api<TtsStatus>('/api/tts/status')
+
+/** Fire-and-forget stop handshake: bumps the backend's synthesis epoch so
+ *  an in-flight chunk for a superseded utterance aborts at its next
+ *  sentence boundary instead of holding the engine. */
+export const ttsStop = () => {
+  fetch(url('/api/tts/stop'), { method: 'POST' }).catch(() => {})
+}
+
+/** Synthesize one prose chunk; resolves to a WAV blob. 409 = model not
+ *  downloaded (the caller offers the Settings download). voice/speed
+ *  override the stored settings (Settings preview); omitted = server default. */
+export async function ttsSynthesize(
+  text: string,
+  signal?: AbortSignal,
+  opts?: { voice?: string; speed?: number },
+): Promise<Blob> {
+  let res: Response
+  try {
+    res = await fetch(url('/api/tts/synthesize'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice: opts?.voice, speed: opts?.speed }),
+      signal,
+    })
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e
+    signalBackendDown()
+    throw new Error('Backend is unreachable (restarting)')
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    const err = new Error(body.detail || `synthesis failed (${res.status})`) as Error & { status?: number }
+    err.status = res.status
+    throw err
+  }
+  return res.blob()
+}
+
+/** Download the TTS model; onLine receives each progress JSON line. */
+export async function ttsDownload(onLine: (p: { stage: string; received?: number; total?: number; detail?: string }) => void): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(url('/api/tts/download'), { method: 'POST' })
+  } catch {
+    signalBackendDown()
+    throw new Error('Backend is unreachable (restarting)')
+  }
+  if (!res.ok || !res.body) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `download failed (${res.status})`)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim()
+      buf = buf.slice(idx + 1)
+      if (line) onLine(JSON.parse(line))
+    }
+  }
 }
 
 

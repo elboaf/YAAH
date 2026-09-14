@@ -855,6 +855,128 @@ async def api_transcribe(request: Request):
             pass
     return {"text": text}
 
+
+# ---- Text-to-speech: read-aloud of agent responses (Kokoro via sherpa-onnx) ----
+
+class TtsBody(BaseModel):
+    text: str
+    voice: str | None = None
+    speed: float | None = None
+
+
+@app.get("/api/tts/status")
+async def api_tts_status():
+    """What the speaker toggle can use right now: model presence, the voice
+    list, and the stored read-aloud settings."""
+    from backend.agent import speak
+
+    voice = load_config().get("voice") or {}
+    return {
+        "available": speak.model_available(),
+        "model": speak.MODEL_NAME,
+        "model_bytes": speak.MODEL_BYTES,
+        "voices": speak.ENGLISH_VOICES,
+        "default_voice": speak.DEFAULT_VOICE,
+        "tts_enabled": bool(voice.get("tts_enabled")),
+        "tts_voice": voice.get("tts_voice") or speak.DEFAULT_VOICE,
+        "tts_speed": voice.get("tts_speed", 1.0),
+        "downloading": speak.download_in_progress(),
+    }
+
+
+@app.post("/api/tts/stop")
+async def api_tts_stop():
+    """Client-side playback stop handshake. The browser owns the audio
+    queue; this endpoint also bumps the synthesis epoch so any in-flight
+    synthesis for an older utterance aborts at its next sentence boundary
+    instead of holding the engine for a full chunk."""
+    from backend.agent import speak
+
+    speak.bump_epoch()
+    return {"ok": True}
+
+
+@app.post("/api/tts/download")
+async def api_tts_download():
+    """Download + unpack the TTS model; streams progress as JSON lines
+    ({"stage": "download"|"extract"|"done"|"error", ...}). One download at
+    a time — a second concurrent request is refused with 409."""
+    import asyncio
+    import json
+
+    from backend.agent import speak
+    from fastapi.responses import StreamingResponse
+
+    if speak.download_in_progress():
+        raise HTTPException(status_code=409, detail="a download is already running")
+    if speak.model_available():
+        return {"ok": True, "stage": "done"}
+
+    async def gen():
+        q: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def progress(p: dict):
+            loop.call_soon_threadsafe(q.put_nowait, p)
+
+        task = loop.run_in_executor(None, speak.download_model, progress)
+        while True:
+            try:
+                p = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                if task.done():
+                    break
+                continue
+            yield json.dumps(p) + "\n"
+            if p.get("stage") in ("done", "error"):
+                break
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except Exception:  # noqa: BLE001 — the thread reports via progress events
+            pass
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/tts/synthesize")
+async def api_tts_synthesize(body: TtsBody):
+    """One prose chunk in, one WAV out (24 kHz 16-bit mono). Voice/speed
+    default to the stored settings. 409 = model not downloaded yet (the
+    UI offers the Settings download); 503 = engine failed to start."""
+    import asyncio
+
+    from backend.agent import speak
+    from fastapi.responses import JSONResponse, Response
+
+    if not speak.model_available():
+        return JSONResponse({"detail": "TTS model not downloaded"}, status_code=409)
+    text = (body.text or "").strip()
+    if not text:
+        return JSONResponse({"detail": "empty text"}, status_code=400)
+    if len(text) > 5000:
+        return JSONResponse({"detail": "text too long — split into sentences"}, status_code=413)
+    voice_cfg = load_config().get("voice") or {}
+    voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
+    speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
+    epoch = speak.bump_epoch()  # this utterance's generation; stop supersedes it
+    try:
+        pcm, rate = await asyncio.to_thread(
+            speak.synthesize, text, voice, float(speed), epoch
+        )
+    except speak.SupersededError:
+        # A newer utterance replaced this one; nothing to send.
+        return JSONResponse({"detail": "superseded"}, status_code=409)
+    except RuntimeError as e:
+        return JSONResponse({"detail": str(e)}, status_code=503)
+    except Exception as e:  # noqa: BLE001 — surfaced as a spoken-output error
+        return JSONResponse({"detail": f"{type(e).__name__}: {e}"}, status_code=500)
+    return Response(content=speak.wav_bytes(pcm, rate), media_type="audio/wav")
+
+
 # ---- Remote hosting: host role (serve other YAAH instances) + client role ----
 
 from backend.agent import discovery, remote as remote_mod
