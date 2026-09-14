@@ -351,9 +351,10 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
             raise SupersededError("superseded under lock")
 
         def check_stale(_samples, _progress) -> int:
-            # sherpa calls this after each internal sentence; returning 1
-            # stops generation (the partial audio is discarded).
-            return 1 if epoch is not None and superseded(epoch) else 0
+            # sherpa's convention (verified by probe, cb_semantics): return 1
+            # = CONTINUE, return 0 = STOP — the opposite of what you'd guess.
+            # It fires between internal sentences; 0 discards the rest.
+            return 0 if epoch is not None and superseded(epoch) else 1
 
         audio = tts.generate(text=text, sid=voice_id(voice), speed=speed, callback=check_stale)
     from array import array
@@ -437,7 +438,11 @@ _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _TABLE_ROW = re.compile(r"(?m)^\s*\|.*\|\s*$")
 _HEADING = re.compile(r"(?m)^#{1,6}\s+")
 _LIST_MARK = re.compile(r"(?m)^\s*[-*+]\s+")
-_BOLD = re.compile(r"\*\*([^*]+)\*\*|\*([^*]+)\*|__([^_]+)__|_([^_]+)_")
+# Emphasis: pair delimiters only when not glued to word chars, so code
+# identifiers (tts_enabled, max_tokens) keep their underscores.
+_BOLD = re.compile(
+    r"\*\*([^*]+)\*\*|\*([^*]+)\*|__([^_]+)__|(?<![A-Za-z0-9_])_([^_]+)_(?![A-Za-z0-9_])"
+)
 _TAG = re.compile(r"<[^>]+>")
 _SPACES = re.compile(r"[ \t]+")
 _BLANKS = re.compile(r"\n{3,}")

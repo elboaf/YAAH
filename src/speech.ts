@@ -30,8 +30,12 @@ export function proseForSpeech(md: string, maxChars = 4000): string {
   t = t.replace(/`([^`]+)`/g, '$1')
   t = t.replace(/^#{1,6}\s+/gm, '')
   t = t.replace(/^\s*[-*+]\s+/gm, '')
-  t = t.replace(/\*\*([^*]+)\*\*|\*([^*]+)\*|__([^_]+)__|_([^_]+)_/g,
-    (_m, a, b, c, d) => a || b || c || d || '')
+  // Emphasis: pair delimiters only when not glued to word chars, so code
+  // identifiers (tts_enabled, max_tokens) keep their underscores.
+  t = t.replace(
+    /\*\*([^*]+)\*\*|\*([^*]+)\*|__([^_]+)__|(?<![A-Za-z0-9_])_([^_]+)_(?![A-Za-z0-9_])/g,
+    (_m, a, b, c, d) => a || b || c || d || '',
+  )
   t = t.replace(/<[^>]+>/g, '')
   t = t.replace(/[ \t]+/g, ' ')
   t = t.replace(/\n{3,}/g, '\n\n')

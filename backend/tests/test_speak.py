@@ -206,7 +206,10 @@ def clean_floor(monkeypatch):
 
 def test_synthesize_superseded_mid_generation(tts_env, monkeypatch, clean_floor):
     """A stop (floor raised past the utterance id) during generation aborts
-    the stale chunk instead of letting it hold the synth lock."""
+    the stale chunk instead of letting it hold the synth lock. NOTE sherpa's
+    callback convention: return 1 = continue, 0 = stop (probe-verified —
+    inverted from what you'd guess; getting it backwards truncated every
+    chunk to its first sentence)."""
     import types
 
     MINE = 100
@@ -217,10 +220,10 @@ def test_synthesize_superseded_mid_generation(tts_env, monkeypatch, clean_floor)
 
         def generate(self, text, sid=0, speed=1.0, callback=None):
             if callback:
-                assert callback([0.0], 0.5) == 0  # still current
+                assert callback([0.0], 0.5) == 1  # still current -> continue
             speak.ensure_epoch(MINE + 1)  # replacement utterance stops this one
             if callback:
-                assert callback([0.0], 1.0) == 1  # now stale -> abort
+                assert callback([0.0], 1.0) == 0  # now stale -> abort
             return types.SimpleNamespace(samples=[0.0, 0.5, -0.5], sample_rate=24000)
 
     monkeypatch.setattr(speak, "_engine", FakeTts())
@@ -239,7 +242,7 @@ def test_synthesize_same_epoch_prefetch_survives(tts_env, monkeypatch, clean_flo
 
         def generate(self, text, sid=0, speed=1.0, callback=None):
             if callback:
-                assert callback([0.0], 0.5) == 0
+                assert callback([0.0], 0.5) == 1
             return types.SimpleNamespace(samples=[0.0, 0.5, -0.5], sample_rate=24000)
 
     monkeypatch.setattr(speak, "_engine", FakeTts())
