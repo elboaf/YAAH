@@ -211,29 +211,39 @@ _engine = None
 _engine_lock = threading.Lock()
 _synth_lock = threading.Lock()
 
-# Replace semantics, server side: the frontend calls /api/tts/stop when a new
-# utterance replaces the old one; any synthesis running for an older epoch
-# aborts at its next internal sentence boundary instead of holding the synth
-# lock for a full chunk (up to ~14s of wasted synthesis that would delay the
-# replacement's first audio).
-_epoch = 0
+# Replace semantics, server side. The frontend numbers utterances
+# monotonically and sends each utterance's id with EVERY chunk request; the
+# backend only ever raises its floor when the frontend pings /api/tts/stop
+# with that utterance's id. superseded(e) == e <= floor, so:
+#   - chunks of one utterance share an id -> concurrent prefetch never
+#     aborts a live chunk (this killed all chat narration before: each
+#     prefetch bumped a shared counter and aborted the chunk before it);
+#   - starting utterance N pings stop(N): every older in-flight chunk
+#     (id <= N) aborts at its next sentence boundary, N's own chunks live;
+#   - stopping utterance N pings stop(N) too: its in-flight chunk aborts.
+# Backend and frontend counters never need to agree on absolute values —
+# only the frontend-provided ids are ever compared.
+_floor = 0
+_epoch_lock = threading.Lock()
 
 
 class SupersededError(RuntimeError):
     """Raised when synthesis was aborted because a newer utterance replaced
-    this one (epoch bumped by /api/tts/stop)."""
+    this one (floor raised by /api/tts/stop)."""
 
 
-def bump_epoch() -> int:
-    global _epoch
-    with _engine_lock:
-        _epoch += 1
-        return _epoch
+def ensure_epoch(floor: int) -> int:
+    """Raise the supersede floor to `floor`; never lower it."""
+    global _floor
+    with _epoch_lock:
+        if floor > _floor:
+            _floor = floor
+        return _floor
 
 
-def current_epoch() -> int:
-    with _engine_lock:
-        return _epoch
+def superseded(epoch: int) -> bool:
+    with _epoch_lock:
+        return epoch <= _floor
 
 
 def _import_engine():
@@ -321,9 +331,11 @@ def voice_id(name: str) -> int:
 def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch: int | None = None):
     """Synthesize one chunk; returns (pcm16le bytes, sample_rate).
 
-    epoch: when given and a newer epoch exists (a replacement utterance
-    called /api/tts/stop), synthesis aborts at the next internal sentence
-    boundary and raises RuntimeError — the caller drops the stale chunk.
+    epoch: the utterance's generation. When the supersede floor has been
+    raised past it (a replacement utterance pinged /api/tts/stop), synthesis
+    aborts at the next internal sentence boundary and raises SupersededError
+    — the caller drops the stale chunk. Chunks of the same utterance share
+    one epoch, so concurrent prefetch never aborts a live chunk.
 
     Raises RuntimeError when the model is missing; the caller (endpoint)
     turns that into a 409 so the UI can offer the download.
@@ -332,22 +344,22 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
     if tts is None:
         raise RuntimeError("TTS model not downloaded")
     speed = max(0.5, min(2.0, float(speed) or 1.0))
-    if epoch is not None and epoch < current_epoch():
+    if epoch is not None and superseded(epoch):
         raise SupersededError("superseded before synthesis")
     with _synth_lock:
-        if epoch is not None and epoch < current_epoch():
-            raise SupersededError("superseded before synthesis")
+        if epoch is not None and superseded(epoch):
+            raise SupersededError("superseded under lock")
 
         def check_stale(_samples, _progress) -> int:
             # sherpa calls this after each internal sentence; returning 1
             # stops generation (the partial audio is discarded).
-            return 1 if epoch is not None and epoch < current_epoch() else 0
+            return 1 if epoch is not None and superseded(epoch) else 0
 
         audio = tts.generate(text=text, sid=voice_id(voice), speed=speed, callback=check_stale)
     from array import array
 
     pcm = array("h", (int(max(-1.0, min(1.0, s)) * 32767) for s in audio.samples))
-    if epoch is not None and epoch < current_epoch():
+    if epoch is not None and superseded(epoch):
         raise SupersededError("superseded after synthesis")
     return pcm.tobytes(), audio.sample_rate
 

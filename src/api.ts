@@ -376,30 +376,41 @@ export interface TtsStatus {
   tts_speed: number
   downloading: boolean
 }
-
 export const ttsStatus = () => api<TtsStatus>('/api/tts/status')
 
-/** Fire-and-forget stop handshake: bumps the backend's synthesis epoch so
- *  an in-flight chunk for a superseded utterance aborts at its next
+/** Fire-and-forget stop handshake: raises the backend's supersede floor to
+ *  `floor` (the frontend's current utterance generation), so any in-flight
+ *  chunk belonging to an older-or-equal generation aborts at its next
  *  sentence boundary instead of holding the engine. */
-export const ttsStop = () => {
-  fetch(url('/api/tts/stop'), { method: 'POST' }).catch(() => {})
+export const ttsStop = (floor: number) => {
+  if (floor <= 0) return
+  fetch(url('/api/tts/stop'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ floor }),
+  }).catch(() => {})
 }
 
-/** Synthesize one prose chunk; resolves to a WAV blob. 409 = model not
- *  downloaded (the caller offers the Settings download). voice/speed
+/** Synthesize one prose chunk; resolves to a WAV blob. 409 = either the
+ *  utterance was superseded (body detail "superseded" — benign, drop it) or
+ *  the model is missing (offer the Settings download). voice/speed/epoch
  *  override the stored settings (Settings preview); omitted = server default. */
 export async function ttsSynthesize(
   text: string,
   signal?: AbortSignal,
-  opts?: { voice?: string; speed?: number },
+  opts?: { voice?: string; speed?: number; epoch?: number },
 ): Promise<Blob> {
   let res: Response
   try {
     res = await fetch(url('/api/tts/synthesize'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice: opts?.voice, speed: opts?.speed }),
+      body: JSON.stringify({
+        text,
+        voice: opts?.voice,
+        speed: opts?.speed,
+        epoch: opts?.epoch,
+      }),
       signal,
     })
   } catch (e) {

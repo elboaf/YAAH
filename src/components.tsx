@@ -2409,6 +2409,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                     } else if (p.stage === 'done') {
                       setTtsModelReady(true)
                       setTtsDownloading(false)
+                      useTts.getState().setReady(true) // un-hide the header toggle
                     } else if (p.stage === 'error') {
                       setTtsDownloading(false)
                       setTtsDlErr(p.detail || 'download failed')

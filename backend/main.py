@@ -862,6 +862,16 @@ class TtsBody(BaseModel):
     text: str
     voice: str | None = None
     speed: float | None = None
+    # The utterance's generation, assigned by the frontend and sent with
+    # EVERY chunk of that utterance (concurrent prefetch shares it — see
+    # /api/tts/stop). Omit it only in hand-made requests (curl/tests).
+    epoch: int | None = None
+
+
+class TtsStopBody(BaseModel):
+    """Optional body for the stop handshake: raise the supersede floor only
+    up to this utterance generation (0/absent = invalidate everything)."""
+    floor: int = 0
 
 
 @app.get("/api/tts/status")
@@ -885,14 +895,19 @@ async def api_tts_status():
 
 
 @app.post("/api/tts/stop")
-async def api_tts_stop():
+async def api_tts_stop(body: TtsStopBody | None = None):
     """Client-side playback stop handshake. The browser owns the audio
-    queue; this endpoint also bumps the synthesis epoch so any in-flight
-    synthesis for an older utterance aborts at its next sentence boundary
-    instead of holding the engine for a full chunk."""
+    queue; this endpoint raises the supersede floor so any in-flight
+    synthesis for the stopped (or older) utterances aborts at their next
+    sentence boundary instead of holding the engine for a full chunk.
+    floor = the frontend's current utterance generation (in-flight chunks
+    always belong to that generation or an older one). floor 0/absent is a
+    no-op — nothing can be in flight below the first generation."""
     from backend.agent import speak
 
-    speak.bump_epoch()
+    floor = body.floor if body else 0
+    if floor > 0:
+        speak.ensure_epoch(floor)
     return {"ok": True}
 
 
@@ -962,7 +977,9 @@ async def api_tts_synthesize(body: TtsBody):
     voice_cfg = load_config().get("voice") or {}
     voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
     speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
-    epoch = speak.bump_epoch()  # this utterance's generation; stop supersedes it
+    # The utterance's generation comes from the frontend (body.epoch); a
+    # hand-made request without one gets epoch 0, which any stop invalidates.
+    epoch = body.epoch if body.epoch is not None else 0
     try:
         pcm, rate = await asyncio.to_thread(
             speak.synthesize, text, voice, float(speed), epoch

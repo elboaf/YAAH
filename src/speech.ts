@@ -100,12 +100,25 @@ export function splitSentences(text: string, minLen = 80, maxLen = 300): string[
 
 type Phase = { speaking: boolean; msgId: string | null }
 
+/** Error shape from ttsSynthesize: `superseded` marks the benign 409 a
+ *  replacement utterance causes (drop silently); `status` 409 otherwise
+ *  means the model went missing. */
+type SynthError = Error & { superseded?: boolean; status?: number }
+
 class SpeechPlayer {
   private ctx: AudioContext | null = null
   private sources: AudioBufferSourceNode[] = []
   private generation = 0
+  /** Monotonic utterance generation, sent with every chunk request: chunks
+   *  of one utterance share it, so concurrent prefetch never supersedes a
+   *  live chunk — only stop(floor) raises the backend's floor past it. */
+  private utteranceId = 0
   private listeners = new Set<(p: Phase) => void>()
   private phase: Phase = { speaking: false, msgId: null }
+  /** Generation of the utterance currently playing (0 = none). The store's
+   *  hard-stop paths floor the backend at this so the stopped utterance's
+   *  own in-flight chunks abort too. */
+  private activeEpoch = 0
 
   subscribe(fn: (p: Phase) => void): () => void {
     this.listeners.add(fn)
@@ -133,10 +146,11 @@ class SpeechPlayer {
    *  chunk while the current one plays. */
   private async fetchBuffer(
     text: string,
-    signal?: AbortSignal,
-    opts?: { voice?: string; speed?: number },
+    signal: AbortSignal | undefined,
+    opts: { voice?: string; speed?: number } | undefined,
+    epoch: number,
   ): Promise<AudioBuffer> {
-    const blob = await ttsSynthesize(text, signal, opts)
+    const blob = await ttsSynthesize(text, signal, { ...opts, epoch })
     const buf = await blob.arrayBuffer()
     return await this.ensureCtx().decodeAudioData(buf)
   }
@@ -164,10 +178,11 @@ class SpeechPlayer {
     if (ctx.state === 'suspended') void ctx.resume()
   }
 
-  /** Stop whatever is playing/queued right now (replace semantics). Also
-   *  pings the backend so any in-flight synthesis for this utterance
-   *  aborts at its next sentence boundary. */
-  stop(): void {
+  /** Stop whatever is playing/queued right now (replace semantics). Pings
+   *  the backend with `floor`: every utterance generation <= floor aborts
+   *  at its next sentence boundary. Pass the CURRENT utterance's id to stop
+   *  it, or (newId - 1) when replacing so only older ones die. */
+  stop(nextFloor = 0): void {
     this.generation++
     const hadAudio = this.sources.length > 0
     for (const s of this.sources) {
@@ -178,8 +193,19 @@ class SpeechPlayer {
       }
     }
     this.sources = []
-    if (this.phase.speaking || hadAudio) ttsStop()
+    if (this.phase.speaking || hadAudio) ttsStop(nextFloor)
     if (this.phase.speaking) this.set(false, null)
+  }
+
+  /** Generation of the utterance currently playing (0 = none). */
+  get currentEpoch(): number {
+    return this.activeEpoch
+  }
+
+  /** Clear the active-utterance marker after a hard stop so a later stop
+   *  never floors at a stale epoch. */
+  clearActiveEpoch(): void {
+    this.activeEpoch = 0
   }
 
   /** Speak a list of prose chunks in order, prefetching one chunk ahead so
@@ -189,31 +215,45 @@ class SpeechPlayer {
   async speak(
     msgId: string,
     chunks: string[],
-    onError?: (e: Error, status?: number) => void,
+    onError?: (e: SynthError, status?: number) => void,
     opts?: { voice?: string; speed?: number },
   ): Promise<void> {
-    this.stop()
+    // Claim this utterance's generation first, then floor the backend at
+    // everything OLDER (superseded(e) == e <= floor): previous utterance's
+    // in-flight chunks abort; our own (id = floor + 1) survive.
+    const epoch = ++this.utteranceId
+    this.stop(epoch - 1)
     if (!chunks.length) return
     const gen = ++this.generation
+    this.activeEpoch = epoch
     this.set(true, msgId)
     try {
-      let prefetch: Promise<AudioBuffer> | null = this.fetchBuffer(chunks[0], undefined, opts)
+      let prefetch: Promise<AudioBuffer> | null = this.fetchBuffer(
+        chunks[0],
+        undefined,
+        opts,
+        epoch,
+      )
       for (let i = 0; i < chunks.length; i++) {
         const current = prefetch
-        prefetch = i + 1 < chunks.length ? this.fetchBuffer(chunks[i + 1], undefined, opts) : null
+        prefetch =
+          i + 1 < chunks.length ? this.fetchBuffer(chunks[i + 1], undefined, opts, epoch) : null
         if (!current) break
         let buf: AudioBuffer
         try {
           buf = await current
         } catch (e) {
-          if ((e as Error).name === 'AbortError' || gen !== this.generation) return
-          onError?.(e as Error, (e as Error & { status?: number }).status)
+          const err = e as SynthError
+          if (err.name === 'AbortError' || gen !== this.generation) return
+          if (err.superseded) return // replaced mid-fetch: benign, stay silent
+          onError?.(err, err.status)
           return
         }
         if (gen !== this.generation) return
         await this.play(buf, gen)
       }
     } finally {
+      this.activeEpoch = 0
       if (gen === this.generation) this.set(false, null)
     }
   }
@@ -246,20 +286,19 @@ interface TtsState {
   /** One-off preview of a voice (Settings); ignores the enabled flag. */
   previewVoice: (voice: string, speed: number) => void
 }
-
 export const useTts = create<TtsState>((set, get) => {
   // Wire the player's phase into the store once.
   speechPlayer.subscribe(({ speaking, msgId }) => {
     set({ speaking, speakingMsgId: msgId })
   })
-  /** Shared playback-failure path: 409 means the model vanished (or was
-   *  never downloaded) — flip ready so the UI offers the download again. */
-  const fail = (e: Error, status?: number) => {
+  /** Shared playback-failure path: a superseded 409 is benign (a newer
+   *  utterance replaced this one — stay silent, no error UI); any other 409
+   *  means the model went missing — flip ready so the UI offers the
+   *  download again. */
+  const fail = (e: SynthError, status?: number) => {
+    if (e.superseded) return
     set({
-      error:
-        status === 409
-          ? 'voice model missing — enable it in Settings'
-          : e.message,
+      error: status === 409 ? 'voice model missing — enable it in Settings' : e.message,
       ...(status === 409 ? { ready: false } : {}),
     })
     setTimeout(() => set({ error: null }), 8000)
@@ -274,7 +313,9 @@ export const useTts = create<TtsState>((set, get) => {
       set({ ready: available, enabled: tts_enabled }),
     setEnabled: (on) => {
       if (on) speechPlayer.warm()
-      speechPlayer.stop()
+      // Muting floors the backend at the playing utterance: its in-flight
+      // chunks abort too (same path as the per-message stop).
+      useTts.getState().stop()
       set({ enabled: on, error: null })
     },
     setReady: (ready) => set({ ready }),
@@ -285,8 +326,6 @@ export const useTts = create<TtsState>((set, get) => {
       const prose = proseForSpeech(markdown)
       const chunks = splitSentences(prose)
       if (!chunks.length) return
-      // Replace: a new utterance always cuts the previous one off.
-      speechPlayer.stop()
       void speechPlayer.speak(msgId, chunks, fail)
     },
     speakQuestion: (callId, question) => {
@@ -294,10 +333,14 @@ export const useTts = create<TtsState>((set, get) => {
       if (!enabled || !ready) return
       const chunks = splitSentences(proseForSpeech(question))
       if (!chunks.length) return
-      speechPlayer.stop()
       void speechPlayer.speak(`q-${callId}`, chunks, fail)
     },
-    stop: () => speechPlayer.stop(),
+    stop: () => {
+      // Hard stop (mute toggle, per-message stop): floor at the utterance
+      // that is playing so its own in-flight chunks abort as well.
+      speechPlayer.stop(speechPlayer.currentEpoch)
+      speechPlayer.clearActiveEpoch()
+    },
     previewVoice: (voice, speed) => {
       speechPlayer.warm()
       void speechPlayer.speak(

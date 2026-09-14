@@ -182,12 +182,34 @@ async def test_tts_download_refuses_concurrent(tts_env, monkeypatch):
     assert res.status_code == 409
 
 
-# ---- replace semantics (synthesis epoch) ----
+@pytest.mark.asyncio
+async def test_tts_stop_accepts_floor(tts_env, monkeypatch):
+    """stop(floor=N) raises the supersede floor exactly to N; the real-engine
+    semantics this protects are covered in test_synthesize_*."""
+    from backend.agent import speak
 
-def test_synthesize_superseded_mid_generation(tts_env, monkeypatch):
-    """A stop (epoch bump) during generation aborts the stale chunk instead
-    of letting it hold the synth lock for a full chunk."""
+    seen = {}
+    monkeypatch.setattr(speak, "ensure_epoch", lambda floor: seen.setdefault("floor", floor))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/tts/stop", json={"floor": 42})
+    assert res.status_code == 200
+    assert seen["floor"] == 42
+
+
+# ---- replace semantics (supersede floor) ----
+
+@pytest.fixture
+def clean_floor(monkeypatch):
+    """Isolate the module-level supersede floor per test."""
+    monkeypatch.setattr(speak, "_floor", 0)
+
+
+def test_synthesize_superseded_mid_generation(tts_env, monkeypatch, clean_floor):
+    """A stop (floor raised past the utterance id) during generation aborts
+    the stale chunk instead of letting it hold the synth lock."""
     import types
+
+    MINE = 100
 
     class FakeTts:
         sample_rate = 24000
@@ -195,19 +217,20 @@ def test_synthesize_superseded_mid_generation(tts_env, monkeypatch):
 
         def generate(self, text, sid=0, speed=1.0, callback=None):
             if callback:
-                callback([0.0], 0.5)  # first internal sentence: still current
-            speak.bump_epoch()  # replacement utterance stops this one
+                assert callback([0.0], 0.5) == 0  # still current
+            speak.ensure_epoch(MINE + 1)  # replacement utterance stops this one
             if callback:
-                callback([0.0], 1.0)  # second: now stale -> callback returns 1
+                assert callback([0.0], 1.0) == 1  # now stale -> abort
             return types.SimpleNamespace(samples=[0.0, 0.5, -0.5], sample_rate=24000)
 
     monkeypatch.setattr(speak, "_engine", FakeTts())
-    mine = speak.bump_epoch()
     with pytest.raises(speak.SupersededError):
-        speak.synthesize("hello", epoch=mine)
+        speak.synthesize("hello", epoch=MINE)
 
 
-def test_synthesize_current_epoch_succeeds(tts_env, monkeypatch):
+def test_synthesize_same_epoch_prefetch_survives(tts_env, monkeypatch, clean_floor):
+    """THE regression that silenced chat narration: concurrent chunks of one
+    utterance share an epoch, so fetching chunk N+1 must never abort chunk N."""
     import types
 
     class FakeTts:
@@ -215,13 +238,22 @@ def test_synthesize_current_epoch_succeeds(tts_env, monkeypatch):
         num_speakers = 54
 
         def generate(self, text, sid=0, speed=1.0, callback=None):
-            assert callback is not None and callback([0.0], 0.5) == 0
+            if callback:
+                assert callback([0.0], 0.5) == 0
             return types.SimpleNamespace(samples=[0.0, 0.5, -0.5], sample_rate=24000)
 
     monkeypatch.setattr(speak, "_engine", FakeTts())
-    mine = speak.bump_epoch()
-    pcm, rate = speak.synthesize("hello", epoch=mine)
-    assert len(pcm) == 6 and rate == 24000
+    # Chunk 0 in flight, chunk 1 arrives with the SAME epoch: both succeed.
+    first = speak.synthesize("chunk zero", epoch=7)
+    second = speak.synthesize("chunk one", epoch=7)
+    assert len(first[0]) == 6 and len(second[0]) == 6
+
+
+def test_ensure_epoch_floor_never_lowers(tts_env):
+    assert speak.ensure_epoch(5) == 5
+    assert speak.ensure_epoch(2) == 5  # ignored
+    assert speak.superseded(5) and speak.superseded(4)
+    assert not speak.superseded(6)
 
 
 @pytest.mark.asyncio
@@ -254,7 +286,7 @@ def test_real_engine_synthesizes_with_abort_callback():
         "First sentence here. Second sentence follows. Third and final one.",
         voice=speak.DEFAULT_VOICE,
         speed=1.0,
-        epoch=speak.bump_epoch(),
+        epoch=1,  # floor starts at 0, so epoch 1 is current
     )
     assert rate == 24000
     assert len(pcm) > 24000  # at least a second of 16-bit mono audio
