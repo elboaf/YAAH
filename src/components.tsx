@@ -2669,7 +2669,7 @@ export function ChatPanel() {
               <li>
                 <span className="mr-1.5 text-zinc-700">3.</span>
                 Describe your task below — type{' '}
-                <span className="font-mono text-indigo-300">/s</span> to load a skill's instructions.
+                <span className="font-mono text-indigo-300">/</span> to load a skill's instructions.
               </li>
             </ol>
             <p className="mt-5 text-[11px] text-zinc-600">
@@ -3115,14 +3115,14 @@ function Composer() {
     }
   }, [input])
 
-  // ---- skills (/s autocomplete + chips) ----
+  // ---- skills (/ autocomplete + chips) ----
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [skillMenuOpen, setSkillMenuOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
   const [skillIndex, setSkillIndex] = useState(0)
   // True only after the user points at a row (arrows or hover). Enter commits
   // a skill solely on this explicit selection; otherwise Enter sends the
-  // literal text — typing a message that starts with "/s" stays possible.
+  // literal text — typing a message that starts with "/" stays possible.
   const [skillNavigated, setSkillNavigated] = useState(false)
   const [pickedSkills, setPickedSkills] = useState<SkillInfo[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -3405,19 +3405,19 @@ function Composer() {
 
   useEffect(loadSkills, [loadSkills])
 
-  // The menu opens when the input is exactly "/s" or starts with "/s " —
+  // The menu opens when the input is exactly "/" or starts with "/" —
   // the query is whatever follows, and the list narrows as it grows.
   useEffect(() => {
-    if (input === '/s') {
+    if (input === '/') {
       setSkillMenuOpen(true)
       setSkillQuery('')
       setSkillIndex(0)
       setSkillNavigated(false)
       return
     }
-    if (input.startsWith('/s ')) {
+    if (input.startsWith('/')) {
       setSkillMenuOpen(true)
-      setSkillQuery(input.slice(3))
+      setSkillQuery(input.slice(1))
       setSkillIndex(0)
       setSkillNavigated(false)
       return
@@ -3774,7 +3774,7 @@ function Composer() {
               title={s.description || s.path}
               className="flex items-center gap-1 rounded bg-indigo-900/60 px-2 py-0.5 font-mono text-[10px] text-indigo-200"
             >
-              /s {s.name}
+              /{s.name}
               <button
                 className="text-indigo-400 hover:text-red-400"
                 onClick={() => removeSkill(s.name)}
@@ -3855,7 +3855,7 @@ function Composer() {
                     pickSkill(s)
                   }}
                 >
-                  <div className="font-mono text-xs text-indigo-300">/s {s.name}</div>
+                  <div className="font-mono text-xs text-indigo-300">/{s.name}</div>
                   {s.description && (
                     <div className="truncate text-[10px] text-zinc-500">{s.description}</div>
                   )}
@@ -3890,7 +3890,7 @@ function Composer() {
           }`}
           rows={2}
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
-          placeholder="Describe a task... (drop/paste/attach images or text files; type /s to load a skill)"          aria-label="Message the agent"
+          placeholder="Describe a task... (drop/paste/attach images or text files; type / to load a skill)"          aria-label="Message the agent"
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
