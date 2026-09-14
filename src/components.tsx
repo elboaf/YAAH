@@ -1891,6 +1891,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [ttsDlPct, setTtsDlPct] = useState<number | null>(null)
   const [ttsDlErr, setTtsDlErr] = useState<string | null>(null)
   const previewVoice = useTts((s) => s.previewVoice)
+  // Playback failures (preview or chat) surface here too — the toggle
+  // tooltip is invisible when the user is inside Settings.
+  const ttsUiError = useTts((s) => s.error)
   // LAN hosting: on by default; passphrase gates remote tool execution.
   const [remoteHost, setRemoteHost] = useState(true)
   const [remotePass, setRemotePass] = useState('')
@@ -2484,6 +2487,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               this machine.
             </p>
           </div>
+        )}
+        {ttsUiError && (
+          <p className="mb-3 text-[10px] text-red-400">Read-aloud error: {ttsUiError}</p>
         )}
 
         <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">

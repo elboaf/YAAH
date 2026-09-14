@@ -4,6 +4,8 @@ The real engine is not exercised here (no model in CI); these tests stub
 `synthesize` and the model-dir resolver, mirroring how test_voice.py fakes
 the whisper binary.
 """
+import os
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -231,3 +233,28 @@ async def test_tts_synthesize_superseded_maps_to_409(tts_env, monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post("/api/tts/synthesize", json={"text": "Hello"})
     assert res.status_code == 409
+
+
+# ---- real-engine integration (regression: lazy numpy import) ----
+
+@pytest.mark.skipif(
+    not os.environ.get("YAAH_TTS_MODEL_DIR"),
+    reason="real Kokoro model not available (CI)",
+)
+def test_real_engine_synthesizes_with_abort_callback():
+    """Guards the lazy `import numpy` inside sherpa's generate(callback=...):
+    the callback is marshaled through numpy, so the frozen sidecar must
+    bundle numpy even though sherpa only imports it on this path (PyInstaller
+    cannot see it). Multi-sentence text so the callback actually fires
+    between sentences. Ran with numpy absent once — it 500'd everywhere."""
+    if speak._engine is None:
+        speak.get_engine()
+    assert speak._engine is not None
+    pcm, rate = speak.synthesize(
+        "First sentence here. Second sentence follows. Third and final one.",
+        voice=speak.DEFAULT_VOICE,
+        speed=1.0,
+        epoch=speak.bump_epoch(),
+    )
+    assert rate == 24000
+    assert len(pcm) > 24000  # at least a second of 16-bit mono audio
