@@ -1818,6 +1818,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [temperature, setTemperature] = useState<number | ''>('')
   const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
+  // Interface scale draft (1.0 / 1.1 / 1.25 / 1.5) — applied live on save.
+  const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -1893,6 +1895,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setTemperature(c.temperature ?? '')
           setMaxTokens(c.max_tokens ? c.max_tokens : '')
           setMaxSteps(c.max_steps ?? '')
+          setUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
           setCloudEndpoint(v?.cloud_endpoint ?? '')
@@ -2036,6 +2039,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
+        ui_scale: uiScale,
         voice: {
           engine: voiceEngine,
           cloud_endpoint: cloudEndpoint,
@@ -2056,6 +2060,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       // Hot-swap the live registration in the Composer; it reports failure
       // (combo taken by another app) through the same reject toast system.
       window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
+      // Live-apply the interface scale (App's UiScale listens and re-zooms).
+      window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: uiScale } }))
       setSaved(true)
       setTimeout(onClose, 600)
     } catch (e) {
@@ -2230,6 +2236,33 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           <p className="mt-1 text-[10px] text-zinc-600">
             Tool-call rounds per turn before the agent gives up; 0 = unlimited (Stop still works)
           </p>
+        </div>
+
+        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Interface
+        </h3>
+        <div className="mb-3" role="radiogroup" aria-label="Interface scale">
+          <p className="mb-1 text-[10px] text-zinc-600">
+            Zoom for the whole app — larger text at the same layout, applied live
+          </p>
+          <div className="flex gap-1.5">
+            {([1.0, 1.1, 1.25, 1.5] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                role="radio"
+                aria-checked={uiScale === s}
+                className={`flex-1 rounded border px-2 py-1.5 font-mono text-xs ${
+                  uiScale === s
+                    ? 'border-blue-600 bg-blue-600/20 text-zinc-100'
+                    : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                }`}
+                onClick={() => setUiScale(s)}
+              >
+                {s === 1.0 ? '100%' : s === 1.1 ? '110%' : s === 1.25 ? '125%' : '150%'}
+              </button>
+            ))}
+          </div>
         </div>
 
         <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">

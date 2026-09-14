@@ -328,6 +328,7 @@ class ConfigUpdate(BaseModel):
     max_steps: int | None = None
     voice: dict | None = None
     remote: dict | None = None
+    ui_scale: float | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -717,6 +718,8 @@ async def api_get_config():
         "max_tokens": cfg.get("max_tokens"),
         "max_steps": cfg.get("max_steps"),
         "last_workspace": cfg.get("last_workspace") or "",
+        # Interface scale (CSS zoom): 1.0 = the terminal-grade default ramp.
+        "ui_scale": cfg.get("ui_scale", 1.0),
         # Voice settings; the cloud key is masked like provider keys.
         "voice": {
             **(cfg.get("voice") or {}),
@@ -746,6 +749,10 @@ async def api_set_config(body: ConfigUpdate):
         existing = load_config().get("remote") or {}
         merged = {**existing, **remote}
         updates["remote"] = merged
+    # Interface scale is clamped to the shipped range (Settings offers
+    # 100/110/125/150%; anything wilder would break the compact layout).
+    if "ui_scale" in updates:
+        updates["ui_scale"] = min(1.5, max(1.0, float(updates["ui_scale"] or 1.0)))
     save_config(updates)
     # Hosting toggles need the mDNS advertiser to follow.
     if isinstance(remote, dict):

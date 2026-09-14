@@ -2,6 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Interface scale: when ui_scale > 1, App.tsx sets zoom on <html> AND the
+   .ui-scaled class. Viewport units (h-screen/w-screen) don't re-zoom, so the
+   root switches to percentage sizing of the (unchanged) visual viewport. */
+html.ui-scaled,
+html.ui-scaled body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
 /* New tool chips slide in from the left edge of the live ticker, matching the
    left-to-right flow that pushes older chips toward the fade-out zone. */
 @keyframes chip-in {
