@@ -80,6 +80,39 @@ def test_prose_truncates_long_text_at_sentence():
     assert out.endswith((".", "!", "?"))
 
 
+# ---- emoji stripping ----
+
+def test_strip_emoji_removes_and_repairs_spacing():
+    """espeak-ng speaks emoji NAMES ('waving hand sign', ~1s each); emoji
+    must go, but the punctuation and words around them must survive."""
+    assert speak.strip_emoji("Take your time 🙂 whenever you're ready.") == (
+        "Take your time whenever you're ready."
+    )
+    assert speak.strip_emoji("Loud and clear! 👋 I'm here.") == "Loud and clear! I'm here."
+    assert speak.strip_emoji("Done ✅") == "Done"
+
+
+def test_strip_emoji_handles_sequences_and_flags():
+    # ZWJ sequences (👨‍👩‍👧 = three emoji joined by ZWJ) and flags collapse
+    # to nothing, variation selectors too.
+    assert speak.strip_emoji("family: \U0001F468\u200D\U0001F469\u200D\U0001F467 end") == "family: end"
+    assert speak.strip_emoji("flag \U0001F1FA\U0001F1F8 done") == "flag done"
+    assert speak.strip_emoji("thumb \U0001F44D\uFE0F up") == "thumb up"
+
+
+def test_strip_emoji_keeps_arrows_and_text():
+    """Arrows are legitimate technical prose ('A → B') and must survive."""
+    t = "A → B, and \u2192 stays; plain words unaffected."
+    assert speak.strip_emoji(t) == t
+    assert "workspace" in speak.strip_emoji("the workspace")
+
+
+def test_prose_for_speech_strips_emoji():
+    out = speak.prose_for_speech("Happy to chat! Not much going on 😄 just waiting.")
+    assert "😄" not in out
+    assert "going on just waiting" in out
+
+
 # ---- sentence chunking ----
 
 def test_split_sentences_merges_short_and_respects_abbrevs():

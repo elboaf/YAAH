@@ -447,6 +447,32 @@ _TAG = re.compile(r"<[^>]+>")
 _SPACES = re.compile(r"[ \t]+")
 _BLANKS = re.compile(r"\n{3,}")
 
+# Emoji: espeak-ng (Kokoro's text front-end) looks emoji up in its dictionary
+# and SPEAKS THEIR NAMES ("waving hand sign", ~0.8-1.7s each, probe-verified).
+# Emoji carry no meaning read aloud, so they are stripped before synthesis.
+# Ranges: all supplementary emoji blocks, misc symbols + dingbats (✅⚠❌),
+# misc-symbols-and-arrows block (⭐), regional indicators, variation
+# selectors, ZWJ and keycap (emoji ZWJ sequences collapse to nothing).
+# Deliberately NOT stripped: →/← (U+2190-21FF) — legitimate technical prose.
+_EMOJI = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U00002B00-\U00002BFF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0000200D\U000020E3"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def strip_emoji(text: str) -> str:
+    """Remove emoji and repair the spacing they leave behind."""
+    t = _EMOJI.sub("", text)
+    t = re.sub(r"\s+([,.!?;:])", r"\1", t)  # "time 🙂." -> "time."
+    t = re.sub(r"  +", " ", t)  # "end 😄 just" -> "end just"
+    return t.strip()
+
 
 def prose_for_speech(md: str, max_chars: int = 4000) -> str:
     """Reduce an assistant markdown message to speakable prose: fenced and
@@ -465,6 +491,7 @@ def prose_for_speech(md: str, max_chars: int = 4000) -> str:
     t = _LIST_MARK.sub("", t)
     t = _BOLD.sub(lambda m: m.group(1) or m.group(2) or m.group(3) or m.group(4) or "", t)
     t = _TAG.sub("", t)
+    t = strip_emoji(t)
     t = _SPACES.sub(" ", t)
     t = _BLANKS.sub("\n\n", t).strip()
     if len(t) <= max_chars:

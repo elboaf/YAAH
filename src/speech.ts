@@ -16,6 +16,22 @@ import { ttsStop, ttsSynthesize } from './api'
 
 // ---------------------------------------------------------------- text prep
 
+// Emoji: espeak-ng (Kokoro's text front-end) looks emoji up in its
+// dictionary and SPEAKS THEIR NAMES (~0.8-1.7s each, probe-verified), so
+// they are stripped before synthesis. Same ranges as speak.py; →/←
+// (U+2190-21FF) deliberately kept — legitimate technical prose.
+const EMOJI =
+  /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}]+/gu
+
+/** Remove emoji and repair the spacing they leave behind. */
+function stripEmoji(text: string): string {
+  return text
+    .replace(EMOJI, '')
+    .replace(/\s+([,.!?;:])/g, '$1')
+    .replace(/ {2,}/g, ' ')
+    .trim()
+}
+
 /** Markdown → speakable prose: code fences and indented blocks become
  *  pauses (dropped), tables drop, links keep their label, emphasis strips.
  *  Mirrors speak.prose_for_speech. */
@@ -37,6 +53,7 @@ export function proseForSpeech(md: string, maxChars = 4000): string {
     (_m, a, b, c, d) => a || b || c || d || '',
   )
   t = t.replace(/<[^>]+>/g, '')
+  t = stripEmoji(t)
   t = t.replace(/[ \t]+/g, ' ')
   t = t.replace(/\n{3,}/g, '\n\n')
   t = t.trim()
