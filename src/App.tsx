@@ -84,16 +84,9 @@ function BackendRecoveryBanner() {
 function UiScale() {
   useEffect(() => {
     const apply = (scale: number) => {
-      const root = document.documentElement
-      if (scale > 1.001) {
-        root.style.zoom = String(scale)
-        // Zoom doesn't scale viewport units; percentage sizing keeps the
-        // app root at exactly the (unchanged) visual viewport (no overflow).
-        root.classList.add('ui-scaled')
-      } else {
-        root.style.zoom = ''
-        root.classList.remove('ui-scaled')
-      }
+      // index.css zooms #root by var(--ui-scale) and pre-divides its box by
+      // the same factor, so the zoomed app lands exactly on the viewport.
+      document.documentElement.style.setProperty('--ui-scale', String(scale))
     }
     // Restore the persisted scale (backend config; blank = 1.0 default).
     getConfig()
@@ -110,7 +103,7 @@ function UiScale() {
 
 export default function App() {
   return (
-    <div className="relative flex h-screen w-screen bg-zinc-900 text-zinc-100">
+    <div className="relative flex h-full w-full bg-zinc-900 text-zinc-100">
       <UiScale />
       <BackendRecoveryBanner />
       <Sidebar />
