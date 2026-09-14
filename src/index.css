@@ -14,6 +14,45 @@ body,
   overflow: hidden;
 }
 
+/* Browser chrome still carries the design. color-scheme: dark keeps every
+   native control the app does not draw (selects, textareas, any unstyled
+   scrollbar region) on the dark side of the platform defaults. */
+:root {
+  color-scheme: dark;
+}
+
+/* Scrollbars are chrome, not content: transparent track so each surface keeps
+   its own floor (console #18181b, code #09090b, modals), ghost-zinc thumb that
+   brightens through the ink ladder on interaction. The 2px transparent border
+   with padding-box clipping floats the thumb at ~6px visual width. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #52525b;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #71717a;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: #a1a1aa;
+}
+
+::-webkit-scrollbar-corner {
+  background-color: transparent;
+}
+
 /* New tool chips slide in from the left edge of the live ticker, matching the
    left-to-right flow that pushes older chips toward the fade-out zone. */
 @keyframes chip-in {
