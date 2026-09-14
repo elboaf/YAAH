@@ -66,26 +66,68 @@ Users invoke skills by typing /s <name> in the chat; the model loads
 them itself with the load_skill tool when the task matches.
 """
 
+GRILL_ME_MD = """---
+name: grill-me
+description: A relentless interview to sharpen a plan or design.
+disable-model-invocation: true
+---
+
+Call the Skill tool with "grilling".
+"""
+
+GRILLING_MD = """---
+name: grilling
+description: Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases.
+---
+
+Interview the user relentlessly until you reach a shared understanding. Map this as a **design tree**: every decision branches into the decisions that hang off it.
+
+Work the tree in **rounds**. The **frontier** is every decision whose prerequisites are already settled: the questions you can ask _now_ without guessing at answers you haven't heard yet. Ask the whole frontier in one round: number each question and give your recommended answer. Then wait for the user's answers before the next round.
+
+Each question contains a title, the question body (might be multiple paragraphs, including multiple choices), and your recommended answer. Deliver each question with the `ask_user` tool (one call per question, options = the choices, recommended answer first) rather than as formatted text.
+
+Each round the user answers reshapes the tree: settled decisions push the frontier outward and unblock questions that depended on them. Recompute the frontier and ask the next round. A question whose answer depends on another question still open in this round belongs to a _later_ round, not this one.
+
+Finding _facts_ is your job, never the user's. When a frontier question needs a fact from the environment (filesystem, tools, etc.), dispatch a sub-agent to find it; don't ask the user for anything you could look up yourself. Don't block on it: a running exploration is an unsettled prerequisite, so only the questions downstream of it wait for the sub-agent to report; ask the rest of the frontier now. The _decisions_ are the user's: put each to them and wait.
+
+The session is done when the frontier is empty: every branch of the design tree visited, nothing left silently assumed. Do not act on it until the user confirms you have reached a shared understanding.
+"""
+
+# Skills written into a fresh (or upgraded) install by ensure_dir().
+# Only seeded when the skill's SKILL.md is missing, so user edits survive.
+BUNDLED_SKILLS: dict[str, str] = {
+    "grill-me": GRILL_ME_MD,
+    "grilling": GRILLING_MD,
+}
+
 
 def ensure_dir() -> bool:
-    """Create SKILLS_DIR (plus a sample skill) when it doesn't exist, so a
-    fresh install has somewhere to put skills and can see the format.
-    Returns True if the directory was just created."""
-    if SKILLS_DIR.is_dir():
-        return False
-    try:
-        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return False
-    try:
-        sample = SKILLS_DIR / "example"
-        sample.mkdir(exist_ok=True)
-        (sample / "SKILL.md").write_text(
-            SAMPLE_SKILL_MD.format(dir=SKILLS_DIR), encoding="utf-8"
-        )
-    except OSError:
-        pass  # dir exists, that's the part that matters
-    return True
+    """Create SKILLS_DIR when it doesn't exist and seed the bundled skills
+    (the example plus anything in BUNDLED_SKILLS), so a fresh install has
+    somewhere to put skills and ships with a working set. Seeding never
+    overwrites an existing SKILL.md. Returns True if the directory was
+    just created."""
+    just_created = False
+    if not SKILLS_DIR.is_dir():
+        try:
+            SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return False
+        just_created = True
+
+    seeds: dict[str, str] = dict(BUNDLED_SKILLS)
+    if just_created:
+        seeds["example"] = SAMPLE_SKILL_MD.format(dir=SKILLS_DIR)
+    for name, text in seeds.items():
+        try:
+            folder = SKILLS_DIR / name
+            folder.mkdir(exist_ok=True)
+            skill_md = folder / "SKILL.md"
+            if not skill_md.exists():
+                skill_md.write_text(text, encoding="utf-8")
+        except OSError:
+            pass  # best-effort seeding; never block startup
+    return just_created
 
 
 def parse_skill_md(path: Path) -> Skill | None:
