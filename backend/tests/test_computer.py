@@ -24,6 +24,12 @@ def fake_activity(monkeypatch):
 
 @pytest.fixture
 def fake_input(monkeypatch):
+    # The input executors lazy-import pynput, which the win32 requirements
+    # markers don't install on Linux CI — these tests are Windows-only,
+    # exactly like the feature.
+    if not computer_mod.WINDOWS:
+        pytest.skip("windows-only input tools")
+
     class FakeMouse:
         def __init__(self):
             self.position = (0, 0)

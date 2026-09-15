@@ -13,15 +13,27 @@ TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
 EXE=""
 [ "$(uname -s)" = "MINGW" -o "$(uname -s)" = "Windows_NT" ] && EXE=".exe" || true
 
+COLLECTS=(
+  --collect-all uvicorn --collect-all fastapi
+  --collect-all pydantic --collect-all pydantic_core
+  --collect-all anyio --collect-all aiosqlite
+  --collect-all httpx --collect-all httpcore
+  --collect-all curl_cffi
+  --collect-all sherpa_onnx
+)
+# Computer use (Windows only; pip skips these elsewhere via sys_platform
+# markers, so collecting them unconditionally would break the Linux/macOS
+# builds). uiautomation wraps comtypes, which generates interface modules
+# at runtime and is invisible to static analysis.
+if [ "$(uname -s)" = "MINGW" ] || [ "$(uname -s)" = "Windows_NT" ]; then
+  COLLECTS+=(--collect-all pynput --collect-all mss
+             --collect-all uiautomation --collect-all comtypes)
+fi
+
 pyinstaller --noconfirm --clean --onefile --noconsole \
   --name backend \
   --paths . \
-  --collect-all uvicorn --collect-all fastapi \
-  --collect-all pydantic --collect-all pydantic_core \
-  --collect-all anyio --collect-all aiosqlite \
-  --collect-all httpx --collect-all httpcore \
-  --collect-all curl_cffi \
-  --collect-all sherpa_onnx \
+  "${COLLECTS[@]}" \
   --hidden-import numpy \
   scripts/backend_entry.py
 
