@@ -42,10 +42,14 @@ COMPUTER_TOOLS_SCHEMA = [
         "function": {
             "name": "screenshot",
             "description": (
-                "Capture the screen and attach it so a vision-capable model "
-                "can see it. Only screenshot when the task requires seeing "
-                "the screen — never to inspect the user's other work. "
-                "Screenshots go to the configured model provider."
+                "Capture a screen and attach it so a vision-capable model "
+                "can see it. With hwnd, captures the monitor that window "
+                "lives on (use this to look at a specific window — "
+                "multi-monitor safe). Without hwnd, captures monitor 1 "
+                "(the primary) unless monitor says otherwise. Only "
+                "screenshot when the task requires seeing the screen — "
+                "never to inspect the user's other work. Screenshots go "
+                "to the configured model provider."
             ),
             "parameters": {
                 "type": "object",
@@ -53,6 +57,13 @@ COMPUTER_TOOLS_SCHEMA = [
                     "monitor": {
                         "type": "integer",
                         "description": "1-based monitor number (default 1 = primary)",
+                    },
+                    "hwnd": {
+                        "type": "integer",
+                        "description": (
+                            "Window handle from list_windows: capture the "
+                            "monitor containing that window (overrides monitor)"
+                        ),
                     },
                 },
             },
@@ -191,6 +202,59 @@ def _capture_screen(monitor: int = 1) -> tuple[bytes, int, int]:
         return png, shot.width, shot.height
 
 
+def _monitors() -> list[dict]:
+    """Real monitors in EnumDisplayMonitors order — the same order mss
+    indexes monitors[1..] with, so position+1 is the mss monitor number."""
+    user32 = ctypes.windll.user32
+    out: list[dict] = []
+    MONITORENUMPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(ctypes.wintypes.RECT), ctypes.c_void_p,
+    )
+
+    def _on_monitor(hmon, _hdc, lprect, _lparam):
+        rect = ctypes.cast(lprect, ctypes.POINTER(ctypes.wintypes.RECT)).contents
+        out.append(
+            {
+                "handle": int(hmon) if hmon else 0,
+                "rect": [rect.left, rect.top, rect.right, rect.bottom],
+                "monitor": len(out) + 1,
+            }
+        )
+        return True
+
+    user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(_on_monitor), None)
+    return out
+
+
+def _monitor_for_rect(rect: list[int]) -> int:
+    """1-based monitor number containing the center of rect (nearest if
+    none contains it, e.g. a minimized window at -32000)."""
+    cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    mons = _monitors()
+    if not mons:
+        return 1
+    for m in mons:
+        r = m["rect"]
+        if r[0] <= cx < r[2] and r[1] <= cy < r[3]:
+            return m["monitor"]
+    # Nearest by squared distance to the monitor rect's center.
+    def _dist(m):
+        r = m["rect"]
+        mx, my = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2
+        return (mx - cx) ** 2 + (my - cy) ** 2
+
+    return min(mons, key=_dist)["monitor"]
+
+
+def _monitor_for_window(hwnd: int) -> int:
+    user32 = ctypes.windll.user32
+    rect = ctypes.wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return 1
+    return _monitor_for_rect([rect.left, rect.top, rect.right, rect.bottom])
+
+
 def _screenshot_result(monitor: int = 1) -> dict:
     from backend.agent.imagedata import save_bytes
 
@@ -199,8 +263,13 @@ def _screenshot_result(monitor: int = 1) -> dict:
     return {"image": rel, "monitor": monitor, "size": [w, h]}
 
 
-async def screenshot(workspace: str = "", monitor: int = 1) -> dict:
+async def screenshot(workspace: str = "", monitor: int = 1, hwnd: int = 0) -> dict:
     try:
+        if hwnd:
+            mon = _monitor_for_window(int(hwnd))
+            result = _screenshot_result(mon)
+            result["hwnd"] = int(hwnd)
+            return result
         return _screenshot_result(monitor)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
@@ -251,6 +320,9 @@ def _enum_windows() -> list[dict]:
                 "pid": pid.value,
                 "process": _process_name(pid.value),
                 "rect": [rect.left, rect.top, rect.right, rect.bottom],
+                "monitor": _monitor_for_rect(
+                    [rect.left, rect.top, rect.right, rect.bottom]
+                ),
             }
         )
         return True

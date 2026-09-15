@@ -44,6 +44,16 @@ Every GUI interaction is: **look → decide → act → look again**.
 - **The user-activity pause is not an error to fight.** It means the user
   is touching the machine. Screenshot, `wait`, retry when idle.
 
+## Multi-monitor
+
+The desktop may span several monitors. `list_windows` reports each
+window's `monitor` (1-based) — use it. To look at a window on a
+non-primary screen, never take a bare `screenshot()`; call
+`screenshot(hwnd=<the window's hwnd>)`, which captures the monitor that
+window lives on. If the shot doesn't show the window you expected, you
+screened the wrong monitor: recheck `monitor` in the `list_windows`
+output and retry with the hwnd.
+
 ## Verification
 
 - "Looks right" in a screenshot is the assertion for UI tests; state the

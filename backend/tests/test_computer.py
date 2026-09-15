@@ -207,15 +207,49 @@ def test_screenshot_returns_image_result(fake_capture):
 
 
 def test_list_windows_shape(monkeypatch):
-    monkeypatch.setattr(
-        computer_mod,
-        "_enum_windows",
-        lambda: [{"hwnd": 42, "title": "Notepad", "pid": 7,
-                  "process": "notepad.exe", "rect": [0, 0, 100, 100]}],
-    )
+    captured = {}
+    fake_wins = [{"hwnd": 42, "title": "Notepad", "pid": 7,
+                  "process": "notepad.exe", "rect": [0, 0, 100, 100],
+                  "monitor": 2}]
+
+    def fake_enum():
+        # Simulate _enum_windows' per-window monitor tagging.
+        captured["called"] = True
+        return fake_wins
+
+    monkeypatch.setattr(computer_mod, "_enum_windows", fake_enum)
     res = asyncio.run(computer_mod.list_windows())
     assert res["count"] == 1
     assert res["windows"][0]["process"] == "notepad.exe"
+    assert res["windows"][0]["monitor"] == 2
+
+
+def test_monitor_for_rect_containment_and_nearest():
+    if not computer_mod.WINDOWS:
+        pytest.skip("windows-only")
+    mons = computer_mod._monitors()
+    if len(mons) < 2:
+        pytest.skip("needs multiple monitors")
+    r0, r1 = mons[0]["rect"], mons[1]["rect"]
+    # Center of monitor 1's rect maps to monitor 1, etc.
+    assert computer_mod._monitor_for_rect(r0) == 1
+    assert computer_mod._monitor_for_rect(r1) == 2
+    # A minimized window sits at -32000: must fall back to nearest, not crash.
+    assert computer_mod._monitor_for_rect([-32000, -32000, -31800, -31900]) in (1, 2)
+
+
+def test_screenshot_hwnd_captures_window_monitor(fake_capture, monkeypatch):
+    monkeypatch.setattr(computer_mod, "_monitor_for_window", lambda hwnd: 2)
+    res = asyncio.run(computer_mod.screenshot(hwnd=1234))
+    assert res["monitor"] == 2
+    assert res["hwnd"] == 1234
+    assert fake_capture == [2]  # captured monitor 2, not the primary
+
+
+def test_screenshot_monitor_param_still_works(fake_capture):
+    res = asyncio.run(computer_mod.screenshot(monitor=1))
+    assert res["monitor"] == 1
+    assert fake_capture == [1]
 
 
 def test_focus_window_pause_contract(fake_activity, fake_input):

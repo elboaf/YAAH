@@ -94,6 +94,10 @@ Computer use (desktop tools):
   is for GUI behavior you must observe or exercise.
 - If a result says "user-activity pause", the user is using the machine
   right now: screenshot to re-verify, wait, and retry when idle.
+- Multi-monitor: list_windows tags each window with the monitor it is
+  on. To look at a specific window, pass its hwnd to screenshot(hwnd=...)
+  — a bare screenshot captures only the primary monitor and may not show
+  the window at all.
 - {computer_mod.panic_notice()}"""
 
 
