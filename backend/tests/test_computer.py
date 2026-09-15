@@ -63,6 +63,7 @@ def fake_input(monkeypatch):
     monkeypatch.setattr(computer_mod, "_mouse", lambda: mouse)
     monkeypatch.setattr(computer_mod, "_keyboard", lambda: keyboard)
     moves = []
+    monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 1)
 
     def _fake_move_abs(x, y):
         moves.append((x, y))
@@ -129,6 +130,16 @@ def test_observe_attaches_post_action_screenshot(fake_activity, fake_input, fake
     res = asyncio.run(computer_mod.mouse_click(x=5, y=6, observe=True))
     assert res["image"] == "screenshots/fake1.png"
     assert fake_capture == [1]
+
+
+def test_observe_captures_the_action_monitor(fake_activity, fake_input, fake_capture, monkeypatch):
+    # Regression: observe used to always capture the PRIMARY monitor, which
+    # made a dogfood session think correct negative-coordinate clicks had
+    # "landed on the wrong monitor". It must capture the action's monitor.
+    monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 6)
+    res = asyncio.run(computer_mod.mouse_click(x=650, y=-1380, observe=True))
+    assert res["monitor"] == 6
+    assert fake_capture == [6]
 
 
 def test_observe_default_off(fake_activity, fake_input, fake_capture):

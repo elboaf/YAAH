@@ -30,8 +30,9 @@ _OBSERVE = {
     "observe": {
         "type": "boolean",
         "description": (
-            "Take a screenshot after acting and return it in the same "
-            "result (saves a round-trip when chaining). Default off."
+            "Take a screenshot after acting — of the monitor the action "
+            "happened on — and return it in the same result (saves a "
+            "round-trip when chaining). Default off."
         ),
     }
 }
@@ -288,6 +289,18 @@ def _monitor_for_window(hwnd: int) -> int:
     return _monitor_for_rect([rect.left, rect.top, rect.right, rect.bottom])
 
 
+def _monitor_for_point(x: int, y: int) -> int:
+    return _monitor_for_rect([int(x), int(y), int(x), int(y)])
+
+
+def _monitor_of_foreground() -> int:
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return 1
+    return _monitor_for_window(hwnd)
+
+
 def _screenshot_result(monitor: int = 1) -> dict:
     from backend.agent.imagedata import save_bytes
 
@@ -380,12 +393,27 @@ async def focus_window(workspace: str = "", hwnd: int = 0, observe: bool = False
         user32 = ctypes.windll.user32
         if not user32.IsWindow(hwnd):
             return {"error": f"hwnd {hwnd} is not a valid window"}
+        # A minimized window can't take focus; restore it first.
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        # Windows refuses foreground switches initiated by background
+        # processes. A brief ALT press makes the OS treat the switch as
+        # user-initiated (the standard workaround); without it this
+        # silently fails whenever another app has focus.
+        user32.keybd_event(0x12, 0, 0, 0)  # ALT down
         user32.SetForegroundWindow(hwnd)
-        result: dict = {"focused": int(hwnd), "ok": True}
+        user32.keybd_event(0x12, 0, 2, 0)  # ALT up
+        ok = user32.GetForegroundWindow() == hwnd
+        result: dict = {"focused": int(hwnd), "ok": bool(ok)}
+        if not ok:
+            result["note"] = (
+                "the OS did not switch foreground; the window may be "
+                "fullscreen-exclusive — screenshot(hwnd=...) still works"
+            )
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
     if observe:
-        result.update(_screenshot_result())
+        result.update(_screenshot_result(_monitor_for_window(hwnd)))
     return result
 
 
@@ -688,10 +716,16 @@ def _keyboard():
     return keyboard.Controller()
 
 
-def _finish(result: dict, observe: bool) -> dict:
+def _finish(result: dict, observe: bool, monitor: int | None = None) -> dict:
+    """Attach the post-action screenshot when observe is set. The capture
+    MUST be the monitor the action happened on — the primary-monitor shot
+    made a dogfood session conclude correct clicks had 'landed on the
+    wrong monitor'. Position-less tools (type/press) use the focused
+    window's monitor."""
     if observe and "error" not in result:
         try:
-            result.update(_screenshot_result())
+            mon = monitor if monitor is not None else _monitor_of_foreground()
+            result.update(_screenshot_result(mon))
         except Exception as e:  # noqa: BLE001
             result["observe_error"] = f"{type(e).__name__}: {e}"
     return result
@@ -705,7 +739,8 @@ async def mouse_move(workspace: str = "", x: int = 0, y: int = 0, observe: bool 
         _send_move_abs(int(x), int(y))
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish({"moved": [int(x), int(y)], "ok": True}, observe)
+    return _finish({"moved": [int(x), int(y)], "ok": True}, observe,
+                   _monitor_for_point(x, y))
 
 
 async def mouse_click(
@@ -730,7 +765,7 @@ async def mouse_click(
         return {"error": f"{type(e).__name__}: {e}"}
     return _finish(
         {"clicked": [int(x), int(y)], "button": button, "double": double, "ok": True},
-        observe,
+        observe, _monitor_for_point(x, y),
     )
 
 
@@ -745,7 +780,8 @@ async def mouse_scroll(
         _mouse().scroll(0, int(amount))
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish({"scrolled": int(amount), "at": [int(x), int(y)], "ok": True}, observe)
+    return _finish({"scrolled": int(amount), "at": [int(x), int(y)], "ok": True},
+                   observe, _monitor_for_point(x, y))
 
 
 async def type_text(workspace: str = "", text: str = "", observe: bool = False) -> dict:
