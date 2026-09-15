@@ -42,14 +42,25 @@ Every GUI interaction is: **look → decide → move → check → act → look 
    in a monitor-6 screenshot is clicked with `mouse_click(x=1340, y=62,
    monitor=6)` — NOT as bare (1340, 62), which is a different point on a
    different screen. Never do origin arithmetic by hand.
-6. **Check the result before trusting the click.** Every mouse action
+6. **Read coordinates off the rulers, never estimate.** Screenshots carry
+   labeled grid ticks in monitor-local pixels. Reading "the target sits
+   just left of the 1400 tick" is reliable; eyeballing proportions is
+   not — a full-monitor capture is perceived downscaled and visual
+   estimates come back systematically scaled-off. For small targets
+   (tabs, menu items, buttons), take a region screenshot around the area
+   first and aim inside it — the finer ruler makes it exact.
+7. **Check the result before trusting the click.** Every mouse action
    returns `cursor` (the REAL position) and `cursor_monitor`. If
    `on_target` is false or `cursor_monitor` isn't the window's monitor,
-   something is off — stop, re-screenshot, re-derive. Do not click again
-   on the same coordinates hoping it lands better.
-7. Verify the effect with `observe: true` (a small crop around the click)
-   or a fresh `screenshot`. Never assume a click landed; never assume
-   text was typed.
+   something is off — stop, re-screenshot, re-derive.
+8. **Missed? Correct from the crop, don't re-guess.** The observe crop
+   shows 400px around where you actually clicked, with labeled rulers
+   and its `origin`. Measure the delta from the visible target to the
+   crop center and apply it once. One measured correction beats three
+   fresh estimates from the full screen. Never click the same
+   coordinates twice hoping it lands better.
+9. Verify the effect with the observe crop or a fresh `screenshot`.
+   Never assume a click landed; never assume text was typed.
 
 ## Discipline
 

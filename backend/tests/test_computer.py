@@ -458,6 +458,34 @@ def test_panic_hotkey_invalid_config_falls_back(monkeypatch):
     assert computer_mod.panic_hotkey_combo() == "<ctrl>+<alt>+y"
 
 
+# ---------------------------------------------------------------- rulers
+
+def test_annotate_draws_rulers():
+    pytest.importorskip("PIL")
+    import io
+
+    from PIL import Image
+
+    # 400x400 crop whose top-left sits at monitor-local (150, 250):
+    # ticks must appear at image x=50 (labeled 200) etc.
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 400), (30, 30, 30)).save(buf, "PNG")
+    out = computer_mod._annotate(buf.getvalue(), 400, 400, [150, 250])
+    img = Image.open(io.BytesIO(out))
+    assert img.size == (400, 400)
+    # 1px ticks at image x=50 / y=50 (monitor-local 200 ticks)
+    assert img.getpixel((50, 200)) != (30, 30, 30)
+    assert img.getpixel((200, 50)) != (30, 30, 30)
+    # base pixels between ticks are untouched
+    assert img.getpixel((75, 200)) == (30, 30, 30)
+
+
+def test_annotate_failure_returns_raw(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "PIL.Image", None)
+    res = computer_mod._annotate(b"\x89PNG", 10, 10, [0, 0])
+    assert res == b"\x89PNG"  # best-effort: raw bytes passthrough
+
+
 # ---------------------------------------------------------------- live integration
 
 @pytest.mark.live

@@ -31,5 +31,8 @@ mss>=9.0; sys_platform == "win32"
 # so both are bundled explicitly.
 uiautomation>=2.0.29; sys_platform == "win32"
 comtypes>=1.4.0; sys_platform == "win32"
+# Screenshot coordinate rulers (computer._annotate draws labeled ticks so
+# the model can read coordinates instead of estimating them).
+Pillow>=11.0; sys_platform == "win32"
 pytest>=8.3.0
 pytest-asyncio>=0.24.0

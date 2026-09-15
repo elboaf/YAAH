@@ -104,6 +104,14 @@ Computer use (desktop tools):
   Every mouse action reports the real cursor position ("cursor") and
   its monitor; if cursor_monitor differs from the target window's
   monitor, STOP and re-check instead of clicking again.
+- Screenshots carry labeled coordinate rulers — read the ruler value
+  nearest the target and click that number. Visual estimation from a
+  full screenshot is systematically scaled-off; for small targets take
+  a region screenshot(x=,y=,w=,h=) first and aim inside it.
+- After a missed click, do NOT re-guess from the full screenshot. Use
+  the observe crop (or take a region shot near the target): its labels
+  and origin tell you the exact delta to correct. One measured
+  correction beats three estimates.
 - If a result says "user-activity pause", the user is using the machine
   right now: screenshot to re-verify, wait, and retry when idle.
 - Multi-monitor: list_windows tags each window with the monitor it is

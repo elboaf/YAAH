@@ -27,7 +27,8 @@ COLLECTS=(
 # at runtime and is invisible to static analysis.
 if [ "$(uname -s)" = "MINGW" ] || [ "$(uname -s)" = "Windows_NT" ]; then
   COLLECTS+=(--collect-all pynput --collect-all mss
-             --collect-all uiautomation --collect-all comtypes)
+             --collect-all uiautomation --collect-all comtypes
+             --collect-all PIL)
 fi
 
 pyinstaller --noconfirm --clean --onefile --noconsole \

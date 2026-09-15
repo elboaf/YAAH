@@ -93,16 +93,19 @@ COMPUTER_TOOLS_SCHEMA = [
             "name": "screenshot",
             "description": (
                 "Capture a screen (or a region of it) and attach it so a "
-                "vision-capable model can see it. With hwnd, captures the "
-                "monitor that window lives on (multi-monitor safe). With "
+                "vision-capable model can see it. Captures carry labeled "
+                "coordinate rulers: read the ruler value nearest the "
+                "target and pass it to mouse_click with this monitor "
+                "number — never estimate pixel positions visually. With "
+                "hwnd, captures the monitor that window lives on. With "
                 "x/y/w/h, captures just that region (desktop coordinates) "
-                "— use it for close-ups around the cursor or a UI area. "
-                "Without either, captures monitor 1 (the primary) unless "
-                "monitor says otherwise. Results carry the monitor's "
-                "\"origin\": pixel (px,py) in the image is desktop "
-                "(origin.x + px, origin.y + py). Only screenshot when the "
-                "task requires seeing the screen — never to inspect the "
-                "user's other work. Screenshots go to the model provider."
+                "— use it for precision targeting and close-ups. Without "
+                "either, captures monitor 1 (primary) unless monitor says "
+                "otherwise. Results carry the monitor's \"origin\": pixel "
+                "(px,py) in the image is desktop (origin.x + px, "
+                "origin.y + py). Only screenshot when the task requires "
+                "seeing the screen — never to inspect the user's other "
+                "work. Screenshots go to the model provider."
             ),
             "parameters": {
                 "type": "object",
@@ -407,9 +410,46 @@ def _clip_region(x: int, y: int, w: int, h: int) -> dict:
     }
 
 
+def _annotate(png: bytes, w: int, h: int, label_offset: list[int]) -> bytes:
+    """Draw labeled coordinate rulers onto a capture so the model can READ
+    the monitor-local coordinate near a target instead of estimating it.
+    This exists because a 2560px capture is perceived downscaled — visual
+    estimation is systematically scaled-off (a dogfood session clicked
+    x=500 where 1340 was meant). Labels are monitor-local pixels: the
+    exact numbers to pass to mouse_click(monitor=N). Best-effort: any
+    failure returns the raw PNG."""
+    try:
+        import io
+
+        from PIL import Image, ImageDraw
+
+        step = 200 if min(w, h) >= 1000 else 100
+        img = Image.open(io.BytesIO(png)).convert("RGB")
+        d = ImageDraw.Draw(img)
+        for x in range((-label_offset[0]) % step, w, step):
+            d.line([(x, 0), (x, h)], fill=(110, 110, 110), width=1)
+            d.text((x + 3, 3), str(label_offset[0] + x), fill=(255, 220, 0))
+            d.text((x + 3, h - 14), str(label_offset[0] + x), fill=(255, 220, 0))
+        for y in range((-label_offset[1]) % step, h, step):
+            d.line([(0, y), (w, y)], fill=(110, 110, 110), width=1)
+            d.text((3, y + 3), str(label_offset[1] + y), fill=(255, 220, 0))
+            d.text((w - 40, y + 3), str(label_offset[1] + y), fill=(255, 220, 0))
+        out = io.BytesIO()
+        img.save(out, "PNG")
+        return out.getvalue()
+    except Exception:  # noqa: BLE001
+        return png
+
+
 def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **extra) -> dict:
     from backend.agent.imagedata import save_bytes
 
+    # label_offset maps image pixels to monitor-local coordinates: a full
+    # monitor shot starts at local (0,0); a crop's top-left sits at
+    # crop_origin - monitor_origin inside the monitor.
+    mon_origin = _monitor_rect(monitor)[:2]
+    label_offset = [origin[0] - mon_origin[0], origin[1] - mon_origin[1]]
+    png = _annotate(png, w, h, label_offset)
     rel = save_bytes(png, "png", "screenshots")
     out = {"image": rel, "monitor": monitor, "size": [w, h], "origin": origin}
     out.update(extra)
