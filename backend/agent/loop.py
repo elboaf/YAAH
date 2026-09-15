@@ -111,7 +111,10 @@ Computer use (desktop tools):
 - After a missed click, do NOT re-guess from the full screenshot. Use
   the observe crop (or take a region shot near the target): its labels
   and origin tell you the exact delta to correct. One measured
-  correction beats three estimates.
+  correction beats three estimates. Vary BOTH axes when correcting —
+  if clicks show the host window's title bar, the content starts LOWER
+  (remote-desktop windows like Parsec have their own chrome at the top
+  of the capture; the streamed content begins below it).
 - If a result says "user-activity pause", the user is using the machine
   right now: screenshot to re-verify, wait, and retry when idle.
 - Multi-monitor: list_windows tags each window with the monitor it is

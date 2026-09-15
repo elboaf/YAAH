@@ -89,6 +89,22 @@ window lives on. If the shot doesn't show the window you expected, you
 screened the wrong monitor: recheck `monitor` in the `list_windows`
 output and retry with the hwnd.
 
+## Remote desktop windows (Parsec, VNC, VM displays)
+
+The host window's own chrome sits at the top of the capture: a Parsec
+window whose top edge is at monitor-local y≈32 has a ~30-40px title
+bar, so y=62 may still be the TITLE BAR, not the streamed content.
+Before clicking anything near the top of such a window, find where the
+remote content actually begins — take a region screenshot of the top
+strip and look for the title-bar/content boundary — then aim below it.
+
+When a miss shows title bar or window chrome, the correction is DOWN
+(increase y into the window). Never fixate on one axis: a correction
+that changes x but keeps y identical was the pattern of an entire
+failed session. If you can see the target inside an observe crop but
+the cursor isn't on it, measure the delta from crop_center to the
+target and apply it to BOTH axes.
+
 ## Verification
 
 - "Looks right" in a screenshot is the assertion for UI tests; state the
