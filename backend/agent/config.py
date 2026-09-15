@@ -62,6 +62,11 @@ DEFAULTS = {
         "passphrase": "",
         "display_name": "",
     },
+    # Computer use (Windows only): the panic hotkey force-cancels every
+    # running turn. pynput syntax; invalid falls back to the default.
+    "computer_use": {
+        "panic_hotkey": "<ctrl>+<alt>+<y>",
+    },
 }
 
 DEFAULT_PROVIDER = {

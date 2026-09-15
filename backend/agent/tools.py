@@ -919,6 +919,15 @@ EXECUTORS = {
     "git_pull": git_pull,
 }
 
+# Computer use (Q2: Windows-only hard line, same pattern as powershell but
+# unconditional — non-Windows never imports this module, so the tools don't
+# exist for the model there). The executors import pynput/mss lazily.
+if os.name == "nt":
+    from backend.agent.computer import COMPUTER_EXECUTORS, COMPUTER_TOOLS_SCHEMA
+
+    TOOLS_SCHEMA += COMPUTER_TOOLS_SCHEMA
+    EXECUTORS.update(COMPUTER_EXECUTORS)
+
 SCHEMAS = {s["function"]["name"]: s for s in TOOLS_SCHEMA}
 
 
