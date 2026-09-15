@@ -97,6 +97,13 @@ Computer use (desktop tools):
   controls and to verify state (edit values, checkmarks) instead of
   screenshotting. Fall back to screenshot only when the tree is empty
   or useless (games, remote streams render as pixels with no tree).
+- COORDINATE RULE (never break this): pixel coordinates you measure in
+  a screenshot are MONITOR-LOCAL. Pass them to mouse tools with the
+  same monitor number (mouse_click(x=..., y=..., monitor=N)) — never
+  convert by hand and never send screenshot pixels as desktop coords.
+  Every mouse action reports the real cursor position ("cursor") and
+  its monitor; if cursor_monitor differs from the target window's
+  monitor, STOP and re-check instead of clicking again.
 - If a result says "user-activity pause", the user is using the machine
   right now: screenshot to re-verify, wait, and retry when idle.
 - Multi-monitor: list_windows tags each window with the monitor it is

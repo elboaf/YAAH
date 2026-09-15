@@ -30,9 +30,25 @@ _OBSERVE = {
     "observe": {
         "type": "boolean",
         "description": (
-            "Take a screenshot after acting — of the monitor the action "
-            "happened on — and return it in the same result (saves a "
-            "round-trip when chaining). Default off."
+            "Take a screenshot after acting and return it in the same "
+            "result (saves a round-trip when chaining). For the position "
+            "tools this is a small crop around the action point, not the "
+            "whole monitor. Default off."
+        ),
+    }
+}
+
+# Mouse x/y are relative to this monitor's origin (what a screenshot of
+# that monitor shows); 0 = absolute virtual-desktop coordinates.
+_MONITOR_PARAM = {
+    "monitor": {
+        "type": "integer",
+        "description": (
+            "Which monitor x/y are relative to: 1-based monitor number "
+            "(default 1 = primary), or 0 for absolute virtual-desktop "
+            "coordinates. Coordinates you measured in a screenshot of "
+            "monitor N are monitor-N-local — pass them with monitor=N "
+            "UNCHANGED; do not convert by hand."
         ),
     }
 }
@@ -76,14 +92,17 @@ COMPUTER_TOOLS_SCHEMA = [
         "function": {
             "name": "screenshot",
             "description": (
-                "Capture a screen and attach it so a vision-capable model "
-                "can see it. With hwnd, captures the monitor that window "
-                "lives on (use this to look at a specific window — "
-                "multi-monitor safe). Without hwnd, captures monitor 1 "
-                "(the primary) unless monitor says otherwise. Only "
-                "screenshot when the task requires seeing the screen — "
-                "never to inspect the user's other work. Screenshots go "
-                "to the configured model provider."
+                "Capture a screen (or a region of it) and attach it so a "
+                "vision-capable model can see it. With hwnd, captures the "
+                "monitor that window lives on (multi-monitor safe). With "
+                "x/y/w/h, captures just that region (desktop coordinates) "
+                "— use it for close-ups around the cursor or a UI area. "
+                "Without either, captures monitor 1 (the primary) unless "
+                "monitor says otherwise. Results carry the monitor's "
+                "\"origin\": pixel (px,py) in the image is desktop "
+                "(origin.x + px, origin.y + py). Only screenshot when the "
+                "task requires seeing the screen — never to inspect the "
+                "user's other work. Screenshots go to the model provider."
             ),
             "parameters": {
                 "type": "object",
@@ -99,6 +118,10 @@ COMPUTER_TOOLS_SCHEMA = [
                             "monitor containing that window (overrides monitor)"
                         ),
                     },
+                    "x": {"type": "integer", "description": "Region left (desktop coords, with w/h)"},
+                    "y": {"type": "integer", "description": "Region top (desktop coords, with w/h)"},
+                    "w": {"type": "integer", "description": "Region width"},
+                    "h": {"type": "integer", "description": "Region height"},
                 },
             },
         },
@@ -134,10 +157,19 @@ COMPUTER_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "mouse_move",
-            "description": "Move the mouse to absolute desktop coordinates.",
+            "description": (
+                "Move the mouse. x/y are relative to the given monitor's "
+                "origin (default 1 = primary). The result reports the REAL "
+                "cursor position afterwards — check it before clicking."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, **_OBSERVE},
+                "properties": {
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                    **_MONITOR_PARAM,
+                    **_OBSERVE,
+                },
                 "required": ["x", "y"],
             },
         },
@@ -146,12 +178,19 @@ COMPUTER_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "mouse_click",
-            "description": "Click at absolute desktop coordinates. The workhorse.",
+            "description": (
+                "Click. x/y are relative to the given monitor's origin "
+                "(default 1 = primary) — screenshot pixel coordinates of "
+                "monitor N pass through unchanged with monitor=N. The "
+                "result reports the REAL cursor position at click time. "
+                "The workhorse."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "x": {"type": "integer"},
                     "y": {"type": "integer"},
+                    **_MONITOR_PARAM,
                     "button": {"type": "string", "enum": ["left", "right"], "description": "Default left"},
                     "double": {"type": "boolean", "description": "Double-click (default false)"},
                     **_OBSERVE,
@@ -170,6 +209,7 @@ COMPUTER_TOOLS_SCHEMA = [
                 "properties": {
                     "x": {"type": "integer"},
                     "y": {"type": "integer"},
+                    **_MONITOR_PARAM,
                     "amount": {"type": "integer"},
                     **_OBSERVE,
                 },
@@ -301,16 +341,116 @@ def _monitor_of_foreground() -> int:
     return _monitor_for_window(hwnd)
 
 
-def _screenshot_result(monitor: int = 1) -> dict:
+def _monitor_rect(monitor: int) -> list[int]:
+    mons = _monitors()
+    for m in mons:
+        if m["monitor"] == monitor:
+            return m["rect"]
+    raise ValueError(f"monitor {monitor} not found")
+
+
+def _to_desktop(x: int, y: int, monitor: int) -> tuple[int, int]:
+    """Monitor-local x/y -> virtual-desktop coordinates. monitor 0 means
+    already-absolute; this is the ONLY place the conversion happens, so
+    the model never does offset arithmetic (that's what clicked the wrong
+    screen)."""
+    if int(monitor) <= 0:
+        return int(x), int(y)
+    r = _monitor_rect(int(monitor))
+    return r[0] + int(x), r[1] + int(y)
+
+
+def _cursor_pos() -> tuple[int, int]:
+    pt = ctypes.wintypes.POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
+
+# observe crops center on the action point; small enough to be cheap,
+# big enough to show the control the cursor is on and its neighbours.
+OBSERVE_CROP = 400
+
+
+def _capture_clip(clip: dict) -> tuple[bytes, int, int]:
+    import mss
+    import mss.tools
+
+    with mss.mss() as sct:
+        shot = sct.grab(clip)
+        return mss.tools.to_png(shot.rgb, shot.size), shot.width, shot.height
+
+
+def _clip_around(ax: int, ay: int, size: int = OBSERVE_CROP) -> dict:
+    """mss clip centered on a desktop point, clamped to the monitor it's
+    on (mss rejects rects that leave a monitor)."""
+    m = _monitor_for_point(ax, ay)
+    r = _monitor_rect(m)
+    half = size // 2
+    left = max(r[0], min(ax - half, r[2] - size))
+    top = max(r[1], min(ay - half, r[3] - size))
+    return {
+        "left": left, "top": top,
+        "width": min(size, r[2] - r[0]), "height": min(size, r[3] - r[1]),
+    }
+
+
+def _clip_region(x: int, y: int, w: int, h: int) -> dict:
+    """mss clip for a desktop-coordinate region, clamped to the monitor
+    containing its center."""
+    m = _monitor_for_point(x + w // 2, y + h // 2)
+    r = _monitor_rect(m)
+    left = max(r[0], min(x, r[2] - 1))
+    top = max(r[1], min(y, r[3] - 1))
+    return {
+        "left": left, "top": top,
+        "width": max(1, min(w, r[2] - left)), "height": max(1, min(h, r[3] - top)),
+    }
+
+
+def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **extra) -> dict:
     from backend.agent.imagedata import save_bytes
 
-    png, w, h = _capture_screen(monitor)
     rel = save_bytes(png, "png", "screenshots")
-    return {"image": rel, "monitor": monitor, "size": [w, h]}
+    out = {"image": rel, "monitor": monitor, "size": [w, h], "origin": origin}
+    out.update(extra)
+    return out
 
 
-async def screenshot(workspace: str = "", monitor: int = 1, hwnd: int = 0) -> dict:
+def _screenshot_result(monitor: int = 1) -> dict:
+    png, w, h = _capture_screen(monitor)
+    return _store_png(png, w, h, monitor, _monitor_rect(monitor)[:2])
+
+
+def _observe_crop_result(ax: int, ay: int) -> dict:
+    """Small crop centered on the action point instead of the full
+    monitor — the close-up the move→verify→click loop needs, without the
+    token cost of a whole screen."""
+    m = _monitor_for_point(ax, ay)
+    clip = _clip_around(ax, ay)
+    png, w, h = _capture_clip(clip)
+    return _store_png(
+        png, w, h, m, [clip["left"], clip["top"]], crop_center=[ax, ay]
+    )
+
+
+async def screenshot(
+    workspace: str = "",
+    monitor: int = 1,
+    hwnd: int = 0,
+    x: int = 0,
+    y: int = 0,
+    w: int = 0,
+    h: int = 0,
+) -> dict:
     try:
+        if w > 0 and h > 0:
+            clip = _clip_region(int(x), int(y), int(w), int(h))
+            png, cw, ch = _capture_clip(clip)
+            mon = _monitor_for_point(
+                clip["left"] + clip["width"] // 2, clip["top"] + clip["height"] // 2
+            )
+            return _store_png(png, cw, ch, mon, [clip["left"], clip["top"]],
+                              region=[x, y, w, h])
         if hwnd:
             mon = _monitor_for_window(int(hwnd))
             result = _screenshot_result(mon)
@@ -639,13 +779,6 @@ def _pause_check() -> dict | None:
     return None
 
 
-class _FakeControllers:
-    """Set by tests (computer._mouse = lambda: fake). Real impls lazy-import."""
-
-    def __init__(self):
-        self.position = (0, 0)
-
-
 class _MOUSEINPUT(ctypes.Structure):
     _fields_ = [
         ("dx", ctypes.wintypes.LONG),
@@ -731,22 +864,45 @@ def _finish(result: dict, observe: bool, monitor: int | None = None) -> dict:
     return result
 
 
-async def mouse_move(workspace: str = "", x: int = 0, y: int = 0, observe: bool = False) -> dict:
+def _cursor_feedback(result: dict, ax: int, ay: int, observe: bool) -> dict:
+    """The move→verify→click checkpoint: every position action reports the
+    REAL cursor position (GetCursorPos) and which monitor it landed on, so
+    a coordinate mistake is visible before the click does damage. observe
+    crops around the point instead of capturing the whole monitor."""
+    cx, cy = _cursor_pos()
+    result["requested_desktop"] = [ax, ay]
+    result["cursor"] = [cx, cy]
+    result["cursor_monitor"] = _monitor_for_point(cx, cy)
+    result["on_target"] = abs(cx - ax) <= 2 and abs(cy - ay) <= 2
+    if observe and "error" not in result:
+        try:
+            result.update(_observe_crop_result(cx, cy))
+        except Exception as e:  # noqa: BLE001
+            result["observe_error"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+async def mouse_move(
+    workspace: str = "", x: int = 0, y: int = 0, monitor: int = 1, observe: bool = False
+) -> dict:
     paused = _pause_check()
     if paused:
         return paused
     try:
-        _send_move_abs(int(x), int(y))
+        ax, ay = _to_desktop(x, y, monitor)
+        _send_move_abs(ax, ay)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish({"moved": [int(x), int(y)], "ok": True}, observe,
-                   _monitor_for_point(x, y))
+    return _cursor_feedback(
+        {"moved": [int(x), int(y)], "monitor": int(monitor), "ok": True}, ax, ay, observe
+    )
 
 
 async def mouse_click(
     workspace: str = "",
     x: int = 0,
     y: int = 0,
+    monitor: int = 1,
     button: str = "left",
     double: bool = False,
     observe: bool = False,
@@ -759,29 +915,37 @@ async def mouse_click(
     try:
         from pynput import mouse as pmouse
 
-        _send_move_abs(int(x), int(y))
+        ax, ay = _to_desktop(x, y, monitor)
+        _send_move_abs(ax, ay)
         _mouse().click(pmouse.Button[button], 2 if double else 1)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish(
-        {"clicked": [int(x), int(y)], "button": button, "double": double, "ok": True},
-        observe, _monitor_for_point(x, y),
+    return _cursor_feedback(
+        {
+            "clicked": [int(x), int(y)], "monitor": int(monitor),
+            "button": button, "double": double, "ok": True,
+        },
+        ax, ay, observe,
     )
 
 
 async def mouse_scroll(
-    workspace: str = "", x: int = 0, y: int = 0, amount: int = 3, observe: bool = False
+    workspace: str = "", x: int = 0, y: int = 0, monitor: int = 1,
+    amount: int = 3, observe: bool = False,
 ) -> dict:
     paused = _pause_check()
     if paused:
         return paused
     try:
-        _send_move_abs(int(x), int(y))
+        ax, ay = _to_desktop(x, y, monitor)
+        _send_move_abs(ax, ay)
         _mouse().scroll(0, int(amount))
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish({"scrolled": int(amount), "at": [int(x), int(y)], "ok": True},
-                   observe, _monitor_for_point(x, y))
+    return _cursor_feedback(
+        {"scrolled": int(amount), "at": [int(x), int(y)], "monitor": int(monitor), "ok": True},
+        ax, ay, observe,
+    )
 
 
 async def type_text(workspace: str = "", text: str = "", observe: bool = False) -> dict:

@@ -32,7 +32,6 @@ def fake_input(monkeypatch):
 
     class FakeMouse:
         def __init__(self):
-            self.position = (0, 0)
             self.calls = []
 
         def click(self, button, count):
@@ -68,25 +67,43 @@ def fake_input(monkeypatch):
     mouse, keyboard = FakeMouse(), FakeKeyboard()
     monkeypatch.setattr(computer_mod, "_mouse", lambda: mouse)
     monkeypatch.setattr(computer_mod, "_keyboard", lambda: keyboard)
+    # Deterministic geometry: one monitor at (0,0) so monitor-local ==
+    # desktop coordinates in every assertion below.
+    monkeypatch.setattr(computer_mod, "_monitor_rect", lambda m: [0, 0, 1920, 1080])
     moves = []
-    monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 1)
 
     def _fake_move_abs(x, y):
         moves.append((x, y))
 
     monkeypatch.setattr(computer_mod, "_send_move_abs", _fake_move_abs)
+    # The cursor is where we just sent it: the move→verify feedback always
+    # reports on_target.
+    monkeypatch.setattr(
+        computer_mod, "_cursor_pos", lambda: moves[-1] if moves else (0, 0)
+    )
+    monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 1)
     return mouse, keyboard, moves
 
 
 @pytest.fixture
 def fake_capture(monkeypatch):
+    """Patches every capture seam: full-screen (_screenshot_result, used by
+    screenshot/focus/type/press observe) and the observe crop."""
     calls = []
 
     def _shot(monitor=1):
-        calls.append(monitor)
-        return {"image": f"screenshots/fake{monitor}.png", "monitor": monitor, "size": [800, 600]}
+        calls.append(("full", monitor))
+        return {"image": f"screenshots/fake{monitor}.png", "monitor": monitor,
+                "size": [800, 600], "origin": [0, 0]}
+
+    def _crop(ax, ay):
+        calls.append(("crop", ax, ay))
+        return {"image": "screenshots/crop.png", "monitor": 1,
+                "size": [400, 400], "origin": [ax - 200, ay - 200],
+                "crop_center": [ax, ay]}
 
     monkeypatch.setattr(computer_mod, "_screenshot_result", _shot)
+    monkeypatch.setattr(computer_mod, "_observe_crop_result", _crop)
     return calls
 
 
@@ -134,18 +151,8 @@ def test_pause_never_applies_to_screenshot_or_wait(fake_activity, fake_capture):
 
 def test_observe_attaches_post_action_screenshot(fake_activity, fake_input, fake_capture):
     res = asyncio.run(computer_mod.mouse_click(x=5, y=6, observe=True))
-    assert res["image"] == "screenshots/fake1.png"
-    assert fake_capture == [1]
-
-
-def test_observe_captures_the_action_monitor(fake_activity, fake_input, fake_capture, monkeypatch):
-    # Regression: observe used to always capture the PRIMARY monitor, which
-    # made a dogfood session think correct negative-coordinate clicks had
-    # "landed on the wrong monitor". It must capture the action's monitor.
-    monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 6)
-    res = asyncio.run(computer_mod.mouse_click(x=650, y=-1380, observe=True))
-    assert res["monitor"] == 6
-    assert fake_capture == [6]
+    assert res["image"] == "screenshots/crop.png"
+    assert fake_capture == [("crop", 5, 6)]
 
 
 def test_observe_default_off(fake_activity, fake_input, fake_capture):
@@ -154,13 +161,55 @@ def test_observe_default_off(fake_activity, fake_input, fake_capture):
     assert fake_capture == []
 
 
+def test_cursor_feedback_reports_real_position(fake_activity, fake_input):
+    res = asyncio.run(computer_mod.mouse_move(x=120, y=80))
+    assert res["cursor"] == [120, 80]
+    assert res["cursor_monitor"] == 1
+    assert res["on_target"] is True
+
+
+def test_cursor_feedback_flags_miss(fake_activity, fake_input, monkeypatch):
+    monkeypatch.setattr(computer_mod, "_cursor_pos", lambda: (900, 900))
+    res = asyncio.run(computer_mod.mouse_click(x=10, y=10))
+    assert res["on_target"] is False
+    assert res["cursor"] == [900, 900]
+
+
+def test_monitor_local_coords_offset_by_origin(fake_activity, fake_input, monkeypatch):
+    # monitor 2 lives at (2560, -1080): local (10, 20) is desktop (2570, -1060)
+    monkeypatch.setattr(computer_mod, "_monitor_rect", lambda m: [2560, -1080, 4480, 0])
+    _, _, moves = fake_input
+    res = asyncio.run(computer_mod.mouse_click(x=10, y=20, monitor=2))
+    assert moves == [(2570, -1060)]
+    assert res["clicked"] == [10, 20] and res["monitor"] == 2
+
+
+def test_monitor_zero_means_desktop_absolute(fake_activity, fake_input, monkeypatch):
+    monkeypatch.setattr(computer_mod, "_monitor_rect", lambda m: [0, 0, 1920, 1080])
+    _, _, moves = fake_input
+    asyncio.run(computer_mod.mouse_move(x=650, y=-1380, monitor=0))
+    assert moves == [(650, -1380)]  # no offset applied
+
+
 def test_observe_failure_does_not_mask_action(fake_activity, fake_input, monkeypatch):
+    # type/press_key observe via the focused-window full-monitor path
+    # (_finish -> _screenshot_result); mouse tools use the crop path.
     def _boom(monitor=1):
         raise RuntimeError("no monitor")
 
     monkeypatch.setattr(computer_mod, "_screenshot_result", _boom)
     res = asyncio.run(computer_mod.press_key(key="ctrl+s", observe=True))
     assert res["ok"] is True
+    assert "RuntimeError" in res["observe_error"]
+
+
+def test_crop_failure_does_not_mask_click(fake_activity, fake_input, fake_capture, monkeypatch):
+    def _boom(ax, ay):
+        raise RuntimeError("no monitor")
+
+    monkeypatch.setattr(computer_mod, "_observe_crop_result", _boom)
+    res = asyncio.run(computer_mod.mouse_click(x=5, y=6, observe=True))
+    assert res["ok"] is True and res["on_target"] is True
     assert "RuntimeError" in res["observe_error"]
 
 
@@ -260,13 +309,28 @@ def test_screenshot_hwnd_captures_window_monitor(fake_capture, monkeypatch):
     res = asyncio.run(computer_mod.screenshot(hwnd=1234))
     assert res["monitor"] == 2
     assert res["hwnd"] == 1234
-    assert fake_capture == [2]  # captured monitor 2, not the primary
+    assert fake_capture == [("full", 2)]  # captured monitor 2, not the primary
 
 
 def test_screenshot_monitor_param_still_works(fake_capture):
     res = asyncio.run(computer_mod.screenshot(monitor=1))
     assert res["monitor"] == 1
-    assert fake_capture == [1]
+    assert fake_capture == [("full", 1)]
+
+
+def test_screenshot_region_captures_clip(fake_capture, monkeypatch):
+    monkeypatch.setattr(
+        computer_mod, "_clip_region",
+        lambda x, y, w, h: {"left": x, "top": y, "width": w, "height": h})
+    monkeypatch.setattr(
+        computer_mod, "_capture_clip",
+        lambda clip: (b"PNG", clip["width"], clip["height"]))
+    monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 6)
+    res = asyncio.run(computer_mod.screenshot(x=100, y=200, w=300, h=200))
+    assert res["size"] == [300, 200]
+    assert res["origin"] == [100, 200]
+    assert res["monitor"] == 6
+    assert res["region"] == [100, 200, 300, 200]
 
 
 def test_focus_window_pause_contract(fake_activity, fake_input):

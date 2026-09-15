@@ -25,23 +25,31 @@ when you need the visual layout to interpret the tree. A hybrid read is
 normal: screenshot once to understand what you're looking at, then
 drive and verify via the tree.
 
-## The loop
+## The click loop (multi-monitor safe)
 
-Every GUI interaction is: **look → decide → act → look again**.
+Every GUI interaction is: **look → decide → move → check → act → look again**.
 
 1. Launch the app via `bash`/`powershell` (`Start-Process`, never a
    trailing `&`). Redirect its stdout/stderr to a log file you can `read_file`
    — app logs are your fastest failure signals.
 2. `list_windows` to find the window (match on process name, exact title).
-   If it's missing, it may still be painting: `wait` 1–2s and re-list,
-   don't retry-storm.
+   Note its `monitor` number. If it's missing, it may still be painting:
+   `wait` 1–2s and re-list, don't retry-storm.
 3. `focus_window` before typing — keystrokes go to the FOCUSED window.
-4. `screenshot` to see the state. Locate the click target by a visual
-   anchor (label text, distinctive color, relative position to a stable
-   edge), then click.
-5. Verify with a fresh `screenshot` (or `observe: true` on the action to
-   get the post-action shot in the same result). Never assume a click
-   landed; never assume text was typed.
+4. `screenshot` (or `read_ui_tree`) to see the state. Locate the click
+   target by a visual anchor or element.
+5. **Coordinates in a screenshot are MONITOR-LOCAL.** A pixel at (1340, 62)
+   in a monitor-6 screenshot is clicked with `mouse_click(x=1340, y=62,
+   monitor=6)` — NOT as bare (1340, 62), which is a different point on a
+   different screen. Never do origin arithmetic by hand.
+6. **Check the result before trusting the click.** Every mouse action
+   returns `cursor` (the REAL position) and `cursor_monitor`. If
+   `on_target` is false or `cursor_monitor` isn't the window's monitor,
+   something is off — stop, re-screenshot, re-derive. Do not click again
+   on the same coordinates hoping it lands better.
+7. Verify the effect with `observe: true` (a small crop around the click)
+   or a fresh `screenshot`. Never assume a click landed; never assume
+   text was typed.
 
 ## Discipline
 
