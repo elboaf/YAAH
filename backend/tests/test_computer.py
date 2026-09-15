@@ -326,6 +326,9 @@ def test_screenshot_region_captures_clip(fake_capture, monkeypatch):
         computer_mod, "_capture_clip",
         lambda clip: (b"PNG", clip["width"], clip["height"]))
     monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 6)
+    # _store_png derives ruler label offsets from the monitor rect, which
+    # needs user32 on the real OS — fake one monitor at (0,0).
+    monkeypatch.setattr(computer_mod, "_monitor_rect", lambda m: [0, 0, 1920, 1080])
     res = asyncio.run(computer_mod.screenshot(x=100, y=200, w=300, h=200))
     assert res["size"] == [300, 200]
     assert res["origin"] == [100, 200]
