@@ -98,6 +98,16 @@ def host_info() -> dict:
     }
 
 
+# The env line's shell caveat: on a cmd host the model's Unix reflexes
+# (ls, grep, tail) each cost a failed turn before it falls back to
+# findstr/Select-String — say so up front. Lives here because both the
+# remote env_line and the local prompt (backend.agent.loop) use it.
+CMD_TOOLS_NOTE = (
+    "POSIX tools such as ls, grep, tail and head are NOT available there — "
+    "use dir, findstr, or PowerShell Select-String / Get-Content -Tail instead."
+)
+
+
 class RemoteSession:
     """Client-side handle on a connected host. Holds only what the
     handshake returned plus the URL + passphrase; nothing is persisted
@@ -122,13 +132,16 @@ class RemoteSession:
     def env_line(self) -> str:
         """Runtime-environment sentence for the system prompt: tools run on
         the HOST, so the model must use the host's OS/shell/paths, not the
-        client's."""
+        client's. The handshake only says windows/not-windows, so the shell
+        is a guess — but the cmd caveat is what saves turns."""
         i = self.info
-        shell = "cmd.exe" if i.get("windows") else "bash/sh"
+        windows = bool(i.get("windows"))
+        shell = "cmd.exe" if windows else "bash/sh"
+        caveat = f" {CMD_TOOLS_NOTE}" if windows else ""
         return (
             f"Runtime environment: {i.get('os', '?')} {i.get('os_version', '')} "
             f"({i.get('machine', '?')}) on the remote host '{self.name}'. "
-            f"The shell tool runs commands there through {shell}; use commands "
+            f"The shell tool runs commands there through {shell};{caveat} use commands "
             f"and paths valid for THAT operating system. The workspace is the "
             f"host's default workspace ({i.get('workspace_root', 'home')}); "
             "file and shell tools operate there, not on this machine."

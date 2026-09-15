@@ -145,7 +145,9 @@ TOOLS_SCHEMA = [
                 "child outlives the tool call, keeps the output pipe open, and "
                 "wedges the session. Servers and watchers need a detached spawn "
                 "instead (e.g. Start-Process with redirect, or nohup with "
-                "stdout/stderr redirected to a file)."
+                "stdout/stderr redirected to a file). For a test suite longer "
+                "than the timeout cap, run it in chunks (per directory or "
+                "file) instead of one monolithic run."
             ),
             "parameters": {
                 "type": "object",
@@ -153,7 +155,7 @@ TOOLS_SCHEMA = [
                     "command": {"type": "string", "description": "The shell command to run"},
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 60, max 300)",
+                        "description": "Timeout in seconds (default 60, max 900)",
                     },
                 },
                 "required": ["command"],
@@ -182,11 +184,11 @@ POWERSHELL_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "The PowerShell command to run"},
-                "timeout_seconds": {
-                    "type": "integer",
-                    "description": "Timeout in seconds (default 60, max 300)",
-                },
+                    "command": {"type": "string", "description": "The PowerShell command to run"},
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default 60, max 900)",
+                    },
             },
             "required": ["command"],
         },
@@ -505,7 +507,7 @@ TOOLS_SCHEMA += [
 
 # ---------------------------------------------------------------- executors
 
-MAX_BASH_TIMEOUT = 300
+MAX_BASH_TIMEOUT = 900
 MAX_OUTPUT_CHARS = 20_000
 
 
@@ -544,9 +546,22 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+def _clamp_note(requested: int) -> str | None:
+    # A silent clamp reads like a hung or flaky run and invites endless
+    # re-runs; the model must hear that its ask was cut and how to cope.
+    if int(requested or 60) > MAX_BASH_TIMEOUT:
+        return (
+            f"[requested timeout {int(requested)}s clamped to {MAX_BASH_TIMEOUT}s; "
+            "if the command still doesn't fit, run it in chunks (per directory "
+            "or file) and inspect incrementally rather than retrying whole]"
+        )
+    return None
+
+
 async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> dict:
     """Run a shell command in the workspace; return structured result."""
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
+    note = _clamp_note(timeout_seconds)
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -583,6 +598,7 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
             "output": output,
             "timed_out": timed_out,
             "truncated": truncated,
+            **({"note": note} if note else {}),
         }
     except Exception as e:  # noqa: BLE001
         return {"exit_code": -1, "output": f"error: {e}", "timed_out": False, "truncated": False}
@@ -592,6 +608,7 @@ async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60
     """Run a Windows PowerShell command in the workspace; same structured
     result shape as run_bash."""
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
+    note = _clamp_note(timeout_seconds)
     try:
         proc = await asyncio.create_subprocess_exec(
             "powershell.exe", "-NoProfile", "-NonInteractive",
@@ -627,6 +644,7 @@ async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60
             "output": output,
             "timed_out": timed_out,
             "truncated": truncated,
+            **({"note": note} if note else {}),
         }
     except Exception as e:  # noqa: BLE001
         return {"exit_code": -1, "output": f"error: {e}", "timed_out": False, "truncated": False}

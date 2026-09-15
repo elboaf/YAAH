@@ -573,3 +573,96 @@ async def test_load_history_fills_unanswered_tool_call(fake_model, tmp_path):
     assert len(tool_msgs) == 1
     assert tool_msgs[0]["tool_call_id"] == "qx"
     assert "not answered" in tool_msgs[0]["content"]
+
+
+# ---------------------------------------------------------------- harness guidance
+# Regression tests for the stalled FlyGD-Wingman verification run: a full
+# pytest that outlives the tool cap, a cmd shell the prompt never named,
+# and project notes the agent had no way to read.
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_clamp_is_signalled(tmp_path):
+    """A request above the cap is clamped, and the model must be TOLD:
+    a silent clamp reads like a hung run and invites endless retries."""
+    from backend.agent.tools import MAX_BASH_TIMEOUT
+
+    r = await execute_tool(
+        "bash", {"command": "echo hi", "timeout_seconds": MAX_BASH_TIMEOUT + 1},
+        str(tmp_path),
+    )
+    assert r["exit_code"] == 0
+    assert "note" in r
+    assert str(MAX_BASH_TIMEOUT) in r["note"]
+    # At or under the cap: no note.
+    r = await execute_tool("bash", {"command": "echo hi"}, str(tmp_path))
+    assert "note" not in r
+
+
+def test_env_line_names_real_shell(monkeypatch):
+    from backend.agent.loop import _local_env_line, _shell_phrase
+
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
+    line = _local_env_line()
+    assert "cmd.exe" in line
+    assert "findstr" in line  # the POSIX-tools caveat
+    monkeypatch.setenv("COMSPEC", r"C:\Program Files\PowerShell\7\pwsh.exe")
+    assert "pwsh.exe" in _local_env_line()
+    assert "findstr" not in _local_env_line()
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    assert "zsh" in _shell_phrase(False)
+
+
+def test_remote_env_line_windows_caveat():
+    from backend.agent.remote import CMD_TOOLS_NOTE, RemoteSession
+
+    win = RemoteSession("http://h", "p", {"windows": True, "os": "Windows"})
+    assert CMD_TOOLS_NOTE in win.env_line()
+    nix = RemoteSession("http://h", "p", {"windows": False, "os": "Linux"})
+    assert "findstr" not in nix.env_line()
+
+
+def test_agents_notes_injection(tmp_path):
+    ws = str(tmp_path)
+    assert loop._agents_notes(ws) == ""  # missing file -> no section
+    (tmp_path / "AGENTS.md").write_text(
+        "test_setup_catalog failures are pre-existing on this box", encoding="utf-8"
+    )
+    notes = loop._agents_notes(ws)
+    assert "Project notes" in notes
+    assert "pre-existing" in notes
+    # Oversized file is clipped, with a marker, never an error.
+    (tmp_path / "AGENTS.md").write_text("x" * (loop.MAX_AGENTS_NOTES_CHARS + 500), encoding="utf-8")
+    clipped = loop._agents_notes(ws)
+    assert len(clipped) < loop.MAX_AGENTS_NOTES_CHARS + 300
+    assert "truncated" in clipped
+
+
+@pytest.mark.asyncio
+async def test_run_agent_injects_agents_notes(fake_model, tmp_path):
+    from backend.db.database import create_conversation
+
+    (tmp_path / "AGENTS.md").write_text("# Baseline\nknow-fails: 3", encoding="utf-8")
+    cid = await create_conversation("t-notes")
+    captured = {}
+
+    async def fake_chat(messages, tools=None, stream=True):
+        captured["system"] = messages[0]["content"]
+        return FakeStream([{"type": "finish"}])
+
+    import backend.agent.model_client as mc
+
+    # run_agent's fake_model fixture patches loop.model_client.chat already;
+    # capture through the same patch by wrapping.
+    orig = loop.model_client.chat
+
+    async def spy(messages, tools=None, stream=True):
+        captured["system"] = messages[0]["content"]
+        return await orig(messages, tools=tools, stream=stream)
+
+    loop.model_client.chat = spy
+    try:
+        await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    finally:
+        loop.model_client.chat = orig
+    assert "know-fails: 3" in captured["system"]

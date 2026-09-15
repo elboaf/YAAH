@@ -19,11 +19,62 @@ from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
-from backend.agent.tools import execute_tool, get_schemas
+from backend.agent.tools import execute_tool, get_schemas, workspace_root
+from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.db.database import add_message, get_conversation, get_messages
 
 DEFAULT_MAX_STEPS = 200
 MAX_TOOL_RESULT_CHARS = 20_000
+MAX_AGENTS_NOTES_CHARS = 8_000
+
+# The env line's shell dialect must match what create_subprocess_shell
+# actually spawns — COMSPEC on Windows (near-universally cmd.exe), $SHELL
+# on POSIX. Saying "bash" on a cmd host (or vice versa) costs the model a
+# turn per Unix reflex (ls, grep, tail) before it falls back to findstr.
+def _shell_phrase(windows: bool) -> str:
+    if windows:
+        shell = Path(os.environ.get("COMSPEC") or "cmd.exe").name.lower()
+        phrase = f"the system shell ({shell})"
+        if "cmd" in shell:
+            phrase += f"; {CMD_TOOLS_NOTE}"
+        return phrase
+    shell = Path(os.environ.get("SHELL") or "bash").name
+    return f"the system shell ({shell})"
+
+
+def _local_env_line() -> str:
+    import platform
+
+    return (
+        f"Runtime environment: {platform.system()} {platform.release()} "
+        f"({platform.machine()}). The bash tool runs commands through "
+        f"{_shell_phrase(os.name == 'nt')}; use commands and paths valid "
+        f"for THIS operating system."
+    )
+
+
+def _agents_notes(workspace: str) -> str:
+    """Project-notes block from <workspace>/AGENTS.md, or ''. Skipped for
+    remote workspaces (the file lives on the host, unreadable here) and
+    swallowed on read errors — optional context must never break a turn."""
+    try:
+        root = workspace_root(workspace)
+        if not root.is_dir():
+            return ""
+        text = (root / "AGENTS.md").read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — missing/unreadable notes are fine
+        return ""
+    if not text.strip():
+        return ""
+    if len(text) > MAX_AGENTS_NOTES_CHARS:
+        text = text[:MAX_AGENTS_NOTES_CHARS] + "\n…[truncated]"
+    return (
+        f"# Project notes ({root / 'AGENTS.md'})\n\n"
+        "The project's own instructions for coding agents follow; they "
+        "override the general guidance below where they conflict.\n\n"
+        f"{text}"
+    )
+
 
 def _default_system_prompt() -> str:
     """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
@@ -31,8 +82,6 @@ def _default_system_prompt() -> str:
     actually do where tools run — the remote host while one is connected,
     otherwise this machine — or the model attempts commands for the wrong
     platform (e.g. PowerShell registry queries on Linux)."""
-    import platform
-
     from backend.agent import remote as remote_mod
 
     host = remote_mod.get_remote()
@@ -41,12 +90,7 @@ def _default_system_prompt() -> str:
         windows = host.windows
     else:
         windows = os.name == "nt"
-        env = (
-            f"Runtime environment: {platform.system()} {platform.release()} "
-            f"({platform.machine()}). The bash tool runs commands through the "
-            f"system shell ({'cmd.exe' if windows else 'bash/sh'}); use "
-            f"commands and paths valid for THIS operating system."
-        )
+        env = _local_env_line()
     tools = ["bash (shell commands)"]
     if windows:
         tools.append("powershell (Windows PowerShell)")
@@ -56,12 +100,6 @@ def _default_system_prompt() -> str:
         "search_files",
         "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull)",
     ]
-    env = (
-        f"Runtime environment: {platform.system()} {platform.release()} "
-        f"({platform.machine()}). The bash tool runs commands through the "
-        f"system shell ({'cmd.exe' if windows else 'bash/sh'}); use "
-        f"commands and paths valid for THIS operating system."
-    )
     prompt = f"""You are an expert AI coding agent working inside a user's project workspace.
 
 {env}
@@ -73,7 +111,13 @@ Guidelines:
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
 - Verify your work: run tests/builds via bash (or powershell for Windows-native
-  tasks: registry, services, WMI) after changes when possible.
+  tasks: registry, services, WMI) after changes when possible. Size the
+  timeout to the command; a full test suite that takes minutes needs a
+  large timeout_seconds or chunked runs (per directory/file), not retries.
+- If a full-suite verification fails, separate YOUR change from the
+  environment: rerun just the failing tests at a clean tree (git stash, or
+  a throwaway `git worktree add` at HEAD) and diff the failure lists
+  before assuming your change caused them.
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
 - Commit meaningful work with git_add/git_commit when the user asks for it.
@@ -343,6 +387,12 @@ async def run_agent(
         skill_block = skill_registry.bodies_for_prompt(invoked)
         if skill_block:
             system_prompt = f"{system_prompt}\n\n---\n\n# Invoked skills\n\n{skill_block}"
+
+    # The project's own agent instructions (baseline failures, shell quirks,
+    # prerequisites) travel with the workspace, so read them fresh each turn.
+    notes = _agents_notes(workspace)
+    if notes:
+        system_prompt = f"{system_prompt}\n\n---\n\n{notes}"
 
     # Full context each turn: system prompt + persisted history
     history = await load_history(conversation_id)
