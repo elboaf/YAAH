@@ -76,6 +76,36 @@ def _agents_notes(workspace: str) -> str:
     )
 
 
+def _computer_use_prompt() -> str:
+    """Computer-use section for the system prompt (Windows local only).
+    Scope discipline + the pause contract + the panic hotkey; the deep
+    playbook lives in the bundled `computer-use` skill."""
+    from backend.agent import computer as computer_mod
+
+    return f"""
+
+Computer use (desktop tools):
+- These tools exist for TESTING apps: launch the app under test via the
+  shell tools, find it with list_windows, then drive and verify its UI.
+  Do not move the user's mouse or type into windows outside the task.
+- screenshot only when the task requires seeing the screen — never to
+  inspect the user's other work. Screenshots go to the model provider.
+- Prefer shell/file tools for anything reachable that way; computer use
+  is for GUI behavior you must observe or exercise.
+- Structured first, pixels second: read_ui_tree gives exact element
+  names, values and center coordinates for a window — use it to locate
+  controls and to verify state (edit values, checkmarks) instead of
+  screenshotting. Fall back to screenshot only when the tree is empty
+  or useless (games, remote streams render as pixels with no tree).
+- If a result says "user-activity pause", the user is using the machine
+  right now: screenshot to re-verify, wait, and retry when idle.
+- Multi-monitor: list_windows tags each window with the monitor it is
+  on. To look at a specific window, pass its hwnd to screenshot(hwnd=...)
+  — a bare screenshot captures only the primary monitor and may not show
+  the window at all.
+- {computer_mod.panic_notice()}"""
+
+
 def _default_system_prompt() -> str:
     """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
     and the runtime-environment line must match what execute_tool can
@@ -92,8 +122,20 @@ def _default_system_prompt() -> str:
         windows = os.name == "nt"
         env = _local_env_line()
     tools = ["bash (shell commands)"]
+    computer_section = ""
     if windows:
         tools.append("powershell (Windows PowerShell)")
+        if host is None:
+            # Computer use always drives THIS machine (never forwarded to a
+            # remote host), so the section only appears without a host.
+            tools += [
+                "screenshot", "list_windows", "focus_window",
+                "read_ui_tree (structured UI elements of a window — prefer "
+                "this over screenshots for locating controls)",
+                "mouse_move", "mouse_click", "mouse_scroll",
+                "type_text", "press_key", "wait",
+            ]
+            computer_section = _computer_use_prompt()
     tools += [
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
@@ -134,6 +176,8 @@ Interview the user (ask_user tool):
   for the exploration to report. Decisions wait; facts don't.
 - The session is done when nothing is left silently assumed. Do not
   act on a decision until the user has confirmed shared understanding."""
+
+    prompt += computer_section
 
     # Skills index: only added when at least one model-invocable skill
     # exists, so a fresh install with no skills sees no extra noise.

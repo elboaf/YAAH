@@ -7,6 +7,7 @@ flow through this server.
 from contextlib import asynccontextmanager
 
 import httpx
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,12 @@ async def lifespan(app: FastAPI):
 
     if (load_config().get("remote") or {}).get("hosting_enabled", True):
         discovery.start_advertising(API_PORT)
+    # Computer use (Windows only): real-input activity detector + panic
+    # hotkey listener. Never fatal — a failure just means no pause/no hotkey.
+    if os.name == "nt":
+        from backend.agent import computer
+
+        computer.start_background()
     yield
     discovery.stop_advertising()
 
