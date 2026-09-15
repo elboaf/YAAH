@@ -5,9 +5,25 @@ description: Playbook for driving and testing GUI apps with YAAH's computer-use 
 
 # Computer use: driving and testing a GUI app
 
-The tools (`screenshot`, `list_windows`, `focus_window`, `mouse_move`,
-`mouse_click`, `mouse_scroll`, `type_text`, `press_key`, `wait`) are real
-input on the user's desktop. Use them only for the app under test.
+The tools (`screenshot`, `list_windows`, `focus_window`, `read_ui_tree`,
+`mouse_move`, `mouse_click`, `mouse_scroll`, `type_text`, `press_key`,
+`wait`) are real input on the user's desktop. Use them only for the app
+under test.
+
+## Structured first, pixels second
+
+`read_ui_tree(hwnd=...)` returns every element of a window — type, name,
+current value, center coordinates — with no vision involved. It beats
+screenshots at everything: exact click targets, exact text values,
+nothing misread. The loop becomes: read tree → find the element → click
+its center → read the tree again to verify.
+
+Reach for `screenshot` only when the tree fails you: empty or useless
+trees (games, custom-drawn controls, remote streams like Parsec — their
+content is pixels on this machine, the real UI lives elsewhere), or
+when you need the visual layout to interpret the tree. A hybrid read is
+normal: screenshot once to understand what you're looking at, then
+drive and verify via the tree.
 
 ## The loop
 

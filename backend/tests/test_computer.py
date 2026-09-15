@@ -268,7 +268,8 @@ def test_tools_registered_on_windows():
 
     names = {s["function"]["name"] for s in get_schemas()}
     expected = {"screenshot", "list_windows", "focus_window", "mouse_move",
-                "mouse_click", "mouse_scroll", "type_text", "press_key", "wait"}
+                "mouse_click", "mouse_scroll", "type_text", "press_key", "wait",
+                "read_ui_tree"}
     if computer_mod.WINDOWS:
         assert expected <= names
     else:
@@ -290,6 +291,47 @@ def test_computer_use_prompt_section_mentions_contract():
     section = _computer_use_prompt()
     assert "user-activity pause" in section
     assert "screenshot" in section
+
+
+# ---------------------------------------------------------------- UIA tree
+
+def test_read_ui_tree_passthrough(monkeypatch):
+    fake = {
+        "elements": [
+            {"path": "0/1", "type": "ButtonControl", "name": "Launch",
+             "center": [120, 40], "value": "", "disabled": False},
+        ],
+        "count": 1,
+        "truncated": False,
+        "process": "Notepad",
+    }
+    seen = {}
+    monkeypatch.setattr(computer_mod, "_read_uia_tree", lambda hwnd, d, n: seen.update(hwnd=hwnd, d=d, n=n) or fake)
+    res = asyncio.run(computer_mod.read_ui_tree(hwnd=42))
+    assert res["count"] == 1
+    assert res["hwnd"] == 42
+    assert seen["d"] == 6 and seen["n"] == 150  # defaults
+
+
+def test_read_ui_tree_caps(monkeypatch):
+    monkeypatch.setattr(computer_mod, "_read_uia_tree", lambda hwnd, d, n: {"elements": [], "count": 0})
+    asyncio.run(computer_mod.read_ui_tree(hwnd=1, max_depth=99, max_nodes=99999))
+    # caps are enforced before _read_uia_tree is called; verify via captured args
+    captured = {}
+    monkeypatch.setattr(
+        computer_mod, "_read_uia_tree",
+        lambda hwnd, d, n: captured.update(d=d, n=n) or {"elements": [], "count": 0})
+    asyncio.run(computer_mod.read_ui_tree(hwnd=1, max_depth=99, max_nodes=99999))
+    assert captured["d"] == 12 and captured["n"] == 400
+
+
+def test_read_ui_tree_error_hints_screenshot(monkeypatch):
+    def _boom(hwnd, d, n):
+        raise ValueError("no tree")
+
+    monkeypatch.setattr(computer_mod, "_read_uia_tree", _boom)
+    res = asyncio.run(computer_mod.read_ui_tree(hwnd=7))
+    assert "screenshot" in res["error"]
 
 
 # ---------------------------------------------------------------- activity detector internals

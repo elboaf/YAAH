@@ -40,6 +40,39 @@ COMPUTER_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "read_ui_tree",
+            "description": (
+                "Read a window's UI Automation tree: every visible element "
+                "with type, name, value, rect and center coordinates. The "
+                "PREFERRED way to locate controls and verify UI state — "
+                "far more reliable than screenshotting and guessing pixel "
+                "positions. Click an element's center with mouse_click. "
+                "Falls back to screenshot for pixel-only surfaces (games, "
+                "remote streams) that expose no tree."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hwnd": {
+                        "type": "integer",
+                        "description": "Window handle from list_windows",
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Max tree depth (default 6)",
+                    },
+                    "max_nodes": {
+                        "type": "integer",
+                        "description": "Max elements returned (default 150)",
+                    },
+                },
+                "required": ["hwnd"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "screenshot",
             "description": (
                 "Capture a screen and attach it so a vision-capable model "
@@ -354,6 +387,91 @@ async def focus_window(workspace: str = "", hwnd: int = 0, observe: bool = False
     if observe:
         result.update(_screenshot_result())
     return result
+
+
+# ---------------------------------------------------------------- UI Automation tree
+
+def _read_uia_tree(hwnd: int, max_depth: int, max_nodes: int) -> dict:
+    """Walk a window's UIA tree (structured UI: no vision needed). Imports
+    uiautomation lazily. Returns a flat element list; each carries its
+    tree path and center coordinates so mouse_click can act on it."""
+    import uiautomation as uia
+
+    root = uia.ControlFromHandle(int(hwnd))
+    if root is None:
+        raise ValueError(f"hwnd {hwnd} exposes no UI Automation tree")
+
+    elements: list[dict] = []
+    truncated = False
+
+    def _short(v, limit: int = 80) -> str:
+        v = " ".join(str(v).split())
+        return v if len(v) <= limit else v[: limit - 1] + "…"
+
+    def _walk(ctrl, path: str, depth: int):
+        nonlocal truncated
+        if len(elements) >= max_nodes:
+            truncated = True
+            return
+        try:
+            rect = ctrl.BoundingRectangle
+            has_rect = rect.width() > 0 and rect.height() > 0
+        except Exception:  # noqa: BLE001 — COM property can throw per element
+            rect, has_rect = None, False
+        if has_rect:
+            entry: dict = {
+                "path": path,
+                "type": ctrl.ControlTypeName,
+                "name": _short(ctrl.Name) if ctrl.Name else "",
+            }
+            if ctrl.AutomationId:
+                entry["id"] = _short(ctrl.AutomationId, 40)
+            if not ctrl.IsEnabled:
+                entry["disabled"] = True
+            entry["center"] = [
+                int(rect.xcenter()), int(rect.ycenter()),
+            ]
+            try:
+                if ctrl.IsValuePatternAvailable:
+                    val = ctrl.GetValuePattern().Value
+                    if val:
+                        entry["value"] = _short(val, 200)
+            except Exception:  # noqa: BLE001
+                pass
+            elements.append(entry)
+        if depth >= max_depth:
+            truncated = truncated or bool(ctrl.GetChildren())
+            return
+        for i, child in enumerate(ctrl.GetChildren()):
+            _walk(child, f"{path}.{i}", depth + 1)
+            if len(elements) >= max_nodes:
+                truncated = True
+                return
+
+    _walk(root, "0", 0)
+    return {
+        "elements": elements,
+        "count": len(elements),
+        "truncated": truncated,
+        "process": _short(getattr(root, "ClassName", "") or "", 40),
+    }
+
+
+async def read_ui_tree(
+    workspace: str = "", hwnd: int = 0, max_depth: int = 6, max_nodes: int = 150
+) -> dict:
+    try:
+        result = _read_uia_tree(int(hwnd), max(1, min(int(max_depth), 12)),
+                                max(1, min(int(max_nodes), 400)))
+        result["hwnd"] = int(hwnd)
+        return result
+    except Exception as e:  # noqa: BLE001
+        return {
+            "error": (
+                f"{type(e).__name__}: {e} — this window may be pixel-only; "
+                "use screenshot(hwnd=...) instead"
+            )
+        }
 
 
 # ---------------------------------------------------------------- activity detector
@@ -684,6 +802,7 @@ COMPUTER_EXECUTORS.update(
         "screenshot": screenshot,
         "list_windows": list_windows,
         "focus_window": focus_window,
+        "read_ui_tree": read_ui_tree,
         "mouse_move": mouse_move,
         "mouse_click": mouse_click,
         "mouse_scroll": mouse_scroll,

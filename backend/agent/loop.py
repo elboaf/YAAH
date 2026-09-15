@@ -92,6 +92,11 @@ Computer use (desktop tools):
   inspect the user's other work. Screenshots go to the model provider.
 - Prefer shell/file tools for anything reachable that way; computer use
   is for GUI behavior you must observe or exercise.
+- Structured first, pixels second: read_ui_tree gives exact element
+  names, values and center coordinates for a window — use it to locate
+  controls and to verify state (edit values, checkmarks) instead of
+  screenshotting. Fall back to screenshot only when the tree is empty
+  or useless (games, remote streams render as pixels with no tree).
 - If a result says "user-activity pause", the user is using the machine
   right now: screenshot to re-verify, wait, and retry when idle.
 - Multi-monitor: list_windows tags each window with the monitor it is
@@ -125,6 +130,8 @@ def _default_system_prompt() -> str:
             # remote host), so the section only appears without a host.
             tools += [
                 "screenshot", "list_windows", "focus_window",
+                "read_ui_tree (structured UI elements of a window — prefer "
+                "this over screenshots for locating controls)",
                 "mouse_move", "mouse_click", "mouse_scroll",
                 "type_text", "press_key", "wait",
             ]

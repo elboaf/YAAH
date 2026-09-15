@@ -26,5 +26,10 @@ numpy>=2.0
 # backend/agent/computer.py, but shipped as core deps per the plan.
 pynput>=1.7.6; sys_platform == "win32"
 mss>=9.0; sys_platform == "win32"
+# UI Automation tree reading (read_ui_tree): structured UI access without
+# screenshots. comtypes is its backend and generates modules at runtime,
+# so both are bundled explicitly.
+uiautomation>=2.0.29; sys_platform == "win32"
+comtypes>=1.4.0; sys_platform == "win32"
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
