@@ -159,6 +159,8 @@ def _default_system_prompt() -> str:
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
         "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull)",
+        "spawn_agent (delegate self-contained work to a sub-agent; see the "
+        "sub-agents index below)",
     ]
     prompt = f"""You are an expert AI coding agent working inside a user's project workspace.
 

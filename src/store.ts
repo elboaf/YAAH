@@ -30,6 +30,8 @@ export interface ChatMessage {
   /** Stored image rel paths (backend/data/images/...), rendered via imageUrl(). */
   images?: string[]
   toolCalls?: ToolCall[]
+  /** Sub-agent run snapshot (persisted spawn_agent result, history load). */
+  subAgent?: SubAgentRun
 }
 
 export type AgentStatus = 'idle' | 'thinking' | 'running-tool' | 'error'
@@ -113,6 +115,13 @@ interface AgentState {
       role: string
       content: string
       images?: string[] | null
+      sub_agent_transcript?: {
+        agent_type?: string
+        status?: string
+        turns?: number
+        output?: string
+        transcript?: Array<{ role: string; content: string; name?: string }>
+      } | null
       tool_call_id?: string | null
       tool_calls: Array<{
         id?: string
@@ -484,6 +493,7 @@ function buildMessages(
 ): ChatMessage[] {
   const resultById = new Map<string, unknown>()
   const nameById = new Map<string, string>()
+  const subAgentById = new Map<string, SubAgentRun>()
   for (const r of rows) {
     if (r.role !== 'tool') continue
     const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
@@ -493,6 +503,29 @@ function buildMessages(
     const name =
       tc?.function?.name ?? (tc as { name?: string } | undefined)?.name
     if (name) nameById.set(id, name)
+    // Rehydrate a spawn_agent run snapshot into the same live shape the
+    // stream builds, so a reloaded turn renders the nested transcript.
+    const snap = r.sub_agent_transcript
+    if (name === 'spawn_agent' && snap && typeof snap === 'object') {
+      const entries = Array.isArray(snap.transcript) ? snap.transcript : []
+      let text = ''
+      const tools: SubAgentRun['tools'] = []
+      for (const e of entries) {
+        if (e.role === 'assistant' && typeof e.content === 'string') {
+          text = e.content // last assistant text wins (the final message)
+        } else if (e.role === 'tool' && e.name) {
+          tools.push({ id: `sat${tools.length + 1}`, name: e.name, result: e.content })
+        }
+      }
+      subAgentById.set(id, {
+        agentId: 0,
+        agentType: snap.agent_type ?? 'sub-agent',
+        prompt: '',
+        status: (snap.status as SubAgentRun['status']) ?? 'completed',
+        text,
+        tools,
+      })
+    }
   }
 
   const out: ChatMessage[] = []
@@ -529,6 +562,7 @@ function buildMessages(
           name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
           args: safeParse(c.function?.arguments),
           result: c.id ? resultById.get(c.id) : undefined,
+          subAgent: c.id ? subAgentById.get(c.id) : undefined,
         })),
       })
       continue
