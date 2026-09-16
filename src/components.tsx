@@ -280,6 +280,11 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
         // Clear only if this is still the same question (a newer ask in
         // another conversation may have replaced it meanwhile).
         setPendingQuestion((q) => (q && q.callId === pending.callId ? null : q))
+        // Reset the in-flight flag unconditionally: if a newer question
+        // already replaced this one in the slot, the .then still fires with
+        // this call's closure. Leaving `submitting` true here is what wedged
+        // every follow-up question into an all-buttons-disabled card.
+        setSubmitting(false)
       })
       .catch((e) => {
         setErr(String(e))
@@ -3058,7 +3063,10 @@ export function ChatPanel() {
       )}
       {pendingQuestion && (
         <div className="border-t border-orange-800/60 px-4 pb-3 pt-3">
-          <AskUserCard pending={pendingQuestion} />
+          {/* key: each question mounts a FRESH card. Without it React reuses
+              the instance across consecutive questions and any stuck local
+              state (submitting, custom text) wedges every later ask. */}
+          <AskUserCard key={pendingQuestion.callId} pending={pendingQuestion} />
         </div>
       )}
       <Composer />

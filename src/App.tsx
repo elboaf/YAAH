@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { BASE, IS_TAURI, getConfig } from './api'
+import { BASE, IS_TAURI, getConfig, getMessages } from './api'
 import { ChatPanel, FilesPanel, PreviewModal, Sidebar } from './components'
+import { useAgent, persistConversationId } from './store'
 
 /**
  * Recovery banner: when any API call finds the backend unreachable, poll
@@ -80,8 +81,7 @@ function BackendRecoveryBanner() {
  * Zoom keeps the terminal-grade density identity intact at 1.0 while letting
  * the user choose a larger, crisper reading size (100–150%). Layout is
  * computed in device pixels, so panes reflow instead of clipping.
- */
-function UiScale() {
+ */function UiScale() {
   useEffect(() => {
     const apply = (scale: number) => {
       // Inline styles only: WebView2's legacy zoom rejects var() in
@@ -107,11 +107,40 @@ function UiScale() {
   return null
 }
 
+/**
+ * Session restore: the recovery banner reloads the whole app when the backend
+ * comes back, and a plain F5 does too. Without this, a reload silently lands
+ * on a fresh "draft" — the next send then creates a brand-new conversation,
+ * which looks like the app switched chats on its own. Mirrors the workspace
+ * restore pattern: localStorage id → reopen + load history (async), and if
+ * the conversation no longer exists, just clear the stale id.
+ */
+function RestoreSession() {
+  useEffect(() => {
+    let stored: string | null = null
+    try {
+      stored = localStorage.getItem('agent.conversationId')
+    } catch {
+      stored = null
+    }
+    const id = stored ? Number(stored) : NaN
+    if (!Number.isInteger(id) || id <= 0) return
+    getMessages(id)
+      .then((rows) => {
+        useAgent.getState().setConversationId(id)
+        useAgent.getState().loadHistory(id, rows)
+      })
+      .catch(() => persistConversationId(null))
+  }, [])
+  return null
+}
+
 export default function App() {
   return (
     <div className="relative flex h-full w-full bg-zinc-900 text-zinc-100">
       <UiScale />
       <BackendRecoveryBanner />
+      <RestoreSession />
       <Sidebar />
       <FilesPanel />
       <ChatPanel />

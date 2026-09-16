@@ -191,6 +191,23 @@ function clearStoredWorkspace(): void {
   )
 }
 
+// The open conversation is remembered across reloads: the recovery banner
+// reloads the whole app when the backend comes back, and without this the
+// reload silently lands on a fresh "draft" — the next send then creates a
+// brand-new conversation, which looks like the app switched chats on its own.
+// localStorage only (the DB is the durable copy; a stale id simply misses).
+const CONV_KEY = 'agent.conversationId'
+
+export function persistConversationId(id: number | null): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    if (id === null) localStorage.removeItem(CONV_KEY)
+    else localStorage.setItem(CONV_KEY, String(id))
+  } catch {
+    /* non-persistent storage is fine */
+  }
+}
+
 export const useAgent = create<AgentState>((set, get) => ({
   conversationId: null,
   messagesByConv: { draft: [] },
@@ -217,18 +234,23 @@ export const useAgent = create<AgentState>((set, get) => ({
     else clearStoredWorkspace()
   },
 
-  newConversation: () =>
+  newConversation: () => {
     set((s) => ({
       conversationId: null,
       messagesByConv: { ...s.messagesByConv, draft: [] },
       status: 'idle',
       error: null,
       pendingQuestion: null,
-    })),
+    }))
+    persistConversationId(null)
+  },
 
-  setConversationId: (id) => set({ conversationId: id }),
+  setConversationId: (id) => {
+    persistConversationId(id)
+    set({ conversationId: id })
+  },
 
-  adoptDraft: (id) =>
+  adoptDraft: (id) => {
     set((s) => {
       const draft = s.messagesByConv.draft ?? []
       const rest = { ...s.messagesByConv }
@@ -243,7 +265,9 @@ export const useAgent = create<AgentState>((set, get) => ({
           draft: [],
         },
       }
-    }),
+    })
+    persistConversationId(id)
+  },
 
   setStatus: (status) => set({ status }),
   setError: (error) => set({ error }),
