@@ -22,6 +22,8 @@ import {
   submitAnswer,
   listSkills,
   refreshSkills,
+  getContext,
+  getGitBranch,
   listMcpServers,
   addMcpServer,
   removeMcpServer,
@@ -280,6 +282,11 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
         // Clear only if this is still the same question (a newer ask in
         // another conversation may have replaced it meanwhile).
         setPendingQuestion((q) => (q && q.callId === pending.callId ? null : q))
+        // Reset the in-flight flag unconditionally: if a newer question
+        // already replaced this one in the slot, the .then still fires with
+        // this call's closure. Leaving `submitting` true here is what wedged
+        // every follow-up question into an all-buttons-disabled card.
+        setSubmitting(false)
       })
       .catch((e) => {
         setErr(String(e))
@@ -727,6 +734,19 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
             </div>
           ) : null}
           <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+          {msg.skills?.length ? (
+            <div className="mt-1.5 flex flex-wrap justify-end gap-1">
+              {msg.skills.map((name) => (
+                <span
+                  key={name}
+                  title={`Skill loaded for this turn: ${name}`}
+                  className="rounded bg-indigo-900/60 px-1.5 py-0.5 font-mono text-[10px] text-indigo-200"
+                >
+                  ${name}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     )
@@ -2195,6 +2215,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [temperature, setTemperature] = useState<number | ''>('')
   const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
+  // Per-model context-window overrides (model id -> tokens); blank = auto.
+  const [ctxOverrides, setCtxOverrides] = useState<Record<string, number>>({})
+  const [ctxModelDraft, setCtxModelDraft] = useState('')
+  const [ctxTokensDraft, setCtxTokensDraft] = useState<number | ''>('')
   // Interface scale draft (1.0 / 1.1 / 1.25 / 1.5) — applied live on save.
   const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
@@ -2272,6 +2296,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setTemperature(c.temperature ?? '')
           setMaxTokens(c.max_tokens ? c.max_tokens : '')
           setMaxSteps(c.max_steps ?? '')
+          setCtxOverrides(c.context_window_overrides ?? {})
           setUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
@@ -2416,6 +2441,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
+        context_window_overrides: ctxOverrides,
         ui_scale: uiScale,
         voice: {
           engine: voiceEngine,
@@ -2613,6 +2639,71 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           <p className="mt-1 text-[10px] text-zinc-600">
             Tool-call rounds per turn before the agent gives up; 0 = unlimited (Stop still works)
           </p>
+        </div>
+
+        <div className="mb-3">
+          <label className="mb-1 block text-xs text-zinc-500">Context window overrides</label>
+          <p className="mb-1 text-[10px] text-zinc-600">
+            Tokens per model id — wins over the provider-reported value and the built-in table
+            (powers the % and bar in the chat panel's context readout).
+          </p>
+          <div className="flex gap-1.5">
+            <input
+              type="text"
+              placeholder="model id"
+              aria-label="Model id for the context window override"
+              className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={ctxModelDraft}
+              onChange={(e) => setCtxModelDraft(e.target.value)}
+            />
+            <input
+              type="number"
+              min="0"
+              placeholder="tokens"
+              aria-label="Context window in tokens"
+              className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={ctxTokensDraft}
+              onChange={(e) => setCtxTokensDraft(e.target.value === '' ? '' : Number(e.target.value))}
+            />
+            <button
+              type="button"
+              className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              onClick={() => {
+                const id = ctxModelDraft.trim()
+                if (!id || !ctxTokensDraft || ctxTokensDraft <= 0) return
+                setCtxOverrides((o) => ({ ...o, [id]: ctxTokensDraft as number }))
+                setCtxModelDraft('')
+                setCtxTokensDraft('')
+              }}
+            >
+              Set
+            </button>
+          </div>
+          {Object.keys(ctxOverrides).length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {Object.entries(ctxOverrides).map(([id, win]) => (
+                <span
+                  key={id}
+                  className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
+                >
+                  {id}: {win.toLocaleString()}
+                  <button
+                    aria-label={`Remove override for ${id}`}
+                    className="text-zinc-500 hover:text-red-400"
+                    onClick={() =>
+                      setCtxOverrides((o) => {
+                        const n = { ...o }
+                        delete n[id]
+                        return n
+                      })
+                    }
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
@@ -2939,6 +3030,62 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
  *  paths once loaded from history — render either. */
 const imageSrc = (img: string) => (img.startsWith('data:') ? img : imageUrl(img))
 
+/** Compact token readout: 43,251 -> "43.3k" (sub-k values stay exact). */
+function fmtTok(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+/** Color ramp for the context bar as the window fills. */
+function ctxColor(frac: number): string {
+  if (frac >= 0.9) return 'bg-red-500'
+  if (frac >= 0.7) return 'bg-amber-500'
+  return 'bg-emerald-500'
+}
+
+/** Git branch chip for the chat panel's status strip (null = not a repo). */
+function GitBranchChip({ branch }: { branch: string | null }) {
+  if (!branch) return null
+  return (
+    <span
+      title="Current git branch of this session's workspace"
+      className="inline-block max-w-[16rem] truncate rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
+    >
+      {branch}
+    </span>
+  )
+}
+
+/** Context-size readout: exact tokens + % + fill bar. Nothing renders until
+ *  the first turn completes (the count comes from the API's usage report). */
+function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
+  if (!info) return null
+  const frac = info.window ? Math.min(1, info.tokens / info.window) : null
+  return (
+    <span
+      className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"
+      title={
+        info.window
+          ? `${info.tokens.toLocaleString()} / ${info.window.toLocaleString()} tokens`
+          : `${info.tokens.toLocaleString()} tokens (unknown context window — set an override in Settings)`
+      }
+    >
+      {frac !== null && (
+        <span className="relative inline-block h-1 w-14 overflow-hidden rounded bg-zinc-700">
+          <span
+            className={`absolute inset-y-0 left-0 rounded ${ctxColor(frac)}`}
+            style={{ width: `${Math.max(2, frac * 100)}%` }}
+          />
+        </span>
+      )}
+      <span>
+        {fmtTok(info.tokens)}
+        {info.window ? ` / ${fmtTok(info.window)}` : ''} tok
+      </span>
+    </span>
+  )
+}
+
 export function ChatPanel() {
   const conversationId = useAgent((s) => s.conversationId)
   const messages = useAgent(
@@ -2957,6 +3104,41 @@ export function ChatPanel() {
   // Only the in-flight assistant message shows the ephemeral ticker; every
   // finished turn collapses to the one-line trace.
   const liveId = streaming && messages.length > 0 ? messages[messages.length - 1].id : null
+
+  // ---- session metadata: context size + git branch (status strip) ----
+  const setContext = useAgent((s) => s.setContext)
+  const contextInfo = useAgent((s) =>
+    s.conversationId === null ? undefined : s.contextByConv[String(s.conversationId)],
+  )
+  const [branch, setBranch] = useState<string | null>(null)
+  useEffect(() => {
+    setBranch(null)
+    if (conversationId === null) return
+    let cancelled = false
+    // Exact context readout: persisted by the backend at every model call.
+    getContext(conversationId)
+      .then((c) => {
+        if (cancelled || c.context_tokens === null || c.context_tokens <= 0) return
+        setContext(conversationId, c.context_tokens, c.context_window, c.context_model)
+      })
+      .catch(() => {})
+    // Branch: cheap mtime-guarded backend read, re-polled every 2s while
+    // this session is on screen so terminal checkouts reflect without any
+    // push channel.
+    const tick = () => {
+      getGitBranch(conversationId)
+        .then((r) => {
+          if (!cancelled) setBranch(r.branch)
+        })
+        .catch(() => {})
+    }
+    tick()
+    const poll = window.setInterval(tick, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(poll)
+    }
+  }, [conversationId, setContext])
 
   // ---- read-aloud (TTS) ----
   const ttsEnabled = useTts((s) => s.enabled)
@@ -3058,7 +3240,10 @@ export function ChatPanel() {
       )}
       {pendingQuestion && (
         <div className="border-t border-orange-800/60 px-4 pb-3 pt-3">
-          <AskUserCard pending={pendingQuestion} />
+          {/* key: each question mounts a FRESH card. Without it React reuses
+              the instance across consecutive questions and any stuck local
+              state (submitting, custom text) wedges every later ask. */}
+          <AskUserCard key={pendingQuestion.callId} pending={pendingQuestion} />
         </div>
       )}
       <Composer />
@@ -3069,6 +3254,9 @@ export function ChatPanel() {
           }`}
         />
         {streaming ? 'working' : status}
+        {/* Session metadata: current git branch + exact context fill. */}
+        <GitBranchChip branch={branch} />
+        <ContextChip info={contextInfo} />
         {/* Read-aloud toggle: one click to mute/unmute the agent's voice.
             Hidden while the model isn't downloaded — Settings owns that. */}
         {ttsReady && (
@@ -3469,6 +3657,7 @@ function Composer() {
     setConversationId,
     adoptDraft,
     setPendingQuestion,
+    setContext,
     pushLog,
     setAbortController,
     removeMessage,
@@ -3497,7 +3686,7 @@ function Composer() {
     }
   }, [input])
 
-  // ---- skills (/ autocomplete + chips) ----
+  // ---- skills (/ autocomplete + chips, $ inline invocation) ----
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [skillMenuOpen, setSkillMenuOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
@@ -3507,6 +3696,8 @@ function Composer() {
   // literal text — typing a message that starts with "/" stays possible.
   const [skillNavigated, setSkillNavigated] = useState(false)
   const [pickedSkills, setPickedSkills] = useState<SkillInfo[]>([])
+  /** Which character opened the menu: '/' adds a chip, '$' completes inline. */
+  const [skillTrigger, setSkillTrigger] = useState<'/' | '$'>('/')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // ---- voice dictation (click-to-toggle; text lands in the input) ----
@@ -3847,10 +4038,13 @@ function Composer() {
   useEffect(loadSkills, [loadSkills])
 
   // The menu opens when the input is exactly "/" or starts with "/" —
-  // the query is whatever follows, and the list narrows as it grows.
+  // the query is whatever follows, and the list narrows as it grows. The
+  // same menu serves "$": the query is the unfinished $name at the very end
+  // of the input, and Tab completes it in place.
   useEffect(() => {
     if (input === '/') {
       setSkillMenuOpen(true)
+      setSkillTrigger('/')
       setSkillQuery('')
       setSkillIndex(0)
       setSkillNavigated(false)
@@ -3858,7 +4052,17 @@ function Composer() {
     }
     if (input.startsWith('/')) {
       setSkillMenuOpen(true)
+      setSkillTrigger('/')
       setSkillQuery(input.slice(1))
+      setSkillIndex(0)
+      setSkillNavigated(false)
+      return
+    }
+    const dollar = /\$([A-Za-z0-9_-]*)$/.exec(input)
+    if (dollar) {
+      setSkillMenuOpen(true)
+      setSkillTrigger('$')
+      setSkillQuery(dollar[1])
       setSkillIndex(0)
       setSkillNavigated(false)
       return
@@ -3871,6 +4075,15 @@ function Composer() {
   )
 
   const pickSkill = (s: SkillInfo) => {
+    if (skillTrigger === '$') {
+      // $ completes the name in place; the menu stays available for another
+      // $name elsewhere in the same prompt.
+      setInput((prev) => prev.replace(/\$[A-Za-z0-9_-]*$/, `$${s.name} `))
+      setSkillMenuOpen(false)
+      setSkillNavigated(false)
+      textareaRef.current?.focus()
+      return
+    }
     setPickedSkills((p) => (p.some((x) => x.name === s.name) ? p : [...p, s]))
     setSkillMenuOpen(false)
     setSkillNavigated(false)
@@ -4029,6 +4242,20 @@ function Composer() {
       // always emits done events in the normal path).
       settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
+    } else if (ev.type === 'usage') {
+      // Exact context size of the turn's final model call, straight from
+      // the provider's usage report. Numeric conversation ids only — the
+      // draft buffer has no row yet; the open-time fetch covers it.
+      const convId = Number(bufKey)
+      if (Number.isInteger(convId) && convId > 0) {
+        setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null)
+        // Resolve the window (override -> provider -> table) for the bar.
+        getContext(convId)
+          .then((c) => {
+            setContext(convId, ev.usage_tokens ?? 0, c.context_window, c.context_model)
+          })
+          .catch(() => {})
+      }
     }
   }
 
@@ -4068,7 +4295,22 @@ function Composer() {
       }
     }
     const imageDataUrls = images.map((i) => i.dataUrl)
-    const invokedSkills = pickedSkills.map((s) => s.name)
+    // $name anywhere in the prompt loads the skill for this turn (unknown
+    // names are literal text; the message is sent exactly as written). The
+    // /-menu chips remain the other way in; both merge into one list.
+    const knownSkillNames = new Set(skills.map((s) => s.name))
+    const dollarNames: string[] = []
+    for (const m of fullText.matchAll(/\$([A-Za-z0-9_-]+)/g)) {
+      const name = m[1]
+      if (
+        knownSkillNames.has(name) &&
+        !pickedSkills.some((s) => s.name === name) &&
+        !dollarNames.includes(name)
+      ) {
+        dollarNames.push(name)
+      }
+    }
+    const invokedSkills = [...pickedSkills.map((s) => s.name), ...dollarNames]
     // Captured draft: if the turn fails before the agent answers, the
     // composer gets it back — a failed send must not cost the prompt.
     const draft = { input, attachments, images, pickedSkills }
@@ -4086,7 +4328,7 @@ function Composer() {
     // `let` because adopting a newly created conversation re-keys the
     // buffer: events before adoption target 'draft', after it the real id.
     let bufKey = conversationId === null ? 'draft' : String(conversationId)
-    const userId = appendUserMessage(bufKey, fullText, imageDataUrls)
+    const userId = appendUserMessage(bufKey, fullText, imageDataUrls, invokedSkills.length ? invokedSkills : undefined)
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
     setAbortController(ac)
@@ -4346,7 +4588,10 @@ function Composer() {
                     pickSkill(s)
                   }}
                 >
-                  <div className="font-mono text-xs text-indigo-300">/{s.name}</div>
+                  <div className="font-mono text-xs text-indigo-300">
+                    {skillTrigger === '$' ? '$' : '/'}
+                    {s.name}
+                  </div>
                   {s.description && (
                     <div className="truncate text-[10px] text-zinc-500">{s.description}</div>
                   )}

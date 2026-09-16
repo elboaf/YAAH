@@ -100,6 +100,12 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE messages ADD COLUMN images TEXT")
     if "sub_agent_transcript" not in cols:
         await db.execute("ALTER TABLE messages ADD COLUMN sub_agent_transcript TEXT")
+    cur = await db.execute("PRAGMA table_info(conversations)")
+    conv_cols = {r[1] for r in await cur.fetchall()}
+    if "context_tokens" not in conv_cols:
+        await db.execute("ALTER TABLE conversations ADD COLUMN context_tokens INTEGER")
+    if "context_model" not in conv_cols:
+        await db.execute("ALTER TABLE conversations ADD COLUMN context_model TEXT")
     await migrate_workspaces(db)
     return db
 
@@ -340,6 +346,23 @@ async def update_conversation(conversation_id: int, **fields):
         )
         await db.commit()
         return True
+    finally:
+        await db.close()
+
+
+async def set_conversation_usage(
+    conversation_id: int, tokens: int, model: str | None
+):
+    """Record the context size (usage.prompt_tokens) of the latest model call
+    in this conversation, plus the model id that produced it. Deliberately
+    does NOT touch updated_at — a context readout must not re-sort the list."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE conversations SET context_tokens = ?, context_model = ? WHERE id = ?",
+            (tokens, model, conversation_id),
+        )
+        await db.commit()
     finally:
         await db.close()
 
