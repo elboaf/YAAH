@@ -22,6 +22,11 @@ import {
   submitAnswer,
   listSkills,
   refreshSkills,
+  listMcpServers,
+  addMcpServer,
+  removeMcpServer,
+  reloadMcpServers,
+  type McpServerInfo,
   uploadAttachment,
   transcribeStatus,
   transcribeAudio,
@@ -1810,6 +1815,176 @@ export function Sidebar() {
 
 // ---------------------------------------------------------------- settings (Q4/Q10/Q31/Q35/Q41)
 
+/** MCP tool servers (Settings panel section). Each registered server is a
+ *  local program the backend launches; its tools appear to the model as
+ *  mcp_<server>_<tool>. Registration is trust — no per-call confirmations. */
+function McpSection() {
+  const [servers, setServers] = useState<McpServerInfo[]>([])
+  const [name, setName] = useState('')
+  const [command, setCommand] = useState('')
+  const [args, setArgs] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      setServers((await listMcpServers()).servers)
+    } catch {
+      /* transient backend hiccup — the poll retries */
+    }
+  }, [])
+
+  // Poll while any server is still starting, so status/ticks arrive live.
+  useEffect(() => {
+    void refresh()
+    const t = setInterval(() => {
+      setServers((cur) => {
+        if (cur.some((s) => s.status === 'starting')) void refresh()
+        return cur
+      })
+    }, 1500)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  const add = async () => {
+    setErr(null)
+    if (!name.trim() || !command.trim()) {
+      setErr('name and command are required')
+      return
+    }
+    setBusy(true)
+    try {
+      const argList = args
+        .split(/\s+/)
+        .map((a) => a.trim())
+        .filter(Boolean)
+      setServers((await addMcpServer({ name: name.trim(), command: command.trim(), args: argList })).servers)
+      setName('')
+      setCommand('')
+      setArgs('')
+    } catch (e) {
+      setErr(String((e as { message?: string }).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (server: string) => {
+    setBusy(true)
+    try {
+      setServers((await removeMcpServer(server)).servers)
+    } catch (e) {
+      setErr(String((e as { message?: string }).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const statusColor = (s: McpServerInfo['status']) =>
+    s === 'connected'
+      ? 'text-emerald-400'
+      : s === 'failed'
+        ? 'text-red-400'
+        : s === 'stopped'
+          ? 'text-zinc-500'
+          : 'text-amber-400'
+
+  return (
+    <>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+        MCP tool servers
+      </h3>
+      <div className="mb-2 space-y-1.5">
+        {servers.length === 0 && (
+          <p className="text-[10px] text-zinc-600">
+            No servers registered. An MCP server is a local tool program (browser control, git,
+            databases...) whose tools the agent can call directly — more reliable than GUI
+            automation.
+          </p>
+        )}
+        {servers.map((s) => (
+          <div key={s.name} className="rounded border border-zinc-800 bg-zinc-900/60 p-2">
+            <div className="flex items-center gap-2">
+              <span className={`font-mono text-[10px] uppercase ${statusColor(s.status)}`}>
+                {s.status}
+              </span>
+              <span className="font-mono text-xs text-zinc-200">{s.name}</span>
+              <span className="flex-1 truncate font-mono text-[10px] text-zinc-600">
+                {s.command} {s.args.join(' ')}
+              </span>
+              <button
+                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                onClick={() => setExpanded(expanded === s.name ? null : s.name)}
+              >
+                {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}
+              </button>
+              <button
+                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
+                disabled={busy}
+                onClick={() => void remove(s.name)}
+              >
+                remove
+              </button>
+            </div>
+            {s.status === 'failed' && s.error && (
+              <p className="mt-1 text-[10px] text-red-400">{s.error}</p>
+            )}
+            {expanded === s.name && (
+              <ul className="mt-1.5 space-y-0.5">
+                {s.tools.map((t) => (
+                  <li key={t.name} className="text-[10px] text-zinc-400">
+                    <span className="font-mono text-zinc-300">{t.name}</span>
+                    {t.description ? ` — ${t.description}` : ''}
+                  </li>
+                ))}
+                {s.tools.length === 0 && (
+                  <li className="text-[10px] text-zinc-600">no tools discovered yet</li>
+                )}
+              </ul>
+            )}
+          </div>
+        ))}
+        <div className="flex gap-1.5">
+          <input
+            className="w-24 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="name"
+            aria-label="Server name"
+          />
+          <input
+            className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            placeholder='command, e.g. npx -y @modelcontextprotocol/server-filesystem ~'
+            aria-label="Server command"
+          />
+          <input
+            className="w-40 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+            value={args}
+            onChange={(e) => setArgs(e.target.value)}
+            placeholder="args (space-separated)"
+            aria-label="Server args"
+          />
+          <button
+            className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            disabled={busy}
+            onClick={() => void add()}
+          >
+            Add
+          </button>
+        </div>
+        <p className="text-[10px] text-zinc-600">
+          Runs locally with your permissions — registering a server trusts it. Its tools appear to
+          the agent as mcp_&lt;name&gt;_&lt;tool&gt;. Config is stored in config.json (mcpServers).
+        </p>
+      </div>
+      {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
+    </>
+  )
+}
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
@@ -2516,6 +2691,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             devices appear next to the chatbox automatically.
           </p>
         </div>
+
+        <McpSection />
 
         {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
 

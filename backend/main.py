@@ -33,6 +33,12 @@ async def lifespan(app: FastAPI):
 
     if (load_config().get("remote") or {}).get("hosting_enabled", True):
         discovery.start_advertising(API_PORT)
+    # MCP tool servers (config "mcpServers"): spawn each registered server
+    # and merge its tools into the model's toolbox. Failures are per-server
+    # and non-fatal — a broken server shows as 'failed' in Settings.
+    from backend.agent import mcp_client
+
+    mcp_client.manager.start_all()
     # Computer use (Windows only): real-input activity detector + panic
     # hotkey listener. Never fatal — a failure just means no pause/no hotkey.
     if os.name == "nt":
@@ -40,6 +46,7 @@ async def lifespan(app: FastAPI):
 
         computer.start_background()
     yield
+    await mcp_client.manager.shutdown()
     discovery.stop_advertising()
 
 
@@ -464,6 +471,85 @@ async def api_list_skills():
 async def api_refresh_skills():
     """Rescan the skills directory (Settings / UI refresh)."""
     return {"skills": skills_registry.refresh()}
+
+
+# ---- MCP tool servers ----
+
+import re as _re
+
+from backend.agent import mcp_client as _mcp
+from backend.agent.config import save_config as _save_config
+
+
+@app.get("/api/mcp/servers")
+async def api_mcp_servers():
+    """Live status of every configured server + its discovered tools.
+    Configured-but-not-yet-running servers show as 'starting' so the
+    panel isn't empty right after a save."""
+    rows = []
+    for name, spec in _mcp.manager.configured().items():
+        s = _mcp.manager.servers.get(name)
+        if s is None:
+            s = _mcp.McpServerState(name, spec if isinstance(spec, dict) else {})
+            s.status = "starting"
+        rows.append(
+            {
+                "name": s.name,
+                "status": s.status,
+                "error": s.error,
+                "command": s.spec.get("command", ""),
+                "args": s.spec.get("args") or [],
+                "tools": [
+                    {
+                        "name": t["function"]["name"],
+                        "description": t["function"]["description"],
+                    }
+                    for t in s.tools
+                ],
+            }
+        )
+    return {"servers": sorted(rows, key=lambda r: r["name"])}
+
+
+class McpServerBody(BaseModel):
+    name: str
+    command: str
+    args: list[str] = []
+    env: dict[str, str] = {}
+
+
+@app.post("/api/mcp/servers")
+async def api_mcp_add_server(body: McpServerBody):
+    """Register (or update) a server and (re)connect it. Registration is
+    trust: the command runs locally with user permissions."""
+    name = body.name.strip()
+    if not _re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
+        raise HTTPException(status_code=400, detail="name: letters/digits/-/_ only")
+    if not body.command.strip():
+        raise HTTPException(status_code=400, detail="command is required")
+    cfg = _mcp.manager.configured()
+    cfg[name] = {"command": body.command.strip(), "args": body.args, "env": body.env}
+    _save_config({"mcpServers": cfg})
+    _mcp.manager.start_all()
+    return await api_mcp_servers()
+
+
+@app.delete("/api/mcp/servers/{name}")
+async def api_mcp_remove_server(name: str):
+    cfg = _mcp.manager.configured()
+    if name not in cfg:
+        raise HTTPException(status_code=404, detail=f"no server named {name!r}")
+    del cfg[name]
+    _save_config({"mcpServers": cfg})
+    _mcp.manager.start_all()
+    return await api_mcp_servers()
+
+
+@app.post("/api/mcp/reload")
+async def api_mcp_reload():
+    """Re-read config and reconcile sessions (restart changed, stop removed)."""
+    _mcp.manager.start_all()
+    return await api_mcp_servers()
 
 
 # ---- Provider / model discovery ----

@@ -942,6 +942,11 @@ async def execute_tool(name: str, arguments: dict, workspace: str) -> dict:
     host = remote_mod.get_remote()
     if host is not None and name in remote_mod.REMOTE_TOOLS:
         return await host.exec_tool(name, arguments)
+    # MCP server tools route by name prefix, before the static executor map.
+    if name.startswith("mcp_"):
+        from backend.agent import mcp_client
+
+        return await mcp_client.manager.call(name, arguments)
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
@@ -963,4 +968,10 @@ def get_schemas() -> list:
 
     host = remote_mod.get_remote()
     windows = host.windows if host is not None else os.name == "nt"
-    return TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA
+    schemas = TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA
+    # MCP server tools (mcp_<server>_<tool>) merge in dynamically — they're
+    # client-local like web/ask_user, regardless of where file tools run.
+    from backend.agent import mcp_client
+
+    schemas = schemas + mcp_client.manager.schemas()
+    return schemas

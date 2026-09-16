@@ -62,6 +62,11 @@ DEFAULTS = {
         "passphrase": "",
         "display_name": "",
     },
+    # MCP tool servers (see backend/agent/mcp_client.py): name ->
+    # {"command": ..., "args": [...], "env": {...}}. Same shape as Claude
+    # Desktop / Cursor configs. Registration is trust: a registered server
+    # runs arbitrary local code and its tools are always available.
+    "mcpServers": {},
     # Computer use (Windows only): the panic hotkey force-cancels every
     # running turn. pynput syntax; invalid falls back to the default.
     # observe_default: mouse tools return a post-action crop by default.

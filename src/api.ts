@@ -330,6 +330,39 @@ export const listSkills = () => api<{ skills: SkillInfo[] }>('/api/skills')
 export const refreshSkills = () =>
   api<{ skills: SkillInfo[] }>('/api/skills/refresh', { method: 'POST' })
 
+// ---- MCP tool servers ----
+
+export interface McpToolInfo {
+  name: string
+  description: string
+}
+
+export interface McpServerInfo {
+  name: string
+  status: 'starting' | 'connected' | 'failed' | 'stopped'
+  error: string
+  command: string
+  args: string[]
+  tools: McpToolInfo[]
+}
+
+export const listMcpServers = () =>
+  api<{ servers: McpServerInfo[] }>('/api/mcp/servers')
+
+export const addMcpServer = (body: { name: string; command: string; args: string[] }) =>
+  api<{ servers: McpServerInfo[] }>('/api/mcp/servers', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const removeMcpServer = (name: string) =>
+  api<{ servers: McpServerInfo[] }>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+
+export const reloadMcpServers = () =>
+  api<{ servers: McpServerInfo[] }>('/api/mcp/reload', { method: 'POST' })
+
 /** Stage an attached text file inside the workspace; returns the
  *  workspace-relative path the agent's read_file tool can open. */
 export const uploadAttachment = (workspace: string, name: string, content: string) =>

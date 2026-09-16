@@ -12,6 +12,9 @@ curl_cffi>=0.7.0
 pyyaml>=6.0
 # LAN host discovery for remote hosting (mDNS advertise + browse)
 zeroconf>=0.136.0
+# MCP client (tool servers): the official SDK. Lets users plug external
+# tool servers (browser, git, filesystem...) into the agent's toolbox.
+mcp>=2.0
 # TTS read-aloud engine (Kokoro-82M via sherpa-onnx; cp314 Windows wheels,
 # bundles its own ONNX Runtime — no torch). The model itself is downloaded
 # on demand from Settings, never bundled.
