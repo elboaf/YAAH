@@ -3458,6 +3458,12 @@ function Composer() {
     appendTextDelta,
     startToolCall,
     finishToolCall,
+    startSubAgent,
+    subAgentTextDelta,
+    subAgentToolStart,
+    subAgentToolResult,
+    finishSubAgent,
+    settleSubAgents,
     setStatus,
     setError,
     setConversationId,
@@ -3984,17 +3990,44 @@ function Composer() {
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
       }
+    } else if (ev.type === 'sub_agent_spawned') {
+      setStatus('running-tool')
+      startSubAgent(
+        bufKey,
+        asstId,
+        ev.call_id ?? '',
+        ev.agent_id ?? 0,
+        ev.agent_type ?? 'sub-agent',
+        ev.prompt ?? '',
+      )
+      pushLog({ kind: 'tool', name: 'spawn_agent', args: { agent_type: ev.agent_type, prompt: ev.prompt } })
+    } else if (ev.type === 'sub_agent_progress') {
+      if (ev.text) subAgentTextDelta(bufKey, asstId, ev.call_id ?? '', ev.text)
+      if (ev.kind === 'tool_start') {
+        subAgentToolStart(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+      } else if (ev.kind === 'tool_result') {
+        subAgentToolResult(bufKey, asstId, ev.call_id ?? '', ev.result)
+      }
+    } else if (ev.type === 'sub_agent_done') {
+      finishSubAgent(bufKey, asstId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0)
+      pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
     } else if (ev.type === 'error') {
       setStatus('error')
       setError(ev.message ?? 'Unknown agent error')
       setTurnError(ev.message ?? 'Unknown agent error')
+      settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     } else if (ev.type === 'stopped') {
       setStatus('idle')
       appendTextDelta(bufKey, asstId, '\n[stopped]')
+      settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     } else if (ev.type === 'done') {
       setStatus('idle')
+      // A completed turn must leave no block pulsing: settle anything the
+      // stream ended without a sub_agent_done for (defensive; the backend
+      // always emits done events in the normal path).
+      settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     }
   }
@@ -4086,6 +4119,9 @@ function Composer() {
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
         appendTextDelta(bufKey, asstId, '\n[stopped]')
+        // Stop pressed mid-delegation: settle any still-running sub-agent
+        // blocks so nothing keeps pulsing after the stream is gone.
+        settleSubAgents(bufKey, asstId)
       } else {
         // The turn never started (network, bad key, server down): roll back
         // the optimistic messages and restore the draft so nothing is lost.
@@ -4141,9 +4177,11 @@ function Composer() {
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
         appendTextDelta(bufKey, asstId, '\n[stopped]')
+        settleSubAgents(bufKey, asstId)
       } else {
         setStatus('error')
         setTurnError(String((e as Error).message ?? e))
+        settleSubAgents(bufKey, asstId)
       }
     } finally {
       setSending(false)

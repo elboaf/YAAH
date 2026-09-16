@@ -477,6 +477,85 @@ async def test_parent_cancel_cancels_sub_agents(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_abort_persists_partial_transcripts(tmp_path, monkeypatch):
+    """The Stop-button path: the HTTP stream aborts, tearing down the
+    generator mid-batch. The grace-window handler must cancel the batch,
+    collect each sub-agent's partial result, and persist a 'cancelled'
+    tool row with its transcript — instead of leaving nothing behind.
+    (Regression for the stuck-pulsing spawn_agent chips.)"""
+    import backend.agent.subagents as sa
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("t")
+
+    calls = {"n": 0}
+
+    async def spawn_then_block(messages, tools=None, stream=True):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeStream([
+                {"type": "tool_calls", "tool_calls": [{
+                    "id": "p1", "type": "function",
+                    "function": {"name": "spawn_agent", "arguments": json.dumps({
+                        "agent_type": "explore", "prompt": "long research",
+                    })},
+                }]},
+                {"type": "finish", "reason": "tool_calls"},
+            ])
+        # Sub-agent: emit one text delta, then block until the cancel
+        # event interrupts the stream — the partial-run shape.
+        if calls["n"] == 2:
+
+            async def partial_stream():
+                yield {"type": "content", "text": "partial findings before stop"}
+                ev = asyncio.Event()
+                await ev.wait()
+
+            return partial_stream()
+        ev = asyncio.Event()
+        await ev.wait()
+
+    monkeypatch.setattr(sa.model_client, "chat", spawn_then_block)
+
+    # Simulate the server: run_agent consumed by a request handler whose
+    # stream is aborted client-side mid-iteration (Stop button).
+    gen = loop.run_agent(cid, "go", str(tmp_path))
+    first = await gen.__anext__()
+    assert json.loads(first)["type"] == "tool_start"
+    await asyncio.sleep(0.15)  # let the sub-agent start and stream its text
+
+    async def aborting_consumer():
+        async for _ in gen:
+            pass
+
+    consumer = asyncio.create_task(aborting_consumer())
+    await asyncio.sleep(0.1)
+    consumer.cancel()  # the abort: GeneratorExit inside run_agent
+    try:
+        await consumer
+    except asyncio.CancelledError:
+        pass
+    # Drain the generator so its CancelledError/GeneratorExit handler runs.
+    try:
+        async for _ in gen:
+            pass
+    except (asyncio.CancelledError, GeneratorExit):
+        pass
+
+    # Whatever the teardown produced must be persisted and terminal.
+    rows = await get_messages(cid)
+    tool_rows = [r for r in rows if r["role"] == "tool" and r["tool_call_id"] == "p1"]
+    assert tool_rows, "interrupted spawn_agent left no persisted row"
+    snap = tool_rows[-1]["sub_agent_transcript"]
+    assert snap is not None
+    assert snap["status"] in ("cancelled", "completed")
+    # Partial work survives in the transcript when the sub-agent got far
+    # enough to stream before the cancel event landed.
+    transcript_text = json.dumps(snap.get("transcript") or [])
+    assert "partial findings before stop" in transcript_text
+
+
+@pytest.mark.asyncio
 async def test_parent_survives_sub_agent_failure(fake_model_single, tmp_path, monkeypatch):
     """A sub-agent that errors returns a structured result; parent continues."""
     from backend.db.database import create_conversation

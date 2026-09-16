@@ -52,6 +52,10 @@ MAX_CONCURRENT = 4
 # clipped by the same budget as any other tool output.
 MAX_RESULT_CHARS = 20_000
 MAX_TRANSCRIPT_CHARS = 200_000
+# When the parent turn dies mid-batch (Stop aborted the stream, client
+# disconnected), the batch gets this many seconds to shut down via the
+# cancel event and return partial results before it is hard-cancelled.
+SPAWN_GRACE_SECONDS = 10.0
 
 
 @dataclass
@@ -427,6 +431,14 @@ async def run_sub_agent(
                         pass
             if cancel_ev.is_set():
                 status = "cancelled"
+                # Cancellation mid-stream: keep whatever the model said
+                # before the interrupt — the partial turn is the record of
+                # what the sub-agent was doing when it was stopped.
+                partial = "".join(acc)
+                if partial:
+                    _record("assistant", partial, tool_calls=None,
+                            note="interrupted mid-turn")
+                    final_text = partial
                 break
 
             content = "".join(acc)
@@ -448,6 +460,15 @@ async def run_sub_agent(
             for tc in tool_calls:
                 if cancel_ev.is_set():
                     status = "cancelled"
+                    # The model streamed this call but the parent stopped
+                    # before it executed: record the intent, not a result.
+                    _record(
+                        "assistant",
+                        "".join(acc),
+                        tool_calls=[tc],
+                        note="tool call interrupted before execution",
+                    )
+                    final_text = "".join(acc)
                     break
                 name = tc["function"]["name"]
                 try:
@@ -564,13 +585,18 @@ async def spawn_batch(
                 )
 
             def _forward(ev: dict):
-                # ev's own "type" (text/tool_start/tool_result) must not
-                # overwrite the wrapper's — spread first, override after.
+                # Wrap the inner event (text | tool_start | tool_result) as
+                # sub_agent_progress. The inner "type" cannot ride through
+                # the spread (the wrapper's type wins), so it is preserved
+                # as "kind" — the frontend routes on it.
+                inner = dict(ev)
+                kind = inner.pop("type", None)
                 on_event(
                     {
                         "agent_id": agent_id,
                         "call_id": call_id,
-                        **ev,
+                        **inner,
+                        "kind": kind,
                         "type": "sub_agent_progress",
                     }
                 )

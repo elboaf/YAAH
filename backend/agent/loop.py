@@ -692,6 +692,24 @@ async def run_agent(
                 batch = asyncio.create_task(
                     subagents_mod.spawn_batch(calls, workspace, cancel_ev, on_event=_emit)
                 )
+
+                async def _persist_spawn_result(tc: dict, result: dict) -> tuple:
+                    """Persist one spawn_agent result row: summary in the
+                    tool content, full transcript in its own column.
+                    Returns (summary, result_str) for the parent context."""
+                    transcript = result.get("transcript")
+                    summary = {k: v for k, v in result.items() if k != "transcript"}
+                    result_str = _clip_result_str(summary)
+                    await add_message(
+                        conversation_id,
+                        "tool",
+                        result_str,
+                        tool_calls=[{"id": tc.get("id", ""), "name": "spawn_agent"}],
+                        tool_call_id=tc.get("id", ""),
+                        sub_agent_transcript=summary | {"transcript": transcript},
+                    )
+                    return summary, result_str
+
                 try:
                     while True:
                         getter = asyncio.create_task(queue.get())
@@ -706,9 +724,43 @@ async def run_agent(
                     while not queue.empty():
                         yield _ndjson(queue.get_nowait())
                     batch_results = batch.result()
+                except (asyncio.CancelledError, GeneratorExit):
+                    # The turn is dying while sub-agents are in flight
+                    # (Stop aborted the stream, client disconnected).
+                    # Give the batch a grace window to shut down via the
+                    # cancel event — each sub-agent then returns a
+                    # 'cancelled' result with its partial transcript —
+                    # and persist whatever came back, so an interrupted
+                    # run leaves a record instead of vanishing. Awaits
+                    # are legal here; only yields are forbidden.
+                    cancel_ev.set()
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(batch),
+                            timeout=subagents_mod.SPAWN_GRACE_SECONDS,
+                        )
+                    except BaseException:  # noqa: BLE001 — grace expired
+                        pass
+                    try:
+                        partial = batch.result()
+                    except BaseException:  # noqa: BLE001 — hard-cancelled
+                        partial = {}
+                    for tc in spawn_calls:
+                        result = partial.get(tc.get("id", "")) or {
+                            "status": "cancelled",
+                            "output": "",
+                            "note": "run interrupted before completion",
+                        }
+                        try:
+                            await asyncio.shield(
+                                _persist_spawn_result(tc, result)
+                            )
+                        except BaseException:  # noqa: BLE001 — best effort
+                            pass
+                    raise
                 finally:
-                    # If the turn dies mid-batch (client gone, Stop pressed
-                    # during teardown), don't leave the batch running detached.
+                    # Last resort: a batch that ignored the grace window
+                    # (e.g. a wedged subprocess) must not leak detached.
                     if not batch.done():
                         batch.cancel()
 
@@ -716,12 +768,7 @@ async def run_agent(
                     result = batch_results.get(
                         tc.get("id", ""), {"error": "sub-agent produced no result"}
                     )
-                    # The parent's context and the persisted tool row hold
-                    # only the summary; the full transcript rides in its own
-                    # column so history replay stays small.
-                    transcript = result.get("transcript")
-                    summary = {k: v for k, v in result.items() if k != "transcript"}
-                    result_str = _clip_result_str(summary)
+                    summary, result_str = await _persist_spawn_result(tc, result)
                     yield _ndjson(
                         {
                             "type": "tool_result",
@@ -736,14 +783,6 @@ async def run_agent(
                             "tool_call_id": tc.get("id", ""),
                             "content": result_str,
                         }
-                    )
-                    await add_message(
-                        conversation_id,
-                        "tool",
-                        result_str,
-                        tool_calls=[{"id": tc.get("id", ""), "name": "spawn_agent"}],
-                        tool_call_id=tc.get("id", ""),
-                        sub_agent_transcript=summary | {"transcript": transcript},
                     )
 
         budget_msg = (

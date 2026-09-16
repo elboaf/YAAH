@@ -106,6 +106,10 @@ interface AgentState {
   subAgentToolStart: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
   subAgentToolResult: (key: string, msgId: string, callId: string, result: unknown) => void
   finishSubAgent: (key: string, msgId: string, callId: string, status: string, turns: number) => void
+  /** Mark every still-running sub-agent on a message as interrupted and
+   *  settle its unfinished tool chips — called when the stream ends
+   *  (done, stopped, error, or abort) so no block pulses forever. */
+  settleSubAgents: (key: string, msgId: string) => void
 
   /** Load a conversation's persisted history into its buffer. */
   loadHistory: (
@@ -467,6 +471,37 @@ export const useAgent = create<AgentState>((set, get) => ({
             }
           }
           return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  settleSubAgents: (key, msgId) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          let changed = false
+          const tcs = m.toolCalls.map((tc) => {
+            if (!tc.subAgent || tc.subAgent.status !== 'running') return tc
+            changed = true
+            const sa = tc.subAgent
+            const tools = sa.tools.map((t) =>
+              t.result === undefined ? { ...t, result: null } : t,
+            )
+            return {
+              ...tc,
+              // The tool result settles too, so the parent chip shows done.
+              result: tc.result ?? {
+                status: 'cancelled',
+                output: '',
+                note: 'run interrupted',
+              },
+              subAgent: { ...sa, status: 'cancelled' as const, tools },
+            }
+          })
+          return changed ? { ...m, toolCalls: tcs } : m
         }),
       },
     }))

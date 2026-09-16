@@ -572,6 +572,8 @@ export interface AgentEvent {
   prompt?: string
   status?: string
   turns?: number
+  /** Inner event type wrapped by sub_agent_progress (text | tool_start | tool_result). */
+  kind?: string
 }
 
 export type AgentEventHandler = (ev: AgentEvent) => void
