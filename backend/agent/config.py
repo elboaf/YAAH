@@ -64,8 +64,10 @@ DEFAULTS = {
     },
     # Computer use (Windows only): the panic hotkey force-cancels every
     # running turn. pynput syntax; invalid falls back to the default.
+    # observe_default: mouse tools return a post-action crop by default.
     "computer_use": {
-        "panic_hotkey": "<ctrl>+<alt>+<y>",
+        "panic_hotkey": "<ctrl>+<alt>+y",
+        "observe_default": True,
     },
 }
 

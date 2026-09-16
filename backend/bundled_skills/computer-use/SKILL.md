@@ -6,9 +6,10 @@ description: Playbook for driving and testing GUI apps with YAAH's computer-use 
 # Computer use: driving and testing a GUI app
 
 The tools (`screenshot`, `list_windows`, `focus_window`, `read_ui_tree`,
-`mouse_move`, `mouse_click`, `mouse_scroll`, `type_text`, `press_key`,
-`wait`) are real input on the user's desktop. Use them only for the app
-under test.
+`mouse_move`, `mouse_click`, `mouse_drag`, `mouse_scroll`, `type_text`,
+`press_key`, `wait`) are real input on the user's desktop. Use them only
+for the app under test. Mouse actions return a post-action crop by
+default (`observe: false` to skip).
 
 ## Structured first, pixels second
 

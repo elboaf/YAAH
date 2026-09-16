@@ -146,7 +146,7 @@ def _default_system_prompt() -> str:
                 "screenshot", "list_windows", "focus_window",
                 "read_ui_tree (structured UI elements of a window — prefer "
                 "this over screenshots for locating controls)",
-                "mouse_move", "mouse_click", "mouse_scroll",
+                "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
                 "type_text", "press_key", "wait",
             ]
             computer_section = _computer_use_prompt()
@@ -407,7 +407,36 @@ async def load_history(conversation_id: int) -> list:
                 ),
             }
         )
-    return out
+    return _prune_old_images(out)
+
+
+# Providers cap vision inputs (and price every one of them): a long
+# computer-use session would otherwise replay dozens of full screenshots
+# on every turn. Keep the most recent KEEP_RECENT_IMAGES images intact;
+# older ones become a text placeholder (the tool result's text survives).
+KEEP_RECENT_IMAGES = 6
+
+
+def _prune_old_images(messages: list, keep: int = KEEP_RECENT_IMAGES) -> list:
+    seen = 0
+    for m in reversed(messages):
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        has_image = False
+        for i, part in enumerate(content):
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                has_image = True
+                seen += 1
+                if seen > keep:
+                    content[i] = {
+                        "type": "text",
+                        "text": "[older screenshot pruned from context]",
+                    }
+        # a parts-list whose images were all pruned still has its text part
+        if not has_image and len(content) == 1 and isinstance(content[0], dict):
+            m["content"] = content[0].get("text", "")
+    return messages
 
 
 async def run_agent(

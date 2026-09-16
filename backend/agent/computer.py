@@ -32,8 +32,9 @@ _OBSERVE = {
         "description": (
             "Take a screenshot after acting and return it in the same "
             "result (saves a round-trip when chaining). For the position "
-            "tools this is a small crop around the action point, not the "
-            "whole monitor. Default off."
+            "tools this is a small crop around the action point. "
+            "Defaults to ON for mouse actions (config "
+            "computer_use.observe_default); pass false to skip."
         ),
     }
 }
@@ -125,6 +126,15 @@ COMPUTER_TOOLS_SCHEMA = [
                             "monitor containing that window (overrides monitor)"
                         ),
                     },
+                    "elements": {
+                        "type": "boolean",
+                        "description": (
+                            "With hwnd: draw numbered boxes on the window's "
+                            "UIA elements (set-of-marks) and return the id -> "
+                            "name/type/center list; click an element's center "
+                            "with mouse_click. Combines the tree with vision."
+                        ),
+                    },
                     "x": {"type": "integer", "description": "Region left (desktop coords, with w/h)"},
                     "y": {"type": "integer", "description": "Region top (desktop coords, with w/h)"},
                     "w": {"type": "integer", "description": "Region width"},
@@ -198,11 +208,54 @@ COMPUTER_TOOLS_SCHEMA = [
                     "x": {"type": "integer"},
                     "y": {"type": "integer"},
                     **_MONITOR_PARAM,
-                    "button": {"type": "string", "enum": ["left", "right"], "description": "Default left"},
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Default left",
+                    },
                     "double": {"type": "boolean", "description": "Double-click (default false)"},
+                    "modifier": {
+                        "type": "string",
+                        "description": (
+                            "Modifier key(s) held during the click, "
+                            '+-joined: "shift", "ctrl", "alt", "ctrl+shift"'
+                        ),
+                    },
                     **_OBSERVE,
                 },
                 "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mouse_drag",
+            "description": (
+                "Press at a start point, drag to an end point, release. "
+                "For sliders, drag-and-drop, and text selection. x/y are "
+                "relative to the given monitor's origin."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_x": {"type": "integer"},
+                    "start_y": {"type": "integer"},
+                    "x": {"type": "integer", "description": "End x"},
+                    "y": {"type": "integer", "description": "End y"},
+                    **_MONITOR_PARAM,
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right"],
+                        "description": "Default left",
+                    },
+                    "duration": {
+                        "type": "number",
+                        "description": "Drag time in seconds (default 0.3, max 3)",
+                    },
+                    **_OBSERVE,
+                },
+                "required": ["start_x", "start_y", "x", "y"],
             },
         },
     },
@@ -243,7 +296,14 @@ COMPUTER_TOOLS_SCHEMA = [
             "description": 'Press a key or chord: "enter", "esc", "ctrl+s", "alt+f4".',
             "parameters": {
                 "type": "object",
-                "properties": {"key": {"type": "string"}, **_OBSERVE},
+                "properties": {
+                    "key": {"type": "string"},
+                    "repeat": {
+                        "type": "integer",
+                        "description": "Times to press (default 1, max 25)",
+                    },
+                    **_OBSERVE,
+                },
                 "required": ["key"],
             },
         },
@@ -425,24 +485,46 @@ def _annotate(png: bytes, w: int, h: int, label_offset: list[int]) -> bytes:
     try:
         import io
 
-        from PIL import Image, ImageDraw
+        from PIL import Image
 
-        step = 200 if min(w, h) >= 1000 else 100
         img = Image.open(io.BytesIO(png)).convert("RGB")
-        d = ImageDraw.Draw(img)
-        for x in range((-label_offset[0]) % step, w, step):
-            d.line([(x, 0), (x, h)], fill=(110, 110, 110), width=1)
-            d.text((x + 3, 3), str(label_offset[0] + x), fill=(255, 220, 0))
-            d.text((x + 3, h - 14), str(label_offset[0] + x), fill=(255, 220, 0))
-        for y in range((-label_offset[1]) % step, h, step):
-            d.line([(0, y), (w, y)], fill=(110, 110, 110), width=1)
-            d.text((3, y + 3), str(label_offset[1] + y), fill=(255, 220, 0))
-            d.text((w - 40, y + 3), str(label_offset[1] + y), fill=(255, 220, 0))
+        _annotate_img(img, w, h, label_offset, 1.0)
         out = io.BytesIO()
         img.save(out, "PNG")
         return out.getvalue()
     except Exception:  # noqa: BLE001
         return png
+
+
+# Screenshots are downscaled to this long edge before storing: providers
+# cap vision inputs around this size anyway, so full-res captures only
+# cost tokens and acuity. Anthropic's guidance: 1024x768..1920x1080.
+MAX_CAPTURE_EDGE = 1568
+
+
+def _annotate_img(img, orig_w: int, orig_h: int, label_offset: list[int], scale: float):
+    """Draw rulers onto a PIL image. Tick spacing is in monitor-local
+    VALUE space (step), positions scale with the image. mutates img."""
+    from PIL import ImageDraw
+
+    step = 200 if min(orig_w, orig_h) >= 1000 else 100
+    d = ImageDraw.Draw(img)
+    img_w, img_h = img.size
+    vx = (int(label_offset[0]) // step + 1) * step
+    while vx < label_offset[0] + orig_w:
+        x = round((vx - label_offset[0]) * scale)
+        d.line([(x, 0), (x, img_h)], fill=(110, 110, 110), width=1)
+        d.text((x + 3, 3), str(vx), fill=(255, 220, 0))
+        d.text((x + 3, img_h - 14), str(vx), fill=(255, 220, 0))
+        vx += step
+    vy = (int(label_offset[1]) // step + 1) * step
+    while vy < label_offset[1] + orig_h:
+        y = round((vy - label_offset[1]) * scale)
+        d.line([(0, y), (img_w, y)], fill=(110, 110, 110), width=1)
+        d.text((3, y + 3), str(vy), fill=(255, 220, 0))
+        d.text((img_w - 40, y + 3), str(vy), fill=(255, 220, 0))
+        vy += step
+    return img
 
 
 def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **extra) -> dict:
@@ -453,7 +535,26 @@ def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **ex
     # crop_origin - monitor_origin inside the monitor.
     mon_origin = _monitor_rect(monitor)[:2]
     label_offset = [origin[0] - mon_origin[0], origin[1] - mon_origin[1]]
-    png = _annotate(png, w, h, label_offset)
+    try:
+        import io
+
+        from PIL import Image
+
+        scale = 1.0
+        img = Image.open(io.BytesIO(png)).convert("RGB")
+        if max(img.size) > MAX_CAPTURE_EDGE:
+            scale = MAX_CAPTURE_EDGE / max(img.size)
+            img = img.resize(
+                (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+                Image.LANCZOS,
+            )
+        _annotate_img(img, w, h, label_offset, scale)
+        out = io.BytesIO()
+        img.save(out, "PNG")
+        png = out.getvalue()
+        w, h = img.size
+    except Exception:  # noqa: BLE001 — store the raw capture un-annotated
+        pass
     rel = save_bytes(png, "png", "screenshots")
     out = {"image": rel, "monitor": monitor, "size": [w, h], "origin": origin}
     out.update(extra)
@@ -477,10 +578,65 @@ def _observe_crop_result(ax: int, ay: int) -> dict:
     )
 
 
+def _som_overlay(
+    rel: str, stored_w: int, stored_h: int, monitor: int, hwnd: int, limit: int = 30
+) -> dict:
+    """Set-of-marks: draw numbered boxes on the stored screenshot for the
+    window's UIA elements and return the id -> element list. Centers are
+    monitor-local, i.e. directly usable as mouse_click coordinates."""
+    from backend.agent.imagedata import IMAGES_ROOT
+
+    tree = _read_uia_tree(int(hwnd), 8, 120)
+    mon_origin = _monitor_rect(monitor)[:2]
+    mon_w = max(1, _monitor_rect(monitor)[2] - _monitor_rect(monitor)[0])
+    sx = stored_w / mon_w
+
+    out: list[dict] = []
+    for el in tree["elements"]:
+        if not el.get("name") or el.get("disabled"):
+            continue
+        cx, cy = el["center"]
+        lx, ly = round((cx - mon_origin[0]) * sx), round((cy - mon_origin[1]) * sx)
+        if not (0 <= lx < stored_w and 0 <= ly < stored_h):
+            continue
+        out.append(
+            {
+                "id": len(out),
+                "name": el["name"],
+                "type": el["type"],
+                "center": [cx - mon_origin[0], cy - mon_origin[1]],
+            }
+        )
+        if len(out) >= limit:
+            break
+
+    try:
+        import io
+
+        from PIL import Image, ImageDraw
+
+        path = IMAGES_ROOT / rel
+        img = Image.open(path).convert("RGB")
+        d = ImageDraw.Draw(img)
+        for el in out:
+            lx = round((el["center"][0]) * sx)
+            ly = round((el["center"][1]) * sx)
+            d.rectangle([lx - 11, ly - 11, lx + 11, ly + 11], outline=(255, 60, 60), width=2)
+            d.text((lx + 13, ly - 8), str(el["id"]), fill=(255, 60, 60))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        path.write_bytes(buf.getvalue())
+    except Exception as e:  # noqa: BLE001 — boxes are best-effort
+        return {"elements": out, "truncated": tree["truncated"],
+                "overlay_error": f"{type(e).__name__}: {e}"}
+    return {"elements": out, "truncated": tree["truncated"]}
+
+
 async def screenshot(
     workspace: str = "",
     monitor: int = 1,
     hwnd: int = 0,
+    elements: bool = False,
     x: int = 0,
     y: int = 0,
     w: int = 0,
@@ -499,6 +655,14 @@ async def screenshot(
             mon = _monitor_for_window(int(hwnd))
             result = _screenshot_result(mon)
             result["hwnd"] = int(hwnd)
+            if elements:
+                try:
+                    result.update(
+                        _som_overlay(result["image"], result["size"][0],
+                                     result["size"][1], mon, int(hwnd))
+                    )
+                except Exception as e:  # noqa: BLE001
+                    result["elements_error"] = f"{type(e).__name__}: {e}"
             return result
         return _screenshot_result(monitor)
     except Exception as e:  # noqa: BLE001
@@ -926,8 +1090,35 @@ def _cursor_feedback(result: dict, ax: int, ay: int, observe: bool) -> dict:
     return result
 
 
+def _observe_default() -> bool:
+    from backend.agent.config import load_config
+
+    return bool((load_config().get("computer_use") or {}).get("observe_default", True))
+
+
+def _resolve_observe(observe: bool | None) -> bool:
+    return _observe_default() if observe is None else bool(observe)
+
+
+def _parse_modifiers(modifier: str):
+    """'+-joined' modifier names -> pynput Key objects ([] on garbage)."""
+    if not modifier:
+        return []
+    try:
+        from pynput import keyboard as pkb
+
+        return [
+            _parse_key(p, pkb)
+            for p in str(modifier).replace("+", "+").split("+")
+            if p.strip()
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 async def mouse_move(
-    workspace: str = "", x: int = 0, y: int = 0, monitor: int = 1, observe: bool = False
+    workspace: str = "", x: int = 0, y: int = 0, monitor: int = 1,
+    observe: bool | None = None,
 ) -> dict:
     paused = _pause_check()
     if paused:
@@ -938,7 +1129,8 @@ async def mouse_move(
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
     return _cursor_feedback(
-        {"moved": [int(x), int(y)], "monitor": int(monitor), "ok": True}, ax, ay, observe
+        {"moved": [int(x), int(y)], "monitor": int(monitor), "ok": True},
+        ax, ay, _resolve_observe(observe),
     )
 
 
@@ -949,8 +1141,50 @@ async def mouse_click(
     monitor: int = 1,
     button: str = "left",
     double: bool = False,
-    observe: bool = False,
+    modifier: str = "",
+    observe: bool | None = None,
 ) -> dict:
+    paused = _pause_check()
+    if paused:
+        return paused
+    if button not in ("left", "right", "middle"):
+        return {"error": f"bad button: {button}"}
+    try:
+        from pynput import mouse as pmouse
+
+        ax, ay = _to_desktop(x, y, monitor)
+        _send_move_abs(ax, ay)
+        mods = _parse_modifiers(modifier)
+        m = _mouse()
+        if mods:
+            with _keyboard().pressed(*mods):
+                m.click(pmouse.Button[button], 2 if double else 1)
+        else:
+            m.click(pmouse.Button[button], 2 if double else 1)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+    return _cursor_feedback(
+        {
+            "clicked": [int(x), int(y)], "monitor": int(monitor),
+            "button": button, "double": double, "ok": True,
+        },
+        ax, ay, _resolve_observe(observe),
+    )
+
+
+async def mouse_drag(
+    workspace: str = "",
+    start_x: int = 0,
+    start_y: int = 0,
+    x: int = 0,
+    y: int = 0,
+    monitor: int = 1,
+    button: str = "left",
+    duration: float = 0.3,
+    observe: bool | None = None,
+) -> dict:
+    import asyncio
+
     paused = _pause_check()
     if paused:
         return paused
@@ -959,23 +1193,35 @@ async def mouse_click(
     try:
         from pynput import mouse as pmouse
 
-        ax, ay = _to_desktop(x, y, monitor)
-        _send_move_abs(ax, ay)
-        _mouse().click(pmouse.Button[button], 2 if double else 1)
+        sx, sy = _to_desktop(start_x, start_y, monitor)
+        ex, ey = _to_desktop(x, y, monitor)
+        _send_move_abs(sx, sy)
+        m = _mouse()
+        m.press(pmouse.Button[button])
+        # Interpolated moves: many apps need intermediate motion to track
+        # a drag, so walk the line rather than jumping to the end.
+        steps = 12
+        duration = min(max(0.05, float(duration)), 3.0)
+        for i in range(1, steps + 1):
+            ix = round(sx + (ex - sx) * i / steps)
+            iy = round(sy + (ey - sy) * i / steps)
+            _send_move_abs(ix, iy)
+            await asyncio.sleep(duration / steps)
+        m.release(pmouse.Button[button])
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
     return _cursor_feedback(
         {
-            "clicked": [int(x), int(y)], "monitor": int(monitor),
-            "button": button, "double": double, "ok": True,
+            "dragged": [[int(start_x), int(start_y)], [int(x), int(y)]],
+            "monitor": int(monitor), "button": button, "ok": True,
         },
-        ax, ay, observe,
+        ex, ey, _resolve_observe(observe),
     )
 
 
 async def mouse_scroll(
     workspace: str = "", x: int = 0, y: int = 0, monitor: int = 1,
-    amount: int = 3, observe: bool = False,
+    amount: int = 3, observe: bool | None = None,
 ) -> dict:
     paused = _pause_check()
     if paused:
@@ -988,7 +1234,7 @@ async def mouse_scroll(
         return {"error": f"{type(e).__name__}: {e}"}
     return _cursor_feedback(
         {"scrolled": int(amount), "at": [int(x), int(y)], "monitor": int(monitor), "ok": True},
-        ax, ay, observe,
+        ax, ay, _resolve_observe(observe),
     )
 
 
@@ -1003,24 +1249,28 @@ async def type_text(workspace: str = "", text: str = "", observe: bool = False) 
     return _finish({"typed": len(text), "ok": True}, observe)
 
 
-async def press_key(workspace: str = "", key: str = "", observe: bool = False) -> dict:
+async def press_key(
+    workspace: str = "", key: str = "", repeat: int = 1, observe: bool = False
+) -> dict:
     paused = _pause_check()
     if paused:
         return paused
     parts = [p.strip() for p in (key or "").split("+") if p.strip()]
     if not parts:
         return {"error": "bad key: empty"}
+    repeat = min(max(1, int(repeat)), 25)
     try:
         from pynput import keyboard as pkb
 
         mods = [_parse_key(p, pkb) for p in parts[:-1]]
         last = _parse_key(parts[-1], pkb)
         kb = _keyboard()
-        with kb.pressed(*mods):
-            kb.tap(last)
+        for _ in range(repeat):
+            with kb.pressed(*mods):
+                kb.tap(last)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish({"pressed": key, "ok": True}, observe)
+    return _finish({"pressed": key, "repeat": repeat, "ok": True}, observe)
 
 
 def _parse_key(name: str, pkb):
@@ -1049,6 +1299,7 @@ COMPUTER_EXECUTORS.update(
         "read_ui_tree": read_ui_tree,
         "mouse_move": mouse_move,
         "mouse_click": mouse_click,
+        "mouse_drag": mouse_drag,
         "mouse_scroll": mouse_scroll,
         "type_text": type_text,
         "press_key": press_key,

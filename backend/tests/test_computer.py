@@ -34,6 +34,12 @@ def fake_input(monkeypatch):
         def __init__(self):
             self.calls = []
 
+        def press(self, button):
+            self.calls.append(("press", button))
+
+        def release(self, button):
+            self.calls.append(("release", button))
+
         def click(self, button, count):
             self.calls.append(("click", button, count))
 
@@ -82,6 +88,8 @@ def fake_input(monkeypatch):
         computer_mod, "_cursor_pos", lambda: moves[-1] if moves else (0, 0)
     )
     monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 1)
+    # observe defaults OFF in fixtures: observe tests opt in explicitly.
+    monkeypatch.setattr(computer_mod, "_observe_default", lambda: False)
     return mouse, keyboard, moves
 
 
@@ -229,7 +237,7 @@ def test_click_button_and_double(fake_input):
 
 
 def test_click_rejects_bad_button(fake_input):
-    res = asyncio.run(computer_mod.mouse_click(x=1, y=2, button="middle"))
+    res = asyncio.run(computer_mod.mouse_click(x=1, y=2, button="side"))
     assert "error" in res
 
 
@@ -487,6 +495,117 @@ def test_annotate_failure_returns_raw(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "PIL.Image", None)
     res = computer_mod._annotate(b"\x89PNG", 10, 10, [0, 0])
     assert res == b"\x89PNG"  # best-effort: raw bytes passthrough
+
+
+# ---------------------------------------------------------------- v0.9.4: drag, modifiers, repeat, observe default, downscale, prune, SoM
+
+def test_observe_default_on_for_mouse_tools(fake_activity, fake_input, fake_capture, monkeypatch):
+    # config observe_default=True (the shipped default): a click with no
+    # observe argument returns the post-action crop.
+    monkeypatch.setattr(computer_mod, "_observe_default", lambda: True)
+    res = asyncio.run(computer_mod.mouse_click(x=1, y=2))
+    assert res["image"] == "screenshots/crop.png"
+
+
+def test_observe_false_skips_crop(fake_activity, fake_input, fake_capture):
+    res = asyncio.run(computer_mod.mouse_click(x=1, y=2, observe=False))
+    assert "image" not in res
+    assert fake_capture == []
+
+
+def test_click_modifier_keys(fake_activity, fake_input):
+    mouse, kb, _ = fake_input
+    res = asyncio.run(computer_mod.mouse_click(x=5, y=5, modifier="ctrl+shift"))
+    assert res["ok"] is True
+    assert mouse.calls[0][0] == "click"
+    assert len(kb.taps) == 2  # both modifiers were held
+
+
+def test_click_middle_button(fake_input):
+    mouse, _, _ = fake_input
+    res = asyncio.run(computer_mod.mouse_click(x=1, y=1, button="middle"))
+    assert res["ok"] is True
+    assert mouse.calls[0][1].name == "middle"
+
+
+def test_mouse_drag_interpolates_and_releases(fake_activity, fake_input):
+    mouse, _, moves = fake_input
+    res = asyncio.run(computer_mod.mouse_drag(start_x=10, start_y=10, x=110, y=60))
+    assert res["ok"] is True
+    assert res["dragged"] == [[10, 10], [110, 60]]
+    assert mouse.calls == [("press", mouse.calls[0][1]), ("release", mouse.calls[-1][1])]
+    assert len(moves) == 13  # start + 12 interpolated steps
+    assert moves[0] == (10, 10) and moves[-1] == (110, 60)
+    # monotonic progression along the line
+    assert all(moves[i][0] <= moves[i + 1][0] for i in range(12))
+
+
+def test_mouse_drag_bad_button(fake_input):
+    res = asyncio.run(computer_mod.mouse_drag(start_x=0, start_y=0, x=5, y=5, button="middle"))
+    assert "error" in res
+
+
+def test_press_key_repeat(fake_input):
+    _, kb, _ = fake_input
+    res = asyncio.run(computer_mod.press_key(key="enter", repeat=3))
+    assert res["repeat"] == 3 and len(kb.taps) == 3
+    res = asyncio.run(computer_mod.press_key(key="enter", repeat=99))
+    assert res["repeat"] == 25  # capped
+
+
+def test_som_elements_overlay(fake_capture, monkeypatch):
+    monkeypatch.setattr(computer_mod, "_monitor_for_window", lambda hwnd: 2)
+    monkeypatch.setattr(
+        computer_mod, "_som_overlay",
+        lambda rel, w, h, mon, hwnd: {
+            "elements": [{"id": 0, "name": "Launch", "type": "ButtonControl",
+                          "center": [120, 40]}],
+            "truncated": False,
+        })
+    res = asyncio.run(computer_mod.screenshot(hwnd=99, elements=True))
+    assert res["elements"][0]["name"] == "Launch"
+    assert res["hwnd"] == 99
+
+
+def test_store_png_downscales_large_captures(monkeypatch, tmp_path):
+    pytest.importorskip("PIL")
+    import io
+
+    from PIL import Image
+
+    import backend.agent.imagedata as imagedata
+
+    monkeypatch.setattr(computer_mod, "_monitor_rect", lambda m: [0, 0, 2560, 1440])
+    monkeypatch.setattr(imagedata, "save_bytes", lambda raw, ext, sub: "screenshots/ds.png")
+    buf = io.BytesIO()
+    Image.new("RGB", (2560, 1440), (40, 40, 40)).save(buf, "PNG")
+    res = computer_mod._store_png(buf.getvalue(), 2560, 1440, 1, [0, 0])
+    assert res["size"] == [1568, 882]  # long edge capped
+    assert res["origin"] == [0, 0]
+
+
+def test_prune_old_images_keeps_recent():
+    from backend.agent.loop import _prune_old_images
+
+    def msg_with_images(n):
+        return {"role": "tool", "content": [
+            {"type": "text", "text": f"shot {n}"},
+            {"type": "image_url", "image_url": {"url": f"data:{n}"}},
+        ]}
+
+    msgs = [msg_with_images(i) for i in range(10)]
+    out = _prune_old_images(msgs, keep=2)
+    imgs = [
+        p["image_url"]["url"]
+        for m in out for p in (m["content"] if isinstance(m["content"], list) else [])
+        if isinstance(p, dict) and p.get("type") == "image_url"
+    ]
+    assert imgs == ["data:8", "data:9"]  # only the last two survive
+    # pruned slots are text placeholders, not dangling parts
+    assert any(
+        isinstance(p, dict) and "pruned" in p.get("text", "")
+        for m in out for p in (m["content"] if isinstance(m["content"], list) else [])
+    )
 
 
 # ---------------------------------------------------------------- live integration
