@@ -78,8 +78,9 @@ def _agents_notes(workspace: str) -> str:
 
 def _computer_use_prompt() -> str:
     """Computer-use section for the system prompt (Windows local only).
-    Scope discipline + the pause contract + the panic hotkey; the deep
-    playbook lives in the bundled `computer-use` skill."""
+    General principles only — tool mechanics live in the tool schemas,
+    depth in the bundled computer-use skill. Kept deliberately lean:
+    hyper-specific rules accrete per dogfood session and go stale."""
     from backend.agent import computer as computer_mod
 
     return f"""
@@ -88,64 +89,34 @@ Computer use (desktop tools):
 - These tools exist for TESTING apps: launch the app under test via the
   shell tools, find it with list_windows, then drive and verify its UI.
   Do not move the user's mouse or type into windows outside the task.
-- screenshot only when the task requires seeing the screen — never to
-  inspect the user's other work. Screenshots go to the model provider.
 - Prefer shell/file tools for anything reachable that way; computer use
   is for GUI behavior you must observe or exercise.
 - Structured first, pixels second: read_ui_tree gives exact element
-  names, values and center coordinates for a window — use it to locate
-  controls and to verify state (edit values, checkmarks) instead of
-  screenshotting. Fall back to screenshot only when the tree is empty
-  or useless (games, remote streams render as pixels with no tree).
-- COORDINATE RULE (never break this): pixel coordinates you measure in
-  a screenshot are MONITOR-LOCAL. Pass them to mouse tools with the
-  same monitor number (mouse_click(x=..., y=..., monitor=N)) — never
-  convert by hand and never send screenshot pixels as desktop coords.
-  Every mouse action reports the real cursor position ("cursor") and
-  its monitor; if cursor_monitor differs from the target window's
-  monitor, STOP and re-check instead of clicking again.
-- Screenshots carry labeled coordinate rulers — read the ruler value
-  nearest the target and click that number. Visual estimation from a
-  full screenshot is systematically scaled-off; for small targets take
-  a region screenshot(x=,y=,w=,h=) first and aim inside it.
-- After a missed click, do NOT re-guess from the full screenshot. Use
-  the observe crop (or take a region shot near the target): its labels
-  and origin tell you the exact delta to correct. One measured
-  correction beats three estimates. Vary BOTH axes when correcting —
-  if clicks show the host window's title bar, the content starts LOWER
-  (remote-desktop windows like Parsec have their own chrome at the top
-  of the capture; the streamed content begins below it).
-- If a result says "user-activity pause", the user is using the machine
-  right now: wait a few seconds and retry when idle. Honor what tool
-  results tell you — an ok:false note or a warning is an instruction,
-  not a suggestion; pressing on after one is how one mistake becomes
-  five.
-- VERIFY with decisive evidence, cheaply. A single frame of a video
-  proves nothing about playback: the test for "is it playing" is two
-  screenshots ~2 seconds apart (frames differ = playing). A mute icon,
-  a missing indicator, a frame that "looks different" from minutes ago
-  — none of that is a conclusion; it is a hint at best. Verification
-  costs at most two tool calls: if two checks didn't settle it, say
-  what you know and ask, don't keep poking.
-- NEVER toggle state you haven't verified. Clicking a video to pause
-  when it was already paused plays it. Prefer the action that is safe
-  regardless of state (media play/pause key for media; explicit menu
-  commands over toggle clicks), act ONCE, then verify with the
-  two-frame rule.
-- read_ui_tree results with "truncated": true are NOT exhaustive —
-  never conclude something doesn't exist from a truncated or
-  depth-limited read. When a cheap scan needs to settle presence
-  (a tab, a button, a message), screenshot the relevant strip; pixels
-  don't truncate.
-- Be decisive: most desktop requests are 2-4 actions (find window,
-  focus, act, verify). Long chains of re-verification and re-reading
-  the same UI are a failure mode, not thoroughness. When a request is
-  done, say so; when it can't be completed, say that instead of
-  wandering.
-- Multi-monitor: list_windows tags each window with the monitor it is
-  on. To look at a specific window, pass its hwnd to screenshot(hwnd=...)
-  — a bare screenshot captures only the primary monitor and may not show
-  the window at all.
+  names, values and center coordinates — prefer it for locating
+  controls and verifying state; fall back to screenshots when the tree
+  is empty or useless.
+- COORDINATE CONTRACT: pixel coordinates from a screenshot are
+  MONITOR-LOCAL — pass them to mouse tools with that monitor number,
+  never converted by hand. Screenshots carry labeled coordinate
+  rulers: click values read off a ruler, never visually estimated
+  positions.
+- CORRECTIONS come from measurement: after a miss, use the observe
+  crop or a region screenshot to measure the delta and adjust once.
+  Re-guessing from the full screen, or repeating the same coordinates,
+  is a failure pattern, not persistence.
+- Honor what tool results tell you: ok:false notes and warnings are
+  instructions. If a result says "user-activity pause", the user is at
+  the machine — wait a few seconds and retry when idle.
+- VERIFY outcomes against a baseline: state claims need before/after
+  evidence, weak indicators are hints rather than conclusions, and two
+  checks that don't settle it mean report what you know and ask.
+  Prefer state-independent actions over toggles, and never toggle
+  state you haven't verified.
+- Be decisive: most desktop requests are 2-4 actions (find, focus,
+  act, verify). When a request is done, say so; when it can't be
+  completed, say that instead of wandering.
+- Screenshot only when the task requires seeing the screen — never to
+  inspect the user's other work. Screenshots go to the model provider.
 - {computer_mod.panic_notice()}"""
 
 

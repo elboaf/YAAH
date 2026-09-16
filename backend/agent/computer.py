@@ -64,8 +64,12 @@ COMPUTER_TOOLS_SCHEMA = [
                 "PREFERRED way to locate controls and verify UI state — "
                 "far more reliable than screenshotting and guessing pixel "
                 "positions. Click an element's center with mouse_click. "
-                "Falls back to screenshot for pixel-only surfaces (games, "
-                "remote streams) that expose no tree."
+                "A result with \"truncated\": true is NOT exhaustive — "
+                "never conclude an element doesn't exist from a "
+                "depth- or node-limited read; raise the limits or "
+                "screenshot instead. Falls back to screenshot for "
+                "pixel-only surfaces (games, remote streams) that expose "
+                "no tree."
             ),
             "parameters": {
                 "type": "object",
