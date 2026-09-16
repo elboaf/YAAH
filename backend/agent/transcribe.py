@@ -127,7 +127,13 @@ def _child_env(binary: Path) -> dict:
 
 
 def transcribe_local(wav_path: str) -> str:
-    """Run whisper.cpp on a 16 kHz mono WAV; return the transcript text."""
+    """Run whisper.cpp on a 16 kHz mono WAV; return the transcript text.
+
+    Runs with ``-l auto`` so the source language is detected per recording
+    (multilingual dictation), and remembers what was detected — the PTT
+    answer router uses it to reject answers dictated in a language the
+    option labels aren't written in.
+    """
     binary = find_binary()
     model = find_model()
     if not binary or not model:
@@ -142,6 +148,8 @@ def transcribe_local(wav_path: str) -> str:
         str(wav_path),
         "-nt",  # no timestamps — plain text for the composer
         "-np",  # no progress prints on stderr
+        "-l",
+        "auto",  # detect the language; reported on stderr
     ]
     proc = subprocess.run(
         cmd,
@@ -156,7 +164,35 @@ def transcribe_local(wav_path: str) -> str:
         raise RuntimeError(
             f"whisper failed ({proc.returncode}): {detail[-1] if detail else 'no output'}"
         )
+    _set_last_language(_parse_whisper_language(proc.stderr))
     return proc.stdout.strip()
+
+
+# Language detected by the most recent transcription (BCP-47-ish short code
+# like "en", or None). Module-level because the whisper.cpp CLI reports the
+# detection on stderr of its own process; the HTTP layer reads it right after
+# the call. Single-user desktop app — no cross-request interleaving concern.
+_LAST_LANG: str | None = None
+
+
+def _set_last_language(lang: str | None) -> None:
+    global _LAST_LANG
+    _LAST_LANG = lang
+
+
+def last_language() -> str | None:
+    """Language detected by the most recent transcription, if reported."""
+    return _LAST_LANG
+
+
+def _parse_whisper_language(stderr: str) -> str | None:
+    """Pull the auto-detected language out of whisper.cpp's stderr line
+    ``whisper_full_with_state: auto-detected language: en`` (best effort —
+    older builds or a fixed -l flag simply report nothing)."""
+    import re
+
+    m = re.search(r"auto-detected language:\s*([A-Za-z]{2,8})", stderr or "")
+    return m.group(1).lower() if m else None
 
 
 async def transcribe_cloud(wav_path: str, endpoint: str, api_key: str, model: str) -> str:
@@ -182,7 +218,11 @@ async def transcribe_cloud(wav_path: str, endpoint: str, api_key: str, model: st
             res = await client.post(url, headers=headers, files={"file": ("audio.wav", f, "audio/wav")}, data=data)
     if res.status_code != 200:
         raise RuntimeError(f"Cloud transcription failed ({res.status_code}): {res.text[:200]}")
-    return (res.json().get("text") or "").strip()
+    body = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
+    # OpenAI-compatible servers may include the detected language; absent is fine.
+    lang = body.get("language")
+    _set_last_language(lang.lower() if isinstance(lang, str) and lang else None)
+    return (body.get("text") or "").strip()
 
 
 def save_wav(pcm16_bytes: bytes, sample_rate: int = 16000) -> str:

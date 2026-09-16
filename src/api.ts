@@ -380,8 +380,11 @@ export interface TranscribeStatus {
 
 export const transcribeStatus = () => api<TranscribeStatus>('/api/transcribe/status')
 
-/** Transcribe a WAV blob (raw body — keeps the sidecar multipart-free). */
-export async function transcribeAudio(wav: Blob): Promise<string> {
+/** Transcribe a WAV blob (raw body — keeps the sidecar multipart-free).
+ *  `language` is the whisper-detected source language (null when the engine
+ *  doesn't report one) — the PTT answer router uses it to reject answers
+ *  dictated in a language the option labels aren't written in. */
+export async function transcribeAudio(wav: Blob): Promise<{ text: string; language: string | null }> {
   let res: Response
   try {
     res = await fetch(url('/api/transcribe'), {
@@ -396,7 +399,7 @@ export async function transcribeAudio(wav: Blob): Promise<string> {
   }
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(body.detail || `transcription failed (${res.status})`)
-  return body.text ?? ''
+  return { text: body.text ?? '', language: body.language ?? null }
 }
 
 // ---------------------------------------------------------------- tts (read-aloud)

@@ -65,7 +65,42 @@ async def test_transcribe_endpoint_local(monkeypatch):
             headers={"Content-Type": "audio/wav"},
         )
     assert res.status_code == 200
-    assert res.json() == {"text": "hello from stub"}
+    body = res.json()
+    assert body["text"] == "hello from stub"
+    assert "language" in body  # None from the stub, but always reported
+
+
+@pytest.mark.asyncio
+async def test_transcribe_endpoint_reports_language(monkeypatch):
+    """The detected language rides along with the transcript (PTT answer
+    routing uses it to reject cross-language answers)."""
+    def fake_local(wav_path):
+        transcribe._set_last_language("en")
+        return "option b please"
+
+    monkeypatch.setattr(transcribe, "transcribe_local", fake_local)
+    monkeypatch.setattr(transcribe, "local_available", lambda: True)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        res = await client.post(
+            "/api/transcribe",
+            content=b"\x00\x01" * 3200,
+            headers={"Content-Type": "audio/wav"},
+        )
+    assert res.status_code == 200
+    assert res.json() == {"text": "option b please", "language": "en"}
+
+
+def test_parse_whisper_language():
+    """Pulls the code out of whisper.cpp's stderr detection line; absent → None."""
+    stderr = (
+        "whisper_init_from_file_with_params_no_state: loading model\n"
+        "whisper_full_with_state: auto-detected language: en (p = 0.987)\n"
+    )
+    assert transcribe._parse_whisper_language(stderr) == "en"
+    assert transcribe._parse_whisper_language("no detection here") is None
+    assert transcribe._parse_whisper_language("") is None
 
 
 @pytest.mark.asyncio

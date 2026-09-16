@@ -953,7 +953,7 @@ async def api_transcribe(request: Request):
             os.unlink(wav_path)
         except OSError:
             pass
-    return {"text": text}
+    return {"text": text, "language": transcribe.last_language()}
 
 
 # ---- Text-to-speech: read-aloud of agent responses (Kokoro via sherpa-onnx) ----
