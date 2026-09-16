@@ -7,6 +7,20 @@ export interface ToolCall {
   name: string
   args?: unknown
   result?: unknown
+  /** Live sub-agent run state (spawn_agent calls only). */
+  subAgent?: SubAgentRun
+}
+
+/** A live sub-agent run (spawn_agent tool call in flight). */
+export interface SubAgentRun {
+  agentId: number
+  agentType: string
+  prompt: string
+  status: 'running' | 'completed' | 'error' | 'cancelled' | 'max_turns'
+  /** Streamed text deltas from the sub-agent's own turns. */
+  text: string
+  /** Tool chips inside the sub-agent's block. */
+  tools: Array<{ id: string; name: string; args?: unknown; result?: unknown }>
 }
 
 export interface ChatMessage {
@@ -83,6 +97,13 @@ interface AgentState {
   removeMessage: (key: string, msgId: string) => void
   startToolCall: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
   finishToolCall: (key: string, msgId: string, callId: string, result: unknown) => void
+
+  /** Sub-agent live state (spawn_agent calls). */
+  startSubAgent: (key: string, msgId: string, callId: string, agentId: number, agentType: string, prompt: string) => void
+  subAgentTextDelta: (key: string, msgId: string, callId: string, text: string) => void
+  subAgentToolStart: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
+  subAgentToolResult: (key: string, msgId: string, callId: string, result: unknown) => void
+  finishSubAgent: (key: string, msgId: string, callId: string, status: string, turns: number) => void
 
   /** Load a conversation's persisted history into its buffer. */
   loadHistory: (
@@ -303,6 +324,136 @@ export const useAgent = create<AgentState>((set, get) => ({
           for (let i = tcs.length - 1; i >= 0; i--) {
             if (tcs[i].id === callId && tcs[i].result === undefined) {
               tcs[i] = { ...tcs[i], result }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  // ---- sub-agent live state ----
+  // All five helpers locate the spawn_agent ToolCall by (msgId, callId) and
+  // mutate its subAgent field. Events carry call_id so parallel agents in
+  // one parent turn route to the right block.
+
+  startSubAgent: (key, msgId, callId, agentId, agentType, prompt) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && !tcs[i].subAgent) {
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: {
+                  agentId,
+                  agentType,
+                  prompt,
+                  status: 'running',
+                  text: '',
+                  tools: [],
+                },
+              }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentTextDelta: (key, msgId, callId, text) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              tcs[i] = { ...tcs[i], subAgent: { ...sa, text: sa.text + text } }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentToolStart: (key, msgId, callId, name, args) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: {
+                  ...sa,
+                  tools: [...sa.tools, { id: `sat${sa.tools.length + 1}`, name, args }],
+                },
+              }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentToolResult: (key, msgId, callId, result) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              const tools = [...sa.tools]
+              for (let j = tools.length - 1; j >= 0; j--) {
+                if (tools[j].result === undefined) {
+                  tools[j] = { ...tools[j], result }
+                  break
+                  }
+              }
+              tcs[i] = { ...tcs[i], subAgent: { ...sa, tools } }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  finishSubAgent: (key, msgId, callId, status, turns) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: { ...sa, status: status as SubAgentRun['status'] },
+              }
               break
             }
           }

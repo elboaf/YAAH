@@ -49,7 +49,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
+import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
@@ -409,6 +409,7 @@ function AskUserTrace({ tc }: { tc: ToolCall }) {
 /** Icon + color identity per tool, so rows read at a glance. */
 function toolGlyph(name: string): string {
   if (name === 'ask_user') return '?'
+  if (name === 'spawn_agent') return '⧉'
   if (name === 'read_file') return '▤'
   if (name === 'search_files') return '⌕'
   if (name === 'bash' || name === 'powershell') return '❯'
@@ -422,6 +423,7 @@ function toolGlyph(name: string): string {
 
 function toolGlyphColor(name: string): string {
   if (name === 'ask_user') return 'text-orange-400'
+  if (name === 'spawn_agent') return 'text-fuchsia-400'
   if (name === 'read_file') return 'text-sky-400'
   if (name === 'search_files') return 'text-violet-400'
   if (name === 'bash') return 'text-emerald-400'
@@ -564,6 +566,10 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
     )
   })()
 
+  if (tc.subAgent) {
+    return <SubAgentBlock run={tc.subAgent} />
+  }
+
   return (
     <div className="font-mono text-[11px]">
       <button
@@ -579,6 +585,75 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
             args: {JSON.stringify(tc.args ?? {}, null, 2)}
           </div>
           {tc.result !== undefined && <div className="mt-1 max-h-96 overflow-auto">{body}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Live nested transcript for one spawn_agent call: the sub-agent's own
+ *  text deltas and tool chips, indented under the parent turn. Collapses
+ *  to a status line when the run finishes; expands on click. */
+function SubAgentBlock({ run }: { run: SubAgentRun }) {
+  const [open, setOpen] = useState(true)
+  const running = run.status === 'running'
+  const statusLabel =
+    run.status === 'running'
+      ? 'running'
+      : run.status === 'completed'
+        ? 'done'
+        : run.status === 'error'
+          ? 'error'
+          : run.status === 'cancelled'
+            ? 'stopped'
+            : 'max turns'
+  const statusColor = running
+    ? 'text-amber-300'
+    : run.status === 'error'
+      ? 'text-red-400'
+      : 'text-emerald-400'
+  return (
+    <div className="my-1 rounded border border-zinc-800 bg-zinc-900/40">
+      <button
+        className="flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[10px]"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-fuchsia-400">{'\u29c9'}</span>
+        <span className="text-zinc-300">{run.agentType}</span>
+        <span className="truncate text-zinc-600">{run.prompt}</span>
+        <span className={`ml-auto shrink-0 ${statusColor}`}>
+          {running && <span className="run-pulse mr-1">{'\u25cf'}</span>}
+          {statusLabel}
+        </span>
+        <span className="shrink-0 text-zinc-600">{open ? '\u25be' : '\u25b8'}</span>
+      </button>
+      {open && (
+        <div className="border-t border-zinc-800/80 px-3 py-1.5">
+          {run.tools.length > 0 && (
+            <div className="mb-1 flex flex-wrap gap-1">
+              {run.tools.map((t) => (
+                <span
+                  key={t.id}
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                    t.result !== undefined
+                      ? 'bg-zinc-800/70 text-zinc-400'
+                      : 'bg-zinc-700/60 text-zinc-200'
+                  }`}
+                >
+                  <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
+                  <span>{t.name}</span>
+                  {t.result === undefined && (
+                    <span className="run-pulse text-amber-300">{'\u25cf'}</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+          {run.text && (
+            <div className="whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-zinc-400">
+              {run.text}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -277,6 +277,44 @@ def bodies_for_prompt(names: list[str]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def load_skill_into_messages(args: dict, loaded_skills: list[str], messages: list) -> dict:
+    """Handle a load_skill tool call: append the skill's body to the system
+    prompt message so the rest of the turn follows it. Returns the tool
+    result dict. Never raises.
+
+    Shared by the parent loop and the sub-agent runner (a sub-agent loads
+    skills into its OWN context the same way the parent does)."""
+    name = str(args.get("name") or "").strip()
+    skill = get_skill(name)
+    if skill is None:
+        available = ", ".join(s.name for s in model_invocable()) or "none available"
+        return {
+            "error": f"Unknown skill: {name}",
+            "available": available,
+        }
+    if skill.name in loaded_skills:
+        return {
+            "loaded": skill.name,
+            "note": "already loaded this turn",
+        }
+    loaded_skills.append(skill.name)
+    # messages[0] is the system prompt; extend it in place so every later
+    # model call in this turn sees the skill's instructions. The folder
+    # path lets the model read the skill's own supporting files.
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = (
+            f"{messages[0]['content']}\n\n---\n\n"
+            f"# Loaded skill: {skill.name}\n\n"
+            f"The skill's folder (any supporting files it references live "
+            f"here) is: {Path(skill.path).parent}\n\n{skill.body}"
+        )
+    return {
+        "loaded": skill.name,
+        "description": skill.description,
+        "folder": str(Path(skill.path).parent),
+    }
+
+
 def refresh() -> list[dict]:
     """Force a rescan (Settings / UI refresh button)."""
     scan_skills()

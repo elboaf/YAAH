@@ -550,13 +550,28 @@ export const disconnectRemote = () =>
 // ---------------------------------------------------------------- agent stream
 
 export interface AgentEvent {
-  type: 'text' | 'tool_start' | 'tool_result' | 'done' | 'error' | 'stopped'
+  type:
+    | 'text'
+    | 'tool_start'
+    | 'tool_result'
+    | 'sub_agent_spawned'
+    | 'sub_agent_progress'
+    | 'sub_agent_done'
+    | 'done'
+    | 'error'
+    | 'stopped'
   text?: string
   name?: string
   args?: unknown
   result?: unknown
   message?: string
   call_id?: string
+  /** Sub-agent identity (sub_agent_* events). */
+  agent_id?: number
+  agent_type?: string
+  prompt?: string
+  status?: string
+  turns?: number
 }
 
 export type AgentEventHandler = (ev: AgentEvent) => void
