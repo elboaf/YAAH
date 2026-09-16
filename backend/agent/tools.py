@@ -482,6 +482,51 @@ TOOLS_SCHEMA += [
     {
         "type": "function",
         "function": {
+            "name": "spawn_agent",
+            "description": (
+                "Delegate a self-contained piece of work to a sub-agent: a "
+                "nested agent with its own fresh context that runs the task "
+                "independently and returns its final message as this tool's "
+                "result. The sub-agent sees ONLY the prompt you pass — "
+                "include file paths, error messages, and decisions it needs. "
+                "Launch several spawn_agent calls in the same turn to run "
+                "them in parallel (max 4 at once). Use for: isolated "
+                "research (explore), parallel independent subtasks, or work "
+                "whose intermediate steps would bloat this conversation. "
+                "Do NOT use for small tasks that need this conversation's "
+                "context, or anything requiring a user decision mid-task — "
+                "sub-agents cannot ask the user questions. Say one line "
+                "about what you're delegating and why BEFORE the call — "
+                "the user is watching and an unannounced spawn reads as a "
+                "hang."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_type": {
+                        "type": "string",
+                        "description": (
+                            "Which sub-agent to run: 'general-purpose' (all "
+                            "tools) or 'explore' (read-only research), or a "
+                            "user-defined agent name."
+                        ),
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Fully self-contained task description for the "
+                            "sub-agent. It sees nothing else from this "
+                            "conversation."
+                        ),
+                    },
+                },
+                "required": ["agent_type", "prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "load_skill",
             "description": (
                 "Load a skill's full instructions into this conversation. "

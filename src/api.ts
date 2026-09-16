@@ -380,8 +380,11 @@ export interface TranscribeStatus {
 
 export const transcribeStatus = () => api<TranscribeStatus>('/api/transcribe/status')
 
-/** Transcribe a WAV blob (raw body — keeps the sidecar multipart-free). */
-export async function transcribeAudio(wav: Blob): Promise<string> {
+/** Transcribe a WAV blob (raw body — keeps the sidecar multipart-free).
+ *  `language` is the whisper-detected source language (null when the engine
+ *  doesn't report one) — the PTT answer router uses it to reject answers
+ *  dictated in a language the option labels aren't written in. */
+export async function transcribeAudio(wav: Blob): Promise<{ text: string; language: string | null }> {
   let res: Response
   try {
     res = await fetch(url('/api/transcribe'), {
@@ -396,7 +399,7 @@ export async function transcribeAudio(wav: Blob): Promise<string> {
   }
   const body = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(body.detail || `transcription failed (${res.status})`)
-  return body.text ?? ''
+  return { text: body.text ?? '', language: body.language ?? null }
 }
 
 // ---------------------------------------------------------------- tts (read-aloud)
@@ -547,13 +550,30 @@ export const disconnectRemote = () =>
 // ---------------------------------------------------------------- agent stream
 
 export interface AgentEvent {
-  type: 'text' | 'tool_start' | 'tool_result' | 'done' | 'error' | 'stopped'
+  type:
+    | 'text'
+    | 'tool_start'
+    | 'tool_result'
+    | 'sub_agent_spawned'
+    | 'sub_agent_progress'
+    | 'sub_agent_done'
+    | 'done'
+    | 'error'
+    | 'stopped'
   text?: string
   name?: string
   args?: unknown
   result?: unknown
   message?: string
   call_id?: string
+  /** Sub-agent identity (sub_agent_* events). */
+  agent_id?: number
+  agent_type?: string
+  prompt?: string
+  status?: string
+  turns?: number
+  /** Inner event type wrapped by sub_agent_progress (text | tool_start | tool_result). */
+  kind?: string
 }
 
 export type AgentEventHandler = (ev: AgentEvent) => void

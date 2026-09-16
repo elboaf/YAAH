@@ -19,6 +19,7 @@ from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
+from backend.agent import subagents as subagents_mod
 from backend.agent.tools import execute_tool, get_schemas, workspace_root
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.db.database import add_message, get_conversation, get_messages
@@ -158,6 +159,8 @@ def _default_system_prompt() -> str:
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
         "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull)",
+        "spawn_agent (delegate self-contained work to a sub-agent; see the "
+        "sub-agents index below)",
     ]
     prompt = f"""You are an expert AI coding agent working inside a user's project workspace.
 
@@ -180,7 +183,11 @@ Guidelines:
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
 - Commit meaningful work with git_add/git_commit when the user asks for it.
-- Be concise in prose; let tools do the talking.
+- Narrate as you work: open with one or two lines on what you're about to
+  do, say what a tool call or delegation is for before making it, and
+  comment on what came back before deciding the next step. Short, plain
+  lines — the user is watching the stream, and a long silence reads as a
+  hang. Never hold all your prose back for one final dump.
 - Paths are relative to the workspace root.
 
 Interview the user (ask_user tool):
@@ -201,6 +208,9 @@ Interview the user (ask_user tool):
     skill_index = skill_registry.index_for_prompt()
     if skill_index:
         prompt += "\n\n" + skill_index
+
+    # Sub-agent index: the parent needs to know what it can delegate to.
+    prompt += "\n\n" + subagents_mod.index_for_prompt()
     return prompt
 
 # Per-conversation cancellation flags checked between model/tool steps.
@@ -256,40 +266,9 @@ async def _load_skill(
     loaded_skills: list[str],
     messages: list,
 ) -> dict:
-    """Handle the model's load_skill call: append the skill's body to the
-    system prompt message so the rest of the turn follows it. Returns the
-    tool result dict. Never raises."""
-    name = str(args.get("name") or "").strip()
-    skill = skill_registry.get_skill(name)
-    if skill is None:
-        available = ", ".join(
-            s.name for s in skill_registry.model_invocable()
-        ) or "none available"
-        return {
-            "error": f"Unknown skill: {name}",
-            "available": available,
-        }
-    if skill.name in loaded_skills:
-        return {
-            "loaded": skill.name,
-            "note": "already loaded this turn",
-        }
-    loaded_skills.append(skill.name)
-    # messages[0] is the system prompt; extend it in place so every later
-    # model call in this turn sees the skill's instructions. The folder
-    # path lets the model read the skill's own supporting files.
-    if messages and messages[0].get("role") == "system":
-        messages[0]["content"] = (
-            f"{messages[0]['content']}\n\n---\n\n"
-            f"# Loaded skill: {skill.name}\n\n"
-            f"The skill's folder (any supporting files it references live "
-            f"here) is: {Path(skill.path).parent}\n\n{skill.body}"
-        )
-    return {
-        "loaded": skill.name,
-        "description": skill.description,
-        "folder": str(Path(skill.path).parent),
-    }
+    """Handle the model's load_skill call. The real logic lives in
+    skills.load_skill_into_messages so the sub-agent runner shares it."""
+    return skill_registry.load_skill_into_messages(args, loaded_skills, messages)
 
 
 def _cancelled(conversation_id: int) -> bool:
@@ -595,8 +574,14 @@ async def run_agent(
                 }
             )
 
-            # Execute each requested tool call in order
-            for tc in tool_calls:
+            # Partition this step's tool calls: spawn_agent delegations run
+            # in parallel (foreground — the parent blocks until all finish);
+            # every other tool stays sequential (v1 contract).
+            spawn_calls = [tc for tc in tool_calls if tc["function"]["name"] == "spawn_agent"]
+            regular_calls = [tc for tc in tool_calls if tc["function"]["name"] != "spawn_agent"]
+
+            # Execute each regular tool call in order
+            for tc in regular_calls:
                 if cancel_ev.is_set():
                     yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                     return
@@ -674,6 +659,135 @@ async def run_agent(
                     tool_call_id=tc.get("id", ""),
                     images=[image_rel] if image_rel else None,
                 )
+
+            # Run every spawn_agent delegation of this step in parallel.
+            # Progress events flow through a queue so the generator can
+            # yield them live while the batch task runs.
+            if spawn_calls and not cancel_ev.is_set():
+                calls = []
+                for i, tc in enumerate(spawn_calls):
+                    try:
+                        args = json.loads(tc["function"]["arguments"] or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    calls.append(
+                        {
+                            "call_id": tc.get("id", ""),
+                            "agent_id": i,
+                            "agent_type": args.get("agent_type"),
+                            "prompt": args.get("prompt"),
+                            "args": args,
+                        }
+                    )
+                    yield _ndjson(
+                        {
+                            "type": "tool_start",
+                            "name": "spawn_agent",
+                            "args": {"agent_type": calls[-1]["agent_type"], "prompt": calls[-1]["prompt"]},
+                            "call_id": tc.get("id", ""),
+                        }
+                    )
+
+                queue: asyncio.Queue = asyncio.Queue()
+
+                def _emit(ev: dict) -> None:
+                    queue.put_nowait(ev)
+
+                batch = asyncio.create_task(
+                    subagents_mod.spawn_batch(calls, workspace, cancel_ev, on_event=_emit)
+                )
+
+                async def _persist_spawn_result(tc: dict, result: dict) -> tuple:
+                    """Persist one spawn_agent result row: summary in the
+                    tool content, full transcript in its own column.
+                    Returns (summary, result_str) for the parent context."""
+                    transcript = result.get("transcript")
+                    summary = {k: v for k, v in result.items() if k != "transcript"}
+                    result_str = _clip_result_str(summary)
+                    await add_message(
+                        conversation_id,
+                        "tool",
+                        result_str,
+                        tool_calls=[{"id": tc.get("id", ""), "name": "spawn_agent"}],
+                        tool_call_id=tc.get("id", ""),
+                        sub_agent_transcript=summary | {"transcript": transcript},
+                    )
+                    return summary, result_str
+
+                try:
+                    while True:
+                        getter = asyncio.create_task(queue.get())
+                        done, _ = await asyncio.wait(
+                            {getter, batch}, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if getter in done:
+                            yield _ndjson(getter.result())
+                        if batch in done:
+                            getter.cancel()
+                            break
+                    while not queue.empty():
+                        yield _ndjson(queue.get_nowait())
+                    batch_results = batch.result()
+                except (asyncio.CancelledError, GeneratorExit):
+                    # The turn is dying while sub-agents are in flight
+                    # (Stop aborted the stream, client disconnected).
+                    # Give the batch a grace window to shut down via the
+                    # cancel event — each sub-agent then returns a
+                    # 'cancelled' result with its partial transcript —
+                    # and persist whatever came back, so an interrupted
+                    # run leaves a record instead of vanishing. Awaits
+                    # are legal here; only yields are forbidden.
+                    cancel_ev.set()
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(batch),
+                            timeout=subagents_mod.SPAWN_GRACE_SECONDS,
+                        )
+                    except BaseException:  # noqa: BLE001 — grace expired
+                        pass
+                    try:
+                        partial = batch.result()
+                    except BaseException:  # noqa: BLE001 — hard-cancelled
+                        partial = {}
+                    for tc in spawn_calls:
+                        result = partial.get(tc.get("id", "")) or {
+                            "status": "cancelled",
+                            "output": "",
+                            "note": "run interrupted before completion",
+                        }
+                        try:
+                            await asyncio.shield(
+                                _persist_spawn_result(tc, result)
+                            )
+                        except BaseException:  # noqa: BLE001 — best effort
+                            pass
+                    raise
+                finally:
+                    # Last resort: a batch that ignored the grace window
+                    # (e.g. a wedged subprocess) must not leak detached.
+                    if not batch.done():
+                        batch.cancel()
+
+                for tc in spawn_calls:
+                    result = batch_results.get(
+                        tc.get("id", ""), {"error": "sub-agent produced no result"}
+                    )
+                    summary, result_str = await _persist_spawn_result(tc, result)
+                    yield _ndjson(
+                        {
+                            "type": "tool_result",
+                            "name": "spawn_agent",
+                            "result": summary,
+                            "call_id": tc.get("id", ""),
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": result_str,
+                        }
+                    )
 
         budget_msg = (
             f"Step budget ({max_steps}) exhausted — raise it in "

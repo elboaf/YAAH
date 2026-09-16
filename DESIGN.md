@@ -26,6 +26,7 @@ colors:
   tool-shell: "#34d399"
   tool-web: "#22d3ee"
   tool-image: "#f472b6"
+  tool-delegate: "#e879f9"
 typography:
   label:
     fontFamily: "JetBrains Mono, Consolas, monospace"
@@ -126,7 +127,7 @@ A near-monochrome zinc console where one blue accent marks human intent and a sm
 - **Ask Orange** (#f97316, deep #c2410c): the agent-is-asking channel — question card border, option selection, the pulsing `?`. Distinct from amber so "busy" and "waiting on you" never blur.
 
 ### Tertiary
-- **Tool Spectrum** (read #38bdf8 · search #a78bfa · shell #34d399 · web #22d3ee · image #f472b6 · edit #fbbf24): per-tool glyph identity inside chips and traces. Sanctioned to appear anywhere a tool is named — not elsewhere.
+- **Tool Spectrum** (read #38bdf8 · search #a78bfa · shell #34d399 · web #22d3ee · image #f472b6 · delegate #e879f9 · edit #fbbf24): per-tool glyph identity inside chips and traces. Sanctioned to appear anywhere a tool is named — not elsewhere. Delegate (fuchsia) marks sub-agent delegation (spawn_agent) and its nested transcript blocks.
 
 ### Neutral
 - **Console Background** (#18181b): app shell and panels.

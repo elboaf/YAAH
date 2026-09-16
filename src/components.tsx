@@ -49,7 +49,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall } from './store'
+import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
@@ -165,6 +165,101 @@ function AskOptionRow({
 /** Live question waiting for the user's answer; rendered above the composer
  *  while the agent blocks on ask_user. Options submit directly; 'Something
  *  else…' reveals a free-text field. */
+
+/** Route a dictated answer to an ask_user question. Returns the matched
+ *  option label, null when nothing matches (transcript is the free-text
+ *  answer), or false when the transcript is in a different language than
+ *  the labels (a match would not mean what the user thinks it means).
+ *
+ *  Matching is deliberately forgiving — dictation is lossy: case and
+ *  punctuation are ignored, a leading "the" is dropped, and a transcript
+ *  that merely CONTAINS an option label counts ("I think option B" → B).
+ *  A bare letter ("b", "option b") matches the option at that position.
+ *  No substring matching: "no" must never match "Not now".
+ *
+ *  `whisperLang` (BCP-47-ish code from /api/transcribe) sharpens the gate:
+ *  labels are UI strings in one script, so a transcript dictated in a
+ *  clearly different language is rejected up front. When absent, the
+ *  transcript's own character script stands in. */
+export function matchOptionLabel(
+  transcript: string,
+  labels: string[],
+  whisperLang?: string | null,
+): string | null | false {
+  const t = transcript.trim().toLowerCase().replace(/[.!?,:;]+$/g, '').trim()
+  if (!t || labels.length === 0) return null
+  const langOf = (s: string) => {
+    const letters = s.match(/\p{L}/gu) ?? []
+    if (letters.length === 0) return null
+    const latin = letters.filter((ch) => /[\u0000-\u024F\u1E00-\u1EFF]/u.test(ch)).length
+    return latin / letters.length >= 0.6 ? 'latin' : 'other'
+  }
+  // Languages whose script is decisively not Latin — a transcript in one of
+  // these cannot be answering labels written in a Latin script.
+  const NON_LATIN = /^(zh|ja|ko|ru|uk|be|bg|sr|mk|ar|he|fa|ur|hi|bn|ta|te|th|km|my|el|ka|hy|yi)/
+  let tLang: string | null = null
+  if (whisperLang) tLang = NON_LATIN.test(whisperLang) ? 'other' : 'latin'
+  const labelLangs = labels.map(langOf)
+  const labelsLatin = labelLangs.some((l) => l === 'latin')
+  if (tLang === null) tLang = langOf(t) // fall back to the transcript's script
+  if (tLang && ((tLang === 'other' && labelsLatin) || (tLang === 'latin' && labelLangs.every((l) => l === 'other'))))
+    return false
+  const norm = (s: string) =>
+    s
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
+      .replace(/\s+/g, ' ')
+  const normed = labels.map((l) => ({ raw: l, norm: norm(l) }))
+  // 1. Exact (normalized) match.
+  const exact = normed.find((x) => x.norm === t)
+  if (exact) return exact.raw
+  // 2. Bare letter / ordinal: "b", "option b", "the second one" → position.
+  const ordinals = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth']
+  const mLetter = t.match(/^(?:option\s+)?([a-z])$/)
+  if (mLetter) {
+    const idx = mLetter[1].charCodeAt(0) - 97
+    if (idx >= 0 && idx < normed.length) return normed[idx].raw
+  }
+  const mOrd = t.match(/^(?:the\s+)?(first|second|third|fourth|fifth|sixth)(?:\s+one)?$/)
+  if (mOrd) {
+    const idx = ordinals.indexOf(mOrd[1])
+    if (idx >= 0 && idx < normed.length) return normed[idx].raw
+  }
+  // 3. Transcript contains a label (≥ 4 chars so "no" can't ride along).
+  const contains = normed.find((x) => x.norm.length >= 4 && t.includes(x.norm))
+  if (contains) return contains.raw
+  // 4. Levenshtein ≤ 1 per word for a single-word label ("Continue" →
+  //    "continue" misheard as "continues").
+  for (const x of normed) {
+    if (x.norm.split(' ').length !== 1) continue
+    for (const w of t.split(' ')) {
+      if (levenshtein(w, x.norm) <= 1) return x.raw
+    }
+  }
+  return null
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  const m = a.length
+  const n = b.length
+  if (!m || !n) return Math.max(m, n)
+  let prev = Array.from({ length: n + 1 }, (_, i) => i)
+  for (let i = 1; i <= m; i++) {
+    const cur = [i]
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      )
+    }
+    prev = cur
+  }
+  return prev[n]
+}
+
 function AskUserCard({ pending }: { pending: PendingQuestion }) {
   const conversationId = useAgent((s) => s.conversationId)
   const setPendingQuestion = useAgent((s) => s.setPendingQuestion)
@@ -172,6 +267,9 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
   const [custom, setCustom] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // Set when push-to-talk routes a transcript into the free-text box, so the
+  // field opens pre-filled and visibly active instead of silently eating it.
+  const [voiceSeeded, setVoiceSeeded] = useState(false)
 
   const answer = (text: string) => {
     if (conversationId === null || submitting) return
@@ -188,6 +286,30 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
         setSubmitting(false)
       })
   }
+
+  // Push-to-talk answer routing: the PTT release dispatches 'yaah-answer-ask'
+  // (window event, because the hotkey fires while the card is unmounted or
+  // the webview unfocused). An exact/fuzzy option match answers directly;
+  // anything else becomes the free-text answer. PTT transcription is slow
+  // relative to a click, so a stale event for an already-answered question
+  // must be dropped, not submitted to whatever ask came next.
+  useEffect(() => {
+    const onVoiceAnswer = (e: Event) => {
+      const { callId, answer: ans } = (e as CustomEvent<{ callId: string; answer: string }>).detail
+      if (callId !== pending.callId || !ans || submitting) return
+      const labels = pending.options.map((o) => o.label)
+      const picked = matchOptionLabel(ans, labels)
+      if (picked) {
+        answer(picked)
+      } else {
+        setCustomOpen(true)
+        setCustom(ans)
+        setVoiceSeeded(true)
+      }
+    }
+    window.addEventListener('yaah-answer-ask', onVoiceAnswer)
+    return () => window.removeEventListener('yaah-answer-ask', onVoiceAnswer)
+  })
 
   return (
     <div className="rounded-lg border border-orange-700/60 bg-zinc-900 p-3 shadow-lg">
@@ -217,10 +339,15 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
           <div className="flex gap-1.5">
             <input
               autoFocus
-              className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-orange-500 focus:outline-none"
-              placeholder="Type your own answer…"
+              className={`flex-1 rounded border bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-orange-500 focus:outline-none ${
+                voiceSeeded ? 'border-orange-500/70' : 'border-zinc-700'
+              }`}
+              placeholder={voiceSeeded ? 'Voice answer staged — edit or Send' : 'Type your own answer…'}
               value={custom}
-              onChange={(e) => setCustom(e.target.value)}
+              onChange={(e) => {
+                setCustom(e.target.value)
+                setVoiceSeeded(false)
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && custom.trim()) {
                   e.preventDefault()
@@ -282,6 +409,7 @@ function AskUserTrace({ tc }: { tc: ToolCall }) {
 /** Icon + color identity per tool, so rows read at a glance. */
 function toolGlyph(name: string): string {
   if (name === 'ask_user') return '?'
+  if (name === 'spawn_agent') return '⧉'
   if (name === 'read_file') return '▤'
   if (name === 'search_files') return '⌕'
   if (name === 'bash' || name === 'powershell') return '❯'
@@ -295,6 +423,7 @@ function toolGlyph(name: string): string {
 
 function toolGlyphColor(name: string): string {
   if (name === 'ask_user') return 'text-orange-400'
+  if (name === 'spawn_agent') return 'text-fuchsia-400'
   if (name === 'read_file') return 'text-sky-400'
   if (name === 'search_files') return 'text-violet-400'
   if (name === 'bash') return 'text-emerald-400'
@@ -437,6 +566,10 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
     )
   })()
 
+  if (tc.subAgent) {
+    return <SubAgentBlock run={tc.subAgent} />
+  }
+
   return (
     <div className="font-mono text-[11px]">
       <button
@@ -452,6 +585,75 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
             args: {JSON.stringify(tc.args ?? {}, null, 2)}
           </div>
           {tc.result !== undefined && <div className="mt-1 max-h-96 overflow-auto">{body}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Live nested transcript for one spawn_agent call: the sub-agent's own
+ *  text deltas and tool chips, indented under the parent turn. Collapses
+ *  to a status line when the run finishes; expands on click. */
+function SubAgentBlock({ run }: { run: SubAgentRun }) {
+  const [open, setOpen] = useState(true)
+  const running = run.status === 'running'
+  const statusLabel =
+    run.status === 'running'
+      ? 'running'
+      : run.status === 'completed'
+        ? 'done'
+        : run.status === 'error'
+          ? 'error'
+          : run.status === 'cancelled'
+            ? 'stopped'
+            : 'max turns'
+  const statusColor = running
+    ? 'text-amber-300'
+    : run.status === 'error'
+      ? 'text-red-400'
+      : 'text-emerald-400'
+  return (
+    <div className="my-1 rounded border border-zinc-800 bg-zinc-900/40">
+      <button
+        className="flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[10px]"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-fuchsia-400">{'\u29c9'}</span>
+        <span className="text-zinc-300">{run.agentType}</span>
+        <span className="truncate text-zinc-600">{run.prompt}</span>
+        <span className={`ml-auto shrink-0 ${statusColor}`}>
+          {running && <span className="run-pulse mr-1">{'\u25cf'}</span>}
+          {statusLabel}
+        </span>
+        <span className="shrink-0 text-zinc-600">{open ? '\u25be' : '\u25b8'}</span>
+      </button>
+      {open && (
+        <div className="border-t border-zinc-800/80 px-3 py-1.5">
+          {run.tools.length > 0 && (
+            <div className="mb-1 flex flex-wrap gap-1">
+              {run.tools.map((t) => (
+                <span
+                  key={t.id}
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                    t.result !== undefined
+                      ? 'bg-zinc-800/70 text-zinc-400'
+                      : 'bg-zinc-700/60 text-zinc-200'
+                  }`}
+                >
+                  <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
+                  <span>{t.name}</span>
+                  {t.result === undefined && (
+                    <span className="run-pulse text-amber-300">{'\u25cf'}</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+          {run.text && (
+            <div className="whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-zinc-400">
+              {run.text}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2531,7 +2733,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
           <p className="mt-1 text-[10px] text-zinc-600">
             System-wide push-to-talk: hold the key to record, release to transcribe and send
-            immediately (works even when YAAH is in the background). Esc cancels capture; "off"
+            immediately (works even when YAAH is in the background). Pressing it while the agent is
+            running stops the run first; while a question card is up, the transcript answers it —
+            say an option, or anything else for a custom answer. Esc cancels capture; "off"
             disables push-to-talk.
           </p>
         </div>
@@ -3254,6 +3458,12 @@ function Composer() {
     appendTextDelta,
     startToolCall,
     finishToolCall,
+    startSubAgent,
+    subAgentTextDelta,
+    subAgentToolStart,
+    subAgentToolResult,
+    finishSubAgent,
+    settleSubAgents,
     setStatus,
     setError,
     setConversationId,
@@ -3264,6 +3474,13 @@ function Composer() {
     removeMessage,
   } = useAgent()
   const abortController = useAgent((s) => s.abortController)
+  // Live ask_user card, for PTT question routing (mirror kept in a ref below
+  // so the global-hotkey handlers never go stale).
+  const pendingQuestion = useAgent((s) => {
+    if (s.pendingQuestion === null) return null
+    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    return s.pendingQuestion.convKey === key ? s.pendingQuestion : null
+  })
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -3328,7 +3545,7 @@ function Composer() {
       setVoiceState('transcribing')
       try {
         const blob = await recorderRef.current!.stop()
-        const text = await transcribeAudio(blob)
+        const { text } = await transcribeAudio(blob)
         if (text) {
           setInput((cur) => (cur ? `${cur.trimEnd()} ${text}` : text))
         } else {
@@ -3383,13 +3600,40 @@ function Composer() {
   // silent no-op. PTT takes the mic from click-dictation (which is
   // cancelled and discarded). Registration failure → warning toast, PTT
   // stays off until re-picked in Settings.
+  //
+  // Interrupt (2026-09-13): pressing the hotkey while a turn is running
+  // cancels that turn first (same path as the Stop button), so a new
+  // dictation never queues behind a long run.
+  //
+  // Question routing (2026-09-13): while an ask_user card is up, the PTT
+  // transcript is routed to that question instead of the composer — a fuzzy
+  // match on an option label answers it directly, anything else fills the
+  // free-text "Something else…" box. Dictated in a different language than
+  // the labels? Rejected with a hint (a match would not mean what the user
+  // thinks it means).
   const [pttHotkey, setPttHotkey] = useState('') // currently registered accelerator
   const pttHeldRef = useRef(false)
   const pttBusyRef = useRef(false) // a release is still transcribing/sending
   const prevTitleRef = useRef('')
   const voiceStateRef = useRef<'idle' | 'recording' | 'transcribing'>('idle')
-  // Assigned after `send` is declared below (TDZ-safe via declaration here).
-  const sendRef = useRef<(text?: string) => Promise<void>>(async () => {})
+  // Live ask_user card (the stream handler owns the store copy; PTT reads it
+  // from a ref so the hotkey handlers never go stale). `anyQuestion` is the
+  // unfiltered store value: a question in a background conversation must
+  // still shield its turn from the interrupt below.
+  const pendingQuestionRef = useRef<PendingQuestion | null>(null)
+  const anyQuestionRef = useRef<PendingQuestion | null>(null)
+  useEffect(() => {
+    pendingQuestionRef.current = pendingQuestion
+  }, [pendingQuestion])
+  const anyQuestion = useAgent((s) => s.pendingQuestion)
+  useEffect(() => {
+    anyQuestionRef.current = anyQuestion
+  }, [anyQuestion])
+  // Assigned after `send`/`stop` are declared below (TDZ-safe via refs).
+  const sendRef = useRef<(text?: string, opts?: { interrupt?: boolean }) => Promise<void>>(
+    async () => {},
+  )
+  const stopRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     voiceStateRef.current = voiceState
@@ -3408,6 +3652,13 @@ function Composer() {
   const pttPress = async () => {
     if (pttBusyRef.current) return // previous release is still in flight
     if (voiceStateRef.current === 'transcribing') return
+    if (status === 'thinking' || status === 'running-tool') {
+      // A turn is running: stop it (Stop-button path, server + client) so
+      // the dictation lands now instead of queueing behind the run — unless
+      // the turn is blocked on an ask_user question, which a PTT press is
+      // about to answer; cancelling it would destroy the question.
+      if (!anyQuestionRef.current) stopRef.current()
+    }
     if (voiceStateRef.current === 'recording') {
       // Take the mic over from click-dictation; discard its audio.
       try {
@@ -3454,11 +3705,33 @@ function Composer() {
     pttBusyRef.current = true
     try {
       const blob = await rec.stop()
-      const text = await transcribeAudio(blob)
-      if (text) {
-        void sendRef.current(text)
+      const { text, language } = await transcribeAudio(blob)
+      if (!text) {
+        // Empty transcript after real speech: whisper heard noise — stay quiet.
+        return
       }
-      // Empty transcript after real speech: whisper heard noise — stay quiet.
+      const q = pendingQuestionRef.current
+      if (q) {
+        const picked = matchOptionLabel(text, q.options.map((o) => o.label), language)
+        if (picked === false) {
+          pushReject(
+            `Heard "${text.trim().slice(0, 40)}" — dictated in a different language than the options; use one of the labels or Something else…`,
+          )
+          return
+        }
+        if (picked !== null) {
+          window.dispatchEvent(
+            new CustomEvent('yaah-answer-ask', { detail: { callId: q.callId, answer: picked } }),
+          )
+          return
+        }
+        // No option matched: the transcript IS the free-text answer.
+        window.dispatchEvent(
+          new CustomEvent('yaah-answer-ask', { detail: { callId: q.callId, answer: text.trim() } }),
+        )
+        return
+      }
+      void sendRef.current(text)
     } catch (e) {
       pushReject(`Dictation failed: ${(e as Error).message}`)
     } finally {
@@ -3501,8 +3774,11 @@ function Composer() {
 
   useEffect(() => {
     let disposed = false
-    const press = () => void pttPress()
-    const release = () => void pttRelease()
+    // Route through pttHandlerRef (reassigned every render), not the
+    // mount-time closures: pttPress reads `status`, and a closure captured
+    // at mount would see 'idle' forever — the interrupt would never fire.
+    const press = () => pttHandlerRef.current({ state: 'Pressed' })
+    const release = () => pttHandlerRef.current({ state: 'Released' })
     ;(async () => {
       try {
         const cfg = await getConfig()
@@ -3714,27 +3990,68 @@ function Composer() {
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
       }
+    } else if (ev.type === 'sub_agent_spawned') {
+      setStatus('running-tool')
+      startSubAgent(
+        bufKey,
+        asstId,
+        ev.call_id ?? '',
+        ev.agent_id ?? 0,
+        ev.agent_type ?? 'sub-agent',
+        ev.prompt ?? '',
+      )
+      pushLog({ kind: 'tool', name: 'spawn_agent', args: { agent_type: ev.agent_type, prompt: ev.prompt } })
+    } else if (ev.type === 'sub_agent_progress') {
+      if (ev.text) subAgentTextDelta(bufKey, asstId, ev.call_id ?? '', ev.text)
+      if (ev.kind === 'tool_start') {
+        subAgentToolStart(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+      } else if (ev.kind === 'tool_result') {
+        subAgentToolResult(bufKey, asstId, ev.call_id ?? '', ev.result)
+      }
+    } else if (ev.type === 'sub_agent_done') {
+      finishSubAgent(bufKey, asstId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0)
+      pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
     } else if (ev.type === 'error') {
       setStatus('error')
       setError(ev.message ?? 'Unknown agent error')
       setTurnError(ev.message ?? 'Unknown agent error')
+      settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     } else if (ev.type === 'stopped') {
       setStatus('idle')
       appendTextDelta(bufKey, asstId, '\n[stopped]')
+      settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     } else if (ev.type === 'done') {
       setStatus('idle')
+      // A completed turn must leave no block pulsing: settle anything the
+      // stream ended without a sub_agent_done for (defensive; the backend
+      // always emits done events in the normal path).
+      settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
     }
   }
 
-  const send = async (pttText?: string) => {
+  const send = async (pttText?: string, opts?: { interrupt?: boolean }) => {
     // Push-to-talk passes explicit text: it sends as its own message and
     // must not touch (or clear) whatever draft is sitting in the composer.
     const isPtt = pttText !== undefined
+    const interrupting = isPtt && opts?.interrupt === true
     const text = (pttText ?? input).trim()
-    if ((!text && (isPtt || (attachments.length === 0 && images.length === 0))) || sending) return
+    if ((!text && (isPtt || (attachments.length === 0 && images.length === 0))) || (sending && !interrupting))
+      return
+    // PTT interrupt: the hotkey press already cancelled the running turn
+    // (stopRef → Stop-button path). That turn's stream is still winding down
+    // in its own send closure — the one that owns setSending(false) and
+    // setAbortController(null) — so wait for it to release the store's
+    // AbortController before touching any shared state. Bounded at 5s; the
+    // abort makes the in-flight fetch throw immediately, so this is fast.
+    if (interrupting) {
+      for (let i = 0; i < 100; i++) {
+        if (!useAgent.getState().abortController) break
+        await new Promise<void>((r) => setTimeout(r, 50))
+      }
+    }
     setSending(true)
     setSendError(null)
 
@@ -3802,6 +4119,9 @@ function Composer() {
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
         appendTextDelta(bufKey, asstId, '\n[stopped]')
+        // Stop pressed mid-delegation: settle any still-running sub-agent
+        // blocks so nothing keeps pulsing after the stream is gone.
+        settleSubAgents(bufKey, asstId)
       } else {
         // The turn never started (network, bad key, server down): roll back
         // the optimistic messages and restore the draft so nothing is lost.
@@ -3857,9 +4177,11 @@ function Composer() {
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
         appendTextDelta(bufKey, asstId, '\n[stopped]')
+        settleSubAgents(bufKey, asstId)
       } else {
         setStatus('error')
         setTurnError(String((e as Error).message ?? e))
+        settleSubAgents(bufKey, asstId)
       }
     } finally {
       setSending(false)
@@ -3872,6 +4194,10 @@ function Composer() {
     if (conversationId !== null) void cancelAgent(conversationId).catch(() => {})
     abortController?.abort()
   }
+  // Keep the PTT handlers pointed at the latest stop (stale-closure shield).
+  stopRef.current = stop
+  // Keep the PTT handlers pointed at the latest stop (stale-closure shield).
+  stopRef.current = stop
 
   return (
     <div

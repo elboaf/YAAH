@@ -7,6 +7,20 @@ export interface ToolCall {
   name: string
   args?: unknown
   result?: unknown
+  /** Live sub-agent run state (spawn_agent calls only). */
+  subAgent?: SubAgentRun
+}
+
+/** A live sub-agent run (spawn_agent tool call in flight). */
+export interface SubAgentRun {
+  agentId: number
+  agentType: string
+  prompt: string
+  status: 'running' | 'completed' | 'error' | 'cancelled' | 'max_turns'
+  /** Streamed text deltas from the sub-agent's own turns. */
+  text: string
+  /** Tool chips inside the sub-agent's block. */
+  tools: Array<{ id: string; name: string; args?: unknown; result?: unknown }>
 }
 
 export interface ChatMessage {
@@ -16,6 +30,8 @@ export interface ChatMessage {
   /** Stored image rel paths (backend/data/images/...), rendered via imageUrl(). */
   images?: string[]
   toolCalls?: ToolCall[]
+  /** Sub-agent run snapshot (persisted spawn_agent result, history load). */
+  subAgent?: SubAgentRun
 }
 
 export type AgentStatus = 'idle' | 'thinking' | 'running-tool' | 'error'
@@ -84,6 +100,17 @@ interface AgentState {
   startToolCall: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
   finishToolCall: (key: string, msgId: string, callId: string, result: unknown) => void
 
+  /** Sub-agent live state (spawn_agent calls). */
+  startSubAgent: (key: string, msgId: string, callId: string, agentId: number, agentType: string, prompt: string) => void
+  subAgentTextDelta: (key: string, msgId: string, callId: string, text: string) => void
+  subAgentToolStart: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
+  subAgentToolResult: (key: string, msgId: string, callId: string, result: unknown) => void
+  finishSubAgent: (key: string, msgId: string, callId: string, status: string, turns: number) => void
+  /** Mark every still-running sub-agent on a message as interrupted and
+   *  settle its unfinished tool chips — called when the stream ends
+   *  (done, stopped, error, or abort) so no block pulses forever. */
+  settleSubAgents: (key: string, msgId: string) => void
+
   /** Load a conversation's persisted history into its buffer. */
   loadHistory: (
     convId: number,
@@ -92,6 +119,13 @@ interface AgentState {
       role: string
       content: string
       images?: string[] | null
+      sub_agent_transcript?: {
+        agent_type?: string
+        status?: string
+        turns?: number
+        output?: string
+        transcript?: Array<{ role: string; content: string; name?: string }>
+      } | null
       tool_call_id?: string | null
       tool_calls: Array<{
         id?: string
@@ -312,6 +346,167 @@ export const useAgent = create<AgentState>((set, get) => ({
     }))
   },
 
+  // ---- sub-agent live state ----
+  // All five helpers locate the spawn_agent ToolCall by (msgId, callId) and
+  // mutate its subAgent field. Events carry call_id so parallel agents in
+  // one parent turn route to the right block.
+
+  startSubAgent: (key, msgId, callId, agentId, agentType, prompt) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && !tcs[i].subAgent) {
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: {
+                  agentId,
+                  agentType,
+                  prompt,
+                  status: 'running',
+                  text: '',
+                  tools: [],
+                },
+              }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentTextDelta: (key, msgId, callId, text) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              tcs[i] = { ...tcs[i], subAgent: { ...sa, text: sa.text + text } }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentToolStart: (key, msgId, callId, name, args) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: {
+                  ...sa,
+                  tools: [...sa.tools, { id: `sat${sa.tools.length + 1}`, name, args }],
+                },
+              }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentToolResult: (key, msgId, callId, result) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              const tools = [...sa.tools]
+              for (let j = tools.length - 1; j >= 0; j--) {
+                if (tools[j].result === undefined) {
+                  tools[j] = { ...tools[j], result }
+                  break
+                  }
+              }
+              tcs[i] = { ...tcs[i], subAgent: { ...sa, tools } }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  finishSubAgent: (key, msgId, callId, status, turns) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: { ...sa, status: status as SubAgentRun['status'] },
+              }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  settleSubAgents: (key, msgId) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          let changed = false
+          const tcs = m.toolCalls.map((tc) => {
+            if (!tc.subAgent || tc.subAgent.status !== 'running') return tc
+            changed = true
+            const sa = tc.subAgent
+            const tools = sa.tools.map((t) =>
+              t.result === undefined ? { ...t, result: null } : t,
+            )
+            return {
+              ...tc,
+              // The tool result settles too, so the parent chip shows done.
+              result: tc.result ?? {
+                status: 'cancelled',
+                output: '',
+                note: 'run interrupted',
+              },
+              subAgent: { ...sa, status: 'cancelled' as const, tools },
+            }
+          })
+          return changed ? { ...m, toolCalls: tcs } : m
+        }),
+      },
+    }))
+  },
+
   loadHistory: (convId, rows) =>
     set((s) => ({
       messagesByConv: {
@@ -333,6 +528,7 @@ function buildMessages(
 ): ChatMessage[] {
   const resultById = new Map<string, unknown>()
   const nameById = new Map<string, string>()
+  const subAgentById = new Map<string, SubAgentRun>()
   for (const r of rows) {
     if (r.role !== 'tool') continue
     const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
@@ -342,6 +538,29 @@ function buildMessages(
     const name =
       tc?.function?.name ?? (tc as { name?: string } | undefined)?.name
     if (name) nameById.set(id, name)
+    // Rehydrate a spawn_agent run snapshot into the same live shape the
+    // stream builds, so a reloaded turn renders the nested transcript.
+    const snap = r.sub_agent_transcript
+    if (name === 'spawn_agent' && snap && typeof snap === 'object') {
+      const entries = Array.isArray(snap.transcript) ? snap.transcript : []
+      let text = ''
+      const tools: SubAgentRun['tools'] = []
+      for (const e of entries) {
+        if (e.role === 'assistant' && typeof e.content === 'string') {
+          text = e.content // last assistant text wins (the final message)
+        } else if (e.role === 'tool' && e.name) {
+          tools.push({ id: `sat${tools.length + 1}`, name: e.name, result: e.content })
+        }
+      }
+      subAgentById.set(id, {
+        agentId: 0,
+        agentType: snap.agent_type ?? 'sub-agent',
+        prompt: '',
+        status: (snap.status as SubAgentRun['status']) ?? 'completed',
+        text,
+        tools,
+      })
+    }
   }
 
   const out: ChatMessage[] = []
@@ -378,6 +597,7 @@ function buildMessages(
           name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
           args: safeParse(c.function?.arguments),
           result: c.id ? resultById.get(c.id) : undefined,
+          subAgent: c.id ? subAgentById.get(c.id) : undefined,
         })),
       })
       continue
