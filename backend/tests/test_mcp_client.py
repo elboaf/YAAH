@@ -49,6 +49,36 @@ async def test_call_errors_are_dicts(demo_server):
     assert "unavailable" in res["error"]
 
 
+async def test_image_blocks_use_v2_mime_attr(demo_server, monkeypatch):
+    """Regression: mcp 2.x renamed ImageContent.mimeType -> mime_type; the
+    old hard attribute read crashed the turn when a server returned an
+    image (puppeteer_screenshot). Either name must work now."""
+    import base64
+
+    import backend.agent.imagedata as imagedata
+
+    monkeypatch.setattr(
+        imagedata, "save_bytes", lambda raw, ext, sub: f"{sub}/fake.{ext}"
+    )
+
+    class Block:
+        type = "image"
+        data = base64.b64encode(b"\x89PNG-fake").decode()
+        mime_type = "image/png"
+
+    class Result:
+        content = [Block()]
+        is_error = False
+
+    class FakeSession:
+        async def call_tool(self, name, arguments):
+            return Result()
+
+    demo_server._session = FakeSession()
+    res = await mcp_client.manager.call("mcp_demo_screenshot", {})
+    assert res["images"] == ["mcp/fake.png"]
+
+
 async def test_schemas_merge_and_routing(demo_server):
     from backend.agent.tools import execute_tool, get_schemas
 

@@ -218,8 +218,14 @@ class McpManager:
 
                 import base64
 
+                # mcp 1.x/2.x renamed mimeType -> mime_type; either may appear.
                 raw = base64.b64decode(block.data)
-                image_rels.append(save_bytes(raw, block.mimeType.split("/")[-1], "mcp"))
+                mime = (
+                    getattr(block, "mime_type", None)
+                    or getattr(block, "mimeType", None)
+                    or "image/png"
+                )
+                image_rels.append(save_bytes(raw, mime.split("/")[-1], "mcp"))
         if texts:
             joined = "\n".join(texts)
             try:
