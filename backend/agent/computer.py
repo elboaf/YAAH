@@ -811,8 +811,8 @@ def _pause_check() -> dict | None:
     if idle is not None and idle < PAUSE_SECONDS:
         return {
             "error": (
-                f"user-activity pause: real input {idle:.1f}s ago — screenshot "
-                "to re-verify, then retry when the user is idle"
+                f"user-activity pause: real input {idle:.1f}s ago — the user "
+                "is at the machine; wait a few seconds and retry when idle"
             ),
             "paused": True,
         }

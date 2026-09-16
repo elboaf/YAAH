@@ -105,7 +105,37 @@ failed session. If you can see the target inside an observe crop but
 the cursor isn't on it, measure the delta from crop_center to the
 target and apply it to BOTH axes.
 
-## Verification
+## Verification: decisive evidence, two calls max
+
+A desktop request is normally 2–4 actions: find the window, focus, act,
+verify. If your chain is much longer, you're floundering, not being
+thorough.
+
+- **State checks need a baseline.** "Is the video playing?" = two
+  screenshots ~2s apart: frames differ → playing, identical → paused.
+  One frame proves nothing. Comparing against a screenshot from minutes
+  ago proves less than nothing.
+- **Weak indicators stay hints.** A mute icon, an indicator's absence,
+  a suspicious-looking button — never treat them as a conclusion. If
+  two checks didn't settle the question, report what you know and ask
+  the user; don't keep poking the same UI.
+- **Never toggle unverified state.** Clicking a playing video pauses
+  it; clicking a paused video PLAYS it. If you didn't verify state
+  first, don't send a second toggle to "fix" the first one — you're
+  flipping a coin. Prefer state-independent actions: media
+  play/pause key for playback, explicit menu commands over toggles.
+- **Honor tool feedback.** `ok: false` notes, user-activity pauses and
+  truncated flags are instructions. Pressing on after one turns a small
+  mistake into a long one.
+- **Truncated is not exhaustive.** `read_ui_tree` with
+  `"truncated": true` (or a small max_depth/max_nodes) must never
+  support a "it doesn't exist" claim. Settling presence cheaply:
+  screenshot the strip where it would be — pixels don't truncate.
+- **Close the loop.** When the request is done, say so plainly. If it
+  can't be completed, say that. An abandoned request the user has to
+  ask about is a failure even if every individual tool call worked.
+
+## Privacy
 
 - "Looks right" in a screenshot is the assertion for UI tests; state the
   expected outcome first, then check the screenshot against it.
