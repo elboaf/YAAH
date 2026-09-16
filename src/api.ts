@@ -60,6 +60,27 @@ export interface ConversationRow {
   updated_at: string
 }
 
+export interface ContextInfo {
+  /** Exact tokens (usage.prompt_tokens) of the session's latest model call. */
+  context_tokens: number | null
+  /** Model id the count was measured with (may differ from the active model). */
+  context_model: string | null
+  /** Currently active model id. */
+  model: string | null
+  /** Resolved context window (override -> provider -> table), null = unknown. */
+  context_window: number | null
+}
+
+export const getContext = (id: number) =>
+  api<ContextInfo>(`/api/conversations/${id}/context`)
+
+export interface GitBranchInfo {
+  branch: string | null
+}
+
+export const getGitBranch = (id: number) =>
+  api<GitBranchInfo>(`/api/conversations/${id}/git-branch`)
+
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
 
@@ -108,6 +129,8 @@ export interface AgentConfig {
   last_workspace?: string
   /** Interface scale (CSS zoom on the app root); 1.0 = default ramp. */
   ui_scale?: number
+  /** Per-model context-window overrides (model id -> tokens). */
+  context_window_overrides?: Record<string, number>
   /** Voice dictation; cloud_api_key arrives masked ("set" | ""). */
   voice?: {
     engine: 'local' | 'cloud'
@@ -145,6 +168,7 @@ export const updateConfig = (
     max_tokens: number
     max_steps: number
     ui_scale: number
+    context_window_overrides: Record<string, number | null>
     voice: {
       engine?: 'local' | 'cloud'
       cloud_endpoint?: string
@@ -574,6 +598,9 @@ export interface AgentEvent {
   turns?: number
   /** Inner event type wrapped by sub_agent_progress (text | tool_start | tool_result). */
   kind?: string
+  /** Exact context size (usage.prompt_tokens) of the turn's final model call. */
+  usage_tokens?: number
+  model?: string
 }
 
 export type AgentEventHandler = (ev: AgentEvent) => void

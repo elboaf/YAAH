@@ -29,6 +29,8 @@ export interface ChatMessage {
   content: string
   /** Stored image rel paths (backend/data/images/...), rendered via imageUrl(). */
   images?: string[]
+  /** Skills invoked for this turn via $name in the text (live display only). */
+  skills?: string[]
   toolCalls?: ToolCall[]
   /** Sub-agent run snapshot (persisted spawn_agent result, history load). */
   subAgent?: SubAgentRun
@@ -79,6 +81,14 @@ interface AgentState {
   pendingQuestion: PendingQuestion | null
   setPendingQuestion: (q: PendingQuestion | null | ((prev: PendingQuestion | null) => PendingQuestion | null)) => void
 
+  /**
+   * Per-conversation context-size readout: exact usage.prompt_tokens of the
+   * latest model call, plus the resolved context window it fills. Written
+   * from the stream's usage event; cleared when the conversation is deleted.
+   */
+  contextByConv: Record<string, { tokens: number; window: number | null; model: string | null }>
+  setContext: (convId: number, tokens: number, window: number | null, model: string | null) => void
+
   setWorkspace: (ws: string) => void
   newConversation: () => void
   setConversationId: (id: number) => void
@@ -92,7 +102,7 @@ interface AgentState {
   abortController: AbortController | null
   setAbortController: (c: AbortController | null) => void
 
-  appendUserMessage: (key: string, text: string, images?: string[]) => string
+  appendUserMessage: (key: string, text: string, images?: string[], skills?: string[]) => string
   appendAssistantPlaceholder: (key: string) => string
   appendTextDelta: (key: string, msgId: string, text: string) => void
   /** Remove one optimistic message (failed-send rollback). */
@@ -227,6 +237,15 @@ export const useAgent = create<AgentState>((set, get) => ({
       pendingQuestion:
         typeof q === 'function' ? q(s.pendingQuestion) : q,
     })),
+
+  contextByConv: {},
+  setContext: (convId, tokens, window, model) =>
+    set((s) => ({
+      contextByConv: {
+        ...s.contextByConv,
+        [String(convId)]: { tokens, window, model },
+      },
+    })),
   setWorkspace: (ws) => {
     const norm = ws === '.' ? '' : ws
     set({ workspace: norm })
@@ -287,14 +306,14 @@ export const useAgent = create<AgentState>((set, get) => ({
   // target at send time, so a turn streams into its own conversation's
   // buffer even when the user is looking at another one.
 
-  appendUserMessage: (key, text, images) => {
+  appendUserMessage: (key, text, images, skills) => {
     const id = genId()
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
         [key]: [
           ...(s.messagesByConv[key] ?? []),
-          { id, role: 'user', content: text, images },
+          { id, role: 'user', content: text, images, skills },
         ],
       },
     }))

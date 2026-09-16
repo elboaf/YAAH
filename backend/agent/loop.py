@@ -22,7 +22,12 @@ from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
 from backend.agent.tools import execute_tool, get_schemas, workspace_root
 from backend.agent.remote import CMD_TOOLS_NOTE
-from backend.db.database import add_message, get_conversation, get_messages
+from backend.db.database import (
+    add_message,
+    get_conversation,
+    get_messages,
+    set_conversation_usage,
+)
 
 DEFAULT_MAX_STEPS = 200
 MAX_TOOL_RESULT_CHARS = 20_000
@@ -501,6 +506,7 @@ async def run_agent(
                 state["content"] = ""
                 state["tool_calls"] = None
                 state["finish"] = None
+                state["usage"] = None
                 acc: list[str] = []
                 stream = await model_client.chat(messages, tools=tools, stream=True)
                 async for ev in stream:
@@ -513,6 +519,8 @@ async def run_agent(
                         state["tool_calls"] = ev["tool_calls"]
                     elif ev["type"] == "finish":
                         state["finish"] = ev.get("reason")
+                    elif ev["type"] == "usage":
+                        state["usage"] = ev.get("usage")
                 state["content"] = "".join(acc)
 
             attempt = 0
@@ -541,6 +549,20 @@ async def run_agent(
             if cancel_ev.is_set():
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
+
+            # Exact context size: usage.prompt_tokens is what THIS call fed
+            # the model (system + history + tool plumbing). Persist per call —
+            # the last call of a turn is the fullest — without touching
+            # updated_at (a readout must not re-sort the session list).
+            usage = state.get("usage") or {}
+            if usage.get("prompt_tokens") is not None:
+                _model_id = load_config().get("model") or None
+                asyncio.create_task(
+                    set_conversation_usage(
+                        conversation_id, int(usage["prompt_tokens"]), _model_id
+                    )
+                )
+
             assistant_content = state["content"]
             tool_calls = state["tool_calls"]
             finish_reason = state["finish"]
@@ -561,6 +583,16 @@ async def run_agent(
                             "type": "text",
                             "text": "\n\n[output truncated: the model hit its "
                             "max output tokens — raise max_tokens in Settings]",
+                        }
+                    )
+                # Final usage readout for the UI's context strip (the last
+                # model call of the turn = the peak context this turn used).
+                if usage.get("prompt_tokens") is not None:
+                    yield _ndjson(
+                        {
+                            "type": "usage",
+                            "prompt_tokens": usage["prompt_tokens"],
+                            "model": load_config().get("model") or None,
                         }
                     )
                 yield _ndjson({"type": "done"})

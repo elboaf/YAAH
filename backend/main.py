@@ -276,6 +276,55 @@ async def api_get_conversation(conversation_id: int):
     return conv
 
 
+@app.get("/api/conversations/{conversation_id}/context")
+async def api_conversation_context(conversation_id: int):
+    """Exact context size of the session's latest model call (usage
+    prompt_tokens persisted by the agent loop) plus the context window to
+    display it against. Window resolution: Settings override for this model
+    -> provider-reported value -> built-in table -> null (UI shows tokens
+    without the %/bar)."""
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="conversation not found")
+    from backend.agent.context_window import get_context_window
+
+    cfg = load_config()
+    model = cfg.get("model")
+    return {
+        "context_tokens": conv.get("context_tokens"),
+        "context_model": conv.get("context_model"),
+        "model": model,
+        "context_window": get_context_window(model, cfg),
+    }
+
+
+@app.get("/api/conversations/{conversation_id}/git-branch")
+async def api_conversation_git_branch(conversation_id: int):
+    """Current branch of the conversation's workspace, when it is a git repo.
+
+    Cheap by design: stats .git/HEAD first and only spawns git when the file
+    changed — the UI re-polls this every couple of seconds while a session
+    is open, and terminal checkouts reflect without any push channel."""
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="conversation not found")
+    from backend.agent.gitinfo import current_git_branch
+    from backend.agent.tools import workspace_root
+
+    ws = conv.get("workspace") or ""
+    if not ws.strip() or ws.startswith("remote:"):
+        return {"branch": None}
+    try:
+        root = workspace_root(ws)
+    except ValueError:
+        return {"branch": None}
+    return {"branch": await current_git_branch(root)}
+
+
 @app.patch("/api/conversations/{conversation_id}")
 async def api_update_conversation(conversation_id: int, body: ConversationUpdate):
     ok = await update_conversation(
@@ -343,6 +392,7 @@ class ConfigUpdate(BaseModel):
     voice: dict | None = None
     remote: dict | None = None
     ui_scale: float | None = None
+    context_window_overrides: dict[str, int | None] | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -821,6 +871,8 @@ async def api_get_config():
         # LAN hosting block. The passphrase is stored plaintext by design
         # (same posture as provider keys) and shown only in this app's UI.
         "remote": cfg.get("remote") or {},
+        # Per-model context-window overrides (Settings edits these).
+        "context_window_overrides": cfg.get("context_window_overrides") or {},
     }
 
 
@@ -846,6 +898,22 @@ async def api_set_config(body: ConfigUpdate):
     # 100/110/125/150%; anything wilder would break the compact layout).
     if "ui_scale" in updates:
         updates["ui_scale"] = min(1.5, max(1.0, float(updates["ui_scale"] or 1.0)))
+    # Context-window overrides: when the key is present it is the
+    # authoritative full map (Settings sends everything it shows, so removals
+    # persist); when absent the stored map is untouched.
+    cwo = updates.get("context_window_overrides")
+    if isinstance(cwo, dict):
+        merged: dict[str, int] = {}
+        for model_id, window in cwo.items():
+            if window is None:
+                continue
+            try:
+                w = int(window)
+            except (TypeError, ValueError):
+                continue
+            if w > 0:
+                merged[str(model_id)] = w
+        updates["context_window_overrides"] = merged
     save_config(updates)
     # Hosting toggles need the mDNS advertiser to follow.
     if isinstance(remote, dict):

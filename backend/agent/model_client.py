@@ -45,6 +45,11 @@ async def chat(
     # 0/blank = no limit: let the provider use the model's full output cap
     if cfg["max_tokens"] and cfg["max_tokens"] > 0:
         payload["max_tokens"] = cfg["max_tokens"]
+    if stream:
+        # Ask for exact usage (usage.prompt_tokens = what this call actually
+        # fed the model) even in streaming mode. OpenAI-compatible servers
+        # that don't know the option just ignore it.
+        payload["stream_options"] = {"include_usage": True}
     if tools:
         payload["tools"] = tools
     log.info("model call: base=%s model=%s tools_sent=%d stream=%s",
@@ -86,6 +91,7 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
 
             tool_calls: dict[int, dict] = {}
             finish_reason = None
+            usage: dict | None = None
             n_content_chars = 0
             saw_done = False
             async for line in r.aiter_lines():
@@ -99,6 +105,11 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                # OpenAI (with stream_options.include_usage) sends a final
+                # choices-less chunk carrying usage; Ollama puts usage on the
+                # last chunk alongside finish_reason. Capture either.
+                if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+                    usage = chunk["usage"]
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
@@ -128,8 +139,9 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                     yield {"type": "finish", "reason": finish}
 
             log.info(
-                "model reply: finish=%s content_chars=%d tool_calls=%d (%s)",
+                "model reply: finish=%s content_chars=%d tool_calls=%d prompt_tokens=%s (%s)",
                 finish_reason, n_content_chars, len(tool_calls),
+                (usage or {}).get("prompt_tokens"),
                 ", ".join(t["function"]["name"] for t in tool_calls.values()) or "-",
             )
             if not saw_done and finish_reason is None:
@@ -141,6 +153,8 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                     "model stream ended without a finish reason — the "
                     "connection was likely dropped mid-response"
                 )
+            if usage and usage.get("prompt_tokens") is not None:
+                yield {"type": "usage", "usage": usage}
             if tool_calls:
                 yield {
                     "type": "tool_calls",

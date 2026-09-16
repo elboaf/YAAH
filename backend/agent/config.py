@@ -74,6 +74,9 @@ DEFAULTS = {
         "panic_hotkey": "<ctrl>+<alt>+y",
         "observe_default": True,
     },
+    # Per-model context-window overrides (model id -> tokens). Wins over the
+    # provider-reported value and the built-in table; set from Settings.
+    "context_window_overrides": {},
 }
 
 DEFAULT_PROVIDER = {
