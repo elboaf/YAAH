@@ -20,7 +20,8 @@ COLLECTS=(
   --collect-all httpx --collect-all httpcore
   --collect-all curl_cffi
   --collect-all sherpa_onnx
-  --collect-all mcp
+  --hidden-import mcp --hidden-import mcp.client.stdio
+  --hidden-import mcp.client.session --hidden-import mcp.types
 )
 # Computer use (Windows only; pip skips these elsewhere via sys_platform
 # markers, so collecting them unconditionally would break the Linux/macOS

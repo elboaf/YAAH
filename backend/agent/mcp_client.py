@@ -24,6 +24,12 @@ the FastAPI app's, started from main.lifespan.
 import asyncio
 import logging
 
+# Imported at module level (not lazily) so PyInstaller's static analysis
+# sees them — bundling must not rely on --collect-all mcp, which pulls in
+# mcp.server.cli and its optional typer dependency.
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
 log = logging.getLogger(__name__)
 
 CALL_TIMEOUT = 60.0
@@ -90,9 +96,6 @@ class McpManager:
     async def _session_loop(self, state: McpServerState):
         """Owns the stdio_client + ClientSession context pair for this
         server; reconnects with backoff until stopped (task cancelled)."""
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
-
         while True:
             state._generation += 1
             gen = state._generation
