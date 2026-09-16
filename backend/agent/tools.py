@@ -495,7 +495,10 @@ TOOLS_SCHEMA += [
                 "whose intermediate steps would bloat this conversation. "
                 "Do NOT use for small tasks that need this conversation's "
                 "context, or anything requiring a user decision mid-task — "
-                "sub-agents cannot ask the user questions."
+                "sub-agents cannot ask the user questions. Say one line "
+                "about what you're delegating and why BEFORE the call — "
+                "the user is watching and an unannounced spawn reads as a "
+                "hang."
             ),
             "parameters": {
                 "type": "object",

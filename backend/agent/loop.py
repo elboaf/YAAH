@@ -183,7 +183,11 @@ Guidelines:
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
 - Commit meaningful work with git_add/git_commit when the user asks for it.
-- Be concise in prose; let tools do the talking.
+- Narrate as you work: open with one or two lines on what you're about to
+  do, say what a tool call or delegation is for before making it, and
+  comment on what came back before deciding the next step. Short, plain
+  lines — the user is watching the stream, and a long silence reads as a
+  hang. Never hold all your prose back for one final dump.
 - Paths are relative to the workspace root.
 
 Interview the user (ask_user tool):

@@ -334,6 +334,8 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
         "- Your final message is the only thing the parent receives. Make "
         "it self-contained: what you did, what you changed (paths), what "
         "you verified, and any follow-ups.\n"
+        "- The user sees your streamed text live in the parent's transcript. "
+        "Lead with a one-line summary of what you're doing, then work.\n"
         "- Paths are relative to the workspace root.\n"
     )
     notes = _agents_notes(workspace)
