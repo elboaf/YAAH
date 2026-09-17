@@ -37,7 +37,8 @@ pyinstaller --noconfirm --clean --onefile --console \
 echo "server: dist/yaah-server$EXE"
 
 # ---- README staged next to the exe (also attached in release.yml) ----
-cat > dist/README-server.txt <<'EOF'
+# Repo root, NOT dist/: dist/ is vite's outDir and `tauri build` wipes it.
+cat > README-server.txt <<'EOF'
 YAAH headless server
 ====================
 
@@ -61,4 +62,4 @@ same store the desktop app uses — so they survive restarts. The server
 executes workspace tools (shell, files, git) in its own home directory;
 conversations and provider keys stay on the desktop app.
 EOF
-echo "readme: dist/README-server.txt"
+echo "readme: README-server.txt"

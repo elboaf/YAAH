@@ -31,3 +31,4 @@ backend/data/models/
 # impeccable live-mode local config
 .impeccable/
 .zcode/
+README-server.txt
