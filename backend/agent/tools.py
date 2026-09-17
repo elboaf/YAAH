@@ -975,6 +975,45 @@ if os.name == "nt":
 
 SCHEMAS = {s["function"]["name"]: s for s in TOOLS_SCHEMA}
 
+# ---- access-mode classification -------------------------------------------
+# Three risk classes drive the access-mode gate (see PLAN-access-modes.md):
+#   read     - observation only; free in every mode
+#   mutating - changes files inside/around the workspace; asks in "ask" mode
+#   shell    - runs arbitrary commands / network+repo actions / MCP tools
+# Anything not classified here defaults to "shell" (safe by default: an
+# unknown or MCP tool always prompts under ask mode and blocks under plan).
+
+_READ_TOOLS = {
+    "read_file", "search_files", "git_status", "git_diff",
+    "web_search", "web_fetch", "view_image", "load_skill",
+    # observation-only computer-use tools (no input injection)
+    "screenshot", "list_windows", "read_ui_tree", "wait",
+    # delegation is free in all modes: the sub-agent's own tool calls hit
+    # the same gate, so spawning cannot launder permissions
+    "spawn_agent",
+}
+_MUTATING_TOOLS = {
+    "write_file", "edit_file", "create_file", "delete_file", "move_file",
+    "git_add", "git_commit",
+}
+_SHELL_TOOLS = {
+    "bash", "powershell", "git_push", "git_pull",
+    # computer-use control tools drive the real mouse/keyboard
+    "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
+    "type_text", "press_key", "focus_window",
+}
+
+
+def tool_risk(name: str) -> str:
+    """Classify a tool for the access-mode gate: "read" | "mutating" |
+    "shell". Unknown names (MCP tools, future tools) classify as "shell"
+    so the safe-by-default rule holds without maintaining a list."""
+    if name in _READ_TOOLS:
+        return "read"
+    if name in _MUTATING_TOOLS:
+        return "mutating"
+    return "shell"
+
 
 async def execute_tool(name: str, arguments: dict, workspace: str) -> dict:
     """Execute a tool by name with a dict of arguments. Never raises.

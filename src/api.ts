@@ -127,6 +127,8 @@ export interface AgentConfig {
   max_steps?: number
   /** Workspace used last, restored into the sidebar on startup. */
   last_workspace?: string
+  /** Access mode gating tool execution: ask | plan | full. */
+  access_mode?: 'ask' | 'plan' | 'full'
   /** Interface scale (CSS zoom on the app root); 1.0 = default ramp. */
   ui_scale?: number
   /** Per-model context-window overrides (model id -> tokens). */
@@ -168,6 +170,7 @@ export const updateConfig = (
     max_tokens: number
     max_steps: number
     ui_scale: number
+    access_mode: 'ask' | 'plan' | 'full'
     context_window_overrides: Record<string, number | null>
     voice: {
       engine?: 'local' | 'cloud'
@@ -578,6 +581,8 @@ export interface AgentEvent {
     | 'text'
     | 'tool_start'
     | 'tool_result'
+    | 'approval_request'
+    | 'approval_decision'
     | 'sub_agent_spawned'
     | 'sub_agent_progress'
     | 'sub_agent_done'

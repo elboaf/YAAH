@@ -353,12 +353,17 @@ async def run_sub_agent(
     workspace: str,
     cancel_ev: asyncio.Event | None = None,
     on_event=None,
+    gate=None,
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
 
     Never raises. A model error becomes status='error' with the message;
     cancellation becomes status='cancelled' with whatever was produced.
+    `gate` is the parent loop's access-mode coroutine factory
+    (loop.make_gate): the sub-agent's tool calls pass through the same
+    approval gate as the parent's, so delegation cannot launder
+    permissions.
     """
     cancel_ev = cancel_ev or asyncio.Event()
     messages = [
@@ -485,9 +490,18 @@ async def run_sub_agent(
                             args, loaded_skills, messages
                         )
                     else:
-                        from backend.agent.tools import execute_tool
+                        if gate is not None:
+                            # Access mode applies to sub-agents too: the
+                            # parent's gate decides before anything runs.
+                            # None = approved (execute below); a dict is the
+                            # denial/plan-block error result.
+                            result = await gate(name, args, tc.get("id", ""))
+                        else:
+                            result = None
+                        if result is None:
+                            from backend.agent.tools import execute_tool
 
-                        result = await execute_tool(name, args, workspace)
+                            result = await execute_tool(name, args, workspace)
                     if on_event:
                         on_event({"type": "tool_result", "name": name, "result": result})
 
@@ -550,13 +564,15 @@ async def spawn_batch(
     workspace: str,
     cancel_ev: asyncio.Event,
     on_event=None,
+    gate=None,
 ) -> dict[str, dict]:
     """Run every spawn_agent call in one parent turn in parallel (capped
     by MAX_CONCURRENT via a semaphore). Returns {call_id: result}.
 
     Each call: {call_id, agent_type, prompt}. Never raises per call — a
     bad agent_type or prompt returns a structured error result so the
-    parent's turn survives.
+    parent's turn survives. `gate` threads the access-mode gate (see
+    run_sub_agent) into every sub-agent of the batch.
     """
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
@@ -573,6 +589,13 @@ async def spawn_batch(
             prompt = str(call.get("prompt") or "").strip()
             if not prompt:
                 return call_id, {"error": "spawn_agent requires a prompt"}
+
+            # Namespace this agent's gate keys by the spawn call id: two
+            # parallel sub-agents (or the parent) can emit the same tool
+            # call id, and the pending-answer map would collide.
+            agent_gate = (
+                (lambda n, a, cid: gate(n, a, f"{call_id}:{cid}")) if gate else None
+            )
 
             agent_id = call.get("agent_id")
             if on_event:
@@ -609,6 +632,7 @@ async def spawn_batch(
                 workspace,
                 cancel_ev=cancel_ev,
                 on_event=_forward if on_event else None,
+                gate=agent_gate,
             )
             if on_event:
                 on_event(

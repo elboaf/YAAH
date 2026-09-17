@@ -393,6 +393,7 @@ class ConfigUpdate(BaseModel):
     remote: dict | None = None
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
+    access_mode: str | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -873,6 +874,9 @@ async def api_get_config():
         "remote": cfg.get("remote") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
+        # Access mode: ask | plan | full (header control; see
+        # PLAN-access-modes.md).
+        "access_mode": cfg.get("access_mode", "ask"),
     }
 
 
@@ -914,6 +918,11 @@ async def api_set_config(body: ConfigUpdate):
             if w > 0:
                 merged[str(model_id)] = w
         updates["context_window_overrides"] = merged
+    # Access mode is validated against the shipped set; anything else falls
+    # back to "ask" (safe default) rather than 422ing a whole settings save.
+    if "access_mode" in updates:
+        mode = str(updates["access_mode"] or "").lower()
+        updates["access_mode"] = mode if mode in ("ask", "plan", "full") else "ask"
     save_config(updates)
     # Hosting toggles need the mDNS advertiser to follow.
     if isinstance(remote, dict):

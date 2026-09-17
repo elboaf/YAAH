@@ -51,7 +51,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { useAgent, type ChatMessage, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
@@ -372,6 +372,164 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
           </div>
         )}
       </div>
+      {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
+    </div>
+  )
+}
+
+/** Live approval card: a tool call blocked by the access-mode gate (ask
+ *  mode). Approve executes it, Deny returns an error to the model; typed
+ *  text denies with that text as guidance. Plan mode reuses this card with
+ *  the plan-exit chip. Voice answers ride the same 'yaah-answer-ask' event
+ *  (labels are option rows like any ask_user card). */
+function ApprovalCard({ approval }: { approval: PendingApproval }) {
+  const conversationId = useAgent((s) => s.conversationId)
+  const setPendingApproval = useAgent((s) => s.setPendingApproval)
+  const setAccessMode = useAgent((s) => s.setAccessMode)
+  const [customOpen, setCustomOpen] = useState(false)
+  const [custom, setCustom] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const respond = (text: string) => {
+    if (conversationId === null || submitting) return
+    setSubmitting(true)
+    setErr(null)
+    submitAnswer(conversationId, approval.callId, text)
+      .then(() => {
+        setPendingApproval((a) => (a && a.callId === approval.callId ? null : a))
+        setSubmitting(false)
+      })
+      .catch((e) => {
+        setErr(String(e))
+        setSubmitting(false)
+      })
+  }
+
+  // Plan-mode exit lives in the status strip (PlanExitButton): plan mode
+  // never holds a pending approval — blocked calls fail immediately and the
+  // model presents its plan as text, so there is no card to hang the exit on.
+  useEffect(() => {
+    const onVoiceAnswer = (e: Event) => {
+      const { callId, answer: ans } = (e as CustomEvent<{ callId: string; answer: string }>).detail
+      if (callId !== approval.callId || !ans || submitting) return
+      const norm = ans.trim().toLowerCase()
+      if (norm === 'approve' || norm === 'yes' || norm === 'ok' || norm === 'approve it' || norm === 'allow') {
+        respond('approve')
+      } else if (norm === 'deny' || norm === 'no' || norm === 'deny it' || norm === 'reject' || norm === 'stop') {
+        respond('deny')
+      } else {
+        // Anything else is guidance: deny, telling the model why.
+        respond(ans)
+      }
+    }
+    window.addEventListener('yaah-answer-ask', onVoiceAnswer)
+    return () => window.removeEventListener('yaah-answer-ask', onVoiceAnswer)
+  })
+
+  // One-line arg summary per tool, mono-styled, so the card reads like a
+  // trace chip rather than prose.
+  const summary = (() => {
+    const a = approval.args ?? {}
+    const pick = (...keys: string[]) => {
+      for (const k of keys) {
+        const v = a[k]
+        if (typeof v === 'string' && v.trim()) return v
+      }
+      return ''
+    }
+    switch (approval.tool) {
+      case 'bash':
+      case 'powershell':
+        return pick('command')
+      case 'write_file':
+      case 'create_file':
+        return pick('path', 'file_path')
+      case 'edit_file':
+        return pick('path', 'file_path')
+      case 'delete_file':
+      case 'move_file':
+        return pick('path', 'src', 'dst')
+      case 'git_commit':
+        return pick('message')
+      case 'git_push':
+      case 'git_pull':
+        return `${approval.tool === 'git_push' ? 'push' : 'pull'} ${pick('remote') || 'origin'}`
+      default: {
+        const kv = Object.entries(a)
+          .filter(([, v]) => typeof v === 'string' && v.length < 80)
+          .slice(0, 2)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(' ')
+        return kv
+      }
+    }
+  })()
+
+  const commandLike = approval.tool === 'bash' || approval.tool === 'powershell'
+
+  return (
+    <div className="rounded-lg border border-amber-700/60 bg-zinc-900 p-3 shadow-lg">
+      <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-amber-400">
+        <span className="run-pulse">!</span> approval needed
+      </div>
+      <p className="mb-1.5 flex items-center gap-2 font-mono text-xs text-zinc-100">
+        <span className="text-amber-300">{approval.tool}</span>
+        {summary && <span className="truncate text-zinc-400">{summary}</span>}
+      </p>
+      {commandLike && (
+        <pre className="mb-2 max-h-32 overflow-y-auto whitespace-pre-wrap rounded border border-zinc-800 bg-zinc-950 p-2 font-mono text-[11px] text-zinc-300">
+          {String(approval.args?.command ?? '')}
+        </pre>
+      )}
+      <div className="flex gap-1.5">
+        <button
+          className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+          disabled={submitting}
+          onClick={() => respond('approve')}
+        >
+          {submitting ? '…' : 'Approve'}
+        </button>
+        <button
+          className="rounded border border-zinc-600 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          disabled={submitting}
+          onClick={() => respond('deny')}
+        >
+          Deny
+        </button>
+      </div>
+      {!customOpen ? (
+        <button
+          className="mt-1.5 block w-full rounded border border-dashed border-zinc-600 px-2.5 py-1.5 text-left text-xs text-zinc-400 hover:border-amber-500/60 hover:text-zinc-200"
+          disabled={submitting}
+          onClick={() => setCustomOpen(true)}
+        >
+          Deny with a note…
+        </button>
+      ) : (
+        <div className="mt-1.5 flex gap-1.5">
+          <input
+            autoFocus
+            className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-amber-500 focus:outline-none"
+            placeholder="Why deny? Sent to the model as guidance…"
+            value={custom}
+            onChange={(e) => setCustom(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && custom.trim()) {
+                e.preventDefault()
+                respond(custom.trim())
+              }
+            }}
+          />
+          <button
+            className="rounded bg-amber-600 px-3 py-1.5 text-xs text-white hover:bg-amber-500 disabled:opacity-50"
+            disabled={submitting || !custom.trim()}
+            onClick={() => respond(custom.trim())}
+          >
+            {submitting ? '…' : 'Send'}
+          </button>
+        </div>
+      )}
       {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
     </div>
   )
@@ -3043,6 +3201,81 @@ function ctxColor(frac: number): string {
   return 'bg-emerald-500'
 }
 
+/** Access-mode control for the status strip: cycles ask → plan → full.
+ *  Writes through to config so the backend's next tool call is gated under
+ *  the new mode (the gate re-reads config per call — live for running
+ *  turns). Ask is the default; plan blocks edits; full runs unsandboxed. */
+function AccessModeControl({ compact }: { compact?: boolean }) {
+  const accessMode = useAgent((s) => s.accessMode)
+  const setAccessMode = useAgent((s) => s.setAccessMode)
+  const next = (): AccessMode =>
+    accessMode === 'ask' ? 'plan' : accessMode === 'plan' ? 'full' : 'ask'
+  const meta: Record<AccessMode, { label: string; title: string; cls: string }> = {
+    ask: {
+      label: 'ask',
+      title: 'Ask before changes — file edits and shell commands prompt first. Click for Plan mode.',
+      cls: 'border-amber-600/70 text-amber-300',
+    },
+    plan: {
+      label: 'plan',
+      title: 'Plan mode — edits and shell are blocked; the agent plans only. Click for Full access.',
+      cls: 'border-sky-600/70 text-sky-300',
+    },
+    full: {
+      label: 'full',
+      title: 'Full access — tools run without confirmation. Click to return to Ask-first.',
+      cls: 'border-zinc-600 text-zinc-200',
+    },
+  }
+  const m = meta[accessMode]
+  const save = (mode: AccessMode) => {
+    setAccessMode(mode)
+    updateConfig({ access_mode: mode }).catch(() => {
+      // Revert on failure so the chip never lies about the real mode.
+      setAccessMode(accessMode)
+    })
+  }
+  return (
+    <button
+      className={`rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${m.cls}`}
+      title={m.title}
+      onClick={() => save(next())}
+    >
+      {compact ? m.label : `mode: ${m.label}`}
+    </button>
+  )
+}
+
+/** One-click plan exit: visible only while plan mode is on and the agent is
+ *  not mid-block — the plan has been presented, this executes it. */
+function PlanExitButton() {
+  const accessMode = useAgent((s) => s.accessMode)
+  const setAccessMode = useAgent((s) => s.setAccessMode)
+  const status = useAgent((s) => s.status)
+  const [busy, setBusy] = useState(false)
+  if (accessMode !== 'plan' || status === 'running-tool' || status === 'thinking') return null
+  const go = () => {
+    setBusy(true)
+    updateConfig({ access_mode: 'full' })
+      .then(() => {
+        setAccessMode('full')
+        window.dispatchEvent(new CustomEvent('yaah-access-mode-changed', { detail: { mode: 'full' } }))
+      })
+      .catch(() => {})
+      .finally(() => setBusy(false))
+  }
+  return (
+    <button
+      className="rounded border border-sky-600/70 bg-sky-950/40 px-1.5 py-0.5 font-mono text-[10px] text-sky-300 hover:bg-sky-900/40"
+      title="Approve the presented plan: switch to Full access and continue"
+      onClick={go}
+      disabled={busy}
+    >
+      {busy ? '…' : 'approve plan & run'}
+    </button>
+  )
+}
+
 /** Git branch chip for the chat panel's status strip (null = not a repo). */
 function GitBranchChip({ branch }: { branch: string | null }) {
   if (!branch) return null
@@ -3098,6 +3331,13 @@ export function ChatPanel() {
     // A question belongs to the turn that asked it: only render when its
     // conversation is on screen (a hidden turn's ask must not leak here).
     return s.pendingQuestion.convKey === key ? s.pendingQuestion : null
+  })
+  const pendingApproval = useAgent((s) => {
+    if (s.pendingApproval === null) return null
+    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    // Same screen-scoping as questions: a hidden turn's approval request
+    // must not render over an unrelated conversation.
+    return s.pendingApproval.convKey === key ? s.pendingApproval : null
   })
   const bottomRef = useRef<HTMLDivElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
@@ -3246,6 +3486,11 @@ export function ChatPanel() {
           <AskUserCard key={pendingQuestion.callId} pending={pendingQuestion} />
         </div>
       )}
+      {pendingApproval && pendingApproval.convKey === (conversationId === null ? 'draft' : String(conversationId)) && (
+        <div className="border-t border-amber-800/60 px-4 pb-3 pt-3">
+          <ApprovalCard key={pendingApproval.callId} approval={pendingApproval} />
+        </div>
+      )}
       <Composer />
       <div className="flex items-center gap-2 px-4 pb-1 pt-0.5 font-mono text-[10px] text-zinc-600">
         <span
@@ -3257,6 +3502,10 @@ export function ChatPanel() {
         {/* Session metadata: current git branch + exact context fill. */}
         <GitBranchChip branch={branch} />
         <ContextChip info={contextInfo} />
+        {/* Access mode: ask / plan / full. Sits with the other session
+            controls; the plan exit appears only when it can act. */}
+        <AccessModeControl />
+        <PlanExitButton />
         {/* Read-aloud toggle: one click to mute/unmute the agent's voice.
             Hidden while the model isn't downloaded — Settings owns that. */}
         {ttsReady && (
@@ -3657,6 +3906,7 @@ function Composer() {
     setConversationId,
     adoptDraft,
     setPendingQuestion,
+    setPendingApproval,
     setContext,
     pushLog,
     setAbortController,
@@ -3813,13 +4063,19 @@ function Composer() {
   // still shield its turn from the interrupt below.
   const pendingQuestionRef = useRef<PendingQuestion | null>(null)
   const anyQuestionRef = useRef<PendingQuestion | null>(null)
-  useEffect(() => {
-    pendingQuestionRef.current = pendingQuestion
-  }, [pendingQuestion])
   const anyQuestion = useAgent((s) => s.pendingQuestion)
   useEffect(() => {
     anyQuestionRef.current = anyQuestion
   }, [anyQuestion])
+  // Live approval card (same ref pattern: the stream handler owns the store
+  // copy; PTT reads a ref so the hotkey handler never goes stale). Unscoped:
+  // an approval in a background conversation must still shield its turn from
+  // the interrupt below.
+  const anyApprovalRef = useRef<PendingApproval | null>(null)
+  const anyApproval = useAgent((s) => s.pendingApproval)
+  useEffect(() => {
+    anyApprovalRef.current = anyApproval
+  }, [anyApproval])
   // Assigned after `send`/`stop` are declared below (TDZ-safe via refs).
   const sendRef = useRef<(text?: string, opts?: { interrupt?: boolean }) => Promise<void>>(
     async () => {},
@@ -3846,9 +4102,10 @@ function Composer() {
     if (status === 'thinking' || status === 'running-tool') {
       // A turn is running: stop it (Stop-button path, server + client) so
       // the dictation lands now instead of queueing behind the run — unless
-      // the turn is blocked on an ask_user question, which a PTT press is
-      // about to answer; cancelling it would destroy the question.
-      if (!anyQuestionRef.current) stopRef.current()
+      // the turn is blocked on an ask_user question or an access-mode
+      // approval, which the dictated answer is about to resolve; cancelling
+      // would destroy the thing being answered.
+      if (!anyQuestionRef.current && !anyApprovalRef.current) stopRef.current()
     }
     if (voiceStateRef.current === 'recording') {
       // Take the mic over from click-dictation; discard its audio.
@@ -3920,6 +4177,22 @@ function Composer() {
         window.dispatchEvent(
           new CustomEvent('yaah-answer-ask', { detail: { callId: q.callId, answer: text.trim() } }),
         )
+        return
+      }
+      // Approval routing: "approve/deny (it)" or yes/no resolves the gate;
+      // anything else is a denial carrying the transcript as guidance.
+      const ap = anyApprovalRef.current
+      if (ap) {
+        const t = text.trim().toLowerCase()
+        if (/^(approve|approve it|allow|yes|ok|go ahead|confirmed)\b/.test(t)) {
+          window.dispatchEvent(
+            new CustomEvent('yaah-answer-ask', { detail: { callId: ap.callId, answer: 'approve' } }),
+          )
+        } else {
+          window.dispatchEvent(
+            new CustomEvent('yaah-answer-ask', { detail: { callId: ap.callId, answer: text.trim() } }),
+          )
+        }
         return
       }
       void sendRef.current(text)
@@ -4203,6 +4476,18 @@ function Composer() {
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
       }
+    } else if (ev.type === 'approval_request') {
+      setStatus('running-tool')
+      startToolCall(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+      pushLog({ kind: 'tool', name: ev.name, args: ev.args })
+      setPendingApproval({
+        callId: ev.call_id ?? '',
+        tool: ev.name ?? 'tool',
+        args: (ev.args ?? {}) as Record<string, unknown>,
+        convKey: bufKey,
+      })
+    } else if (ev.type === 'approval_decision') {
+      setPendingApproval((a) => (a && a.callId === ev.call_id ? null : a))
     } else if (ev.type === 'sub_agent_spawned') {
       setStatus('running-tool')
       startSubAgent(
@@ -4220,6 +4505,18 @@ function Composer() {
         subAgentToolStart(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       } else if (ev.kind === 'tool_result') {
         subAgentToolResult(bufKey, asstId, ev.call_id ?? '', ev.result)
+      } else if (ev.kind === 'approval_request') {
+        setStatus('running-tool')
+        setPendingApproval({
+          // The forwarded event's call_id is the namespaced gate key
+          // (spawnCallId:toolCallId) the /answer endpoint must echo.
+          callId: ev.call_id ?? '',
+          tool: ev.name ?? 'tool',
+          args: (ev.args ?? {}) as Record<string, unknown>,
+          convKey: bufKey,
+        })
+      } else if (ev.kind === 'approval_decision') {
+        setPendingApproval((a) => (a && a.callId === ev.call_id ? null : a))
       }
     } else if (ev.type === 'sub_agent_done') {
       finishSubAgent(bufKey, asstId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0)
@@ -4230,11 +4527,13 @@ function Composer() {
       setTurnError(ev.message ?? 'Unknown agent error')
       settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
+      setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
     } else if (ev.type === 'stopped') {
       setStatus('idle')
       appendTextDelta(bufKey, asstId, '\n[stopped]')
       settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
+      setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
     } else if (ev.type === 'done') {
       setStatus('idle')
       // A completed turn must leave no block pulsing: settle anything the
@@ -4242,6 +4541,7 @@ function Composer() {
       // always emits done events in the normal path).
       settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
+      setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
     } else if (ev.type === 'usage') {
       // Exact context size of the turn's final model call, straight from
       // the provider's usage report. Numeric conversation ids only — the

@@ -48,6 +48,18 @@ export interface PendingQuestion {
   convKey: string
 }
 
+/** Access modes for the global tool-approval gate (PLAN-access-modes.md). */
+export type AccessMode = 'ask' | 'plan' | 'full'
+
+/** A tool call waiting for the user's approve/deny under ask mode. */
+export interface PendingApproval {
+  callId: string
+  tool: string
+  args: Record<string, unknown>
+  /** Buffer of the turn that asked; only rendered when on screen. */
+  convKey: string
+}
+
 /** One line in the right-panel activity log. */
 export interface LogEntry {
   id: number
@@ -80,6 +92,15 @@ interface AgentState {
   /** Question the agent is currently waiting on (null = none). */
   pendingQuestion: PendingQuestion | null
   setPendingQuestion: (q: PendingQuestion | null | ((prev: PendingQuestion | null) => PendingQuestion | null)) => void
+
+  /** Tool call awaiting approve/deny under the access-mode gate. */
+  pendingApproval: PendingApproval | null
+  setPendingApproval: (a: PendingApproval | null | ((prev: PendingApproval | null) => PendingApproval | null)) => void
+
+  /** Live copy of the configured access mode (loaded at startup, updated by
+   *  the header control and by plan-mode's approve-plan flow). */
+  accessMode: AccessMode
+  setAccessMode: (m: AccessMode) => void
 
   /**
    * Per-conversation context-size readout: exact usage.prompt_tokens of the
@@ -237,6 +258,14 @@ export const useAgent = create<AgentState>((set, get) => ({
       pendingQuestion:
         typeof q === 'function' ? q(s.pendingQuestion) : q,
     })),
+  pendingApproval: null,
+  setPendingApproval: (a) =>
+    set((s) => ({
+      pendingApproval:
+        typeof a === 'function' ? a(s.pendingApproval) : a,
+    })),
+  accessMode: 'ask',
+  setAccessMode: (m) => set({ accessMode: m }),
 
   contextByConv: {},
   setContext: (convId, tokens, window, model) =>
@@ -260,6 +289,7 @@ export const useAgent = create<AgentState>((set, get) => ({
       status: 'idle',
       error: null,
       pendingQuestion: null,
+      pendingApproval: null,
     }))
     persistConversationId(null)
   },

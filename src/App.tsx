@@ -120,6 +120,33 @@ function BackendRecoveryBanner() {
 }
 
 /**
+ * Access mode: loads the persisted `access_mode` config value into the store
+ * at startup and follows live changes (plan-mode exit, other windows) via a
+ * window event, mirroring the ui-scale pattern.
+ */
+function AccessMode() {
+  useEffect(() => {
+    getConfig()
+      .then((c) => {
+        const m = c.access_mode
+        if (m === 'ask' || m === 'plan' || m === 'full') {
+          useAgent.getState().setAccessMode(m)
+        }
+      })
+      .catch(() => {})
+    const onChange = (e: Event) => {
+      const mode = (e as CustomEvent<{ mode?: string }>).detail?.mode
+      if (mode === 'ask' || mode === 'plan' || mode === 'full') {
+        useAgent.getState().setAccessMode(mode)
+      }
+    }
+    window.addEventListener('yaah-access-mode-changed', onChange)
+    return () => window.removeEventListener('yaah-access-mode-changed', onChange)
+  }, [])
+  return null
+}
+
+/**
  * Session restore: the recovery banner reloads the whole app when the backend
  * comes back, and a plain F5 does too. Without this, a reload silently lands
  * on a fresh "draft" — the next send then creates a brand-new conversation,
@@ -151,6 +178,7 @@ export default function App() {
   return (
     <div className="relative flex h-full w-full bg-zinc-900 text-zinc-100">
       <UiScale />
+      <AccessMode />
       <BackendRecoveryBanner />
       <RestoreSession />
       <Sidebar />

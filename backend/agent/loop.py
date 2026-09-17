@@ -20,7 +20,7 @@ from backend.agent.config import load_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
-from backend.agent.tools import execute_tool, get_schemas, workspace_root
+from backend.agent.tools import execute_tool, get_schemas, tool_risk, workspace_root
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.db.database import (
     add_message,
@@ -227,7 +227,8 @@ _pending_answers: dict[str, asyncio.Future] = {}
 
 
 def resolve_answer(conversation_id: int, call_id: str, answer: str) -> bool:
-    """Deliver a user answer to a pending ask_user call. Returns False when
+    """Deliver a user answer to a pending ask_user call or approval request.
+    Returns False when
     no question is waiting (e.g. the run already ended or was stopped)."""
     fut = _pending_answers.get(f"{conversation_id}:{call_id}")
     if fut is None or fut.done():
@@ -264,6 +265,123 @@ def cancel_agent(conversation_id: int):
     ev = _cancel_events.get(conversation_id)
     if ev is not None:
         ev.set()
+
+
+# ---- access-mode gate (PLAN-access-modes.md) -------------------------------
+
+_VALID_MODES = ("ask", "plan", "full")
+
+# Answers the approval card sends through the /answer endpoint. Anything
+# else typed into the free-text box is a deny-with-guidance for the model.
+_APPROVE = "approve"
+_DENY = "deny"
+
+
+def current_access_mode() -> str:
+    """The configured access mode, validated. Read fresh at every gate so a
+    header switch applies to the next tool call of a running turn."""
+    mode = (load_config().get("access_mode") or "ask").lower()
+    return mode if mode in _VALID_MODES else "ask"
+
+
+def _plan_mode_note() -> str:
+    """System-prompt section injected while plan mode is active."""
+    return (
+        "# Access mode: PLAN\n\n"
+        "Plan mode is ON: file edits and shell commands are blocked. Do not "
+        "attempt them. Explore, then present your plan as text and stop \u2014 "
+        "the user will review it and switch to execution when ready."
+    )
+
+
+def _plan_block_result(name: str) -> dict:
+    return {
+        "error": (
+            f"plan mode is on: {name} was not executed. Present your plan "
+            "as text and wait for the user to switch to execution."
+        )
+    }
+
+
+async def _await_approval(
+    conversation_id: int, call_id: str, name: str, cancel_ev: asyncio.Event
+) -> dict | None:
+    """Ask mode: block until the user approves or denies this tool call
+    (same future machinery as ask_user; the frontend renders an approval
+    card). None = approved; dict = denial error result for the model."""
+    key = f"{conversation_id}:{call_id}"
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    _pending_answers[key] = fut
+    cancel_task = asyncio.create_task(cancel_ev.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {fut, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if fut in done:
+            answer = fut.result()
+            if answer == _APPROVE:
+                return None
+            if answer == _DENY:
+                return {"error": f"user denied the {name} tool call"}
+            # Free-text answer: a denial carrying guidance for the model.
+            return {"error": f"user denied the {name} tool call: {answer}"}
+        return {"error": "user did not answer the approval request (run stopped)"}
+    finally:
+        cancel_task.cancel()
+        _pending_answers.pop(key, None)
+        if not fut.done():
+            fut.cancel()
+
+
+async def run_gate(
+    name: str,
+    args: dict,
+    call_id: str,
+    conversation_id: int,
+    cancel_ev: asyncio.Event,
+    mode: str | None = None,
+    emit=None,
+) -> dict | None:
+    """Access-mode decision for one tool call, shared by the main loop and
+    the sub-agent runner. Returns None to execute, or an error-result dict
+    to use instead of executing. `mode` may be passed in by a caller that
+    already read it (the main loop reads once per call so its streamed
+    request event and this decision cannot disagree). `emit` (optional)
+    receives the approval_request / approval_decision events in order —
+    used by the sub-agent runner, which forwards them to the parent stream.
+
+    - read tools and full mode: pass through.
+    - plan mode + mutating/shell: never executes; returns the plan-mode
+      error immediately (the prompt already told the model to plan).
+    - ask mode + mutating/shell: block on the user's decision.
+    """
+    risk = tool_risk(name)
+    if mode is None:
+        mode = current_access_mode()
+    if risk == "read" or mode == "full":
+        return None
+    if mode == "plan":
+        return _plan_block_result(name)
+    if emit:
+        emit(
+            {
+                "type": "approval_request",
+                "name": name,
+                "args": args,
+                "call_id": call_id,
+            }
+        )
+    result = await _await_approval(conversation_id, call_id, name, cancel_ev)
+    if emit:
+        emit(
+            {
+                "type": "approval_decision",
+                "name": name,
+                "call_id": call_id,
+                "approved": result is None,
+            }
+        )
+    return result
 
 
 async def _load_skill(
@@ -468,6 +586,11 @@ async def run_agent(
     if notes:
         system_prompt = f"{system_prompt}\n\n---\n\n{notes}"
 
+    # Plan mode tells the model what it cannot do, so it plans instead of
+    # hitting blocked-tool errors all turn.
+    if current_access_mode() == "plan":
+        system_prompt = f"{system_prompt}\n\n---\n\n{_plan_mode_note()}"
+
     # Full context each turn: system prompt + persisted history
     history = await load_history(conversation_id)
     messages = [{"role": "system", "content": system_prompt}] + history
@@ -652,7 +775,46 @@ async def run_agent(
                     elif name == "load_skill":
                         result = await _load_skill(args, loaded_skills, messages)
                     else:
-                        result = await execute_tool(name, args, workspace)
+                        # Access-mode gate (PLAN-access-modes.md). The mode is
+                        # read ONCE here and passed in, so the request event
+                        # the loop yields and the decision the gate enforces
+                        # cannot disagree. approval_request must stream
+                        # BEFORE the gate blocks: a generator cannot yield
+                        # while it is awaiting the user's answer.
+                        mode = current_access_mode()
+                        if tool_risk(name) == "read" or mode == "full":
+                            result = await execute_tool(name, args, workspace)
+                        else:
+                            if mode == "ask":
+                                yield _ndjson(
+                                    {
+                                        "type": "approval_request",
+                                        "name": name,
+                                        "args": args,
+                                        "call_id": tc.get("id", ""),
+                                    }
+                                )
+                            result = await run_gate(
+                                name,
+                                args,
+                                tc.get("id", ""),
+                                conversation_id,
+                                cancel_ev,
+                                mode=mode,
+                            )
+                            if mode == "ask":
+                                yield _ndjson(
+                                    {
+                                        "type": "approval_decision",
+                                        "name": name,
+                                        "call_id": tc.get("id", ""),
+                                        "approved": result is None,
+                                    }
+                                )
+                            # Approved (None) -> execute for real now; a
+                            # denial/plan-block carries its own error result.
+                            if result is None:
+                                result = await execute_tool(name, args, workspace)
 
                 result_str = _clip_result_str(result)
                 # A tool that attached an image (view_image) becomes a
@@ -725,8 +887,24 @@ async def run_agent(
                 def _emit(ev: dict) -> None:
                     queue.put_nowait(ev)
 
+                # Sub-agent tool calls pass through the same access-mode
+                # gate: approval requests ride the batch's event queue to
+                # the stream, and the user's decision resolves the same
+                # future map (keyed by the sub-agent's own tool call id).
+                def _sub_gate(name: str, args: dict, call_id: str):
+                    return run_gate(
+                        name,
+                        args,
+                        call_id,
+                        conversation_id,
+                        cancel_ev,
+                        emit=_emit,
+                    )
+
                 batch = asyncio.create_task(
-                    subagents_mod.spawn_batch(calls, workspace, cancel_ev, on_event=_emit)
+                    subagents_mod.spawn_batch(
+                        calls, workspace, cancel_ev, on_event=_emit, gate=_sub_gate
+                    )
                 )
 
                 async def _persist_spawn_result(tc: dict, result: dict) -> tuple:
