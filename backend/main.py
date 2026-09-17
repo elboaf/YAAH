@@ -296,7 +296,7 @@ async def api_conversation_context(conversation_id: int):
         "context_tokens": conv.get("context_tokens"),
         "context_model": conv.get("context_model"),
         "model": model,
-        "context_window": get_context_window(model, cfg),
+        "context_window": await get_context_window(model, cfg),
     }
 
 

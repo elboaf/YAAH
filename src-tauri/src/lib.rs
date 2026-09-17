@@ -339,6 +339,28 @@ fn supervise_backend(app: tauri::AppHandle, shared: Arc<BackendShared>) {
                 return;
             }
             if shared.restart_requested.swap(false, Ordering::SeqCst) {
+                // A poke that arrives while a freshly spawned backend is
+                // alive AND serving the port is a stale signal from the UI
+                // (its health poll raced a kill it had already requested).
+                // Honoring it murders a healthy backend and ping-pongs the
+                // banner forever, and poke-kills bypass fast_deaths, so
+                // nothing caps it. Ignore pokes against a demonstrably up
+                // backend within the grace window; honor them otherwise.
+                let young = spawned_at.elapsed() < std::time::Duration::from_secs(30);
+                let healthy = young
+                    && shared
+                        .child
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .map(|c| c.try_wait().ok().flatten().is_none())
+                        .unwrap_or(false)
+                    && std::net::TcpStream::connect("127.0.0.1:8765").is_ok();
+                if healthy {
+                    eprintln!("restart_backend ignored: backend is up and within grace window");
+                    emit_backend_status(&app, "up", "Backend is running.");
+                    continue;
+                }
                 eprintln!("restart_backend requested; killing backend");
                 let mut guard = shared.child.lock().unwrap();
                 if let Some(c) = guard.as_mut() {
