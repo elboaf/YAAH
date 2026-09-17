@@ -3235,48 +3235,99 @@ function ctxColor(frac: number): string {
   return 'bg-emerald-500'
 }
 
-/** Access-mode control for the status strip: cycles ask → plan → full.
- *  Writes through to config so the backend's next tool call is gated under
- *  the new mode (the gate re-reads config per call — live for running
- *  turns). Ask is the default; plan blocks edits; full runs unsandboxed. */
-function AccessModeControl({ compact }: { compact?: boolean }) {
+/** Access-mode dropdown for the composer toolbar: ask / plan / full, each
+ *  with a one-line description. Writes through to config so the backend's
+ *  next tool call is gated under the new mode (the gate re-reads config
+ *  per call — live for running turns). Ask is the default; plan blocks
+ *  edits; full runs unsandboxed. */
+function AccessModeControl() {
   const accessMode = useAgent((s) => s.accessMode)
   const setAccessMode = useAgent((s) => s.setAccessMode)
-  const next = (): AccessMode =>
-    accessMode === 'ask' ? 'plan' : accessMode === 'plan' ? 'full' : 'ask'
-  const meta: Record<AccessMode, { label: string; title: string; cls: string }> = {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const meta: Record<AccessMode, { short: string; label: string; desc: string; dot: string }> = {
     ask: {
-      label: 'ask',
-      title: 'Ask before changes — file edits and shell commands prompt first. Click for Plan mode.',
-      cls: 'border-amber-600/70 text-amber-300',
+      short: 'ask',
+      label: 'Ask first',
+      desc: 'Edits and shell commands prompt before running',
+      dot: 'bg-amber-400',
     },
     plan: {
-      label: 'plan',
-      title: 'Plan mode — edits and shell are blocked; the agent plans only. Click for Full access.',
-      cls: 'border-sky-600/70 text-sky-300',
+      short: 'plan',
+      label: 'Plan',
+      desc: 'Read-only — the agent plans, never edits',
+      dot: 'bg-sky-400',
     },
     full: {
-      label: 'full',
-      title: 'Full access — tools run without confirmation. Click to return to Ask-first.',
-      cls: 'border-zinc-600 text-zinc-200',
+      short: 'full',
+      label: 'Full access',
+      desc: 'Tools run without confirmation',
+      dot: 'bg-zinc-400',
     },
   }
   const m = meta[accessMode]
   const save = (mode: AccessMode) => {
     setAccessMode(mode)
-    updateConfig({ access_mode: mode }).catch(() => {
-      // Revert on failure so the chip never lies about the real mode.
-      setAccessMode(accessMode)
-    })
+    setOpen(false)
+    updateConfig({ access_mode: mode })
+      .then(() => {
+        // Other windows follow live changes via this event (App.tsx).
+        window.dispatchEvent(
+          new CustomEvent('yaah-access-mode-changed', { detail: { mode } }),
+        )
+      })
+      .catch(() => {
+        // Revert on failure so the chip never lies about the real mode.
+        setAccessMode(accessMode)
+      })
   }
+  // Click-outside closes the menu.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
   return (
-    <button
-      className={`rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${m.cls}`}
-      title={m.title}
-      onClick={() => save(next())}
-    >
-      {compact ? m.label : `mode: ${m.label}`}
-    </button>
+    <div ref={ref} className="relative">
+      <button
+        className="flex items-center gap-1.5 rounded px-2 py-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-200"
+        title="Access mode — what the agent may do without asking"
+        aria-label="Access mode"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${m.dot}`} />
+        mode: {m.short}
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+          <path d="M1.5 3l2.5 2.5L6.5 3" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-9 left-0 z-20 w-64 rounded border border-zinc-700 bg-zinc-900 py-1 shadow-lg">
+          {(Object.keys(meta) as AccessMode[]).map((mode) => (
+            <button
+              key={mode}
+              className="flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-zinc-800/60"
+              onClick={() => save(mode)}
+            >
+              <span className={`mt-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full ${meta[mode].dot}`} />
+              <span className="min-w-0">
+                <span className="block text-xs text-zinc-200">{meta[mode].label}</span>
+                <span className="block text-[10px] leading-snug text-zinc-500">{meta[mode].desc}</span>
+              </span>
+              {mode === accessMode && (
+                <svg className="ml-auto mt-1 shrink-0 text-blue-400" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M1.5 5.5l2.5 2.5 4.5-5.5" />
+                </svg>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -3536,9 +3587,8 @@ export function ChatPanel() {
         {/* Session metadata: current git branch + exact context fill. */}
         <GitBranchChip branch={branch} />
         <ContextChip info={contextInfo} />
-        {/* Access mode: ask / plan / full. Sits with the other session
-            controls; the plan exit appears only when it can act. */}
-        <AccessModeControl />
+        {/* Access mode lives in the composer toolbar now; the plan exit
+            appears here only when it can act. */}
         <PlanExitButton />
         {/* Read-aloud toggle: one click to mute/unmute the agent's voice.
             Hidden while the model isn't downloaded — Settings owns that. */}
@@ -3794,7 +3844,7 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
   const connected = status?.connected === true
 
   return (
-    <div className="relative self-end">
+    <div className="relative">
       <button
         title={
           connected
@@ -3804,10 +3854,8 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
         aria-label="Host switcher"
         aria-expanded={open}
         disabled={disabled}
-        className={`flex items-center gap-1.5 whitespace-nowrap rounded border px-2.5 py-2 text-xs ${
-          connected
-            ? 'border-emerald-700 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-950'
-            : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+        className={`flex items-center gap-1.5 whitespace-nowrap rounded px-2 py-1.5 text-xs hover:bg-zinc-700/50 ${
+          connected ? 'text-emerald-300' : 'text-zinc-300'
         } disabled:opacity-50`}
         onClick={() => {
           setOpen(!open)
@@ -3828,9 +3876,12 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
           <rect x="2" y="8.5" width="10" height="4" rx="1" />
         </svg>
         {connected ? status?.name : 'This device'}
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+          <path d="M1.5 3l2.5 2.5L6.5 3" />
+        </svg>
       </button>
       {open && (
-        <div className="absolute bottom-12 left-0 z-20 w-80 rounded border border-zinc-700 bg-zinc-900 shadow-lg">
+        <div className="absolute bottom-9 left-0 z-20 w-64 rounded border border-zinc-700 bg-zinc-900 py-1 shadow-lg">
           {askingPass ? (
             <form
               className="p-3"
@@ -3872,33 +3923,44 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
           ) : (
             <>
               <button
-                className={`block w-full px-3 py-2 text-left text-xs ${
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs ${
                   connected ? 'hover:bg-zinc-800/60' : 'bg-zinc-800/80 text-zinc-400'
                 }`}
                 disabled={busy}
                 onClick={() => void goLocal()}
               >
-                💻 This device
-                {!connected && <span className="ml-1 text-[10px] text-zinc-500">(current)</span>}
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                  <rect x="2" y="2.5" width="10" height="4" rx="1" />
+                  <rect x="2" y="8.5" width="10" height="4" rx="1" />
+                </svg>
+                <span className="text-zinc-200">This device</span>
+                {!connected && <span className="ml-auto text-[10px] text-zinc-500">current</span>}
               </button>
               <div className="border-t border-zinc-800" />
               {(hosts ?? []).map((h) => (
                 <button
                   key={`${h.host}:${h.port}`}
-                  className="block w-full px-3 py-2 text-left text-xs hover:bg-zinc-800/60"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-zinc-800/60"
                   disabled={busy}
+                  title={`${h.host}:${h.port} · ${h.os}`}
                   onClick={() => pickHost(h)}
                 >
-                  <span className="text-zinc-200">
-                    {h.auth ? '🔒' : '🌐'} {h.name}
-                  </span>
-                  <span className="ml-1 text-[10px] text-zinc-500">
-                    {h.host}:{h.port} · {h.os}
-                  </span>
+                  {h.auth ? (
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <rect x="3" y="6" width="8" height="6" rx="1" />
+                      <path d="M5 6V4.5a2 2 0 0 1 4 0V6" />
+                    </svg>
+                  ) : (
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                      <circle cx="7" cy="7" r="5" />
+                      <path d="M2 7h10M7 2c1.8 1.5 1.8 8.5 0 10M7 2c-1.8 1.5-1.8 8.5 0 10" />
+                    </svg>
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-zinc-200">{h.name}</span>
                 </button>
               ))}
               {hosts !== null && hosts.length === 0 && (
-                <p className="px-3 py-2 text-[11px] text-zinc-500">
+                <p className="px-3 py-2 text-[11px] leading-snug text-zinc-500">
                   No hosts found on this network. Install YAAH on the other machine (hosting is on
                   by default) — first launches may need the Windows firewall prompt accepted.
                 </p>
@@ -4777,7 +4839,7 @@ function Composer() {
 
   return (
     <div
-      className="border-t border-zinc-800 p-3"
+      className="p-3"
       onDragOver={(e) => {
         e.preventDefault()
         setDragOver(true)
@@ -4789,118 +4851,6 @@ function Composer() {
         if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files)
       }}
     >
-      {images.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-2">
-          {images.map((img, i) => (
-            <span key={i} className="relative">
-              <img
-                src={img.dataUrl}
-                alt={img.name}
-                title={img.name}
-                className="h-16 rounded border border-zinc-700"
-              />
-              <button
-                className="absolute -right-1.5 -top-1.5 h-4 w-4 rounded-full bg-zinc-700 text-[10px] leading-4 text-zinc-300 hover:bg-red-600 hover:text-white"
-                onClick={() => setImages((arr) => arr.filter((_, j) => j !== i))}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {attachments.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-1">
-          {attachments.map((a, i) => (
-            <span
-              key={i}
-              title={a.savedPath ?? a.name}
-              className="flex items-center gap-1 rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300"
-            >
-              {a.name}
-              {a.savedPath && (
-                <span className="text-zinc-500">
-                  · {Math.max(1, Math.round(a.size / 1_000))} KB · staged
-                </span>
-              )}
-              <button
-                className="text-zinc-500 hover:text-red-400"
-                onClick={() => setAttachments((arr) => arr.filter((_, j) => j !== i))}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {pickedSkills.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-1">
-          {pickedSkills.map((s) => (
-            <span
-              key={s.name}
-              title={s.description || s.path}
-              className="flex items-center gap-1 rounded bg-indigo-900/60 px-2 py-0.5 font-mono text-[10px] text-indigo-200"
-            >
-              /{s.name}
-              <button
-                className="text-indigo-400 hover:text-red-400"
-                onClick={() => removeSkill(s.name)}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {rejects.length > 0 && (
-        <div className="mb-2 space-y-1" aria-live="polite">
-          {rejects.map((msg, i) => (
-            <p
-              key={`${msg}-${i}`}
-              className="rounded border border-amber-800/60 bg-amber-950/40 px-2 py-1 text-[11px] text-amber-300"
-            >
-              {msg}
-            </p>
-          ))}
-        </div>
-      )}
-      {sendError && (
-        <div
-          className="mb-2 flex items-center justify-between gap-2 rounded border border-red-800/60 bg-red-950/40 px-2 py-1.5"
-          role="alert"
-        >
-          <p className="text-[11px] text-red-300">{sendError}</p>
-          <button
-            className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
-            onClick={() => setSendError(null)}
-          >
-            dismiss
-          </button>
-        </div>
-      )}
-      {turnError && (
-        <div
-          className="mb-2 flex items-center justify-between gap-2 rounded border border-red-800/60 bg-red-950/40 px-2 py-1.5"
-          role="alert"
-        >
-          <p className="min-w-0 flex-1 truncate text-[11px] text-red-300" title={turnError}>
-            The turn failed mid-stream — {turnError}
-          </p>
-          <button
-            className="shrink-0 rounded border border-red-700 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-950"
-            disabled={sending}
-            onClick={() => void resumeTurn()}
-          >
-            Resume turn
-          </button>
-          <button
-            className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
-            onClick={() => setTurnError(null)}
-          >
-            dismiss
-          </button>
-        </div>
-      )}
       {skillMenuOpen && (
         <div className="relative">
           <div className="absolute bottom-1 left-0 z-10 max-h-56 w-80 overflow-y-auto rounded border border-zinc-700 bg-zinc-900 shadow-lg">
@@ -4947,20 +4897,137 @@ function Composer() {
           </div>
         </div>
       )}
-      <div className="flex gap-2">
-        <HostSwitcher disabled={streaming || sending} />
+      <div
+        className={`rounded border bg-zinc-800/50 ${
+          dragOver
+            ? 'border-blue-500'
+            : streaming
+              ? 'border-amber-600/70 focus-within:border-amber-500'
+              : 'border-zinc-700 focus-within:border-blue-500'
+        }`}
+      >
+        {/* Staged content lives inside the card: everything the message is
+            made of sits in one bordered container. */}
+        {images.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-3 pt-3">
+            {images.map((img, i) => (
+              <span key={i} className="relative">
+                <img
+                  src={img.dataUrl}
+                  alt={img.name}
+                  title={img.name}
+                  className="h-16 rounded border border-zinc-700"
+                />
+                <button
+                  className="absolute -right-1.5 -top-1.5 h-4 w-4 rounded-full bg-zinc-700 text-[10px] leading-4 text-zinc-300 hover:bg-red-600 hover:text-white"
+                  onClick={() => setImages((arr) => arr.filter((_, j) => j !== i))}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1 px-3 pt-3">
+            {attachments.map((a, i) => (
+              <span
+                key={i}
+                title={a.savedPath ?? a.name}
+                className="flex items-center gap-1 rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300"
+              >
+                {a.name}
+                {a.content !== undefined && <span className="text-zinc-500">· inline</span>}
+                {a.savedPath && (
+                  <span className="text-zinc-500">
+                    · {Math.max(1, Math.round(a.size / 1_000))} KB · staged
+                  </span>
+                )}
+                <button
+                  className="text-zinc-500 hover:text-red-400"
+                  onClick={() => setAttachments((arr) => arr.filter((_, j) => j !== i))}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {pickedSkills.length > 0 && (
+          <div className="flex flex-wrap gap-1 px-3 pt-3">
+            {pickedSkills.map((s) => (
+              <span
+                key={s.name}
+                title={s.description || s.path}
+                className="flex items-center gap-1 rounded bg-indigo-900/60 px-2 py-0.5 font-mono text-[10px] text-indigo-200"
+              >
+                /{s.name}
+                <button
+                  className="text-indigo-400 hover:text-red-400"
+                  onClick={() => removeSkill(s.name)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {rejects.length > 0 && (
+          <div className="space-y-1 px-3 pt-3" aria-live="polite">
+            {rejects.map((msg, i) => (
+              <p
+                key={`${msg}-${i}`}
+                className="rounded border border-amber-800/60 bg-amber-950/40 px-2 py-1 text-[11px] text-amber-300"
+              >
+                {msg}
+              </p>
+            ))}
+          </div>
+        )}
+        {sendError && (
+          <div
+            className="mx-3 mt-3 flex items-center justify-between gap-2 rounded border border-red-800/60 bg-red-950/40 px-2 py-1.5"
+            role="alert"
+          >
+            <p className="text-[11px] text-red-300">{sendError}</p>
+            <button
+              className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
+              onClick={() => setSendError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+        {turnError && (
+          <div
+            className="mx-3 mt-3 flex items-center justify-between gap-2 rounded border border-red-800/60 bg-red-950/40 px-2 py-1.5"
+            role="alert"
+          >
+            <p className="min-w-0 flex-1 truncate text-[11px] text-red-300" title={turnError}>
+              The turn failed mid-stream — {turnError}
+            </p>
+            <button
+              className="shrink-0 rounded border border-red-700 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-950"
+              disabled={sending}
+              onClick={() => void resumeTurn()}
+            >
+              Resume turn
+            </button>
+            <button
+              className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
+              onClick={() => setTurnError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
         <textarea
           ref={textareaRef}
-          className={`flex-1 resize-none rounded border bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none ${
-            dragOver
-              ? 'border-blue-500'
-              : streaming
-                ? 'border-amber-600/70 focus:border-amber-500'
-                : 'border-zinc-700 focus:border-blue-500'
-          }`}
+          className="block w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 focus:outline-none"
           rows={2}
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
-          placeholder="Describe a task... (drop/paste/attach images or text files; type / to load a skill)"          aria-label="Message the agent"
+          placeholder="Describe a task... (drop/paste/attach images or text files; type / to load a skill)"
+          aria-label="Message the agent"
           value={input}
           onChange={(e) => {
             setInput(e.target.value)
@@ -5033,52 +5100,18 @@ function Composer() {
             e.target.value = ''
           }}
         />
-        <button
-          title="Attach files"
-          aria-label="Attach files"
-          className="self-end rounded border border-zinc-700 px-3 py-2 text-zinc-300 hover:bg-zinc-800"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 14 14"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            aria-hidden="true"
-          >
-            <path d="M7 2v10M2 7h10" />
-          </svg>
-        </button>
-        {/* Only render once confirmed available: an optimistic show/hide
-            flashed the button before the backend could answer. */}
-        {micAvailable === true && (
-          <button
-            title={
-              voiceState === 'recording'
-                ? 'Stop and transcribe (auto-stops ~1.5s after you stop talking)'
-                : voiceState === 'transcribing'
-                  ? 'Transcribing…'
-                  : 'Dictate (voice to text; stops automatically on silence)'
-            }
-            aria-label={
-              voiceState === 'recording' ? 'Stop and transcribe' : 'Dictate (voice to text)'
-            }
-            aria-pressed={voiceState === 'recording'}
-            className={`self-end rounded border px-3 py-2 ${
-              voiceState === 'recording'
-                ? 'border-red-600 text-red-400'
-                : voiceState === 'transcribing'
-                  ? 'border-amber-600/70 text-amber-300'
-                  : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
-            }`}
-            onClick={() => void toggleDictation()}
-          >
-            {voiceState === 'transcribing' ? (
-              <span className="run-pulse inline-block text-[10px] leading-[14px]">●</span>
-            ) : (
+        {/* Unified toolbar: host + mode on the left, attach/mic/send on the
+            right — one hairline-separated row inside the composer card. */}
+        <div className="flex items-center gap-1 border-t border-zinc-700/70 px-1.5 py-1.5">
+          <HostSwitcher disabled={streaming || sending} />
+          <AccessModeControl />
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              title="Attach files"
+              aria-label="Attach files"
+              className="rounded p-1.5 text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-200"
+              onClick={() => fileInputRef.current?.click()}
+            >
               <svg
                 width="14"
                 height="14"
@@ -5089,28 +5122,70 @@ function Composer() {
                 strokeLinecap="round"
                 aria-hidden="true"
               >
-                <rect x="5" y="1.25" width="4" height="7" rx="2" />
-                <path d="M2.75 6.5a4.25 4.25 0 0 0 8.5 0M7 10.75v2" />
+                <path d="M7 2v10M2 7h10" />
               </svg>
+            </button>
+            {/* Only render once confirmed available: an optimistic show/hide
+                flashed the button before the backend could answer. */}
+            {micAvailable === true && (
+              <button
+                title={
+                  voiceState === 'recording'
+                    ? 'Stop and transcribe (auto-stops ~1.5s after you stop talking)'
+                    : voiceState === 'transcribing'
+                      ? 'Transcribing…'
+                      : 'Dictate (voice to text; stops automatically on silence)'
+                }
+                aria-label={
+                  voiceState === 'recording' ? 'Stop and transcribe' : 'Dictate (voice to text)'
+                }
+                aria-pressed={voiceState === 'recording'}
+                className={`rounded p-1.5 ${
+                  voiceState === 'recording'
+                    ? 'text-red-400'
+                    : voiceState === 'transcribing'
+                      ? 'text-amber-300'
+                      : 'text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-200'
+                }`}
+                onClick={() => void toggleDictation()}
+              >
+                {voiceState === 'transcribing' ? (
+                  <span className="run-pulse inline-block text-[10px] leading-[14px]">●</span>
+                ) : (
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 14 14"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    aria-hidden="true"
+                  >
+                    <rect x="5" y="1.25" width="4" height="7" rx="2" />
+                    <path d="M2.75 6.5a4.25 4.25 0 0 0 8.5 0M7 10.75v2" />
+                  </svg>
+                )}
+              </button>
             )}
-          </button>
-        )}
-        {sending ? (
-          <button
-            className="self-end rounded border border-red-700 px-3 py-2 text-sm text-red-300 hover:bg-red-950"
-            onClick={stop}
-          >
-            Stop
-          </button>
-        ) : (
-          <button
-            className="self-end rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
-            onClick={() => void send()}
-            disabled={!input.trim() && attachments.length === 0 && images.length === 0}
-          >
-            Send
-          </button>
-        )}
+            {sending ? (
+              <button
+                className="rounded border border-red-700 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950"
+                onClick={stop}
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
+                onClick={() => void send()}
+                disabled={!input.trim() && attachments.length === 0 && images.length === 0}
+              >
+                Send
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )
