@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
   listConversations,
   createConversation,
@@ -684,52 +684,138 @@ function toolTarget(tc: ToolCall): string {
   return t.length > 48 ? t.slice(0, 48) + '…' : t
 }
 
-/** One compact chip: glyph + name + target, pulsing while the call runs. */
+/** One compact chip: glyph + name + target, shimmering and counting while
+ *  the call runs; calm the moment it finishes. */
 function ToolChip({ tc }: { tc: ToolCall }) {
   const done = tc.result !== undefined
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
-        done ? 'bg-zinc-800/70 text-zinc-400' : 'bg-zinc-700/60 text-zinc-200'
+        done ? 'bg-zinc-800/70 text-zinc-400' : 'chip-running bg-zinc-700/60 text-zinc-200'
       }`}
     >
       <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
       <span>{tc.name}</span>
       {toolTarget(tc) && <span className="text-zinc-500">{toolTarget(tc)}</span>}
+      {!done && <ElapsedBadge startedAt={tc.startedAt} />}
       {!done && <span className="run-pulse text-amber-300">●</span>}
     </span>
   )
 }
 
-/** Live output tail for the currently-running shell call, streamed under the
- *  ticker row so "still working" vs "wedged" is visible at a glance. Shows
- *  the last lines auto-scrolled to the bottom; click to expand. */
-function LiveToolOutput({ tc }: { tc: ToolCall }) {
+// ---- liveness clock --------------------------------------------------------
+// One shared 100ms interval for every elapsed counter on screen. The timer
+// exists only while at least one subscriber is mounted, so a settled UI
+// (everything finished) costs zero timers.
+
+const tickerListeners = new Set<() => void>()
+let tickerTimer: ReturnType<typeof setInterval> | null = null
+
+function subscribeTicker(cb: () => void) {
+  tickerListeners.add(cb)
+  if (!tickerTimer) tickerTimer = setInterval(() => tickerListeners.forEach((l) => l()), 100)
+  return () => {
+    tickerListeners.delete(cb)
+    if (tickerListeners.size === 0 && tickerTimer) {
+      clearInterval(tickerTimer)
+      tickerTimer = null
+    }
+  }
+}
+
+/** Re-renders the caller on the shared 100ms clock. Only mount it under
+ *  something that is actually running. */
+function useNow(): number {
+  return useSyncExternalStore(
+    subscribeTicker,
+    () => Date.now(),
+    () => 0,
+  )
+}
+
+function formatElapsed(ms: number): string {
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s`
+  return `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, '0')}`
+}
+
+/** Live elapsed time since `startedAt`, tabular so digits don't jitter. */
+function ElapsedBadge({ startedAt, className = 'text-zinc-500' }: { startedAt?: number; className?: string }) {
+  const now = useNow()
+  const ms = Math.max(0, now - (startedAt ?? now))
+  return <span className={`tabular-nums ${className}`}>{formatElapsed(ms)}</span>
+}
+
+/** The telemetry strip under the ticker row: proof that output is occurring.
+ *  Real shell output streams by (unreadable-by-design, auto-scrolled, caret
+ *  at the tail); fast tools leave brief completion blips so the strip is
+ *  never static; a footer carries the hot/cold signal and elapsed clock.
+ *  Vanishes when the turn settles — history stays calm in the TraceLine. */
+function LiveTelemetry({ calls }: { calls: ToolCall[] }) {
+  const now = useNow()
   const [expanded, setExpanded] = useState(false)
   const preRef = useRef<HTMLPreElement>(null)
+  const active = calls.find((tc) => tc.result === undefined)
+  const streaming = !!(active && active.output)
+  const blips = calls
+    .filter((tc) => tc.result !== undefined && tc.finishedAt && now - tc.finishedAt < 4500)
+    .slice(-3)
+    .reverse()
   useEffect(() => {
     const el = preRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [tc.output, expanded])
+  }, [active?.output, expanded])
+
+  if (!active && blips.length === 0) return null
   return (
-    <div className="mt-1 rounded border border-zinc-800 bg-zinc-900/60">
-      <button
-        className="flex w-full items-center gap-2 px-2 py-0.5 text-left font-mono text-[10px] text-zinc-500"
-        onClick={() => setExpanded((o) => !o)}
-      >
-        <span className="run-pulse text-amber-300">{'\u25cf'}</span>
-        <span className="text-zinc-400">{tc.name}</span>
-        <span>live output</span>
-        <span className="ml-auto shrink-0">{expanded ? '\u25be' : '\u25b4'}</span>
-      </button>
-      <pre
-        ref={preRef}
-        className={`overflow-auto whitespace-pre-wrap break-all px-2 pb-1 font-mono text-[10px] leading-4 text-zinc-400 ${
-          expanded ? 'max-h-40' : 'max-h-8'
-        }`}
-      >
-        {tc.output}
-      </pre>
+    <div
+      className="mt-1 rounded border border-zinc-800 bg-zinc-900/60 font-mono text-[10px] leading-4"
+      onClick={() => setExpanded((o) => !o)}
+    >
+      {blips.length > 0 && (
+        <div className={`space-y-0.5 px-2 ${streaming ? 'pt-1' : 'py-1'}`}>
+          {blips.map((tc) => (
+            <div key={tc.id} className="telemetry-blip flex items-center gap-1.5">
+              <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
+              <span className="text-zinc-300">{tc.name}</span>
+              {toolTarget(tc) && <span className="truncate text-zinc-500">{toolTarget(tc)}</span>}
+              <span className="ml-auto shrink-0 text-zinc-500 tabular-nums">
+                {tc.startedAt && tc.finishedAt ? formatElapsed(tc.finishedAt - tc.startedAt) : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {streaming && active && (
+        <pre
+          ref={preRef}
+          className={`overflow-auto whitespace-pre-wrap break-all px-2 pt-1 text-zinc-400 ${
+            expanded ? 'max-h-40' : 'max-h-8'
+          }`}
+        >
+          {active.output}
+          <span className="stream-caret" />
+        </pre>
+      )}
+      {active && (
+        <div className="flex items-center gap-2 border-t border-zinc-800/80 px-2 py-0.5">
+          {streaming ? (
+            <>
+              <span className="text-amber-300">█</span>
+              <span className="text-zinc-400">streaming…</span>
+            </>
+          ) : (
+            <>
+              <span className="run-pulse text-amber-300">●</span>
+              <span className="text-zinc-400">{active.name}</span>
+            </>
+          )}
+          <ElapsedBadge
+            startedAt={active.startedAt}
+            className={`ml-auto shrink-0 ${streaming ? 'text-amber-300/80' : 'text-zinc-500'}`}
+          />
+        </div>
+      )}
     </div>
   )
 }
@@ -739,7 +825,7 @@ function LiveToolOutput({ tc }: { tc: ToolCall }) {
  *  edge; the row never grows past the chat panel's width. */
 function ToolTicker({ calls }: { calls: ToolCall[] }) {
   const recent = calls.slice(-12)
-  const active = calls.find((tc) => tc.result === undefined && tc.output)
+  const anyActive = calls.some((tc) => tc.result === undefined)
   const fade =
     'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
   return (
@@ -757,7 +843,7 @@ function ToolTicker({ calls }: { calls: ToolCall[] }) {
           </span>
         ))}
       </div>
-      {active && <LiveToolOutput tc={active} />}
+      {anyActive && <LiveTelemetry calls={calls} />}
     </div>
   )
 }
@@ -879,10 +965,16 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
 
 /** Live nested transcript for one spawn_agent call: the sub-agent's own
  *  text deltas and tool chips, indented under the parent turn. Collapses
- *  to a status line when the run finishes; expands on click. */
+ *  to a status line when the run finishes; expands on click. Running
+ *  state shimmers and its transcript carries the streaming caret. */
 function SubAgentBlock({ run }: { run: SubAgentRun }) {
   const [open, setOpen] = useState(true)
+  const textRef = useRef<HTMLDivElement>(null)
   const running = run.status === 'running'
+  useEffect(() => {
+    const el = textRef.current
+    if (el && running) el.scrollTop = el.scrollHeight
+  }, [run.text, running])
   const statusLabel =
     run.status === 'running'
       ? 'running'
@@ -901,7 +993,9 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
   return (
     <div className="my-1 rounded border border-zinc-800 bg-zinc-900/40">
       <button
-        className="flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[10px]"
+        className={`flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[10px] ${
+          running ? 'chip-running' : ''
+        }`}
         onClick={() => setOpen((o) => !o)}
       >
         <span className="text-fuchsia-400">{'\u29c9'}</span>
@@ -923,7 +1017,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
                   className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${
                     t.result !== undefined
                       ? 'bg-zinc-800/70 text-zinc-400'
-                      : 'bg-zinc-700/60 text-zinc-200'
+                      : 'chip-running bg-zinc-700/60 text-zinc-200'
                   }`}
                 >
                   <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
@@ -936,8 +1030,14 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
             </div>
           )}
           {run.text && (
-            <div className="whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-zinc-400">
+            <div
+              ref={textRef}
+              className={`whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-zinc-400 ${
+                running ? 'max-h-40 overflow-auto' : ''
+              }`}
+            >
               {run.text}
+              {running && <span className="stream-caret" />}
             </div>
           )}
         </div>

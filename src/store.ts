@@ -9,6 +9,9 @@ export interface ToolCall {
   result?: unknown
   /** Live output tail while the tool runs (tool_progress chunks). */
   output?: string
+  /** Client clock ms when the call started / finished (liveness UI). */
+  startedAt?: number
+  finishedAt?: number
   /** Live sub-agent run state (spawn_agent calls only). */
   subAgent?: SubAgentRun
 }
@@ -430,7 +433,12 @@ export const useAgent = create<AgentState>((set, get) => ({
                 ...m,
                 toolCalls: [
                   ...(m.toolCalls ?? []),
-                  { id: callId || `t${(m.toolCalls?.length ?? 0) + 1}`, name, args },
+                  {
+                    id: callId || `t${(m.toolCalls?.length ?? 0) + 1}`,
+                    name,
+                    args,
+                    startedAt: Date.now(),
+                  },
                 ],
               }
             : m,
@@ -448,7 +456,7 @@ export const useAgent = create<AgentState>((set, get) => ({
           const tcs = [...m.toolCalls]
           for (let i = tcs.length - 1; i >= 0; i--) {
             if (tcs[i].id === callId && tcs[i].result === undefined) {
-              tcs[i] = { ...tcs[i], result }
+              tcs[i] = { ...tcs[i], result, finishedAt: Date.now() }
               break
             }
           }
