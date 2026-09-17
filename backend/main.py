@@ -325,6 +325,191 @@ async def api_conversation_git_branch(conversation_id: int):
     return {"branch": await current_git_branch(root)}
 
 
+@app.get("/api/conversations/{conversation_id}/git-info")
+async def api_conversation_git_info(conversation_id: int):
+    """Full git readout for the status strip: branch, dirty state, +N −N
+    line counts, local vs upstream hashes and ahead/behind. TTL-cached in
+    gitinfo (one git burst per ~2s per workspace) — the UI polls this while
+    a session is open."""
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="conversation not found")
+    from backend.agent.gitinfo import git_workspace_info
+    from backend.agent.tools import workspace_root
+
+    ws = conv.get("workspace") or ""
+    if not ws.strip() or ws.startswith("remote:"):
+        return {"info": None}
+    try:
+        root = workspace_root(ws)
+    except ValueError:
+        return {"info": None}
+    return {"info": await git_workspace_info(root)}
+
+
+@app.get("/api/conversations/{conversation_id}/git-branches")
+async def api_conversation_git_branches(conversation_id: int):
+    """Local branch names for the chip's checkout dropdown (not a repo -> [])."""
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="conversation not found")
+    from backend.agent.gitinfo import list_local_branches
+    from backend.agent.tools import workspace_root
+
+    ws = conv.get("workspace") or ""
+    if not ws.strip() or ws.startswith("remote:"):
+        return {"branches": []}
+    try:
+        root = workspace_root(ws)
+    except ValueError:
+        return {"branches": []}
+    return {"branches": await list_local_branches(root)}
+
+
+class GitCommandBody(BaseModel):
+    action: str  # status | commit | push | pull | checkout
+    message: str | None = None  # commit message
+    branch: str | None = None  # checkout target
+
+
+_GIT_ACTIONS = {"status", "commit", "push", "pull", "checkout"}
+
+
+async def _conversation_git_root(conversation_id: int):
+    """Resolved workspace root for a conversation, or None when the session
+    has no local git workspace (remote:/empty/non-repo handled by callers)."""
+    from backend.agent.tools import workspace_root
+
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="conversation not found")
+    ws = conv.get("workspace") or ""
+    if not ws.strip() or ws.startswith("remote:"):
+        return None
+    try:
+        return workspace_root(ws)
+    except ValueError:
+        return None
+
+
+async def _run_ui_git(root, *args: str) -> dict:
+    """One UI-initiated git command, shell-free (argument list exec — a
+    crafted branch name or commit message cannot become a second command)."""
+    import asyncio
+
+    from backend.agent.tools import _NO_WINDOW, _NEW_SESSION
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args,
+            cwd=str(root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            **_NO_WINDOW,
+            **_NEW_SESSION,
+        )
+    except OSError as e:
+        return {"error": f"git not runnable: {e}"}
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return {"error": "git timed out"}
+    text = out.decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        return {"error": text[:2000] or f"git exited {proc.returncode}"}
+    return {"output": text[:2000]}
+
+
+async def _post_git_trace(conversation_id: int, action: str, result: dict) -> None:
+    """Record the command in the conversation as a synthetic tool row: it
+    renders through the normal tool-trace UI, survives reloads, and is never
+    replayed into model context (load_history drops rows whose tool_call_id
+    has no matching assistant call)."""
+    import json as _json
+
+    call_id = f"ui-git-{action}-{os.urandom(4).hex()}"
+    await add_message(
+        conversation_id,
+        "tool",
+        _json.dumps(result),
+        tool_calls=[
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": f"git {action}",
+                    "arguments": _json.dumps({}),
+                },
+            }
+        ],
+        tool_call_id=call_id,
+    )
+
+
+@app.post("/api/conversations/{conversation_id}/git-command")
+async def api_conversation_git_command(conversation_id: int, body: GitCommandBody):
+    """Human-initiated git action from the status strip. Deliberately NOT
+    gated by access mode — that gate throttles the agent, not the user at
+    their own machine. Whitelist-only actions; everything lands in the
+    conversation as a trace row."""
+    from backend.agent.gitinfo import invalidate_git_caches
+
+    action = body.action
+    if action not in _GIT_ACTIONS:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=f"unsupported git action: {action}")
+
+    root = await _conversation_git_root(conversation_id)
+    if root is None:
+        return {"ok": False, "error": "no local git workspace"}
+
+    if action == "status":
+        result = await _run_ui_git(root, "status", "--short", "--branch")
+    elif action == "commit":
+        msg = (body.message or "").strip()
+        if not msg:
+            return {"ok": False, "error": "commit message is empty"}
+        added = await _run_ui_git(root, "add", "-A")
+        if "error" in added:
+            result = added
+        else:
+            result = await _run_ui_git(root, "commit", "-m", msg)
+    elif action == "push":
+        result = await _run_ui_git(root, "push")
+        err = result.get("error", "").lower()
+        if "error" in result and ("upstream" in err or "push destination" in err):
+            # No upstream (new branch) or no remote configured yet: retry
+            # with --set-upstream and say so in the recorded output.
+            probe = await _run_ui_git(root, "rev-parse", "--abbrev-ref", "HEAD")
+            branch = probe.get("output", "").strip() if "output" in probe else ""
+            if branch:
+                retried = await _run_ui_git(
+                    root, "push", "--set-upstream", "origin", branch
+                )
+                retried.setdefault("note", f"set upstream to origin/{branch}")
+                result = retried
+    elif action == "pull":
+        result = await _run_ui_git(root, "pull")
+    elif action == "checkout":
+        branch = (body.branch or "").strip()
+        if not branch:
+            return {"ok": False, "error": "checkout target is empty"}
+        result = await _run_ui_git(root, "checkout", branch)
+
+    invalidate_git_caches(root)
+    await _post_git_trace(conversation_id, action, result)
+    return {"ok": "error" not in result, **result}
+
+
 @app.patch("/api/conversations/{conversation_id}")
 async def api_update_conversation(conversation_id: int, body: ConversationUpdate):
     ok = await update_conversation(

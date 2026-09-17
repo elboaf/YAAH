@@ -24,6 +24,11 @@ import {
   refreshSkills,
   getContext,
   getGitBranch,
+  getGitInfo,
+  getGitBranches,
+  runGitCommand,
+  type GitInfo,
+  type GitAction,
   listMcpServers,
   addMcpServer,
   removeMcpServer,
@@ -3457,15 +3462,302 @@ function AccessModeControl() {
   )
 }
 
-/** Git branch chip for the chat panel's status strip (null = not a repo). */
-function GitBranchChip({ branch }: { branch: string | null }) {
-  if (!branch) return null
+/** Git cluster for the status strip: branch chip (click = checkout dropdown),
+ *  +N −N uncommitted line counts, local·upstream hash pair with ↑N ↓N, and
+ *  the status/commit/push/pull commands. Hidden entirely for non-repos.
+ *
+ *  Commands run directly against git (no agent turn, no tokens) and land in
+ *  the conversation as synthetic tool rows; mutating actions are disabled
+ *  while the agent is mid-turn (status stays readable), push/pull confirm
+ *  inline first, commit opens a small popover with a visible file count. */
+function GitChipCluster({
+  info,
+  streaming,
+  conversationId,
+  onCommandDone,
+}: {
+  info: GitInfo | null
+  streaming: boolean
+  conversationId: number | null
+  onCommandDone: () => void
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [branches, setBranches] = useState<string[]>([])
+  const [branchesLoaded, setBranchesLoaded] = useState(false)
+  const [confirmAction, setConfirmAction] = useState<'push' | 'pull' | null>(null)
+  const [commitOpen, setCommitOpen] = useState(false)
+  const [commitMsg, setCommitMsg] = useState('')
+  const [busyAction, setBusyAction] = useState<GitAction | null>(null)
+  const [copied, setCopied] = useState<'local' | 'remote' | null>(null)
+  const wrapRef = useRef<HTMLSpanElement>(null)
+  const appendRawMessage = useAgent((s) => s.appendRawMessage)
+
+  // Fresh branch list per conversation; never reuse across sessions.
+  useEffect(() => {
+    setBranches([])
+    setBranchesLoaded(false)
+    setMenuOpen(false)
+  }, [conversationId])
+
+  // Click-outside closes any open popover/menu.
+  useEffect(() => {
+    if (!menuOpen && !commitOpen && !confirmAction) return
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setMenuOpen(false)
+        setCommitOpen(false)
+        setConfirmAction(null)
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen, commitOpen, confirmAction])
+
+  if (!info) return null
+
+  const busy = busyAction !== null
+  const lockMutations = streaming || busy
+
+  const openMenu = () => {
+    setCommitOpen(false)
+    setConfirmAction(null)
+    setMenuOpen((o) => !o)
+    if (!branchesLoaded && conversationId !== null) {
+      getGitBranches(conversationId)
+        .then((r) => {
+          setBranches(r.branches)
+          setBranchesLoaded(true)
+        })
+        .catch(() => {})
+    }
+  }
+
+  const run = async (action: GitAction, opts?: { message?: string; branch?: string }) => {
+    if (conversationId === null || busyAction !== null) return
+    setBusyAction(action)
+    try {
+      const res = await runGitCommand(conversationId, action, opts)
+      // Live trace row (the backend persists the same row for reloads — the
+      // live path never refetches history, so no duplicates can form).
+      const callId = `ui-${action}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+      appendRawMessage(String(conversationId), {
+        id: callId,
+        role: 'tool',
+        content: JSON.stringify(res),
+        toolCalls: [{ id: callId, name: `git ${action}`, args: opts ?? {}, result: res }],
+      })
+    } catch {
+      // HTTP-level failure (backend down/restarting): the banner owns that.
+    } finally {
+      setBusyAction(null)
+      setCommitOpen(false)
+      setCommitMsg('')
+      setConfirmAction(null)
+      onCommandDone()
+    }
+  }
+
+  const copyHash = (h: string, which: 'local' | 'remote') => {
+    navigator.clipboard
+      ?.writeText(h)
+      .then(() => {
+        setCopied(which)
+        window.setTimeout(() => setCopied(null), 1200)
+      })
+      .catch(() => {})
+  }
+
+  const pairAway = info.ahead > 0 || info.behind > 0
+  const pairDiverged = info.ahead > 0 && info.behind > 0
+  const pairColor = pairDiverged ? 'text-red-400' : pairAway ? 'text-amber-400' : 'text-zinc-500'
+  const pairTitle =
+    `local ${info.local_hash ?? '?'} · upstream ${info.upstream ?? '(none)'} ${info.remote_hash ?? '—'}` +
+    (pairAway ? ` — ↑${info.ahead} ahead ↓${info.behind} behind` : ' — in sync')
+
+  const cmdBtn =
+    'rounded px-1 py-0.5 font-mono text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ' +
+    'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-500'
+
   return (
-    <span
-      title="Current git branch of this session's workspace"
-      className="inline-block max-w-[16rem] truncate rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
-    >
-      {branch}
+    <span ref={wrapRef} className="relative flex min-w-0 items-center gap-2">
+      {/* branch chip: dirty dot + name + chevron */}
+      <button
+        className="flex shrink-0 items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-zinc-500"
+        title="Current git branch — click to switch"
+        aria-label="Switch git branch"
+        aria-expanded={menuOpen}
+        onClick={openMenu}
+      >
+        <span
+          className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${info.dirty ? 'bg-amber-400' : 'bg-transparent'}`}
+          title={info.dirty ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)` : undefined}
+        />
+        <span className="min-w-0 max-w-[10rem] truncate">{info.branch}</span>
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+          <path d="M1.5 3l2.5 2.5L6.5 3" />
+        </svg>
+      </button>
+
+      {/* checkout dropdown (opens upward — the strip is the floor) */}
+      {menuOpen && (
+        <div className="absolute bottom-full left-0 z-30 mb-1 w-56 rounded border border-zinc-700 bg-zinc-900 py-1 shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_8px_10px_-6px_rgba(0,0,0,0.1)]">
+          <div className="px-3 pb-1 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-600">
+            branches
+          </div>
+          <div className="max-h-56 overflow-auto">
+            {branches.length === 0 && (
+              <div className="px-3 py-1.5 font-mono text-[11px] text-zinc-600">
+                {branchesLoaded ? 'no local branches' : 'loading…'}
+              </div>
+            )}
+            {branches.map((b) => (
+              <button
+                key={b}
+                disabled={lockMutations}
+                className={`flex w-full items-center gap-2 px-3 py-1 text-left font-mono text-[11px] hover:bg-zinc-800/60 ${
+                  b === info.branch ? 'text-zinc-200' : 'text-zinc-400'
+                } ${lockMutations ? 'cursor-not-allowed opacity-40' : ''}`}
+                onClick={() => {
+                  setMenuOpen(false)
+                  if (b !== info.branch) run('checkout', { branch: b })
+                }}
+              >
+                <span className="w-3 shrink-0 text-blue-400">{b === info.branch ? '✓' : ''}</span>
+                <span className="truncate">{b}</span>
+              </button>
+            ))}
+          </div>
+          {lockMutations && (
+            <div className="border-t border-zinc-800 px-3 py-1 font-mono text-[10px] text-zinc-600">
+              {busy ? 'git is running…' : 'agent is working — wait for the turn to end'}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* uncommitted line counts (tracked changes) */}
+      {info.added + info.deleted > 0 && (
+        <span
+          className="shrink-0 font-mono text-[10px]"
+          title={`${info.added} added / ${info.deleted} deleted lines (uncommitted, tracked files)`}
+        >
+          <span className="text-emerald-500/90">+{info.added}</span>{' '}
+          <span className="text-red-400/90">−{info.deleted}</span>
+        </span>
+      )}
+
+      {/* local·upstream hash pair (click a hash to copy) */}
+      {info.local_hash && (
+        <span className={`shrink-0 font-mono text-[10px] ${pairColor}`} title={pairTitle}>
+          <button
+            className="hover:text-zinc-200"
+            title={copied === 'local' ? 'copied' : `copy ${info.local_hash}`}
+            onClick={() => copyHash(info.local_hash!, 'local')}
+          >
+            {copied === 'local' ? '✓' : info.local_hash}
+          </button>
+          <span className="text-zinc-700">·</span>
+          <button
+            className="hover:text-zinc-200"
+            title={copied === 'remote' ? 'copied' : info.remote_hash ? `copy ${info.remote_hash}` : 'no upstream'}
+            onClick={() => info.remote_hash && copyHash(info.remote_hash, 'remote')}
+          >
+            {copied === 'remote' ? '✓' : info.remote_hash ?? '—'}
+          </button>
+          {info.ahead > 0 && <span> ↑{info.ahead}</span>}
+          {info.behind > 0 && <span> ↓{info.behind}</span>}
+        </span>
+      )}
+
+      {/* commands: status · commit · push · pull */}
+      <span className="flex shrink-0 items-center gap-0.5">
+        <button className={cmdBtn} disabled={busyAction !== null} title="git status" onClick={() => run('status')}>
+          status{busyAction === 'status' && <span className="run-pulse text-amber-300"> ●</span>}
+        </button>
+        <button
+          className={cmdBtn}
+          disabled={lockMutations}
+          title={streaming ? 'agent is working — wait for the turn to end' : 'stage all + commit'}
+          onClick={() => {
+            setConfirmAction(null)
+            setCommitOpen(true)
+          }}
+        >
+          commit{busyAction === 'commit' && <span className="run-pulse text-amber-300"> ●</span>}
+        </button>
+        {confirmAction === 'push' ? (
+          <span className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+            push to {info.upstream ?? `origin/${info.branch}`}?{' '}
+            <button className="text-blue-400 hover:text-blue-300" title="confirm push" onClick={() => run('push')}>
+              ✓
+            </button>
+            <button className="text-zinc-500 hover:text-zinc-300" title="cancel" onClick={() => setConfirmAction(null)}>
+              ✕
+            </button>
+          </span>
+        ) : (
+          <button
+            className={cmdBtn}
+            disabled={lockMutations}
+            title={streaming ? 'agent is working — wait for the turn to end' : info.upstream ? `push to ${info.upstream}` : 'push (sets upstream on first push)'}
+            onClick={() => setConfirmAction('push')}
+          >
+            push{busyAction === 'push' && <span className="run-pulse text-amber-300"> ●</span>}
+          </button>
+        )}
+        {confirmAction === 'pull' ? (
+          <span className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+            pull {info.upstream ? `from ${info.upstream}` : '(no upstream)'}?{' '}
+            <button className="text-blue-400 hover:text-blue-300" title="confirm pull" onClick={() => run('pull')}>
+              ✓
+            </button>
+            <button className="text-zinc-500 hover:text-zinc-300" title="cancel" onClick={() => setConfirmAction(null)}>
+              ✕
+            </button>
+          </span>
+        ) : (
+          <button
+            className={cmdBtn}
+            disabled={lockMutations}
+            title={streaming ? 'agent is working — wait for the turn to end' : info.upstream ? `pull from ${info.upstream}` : 'pull (no upstream set)'}
+            onClick={() => setConfirmAction('pull')}
+          >
+            pull{busyAction === 'pull' && <span className="run-pulse text-amber-300"> ●</span>}
+          </button>
+        )}
+      </span>
+
+      {/* commit popover: message + visible stage-all sweep */}
+      {commitOpen && (
+        <div className="absolute bottom-full right-0 z-30 mb-1 w-72 rounded border border-zinc-700 bg-zinc-900 p-2 shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_8px_10px_-6px_rgba(0,0,0,0.1)]">
+          <input
+            autoFocus
+            value={commitMsg}
+            onChange={(e) => setCommitMsg(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') run('commit', { message: commitMsg })
+              else if (e.key === 'Escape') {
+                setCommitOpen(false)
+                setCommitMsg('')
+              }
+            }}
+            placeholder="commit message"
+            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-blue-500 focus:outline-none"
+          />
+          <div className="mt-1.5 flex items-center justify-between gap-2">
+            <span className="font-mono text-[10px] text-zinc-500">
+              stage all (git add -A) · {info.changed} file{info.changed === 1 ? '' : 's'}
+            </span>
+            <button
+              className="rounded bg-blue-600 px-2 py-1 text-[11px] text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!commitMsg.trim() || lockMutations}
+              onClick={() => run('commit', { message: commitMsg })}
+            >
+              {busyAction === 'commit' ? 'committing…' : `commit ${info.changed} file${info.changed === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        </div>
+      )}
     </span>
   )
 }
@@ -3536,9 +3828,9 @@ export function ChatPanel() {
   const contextInfo = useAgent((s) =>
     s.conversationId === null ? undefined : s.contextByConv[String(s.conversationId)],
   )
-  const [branch, setBranch] = useState<string | null>(null)
+  const [gitInfo, setGitInfo] = useState<GitInfo | null>(null)
   useEffect(() => {
-    setBranch(null)
+    setGitInfo(null)
     if (conversationId === null) return
     let cancelled = false
     // Exact context readout: persisted by the backend at every model call.
@@ -3548,13 +3840,13 @@ export function ChatPanel() {
         setContext(conversationId, c.context_tokens, c.context_window, c.context_model)
       })
       .catch(() => {})
-    // Branch: cheap mtime-guarded backend read, re-polled every 2s while
-    // this session is on screen so terminal checkouts reflect without any
-    // push channel.
+    // Git cluster readout: TTL-cached backend read (branch, dirty, counts,
+    // hashes), re-polled every 2s while this session is on screen so
+    // terminal activity reflects without any push channel.
     const tick = () => {
-      getGitBranch(conversationId)
+      getGitInfo(conversationId)
         .then((r) => {
-          if (!cancelled) setBranch(r.branch)
+          if (!cancelled) setGitInfo(r.info)
         })
         .catch(() => {})
     }
@@ -3565,6 +3857,14 @@ export function ChatPanel() {
       window.clearInterval(poll)
     }
   }, [conversationId, setContext])
+  // After a UI-driven git command, refresh the readouts immediately (the
+  // backend already invalidated its caches) instead of waiting for the poll.
+  const refreshGitInfo = useCallback(() => {
+    if (conversationId === null) return
+    getGitInfo(conversationId)
+      .then((r) => setGitInfo(r.info))
+      .catch(() => {})
+  }, [conversationId])
 
   // ---- read-aloud (TTS) ----
   const ttsEnabled = useTts((s) => s.enabled)
@@ -3690,8 +3990,13 @@ export function ChatPanel() {
           }`}
         />
         {streaming ? 'working' : status}
-        {/* Session metadata: current git branch + exact context fill. */}
-        <GitBranchChip branch={branch} />
+        {/* Session metadata: git cluster + exact context fill. */}
+        <GitChipCluster
+          info={gitInfo}
+          streaming={streaming}
+          conversationId={conversationId}
+          onCommandDone={refreshGitInfo}
+        />
         <ContextChip info={contextInfo} />
         {/* Access mode lives in the composer toolbar now. Plan approval is a
             live card above the composer (exit_plan), not a status-strip chip. */}

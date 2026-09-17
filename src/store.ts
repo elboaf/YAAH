@@ -138,6 +138,9 @@ interface AgentState {
 
   appendUserMessage: (key: string, text: string, images?: string[], skills?: string[]) => string
   appendAssistantPlaceholder: (key: string) => string
+  /** UI-generated rows outside the streaming protocol (git command trace
+   *  rows). Persisted by the backend; live list only. */
+  appendRawMessage: (key: string, msg: ChatMessage) => void
   appendTextDelta: (key: string, msgId: string, text: string) => void
   /** Remove one optimistic message (failed-send rollback). */
   removeMessage: (key: string, msgId: string) => void
@@ -390,6 +393,15 @@ export const useAgent = create<AgentState>((set, get) => ({
     return id
   },
 
+  appendRawMessage: (key, msg) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: [...(s.messagesByConv[key] ?? []), msg],
+      },
+    }))
+  },
+
   appendTextDelta: (key, msgId, text) => {
     set((s) => ({
       messagesByConv: {
@@ -622,7 +634,14 @@ function buildMessages(
   const resultById = new Map<string, unknown>()
   const nameById = new Map<string, string>()
   const subAgentById = new Map<string, SubAgentRun>()
+  // Ids that a persisted assistant tool_calls row actually called. UI rows
+  // (git commands run from the strip) carry a result but have no assistant
+  // caller — they must render standalone, not be treated as absorbed.
+  const calledIds = new Set<string>()
   for (const r of rows) {
+    if (r.role === 'assistant' && r.tool_calls?.length) {
+      for (const c of r.tool_calls) if (c.id) calledIds.add(c.id)
+    }
     if (r.role !== 'tool') continue
     const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
     if (!id) continue
@@ -661,8 +680,9 @@ function buildMessages(
     if (r.role === 'tool') {
       const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
       // Already absorbed into the assistant turn's trace; render
-      // standalone only when orphaned (no matching call row).
-      if (id && resultById.has(id)) continue
+      // standalone only when orphaned (no matching call row) — e.g. the
+      // git commands the user ran from the status strip.
+      if (id && resultById.has(id) && calledIds.has(id)) continue
       out.push({
         id: `db${r.id}`,
         role: 'tool',

@@ -81,6 +81,43 @@ export interface GitBranchInfo {
 export const getGitBranch = (id: number) =>
   api<GitBranchInfo>(`/api/conversations/${id}/git-branch`)
 
+/** Everything the status strip's git cluster reads: branch, dirty state,
+ *  +N −N line counts, local vs upstream hashes, ahead/behind, file counts. */
+export interface GitInfo {
+  branch: string
+  upstream: string | null
+  local_hash: string | null
+  remote_hash: string | null
+  ahead: number
+  behind: number
+  added: number
+  deleted: number
+  dirty: boolean
+  untracked: number
+  changed: number
+}
+
+export const getGitInfo = (id: number) =>
+  api<{ info: GitInfo | null }>(`/api/conversations/${id}/git-info`)
+
+export const getGitBranches = (id: number) =>
+  api<{ branches: string[] }>(`/api/conversations/${id}/git-branches`)
+
+export type GitAction = 'status' | 'commit' | 'push' | 'pull' | 'checkout'
+
+export interface GitCommandResult {
+  ok: boolean
+  output?: string
+  error?: string
+  note?: string
+}
+
+export const runGitCommand = (id: number, action: GitAction, opts?: { message?: string; branch?: string }) =>
+  api<GitCommandResult>(`/api/conversations/${id}/git-command`, {
+    method: 'POST',
+    body: JSON.stringify({ action, message: opts?.message, branch: opts?.branch }),
+  })
+
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
 
