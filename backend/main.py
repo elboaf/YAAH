@@ -112,7 +112,13 @@ async def remote_auth_guard(request, call_next):
     # can know the passphrase.
     path_open = request.url.path in ("/api/health", "/api/remote/info")
     if (marked or not is_local) and not path_open:
-        expected = (load_config().get("remote") or {}).get("passphrase") or ""
+        # YAAH_PASSPHRASE (set via systemd's EnvironmentFile=/etc/yaah/yaah.conf
+        # on the Linux daemon) takes precedence over ~/.yaah/config.json.
+        expected = (
+            os.environ.get("YAAH_PASSPHRASE")
+            or (load_config().get("remote") or {}).get("passphrase")
+            or ""
+        )
         got = request.headers.get("x-yaah-passphrase") or ""
         if not expected or got != expected:
             detail = (

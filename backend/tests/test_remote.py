@@ -69,6 +69,27 @@ async def test_host_without_passphrase_refuses_all_remote_access():
     assert "no passphrase set" in res.json()["detail"]
 
 
+@pytest.mark.asyncio
+async def test_env_passphrase_overrides_config(monkeypatch):
+    """The Linux daemon's /etc/yaah/yaah.conf arrives as YAAH_PASSPHRASE via
+    the unit's EnvironmentFile and must win over ~/.yaah/config.json."""
+    _set_host("from-config")
+    monkeypatch.setenv("YAAH_PASSPHRASE", "from-env")
+    async with await _client() as c:
+        ok = await c.post(
+            "/api/remote/exec",
+            json={"name": "bash", "args": {"command": "echo hi"}},
+            headers={"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "from-env"},
+        )
+        stale = await c.post(
+            "/api/remote/exec",
+            json={"name": "bash", "args": {"command": "echo hi"}},
+            headers={"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "from-config"},
+        )
+    assert ok.status_code != 401
+    assert stale.status_code == 401
+
+
 # ---------------------------------------------------------------- exec endpoint
 
 @pytest.mark.asyncio

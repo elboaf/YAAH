@@ -104,3 +104,26 @@ def test_default_bind_is_lan_hosting(entry):
 def test_bind_overrides(entry):
     entry.main(["--host", "127.0.0.1", "--port", "9999"])
     assert _uvicorn_calls["bind"] == ("127.0.0.1", 9999)
+
+
+# ---------------------------------------------------------------- service dispatch
+
+def test_service_verbs_refused_off_windows_or_without_pywin32(entry, monkeypatch):
+    """On Linux (or a Windows build lacking pywin32) the verbs must fail
+    loudly rather than fall through to CLI parsing (which would argparse-
+    error on the unknown positional)."""
+    monkeypatch.setattr(entry, "_service_class", lambda: None)
+    assert entry._handle_service_command(["install"]) == 1
+
+
+def test_non_service_argv_is_not_swallowed(entry):
+    """Normal CLI runs (flags only) must pass through to main()."""
+    assert entry._handle_service_command(["--passphrase", "x"]) is None
+
+
+def test_entry_routes_service_verb_without_serving(entry, monkeypatch):
+    """entry() with a service verb on a pywin32-less box exits before any
+    uvicorn bind; bare flags still reach main()."""
+    monkeypatch.setattr(entry, "_handle_service_command", lambda a: 1)
+    assert entry.entry(["install"]) == 1
+    assert "bind" not in _uvicorn_calls

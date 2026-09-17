@@ -62,8 +62,14 @@ jobs:
           bash scripts/build_server.sh
           if [ -f dist/yaah-server.exe ]; then
             mv dist/yaah-server.exe "yaah-server-${RUNNER_OS,,}.exe"
+            mv dist/yaah-server-setup.exe "yaah-server-setup-${RUNNER_OS,,}.exe"
           else
             mv dist/yaah-server "yaah-server-${RUNNER_OS,,}"
+            # Daemon packaging: systemd unit + /etc/yaah conf example
+            # (scripts/build_server_deb.sh); renamed to match the
+            # yaah-server-linux* upload glob below.
+            bash scripts/build_server_deb.sh
+            mv dist/yaah-server_*_all.deb "yaah-server-${RUNNER_OS,,}.deb"
           fi
 
       - name: Build (verbose, logged)

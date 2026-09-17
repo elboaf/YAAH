@@ -17,9 +17,19 @@ pip install -r requirements.txt -r requirements-build.txt
 EXE=""
 [ "$(uname -s)" = "MINGW" -o "$(uname -s)" = "Windows_NT" ] && EXE=".exe" || true
 
+# Windows service support (YaahService in server_entry.py + the setup
+# wizard exe): pywin32 only exists on Windows builds.
+PYWIN32_ARGS=()
+if [ -n "$EXE" ]; then
+  pip install pywin32
+  PYWIN32_ARGS=(--hidden-import win32timezone --hidden-import win32serviceutil
+    --hidden-import win32service --hidden-import win32event
+    --hidden-import servicemanager)
+fi
+
 pyinstaller --noconfirm --clean --onefile --console \
   --name yaah-server \
-  --paths . \
+  --paths . --paths scripts \
   --collect-all uvicorn --collect-all fastapi \
   --collect-all pydantic --collect-all pydantic_core \
   --collect-all anyio --collect-all aiosqlite \
@@ -32,7 +42,19 @@ pyinstaller --noconfirm --clean --onefile --console \
   --exclude-module curl_cffi --exclude-module pynput \
   --exclude-module mss --exclude-module uiautomation \
   --exclude-module comtypes --exclude-module PIL \
+  "${PYWIN32_ARGS[@]}" \
   scripts/server_entry.py
+
+# Windows-only companion: the interactive service installer wizard.
+if [ -n "$EXE" ]; then
+  pyinstaller --noconfirm --clean --onefile --console \
+    --name yaah-server-setup \
+    --paths . --paths scripts \
+    --hidden-import server_entry \
+    "${PYWIN32_ARGS[@]}" \
+    scripts/server_setup_entry.py
+  echo "setup wizard: dist/yaah-server-setup.exe"
+fi
 
 echo "server: dist/yaah-server$EXE"
 
@@ -61,5 +83,23 @@ The passphrase and display name are saved to ~/.yaah/config.json — the
 same store the desktop app uses — so they survive restarts. The server
 executes workspace tools (shell, files, git) in its own home directory;
 conversations and provider keys stay on the desktop app.
+
+Install as a background service
+-------------------------------
+Windows: run yaah-server-setup.exe (from this zip) in an elevated prompt.
+It prompts for a passphrase, registers the "YAAH Headless Server" service
+(automatic startup, runs as your user so the workspace is your home),
+and starts it. Manage with: yaah-server start|stop|remove.
+
+Linux: install the yaah-server .deb. It drops /usr/bin/yaah-server, a
+systemd template unit (enabled + started for your login user), and
+/etc/yaah/yaah.conf.example. Configure:
+
+    sudo sh -c 'echo "YAAH_PASSPHRASE=your-secret" > /etc/yaah/yaah.conf'
+    sudo chmod 640 /etc/yaah/yaah.conf
+    sudo systemctl restart yaah-server@<youruser>
+
+With no /etc/yaah/yaah.conf the daemon still runs and is discoverable,
+but refuses every remote request (no passphrase = no access).
 EOF
 echo "readme: README-server.txt"
