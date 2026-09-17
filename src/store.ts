@@ -60,6 +60,15 @@ export interface PendingApproval {
   convKey: string
 }
 
+/** The agent's exit_plan call waiting for approval under plan mode. The run
+ *  is blocked on it; approving ends plan mode and resumes the SAME turn. */
+export interface PendingPlanApproval {
+  callId: string
+  plan: string
+  /** Buffer of the turn that asked; only rendered when on screen. */
+  convKey: string
+}
+
 /** One line in the right-panel activity log. */
 export interface LogEntry {
   id: number
@@ -96,6 +105,10 @@ interface AgentState {
   /** Tool call awaiting approve/deny under the access-mode gate. */
   pendingApproval: PendingApproval | null
   setPendingApproval: (a: PendingApproval | null | ((prev: PendingApproval | null) => PendingApproval | null)) => void
+
+  /** exit_plan call awaiting approve/revise under plan mode. */
+  pendingPlanApproval: PendingPlanApproval | null
+  setPendingPlanApproval: (p: PendingPlanApproval | null | ((prev: PendingPlanApproval | null) => PendingPlanApproval | null)) => void
 
   /** Live copy of the configured access mode (loaded at startup, updated by
    *  the header control and by plan-mode's approve-plan flow). */
@@ -264,6 +277,12 @@ export const useAgent = create<AgentState>((set, get) => ({
       pendingApproval:
         typeof a === 'function' ? a(s.pendingApproval) : a,
     })),
+  pendingPlanApproval: null,
+  setPendingPlanApproval: (p) =>
+    set((s) => ({
+      pendingPlanApproval:
+        typeof p === 'function' ? p(s.pendingPlanApproval) : p,
+    })),
   accessMode: 'ask',
   setAccessMode: (m) => set({ accessMode: m }),
 
@@ -290,6 +309,7 @@ export const useAgent = create<AgentState>((set, get) => ({
       error: null,
       pendingQuestion: null,
       pendingApproval: null,
+      pendingPlanApproval: null,
     }))
     persistConversationId(null)
   },

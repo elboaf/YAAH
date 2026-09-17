@@ -44,13 +44,24 @@ YAAH currently executes every tool unconditionally — "Full access" is the only
 
 ### Frontend (implemented)
 
-7. **Status-strip control** — `AccessModeControl` (cycles ask → plan → full, uppercase mono chip, reverts on save failure) + `PlanExitButton` ("approve plan & run", visible only in plan mode while not streaming) [moved here from the card: plan mode never holds a pending approval — blocked calls fail instantly, so the exit belongs next to the mode control].
+7. **Status-strip control** — `AccessModeControl` (cycles ask → plan → full, uppercase mono chip, reverts on save failure). The old `PlanExitButton` chip is GONE: it only flipped the mode and never resumed anything.
 8. **Approval card** — `ApprovalCard` (amber, `!` pulse, tool + one-line arg summary, full command block for bash/powershell, Approve / Deny / "Deny with a note…" free text). Screen-scoped via `pendingApproval.convKey` like questions; cleared on error/stop/done.
 9. **Trace** — the approval renders as a normal tool chip + result (approved execution or denial error); `approval_request`/`approval_decision` also push into the activity log.
 10. **Voice** — PTT routing: approve-words ("approve/allow/yes/ok/go ahead/confirmed") resolve the gate, any other transcript denies with the transcript as guidance; a PTT press no longer kills a turn blocked on an approval (same shield as ask_user questions).
-11. **Startup** — `AccessMode` component in App.tsx loads the persisted mode and follows `yaah-access-mode-changed` events (plan-exit dispatches it).
+11. **Startup** — `AccessMode` component in App.tsx loads the persisted mode and follows `yaah-access-mode-changed` events (plan approval dispatches it).
 
-## Tests (backend/tests/test_access_modes.py — 13 tests, all green)
+### Plan approval via exit_plan (implemented 2026-09-16)
+
+Plan approval is a TOOL CALL, ask_user-style — not a mode switch. While plan mode is on, the loop appends an `exit_plan` schema (`loop.EXIT_PLAN_SCHEMA`) to the tool list and the prompt note tells the model to present its plan through it. The loop intercepts the call before the gate (`loop._exit_plan`) and blocks on the shared pending-answer future:
+
+- **"approve"** → the backend saves `access_mode: "full"` FIRST, then resolves; the gate passes and the SAME turn continues straight into execution.
+- **Free text** → `{"decision": "revised", "feedback": ...}`; plan mode stays on, the model revises and may call exit_plan again.
+- **Cancel** → `{"decision": "cancelled", ...}`, like an unanswered ask_user.
+- Outside plan mode the call returns an error without blocking; a blank plan is rejected.
+
+Frontend: the `tool_start`/`tool_result` events for `exit_plan` drive a sky-bordered `PlanApprovalCard` above the composer ("Approve & run" / "Request changes" free text); on approve it mirrors `setAccessMode('full')` + dispatches `yaah-access-mode-changed` (the backend already saved). PTT: `yaah-answer-plan` event, approve-words approve, anything else is feedback, and a plan card shields its turn from the PTT interrupt. Trace: exit_plan gets its own glyph (`▸`, sky) and rich body (plan + decision).
+
+## Tests (backend/tests/test_access_modes.py — 17 tests, all green)
 
 - Classification: read/mutating/shell sets; unknown + MCP names → shell.
 - Gate unit: reads pass in every mode; full passes all; plan blocks with the plan-mode error; ask blocks until approve/deny/free-text; cancel unblocks with an error.

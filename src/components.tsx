@@ -51,7 +51,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
@@ -535,6 +535,111 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   )
 }
 
+/** Live exit_plan card: the agent's plan blocked the run under plan mode.
+ *  Approve & run flips the access mode to full (the backend does the same
+ *  save before resuming) and the SAME turn continues into execution; typed
+ *  text is a change request — plan mode stays on and the model revises. */
+function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
+  const conversationId = useAgent((s) => s.conversationId)
+  const setPendingPlanApproval = useAgent((s) => s.setPendingPlanApproval)
+  const setAccessMode = useAgent((s) => s.setAccessMode)
+  const [customOpen, setCustomOpen] = useState(false)
+  const [custom, setCustom] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const respond = (text: string) => {
+    if (conversationId === null || submitting) return
+    setSubmitting(true)
+    setErr(null)
+    submitAnswer(conversationId, pending.callId, text)
+      .then(() => {
+        if (text === 'approve') {
+          // The backend already saved access_mode=full before unblocking the
+          // run; mirror it into the store so the UI follows immediately.
+          setAccessMode('full')
+          window.dispatchEvent(
+            new CustomEvent('yaah-access-mode-changed', { detail: { mode: 'full' } }),
+          )
+        }
+        setPendingPlanApproval((p) => (p && p.callId === pending.callId ? null : p))
+        setSubmitting(false)
+      })
+      .catch((e) => {
+        setErr(String(e))
+        setSubmitting(false)
+      })
+  }
+
+  // Push-to-talk routing: PTT release dispatches 'yaah-answer-plan' (its own
+  // event — the ask/approval cards answer a different vocabulary). "Approve"
+  // wording approves; anything else becomes change-request feedback.
+  useEffect(() => {
+    const onVoiceAnswer = (e: Event) => {
+      const { callId, answer: ans } = (e as CustomEvent<{ callId: string; answer: string }>).detail
+      if (callId !== pending.callId || !ans || submitting) return
+      if (ans === 'approve') respond('approve')
+      else respond(ans)
+    }
+    window.addEventListener('yaah-answer-plan', onVoiceAnswer)
+    return () => window.removeEventListener('yaah-answer-plan', onVoiceAnswer)
+  })
+
+  return (
+    <div className="rounded-lg border border-sky-700/60 bg-zinc-900 p-3 shadow-lg">
+      <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-sky-400">
+        <span className="run-pulse">▸</span> plan ready — approve to run
+      </div>
+      <pre className="mb-2.5 max-h-64 overflow-y-auto whitespace-pre-wrap font-sans text-sm text-zinc-100">
+        {pending.plan}
+      </pre>
+      <div className="flex gap-1.5">
+        <button
+          className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+          disabled={submitting}
+          onClick={() => respond('approve')}
+        >
+          {submitting ? '…' : 'Approve & run'}
+        </button>
+        {!customOpen && (
+          <button
+            className="rounded border border-zinc-600 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            disabled={submitting}
+            onClick={() => setCustomOpen(true)}
+          >
+            Request changes
+          </button>
+        )}
+      </div>
+      {customOpen && (
+        <div className="mt-1.5 flex gap-1.5">
+          <input
+            autoFocus
+            className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-sky-500 focus:outline-none"
+            placeholder="What should change? Sent to the model as feedback…"
+            value={custom}
+            onChange={(e) => setCustom(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && custom.trim()) {
+                e.preventDefault()
+                respond(custom.trim())
+              }
+            }}
+          />
+          <button
+            className="rounded bg-sky-600 px-3 py-1.5 text-xs text-white hover:bg-sky-500 disabled:opacity-50"
+            disabled={submitting || !custom.trim()}
+            onClick={() => respond(custom.trim())}
+          >
+            {submitting ? '…' : 'Send'}
+          </button>
+        </div>
+      )}
+      {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
+    </div>
+  )
+}
+
 /** Answered ask_user call as it appears in the trace/history. */
 function AskUserTrace({ tc }: { tc: ToolCall }) {
   const args = (tc.args ?? {}) as {
@@ -574,6 +679,7 @@ function AskUserTrace({ tc }: { tc: ToolCall }) {
 /** Icon + color identity per tool, so rows read at a glance. */
 function toolGlyph(name: string): string {
   if (name === 'ask_user') return '?'
+  if (name === 'exit_plan') return '▸'
   if (name === 'spawn_agent') return '⧉'
   if (name === 'read_file') return '▤'
   if (name === 'search_files') return '⌕'
@@ -588,6 +694,7 @@ function toolGlyph(name: string): string {
 
 function toolGlyphColor(name: string): string {
   if (name === 'ask_user') return 'text-orange-400'
+  if (name === 'exit_plan') return 'text-sky-400'
   if (name === 'spawn_agent') return 'text-fuchsia-400'
   if (name === 'read_file') return 'text-sky-400'
   if (name === 'search_files') return 'text-violet-400'
@@ -701,6 +808,21 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
   const body = (() => {
     if (tc.name === 'ask_user') {
       return <AskUserTrace tc={tc} />
+    }
+    if (tc.name === 'exit_plan') {
+      const result = (tc.result ?? {}) as { decision?: string; feedback?: string; note?: string }
+      return (
+        <div className="rounded border border-sky-800/60 bg-zinc-900/60 p-2">
+          <p className="mb-1.5 whitespace-pre-wrap font-sans text-xs text-zinc-200">{String(args.plan ?? '')}</p>
+          <p className="font-mono text-[11px] text-sky-300">
+            {result.decision === 'approved'
+              ? '✓ approved — plan mode off, executing'
+              : result.decision === 'revised'
+                ? `↻ changes requested: ${result.feedback ?? ''}`
+                : (result.note ?? 'no decision')}
+          </p>
+        </div>
+      )
     }
     if (tc.name === 'edit_file' && typeof args.old_text === 'string' && typeof args.new_text === 'string') {
       return <DiffBlock oldText={args.old_text} newText={args.new_text} />
@@ -3331,36 +3453,6 @@ function AccessModeControl() {
   )
 }
 
-/** One-click plan exit: visible only while plan mode is on and the agent is
- *  not mid-block — the plan has been presented, this executes it. */
-function PlanExitButton() {
-  const accessMode = useAgent((s) => s.accessMode)
-  const setAccessMode = useAgent((s) => s.setAccessMode)
-  const status = useAgent((s) => s.status)
-  const [busy, setBusy] = useState(false)
-  if (accessMode !== 'plan' || status === 'running-tool' || status === 'thinking') return null
-  const go = () => {
-    setBusy(true)
-    updateConfig({ access_mode: 'full' })
-      .then(() => {
-        setAccessMode('full')
-        window.dispatchEvent(new CustomEvent('yaah-access-mode-changed', { detail: { mode: 'full' } }))
-      })
-      .catch(() => {})
-      .finally(() => setBusy(false))
-  }
-  return (
-    <button
-      className="rounded border border-sky-600/70 bg-sky-950/40 px-1.5 py-0.5 font-mono text-[10px] text-sky-300 hover:bg-sky-900/40"
-      title="Approve the presented plan: switch to Full access and continue"
-      onClick={go}
-      disabled={busy}
-    >
-      {busy ? '…' : 'approve plan & run'}
-    </button>
-  )
-}
-
 /** Git branch chip for the chat panel's status strip (null = not a repo). */
 function GitBranchChip({ branch }: { branch: string | null }) {
   if (!branch) return null
@@ -3423,6 +3515,11 @@ export function ChatPanel() {
     // Same screen-scoping as questions: a hidden turn's approval request
     // must not render over an unrelated conversation.
     return s.pendingApproval.convKey === key ? s.pendingApproval : null
+  })
+  const pendingPlanApproval = useAgent((s) => {
+    if (s.pendingPlanApproval === null) return null
+    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    return s.pendingPlanApproval.convKey === key ? s.pendingPlanApproval : null
   })
   const bottomRef = useRef<HTMLDivElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
@@ -3576,6 +3673,11 @@ export function ChatPanel() {
           <ApprovalCard key={pendingApproval.callId} approval={pendingApproval} />
         </div>
       )}
+      {pendingPlanApproval && pendingPlanApproval.convKey === (conversationId === null ? 'draft' : String(conversationId)) && (
+        <div className="border-t border-sky-800/60 px-4 pb-3 pt-3">
+          <PlanApprovalCard key={pendingPlanApproval.callId} pending={pendingPlanApproval} />
+        </div>
+      )}
       <Composer />
       <div className="flex items-center gap-2 px-4 pb-1 pt-0.5 font-mono text-[10px] text-zinc-600">
         <span
@@ -3587,9 +3689,8 @@ export function ChatPanel() {
         {/* Session metadata: current git branch + exact context fill. */}
         <GitBranchChip branch={branch} />
         <ContextChip info={contextInfo} />
-        {/* Access mode lives in the composer toolbar now; the plan exit
-            appears here only when it can act. */}
-        <PlanExitButton />
+        {/* Access mode lives in the composer toolbar now. Plan approval is a
+            live card above the composer (exit_plan), not a status-strip chip. */}
         {/* Read-aloud toggle: one click to mute/unmute the agent's voice.
             Hidden while the model isn't downloaded — Settings owns that. */}
         {ttsReady && (
@@ -4003,6 +4104,7 @@ function Composer() {
     adoptDraft,
     setPendingQuestion,
     setPendingApproval,
+    setPendingPlanApproval,
     setContext,
     pushLog,
     setAbortController,
@@ -4172,6 +4274,13 @@ function Composer() {
   useEffect(() => {
     anyApprovalRef.current = anyApproval
   }, [anyApproval])
+  // Live exit_plan card (same ref pattern): a plan waiting for approval must
+  // shield its turn from the PTT interrupt, and a dictated answer resolves it.
+  const anyPlanRef = useRef<PendingPlanApproval | null>(null)
+  const anyPlan = useAgent((s) => s.pendingPlanApproval)
+  useEffect(() => {
+    anyPlanRef.current = anyPlan
+  }, [anyPlan])
   // Assigned after `send`/`stop` are declared below (TDZ-safe via refs).
   const sendRef = useRef<(text?: string, opts?: { interrupt?: boolean }) => Promise<void>>(
     async () => {},
@@ -4198,10 +4307,11 @@ function Composer() {
     if (status === 'thinking' || status === 'running-tool') {
       // A turn is running: stop it (Stop-button path, server + client) so
       // the dictation lands now instead of queueing behind the run — unless
-      // the turn is blocked on an ask_user question or an access-mode
-      // approval, which the dictated answer is about to resolve; cancelling
-      // would destroy the thing being answered.
-      if (!anyQuestionRef.current && !anyApprovalRef.current) stopRef.current()
+      // the turn is blocked on an ask_user question, an access-mode
+      // approval, or a plan waiting for approval, which the dictated
+      // answer is about to resolve; cancelling would destroy the thing
+      // being answered.
+      if (!anyQuestionRef.current && !anyApprovalRef.current && !anyPlanRef.current) stopRef.current()
     }
     if (voiceStateRef.current === 'recording') {
       // Take the mic over from click-dictation; discard its audio.
@@ -4289,6 +4399,19 @@ function Composer() {
             new CustomEvent('yaah-answer-ask', { detail: { callId: ap.callId, answer: text.trim() } }),
           )
         }
+        return
+      }
+      // Plan routing: "approve/go ahead" approves the plan; anything else is
+      // a change request for the model to incorporate.
+      const pl = anyPlanRef.current
+      if (pl) {
+        const t = text.trim().toLowerCase()
+        const decision = /^(approve|approve it|approved|allow|yes|ok|go ahead|confirmed|looks good)\b/.test(t)
+          ? 'approve'
+          : text.trim()
+        window.dispatchEvent(
+          new CustomEvent('yaah-answer-plan', { detail: { callId: pl.callId, answer: decision } }),
+        )
         return
       }
       void sendRef.current(text)
@@ -4567,11 +4690,22 @@ function Composer() {
           convKey: bufKey,
         })
       }
+      if (ev.name === 'exit_plan') {
+        const a = (ev.args ?? {}) as { plan?: string }
+        setPendingPlanApproval({
+          callId: ev.call_id ?? '',
+          plan: a.plan ?? '',
+          convKey: bufKey,
+        })
+      }
     } else if (ev.type === 'tool_result') {
       finishToolCall(bufKey, asstId, ev.call_id ?? '', ev.result)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
+      }
+      if (ev.name === 'exit_plan') {
+        setPendingPlanApproval((p) => (p && p.callId === ev.call_id ? null : p))
       }
     } else if (ev.type === 'approval_request') {
       setStatus('running-tool')
@@ -4625,12 +4759,14 @@ function Composer() {
       settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
+      setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'stopped') {
       setStatus('idle')
       appendTextDelta(bufKey, asstId, '\n[stopped]')
       settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
+      setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'done') {
       setStatus('idle')
       // A completed turn must leave no block pulsing: settle anything the
@@ -4639,6 +4775,7 @@ function Composer() {
       settleSubAgents(bufKey, asstId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
+      setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'usage') {
       // Exact context size of the turn's final model call, straight from
       // the provider's usage report. Numeric conversation ids only — the

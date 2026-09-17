@@ -383,3 +383,173 @@ def test_config_roundtrip_and_validation(tmp_path, monkeypatch):
         assert r.status_code == 200
         assert client.get("/api/config").json()["access_mode"] == "ask"
         assert loop.current_access_mode() == "ask"
+
+
+# ---------------------------------------------------------------- exit_plan
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_approval_ends_plan_mode_and_resumes(fake_model, tmp_path, monkeypatch):
+    """The exit_plan call blocks the run; approving flips the saved access
+    mode to full and the SAME turn continues — the follow-up write_file
+    executes without another approval round-trip."""
+    from backend.agent import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(loop, "load_config", cfgmod.load_config)
+
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "p1",
+                "type": "function",
+                "function": {
+                    "name": "exit_plan",
+                    "arguments": json.dumps({"plan": "I will write a.txt"}),
+                },
+            }],
+        },
+    ])
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "w1",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "a.txt", "content": "hi"}),
+                },
+            }],
+        },
+    ])
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+
+    cfgmod.save_config({"access_mode": "plan"})
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-exit-plan")
+
+    agent = loop.run_agent(cid, "go", str(tmp_path))
+
+    async def approve_when_asked():
+        for _ in range(200):
+            if loop.resolve_answer(cid, "p1", "approve"):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("exit_plan never became pending")
+
+    results = await asyncio.gather(_collect(agent), approve_when_asked())
+    events = results[0]
+    plan_result = next(e for e in events if e["type"] == "tool_result" and e["name"] == "exit_plan")
+    assert plan_result["result"]["decision"] == "approved"
+    # The write executed in the same turn: no approval_request was ever
+    # needed (full mode passes the gate) and the file exists.
+    types = [e["type"] for e in events]
+    assert "approval_request" not in types
+    assert (tmp_path / "a.txt").exists()
+    # The saved mode is now full (backend-side, not just the store).
+    assert cfgmod.load_config()["access_mode"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_feedback_keeps_plan_mode(fake_model, tmp_path, monkeypatch):
+    """Typed feedback resolves the call as a change request: plan mode stays
+    on and the model gets the feedback as the tool result."""
+    from backend.agent import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(loop, "load_config", cfgmod.load_config)
+
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "p1",
+                "type": "function",
+                "function": {
+                    "name": "exit_plan",
+                    "arguments": json.dumps({"plan": "v1"}),
+                },
+            }],
+        },
+    ])
+    fake_model.append([{"type": "content", "text": "revised"}, {"type": "finish"}])
+
+    cfgmod.save_config({"access_mode": "plan"})
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-exit-plan2")
+    agent = loop.run_agent(cid, "go", str(tmp_path))
+
+    async def send_feedback():
+        for _ in range(200):
+            if loop.resolve_answer(cid, "p1", "use less files"):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("exit_plan never became pending")
+
+    results = await asyncio.gather(_collect(agent), send_feedback())
+    plan_result = next(
+        e for e in results[0] if e["type"] == "tool_result" and e["name"] == "exit_plan"
+    )
+    assert plan_result["result"]["decision"] == "revised"
+    assert plan_result["result"]["feedback"] == "use less files"
+    assert cfgmod.load_config()["access_mode"] == "plan"
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_unit_paths(tmp_path, monkeypatch):
+    """Unit: cancel unblocks; calling outside plan mode is an error; a blank
+    plan is rejected without blocking."""
+    from backend.agent import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(loop, "load_config", cfgmod.load_config)
+
+    # Outside plan mode: immediate error, nothing pending.
+    result = await loop._exit_plan(1, "c0", {"plan": "p"}, asyncio.Event())
+    assert "error" in result
+    assert not loop._pending_answers
+
+    cfgmod.save_config({"access_mode": "plan"})
+
+    # Blank plan rejected without registering a future.
+    result = await loop._exit_plan(1, "c1", {}, asyncio.Event())
+    assert "error" in result
+    assert not loop._pending_answers
+
+    # Cancel while blocked.
+    cancel = asyncio.Event()
+    task = asyncio.create_task(loop._exit_plan(1, "c2", {"plan": "p"}, cancel))
+    for _ in range(200):
+        if "1:c2" in loop._pending_answers:
+            break
+        await asyncio.sleep(0.01)
+    cancel.set()
+    result = await task
+    assert result["decision"] == "cancelled"
+
+    # Approve flips the saved mode before the caller resumes.
+    task = asyncio.create_task(loop._exit_plan(1, "c3", {"plan": "p"}, asyncio.Event()))
+    for _ in range(200):
+        if "1:c3" in loop._pending_answers:
+            break
+        await asyncio.sleep(0.01)
+    assert loop.resolve_answer(1, "c3", "approve")
+    result = await task
+    assert result["decision"] == "approved"
+    assert cfgmod.load_config()["access_mode"] == "full"
+
+
+def test_exit_plan_schema_only_injected_in_plan_mode(tmp_path, monkeypatch):
+    """get_schemas() itself never carries exit_plan; the loop appends it
+    only while plan mode is on."""
+    from backend.agent import config as cfgmod
+    from backend.agent.tools import get_schemas
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(loop, "load_config", cfgmod.load_config)
+    names = {s["function"]["name"] for s in get_schemas()}
+    assert "exit_plan" not in names

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
-from backend.agent.config import load_config
+from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
@@ -237,11 +237,13 @@ def resolve_answer(conversation_id: int, call_id: str, answer: str) -> bool:
     return True
 
 
-async def _ask_user(
-    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event
-) -> dict:
-    """Block the loop until the user answers (or the run is cancelled).
-    The stream stays open and other conversations keep running."""
+async def _wait_answer(
+    conversation_id: int, call_id: str, cancel_ev: asyncio.Event
+) -> asyncio.Future:
+    """Register a pending-answer future and block until the user resolves it
+    (POST /answer) or the run is cancelled. The stream stays open and other
+    conversations keep running. Raises on cancel so callers can emit their
+    own not-answered result; the future's result is the raw answer string."""
     key = f"{conversation_id}:{call_id}"
     fut: asyncio.Future = asyncio.get_running_loop().create_future()
     _pending_answers[key] = fut
@@ -251,13 +253,25 @@ async def _ask_user(
             {fut, cancel_task}, return_when=asyncio.FIRST_COMPLETED
         )
         if fut in done:
-            return {"answer": fut.result()}
-        return {"answer": None, "note": "user did not answer (run stopped)"}
+            return fut
+        raise asyncio.CancelledError("run stopped before answer")
     finally:
         cancel_task.cancel()
         _pending_answers.pop(key, None)
         if not fut.done():
             fut.cancel()
+
+
+async def _ask_user(
+    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event
+) -> dict:
+    """Block the loop until the user answers (or the run is cancelled).
+    The stream stays open and other conversations keep running."""
+    try:
+        fut = await _wait_answer(conversation_id, call_id, cancel_ev)
+    except asyncio.CancelledError:
+        return {"answer": None, "note": "user did not answer (run stopped)"}
+    return {"answer": fut.result()}
 
 
 def cancel_agent(conversation_id: int):
@@ -288,19 +302,74 @@ def _plan_mode_note() -> str:
     """System-prompt section injected while plan mode is active."""
     return (
         "# Access mode: PLAN\n\n"
-        "Plan mode is ON: file edits and shell commands are blocked. Do not "
-        "attempt them. Explore, then present your plan as text and stop \u2014 "
-        "the user will review it and switch to execution when ready."
+        "Plan mode is ON: file edits and shell commands are blocked, so do "
+        "not attempt them. Explore, then present your plan by calling the "
+        "exit_plan tool with the plan as its `plan` argument \u2014 the user "
+        "approves it (plan mode ends and you continue executing in the same "
+        "run) or sends change requests for you to incorporate. Do NOT just "
+        "write the plan as text and stop: without an exit_plan call the user "
+        "has no way to approve it."
     )
+
+
+# Only injected while plan mode is active (run_agent_turn below); in every
+# other mode the model has no exit_plan to call.
+EXIT_PLAN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "exit_plan",
+        "description": (
+            "Present your plan for approval while in plan mode. Blocks until "
+            "the user responds: approval ends plan mode and the SAME run "
+            "continues straight into execution; anything else comes back as "
+            "feedback for you to incorporate and re-present. Call this "
+            "instead of writing the plan as plain text."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "The full plan for the user to review",
+                },
+            },
+            "required": ["plan"],
+        },
+    },
+}
 
 
 def _plan_block_result(name: str) -> dict:
     return {
         "error": (
             f"plan mode is on: {name} was not executed. Present your plan "
-            "as text and wait for the user to switch to execution."
+            "with the exit_plan tool and wait for approval."
         )
     }
+
+
+async def _exit_plan(
+    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event
+) -> dict:
+    """Block the loop until the user approves the plan, requests changes, or
+    the run is cancelled. Approval flips the saved access mode to full BEFORE
+    the future resolves, so the gate passes on the very next tool call of
+    this same turn."""
+    if current_access_mode() != "plan":
+        return {"error": "exit_plan is only available in plan mode"}
+    plan = str(args.get("plan") or "").strip()
+    if not plan:
+        return {"error": "exit_plan requires a non-empty `plan` argument"}
+    try:
+        fut = await _wait_answer(conversation_id, call_id, cancel_ev)
+    except asyncio.CancelledError:
+        return {"decision": "cancelled", "note": "user did not answer (run stopped)"}
+    answer = fut.result()
+    if answer == "approve":
+        save_config({"access_mode": "full"})
+        return {"decision": "approved", "note": "plan approved; plan mode is OFF — execute the plan now"}
+    # Free text = a change request; stay in plan mode and let the model revise.
+    return {"decision": "revised", "feedback": answer}
 
 
 async def _await_approval(
@@ -596,6 +665,10 @@ async def run_agent(
     messages = [{"role": "system", "content": system_prompt}] + history
 
     tools = get_schemas()
+    # exit_plan exists only while plan mode is on (the schema is how the
+    # model learns it can ask for approval at all).
+    if current_access_mode() == "plan":
+        tools = tools + [EXIT_PLAN_SCHEMA]
     cancel_ev = asyncio.Event()
     _cancel_events[conversation_id] = cancel_ev
 
@@ -770,6 +843,10 @@ async def run_agent(
                     )
                     if name == "ask_user":
                         result = await _ask_user(
+                            conversation_id, tc.get("id", ""), args, cancel_ev
+                        )
+                    elif name == "exit_plan":
+                        result = await _exit_plan(
                             conversation_id, tc.get("id", ""), args, cancel_ev
                         )
                     elif name == "load_skill":
