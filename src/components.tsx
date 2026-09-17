@@ -2521,6 +2521,32 @@ function McpSection() {
   )
 }
 
+/** One settings group: mono micro-label header, hairline frame, compact
+ *  body. Cards are flat (no fill, no shadow) — hairlines do the grouping. */
+function SettingsCard({
+  title,
+  className = '',
+  children,
+}: {
+  title: string
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className={`rounded-lg border border-zinc-800 p-3 ${className}`}>
+      <h3 className="mb-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.1em] text-zinc-500">
+        {title}
+      </h3>
+      {children}
+    </section>
+  )
+}
+
+/** Shared field chrome: raised fill, hairline border, blue focus border.
+ *  Width is set per-use (w-full / flex-1 / fixed). */
+const settingsInputCls =
+  'rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-blue-500 focus:outline-none'
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
@@ -2790,536 +2816,575 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       onClick={onClose}
     >
+      {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
+          units would double-zoom. Header/footer pinned, body scrolls. */}
       <div
-        className="max-h-[90%] w-96 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-4 text-sm text-zinc-200"
+        className="flex max-h-[90%] w-[92%] max-w-4xl flex-col overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-3 font-semibold">Settings</h2>
-
-        {/* providers: collapsed rows, active first; fields behind one open row */}
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Providers
-        </h3>
-        {providerOrder.length === 0 && (
-          <p className="mb-2 text-[11px] text-zinc-600">
-            No providers yet — add one below to start using the agent.
-          </p>
-        )}
-        {providerOrder.map((name) => {
-          const p = providers[name]
-          const isOpen = expanded === name
-          const summary = p.savedKey
-            ? 'key saved'
-            : p.apiKeyInput
-              ? 'key entered'
-              : 'no key'
-          return (
-            <div key={name} className="mb-1.5 rounded border border-zinc-700">
-              <button
-                className="flex w-full items-center gap-2 px-2 py-1.5 text-left"
-                onClick={() => setExpanded(isOpen ? null : name)}
-                aria-expanded={isOpen}
-              >
-                <input
-                  type="radio"
-                  name="active-provider"
-                  checked={active === name}
-                  onChange={() => setActive(name)}
-                  onClick={(e) => e.stopPropagation()}
-                  title="Make active"
-                  aria-label={`Make ${name} the active provider`}
-                />
-                <span className="font-mono text-xs text-zinc-200">{name}</span>
-                {!isOpen && (
-                  <span className="truncate text-[10px] text-zinc-600">{summary}</span>
-                )}
-                <span className="ml-auto text-[10px] text-zinc-600">
-                  {isOpen ? '▾' : '▸'}
-                </span>
-              </button>
-              {isOpen && (
-                <div className="border-t border-zinc-800 p-2">
-                  <input
-                    className="mb-1 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                    value={p.api_base}
-                    onChange={(e) => patchProvider(name, { api_base: e.target.value })}
-                    placeholder="https://api.openai.com/v1"
-                    aria-label={`${name} API base URL`}
-                  />
-                  <div className="mb-1 flex gap-1">
-                    <select
-                      className="w-full rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-[10px] text-zinc-300"
-                      value=""
-                      onChange={(e) => applyPreset(name, e.target.value)}
-                      aria-label={`Apply a preset to ${name}`}
-                    >
-                      <option value="">use preset…</option>
-                      {Object.keys(presets).map((preset) => (
-                        <option key={preset} value={preset}>
-                          {preset}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <input
-                    type="password"
-                    className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                    placeholder={p.savedKey ? 'key saved' : 'sk-... (optional for local)'}
-                    value={p.apiKeyInput}
-                    onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
-                    aria-label={`${name} API key`}
-                  />
-                  <button
-                    className="mt-1.5 text-[10px] text-red-400 hover:text-red-300"
-                    onClick={() => setRemoveTarget(name)}
-                  >
-                    remove provider
-                  </button>
-                </div>
-              )}
-            </div>
-          )
-        })}
-
-        {/* add a provider: preset templates or a custom OpenAI-compatible URL */}
-        <div className="mb-1 flex gap-1">
-          <input
-            className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-            placeholder="new provider name (or 'custom')"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            aria-label="New provider name"
-          />
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <h2 className="text-sm font-semibold text-zinc-100">Settings</h2>
           <button
-            className="rounded border border-zinc-700 px-2 text-[11px] text-zinc-300 hover:bg-zinc-800"
-            onClick={() => addProvider(newName)}
+            type="button"
+            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            onClick={onClose}
+            aria-label="Close settings"
           >
-            + custom
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
           </button>
         </div>
-        <div className="mb-4 flex flex-wrap gap-1">
-          {Object.keys(presets).map((preset) => (
-            <button
-              key={preset}
-              className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-              onClick={() => addProvider(providers[preset] ? `${preset}-2` : preset, preset)}
-            >
-              + {preset}
-            </button>
-          ))}
-        </div>
 
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Generation
-        </h3>
-        <div className="mb-3 flex gap-2">
-          <div className="flex-1">
-            <label className="mb-1 block text-xs text-zinc-500">Temperature</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              max="2"
-              className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={temperature}
-              onChange={(e) => setTemperature(e.target.value === '' ? '' : Number(e.target.value))}
-            />
-          </div>
-          <div className="flex-1">
-            <label className="mb-1 block text-xs text-zinc-500">Max tokens</label>
-            <input
-              type="number"
-              min="0"
-              className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={maxTokens}
-              onChange={(e) => setMaxTokens(e.target.value === '' ? '' : Number(e.target.value))}
-            />
-            <p className="mt-1 text-[10px] text-zinc-600">0 or blank = no limit (provider default)</p>
-          </div>
-        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <div className="grid grid-cols-4 gap-3">
+            {/* providers: collapsed rows, active first; fields behind one open row */}
+            <SettingsCard title="Providers" className="col-span-4">
+              {providerOrder.length === 0 && (
+                <p className="text-[11px] text-zinc-600">
+                  No providers yet — add one below to start using the agent.
+                </p>
+              )}
+              <div className="space-y-1.5">
+                {providerOrder.map((name) => {
+                  const p = providers[name]
+                  const isOpen = expanded === name
+                  const summary = p.savedKey
+                    ? 'key saved'
+                    : p.apiKeyInput
+                      ? 'key entered'
+                      : 'no key'
+                  return (
+                    <div
+                      key={name}
+                      className={`rounded border ${active === name ? 'border-zinc-700' : 'border-zinc-800'}`}
+                    >
+                      <div className="flex items-center gap-2.5 px-2.5 py-2">
+                        <input
+                          type="radio"
+                          name="active-provider"
+                          checked={active === name}
+                          onChange={() => setActive(name)}
+                          title="Make active"
+                          aria-label={`Make ${name} the active provider`}
+                          className="h-3 w-3 shrink-0 accent-blue-600"
+                        />
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          onClick={() => setExpanded(isOpen ? null : name)}
+                          aria-expanded={isOpen}
+                          aria-label={`Toggle ${name} settings`}
+                        >
+                          <span className={`truncate font-mono text-xs ${active === name ? 'text-zinc-100' : 'text-zinc-200'}`}>
+                            {name}
+                          </span>
+                          {!isOpen && (
+                            <span className="truncate font-mono text-[10px] text-zinc-600">{summary}</span>
+                          )}
+                          <span className="ml-auto shrink-0 text-[10px] text-zinc-500">
+                            {isOpen ? '▾' : '▸'}
+                          </span>
+                        </button>
+                      </div>
+                      {isOpen && (
+                        <div className="border-t border-zinc-800 p-2.5">
+                          <div className="mb-1.5 flex gap-1.5">
+                            <input
+                              className={`${settingsInputCls} min-w-0 flex-1`}
+                              value={p.api_base}
+                              onChange={(e) => patchProvider(name, { api_base: e.target.value })}
+                              placeholder="https://api.openai.com/v1"
+                              aria-label={`${name} API base URL`}
+                            />
+                            <select
+                              className={`${settingsInputCls} w-36 shrink-0 px-1 text-[10px] text-zinc-300`}
+                              value=""
+                              onChange={(e) => applyPreset(name, e.target.value)}
+                              aria-label={`Apply a preset to ${name}`}
+                            >
+                              <option value="">use preset…</option>
+                              {Object.keys(presets).map((preset) => (
+                                <option key={preset} value={preset}>
+                                  {preset}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <input
+                            type="password"
+                            className={`${settingsInputCls} w-full`}
+                            placeholder={p.savedKey ? 'key saved' : 'sk-... (optional for local)'}
+                            value={p.apiKeyInput}
+                            onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
+                            aria-label={`${name} API key`}
+                          />
+                          <div className="mt-2 flex justify-end">
+                            <button
+                              type="button"
+                              className="text-[10px] text-red-400 hover:text-red-300"
+                              onClick={() => setRemoveTarget(name)}
+                            >
+                              remove provider
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
 
-        <div className="mb-3">
-          <label className="mb-1 block text-xs text-zinc-500">Max steps</label>
-          <input
-            type="number"
-            min="0"
-            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-            value={maxSteps}
-            onChange={(e) => setMaxSteps(e.target.value === '' ? '' : Number(e.target.value))}
-          />
-          <p className="mt-1 text-[10px] text-zinc-600">
-            Tool-call rounds per turn before the agent gives up; 0 = unlimited (Stop still works)
-          </p>
-        </div>
-
-        <div className="mb-3">
-          <label className="mb-1 block text-xs text-zinc-500">Context window overrides</label>
-          <p className="mb-1 text-[10px] text-zinc-600">
-            Tokens per model id — wins over the provider-reported value and the built-in table
-            (powers the % and bar in the chat panel's context readout).
-          </p>
-          <div className="flex gap-1.5">
-            <input
-              type="text"
-              placeholder="model id"
-              aria-label="Model id for the context window override"
-              className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={ctxModelDraft}
-              onChange={(e) => setCtxModelDraft(e.target.value)}
-            />
-            <input
-              type="number"
-              min="0"
-              placeholder="tokens"
-              aria-label="Context window in tokens"
-              className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={ctxTokensDraft}
-              onChange={(e) => setCtxTokensDraft(e.target.value === '' ? '' : Number(e.target.value))}
-            />
-            <button
-              type="button"
-              className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-              onClick={() => {
-                const id = ctxModelDraft.trim()
-                if (!id || !ctxTokensDraft || ctxTokensDraft <= 0) return
-                setCtxOverrides((o) => ({ ...o, [id]: ctxTokensDraft as number }))
-                setCtxModelDraft('')
-                setCtxTokensDraft('')
-              }}
-            >
-              Set
-            </button>
-          </div>
-          {Object.keys(ctxOverrides).length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {Object.entries(ctxOverrides).map(([id, win]) => (
-                <span
-                  key={id}
-                  className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
+              {/* add a provider: preset templates or a custom OpenAI-compatible URL */}
+              <div className="mt-2.5 flex gap-1.5">
+                <input
+                  className={`${settingsInputCls} min-w-0 flex-1`}
+                  placeholder="new provider name (or 'custom')"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  aria-label="New provider name"
+                />
+                <button
+                  type="button"
+                  className="shrink-0 rounded border border-zinc-700 px-2 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                  onClick={() => addProvider(newName)}
                 >
-                  {id}: {win.toLocaleString()}
+                  + custom
+                </button>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {Object.keys(presets).map((preset) => (
                   <button
-                    aria-label={`Remove override for ${id}`}
-                    className="text-zinc-500 hover:text-red-400"
-                    onClick={() =>
-                      setCtxOverrides((o) => {
-                        const n = { ...o }
-                        delete n[id]
-                        return n
-                      })
-                    }
+                    key={preset}
+                    type="button"
+                    className="rounded border border-zinc-700 px-2 py-1 font-mono text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                    onClick={() => addProvider(providers[preset] ? `${preset}-2` : preset, preset)}
                   >
-                    ×
+                    + {preset}
                   </button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
+                ))}
+              </div>
+            </SettingsCard>
 
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Interface
-        </h3>
-        <div className="mb-3" role="radiogroup" aria-label="Interface scale">
-          <p className="mb-1 text-[10px] text-zinc-600">
-            Zoom for the whole app — larger text at the same layout, applied live
-          </p>
-          <div className="flex gap-1.5">
-            {([1.0, 1.1, 1.25, 1.5] as const).map((s) => (
-              <button
-                key={s}
-                type="button"
-                role="radio"
-                aria-checked={uiScale === s}
-                className={`flex-1 rounded border px-2 py-1.5 font-mono text-xs ${
-                  uiScale === s
-                    ? 'border-blue-600 bg-blue-600/20 text-zinc-100'
-                    : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
-                }`}
-                onClick={() => setUiScale(s)}
-              >
-                {s === 1.0 ? '100%' : s === 1.1 ? '110%' : s === 1.25 ? '125%' : '150%'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Voice dictation
-        </h3>
-        <div className="mb-2 flex gap-2" role="radiogroup" aria-label="Transcription engine">
-          {(['local', 'cloud'] as const).map((engine) => (
-            <button
-              key={engine}
-              role="radio"
-              aria-checked={voiceEngine === engine}
-              className={`flex-1 rounded border px-2 py-1.5 font-mono text-xs ${
-                voiceEngine === engine
-                  ? 'border-blue-600 bg-blue-950/40 text-blue-200'
-                  : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
-              }`}
-              onClick={() => setVoiceEngine(engine)}
-            >
-              {engine === 'local' ? 'local whisper' : 'cloud (BYOK)'}
-            </button>
-          ))}
-        </div>
-        {voiceEngine === 'local' ? (
-          <p className="mb-3 text-[10px] text-zinc-600">
-            {voiceLocalReady ? (
-              <>
-                On-device engine ready — model{' '}
-                <span className="font-mono text-zinc-500">{voiceLocalModel}</span>. Audio never
-                leaves this machine.
-              </>
-            ) : (
-              <>
-                No local whisper engine found (packaged installs bundle one; this looks like a dev
-                run). Use cloud, or place a whisper.cpp CLI + ggml model under backend/.
-              </>
-            )}
-          </p>
-        ) : (
-          <div className="mb-3 space-y-1.5">
-            <input
-              className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={cloudEndpoint}
-              onChange={(e) => setCloudEndpoint(e.target.value)}
-              placeholder="https://api.openai.com/v1  or  http://192.168.1.10:8080/inference"
-              aria-label="Cloud transcription endpoint"
-            />
-            <div className="flex gap-1.5">
-              <input
-                type="password"
-                className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={cloudKey}
-                onChange={(e) => setCloudKey(e.target.value)}
-                placeholder={cloudKeySaved ? 'key saved (optional)' : 'API key (optional)'}
-                aria-label="Cloud transcription API key"
-              />
-              <input
-                className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={cloudModel}
-                onChange={(e) => setCloudModel(e.target.value)}
-                placeholder="model (optional)"
-                aria-label="Cloud transcription model"
-              />
-            </div>
-            <p className="text-[10px] text-zinc-600">
-              OpenAI-compatible /audio/transcriptions endpoint (base URL is fine) or a whisper.cpp
-              server /inference URL. API key and model are optional — local model servers usually
-              need neither. Recordings are sent to that server.
-            </p>
-          </div>
-        )}
-        <div className="mb-3">
-          <div className="flex items-center gap-1.5">
-            <button
-              className={`shrink-0 rounded border px-2 py-1 font-mono text-xs ${
-                capturingHotkey
-                  ? 'border-amber-600 bg-amber-950/40 text-amber-200'
-                  : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
-              }`}
-              onClick={() => setCapturingHotkey(true)}
-              aria-label="Record push-to-talk hotkey"
-            >
-              {capturingHotkey ? 'press keys…' : pttHotkeyDraft || 'set hotkey'}
-            </button>
-            <button
-              className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800"
-              onClick={() => setPttHotkeyDraft('')}
-              aria-label="Disable push-to-talk hotkey"
-            >
-              off
-            </button>
-          </div>
-          <p className="mt-1 text-[10px] text-zinc-600">
-            System-wide push-to-talk: hold the key to record, release to transcribe and send
-            immediately (works even when YAAH is in the background). Pressing it while the agent is
-            running stops the run first; while a question card is up, the transcript answers it —
-            say an option, or anything else for a custom answer. Esc cancels capture; "off"
-            disables push-to-talk.
-          </p>
-        </div>
-
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Read aloud
-        </h3>
-        {!ttsModelReady ? (
-          <div className="mb-3">
-            <p className="mb-1.5 text-[10px] text-zinc-600">
-              The agent can read its responses aloud with an on-device voice (Kokoro, 54 voices,
-              nothing leaves this machine). One-time download:
-            </p>
-            {ttsDownloading ? (
-              <div className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5">
-                <div className="mb-1 flex justify-between font-mono text-[10px] text-zinc-400">
-                  <span>downloading voice model…</span>
-                  <span>{ttsDlPct !== null ? `${ttsDlPct}%` : ''}</span>
-                </div>
-                <div className="h-1 overflow-hidden rounded bg-zinc-700">
-                  <div
-                    className="h-full bg-blue-500 transition-all"
-                    style={{ width: `${ttsDlPct ?? 0}%` }}
+            <SettingsCard title="Generation" className="col-span-2">
+              <div className="grid grid-cols-3 gap-2.5">
+                <div>
+                  <label className="mb-1 block text-[10px] text-zinc-500">Temperature</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="2"
+                    className={`${settingsInputCls} w-full`}
+                    value={temperature}
+                    onChange={(e) => setTemperature(e.target.value === '' ? '' : Number(e.target.value))}
                   />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] text-zinc-500">Max tokens</label>
+                  <input
+                    type="number"
+                    min="0"
+                    className={`${settingsInputCls} w-full`}
+                    value={maxTokens}
+                    onChange={(e) => setMaxTokens(e.target.value === '' ? '' : Number(e.target.value))}
+                  />
+                  <p className="mt-1 text-[10px] text-zinc-600">0 = provider default</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] text-zinc-500">Max steps</label>
+                  <input
+                    type="number"
+                    min="0"
+                    className={`${settingsInputCls} w-full`}
+                    value={maxSteps}
+                    onChange={(e) => setMaxSteps(e.target.value === '' ? '' : Number(e.target.value))}
+                  />
+                  <p className="mt-1 text-[10px] text-zinc-600">0 = unlimited (Stop still works)</p>
                 </div>
               </div>
-            ) : (
-              <button
-                className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-                onClick={() => {
-                  setTtsDownloading(true)
-                  setTtsDlErr(null)
-                  ttsDownload((p) => {
-                    if (p.stage === 'download' && p.total) {
-                      setTtsDlPct(Math.round(((p.received ?? 0) / p.total) * 100))
-                    } else if (p.stage === 'extract') {
-                      setTtsDlPct(null)
-                    } else if (p.stage === 'done') {
-                      setTtsModelReady(true)
-                      setTtsDownloading(false)
-                      useTts.getState().setReady(true) // un-hide the header toggle
-                    } else if (p.stage === 'error') {
-                      setTtsDownloading(false)
-                      setTtsDlErr(p.detail || 'download failed')
-                    }
-                  })
-                    .then(() => setTtsDownloading(false))
-                    .catch((e) => {
-                      setTtsDownloading(false)
-                      setTtsDlErr(String((e as Error).message ?? e))
-                    })
-                }}
-              >
-                Download voice model (~126 MB)
-              </button>
-            )}
-            {ttsDlErr && <p className="mt-1 text-[10px] text-red-400">{ttsDlErr}</p>}
-          </div>
-        ) : (
-          <div className="mb-3 space-y-1.5">
-            <div className="flex gap-1.5">
-              <select
-                className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={ttsVoiceDraft}
-                onChange={(e) => setTtsVoiceDraft(e.target.value)}
-                aria-label="Read-aloud voice"
-              >
-                <optgroup label="American English — female">
-                  {['af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky'].map((v) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="American English — male">
-                  {['am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa'].map((v) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="British English — female">
-                  {['bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily'].map((v) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="British English — male">
-                  {['bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis'].map((v) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </optgroup>
-              </select>
-              <button
-                className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-                title="Preview this voice"
-                aria-label="Preview voice"
-                onClick={() => previewVoice(ttsVoiceDraft, ttsSpeedDraft)}
-              >
-                ▶
-              </button>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="shrink-0 text-[10px] text-zinc-500">speed</span>
-              <input
-                type="range"
-                min="0.5"
-                max="2"
-                step="0.05"
-                value={ttsSpeedDraft}
-                onChange={(e) => setTtsSpeedDraft(Number(e.target.value))}
-                className="flex-1 accent-blue-500"
-                aria-label="Speaking rate"
-              />
-              <span className="w-10 shrink-0 text-right font-mono text-[10px] text-zinc-400">
-                {ttsSpeedDraft.toFixed(2)}×
-              </span>
-            </div>
-            <p className="text-[10px] text-zinc-600">
-              Reads each finished response aloud (prose only — code blocks are skipped). Toggle it
-              any time with the speaker button under the chat. 28 English voices; the model stays on
-              this machine.
-            </p>
-          </div>
-        )}
-        {ttsUiError && (
-          <p className="mb-3 text-[10px] text-red-400">Read-aloud error: {ttsUiError}</p>
-        )}
 
-        <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Remote hosting
-        </h3>
-        <div className="mb-2 space-y-1.5">
-          <label className="flex items-center gap-2 text-xs text-zinc-300">
-            <input
-              type="checkbox"
-              checked={remoteHost}
-              onChange={(e) => setRemoteHost(e.target.checked)}
-            />
-            Let other YAAH instances on this network use this machine
-          </label>
-          <div className="flex gap-1.5">
-            <input
-              className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              type="password"
-              value={remotePass}
-              onChange={(e) => setRemotePass(e.target.value)}
-              placeholder="passphrase (required to accept remote tools)"
-              aria-label="Hosting passphrase"
-            />
-            <input
-              className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={remoteName}
-              onChange={(e) => setRemoteName(e.target.value)}
-              placeholder="display name (optional)"
-              aria-label="Host display name"
-            />
+              <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
+                <label className="mb-1 block text-[10px] text-zinc-500">Context window overrides</label>
+                <p className="mb-1.5 text-[10px] text-zinc-600">
+                  Tokens per model id — wins over the provider-reported value and the built-in
+                  table (powers the context readout in the chat panel).
+                </p>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="model id"
+                    aria-label="Model id for the context window override"
+                    className={`${settingsInputCls} min-w-0 flex-1`}
+                    value={ctxModelDraft}
+                    onChange={(e) => setCtxModelDraft(e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder="tokens"
+                    aria-label="Context window in tokens"
+                    className={`${settingsInputCls} w-24 shrink-0`}
+                    value={ctxTokensDraft}
+                    onChange={(e) => setCtxTokensDraft(e.target.value === '' ? '' : Number(e.target.value))}
+                  />
+                  <button
+                    type="button"
+                    className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                    onClick={() => {
+                      const id = ctxModelDraft.trim()
+                      if (!id || !ctxTokensDraft || ctxTokensDraft <= 0) return
+                      setCtxOverrides((o) => ({ ...o, [id]: ctxTokensDraft as number }))
+                      setCtxModelDraft('')
+                      setCtxTokensDraft('')
+                    }}
+                  >
+                    Set
+                  </button>
+                </div>
+                {Object.keys(ctxOverrides).length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {Object.entries(ctxOverrides).map(([id, win]) => (
+                      <span
+                        key={id}
+                        className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
+                      >
+                        {id}: {win.toLocaleString()}
+                        <button
+                          aria-label={`Remove override for ${id}`}
+                          className="text-zinc-500 hover:text-red-400"
+                          onClick={() =>
+                            setCtxOverrides((o) => {
+                              const n = { ...o }
+                              delete n[id]
+                              return n
+                            })
+                          }
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </SettingsCard>
+
+            <SettingsCard title="Voice dictation" className="col-span-2">
+              <div className="mb-2.5 flex gap-1.5" role="radiogroup" aria-label="Transcription engine">
+                {(['local', 'cloud'] as const).map((engine) => (
+                  <button
+                    key={engine}
+                    type="button"
+                    role="radio"
+                    aria-checked={voiceEngine === engine}
+                    className={`flex-1 rounded border px-2 py-1.5 font-mono text-xs ${
+                      voiceEngine === engine
+                        ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
+                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                    }`}
+                    onClick={() => setVoiceEngine(engine)}
+                  >
+                    {engine === 'local' ? 'local whisper' : 'cloud (BYOK)'}
+                  </button>
+                ))}
+              </div>
+              {voiceEngine === 'local' ? (
+                <p className="text-[10px] leading-relaxed text-zinc-600">
+                  {voiceLocalReady ? (
+                    <>
+                      On-device engine ready — model{' '}
+                      <span className="font-mono text-zinc-500">{voiceLocalModel}</span>. Audio never
+                      leaves this machine.
+                    </>
+                  ) : (
+                    <>
+                      No local whisper engine found (packaged installs bundle one; this looks like a
+                      dev run). Use cloud, or place a whisper.cpp CLI + ggml model under backend/.
+                    </>
+                  )}
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  <input
+                    className={`${settingsInputCls} w-full`}
+                    value={cloudEndpoint}
+                    onChange={(e) => setCloudEndpoint(e.target.value)}
+                    placeholder="https://api.openai.com/v1  or  http://192.168.1.10:8080/inference"
+                    aria-label="Cloud transcription endpoint"
+                  />
+                  <div className="flex gap-1.5">
+                    <input
+                      type="password"
+                      className={`${settingsInputCls} min-w-0 flex-1`}
+                      value={cloudKey}
+                      onChange={(e) => setCloudKey(e.target.value)}
+                      placeholder={cloudKeySaved ? 'key saved (optional)' : 'API key (optional)'}
+                      aria-label="Cloud transcription API key"
+                    />
+                    <input
+                      className={`${settingsInputCls} w-28 shrink-0`}
+                      value={cloudModel}
+                      onChange={(e) => setCloudModel(e.target.value)}
+                      placeholder="model (optional)"
+                      aria-label="Cloud transcription model"
+                    />
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-zinc-600">
+                    OpenAI-compatible /audio/transcriptions endpoint (base URL is fine) or a
+                    whisper.cpp server /inference URL. Key and model are optional. Recordings are
+                    sent to that server.
+                  </p>
+                </div>
+              )}
+
+              <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
+                <div className="mb-1.5 flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-500">Push-to-talk</span>
+                  <button
+                    type="button"
+                    className={`shrink-0 rounded border px-2 py-1 font-mono text-xs ${
+                      capturingHotkey
+                        ? 'border-amber-600 bg-amber-950/40 text-amber-200'
+                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                    }`}
+                    onClick={() => setCapturingHotkey(true)}
+                    aria-label="Record push-to-talk hotkey"
+                  >
+                    {capturingHotkey ? 'press keys…' : pttHotkeyDraft || 'set hotkey'}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800"
+                    onClick={() => setPttHotkeyDraft('')}
+                    aria-label="Disable push-to-talk hotkey"
+                  >
+                    off
+                  </button>
+                </div>
+                <p className="text-[10px] leading-relaxed text-zinc-600">
+                  Hold the key to record, release to transcribe and send — works system-wide, even
+                  when YAAH is in the background. Pressing it stops a running turn first; with a
+                  question card up, the transcript answers it. Esc cancels capture; "off" disables.
+                </p>
+              </div>
+            </SettingsCard>
+
+            <SettingsCard title="Read aloud" className="col-span-2">
+              {!ttsModelReady ? (
+                <div>
+                  <p className="mb-1.5 text-[10px] leading-relaxed text-zinc-600">
+                    The agent can read its responses aloud with an on-device voice (Kokoro —
+                    nothing leaves this machine). One-time download:
+                  </p>
+                  {ttsDownloading ? (
+                    <div className="rounded border border-zinc-800 bg-zinc-800/40 px-2 py-1.5">
+                      <div className="mb-1 flex justify-between font-mono text-[10px] text-zinc-400">
+                        <span>downloading voice model…</span>
+                        <span>{ttsDlPct !== null ? `${ttsDlPct}%` : ''}</span>
+                      </div>
+                      <div className="h-1 overflow-hidden rounded bg-zinc-700">
+                        <div
+                          className="h-full bg-blue-500 transition-all"
+                          style={{ width: `${ttsDlPct ?? 0}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                      onClick={() => {
+                        setTtsDownloading(true)
+                        setTtsDlErr(null)
+                        ttsDownload((p) => {
+                          if (p.stage === 'download' && p.total) {
+                            setTtsDlPct(Math.round(((p.received ?? 0) / p.total) * 100))
+                          } else if (p.stage === 'extract') {
+                            setTtsDlPct(null)
+                          } else if (p.stage === 'done') {
+                            setTtsModelReady(true)
+                            setTtsDownloading(false)
+                            useTts.getState().setReady(true) // un-hide the header toggle
+                          } else if (p.stage === 'error') {
+                            setTtsDownloading(false)
+                            setTtsDlErr(p.detail || 'download failed')
+                          }
+                        })
+                          .then(() => setTtsDownloading(false))
+                          .catch((e) => {
+                            setTtsDownloading(false)
+                            setTtsDlErr(String((e as Error).message ?? e))
+                          })
+                      }}
+                    >
+                      Download voice model (~126 MB)
+                    </button>
+                  )}
+                  {ttsDlErr && <p className="mt-1 text-[10px] text-red-400">{ttsDlErr}</p>}
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <div className="flex gap-1.5">
+                    <select
+                      className={`${settingsInputCls} w-full`}
+                      value={ttsVoiceDraft}
+                      onChange={(e) => setTtsVoiceDraft(e.target.value)}
+                      aria-label="Read-aloud voice"
+                    >
+                      <optgroup label="American English — female">
+                        {['af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky'].map((v) => (
+                          <option key={v} value={v}>{v}</option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="American English — male">
+                        {['am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck', 'am_santa'].map((v) => (
+                          <option key={v} value={v}>{v}</option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="British English — female">
+                        {['bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily'].map((v) => (
+                          <option key={v} value={v}>{v}</option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="British English — male">
+                        {['bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis'].map((v) => (
+                          <option key={v} value={v}>{v}</option>
+                        ))}
+                      </optgroup>
+                    </select>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                      title="Preview this voice"
+                      aria-label="Preview voice"
+                      onClick={() => previewVoice(ttsVoiceDraft, ttsSpeedDraft)}
+                    >
+                      ▶
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="shrink-0 text-[10px] text-zinc-500">speed</span>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="2"
+                      step="0.05"
+                      value={ttsSpeedDraft}
+                      onChange={(e) => setTtsSpeedDraft(Number(e.target.value))}
+                      className="flex-1 accent-blue-500"
+                      aria-label="Speaking rate"
+                    />
+                    <span className="w-10 shrink-0 text-right font-mono text-[10px] text-zinc-400">
+                      {ttsSpeedDraft.toFixed(2)}×
+                    </span>
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-zinc-600">
+                    Reads each finished response aloud (prose only — code is skipped). Toggle
+                    anytime with the speaker button under the chat. The voice model stays on this
+                    machine.
+                  </p>
+                </div>
+              )}
+              {ttsUiError && (
+                <p className="mt-2 text-[10px] text-red-400">Read-aloud error: {ttsUiError}</p>
+              )}
+            </SettingsCard>
+
+            <SettingsCard title="Remote hosting" className="col-span-2">
+              <div className="space-y-1.5">
+                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                  <input
+                    type="checkbox"
+                    className="accent-blue-600"
+                    checked={remoteHost}
+                    onChange={(e) => setRemoteHost(e.target.checked)}
+                  />
+                  Let other YAAH instances on this network use this machine
+                </label>
+                <div className="flex gap-1.5">
+                  <input
+                    className={`${settingsInputCls} min-w-0 flex-1`}
+                    type="password"
+                    value={remotePass}
+                    onChange={(e) => setRemotePass(e.target.value)}
+                    placeholder="passphrase (required to accept remote tools)"
+                    aria-label="Hosting passphrase"
+                  />
+                  <input
+                    className={`${settingsInputCls} w-32 shrink-0`}
+                    value={remoteName}
+                    onChange={(e) => setRemoteName(e.target.value)}
+                    placeholder="display name (optional)"
+                    aria-label="Host display name"
+                  />
+                </div>
+                <p className="text-[10px] leading-relaxed text-zinc-600">
+                  Workspace tools (shell, files, git) of a connected client run on this machine's
+                  home directory — set a passphrase before accepting the firewall prompt. Other
+                  devices appear next to the chatbox automatically.
+                </p>
+              </div>
+            </SettingsCard>
+
+            <SettingsCard title="Interface" className="col-span-4">
+              <div className="flex items-center justify-between gap-3" role="radiogroup" aria-label="Interface scale">
+                <p className="text-[10px] text-zinc-600">
+                  Zoom for the whole app — larger text at the same layout, applied live
+                </p>
+                <div className="flex shrink-0 gap-1.5">
+                  {([1.0, 1.1, 1.25, 1.5] as const).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      role="radio"
+                      aria-checked={uiScale === s}
+                      className={`rounded border px-2.5 py-1 font-mono text-xs ${
+                        uiScale === s
+                          ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
+                          : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                      }`}
+                      onClick={() => setUiScale(s)}
+                    >
+                      {s === 1.0 ? '100%' : s === 1.1 ? '110%' : s === 1.25 ? '125%' : '150%'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </SettingsCard>
+
+            <SettingsCard title="MCP tool servers" className="col-span-4">
+              <McpSection />
+            </SettingsCard>
           </div>
-          <p className="text-[10px] text-zinc-600">
-            Workspace tools (shell, files, git) of a connected client run on this machine's home
-            directory — set a passphrase before the Windows firewall prompt is accepted. Other
-            devices appear next to the chatbox automatically.
-          </p>
         </div>
 
-        <McpSection />
-
-        {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
-
-        <div className="flex justify-end gap-2">
-          <button
-            className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          <button
-            className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
-            disabled={saving || !loaded}
-            title={loaded ? undefined : 'Settings are still loading'}
-            onClick={save}
-          >
-            {saved ? 'Saved!' : saving ? 'Saving...' : 'Save'}
-          </button>
+        {/* Pinned footer: errors and the save state never scroll away */}
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-zinc-800 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            {err && <p className="text-xs leading-relaxed text-red-400">{err}</p>}
+          </div>
+          <div className="flex shrink-0 gap-2">
+            <button
+              type="button"
+              className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+              onClick={onClose}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              disabled={saving || !loaded}
+              title={loaded ? undefined : 'Settings are still loading'}
+              onClick={save}
+            >
+              {saved ? 'Saved!' : saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
         </div>
       </div>
       {removeTarget && (
@@ -3337,6 +3402,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     </div>
   )
 }
+
 
 // ---------------------------------------------------------------- chat
 
