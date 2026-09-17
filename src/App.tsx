@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
-import { ChatPanel, FilesPanel, PreviewModal, Sidebar } from './components'
+import { ChatPanel, PreviewModal, Sidebar } from './components'
 import { useAgent, persistConversationId } from './store'
 
 /**
@@ -182,7 +182,9 @@ export default function App() {
       <BackendRecoveryBanner />
       <RestoreSession />
       <Sidebar />
-      <FilesPanel />
+      {/* FilesPanel is GUI-removed (see DESIGN.md Layout): the component and
+          its wiring stay in components.tsx — restore by re-adding the mount:
+          <FilesPanel /> */}
       <ChatPanel />
       <PreviewModal />
     </div>

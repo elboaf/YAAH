@@ -155,7 +155,7 @@ A near-monochrome zinc console where one blue accent marks human intent and a sm
 
 ### Hierarchy
 - **Title** (600, 14px, 1.625): panel headings ("FILES", "Settings").
-- **Body** (400, 14px, 1.625): user and agent prose, max ~70ch in the chat column.
+- **Body** (400, 14px, 1.625): user and agent prose. Agent text runs the full chat-column width; user bubbles cap at 85%.
 - **Secondary** (400, 12px, 1.5): option descriptions, settings help, conversation rows.
 - **Mono Body** (400, 11px/16px): tool chips, traces, file tree, code, args/results.
 - **Label** (500, 10px, 0.1em tracking, uppercase): section markers — "agent", "agent asks — pick an answer", the status line.
@@ -165,7 +165,9 @@ A near-monochrome zinc console where one blue accent marks human intent and a sm
 
 ## Layout
 
-A fixed three-pane console: sidebar (256px, min 220px) for identity, workspace, model, and conversations; files panel (240px, min 200px, collapsible to a 28px vertical rail) present only at ≥1280px (xl); chat takes the remainder with a min-width-0 flex so long content truncates instead of pushing panes out. Chat content sits in a 16px-padded scroll column with 16px between messages; the composer is a 12px-padded band pinned below it, with the status line (6px dot + 10px mono label) as the last row of the app. Spacing rhythm is a tight 4/8/12/16px scale; vertical padding inside controls is 4–8px. Depth of the file tree is 12px indent per level.
+A fixed two-pane console: sidebar (256px, min 220px) for identity, workspace, model, and conversations; chat takes the remainder with a min-width-0 flex so long content truncates instead of pushing panes out. Workspace groups toggle by name click — click expands the group and starts a new draft chat there, click again collapses (persisted per workspace); an expanded group shows its 5 most recent chats plus the open conversation, with a dimmed "show more" stepping +5 per click (session-only). Chat content sits in a 16px-padded scroll column with 16px between messages; the composer is a 12px-padded band pinned below it, with the status line (6px dot + 10px mono label) as the last row of the app. Spacing rhythm is a tight 4/8/12/16px scale; vertical padding inside controls is 4–8px.
+
+**Files panel — removed from the GUI (deliberate).** The workspace file tree and its collapsed 28px "FILES" rail are absent from the interface, but the functional code remains in components.tsx (`FilesPanel`, tree fetch/lazy-load/cache, context menu) and the file-preview popup it fed is still wired. Restore by re-adding `<FilesPanel />` to App.tsx. Tree indent stays 12px per level for when it returns.
 
 ## Elevation & Depth
 

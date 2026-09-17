@@ -918,7 +918,7 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
         <MessageStopButton msgId={msg.id} />
       </div>
       {msg.content ? (
-        <div className="max-w-prose text-sm leading-relaxed text-zinc-200">
+        <div className="text-sm leading-relaxed text-zinc-200">
           <MessageBody content={msg.content} />
         </div>
       ) : null}
@@ -1502,9 +1502,9 @@ const wsBasename = (path: string) => {
   return idx >= 0 ? norm.slice(idx + 1) : norm
 }
 
-/** localStorage key for a group's collapsed state. */
-const collapseKey = (path: string | null) =>
-  `yaah.group.collapsed.${path ?? 'default'}`
+/** localStorage key for a group's expanded (chats visible) state. */
+const expandKey = (path: string | null) =>
+  `yaah.group.expanded.${path ?? 'default'}`
 
 /** Groups for the greyed "This device" section shown while connected. */
 function buildLocalGroups(
@@ -1537,7 +1537,12 @@ function ConversationList() {
   const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation, workspace } = useAgent()
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  // Expanded groups show their chats (capped, with show-more stepping);
+  // collapsed groups show the header only. Persisted per workspace.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  // Session-only show-more stepping: +5 visible chats per click, resets on
+  // restart (deliberate tightness persists; casual browsing doesn't).
+  const [extra, setExtra] = useState<Record<string, number>>({})
   const [notice, setNotice] = useState<{ title: string; message: string } | null>(null)
   const [sysTarget, setSysTarget] = useState<{ id: number; title: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null)
@@ -1567,31 +1572,39 @@ function ConversationList() {
     // and the new registry row must appear without any other refresh trigger.
   }, [conversationId, workspace, refresh])
 
-  // Collapse state persists per workspace (Q14); groups start expanded.
+  // Expanded state persists per workspace (Q14); a group with no remembered
+  // state starts expanded.
   useEffect(() => {
     const next: Record<string, boolean> = {}
     for (const w of workspaces) {
-      const key = collapseKey(w.path ?? '')
+      const key = expandKey(w.path ?? '')
       try {
-        next[key] = localStorage.getItem(key) === '1'
+        next[key] = localStorage.getItem(key) !== '0'
       } catch {
-        next[key] = false
+        next[key] = true
       }
     }
-    setCollapsed(next)
+    setExpanded(next)
   }, [workspaces])
 
-  const toggleCollapsed = (path: string | null) => {
-    const key = collapseKey(path ?? '')
-    setCollapsed((c) => {
-      const v = !c[key]
-      try {
-        localStorage.setItem(key, v ? '1' : '0')
-      } catch {
-        /* non-persistent collapse is fine */
-      }
-      return { ...c, [key]: v }
-    })
+  /** Name click: collapsed -> expand + start a new draft chat in this
+   *  workspace; expanded -> collapse. No chevron — the name is the toggle. */
+  const toggleGroup = (path: string | null) => {
+    const key = expandKey(path ?? '')
+    const wasExpanded = expanded[key] ?? true
+    setExpanded((c) => ({ ...c, [key]: !wasExpanded }))
+    // Re-expansion starts fresh at 5+active: show-more stepping is
+    // session-scoped browsing state, dropped on collapse.
+    setExtra((e) => ({ ...e, [key]: 0 }))
+    try {
+      localStorage.setItem(key, wasExpanded ? '0' : '1')
+    } catch {
+      /* non-persistent toggle is fine */
+    }
+    if (!wasExpanded) {
+      setWorkspace(path ?? '')
+      newConversation()
+    }
   }
 
   // Esc closes an open row menu — the app-wide dialog contract (dialogs,
@@ -1625,18 +1638,6 @@ function ConversationList() {
     getMessages(c.id)
       .then((rows) => loadHistory(c.id, rows))
       .catch(() => {})
-  }
-
-  /** Header body click = open that workspace's most recent conversation,
-   *  or a fresh chat in it when the group is empty (same as the dropdown). */
-  const openWorkspace = (w: WorkspaceRow) => {
-    const latest = convs.find((c) => (c.workspace ?? null) === w.path)
-    if (latest) {
-      openConversation(latest)
-    } else {
-      setWorkspace(w.path ?? '')
-      newConversation()
-    }
   }
 
   // Group rows by workspace; Default (null path) first, then by the most
@@ -1679,31 +1680,38 @@ function ConversationList() {
   return (
     <div className="flex-1 overflow-y-auto">
       {groups.map(({ ws, items }) => {
-        const key = collapseKey(ws.path ?? '')
-        const isCollapsed = collapsed[key] ?? false
+        const key = expandKey(ws.path ?? '')
+        const isExpanded = expanded[key] ?? true
         const isActiveWs = (ws.path ?? '') === (workspace || '')
+        // Capped view: the 5 most recent chats, plus the open conversation
+        // appended whenever it ranks older (the list never hides what you're
+        // looking at); "show more" steps +5 per click, session-only.
+        const activeIdx = items.findIndex((c) => c.id === conversationId)
+        const base = Math.min(5 + (extra[key] ?? 0), items.length)
+        const head = items.slice(0, base)
+        // The active chat sits outside the head block: append it (never a
+        // duplicate — only when its index is past the head) so it stays
+        // visible directly above the "show more" line.
+        const visible =
+          activeIdx >= base ? [...head, items[activeIdx]] : head
+        const hidden = items.length - visible.length
         return (
           <div key={ws.path ?? 'default'} className="mb-3">
-            {/* Workspace section: a loud, unmistakable block — bold header,
-                hairline top rule, chat count, collapse, remove menu. The
-                active workspace (the open conversation's workspace) carries
-                the state marker. */}
+            {/* Workspace section: bold header, hairline top rule, chat count,
+                remove menu. The name IS the toggle: click expands the group
+                and starts a new chat there; click again collapses. The active
+                workspace (the open conversation's workspace) carries the
+                state marker — it survives collapse so a hidden active chat
+                stays findable. */}
             <div className="border-t border-zinc-800 pt-2 first:border-t-0 first:pt-0">
             <div className="group flex items-center gap-0.5 rounded px-1 py-1 hover:bg-zinc-800/60">
-              <button
-                className="rounded px-0.5 text-[10px] text-zinc-500 hover:text-zinc-200"
-                aria-label={isCollapsed ? 'Expand group' : 'Collapse group'}
-                aria-expanded={!isCollapsed}
-                onClick={() => toggleCollapsed(ws.path)}
-              >
-                {isCollapsed ? '▸' : '▾'}
-              </button>
               <button
                 className={`min-w-0 flex-1 truncate text-left font-mono text-[11px] font-semibold uppercase tracking-wider ${
                   isActiveWs ? 'text-zinc-100' : 'text-zinc-400'
                 } hover:text-zinc-200`}
                 title={ws.path ?? 'No root directory — conversations without a workspace'}
-                onClick={() => openWorkspace(ws)}
+                aria-expanded={isExpanded}
+                onClick={() => toggleGroup(ws.path)}
               >
                 {ws.label}
                 {ws.path !== null && !ws.exists && (
@@ -1736,25 +1744,35 @@ function ConversationList() {
                 />
               )}
             </div>
-            {!isCollapsed &&
+            {isExpanded &&
               (items.length > 0 ? (
-                items.map((c) => (
-                  <ConversationRow
-                    key={c.id}
-                    conv={c}
-                    active={c.id === conversationId}
-                    menuOpen={menuOpenId === c.id}
-                    setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
-                    onOpen={() => openConversation(c)}
-                    onExport={() =>
-                      exportConversationMarkdown(c.id, c.title).catch((e) =>
-                        setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
-                      )
-                    }
-                    onSys={() => setSysTarget({ id: c.id, title: c.title })}
-                    onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
-                  />
-                ))
+                <>
+                  {visible.map((c) => (
+                    <ConversationRow
+                      key={c.id}
+                      conv={c}
+                      active={c.id === conversationId}
+                      menuOpen={menuOpenId === c.id}
+                      setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
+                      onOpen={() => openConversation(c)}
+                      onExport={() =>
+                        exportConversationMarkdown(c.id, c.title).catch((e) =>
+                          setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
+                        )
+                      }
+                      onSys={() => setSysTarget({ id: c.id, title: c.title })}
+                      onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
+                    />
+                  ))}
+                  {hidden > 0 && (
+                    <button
+                      className="block w-full px-3 py-1 text-left text-[11px] text-zinc-600 hover:text-zinc-300"
+                      onClick={() => setExtra((e) => ({ ...e, [key]: (e[key] ?? 0) + 5 }))}
+                    >
+                      Show more ({hidden} more)
+                    </button>
+                  )}
+                </>
               ) : (
                 <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
               ))}
@@ -1774,18 +1792,34 @@ function ConversationList() {
           <p className="px-2 pb-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
             💻 This device — view only
           </p>
-          {buildLocalGroups(localWorkspaces, localConvs).map(({ ws, items }) => (
-            <div key={ws.path ?? 'default'} className="mb-1 px-1">
-              <p className="truncate py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-                {ws.label}
-              </p>
-              {items.map((c) => (
-                <p key={c.id} className="truncate rounded px-2 py-1 text-xs text-zinc-600">
-                  {c.title}
+          {buildLocalGroups(localWorkspaces, localConvs).map(({ ws, items }) => {
+            // Same 5-cap + show-more as live groups (session-only stepping,
+            // keyed under local: to stay apart from workspace keys); no
+            // toggle — the section is view-only.
+            const lkey = `local:${ws.path ?? 'default'}`
+            const lbase = Math.min(5 + (extra[lkey] ?? 0), items.length)
+            const lvisible = items.slice(0, lbase)
+            return (
+              <div key={ws.path ?? 'default'} className="mb-1 px-1">
+                <p className="truncate py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+                  {ws.label}
                 </p>
-              ))}
-            </div>
-          ))}
+                {lvisible.map((c) => (
+                  <p key={c.id} className="truncate rounded px-2 py-1 text-xs text-zinc-600">
+                    {c.title}
+                  </p>
+                ))}
+                {items.length > lvisible.length && (
+                  <button
+                    className="block w-full px-2 py-1 text-left text-[11px] text-zinc-600 hover:text-zinc-400"
+                    onClick={() => setExtra((e) => ({ ...e, [lkey]: (e[lkey] ?? 0) + 5 }))}
+                  >
+                    Show more ({items.length - lvisible.length} more)
+                  </button>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 
