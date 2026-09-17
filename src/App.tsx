@@ -34,6 +34,18 @@ function BackendRecoveryBanner() {
         if (failures === 4 || (failures > 4 && (failures - 4) % 15 === 0)) {
           setRestarting(true)
           if (IS_TAURI) {
+            // Re-check health immediately before pulling the trigger: the
+            // backend may have come up since the last poll, and killing it
+            // now would restart a healthy process and ping-pong this banner.
+            try {
+              const fresh = await fetch(`${BASE}/api/health`, { cache: 'no-store' })
+              if (fresh.ok) {
+                window.location.reload()
+                return
+              }
+            } catch {
+              /* still down — proceed with the poke */
+            }
             import('@tauri-apps/api/core')
               .then(({ invoke }) => invoke('restart_backend'))
               .catch(() => {})
