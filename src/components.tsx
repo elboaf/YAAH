@@ -4409,7 +4409,7 @@ function Composer() {
   // The menu opens when the input is exactly "/" or starts with "/" —
   // the query is whatever follows, and the list narrows as it grows. The
   // same menu serves "$": the query is the unfinished $name at the very end
-  // of the input, and Tab completes it in place.
+  // of the input; picking one adds a chip and strips the token, same as /.
   useEffect(() => {
     if (input === '/') {
       setSkillMenuOpen(true)
@@ -4445,9 +4445,10 @@ function Composer() {
 
   const pickSkill = (s: SkillInfo) => {
     if (skillTrigger === '$') {
-      // $ completes the name in place; the menu stays available for another
-      // $name elsewhere in the same prompt.
-      setInput((prev) => prev.replace(/\$[A-Za-z0-9_-]*$/, `$${s.name} `))
+      // $ picks a chip too, stripping the raw $name from the text —
+      // identical to /, just without clearing the rest of the prompt.
+      setPickedSkills((p) => (p.some((x) => x.name === s.name) ? p : [...p, s]))
+      setInput((prev) => prev.replace(/\$[A-Za-z0-9_-]*$/, ''))
       setSkillMenuOpen(false)
       setSkillNavigated(false)
       textareaRef.current?.focus()
@@ -4692,8 +4693,9 @@ function Composer() {
     }
     const imageDataUrls = images.map((i) => i.dataUrl)
     // $name anywhere in the prompt loads the skill for this turn (unknown
-    // names are literal text; the message is sent exactly as written). The
-    // /-menu chips remain the other way in; both merge into one list.
+    // names are literal text; the message is sent exactly as written). Menu
+    // picks — / or $ — become chips; this scan is the fallback for hand-typed
+    // $names that never went through the menu. All merge into one list.
     const knownSkillNames = new Set(skills.map((s) => s.name))
     const dollarNames: string[] = []
     for (const m of fullText.matchAll(/\$([A-Za-z0-9_-]+)/g)) {
