@@ -6,7 +6,7 @@ shell, files, git, search — and every tool call shown transparently. See
 
 ## Download
 
-Prebuilt installers (Windows / macOS / Linux) are on the
+Prebuilt installers (Windows / Linux) are on the
 [Releases](../../releases) page. Apps are unsigned — expect an OS warning on
 first run.
 

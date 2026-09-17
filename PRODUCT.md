@@ -20,7 +20,7 @@ Explicitly undecided — no deliberate differentiation has been chosen (user-con
 
 ## Operating Context
 
-- Runs as a Tauri 2 desktop app (Windows/macOS/Linux) with an embedded FastAPI backend subprocess; also runnable in a browser via `npm run dev` (Vite + uvicorn on localhost:8765).
+- Runs as a Tauri 2 desktop app (Windows/Linux) with an embedded FastAPI backend subprocess; also runnable in a browser via `npm run dev` (Vite + uvicorn on localhost:8765).
 - The user configures their own model providers (any OpenAI-compatible base URL + API key) in Settings; keys stay in local config.json and never reach the browser.
 - The agent operates inside a user-chosen workspace folder; the file tree panel and preview modal are scoped to it.
 - Skills are user-extensible markdown folders in ~/.yaah/skills, invoked via `/s` or chips; the model can also load them itself mid-turn.

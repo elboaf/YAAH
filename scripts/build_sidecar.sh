@@ -24,8 +24,7 @@ COLLECTS=(
   --hidden-import mcp.client.session --hidden-import mcp.types
 )
 # Computer use (Windows only; pip skips these elsewhere via sys_platform
-# markers, so collecting them unconditionally would break the Linux/macOS
-# builds). uiautomation wraps comtypes, which generates interface modules
+# markers, so collecting them unconditionally would break the Linux build). uiautomation wraps comtypes, which generates interface modules
 # at runtime and is invisible to static analysis.
 if [ "$(uname -s)" = "MINGW" ] || [ "$(uname -s)" = "Windows_NT" ]; then
   COLLECTS+=(--collect-all pynput --collect-all mss
@@ -45,8 +44,7 @@ cp "dist/backend$EXE" "src-tauri/binaries/backend-$TRIPLE$EXE"
 echo "sidecar: src-tauri/binaries/backend-$TRIPLE$EXE"
 
 # ---- voice dictation: whisper.cpp CLI + pre-packaged ggml model ----
-# Built from source for every target (the release assets carry no macOS
-# CLI binary) and staged under backend/whisper/, which tauri.conf.json
+# Built from source for every target and staged under backend/whisper/, which tauri.conf.json
 # ships as resources so it lands next to the bundled backend/*.py files.
 WHISPER_TAG=v1.9.2
 WHISPER_MODEL=ggml-base-q5_1.bin

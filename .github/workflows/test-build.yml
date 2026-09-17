@@ -2,7 +2,7 @@ name: Test Build
 
 # Builds the Tauri desktop app without creating a release. Run it manually
 # from the Actions tab ("Run workflow") and pick the platform: windows,
-# macos, linux, or all. Pull requests touching the app get a cheap
+# linux, or all. Pull requests touching the app get a cheap
 # Linux-only smoke build. Installers are attached as workflow artifacts.
 
 on:
@@ -14,7 +14,6 @@ on:
         default: windows
         options:
           - windows
-          - macos
           - linux
           - all
   pull_request:
@@ -31,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         # PRs smoke-build Linux only; dispatch builds the chosen platform.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || (inputs.platform == 'all' && '["windows-latest", "macos-latest", "ubuntu-22.04"]' || (inputs.platform == 'windows' && '["windows-latest"]' || (inputs.platform == 'macos' && '["macos-latest"]' || '["ubuntu-22.04"]')))) }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || (inputs.platform == 'all' && '["windows-latest", "ubuntu-22.04"]' || (inputs.platform == 'windows' && '["windows-latest"]' || '["ubuntu-22.04"]'))) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -79,8 +78,6 @@ jobs:
           path: |
             src-tauri/target/release/bundle/**/*.exe
             src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.app.tar.gz
             src-tauri/target/release/bundle/**/*.AppImage
             src-tauri/target/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.rpm
