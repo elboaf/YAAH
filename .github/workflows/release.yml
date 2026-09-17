@@ -64,11 +64,10 @@ jobs:
             mv dist/yaah-server.exe "yaah-server-${RUNNER_OS,,}.exe"
             mv dist/yaah-server-setup.exe "yaah-server-setup-${RUNNER_OS,,}.exe"
           else
-            mv dist/yaah-server "yaah-server-${RUNNER_OS,,}"
-            # Daemon packaging: systemd unit + /etc/yaah conf example
-            # (scripts/build_server_deb.sh); renamed to match the
-            # yaah-server-linux* upload glob below.
+            # Daemon packaging (scripts/build_server_deb.sh) still needs the
+            # binary in dist/ — build the deb BEFORE renaming the exe.
             bash scripts/build_server_deb.sh
+            mv dist/yaah-server "yaah-server-${RUNNER_OS,,}"
             mv dist/yaah-server_*_all.deb "yaah-server-${RUNNER_OS,,}.deb"
           fi
 

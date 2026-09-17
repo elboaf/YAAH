@@ -15,7 +15,11 @@ cd "$(dirname "$0")/.."
 pip install -r requirements.txt -r requirements-build.txt
 
 EXE=""
-[ "$(uname -s)" = "MINGW" -o "$(uname -s)" = "Windows_NT" ] && EXE=".exe" || true
+# Git Bash reports MINGW64_NT-… etc; the Windows runner is not plain
+# "MINGW"/"Windows_NT", so glob the family (case, not [ = ], see 0.16.3).
+case "$(uname -s)" in
+  MINGW*|MSYS*|Windows_NT*|CYGWIN*) EXE=".exe" ;;
+esac
 
 # Windows service support (YaahService in server_entry.py + the setup
 # wizard exe): pywin32 only exists on Windows builds.
