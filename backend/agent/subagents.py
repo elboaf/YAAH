@@ -268,18 +268,24 @@ def index_for_prompt() -> str:
     Empty string when only the built-ins exist (they are always present,
     so the block is never empty — but kept as a function for symmetry)."""
     lines = [
-        "Sub-agents available (delegate with the spawn_agent tool when a "
-        "task fits an isolated, self-contained piece of work):",
+        "Sub-agents available (delegate with the spawn_agent tool):",
     ]
     for d in list_agents():
         desc = " ".join(d["description"].split())
         lines.append(f"- {d['name']}: {desc}")
     lines.append(
-        "Call spawn_agent with agent_type and a fully self-contained "
-        "prompt (the sub-agent sees nothing else from this conversation). "
-        "Launch several spawn_agent calls in the same turn to run them "
-        "in parallel; partition independent work across them. Do not "
-        "delegate small tasks that need this conversation's context."
+        "Delegate proactively: when a chunk of work is self-contained — "
+        "a sweep over many files, independent research threads, broad "
+        "exploration that would eat this conversation's context — prefer "
+        "spawning a sub-agent over doing it inline. Launch several "
+        "spawn_agent calls in the SAME turn to run them in parallel "
+        "instead of one long sequential investigation. Announce each "
+        "delegation in one line before the calls, and summarize what "
+        "came back when the results arrive. Write each sub-agent prompt "
+        "fully self-contained (it sees nothing else from this "
+        "conversation — include paths, constraints, and exactly what to "
+        "report back). Do not delegate what needs back-and-forth with "
+        "the user, and don't fragment one small edit into delegation."
     )
     return "\n".join(lines)
 
