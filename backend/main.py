@@ -28,10 +28,16 @@ async def lifespan(app: FastAPI):
     # LAN hosting (on by default): advertise this backend over mDNS so
     # other YAAH instances can discover it. A host that can't advertise
     # is still reachable by direct IP; failures are logged, never fatal.
+    # YAAH_NO_HOSTING (the headless server's --no-hosting) skips the
+    # beacon for that run without touching the stored setting.
+    import os as _os
+
     from backend.agent import discovery
     from backend.agent.config import load_config
 
-    if (load_config().get("remote") or {}).get("hosting_enabled", True):
+    if _os.environ.get("YAAH_NO_HOSTING") != "1" and (
+        load_config().get("remote") or {}
+    ).get("hosting_enabled", True):
         discovery.start_advertising(API_PORT)
     # MCP tool servers (config "mcpServers"): spawn each registered server
     # and merge its tools into the model's toolbox. Failures are per-server
@@ -41,7 +47,9 @@ async def lifespan(app: FastAPI):
     mcp_client.manager.start_all()
     # Computer use (Windows only): real-input activity detector + panic
     # hotkey listener. Never fatal — a failure just means no pause/no hotkey.
-    if os.name == "nt":
+    # Skipped entirely in headless mode (the yaah-server binary): there is
+    # no interactive session to hook on a headless box.
+    if os.name == "nt" and os.environ.get("YAAH_HEADLESS") != "1":
         from backend.agent import computer
 
         computer.start_background()

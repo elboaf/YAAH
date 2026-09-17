@@ -52,6 +52,20 @@ jobs:
         shell: bash
         run: bash scripts/build_sidecar.sh
 
+      # Headless server (yaah-server): the same backend app, lean build
+      # (no voice / computer-use deps), console entry point. Attached to
+      # the release so a target device can host for desktop clients
+      # without running the GUI (scripts/build_server.sh).
+      - name: Build headless server
+        shell: bash
+        run: |
+          bash scripts/build_server.sh
+          if [ -f dist/yaah-server.exe ]; then
+            mv dist/yaah-server.exe "yaah-server-${RUNNER_OS,,}.exe"
+          else
+            mv dist/yaah-server "yaah-server-${RUNNER_OS,,}"
+          fi
+
       - name: Build (verbose, logged)
         shell: bash
         run: npx tauri build --verbose 2>&1 | tee build.log
@@ -97,6 +111,9 @@ jobs:
             Linux)   pats="-name *.AppImage -o -name *.deb -o -name *.rpm" ;;
           esac
           files=$(find src-tauri/target/release/bundle -type f \( $pats \))
+          # The headless server exe (renamed per-OS by the build step:
+          # yaah-server-windows.exe / -macos / -linux) + its README.
+          files="$files yaah-server-${RUNNER_OS,,}* dist/README-server.txt"
           echo "assets:"; echo "$files"
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --title "$tag" --generate-notes || true
