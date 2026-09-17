@@ -5,6 +5,7 @@ the model and an async executor. All paths are resolved against a workspace
 root and validated to prevent escapes.
 """
 import asyncio
+import codecs
 import fnmatch
 import json
 import os
@@ -603,8 +604,51 @@ def _clamp_note(requested: int) -> str | None:
     return None
 
 
-async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> dict:
-    """Run a shell command in the workspace; return structured result."""
+async def _run_capturing(
+    proc: asyncio.subprocess.Process, job, timeout: int, on_chunk=None
+) -> tuple[str, bool]:
+    """Read a spawned proc's merged stdout to completion under an overall
+    deadline, invoking on_chunk(text) per decoded piece for live progress.
+    Returns (output, timed_out). On timeout the tree is killed; the read
+    stream is then dead, so wait() — not a second read — gets the exit."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    pieces: list[str] = []
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            chunk = await asyncio.wait_for(proc.stdout.read(4096), timeout=remaining)
+            if not chunk:
+                break
+            text = decoder.decode(chunk)
+            if text and on_chunk is not None:
+                try:
+                    on_chunk(text)
+                except Exception:  # noqa: BLE001 — progress must never kill the tool
+                    pass
+            pieces.append(text)
+        text = decoder.decode(b"", final=True)
+        if text:
+            pieces.append(text)
+        # EOF only means the pipe closed; wait() fills in returncode.
+        await asyncio.wait_for(proc.wait(), timeout=5)
+        return "".join(pieces), False
+    except asyncio.TimeoutError:
+        _kill_tree(proc, job)
+        # The read was cancelled mid-stream; read() again is unsupported and
+        # can hang forever. wait() only needs the exit.
+        await _reap(proc)
+        return f"[timed out after {timeout}s]", True
+
+
+async def run_bash(
+    workspace: str, command: str, timeout_seconds: int = 60, on_chunk=None
+) -> dict:
+    """Run a shell command in the workspace; return structured result.
+    on_chunk, when given, receives output incrementally while it runs."""
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
     note = _clamp_note(timeout_seconds)
     try:
@@ -619,17 +663,7 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
         if job:
             _job_assign(job, proc.pid)
         try:
-            try:
-                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                output = out.decode("utf-8", errors="replace")
-                timed_out = False
-            except asyncio.TimeoutError:
-                _kill_tree(proc, job)
-                # communicate() was cancelled mid-read; calling it again is
-                # unsupported and can hang forever. wait() only needs the exit.
-                await _reap(proc)
-                output = f"[timed out after {timeout}s]"
-                timed_out = True
+            output, timed_out = await _run_capturing(proc, job, timeout, on_chunk)
         finally:
             _job_close(job)
 
@@ -649,9 +683,11 @@ async def run_bash(workspace: str, command: str, timeout_seconds: int = 60) -> d
         return {"exit_code": -1, "output": f"error: {e}", "timed_out": False, "truncated": False}
 
 
-async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60) -> dict:
+async def run_powershell(
+    workspace: str, command: str, timeout_seconds: int = 60, on_chunk=None
+) -> dict:
     """Run a Windows PowerShell command in the workspace; same structured
-    result shape as run_bash."""
+    result shape as run_bash. on_chunk receives output incrementally."""
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
     note = _clamp_note(timeout_seconds)
     try:
@@ -667,15 +703,7 @@ async def run_powershell(workspace: str, command: str, timeout_seconds: int = 60
         if job:
             _job_assign(job, proc.pid)
         try:
-            try:
-                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                output = out.decode("utf-8", errors="replace")
-                timed_out = False
-            except asyncio.TimeoutError:
-                _kill_tree(proc, job)
-                await _reap(proc)
-                output = f"[timed out after {timeout}s]"
-                timed_out = True
+            output, timed_out = await _run_capturing(proc, job, timeout, on_chunk)
         finally:
             _job_close(job)
 
@@ -1015,12 +1043,13 @@ def tool_risk(name: str) -> str:
     return "shell"
 
 
-async def execute_tool(name: str, arguments: dict, workspace: str) -> dict:
+async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None) -> dict:
     """Execute a tool by name with a dict of arguments. Never raises.
 
     While a remote session is active, workspace-touching tools are
     forwarded to the host (see backend/agent/remote.py); everything else
-    runs locally."""
+    runs locally. on_chunk, when given, is forwarded to the local shell
+    executors for incremental output (remote/MCP tools ignore it)."""
     from backend.agent import remote as remote_mod
 
     host = remote_mod.get_remote()
@@ -1035,6 +1064,8 @@ async def execute_tool(name: str, arguments: dict, workspace: str) -> dict:
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
     try:
+        if on_chunk is not None and name in ("bash", "powershell"):
+            return await fn(workspace=workspace, on_chunk=on_chunk, **arguments)
         return await fn(workspace=workspace, **arguments)
     except TypeError as e:
         return {"error": f"Bad arguments for {name}: {e}"}

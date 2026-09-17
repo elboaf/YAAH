@@ -4,6 +4,7 @@ Runs until the model produces a final answer or the step budget is exhausted.
 Emits JSON-line events for the frontend:
   {'type': 'text', 'text': ...}             - assistant text delta
   {'type': 'tool_start', 'name', 'args'}    - tool execution beginning
+  {'type': 'tool_progress', 'call_id', 'chunk'} - live shell output while a tool runs
   {'type': 'tool_result', 'name', 'result'} - tool output
   {'type': 'done'}                          - final answer complete
   {'type': 'error', 'message'}              - fatal error
@@ -472,6 +473,45 @@ def _ndjson(event: dict) -> str:
     return json.dumps(event) + "\n"
 
 
+async def _execute_with_progress(
+    name: str, args: dict, workspace: str, call_id: str, box: dict
+):
+    """Run a tool, yielding tool_progress events with live output while it
+    runs (only the shell executors actually stream; everything else emits
+    nothing and behaves like a plain await). The final result lands in
+    `box["result"]` because async-generator return values are awkward to
+    consume alongside `async for`."""
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    def on_chunk(text: str) -> None:
+        queue.put_nowait(text)
+
+    task = asyncio.create_task(execute_tool(name, args, workspace, on_chunk=on_chunk))
+
+    async def _finisher():
+        try:
+            await task
+        finally:
+            queue.put_nowait(_DONE)
+
+    finisher = asyncio.create_task(_finisher())
+    try:
+        while True:
+            item = await queue.get()
+            if item is _DONE:
+                break
+            yield {"type": "tool_progress", "call_id": call_id, "chunk": item}
+        await finisher
+        box["result"] = task.result()
+    finally:
+        # If the turn is torn down mid-tool (client disconnect), don't leak
+        # a running tool task the way a bare create_task would.
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, finisher, return_exceptions=True)
+
+
 def _clip_result_str(result, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
     """Serialize a tool result, staying under `limit` WITHOUT producing
     invalid JSON: the longest string field is clipped instead of slicing
@@ -860,7 +900,12 @@ async def run_agent(
                         # while it is awaiting the user's answer.
                         mode = current_access_mode()
                         if tool_risk(name) == "read" or mode == "full":
-                            result = await execute_tool(name, args, workspace)
+                            box: dict = {}
+                            async for pev in _execute_with_progress(
+                                name, args, workspace, tc.get("id", ""), box
+                            ):
+                                yield _ndjson(pev)
+                            result = box.get("result")
                         else:
                             if mode == "ask":
                                 yield _ndjson(
@@ -891,7 +936,12 @@ async def run_agent(
                             # Approved (None) -> execute for real now; a
                             # denial/plan-block carries its own error result.
                             if result is None:
-                                result = await execute_tool(name, args, workspace)
+                                box = {}
+                                async for pev in _execute_with_progress(
+                                    name, args, workspace, tc.get("id", ""), box
+                                ):
+                                    yield _ndjson(pev)
+                                result = box.get("result")
 
                 result_str = _clip_result_str(result)
                 # A tool that attached an image (view_image) becomes a

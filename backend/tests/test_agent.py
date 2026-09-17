@@ -18,6 +18,61 @@ async def test_bash_tool(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bash_streams_chunks_live(tmp_path):
+    """on_chunk must fire incrementally while the command runs, before the
+    final result comes back — that is the whole point of tool_progress."""
+    chunks: list[str] = []
+    r = await execute_tool(
+        "bash",
+        {"command": "echo one; echo two", "timeout_seconds": 10},
+        str(tmp_path),
+        on_chunk=chunks.append,
+    )
+    assert r["exit_code"] == 0
+    assert chunks, "no live chunks delivered"
+    assert "one" in "".join(chunks)
+    assert "one" in r["output"] and "two" in r["output"]
+    # Final output must be the full stream, not just the first chunk.
+    assert "".join(chunks).strip() == r["output"].strip()
+
+
+@pytest.mark.asyncio
+async def test_bash_stream_timeout_kills_tree(tmp_path):
+    """The incremental read loop must enforce the deadline and kill the
+    tree just like the old communicate() path did."""
+    import sys
+
+    if sys.platform == "win32":
+        command = 'start /b ping -n 30 127.0.0.1 >nul'
+    else:
+        command = "sleep 30 &"
+    chunks: list[str] = []
+    r = await asyncio.wait_for(
+        execute_tool(
+            "bash",
+            {"command": command, "timeout_seconds": 2},
+            str(tmp_path),
+            on_chunk=chunks.append,
+        ),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
+
+
+@pytest.mark.asyncio
+async def test_bash_on_chunk_errors_swallowed(tmp_path):
+    """A throwing on_chunk (dead UI stream) must never fail the tool."""
+    def bad(_chunk):
+        raise RuntimeError("stream gone")
+
+    r = await execute_tool(
+        "bash", {"command": "echo ok"}, str(tmp_path), on_chunk=bad
+    )
+    assert r["exit_code"] == 0
+    assert "ok" in r["output"]
+
+
+@pytest.mark.asyncio
 async def test_bash_timeout_kills_backgrounded_child(tmp_path):
     """A backgrounded child inherits the output pipe; the timeout path must
     kill the whole tree or run_bash hangs in the post-kill communicate()
@@ -145,15 +200,49 @@ async def test_agent_tool_cycle(fake_model, tmp_path):
 
     events = await collect(loop.run_agent(cid, "go", str(tmp_path)))
     types = [e["type"] for e in events]
-    # tool_start/tool_result, then the final step's text delta, then done
-    assert types == ["tool_start", "tool_result", "text", "done"]
-    assert events[1]["result"]["exit_code"] == 0
-    assert "tool ran" in events[1]["result"]["output"]
+    # tool_start(/tool_progress…) then tool_result, final text delta, done.
+    # tool_progress chunks are filtered: fast commands emit a variable number.
+    core = [t for t in types if t != "tool_progress"]
+    assert core == ["tool_start", "tool_result", "text", "done"]
+    tr = next(e for e in events if e["type"] == "tool_result")
+    assert tr["result"]["exit_code"] == 0
+    assert "tool ran" in tr["result"]["output"]
 
     msgs = await get_messages(cid)
     roles = [m["role"] for m in msgs]
     # user, assistant(tool_call), tool, assistant(final)
     assert roles == ["user", "assistant", "tool", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_agent_yields_tool_progress(fake_model, tmp_path):
+    """A bash call now streams tool_progress events between tool_start and
+    tool_result so the UI can show live output."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-progress")
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({"command": "echo streaming out"})},
+            }],
+        },
+    ])
+    fake_model.append([{"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(tmp_path)))
+    types = [e["type"] for e in events]
+    assert types[0] == "tool_start"
+    assert types[-1] == "done"
+    progress = [e for e in events if e["type"] == "tool_progress"]
+    assert progress, f"no tool_progress in {types}"
+    assert all(e["call_id"] == "c1" for e in progress)
+    assert "streaming out" in "".join(e["chunk"] for e in progress)
+    # tool_result still lands after the last progress chunk
+    assert types.index("tool_progress") < types.index("tool_result") < types.index("done")
 
 
 # ---------------------------------------------------------------- new tools

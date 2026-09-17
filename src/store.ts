@@ -7,9 +7,15 @@ export interface ToolCall {
   name: string
   args?: unknown
   result?: unknown
+  /** Live output tail while the tool runs (tool_progress chunks). */
+  output?: string
   /** Live sub-agent run state (spawn_agent calls only). */
   subAgent?: SubAgentRun
 }
+
+/** Cap on the streamed-output tail kept per tool call, so a chatty build
+ *  can't grow memory unbounded. */
+export const TOOL_OUTPUT_CAP = 8_000
 
 /** A live sub-agent run (spawn_agent tool call in flight). */
 export interface SubAgentRun {
@@ -146,6 +152,7 @@ interface AgentState {
   removeMessage: (key: string, msgId: string) => void
   startToolCall: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
   finishToolCall: (key: string, msgId: string, callId: string, result: unknown) => void
+  appendToolOutput: (key: string, msgId: string, callId: string, chunk: string) => void
 
   /** Sub-agent live state (spawn_agent calls). */
   startSubAgent: (key: string, msgId: string, callId: string, agentId: number, agentType: string, prompt: string) => void
@@ -442,6 +449,29 @@ export const useAgent = create<AgentState>((set, get) => ({
           for (let i = tcs.length - 1; i >= 0; i--) {
             if (tcs[i].id === callId && tcs[i].result === undefined) {
               tcs[i] = { ...tcs[i], result }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  appendToolOutput: (key, msgId, callId, chunk) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].result === undefined) {
+              const merged = (tcs[i].output ?? '') + chunk
+              // Keep only the tail; a chatty build must not grow unbounded.
+              const output =
+                merged.length > TOOL_OUTPUT_CAP ? merged.slice(-TOOL_OUTPUT_CAP) : merged
+              tcs[i] = { ...tcs[i], output }
               break
             }
           }

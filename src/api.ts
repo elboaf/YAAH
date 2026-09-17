@@ -617,6 +617,7 @@ export interface AgentEvent {
   type:
     | 'text'
     | 'tool_start'
+    | 'tool_progress'
     | 'tool_result'
     | 'approval_request'
     | 'approval_decision'
@@ -632,6 +633,8 @@ export interface AgentEvent {
   result?: unknown
   message?: string
   call_id?: string
+  /** Live output chunk while a shell tool runs (tool_progress). */
+  chunk?: string
   /** Sub-agent identity (sub_agent_* events). */
   agent_id?: number
   agent_type?: string

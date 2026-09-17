@@ -701,26 +701,63 @@ function ToolChip({ tc }: { tc: ToolCall }) {
   )
 }
 
+/** Live output tail for the currently-running shell call, streamed under the
+ *  ticker row so "still working" vs "wedged" is visible at a glance. Shows
+ *  the last lines auto-scrolled to the bottom; click to expand. */
+function LiveToolOutput({ tc }: { tc: ToolCall }) {
+  const [expanded, setExpanded] = useState(false)
+  const preRef = useRef<HTMLPreElement>(null)
+  useEffect(() => {
+    const el = preRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [tc.output, expanded])
+  return (
+    <div className="mt-1 rounded border border-zinc-800 bg-zinc-900/60">
+      <button
+        className="flex w-full items-center gap-2 px-2 py-0.5 text-left font-mono text-[10px] text-zinc-500"
+        onClick={() => setExpanded((o) => !o)}
+      >
+        <span className="run-pulse text-amber-300">{'\u25cf'}</span>
+        <span className="text-zinc-400">{tc.name}</span>
+        <span>live output</span>
+        <span className="ml-auto shrink-0">{expanded ? '\u25be' : '\u25b4'}</span>
+      </button>
+      <pre
+        ref={preRef}
+        className={`overflow-auto whitespace-pre-wrap break-all px-2 pb-1 font-mono text-[10px] leading-4 text-zinc-400 ${
+          expanded ? 'max-h-40' : 'max-h-8'
+        }`}
+      >
+        {tc.output}
+      </pre>
+    </div>
+  )
+}
+
 /** Live, ephemeral stream of calls while the agent works. Newest chip appears
  *  at the left edge and older ones are pushed right, fading out at the right
  *  edge; the row never grows past the chat panel's width. */
 function ToolTicker({ calls }: { calls: ToolCall[] }) {
   const recent = calls.slice(-12)
+  const active = calls.find((tc) => tc.result === undefined && tc.output)
   const fade =
     'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
   return (
-    <div
-      className="my-1 flex w-full min-w-0 items-center gap-1.5 overflow-hidden"
-      style={{ maskImage: fade, WebkitMaskImage: fade }}
-    >
-      <span className="shrink-0 font-mono text-[10px] text-zinc-600">
-        {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
-      </span>
-      {[...recent].reverse().map((tc, i) => (
-        <span key={tc.id} className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}>
-          <ToolChip tc={tc} />
+    <div className="my-1 w-full min-w-0">
+      <div
+        className="flex items-center gap-1.5 overflow-hidden"
+        style={{ maskImage: fade, WebkitMaskImage: fade }}
+      >
+        <span className="shrink-0 font-mono text-[10px] text-zinc-600">
+          {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
         </span>
-      ))}
+        {[...recent].reverse().map((tc, i) => (
+          <span key={tc.id} className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}>
+            <ToolChip tc={tc} />
+          </span>
+        ))}
+      </div>
+      {active && <LiveToolOutput tc={active} />}
     </div>
   )
 }
@@ -4400,6 +4437,7 @@ function Composer() {
     appendAssistantPlaceholder,
     appendTextDelta,
     startToolCall,
+    appendToolOutput,
     finishToolCall,
     startSubAgent,
     subAgentTextDelta,
@@ -5007,6 +5045,8 @@ function Composer() {
           convKey: bufKey,
         })
       }
+    } else if (ev.type === 'tool_progress') {
+      if (ev.chunk) appendToolOutput(bufKey, asstId, ev.call_id ?? '', ev.chunk)
     } else if (ev.type === 'tool_result') {
       finishToolCall(bufKey, asstId, ev.call_id ?? '', ev.result)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
