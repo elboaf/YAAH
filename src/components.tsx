@@ -54,54 +54,11 @@ import {
 import { useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
-import { diffLines, highlightLine, langOf, type DiffLine } from './codeview'
+import { diffLines, langOf, type DiffLine } from './codeview'
+import { CodeBlock, AgentMarkdown } from './markdown'
 import { VoiceRecorder } from './voice'
 
 // ---------------------------------------------------------------- code views
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-      onClick={() => {
-        void navigator.clipboard.writeText(text).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1200)
-        })
-      }}
-    >
-      {copied ? 'copied!' : 'copy'}
-    </button>
-  )
-}
-
-/** Syntax-highlighted code with line numbers (Q43). */
-function CodeBlock({ code, lang, startLine = 1 }: { code: string; lang?: string; startLine?: number }) {
-  const lines = code.replace(/\n$/, '').split('\n')
-  return (
-    <div className="my-1 overflow-hidden rounded border border-zinc-700 bg-zinc-950">
-      <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-2 py-1">
-        <span className="font-mono text-[10px] text-zinc-500">{lang ?? 'text'}</span>
-        <CopyButton text={code} />
-      </div>
-      <pre className="max-h-96 overflow-auto p-1 font-mono text-[11px] leading-4">
-        {lines.map((line, i) => (
-          <div key={i} className="flex">
-            <span className="w-10 shrink-0 select-none pr-2 text-right text-zinc-600">
-              {startLine + i}
-            </span>
-            <span className="whitespace-pre-wrap break-all text-zinc-300">
-              {highlightLine(line).map((t, j) => (
-                <span key={j} className={t.cls}>{t.text}</span>
-              ))}
-            </span>
-          </div>
-        ))}
-      </pre>
-    </div>
-  )
-}
 
 /** Old/new diff rendering for edit_file calls (Q43 diff view). */
 function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
@@ -947,28 +904,9 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
   )
 }
 
-/** Markdown-lite assistant rendering: fenced code blocks become CodeBlocks. */
+/** Agent message body: full markdown rendering (see src/markdown.tsx). */
 function MessageBody({ content }: { content: string }) {
-  const parts = content.split(/```/)
-  return (
-    <>
-      {parts.map((part, i) => {
-        if (i % 2 === 1) {
-          const nl = part.indexOf('\n')
-          const lang = nl > 0 ? part.slice(0, nl).trim() : ''
-          const code = nl > 0 ? part.slice(nl + 1) : part
-          return <CodeBlock key={i} code={code} lang={lang || undefined} />
-        }
-        return (
-          part.trim() && (
-            <div key={i} className="whitespace-pre-wrap break-words">
-              {part}
-            </div>
-          )
-        )
-      })}
-    </>
-  )
+  return <AgentMarkdown content={content} />
 }
 
 function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {

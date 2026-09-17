@@ -19,4 +19,9 @@ export default defineConfig({
     outDir: 'dist',
     target: 'es2021',
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test-setup.ts'],
+  },
 })
