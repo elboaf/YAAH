@@ -79,31 +79,39 @@ jobs:
           files: build-*.log
           overwrite_files: true
 
-      - name: Upload Windows artifacts
-        if: success() && matrix.os == 'windows-latest'
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: false
-          generate_release_notes: true
-          files: |
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.msi
-
-      - name: Upload macOS artifacts
-        if: success() && matrix.os == 'macos-latest'
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: false
-          files: |
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.app.tar.gz
-
-      - name: Upload Linux artifacts
-        if: success() && matrix.os == 'ubuntu-22.04'
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: false
-          files: |
-            src-tauri/target/release/bundle/**/*.AppImage
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.rpm
+      # Uploads via gh with per-file retries: softprops/action-gh-release has
+      # none, and the 110–240MB assets have repeatedly died mid-upload on
+      # GitHub's flaky release endpoint ("Error saving asset", "Headers
+      # Timeout Error", HTML 502s). Per-file so one bad upload can't sink the
+      # rest; --clobber so re-runs overwrite instead of name-conflicting.
+      - name: Upload release assets
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          case "$RUNNER_OS" in
+            Windows) pats="-name *.exe -o -name *.msi" ;;
+            macOS)   pats="-name *.dmg -o -name *.app.tar.gz" ;;
+            Linux)   pats="-name *.AppImage -o -name *.deb -o -name *.rpm" ;;
+          esac
+          files=$(find src-tauri/target/release/bundle -type f \( $pats \))
+          echo "assets:"; echo "$files"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --generate-notes || true
+          rc=0
+          for f in $files; do
+            ok=0
+            for attempt in 1 2 3 4 5 6; do
+              if gh release upload "$tag" "$f" --clobber; then ok=1; break; fi
+              echo "::warning::upload attempt $attempt failed for $f, retrying"
+              sleep 20
+            done
+            [ "$ok" = 1 ] || { echo "::error::gave up uploading $f"; rc=1; }
+          done
+          for f in $files; do
+            gh release view "$tag" --json assets -q '.assets[].name' | grep -Fx "$(basename "$f")" \
+              || { echo "::error::asset missing from release: $f"; rc=1; }
+          done
+          exit $rc
