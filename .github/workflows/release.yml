@@ -110,11 +110,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          # Array + quoted globs: unquoted, *.exe would expand against the
+          # repo root (which holds yaah-server-windows*.exe by this point)
+          # and find would die on "paths must precede expression".
           case "$RUNNER_OS" in
-            Windows) pats="-name *.exe -o -name *.msi" ;;
-            Linux)   pats="-name *.AppImage -o -name *.deb -o -name *.rpm" ;;
+            Windows) pats=(-name '*.exe' -o -name '*.msi') ;;
+            Linux)   pats=(-name '*.AppImage' -o -name '*.deb' -o -name '*.rpm') ;;
           esac
-          files=$(find src-tauri/target/release/bundle -type f \( $pats \))
+          files=$(find src-tauri/target/release/bundle -type f \( "${pats[@]}" \))
           # The headless server exe (renamed per-OS by the build step:
           # yaah-server-windows.exe / -linux) + its README.
           files="$files yaah-server-${RUNNER_OS,,}* README-server.txt"
