@@ -130,17 +130,19 @@ Computer use (desktop tools):
 - {computer_mod.panic_notice()}"""
 
 
-def _default_system_prompt() -> str:
+def _default_system_prompt(workspace: str = "") -> str:
     """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
     and the runtime-environment line must match what execute_tool can
     actually do where tools run — the remote host while one is connected,
     otherwise this machine — or the model attempts commands for the wrong
-    platform (e.g. PowerShell registry queries on Linux)."""
+    platform (e.g. PowerShell registry queries on Linux). The chat's
+    workspace rides along so a remote session can name the selected folder
+    on the host instead of always claiming the host's home."""
     from backend.agent import remote as remote_mod
 
     host = remote_mod.get_remote()
     if host is not None:
-        env = host.env_line()
+        env = host.env_line(workspace)
         windows = host.windows
     else:
         windows = os.name == "nt"
@@ -678,7 +680,7 @@ async def run_agent(
 
     # Per-conversation system prompt override (Q17) wins over the global one
     conv = await get_conversation(conversation_id)
-    system_prompt = (conv or {}).get("system_prompt_override") or _default_system_prompt()
+    system_prompt = (conv or {}).get("system_prompt_override") or _default_system_prompt(workspace)
 
     # Explicitly invoked skills (/s name or a chip): their instruction
     # bodies are appended to the system prompt for THIS turn only — never

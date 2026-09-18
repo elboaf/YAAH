@@ -160,8 +160,8 @@ class _StubSession(remote_mod.RemoteSession):
         self.result = result if result is not None else {"ok": True}
         self.calls = []
 
-    async def exec_tool(self, name, args):
-        self.calls.append((name, args))
+    async def exec_tool(self, name, args, workspace=""):
+        self.calls.append((name, args, workspace))
         return self.result
 
 
@@ -173,7 +173,115 @@ async def test_workspace_tools_route_to_remote(monkeypatch):
 
     result = await execute_tool("bash", {"command": "echo hi"}, "C:/local/ws")
     assert result == {"exit_code": 0, "output": "remote!"}
-    assert stub.calls == [("bash", {"command": "echo hi"})]
+    assert stub.calls == [("bash", {"command": "echo hi"}, "C:/local/ws")]
+
+
+@pytest.mark.asyncio
+async def test_exec_forwards_selected_workspace(monkeypatch):
+    """/api/remote/exec runs the tool in the workspace the client selected
+    (v2 protocol) — never silently in the host's home."""
+    _set_host("hunter2")
+    seen = {}
+
+    async def fake_bash(workspace, command, timeout_seconds=60):
+        seen["ws"] = workspace
+        return {"exit_code": 0, "output": command}
+
+    from backend.agent import tools as tools_mod
+
+    monkeypatch.setitem(tools_mod.EXECUTORS, "bash", fake_bash)
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/exec",
+            json={
+                "name": "bash",
+                "args": {"command": "pwd"},
+                "workspace": "/srv/proj",
+            },
+            headers={"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "hunter2"},
+        )
+    assert res.status_code == 200
+    assert seen["ws"] == "/srv/proj"
+
+
+@pytest.mark.asyncio
+async def test_add_workspace_proxies_host_path_raw(monkeypatch):
+    """Host-bound paths must NOT be normalized with the client's OS rules:
+    a Linux path typed on a Windows client (/proj or proj) would otherwise
+    be rewritten to C:\\Users\\... before it ever reaches the host."""
+    from backend.agent import remote as rm
+
+    host = _StubSession()
+    host.info["host_id"] = host.host_id = "abc123"
+    _FakeProxyClient.response_body = {
+        "id": 9, "path": "/home/derp/proj", "label": "proj", "exists": True,
+        "last_opened_at": None, "conversation_count": 0,
+    }
+    monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
+    remote_mod.set_remote(host)
+    async with await _client() as c:
+        row = (await c.post("/api/workspaces", json={"path": "proj"})).json()
+    sent = _FakeProxyClient.last_request
+    assert sent["json"]["path"] == "proj"  # raw, untouched by client rules
+    assert row["path"] == "remote:abc123:/home/derp/proj"  # namespaced reply
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_strips_own_namespace_and_refuses_foreign():
+    # A REAL RemoteSession (not _StubSession, whose exec_tool is stubbed out)
+    host = remote_mod.RemoteSession(
+        "http://host:8765",
+        "p",
+        {"os": "Linux", "os_version": "6", "machine": "x86_64", "windows": False,
+         "workspace_root": "/home/host", "hostname": "stub", "host_id": "abc123"},
+    )
+    host.host_id = "abc123"
+
+    captured = {}
+
+    class _C:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["json"] = json
+            return _FakeResponse({"ok": True})
+
+    from backend.agent import remote as rm
+
+    orig = rm.httpx.AsyncClient
+    rm.httpx.AsyncClient = _C
+    try:
+        ok = await host.exec_tool("bash", {"command": "pwd"}, workspace="remote:abc123:/srv/x")
+        assert ok == {"ok": True}
+        assert captured["json"]["workspace"] == "/srv/x"  # namespace stripped
+
+        bad = await host.exec_tool("bash", {"command": "pwd"}, workspace="remote:other:/x")
+        assert "different remote host" in bad["error"]
+    finally:
+        rm.httpx.AsyncClient = orig
+
+
+def test_env_line_names_selected_workspace():
+    host = _StubSession()
+    host.info["host_id"] = host.host_id = "abc123"
+    remote_mod.set_remote(host)
+
+    line = host.env_line("remote:abc123:/srv/proj")
+    assert "/srv/proj" in line
+    assert "default workspace" not in line
+
+    # Host Default (empty path) or a foreign namespace falls back to home
+    assert host.env_line("remote:abc123:") == host.env_line("")
+    assert "/home/host" in host.env_line("remote:other:/x")
+
+    remote_mod.clear_remote()
 
 
 @pytest.mark.asyncio

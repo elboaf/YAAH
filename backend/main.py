@@ -226,18 +226,23 @@ async def api_add_workspace(body: NewWorkspace):
     it exists)."""
     import os
 
-    # Typed paths need normalizing before anything resolves them: `~` does
-    # not expand itself, and a bare name must anchor to the home directory
-    # (the Default workspace), not the backend's root-owned install cwd.
-    body.path = os.path.expanduser(body.path.strip())
-    if body.path and not os.path.isabs(body.path):
-        body.path = str(workspace_root("") / body.path)
-
     host = remote_mod.get_remote()
+    if host is None:
+        # Typed paths need normalizing before anything resolves them: `~` does
+        # not expand itself, and a bare name must anchor to the home directory
+        # (the Default workspace), not the backend's root-owned install cwd.
+        # NOT done for host-bound paths: expanduser/isabs would apply THIS
+        # machine's OS rules to a path that must resolve on the HOST's — a
+        # Linux-style path typed on a Windows client would be rewritten to
+        # C:\\Users\\... before it ever left the machine.
+        body.path = os.path.expanduser(body.path.strip())
+        if body.path and not os.path.isabs(body.path):
+            body.path = str(workspace_root("") / body.path)
+
     if host is not None:
         raw = remote_mod.parse_ns(body.path)
         res = await host.proxy(
-            "POST", "/api/workspaces", json_body={"path": raw[1] if raw else body.path}
+            "POST", "/api/workspaces", json_body={"path": raw[1] if raw else body.path.strip()}
         )
         row = _proxy_result(res)
         row["path"] = remote_mod.ns_path(host.host_id, row.get("path"))
@@ -1381,6 +1386,7 @@ from backend.agent import tools as tools_mod
 class RemoteExec(BaseModel):
     name: str
     args: dict = {}
+    workspace: str = ""
 
 
 @app.get("/api/remote/info")
@@ -1394,7 +1400,8 @@ async def api_remote_info():
 
 @app.post("/api/remote/exec")
 async def api_remote_exec(body: RemoteExec):
-    """Execute one workspace tool in THIS host's default workspace. Only
+    """Execute one workspace tool on THIS host, in the workspace the client
+    selected (empty = this host's default workspace = home). Only
     reachable with the passphrase (the X-Yaah-Remote middleware above
     enforces it for every marker-carrying request), and only for tools
     in REMOTE_TOOLS — the host never runs anything else on behalf of a
@@ -1405,8 +1412,11 @@ async def api_remote_exec(body: RemoteExec):
     fn = tools_mod.EXECUTORS.get(body.name)
     if body.name not in remote_mod.REMOTE_TOOLS or fn is None:
         raise HTTPException(status_code=400, detail=f"{body.name} is not a remote-capable tool")
+    # Passed through as-is: every workspace the client can name here came
+    # from this host's registry (already normalized by /api/workspaces on
+    # THIS host), so re-normalizing would just re-apply the wrong OS's rules.
     try:
-        return await fn(workspace="", **body.args)
+        return await fn(workspace=body.workspace.strip(), **body.args)
     except TypeError as e:
         return {"error": f"Bad arguments for {body.name}: {e}"}
     except Exception as e:  # noqa: BLE001 — mirror execute_tool's never-raise

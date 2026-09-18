@@ -1054,7 +1054,7 @@ async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None
 
     host = remote_mod.get_remote()
     if host is not None and name in remote_mod.REMOTE_TOOLS:
-        return await host.exec_tool(name, arguments)
+        return await host.exec_tool(name, arguments, workspace=workspace)
     # MCP server tools route by name prefix, before the static executor map.
     if name.startswith("mcp_"):
         from backend.agent import mcp_client

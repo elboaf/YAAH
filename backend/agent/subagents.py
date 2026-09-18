@@ -314,10 +314,18 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
     """System prompt for a sub-agent run: its definition body plus the
     same environment grounding the parent gets (env line, workspace
     notes, skills index) so commands and paths are valid for the host."""
+    from backend.agent import remote as remote_mod
     from backend.agent.loop import _local_env_line, _agents_notes
 
-    windows = os.name == "nt"
-    env = _local_env_line()
+    host = remote_mod.get_remote()
+    if host is not None:
+        # Tools forward to the host, so the sub-agent needs the HOST's
+        # environment grounding (OS/shell/workspace), not this machine's.
+        windows = host.windows
+        env = host.env_line(workspace)
+    else:
+        windows = os.name == "nt"
+        env = _local_env_line()
     tools = ["bash (shell commands)"]
     if windows:
         tools.append("powershell (Windows PowerShell)")

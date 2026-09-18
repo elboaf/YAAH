@@ -21,7 +21,10 @@ from pathlib import Path
 import httpx
 
 # Bump on any change to the remote endpoints' request/response shape.
-PROTOCOL_VERSION = 1
+# v2: /api/remote/exec carries the client's selected workspace, and
+# host-bound workspace paths are proxied raw (the client no longer
+# normalizes them with its own OS's path rules).
+PROTOCOL_VERSION = 2
 
 # Random per-process identity: a host that is also a client can recognize
 # itself at handshake time and refuse the self-connection (which would
@@ -129,36 +132,53 @@ class RemoteSession:
     def windows(self) -> bool:
         return bool(self.info.get("windows"))
 
-    def env_line(self) -> str:
+    def env_line(self, workspace: str = "") -> str:
         """Runtime-environment sentence for the system prompt: tools run on
         the HOST, so the model must use the host's OS/shell/paths, not the
         client's. The handshake only says windows/not-windows, so the shell
-        is a guess — but the cmd caveat is what saves turns."""
+        is a guess — but the cmd caveat is what saves turns. When the chat
+        has a workspace selected on this host, name it — otherwise the model
+        reports the host's home as its cwd even mid-project."""
         i = self.info
         windows = bool(i.get("windows"))
         shell = "cmd.exe" if windows else "bash/sh"
         caveat = f" {CMD_TOOLS_NOTE}" if windows else ""
+        ns = parse_ns(workspace)
+        if ns is not None and ns[0] == self.host_id and ns[1]:
+            ws = f"The workspace is {ns[1]} on the host"
+        else:
+            ws = (
+                f"The workspace is the host's default workspace "
+                f"({i.get('workspace_root', 'home')})"
+            )
         return (
             f"Runtime environment: {i.get('os', '?')} {i.get('os_version', '')} "
             f"({i.get('machine', '?')}) on the remote host '{self.name}'. "
             f"The shell tool runs commands there through {shell};{caveat} use commands "
-            f"and paths valid for THAT operating system. The workspace is the "
-            f"host's default workspace ({i.get('workspace_root', 'home')}); "
+            f"and paths valid for THAT operating system. {ws}; "
             "file and shell tools operate there, not on this machine."
         )
 
     def _headers(self) -> dict:
         return {"X-Yaah-Remote": "1", "X-Yaah-Passphrase": self.passphrase}
 
-    async def exec_tool(self, name: str, args: dict) -> dict:
-        """Forward one workspace-tool call to the host. Never raises."""
+    async def exec_tool(self, name: str, args: dict, workspace: str = "") -> dict:
+        """Forward one workspace-tool call to the host, in `workspace` (a
+        namespaced path for THIS host is stripped to the raw host path; a
+        namespace for any OTHER host is rejected, mirroring the files-proxy
+        defense). Never raises."""
         if name not in REMOTE_TOOLS:
             return {"error": f"{name} is not a workspace tool; it runs locally"}
+        ns = parse_ns(workspace)
+        if ns is not None:
+            if ns[0] != self.host_id:
+                return {"error": "that workspace belongs to a different remote host"}
+            workspace = ns[1]
         try:
             async with httpx.AsyncClient(timeout=EXEC_TIMEOUT) as client:
                 res = await client.post(
                     f"{self.url}/api/remote/exec",
-                    json={"name": name, "args": args},
+                    json={"name": name, "args": args, "workspace": workspace},
                     headers=self._headers(),
                 )
             if res.status_code == 401:

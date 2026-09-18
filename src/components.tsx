@@ -1911,7 +1911,11 @@ function ConversationList() {
                 className={`min-w-0 flex-1 truncate text-left font-mono text-[11px] font-semibold uppercase tracking-wider ${
                   isActiveWs ? 'text-zinc-100' : 'text-zinc-400'
                 } hover:text-zinc-200`}
-                title={ws.path ?? 'No root directory — conversations without a workspace'}
+                title={
+                  ws.path === null
+                    ? 'No root directory — conversations without a workspace'
+                    : parseNsWorkspace(ws.path)?.path || ws.path
+                }
                 aria-expanded={isExpanded}
                 onClick={() => toggleGroup(ws.path)}
               >
