@@ -396,6 +396,10 @@ def test_status_shape(isolated, monkeypatch):
 def test_execute_tool_dispatches_sandbox_status(isolated, monkeypatch):
     """The executor must work through the real dispatcher (which passes
     workspace= as a kwarg, like every other tool)."""
+    import os as _os
+
+    if _os.name != "nt":
+        pytest.skip("sandbox tools only register on Windows")
     monkeypatch.setattr(sb.config_mod, "load_config",
                         lambda: {"sandbox": {}})
     from backend.agent.tools import execute_tool
@@ -406,15 +410,13 @@ def test_execute_tool_dispatches_sandbox_status(isolated, monkeypatch):
     assert result["running"] is False
 
 
-def test_execute_tool_rejects_bad_sandbox_run_args(isolated):
-    from backend.agent.tools import execute_tool
-
-    result = asyncio.run(
-        execute_tool("sandbox_run", {"command": "   "}, "C:\\proj"))
+def test_sandbox_run_executor_validates_args(isolated):
+    """The executor's own argument validation is cross-platform (no
+    dispatch, no Windows feature needed)."""
+    result = asyncio.run(sb.sandbox_run(workspace="C:\\proj", command="   "))
     assert "error" in result
-    result = asyncio.run(
-        execute_tool("sandbox_run", {"command": "dir", "timeout_seconds": "x"},
-                     "C:\\proj"))
+    result = asyncio.run(sb.sandbox_run(
+        workspace="C:\\proj", command="dir", timeout_seconds="x"))
     assert "error" in result
 
 
