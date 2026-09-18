@@ -552,9 +552,9 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
       <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-sky-400">
         <span className="run-pulse">▸</span> plan ready — approve to run
       </div>
-      <pre className="mb-2.5 max-h-64 overflow-y-auto whitespace-pre-wrap font-sans text-sm text-zinc-100">
-        {pending.plan}
-      </pre>
+      <div className="mb-2.5 max-h-64 overflow-y-auto text-sm text-zinc-100">
+        <AgentMarkdown content={pending.plan} />
+      </div>
       <div className="flex gap-1.5">
         <button
           className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
