@@ -120,7 +120,9 @@ jobs:
           files=$(find src-tauri/target/release/bundle -type f \( "${pats[@]}" \))
           # The headless server exe (renamed per-OS by the build step:
           # yaah-server-windows.exe / -linux) + its README.
-          files="$files yaah-server-${RUNNER_OS,,}* README-server.txt"
+          # yaah-server* (not yaah-server-windows*) so the setup wizard
+          # exe and the linux .deb are matched too.
+          files="$files yaah-server* README-server.txt"
           echo "assets:"; echo "$files"
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --title "$tag" --generate-notes || true
