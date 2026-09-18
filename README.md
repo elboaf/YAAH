@@ -20,14 +20,20 @@ Settings → hosting: set a passphrase (required — a host without one refuses
 all remote exec), then connect from another machine via the host switcher or
 a direct `IP:8765` entry.
 
-## Headless server (`yaah-server`)
+## Headless server (`yaah-server-setup`)
 
-The same host role, without the GUI: a standalone `yaah-server` executable
-(attached to every release as `yaah-server-<os>`) that runs from a plain
-shell — no display, no Python, no installer. Run it on the target device:
+The same host role, without the GUI — as a **background service** that
+survives reboots. One self-contained artifact per OS: `yaah-server-setup.exe`
+on Windows (double-click → wizard installs the auto-start service, no
+companion files) and `yaah-server-setup.deb` on Linux (systemd daemon,
+passphrase via `/etc/yaah/yaah.conf`). See
+[SERVER-SETUP.md](SERVER-SETUP.md) for the full installation guide.
+
+For a plain foreground run without installing, the same binary also works
+from a shell (`serve` verb on Windows; bare binary on Linux):
 
 ```
-yaah-server --passphrase <secret>
+yaah-server serve --passphrase <secret>
 ```
 
 Then connect from the YAAH desktop app: the server appears in the host
