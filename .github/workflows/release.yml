@@ -52,23 +52,21 @@ jobs:
         shell: bash
         run: bash scripts/build_sidecar.sh
 
-      # Headless server (yaah-server): the same backend app, lean build
-      # (no voice / computer-use deps), console entry point. Attached to
-      # the release so a target device can host for desktop clients
-      # without running the GUI (scripts/build_server.sh).
+      # Headless server: the same backend app, lean build (no voice /
+      # computer-use deps). Windows: single self-contained setup exe
+      # (service host + wizard). Linux: binary packaged as the daemon
+      # .deb (scripts/build_server.sh, build_server_deb.sh).
       - name: Build headless server
         shell: bash
         run: |
           bash scripts/build_server.sh
-          if [ -f dist/yaah-server.exe ]; then
-            mv dist/yaah-server.exe "yaah-server-${RUNNER_OS,,}.exe"
-            mv dist/yaah-server-setup.exe "yaah-server-setup-${RUNNER_OS,,}.exe"
+          if [ -f dist/yaah-server-setup.exe ]; then
+            mv dist/yaah-server-setup.exe yaah-server-setup.exe
           else
-            # Daemon packaging (scripts/build_server_deb.sh) still needs the
-            # binary in dist/ — build the deb BEFORE renaming the exe.
+            # The deb script still needs the binary in dist/ — build it
+            # BEFORE renaming anything out of dist/.
             bash scripts/build_server_deb.sh
-            mv dist/yaah-server "yaah-server-${RUNNER_OS,,}"
-            mv dist/yaah-server_*_all.deb "yaah-server-${RUNNER_OS,,}.deb"
+            mv dist/yaah-server_*_all.deb yaah-server-setup.deb
           fi
 
       - name: Build (verbose, logged)
@@ -110,19 +108,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          # Array + quoted globs: unquoted, *.exe would expand against the
-          # repo root (which holds yaah-server-windows*.exe by this point)
-          # and find would die on "paths must precede expression".
-          case "$RUNNER_OS" in
-            Windows) pats=(-name '*.exe' -o -name '*.msi') ;;
-            Linux)   pats=(-name '*.AppImage' -o -name '*.deb' -o -name '*.rpm') ;;
-          esac
-          files=$(find src-tauri/target/release/bundle -type f \( "${pats[@]}" \))
-          # The headless server exe (renamed per-OS by the build step:
-          # yaah-server-windows.exe / -linux) + its README.
-          # yaah-server* (not yaah-server-windows*) so the setup wizard
-          # exe and the linux .deb are matched too.
-          files="$files yaah-server* README-server.txt"
+          # Exactly four artifacts: one setup exe + one setup deb per OS.
+          # Desktop NSIS/deb are renamed from tauri's versioned names.
+          if [ "$RUNNER_OS" = Windows ]; then
+            mv src-tauri/target/release/bundle/nsis/yaah_*_x64-setup.exe yaah-desktop-setup.exe
+            files="yaah-desktop-setup.exe yaah-server-setup.exe"
+          else
+            mv src-tauri/target/release/bundle/deb/yaah_*_amd64.deb yaah-desktop-setup.deb
+            files="yaah-desktop-setup.deb yaah-server-setup.deb"
+          fi
           echo "assets:"; echo "$files"
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --title "$tag" --generate-notes || true

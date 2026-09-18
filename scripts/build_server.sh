@@ -1,113 +1,72 @@
 #!/usr/bin/env bash
-# Build the headless YAAH server (yaah-server) into a standalone PyInstaller
-# executable: dist/yaah-server[.exe], plus a short README next to it.
+# Build the headless YAAH server (scripts/server_entry.py) into standalone
+# PyInstaller executables.
+#
+# One self-contained artifact per platform — no companion files:
+#   Windows: dist/yaah-server-setup.exe  (service host + `setup` wizard +
+#            install/remove/start/stop/restart + foreground `serve`)
+#   Linux:   dist/yaah-server            (binary packaged into the .deb by
+#            scripts/build_server_deb.sh)
 #
 # Unlike build_sidecar.sh (the desktop sidecar), this build carries no voice
 # (sherpa_onnx/numpy), no computer use (pynput/mss/uiautomation/comtypes/PIL)
 # and no curl_cffi — a remote client only forwards REMOTE_TOOLS (shell, files,
 # git) to its host, so a headless box needs none of that. Web tools stay
 # client-local and degrade gracefully without curl_cffi (documented soft dep).
-#
-# No whisper stage: the server build is a single PyInstaller pass.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 pip install -r requirements.txt -r requirements-build.txt
 
 EXE=""
-# Git Bash reports MINGW64_NT-… etc; the Windows runner is not plain
-# "MINGW"/"Windows_NT", so glob the family (case, not [ = ], see 0.16.3).
 case "$(uname -s)" in
   MINGW*|MSYS*|Windows_NT*|CYGWIN*) EXE=".exe" ;;
 esac
 
-# Windows service support (YaahService in server_entry.py + the setup
-# wizard exe): pywin32 only exists on Windows builds.
-PYWIN32_ARGS=()
 if [ -n "$EXE" ]; then
+  # Windows: the single exe hosts the service (pywin32) AND the setup
+  # wizard (`yaah-server-setup setup` / double-click).
   pip install pywin32
-  PYWIN32_ARGS=(--hidden-import win32timezone --hidden-import win32serviceutil
-    --hidden-import win32service --hidden-import win32event
-    --hidden-import servicemanager)
-fi
-
-pyinstaller --noconfirm --clean --onefile --console \
-  --name yaah-server \
-  --paths . --paths scripts \
-  --collect-all uvicorn --collect-all fastapi \
-  --collect-all pydantic --collect-all pydantic_core \
-  --collect-all anyio --collect-all aiosqlite \
-  --collect-all httpx --collect-all httpcore \
-  --collect-all zeroconf \
-  --hidden-import mcp --hidden-import mcp.client.stdio \
-  --hidden-import mcp.client.session --hidden-import mcp.types \
-  --hidden-import yaml \
-  --exclude-module sherpa_onnx --exclude-module numpy \
-  --exclude-module curl_cffi --exclude-module pynput \
-  --exclude-module mss --exclude-module uiautomation \
-  --exclude-module comtypes --exclude-module PIL \
-  "${PYWIN32_ARGS[@]}" \
-  scripts/server_entry.py
-
-# Windows-only companion: the interactive service installer wizard.
-if [ -n "$EXE" ]; then
   pyinstaller --noconfirm --clean --onefile --console \
     --name yaah-server-setup \
     --paths . --paths scripts \
-    --hidden-import server_entry \
-    "${PYWIN32_ARGS[@]}" \
-    scripts/server_setup_entry.py
-  echo "setup wizard: dist/yaah-server-setup.exe"
+    --collect-all uvicorn --collect-all fastapi \
+    --collect-all pydantic --collect-all pydantic_core \
+    --collect-all anyio --collect-all aiosqlite \
+    --collect-all httpx --collect-all httpcore \
+    --collect-all zeroconf \
+    --hidden-import mcp --hidden-import mcp.client.stdio \
+    --hidden-import mcp.client.session --hidden-import mcp.types \
+    --hidden-import yaml \
+    --hidden-import win32timezone --hidden-import win32serviceutil \
+    --hidden-import win32service --hidden-import win32event \
+    --hidden-import servicemanager \
+    --exclude-module sherpa_onnx --exclude-module numpy \
+    --exclude-module curl_cffi --exclude-module pynput \
+    --exclude-module mss --exclude-module uiautomation \
+    --exclude-module comtypes --exclude-module PIL \
+    scripts/server_entry.py
+  echo "server setup exe: dist/yaah-server-setup.exe"
+else
+  pyinstaller --noconfirm --clean --onefile --console \
+    --name yaah-server \
+    --paths . --paths scripts \
+    --collect-all uvicorn --collect-all fastapi \
+    --collect-all pydantic --collect-all pydantic_core \
+    --collect-all anyio --collect-all aiosqlite \
+    --collect-all httpx --collect-all httpcore \
+    --collect-all zeroconf \
+    --hidden-import mcp --hidden-import mcp.client.stdio \
+    --hidden-import mcp.client.session --hidden-import mcp.types \
+    --hidden-import yaml \
+    --exclude-module sherpa_onnx --exclude-module numpy \
+    --exclude-module curl_cffi --exclude-module pynput \
+    --exclude-module mss --exclude-module uiautomation \
+    --exclude-module comtypes --exclude-module PIL \
+    scripts/server_entry.py
+  echo "server: dist/yaah-server"
 fi
 
-echo "server: dist/yaah-server$EXE"
-
-# PyInstaller leaves the .spec in the CWD (repo root) — with the release
-# upload glob being yaah-server*, it would ship as a release asset.
+# PyInstaller leaves the .spec in the CWD (repo root) — it must not ship
+# as a release asset (the upload glob catches yaah-server*).
 rm -f yaah-server.spec yaah-server-setup.spec
-
-# ---- README staged next to the exe (also attached in release.yml) ----
-# Repo root, NOT dist/: dist/ is vite's outDir and `tauri build` wipes it.
-cat > README-server.txt <<'EOF'
-YAAH headless server
-====================
-
-Run on the target device (no GUI, no Python needed):
-
-    yaah-server --passphrase <secret>
-
-Then connect from the YAAH desktop app: open the host switcher (the
-server appears automatically on the LAN) or enter the device's IP
-directly (default port 8765), using the same passphrase.
-
-Options:
-  --host H            bind address (default 0.0.0.0)
-  --port P            listen port (default 8765)
-  --passphrase SECRET save the passphrase clients must present
-  --display-name NAME name shown in the desktop app's host switcher
-  --no-hosting        skip LAN discovery; connect by direct IP only
-
-The passphrase and display name are saved to ~/.yaah/config.json — the
-same store the desktop app uses — so they survive restarts. The server
-executes workspace tools (shell, files, git) in its own home directory;
-conversations and provider keys stay on the desktop app.
-
-Install as a background service
--------------------------------
-Windows: run yaah-server-setup.exe (from this zip) in an elevated prompt.
-It prompts for a passphrase, registers the "YAAH Headless Server" service
-(automatic startup, runs as your user so the workspace is your home),
-and starts it. Manage with: yaah-server start|stop|remove.
-
-Linux: install the yaah-server .deb. It drops /usr/bin/yaah-server, a
-systemd template unit (enabled + started for your login user), and
-/etc/yaah/yaah.conf.example. Configure:
-
-    sudo sh -c 'echo "YAAH_PASSPHRASE=your-secret" > /etc/yaah/yaah.conf'
-    sudo chmod 640 /etc/yaah/yaah.conf
-    sudo systemctl restart yaah-server@<youruser>
-
-With no /etc/yaah/yaah.conf the daemon still runs and is discoverable,
-but refuses every remote request (no passphrase = no access).
-EOF
-echo "readme: README-server.txt"
