@@ -89,7 +89,10 @@ if [ "$1" = configure ] && command -v systemctl >/dev/null 2>&1; then
   # First real login user (UID 1000-59999, home dir, login shell).
   USER=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 && $6 != "" && $7 !~ /(nologin|false)$/ {print $1; exit}')
   if [ -n "$USER" ]; then
-    deb-systemd-invoke enable --now "yaah-server@$USER.service" || true
+    # deb-systemd-invoke rejects combined flags (`enable --now`) on some
+    # releases ("Unknown option: now") — enable and start separately.
+    deb-systemd-invoke enable "yaah-server@$USER.service" || true
+    deb-systemd-invoke start "yaah-server@$USER.service" || true
     echo "yaah-server: enabled + started yaah-server@$USER"
     echo "  configure the passphrase: see /etc/yaah/yaah.conf.example"
     echo "  other users: sudo systemctl enable --now yaah-server@<user>"
