@@ -12,6 +12,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend._version import __version__
 from backend.db.database import init_db
 
 
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
 # The sidecar always serves on this port (backend_entry.py, lib.rs spawn).
 API_PORT = 8765
 
-app = FastAPI(title="AI Coding Agent", version="0.7.9", lifespan=lifespan)
+app = FastAPI(title="AI Coding Agent", version=__version__, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
