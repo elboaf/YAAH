@@ -189,7 +189,12 @@ $tk  = '{SB_TOOLKIT}'
 $ws  = '{SB_WS}'
 $processed = @{{}}
 $env:Path = "$tk;$tk\\bin;$tk\\Scripts;$tk\\node_modules\\.bin;$env:Path"
-if (Test-Path $ws) {{ Set-Location $ws }} else {{ Set-Location $dir }}
+$cwd = $dir
+if (Test-Path $ws) {{ $cwd = $ws }}
+Set-Location $cwd
+# Set-Location only moves the PS provider location; child processes inherit
+# the PROCESS cwd (system32 otherwise), so pin that too.
+[Environment]::CurrentDirectory = $cwd
 # UTF-8 wrapper: invoking the command file with the call operator (&)
 # keeps `exit N` semantics (verified: propagates N; a native-command tail
 # propagates $LASTEXITCODE) while forcing UTF-8 stdio both ways.
@@ -221,6 +226,9 @@ while ($true) {{
       $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$dir\\__yaah_wrapper.ps1`" -ScriptPath `"$($f.FullName)`""
       $psi.UseShellExecute = $false
       $psi.CreateNoWindow = $true
+      # Pin the command's cwd to the workspace mount (the documented
+      # sandbox cwd); the bootstrap's own process cwd is system32.
+      $psi.WorkingDirectory = $cwd
       $psi.RedirectStandardOutput = $true
       $psi.RedirectStandardError = $true
       $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
@@ -334,11 +342,14 @@ def _write_session_files(sdir: Path, workspace_root: Path) -> tuple[Path, Path, 
     _clean_logs(logs)
     (sdir / "sandbox.wsb").write_text(
         generate_wsb(workspace_root, toolkit, logs), encoding="utf-8")
-    (sdir / BOOTSTRAP_NAME).write_text(_bootstrap_script(), encoding="utf-8")
+    # The bootstrap must live INSIDE the mapped logs dir: the .wsb
+    # LogonCommand targets it there, and the session dir itself is not
+    # mapped into the VM at all.
+    (logs / BOOTSTRAP_NAME).write_text(_bootstrap_script(), encoding="utf-8")
     (logs / "runtime.json").write_text(
         json.dumps({"command_timeout_seconds": MAX_RUN_TIMEOUT}),
         encoding="utf-8")
-    return sdir / "sandbox.wsb", sdir / BOOTSTRAP_NAME, logs
+    return sdir / "sandbox.wsb", logs / BOOTSTRAP_NAME, logs
 
 
 # ---------------------------------------------------------------- lifecycle

@@ -72,6 +72,22 @@ def test_wsb_honors_config_and_workspace_mapping_toggle(isolated, monkeypatch):
     assert sb.SB_WS not in wsb  # workspace mount suppressed
 
 
+def test_bootstrap_is_written_into_the_mapped_logs_dir(isolated, monkeypatch):
+    """Regression: the LogonCommand runs the bootstrap from the mapped logs
+    dir, but it was written to the session dir — which is not mapped into
+    the VM at all, so the VM booted with no bootstrap and every handshake
+    and command ack timed out."""
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    sdir = isolated / "sb" / "ws-abc"
+    _wsb, boot, logs = sb._write_session_files(sdir, Path(r"C:\proj"))
+    assert boot == logs / sb.BOOTSTRAP_NAME
+    assert boot.exists()
+    assert not (sdir / sb.BOOTSTRAP_NAME).exists()
+    # The LogonCommand target must be the file we actually wrote.
+    wsb_text = (sdir / "sandbox.wsb").read_text(encoding="utf-8")
+    assert f"{sb.SB_LOGS}\\{sb.BOOTSTRAP_NAME}" in wsb_text
+
+
 def test_bootstrap_signals_ready_and_batches(isolated, monkeypatch):
     monkeypatch.setattr(sb.config_mod, "load_config",
                         lambda: {"sandbox": {}})
@@ -80,6 +96,10 @@ def test_bootstrap_signals_ready_and_batches(isolated, monkeypatch):
     assert sb.SB_TOOLKIT in script  # toolkit on PATH
     # the processed-set guard against re-running old command files
     assert "$processed" in script
+    # child commands must inherit the workspace cwd, not system32
+    # (Set-Location alone does not move the process cwd)
+    assert "[Environment]::CurrentDirectory = $cwd" in script
+    assert "$psi.WorkingDirectory = $cwd" in script
 
 
 # ---------------------------------------------------------------- config
