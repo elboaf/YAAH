@@ -188,7 +188,12 @@ async def git_workspace_info(root: Path | str) -> dict | None:
             for line in out.splitlines():
                 if not line.strip():
                     continue
-                a, d, _p = line.split("\t", 2)
+                # _run_git merges stderr in, so warning lines (e.g. CRLF
+                # notices) land here tab-less; they are not numstat rows.
+                parts = line.split("\t", 2)
+                if len(parts) != 3:
+                    continue
+                a, d, _p = parts
                 # Binary files report "-" for both counts; ignore them.
                 added += int(a) if a.isdigit() else 0
                 deleted += int(d) if d.isdigit() else 0
