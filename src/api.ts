@@ -616,6 +616,7 @@ export const disconnectRemote = () =>
 export interface AgentEvent {
   type:
     | 'text'
+    | 'thinking'
     | 'tool_start'
     | 'tool_progress'
     | 'tool_result'

@@ -5110,6 +5110,10 @@ function Composer() {
     if (ev.type === 'text') {
       setStatus('thinking')
       if (ev.text) appendTextDelta(bufKey, asstId, ev.text)
+    } else if (ev.type === 'thinking') {
+      setStatus('thinking')
+      // Model reasoning flows onto the tape (UI-only; never stored).
+      if (ev.text) appendTape(bufKey, oneLine(ev.text) + ' ')
     } else if (ev.type === 'tool_start') {
       setStatus('running-tool')
       startToolCall(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)

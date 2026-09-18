@@ -119,6 +119,13 @@ async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
                     n_content_chars += len(delta["content"])
                     yield {"type": "content", "text": delta["content"]}
 
+                # Reasoning models (GLM, DeepSeek-R1, ...) stream their
+                # thinking as reasoning_content/reasoning deltas. Not kept
+                # for the transcript — the UI telemetry tape consumes them.
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                if reasoning and isinstance(reasoning, str):
+                    yield {"type": "thinking", "text": reasoning}
+
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)
                     slot = tool_calls.setdefault(

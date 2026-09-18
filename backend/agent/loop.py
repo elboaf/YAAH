@@ -3,6 +3,7 @@
 Runs until the model produces a final answer or the step budget is exhausted.
 Emits JSON-line events for the frontend:
   {'type': 'text', 'text': ...}             - assistant text delta
+  {'type': 'thinking', 'text': ...}         - model reasoning delta (UI-only)
   {'type': 'tool_start', 'name', 'args'}    - tool execution beginning
   {'type': 'tool_progress', 'call_id', 'chunk'} - live shell output while a tool runs
   {'type': 'tool_result', 'name', 'result'} - tool output
@@ -753,6 +754,10 @@ async def run_agent(
                     if ev["type"] == "content":
                         acc.append(ev["text"])
                         yield _ndjson({"type": "text", "text": ev["text"]})
+                    elif ev["type"] == "thinking":
+                        # Model reasoning stream: UI-only (telemetry tape),
+                        # never stored in the transcript.
+                        yield _ndjson({"type": "thinking", "text": ev["text"]})
                     elif ev["type"] == "tool_calls":
                         state["tool_calls"] = ev["tool_calls"]
                     elif ev["type"] == "finish":
