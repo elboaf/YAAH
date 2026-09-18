@@ -150,6 +150,7 @@ def _default_system_prompt(workspace: str = "") -> str:
         env = _local_env_line()
     tools = ["bash (shell commands)"]
     computer_section = ""
+    sandbox_section = ""
     if windows:
         tools.append("powershell (Windows PowerShell)")
         if host is None:
@@ -163,6 +164,17 @@ def _default_system_prompt(workspace: str = "") -> str:
                 "type_text", "press_key", "wait",
             ]
             computer_section = _computer_use_prompt()
+            # Same rule: the sandbox integration drives THIS machine's
+            # disposable VMs, so it's only offered in local sessions.
+            from backend.agent import sandbox as sandbox_mod
+
+            tools += [
+                "sandbox_test (boot/reuse a disposable Windows Sandbox VM "
+                "for live verification of the workspace's app)",
+                "sandbox_run (run a command inside that VM)",
+                "sandbox_status", "sandbox_stop",
+            ]
+            sandbox_section = sandbox_mod.prompt_section()
     tools += [
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
@@ -211,6 +223,7 @@ Interview the user (ask_user tool):
   act on a decision until the user has confirmed shared understanding."""
 
     prompt += computer_section
+    prompt += sandbox_section
 
     # Skills index: only added when at least one model-invocable skill
     # exists, so a fresh install with no skills sees no extra noise.

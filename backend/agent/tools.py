@@ -1001,6 +1001,18 @@ if os.name == "nt":
     TOOLS_SCHEMA += COMPUTER_TOOLS_SCHEMA
     EXECUTORS.update(COMPUTER_EXECUTORS)
 
+# Windows Sandbox tools (disposable test VMs + persistent dev toolkit,
+# see backend/agent/sandbox.py): Windows-only for the same reason, and
+# additionally stripped for remote sessions in get_schemas() — the sandbox
+# integration drives THIS machine's VMs, never a remote host's.
+_SANDBOX_NAMES: set = set()
+if os.name == "nt":
+    from backend.agent.sandbox import SANDBOX_EXECUTORS, SANDBOX_TOOLS_SCHEMA
+
+    TOOLS_SCHEMA += SANDBOX_TOOLS_SCHEMA
+    EXECUTORS.update(SANDBOX_EXECUTORS)
+    _SANDBOX_NAMES = {s["function"]["name"] for s in SANDBOX_TOOLS_SCHEMA}
+
 SCHEMAS = {s["function"]["name"]: s for s in TOOLS_SCHEMA}
 
 # ---- access-mode classification -------------------------------------------
@@ -1016,6 +1028,8 @@ _READ_TOOLS = {
     "web_search", "web_fetch", "view_image", "load_skill",
     # observation-only computer-use tools (no input injection)
     "screenshot", "list_windows", "read_ui_tree", "wait",
+    # pure observation: availability, enabled, session state
+    "sandbox_status",
     # delegation is free in all modes: the sub-agent's own tool calls hit
     # the same gate, so spawning cannot launder permissions
     "spawn_agent",
@@ -1023,12 +1037,17 @@ _READ_TOOLS = {
 _MUTATING_TOOLS = {
     "write_file", "edit_file", "create_file", "delete_file", "move_file",
     "git_add", "git_commit",
+    # creates a disposable VM and maps the workspace R/W into it (prompts
+    # in ask mode, blocked in plan mode)
+    "sandbox_test",
 }
 _SHELL_TOOLS = {
     "bash", "powershell", "git_push", "git_pull",
     # computer-use control tools drive the real mouse/keyboard
     "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
     "type_text", "press_key", "focus_window",
+    # arbitrary command execution inside the sandbox VM
+    "sandbox_run", "sandbox_stop",
 }
 
 
@@ -1084,6 +1103,13 @@ def get_schemas() -> list:
     host = remote_mod.get_remote()
     windows = host.windows if host is not None else os.name == "nt"
     schemas = TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA
+    # Sandbox tools drive the LOCAL machine's Windows Sandbox (they're in
+    # TOOLS_SCHEMA only when os.name == "nt"): strip them whenever a remote
+    # host is connected — a remote Windows host must not see the client's
+    # sandbox any more than a Linux one should.
+    if host is not None:
+        schemas = [s for s in schemas
+                   if s["function"]["name"] not in _SANDBOX_NAMES]
     # MCP server tools (mcp_<server>_<tool>) merge in dynamically — they're
     # client-local like web/ask_user, regardless of where file tools run.
     from backend.agent import mcp_client

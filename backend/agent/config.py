@@ -82,6 +82,25 @@ DEFAULTS = {
     # "full" = run everything without confirmation. Read at gate time so a
     # header switch applies to the next tool call of a running turn.
     "access_mode": "ask",
+    # Windows Sandbox integration (backend/agent/sandbox.py): disposable
+    # test VMs for live verification + a persistent dev toolkit mounted
+    # read/write into every sandbox (installs there persist to the host).
+    "sandbox": {
+        # Feature on by default (Windows only); false short-circuits the
+        # sandbox tools with an explanatory error.
+        "enabled": True,
+        # Persistent toolkit dir; "" = ~/.yaah/toolkit. Mounted R/W into
+        # every sandbox and prepended to the sandbox PATH.
+        "toolkit_dir": "",
+        # .wsb knobs.
+        "networking": "Enable",
+        "memory_mb": 8192,
+        "vgpu": "Default",
+        # Map the workspace into the sandbox (R/W) at Desktop\ws.
+        "map_workspace": True,
+        # How long sandbox_test waits for the first boot to signal ready.
+        "startup_timeout": 180,
+    },
 }
 
 DEFAULT_PROVIDER = {
