@@ -131,9 +131,11 @@ def test_entry_routes_service_verb_without_serving(entry, monkeypatch):
 
 
 def test_install_flags_before_verb_reach_handle_commandline(entry, monkeypatch):
-    """The setup wizard invokes `exe --startup auto install --username …`
-    (pywin32's convention: flags BEFORE the verb). That must route to
-    HandleCommandLine, not fall through to argparse (v0.16.4 bug)."""
+    """The setup wizard invokes `exe --startup auto --username … install`.
+    pywin32's HandleCommandLine parses with getopt, which stops at the
+    first positional: the verb must be the ONLY/last positional or it
+    prints usage and exits 1 (broke v0.16.4 AND v0.16.5 — verified live
+    against pywin32). Routing itself must accept flags before the verb."""
     import types
 
     captured = {}
@@ -141,7 +143,7 @@ def test_install_flags_before_verb_reach_handle_commandline(entry, monkeypatch):
     fake_mod.HandleCommandLine = lambda cls, argv: captured.update(argv=argv)
     monkeypatch.setattr(entry, "_service_class", lambda: object())
     monkeypatch.setitem(sys.modules, "win32serviceutil", fake_mod)
-    argv = ["--startup", "auto", "install",
-            "--username", ".\\Administrator", "--password", "x"]
+    argv = ["--startup", "auto", "--username", ".\\Administrator",
+            "--password", "x", "install"]
     assert entry._handle_service_command(argv) == 0
     assert captured["argv"] == [""] + argv

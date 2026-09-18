@@ -71,18 +71,35 @@ def _service_class():
     if sys.platform != "win32":
         return None
     try:
+        import win32event
         import win32serviceutil
     except ImportError:
         return None
+
+    import threading
 
     class YaahService(win32serviceutil.ServiceFramework):
         _svc_name_ = SERVICE_NAME
         _svc_display_name_ = SERVICE_DISPLAY
         _svc_description_ = SERVICE_DESC
 
+        def __init__(self, args):
+            import servicemanager
+            import win32event
+            import win32service
+
+            self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+            win32serviceutil.ServiceFramework.__init__(self, args)
+            self.log = servicemanager.LogMsg
+
         def SvcStop(self):
-            self.ReportServiceStatus(win32serviceutil.SERVICE_STOP_PENDING)
-            win32serviceutil.ServiceFramework.SvcStop(self)
+            # Signal SvcDoRun; without this the SCM stop times out and the
+            # service hangs in STOP_PENDING ("Gave up waiting...").
+            import win32event
+            import win32service
+
+            self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+            win32event.SetEvent(self.hWaitStop)
 
         def SvcDoRun(self):
             import servicemanager
@@ -92,6 +109,25 @@ def _service_class():
                 servicemanager.PYS_SERVICE_STARTED,
                 (self._svc_name_, ""),
             )
+            # Service context has no console: print would raise on a None
+            # stdout (uvicorn's loggers write there too).
+            if sys.stdout is None:
+                sys.stdout = open(os.devnull, "w")
+            if sys.stderr is None:
+                sys.stderr = open(os.devnull, "w")
+            # uvicorn blocks, so run it aside and wait for the stop event —
+            # SvcDoRun must return for the service to stop cleanly. The
+            # host is stateless, so an abrupt teardown loses nothing.
+            t = threading.Thread(target=self._serve, daemon=True)
+            t.start()
+            import win32event
+
+            win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
+            self.ReportServiceStatus(win32serviceutil.SERVICE_STOPPED)
+
+        def _serve(self):
+            import servicemanager
+
             try:
                 # Passphrase comes from ~/.yaah/config.json (setup wrote it
                 # as the user); mDNS stays on — a service has the same LAN
@@ -213,12 +249,14 @@ def _run_setup_wizard() -> int:
           f"%USERPROFILE%\\.yaah\\config.json")
 
     # Register + start the service as the current user. HandleCommandLine
-    # owns the exact install semantics; --startup auto = start at boot.
+    # parses with getopt, which stops at the first positional — ALL options
+    # must come first and the verb is the LAST argument. (Verified against
+    # pywin32: any other order prints usage and exits 1.)
     print(f"installing service as {user} (automatic startup)...")
     rc = subprocess.run(
-        [installed, "--startup", "auto", "install",
+        [installed, "--startup", "auto",
          "--username", f".\\{user}", "--password", getpass.getpass(
-             f"Windows password for {user}: ")],
+             f"Windows password for {user}: "), "install"],
     ).returncode
     if rc != 0:
         print(f"error: service install failed (exit {rc})")
