@@ -62,6 +62,10 @@ fi
 
 echo "server: dist/yaah-server$EXE"
 
+# PyInstaller leaves the .spec in the CWD (repo root) — with the release
+# upload glob being yaah-server*, it would ship as a release asset.
+rm -f yaah-server.spec yaah-server-setup.spec
+
 # ---- README staged next to the exe (also attached in release.yml) ----
 # Repo root, NOT dist/: dist/ is vite's outDir and `tauri build` wipes it.
 cat > README-server.txt <<'EOF'
