@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   listConversations,
   createConversation,
@@ -56,7 +56,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { lastAssistantId, useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
@@ -1096,13 +1096,17 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
     )
   }
 
-  return (
-    <div className="border-l-2 border-zinc-700/70 pl-3">
-      <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-600">
-        agent
-        {/* Stop control on the message currently being read aloud. */}
-        <MessageStopButton msgId={msg.id} />
-      </div>
+  // Plan-approval boundary: this message is the planning emission when it
+  // carries an APPROVED exit_plan call (a revised/rejected one keeps the
+  // same message going — planning continues there). Once approved it folds
+  // to a one-line header; the execution runs in the next message.
+  const exitCalls = msg.toolCalls?.filter((t) => t.name === 'exit_plan') ?? []
+  const planApproved = exitCalls.some(
+    (c) => (c.result as { decision?: string } | undefined)?.decision === 'approved',
+  )
+
+  const body = (
+    <>
       {msg.content ? (
         <div className="text-sm leading-relaxed text-zinc-200">
           <MessageBody content={msg.content} />
@@ -1117,6 +1121,76 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
       ) : null}
       {!msg.content && !msg.toolCalls?.length && (
         <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
+      )}
+    </>
+  )
+
+  if (planApproved) {
+    return <PlanningFold msg={msg} body={body} />
+  }
+
+  return (
+    <div className="border-l-2 border-zinc-700/70 pl-3">
+      <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-600">
+        agent
+        {/* Stop control on the message currently being read aloud. */}
+        <MessageStopButton msgId={msg.id} />
+      </div>
+      {msg.implementsPlan && <PlanBanner plan={msg.implementsPlan} />}
+      {body}
+    </div>
+  )
+}
+
+/** Collapsed planning emission: everything the model said/did before its
+ *  exit_plan call was approved, behind one sky header. Expandable for the
+ *  full reasoning trail (text + trace, exactly the normal message body). */
+function PlanningFold({ msg, body }: { msg: ChatMessage; body: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const n = msg.toolCalls?.length ?? 0
+  return (
+    <div className="border-l-2 border-sky-800/50 pl-3">
+      <button
+        className="flex w-full items-center gap-2 py-0.5 text-left font-mono text-[10px] uppercase tracking-widest text-sky-400 hover:text-sky-300"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-sky-600">{open ? '▾' : '▸'}</span>
+        <span>planning</span>
+        {n > 0 && (
+          <span className="tracking-normal text-zinc-600 normal-case">
+            {n} call{n === 1 ? '' : 's'}
+          </span>
+        )}
+        <span className="ml-auto tracking-normal text-zinc-600 normal-case">
+          ✓ approved — {open ? 'hide' : 'show'}
+        </span>
+      </button>
+      {open && <div className="mt-0.5">{body}</div>}
+    </div>
+  )
+}
+
+/** Header on the execution half of a plan turn: the approved plan sits
+ *  above the tool calls so what the model is implementing stays visible.
+ *  Plan body collapsible; open by default, scrolled if long. */
+function PlanBanner({ plan }: { plan: string }) {
+  const [open, setOpen] = useState(true)
+  return (
+    <div className="mb-2 rounded border border-sky-800/60 bg-sky-950/30">
+      <button
+        className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[10px] uppercase tracking-widest text-sky-400"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-sky-600">{open ? '▾' : '▸'}</span>
+        <span>implementing approved plan</span>
+        <span className="ml-auto tracking-normal text-zinc-600 normal-case">
+          {open ? 'hide plan' : 'show plan'}
+        </span>
+      </button>
+      {open && (
+        <div className="max-h-64 overflow-y-auto border-t border-sky-800/40 px-3 py-2 text-sm text-zinc-100">
+          <AgentMarkdown content={plan} />
+        </div>
       )}
     </div>
   )
@@ -4527,6 +4601,7 @@ function Composer() {
     startToolCall,
     appendToolOutput,
     finishToolCall,
+    splitAtPlanApproval,
     appendTape,
     startSubAgent,
     subAgentTextDelta,
@@ -5105,18 +5180,22 @@ function Composer() {
 
   /** One shared stream-event handler for both a fresh send and a resume:
    *  everything keys off the in-flight assistant message id and the buffer
-   *  captured at send time — a stream never writes to "what's on screen". */
-  const handleStreamEvent = (bufKey: string, asstId: string) => (ev: AgentEvent) => {
+   *  captured at send time — a stream never writes to "what's on screen".
+   *  curId advances past an approved exit_plan (splitAtPlanApproval), so
+   *  the execution half of the turn streams into its own message. */
+  const handleStreamEvent = (bufKey: string, asstId: string) => {
+    let curId = asstId
+    return (ev: AgentEvent) => {
     if (ev.type === 'text') {
       setStatus('thinking')
-      if (ev.text) appendTextDelta(bufKey, asstId, ev.text)
+      if (ev.text) appendTextDelta(bufKey, curId, ev.text)
     } else if (ev.type === 'thinking') {
       setStatus('thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).
       if (ev.text) appendTape(bufKey, oneLine(ev.text) + ' ')
     } else if (ev.type === 'tool_start') {
       setStatus('running-tool')
-      startToolCall(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+      startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       // Telemetry tape: every tool event of the turn flows into one
       // per-conversation line that survives gaps and turn boundaries.
@@ -5150,16 +5229,16 @@ function Composer() {
       }
     } else if (ev.type === 'tool_progress') {
       if (ev.chunk) {
-        appendToolOutput(bufKey, asstId, ev.call_id ?? '', ev.chunk)
+        appendToolOutput(bufKey, curId, ev.call_id ?? '', ev.chunk)
         appendTape(bufKey, oneLine(ev.chunk))
       }
     } else if (ev.type === 'tool_result') {
-      finishToolCall(bufKey, asstId, ev.call_id ?? '', ev.result)
+      finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
       // Close the call's tape segment: response summary + client-measured time.
       {
         const callId = ev.call_id ?? ''
-        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === asstId)
+        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
         const tc = msg?.toolCalls?.slice().reverse().find((t) => t.id === callId)
         const res = ev.result as { output?: unknown } | null
         let seg = ''
@@ -5176,10 +5255,14 @@ function Composer() {
       }
       if (ev.name === 'exit_plan') {
         setPendingPlanApproval((p) => (p && p.callId === ev.call_id ? null : p))
+        // Approved -> the rest of the turn is implementation: split the live
+        // message so the pre-plan emission stays its own (foldable) block.
+        const nid = splitAtPlanApproval(bufKey, curId)
+        if (nid) curId = nid
       }
     } else if (ev.type === 'approval_request') {
       setStatus('running-tool')
-      startToolCall(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+      startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       setPendingApproval({
         callId: ev.call_id ?? '',
@@ -5193,7 +5276,7 @@ function Composer() {
       setStatus('running-tool')
       startSubAgent(
         bufKey,
-        asstId,
+        curId,
         ev.call_id ?? '',
         ev.agent_id ?? 0,
         ev.agent_type ?? 'sub-agent',
@@ -5201,11 +5284,11 @@ function Composer() {
       )
       pushLog({ kind: 'tool', name: 'spawn_agent', args: { agent_type: ev.agent_type, prompt: ev.prompt } })
     } else if (ev.type === 'sub_agent_progress') {
-      if (ev.text) subAgentTextDelta(bufKey, asstId, ev.call_id ?? '', ev.text)
+      if (ev.text) subAgentTextDelta(bufKey, curId, ev.call_id ?? '', ev.text)
       if (ev.kind === 'tool_start') {
-        subAgentToolStart(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+        subAgentToolStart(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       } else if (ev.kind === 'tool_result') {
-        subAgentToolResult(bufKey, asstId, ev.call_id ?? '', ev.result)
+        subAgentToolResult(bufKey, curId, ev.call_id ?? '', ev.result)
       } else if (ev.kind === 'approval_request') {
         setStatus('running-tool')
         setPendingApproval({
@@ -5220,20 +5303,20 @@ function Composer() {
         setPendingApproval((a) => (a && a.callId === ev.call_id ? null : a))
       }
     } else if (ev.type === 'sub_agent_done') {
-      finishSubAgent(bufKey, asstId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0)
+      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0)
       pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
     } else if (ev.type === 'error') {
       setStatus('error')
       setError(ev.message ?? 'Unknown agent error')
       setTurnError(ev.message ?? 'Unknown agent error')
-      settleSubAgents(bufKey, asstId)
+      settleSubAgents(bufKey, curId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'stopped') {
       setStatus('idle')
-      appendTextDelta(bufKey, asstId, '\n[stopped]')
-      settleSubAgents(bufKey, asstId)
+      appendTextDelta(bufKey, curId, '\n[stopped]')
+      settleSubAgents(bufKey, curId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
@@ -5242,7 +5325,7 @@ function Composer() {
       // A completed turn must leave no block pulsing: settle anything the
       // stream ended without a sub_agent_done for (defensive; the backend
       // always emits done events in the normal path).
-      settleSubAgents(bufKey, asstId)
+      settleSubAgents(bufKey, curId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
@@ -5260,6 +5343,7 @@ function Composer() {
           })
           .catch(() => {})
       }
+    }
     }
   }
 
@@ -5365,10 +5449,11 @@ function Composer() {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
-        appendTextDelta(bufKey, asstId, '\n[stopped]')
+        const tailId = lastAssistantId(bufKey) ?? asstId
+        appendTextDelta(bufKey, tailId, '\n[stopped]')
         // Stop pressed mid-delegation: settle any still-running sub-agent
         // blocks so nothing keeps pulsing after the stream is gone.
-        settleSubAgents(bufKey, asstId)
+        settleSubAgents(bufKey, tailId)
       } else {
         // The turn never started (network, bad key, server down): roll back
         // the optimistic messages and restore the draft so nothing is lost.
@@ -5423,12 +5508,13 @@ function Composer() {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
         setStatus('idle')
-        appendTextDelta(bufKey, asstId, '\n[stopped]')
-        settleSubAgents(bufKey, asstId)
+        const tailId = lastAssistantId(bufKey) ?? asstId
+        appendTextDelta(bufKey, tailId, '\n[stopped]')
+        settleSubAgents(bufKey, tailId)
       } else {
         setStatus('error')
         setTurnError(String((e as Error).message ?? e))
-        settleSubAgents(bufKey, asstId)
+        settleSubAgents(bufKey, lastAssistantId(bufKey) ?? asstId)
       }
     } finally {
       setSending(false)

@@ -46,6 +46,9 @@ export interface ChatMessage {
   toolCalls?: ToolCall[]
   /** Sub-agent run snapshot (persisted spawn_agent result, history load). */
   subAgent?: SubAgentRun
+  /** The approved plan this message implements (set at the exit_plan
+   *  approval boundary; rendered as a header above the execution). */
+  implementsPlan?: string
 }
 
 export type AgentStatus = 'idle' | 'thinking' | 'running-tool' | 'error'
@@ -168,6 +171,11 @@ interface AgentState {
   startToolCall: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
   finishToolCall: (key: string, msgId: string, callId: string, result: unknown) => void
   appendToolOutput: (key: string, msgId: string, callId: string, chunk: string) => void
+  /** At an approved exit_plan tool_result: close the planning message and
+   *  open a fresh assistant message (flagged with the plan) for everything
+   *  the rest of the turn emits. Returns the new message id, or null when
+   *  the call was not on msgId or was not approved (plan continues). */
+  splitAtPlanApproval: (key: string, msgId: string) => string | null
 
   /** Sub-agent live state (spawn_agent calls). */
   startSubAgent: (key: string, msgId: string, callId: string, agentId: number, agentType: string, prompt: string) => void
@@ -513,6 +521,29 @@ export const useAgent = create<AgentState>((set, get) => ({
     }))
   },
 
+  splitAtPlanApproval: (key, msgId) => {
+    let newId: string | null = null
+    set((s) => {
+      const msgs = s.messagesByConv[key] ?? []
+      const idx = msgs.findIndex((m) => m.id === msgId)
+      if (idx === -1) return {}
+      const call = msgs[idx].toolCalls?.find((t) => t.name === 'exit_plan')
+      const decision = (call?.result ?? null) as { decision?: string } | null
+      if (decision?.decision !== 'approved') return {}
+      const plan = (call?.args ?? {}) as { plan?: unknown }
+      newId = genId()
+      const next = msgs.slice()
+      next.splice(idx + 1, 0, {
+        id: newId,
+        role: 'assistant',
+        content: '',
+        implementsPlan: typeof plan.plan === 'string' ? plan.plan : undefined,
+      })
+      return { messagesByConv: { ...s.messagesByConv, [key]: next } }
+    })
+    return newId
+  },
+
   // ---- sub-agent live state ----
   // All five helpers locate the spawn_agent ToolCall by (msgId, callId) and
   // mutate its subAgent field. Events carry call_id so parallel agents in
@@ -683,6 +714,17 @@ export const useAgent = create<AgentState>((set, get) => ({
     })),
 }))
 
+/** Id of the last assistant message in a buffer — after a plan-approval
+ *  split, turn-end writes ([stopped], sub-agent settle) belong to the tail,
+ *  not the id captured at send time. */
+export function lastAssistantId(key: string): string | null {
+  const msgs = useAgent.getState().messagesByConv[key] ?? []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant') return msgs[i].id
+  }
+  return null
+}
+
 /**
  * Build a rendered message list from persisted rows. Tool rows carry one
  * result each, linked to their call by tool_call_id (the call name is
@@ -690,7 +732,7 @@ export const useAgent = create<AgentState>((set, get) => ({
  * turn's calls so a reloaded turn renders exactly like a finished live turn:
  * one collapsed trace, results inside it - not a second wall of tool blocks.
  */
-function buildMessages(
+export function buildMessages(
   rows: Parameters<AgentState['loadHistory']>[1],
 ): ChatMessage[] {
   const resultById = new Map<string, unknown>()
@@ -738,6 +780,11 @@ function buildMessages(
   }
 
   const out: ChatMessage[] = []
+  // Plan-approval boundary: when an assistant row carries an exit_plan call
+  // whose persisted result says approved, the NEXT assistant row (the rest
+  // of the same turn) implements that plan — flag it so it renders with the
+  // plan header, mirroring the live splitAtPlanApproval behavior.
+  let pendingPlanText: string | null = null
   for (const r of rows) {
     if (r.role === 'tool') {
       const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
@@ -762,19 +809,33 @@ function buildMessages(
       continue
     }
     if (r.role === 'assistant' && r.tool_calls?.length) {
+      const calls = r.tool_calls.map((c, i) => ({
+        id: c.id ?? `t${r.id}-${i}`,
+        name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
+        args: safeParse(c.function?.arguments),
+        result: c.id ? resultById.get(c.id) : undefined,
+        subAgent: c.id ? subAgentById.get(c.id) : undefined,
+      }))
       out.push({
         id: `db${r.id}`,
         role: 'assistant',
         content: r.content,
         images: r.images ?? undefined,
-        toolCalls: r.tool_calls.map((c, i) => ({
-          id: c.id ?? `t${r.id}-${i}`,
-          name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
-          args: safeParse(c.function?.arguments),
-          result: c.id ? resultById.get(c.id) : undefined,
-          subAgent: c.id ? subAgentById.get(c.id) : undefined,
-        })),
+        toolCalls: calls,
+        implementsPlan:
+          pendingPlanText !== null
+            ? pendingPlanText
+            : undefined,
       })
+      pendingPlanText = null
+      for (const c of calls) {
+        if (c.name !== 'exit_plan') continue
+        const decision = (c.result ?? {}) as { decision?: string }
+        const plan = (c.args ?? {}) as { plan?: unknown }
+        if (decision.decision === 'approved' && typeof plan.plan === 'string') {
+          pendingPlanText = plan.plan
+        }
+      }
       continue
     }
     out.push({
