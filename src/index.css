@@ -85,41 +85,7 @@ body,
   animation: run-pulse 1s ease-in-out infinite;
 }
 
-/* Amber shimmer sweeping across a RUNNING chip — the "this one is hot"
-   tell. A narrow highlight travels left→right over the chip surface;
-   transform-only so it stays on the compositor. */
-@keyframes chip-sweep {
-  from {
-    transform: translateX(-110%);
-  }
-  to {
-    transform: translateX(240%);
-  }
-}
-
-.chip-running {
-  position: relative;
-  overflow: hidden;
-}
-
-.chip-running::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 45%;
-  background: linear-gradient(
-    100deg,
-    transparent 0%,
-    rgba(251, 191, 36, 0.18) 45%,
-    rgba(251, 191, 36, 0.38) 50%,
-    rgba(251, 191, 36, 0.18) 55%,
-    transparent 100%
-  );
-  animation: chip-sweep 1.6s ease-in-out infinite;
-  pointer-events: none;
-}
-
-/* Block caret at the tail of the live telemetry stream. */
+/* Block caret at the tail of the live telemetry tape. */
 @keyframes caret-blink {
   0%,
   100% {
@@ -140,42 +106,10 @@ body,
   animation: caret-blink 1s steps(1) infinite;
 }
 
-/* Completed-call blip in the telemetry strip: enters hot, fades to quiet. */
-@keyframes blip-in {
-  from {
-    opacity: 0;
-    transform: translateX(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-@keyframes blip-fade {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0.35;
-  }
-}
-
-.telemetry-blip {
-  animation:
-    blip-in 0.2s cubic-bezier(0.16, 1, 0.3, 1),
-    blip-fade 3.2s ease-in 1.2s forwards;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .chip-in,
   .run-pulse,
-  .chip-running::after,
-  .stream-caret,
-  .telemetry-blip {
+  .stream-caret {
     animation: none;
-  }
-  .telemetry-blip {
-    opacity: 0.8;
   }
 }

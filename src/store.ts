@@ -20,6 +20,9 @@ export interface ToolCall {
  *  can't grow memory unbounded. */
 export const TOOL_OUTPUT_CAP = 8_000
 
+/** Cap on the telemetry tape per conversation (a tail is kept). */
+export const TAPE_CAP = 16_000
+
 /** A live sub-agent run (spawn_agent tool call in flight). */
 export interface SubAgentRun {
   agentId: number
@@ -131,6 +134,15 @@ interface AgentState {
    */
   contextByConv: Record<string, { tokens: number; window: number | null; model: string | null }>
   setContext: (convId: number, tokens: number, window: number | null, model: string | null) => void
+
+  /**
+   * Per-conversation telemetry tape: one ever-growing line that every tool
+   * event of the session appends into (call, arguments, streamed output,
+   * response, timing). Survives individual tool calls, thinking gaps, and
+   * turn boundaries; capped to a tail so it can't grow unbounded.
+   */
+  tapeByConv: Record<string, string>
+  appendTape: (key: string, chunk: string) => void
 
   setWorkspace: (ws: string) => void
   newConversation: () => void
@@ -307,6 +319,18 @@ export const useAgent = create<AgentState>((set, get) => ({
         [String(convId)]: { tokens, window, model },
       },
     })),
+
+  tapeByConv: {},
+  appendTape: (key, chunk) =>
+    set((s) => {
+      const merged = (s.tapeByConv[key] ?? '') + chunk
+      return {
+        tapeByConv: {
+          ...s.tapeByConv,
+          [key]: merged.length > TAPE_CAP ? merged.slice(-TAPE_CAP) : merged,
+        },
+      }
+    }),
   setWorkspace: (ws) => {
     const norm = ws === '.' ? '' : ws
     set({ workspace: norm })

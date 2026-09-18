@@ -684,14 +684,13 @@ function toolTarget(tc: ToolCall): string {
   return t.length > 48 ? t.slice(0, 48) + '…' : t
 }
 
-/** One compact chip: glyph + name + target, shimmering and counting while
- *  the call runs; calm the moment it finishes. */
+/** One compact chip: glyph + name + target, counting while the call runs. */
 function ToolChip({ tc }: { tc: ToolCall }) {
   const done = tc.result !== undefined
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
-        done ? 'bg-zinc-800/70 text-zinc-400' : 'chip-running bg-zinc-700/60 text-zinc-200'
+        done ? 'bg-zinc-800/70 text-zinc-400' : 'bg-zinc-700/60 text-zinc-200'
       }`}
     >
       <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
@@ -746,104 +745,91 @@ function ElapsedBadge({ startedAt, className = 'text-zinc-500' }: { startedAt?: 
   return <span className={`tabular-nums ${className}`}>{formatElapsed(ms)}</span>
 }
 
-/** The telemetry strip under the ticker row: proof that output is occurring.
- *  Real shell output streams by (unreadable-by-design, auto-scrolled, caret
- *  at the tail); fast tools leave brief completion blips so the strip is
- *  never static; a footer carries the hot/cold signal and elapsed clock.
- *  Vanishes when the turn settles — history stays calm in the TraceLine. */
-function LiveTelemetry({ calls }: { calls: ToolCall[] }) {
-  const now = useNow()
-  const [expanded, setExpanded] = useState(false)
-  const preRef = useRef<HTMLPreElement>(null)
-  const active = calls.find((tc) => tc.result === undefined)
-  const streaming = !!(active && active.output)
-  const blips = calls
-    .filter((tc) => tc.result !== undefined && tc.finishedAt && now - tc.finishedAt < 4500)
-    .slice(-3)
-    .reverse()
+/** The telemetry tape: one borderless terminal line per conversation where
+ *  every tool event of the session flows by — call, arguments, streamed
+ *  output, response, timing — newest at the right edge, old text pushing
+ *  out through a left fade. Lives in the store, so it survives tool calls,
+ *  thinking gaps, and turn boundaries. Rendered in a narrow window under
+ *  the ticker chips, right edge aligned with the newest chip's right edge.
+ *  Not meant to be read; it is proof that output is occurring. */
+function LiveTelemetry() {
+  const tape = useAgent((s) => s.tapeByConv[s.bufferKey()] ?? '')
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const tapeRef = useRef<HTMLSpanElement>(null)
+  const [offset, setOffset] = useState(0)
   useEffect(() => {
-    const el = preRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [active?.output, expanded])
-
-  if (!active && blips.length === 0) return null
+    const w = wrapRef.current?.clientWidth ?? 0
+    const t = tapeRef.current?.scrollWidth ?? 0
+    setOffset(Math.min(0, w - t))
+  }, [tape])
   return (
     <div
-      className="mt-1 rounded border border-zinc-800 bg-zinc-900/60 font-mono text-[10px] leading-4"
-      onClick={() => setExpanded((o) => !o)}
+      ref={wrapRef}
+      className="overflow-hidden"
+      style={{
+        maskImage:
+          'linear-gradient(to right, transparent 0%, black 14%, black 100%)',
+        WebkitMaskImage:
+          'linear-gradient(to right, transparent 0%, black 14%, black 100%)',
+      }}
     >
-      {blips.length > 0 && (
-        <div className={`space-y-0.5 px-2 ${streaming ? 'pt-1' : 'py-1'}`}>
-          {blips.map((tc) => (
-            <div key={tc.id} className="telemetry-blip flex items-center gap-1.5">
-              <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
-              <span className="text-zinc-300">{tc.name}</span>
-              {toolTarget(tc) && <span className="truncate text-zinc-500">{toolTarget(tc)}</span>}
-              <span className="ml-auto shrink-0 text-zinc-500 tabular-nums">
-                {tc.startedAt && tc.finishedAt ? formatElapsed(tc.finishedAt - tc.startedAt) : ''}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-      {streaming && active && (
-        <pre
-          ref={preRef}
-          className={`overflow-auto whitespace-pre-wrap break-all px-2 pt-1 text-zinc-400 ${
-            expanded ? 'max-h-40' : 'max-h-8'
-          }`}
-        >
-          {active.output}
-          <span className="stream-caret" />
-        </pre>
-      )}
-      {active && (
-        <div className="flex items-center gap-2 border-t border-zinc-800/80 px-2 py-0.5">
-          {streaming ? (
-            <>
-              <span className="text-amber-300">█</span>
-              <span className="text-zinc-400">streaming…</span>
-            </>
-          ) : (
-            <>
-              <span className="run-pulse text-amber-300">●</span>
-              <span className="text-zinc-400">{active.name}</span>
-            </>
-          )}
-          <ElapsedBadge
-            startedAt={active.startedAt}
-            className={`ml-auto shrink-0 ${streaming ? 'text-amber-300/80' : 'text-zinc-500'}`}
-          />
-        </div>
-      )}
+      <span
+        ref={tapeRef}
+        className="block whitespace-pre font-mono text-[10px] leading-4 text-zinc-400"
+        style={{ transform: `translateX(${offset}px)` }}
+      >
+        {tape}
+      </span>
     </div>
   )
 }
 
+/** Collapse a chunk of tool output to one flowing tape line: line endings
+ *  become wide separators so the tape never wraps or stacks. */
+function oneLine(s: string): string {
+  return s.replace(/[\r\n]+/g, '    ').replace(/\t/g, '  ')
+}
+
 /** Live, ephemeral stream of calls while the agent works. Newest chip appears
  *  at the left edge and older ones are pushed right, fading out at the right
- *  edge; the row never grows past the chat panel's width. */
+ *  edge; the row never grows past the chat panel's width. The telemetry tape
+ *  runs in a window directly below, whose right edge lines up with the
+ *  newest chip's right edge — tape and chip read as one column. */
 function ToolTicker({ calls }: { calls: ToolCall[] }) {
   const recent = calls.slice(-12)
-  const anyActive = calls.some((tc) => tc.result === undefined)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const [tapeWidth, setTapeWidth] = useState<number | null>(null)
+  useEffect(() => {
+    const align = rowRef.current?.querySelector('[data-tape-align]')
+    if (align instanceof HTMLElement) setTapeWidth(align.offsetLeft + align.offsetWidth)
+  }, [calls])
   const fade =
     'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
   return (
     <div className="my-1 w-full min-w-0">
       <div
-        className="flex items-center gap-1.5 overflow-hidden"
+        ref={rowRef}
+        className="relative flex items-center gap-1.5 overflow-hidden"
         style={{ maskImage: fade, WebkitMaskImage: fade }}
       >
         <span className="shrink-0 font-mono text-[10px] text-zinc-600">
           {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
         </span>
         {[...recent].reverse().map((tc, i) => (
-          <span key={tc.id} className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}>
+          <span
+            key={tc.id}
+            data-tape-align={i === 0 ? '' : undefined}
+            className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}
+          >
             <ToolChip tc={tc} />
           </span>
         ))}
       </div>
-      {anyActive && <LiveTelemetry calls={calls} />}
+      {tapeWidth !== null && tapeWidth > 0 && (
+        <div className="-mt-px" style={{ width: tapeWidth }}>
+          <LiveTelemetry />
+        </div>
+      )}
     </div>
   )
 }
@@ -965,8 +951,8 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
 
 /** Live nested transcript for one spawn_agent call: the sub-agent's own
  *  text deltas and tool chips, indented under the parent turn. Collapses
- *  to a status line when the run finishes; expands on click. Running
- *  state shimmers and its transcript carries the streaming caret. */
+ *  to a status line when the run finishes; expands on click. The running
+ *  transcript carries the streaming caret. */
 function SubAgentBlock({ run }: { run: SubAgentRun }) {
   const [open, setOpen] = useState(true)
   const textRef = useRef<HTMLDivElement>(null)
@@ -993,9 +979,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
   return (
     <div className="my-1 rounded border border-zinc-800 bg-zinc-900/40">
       <button
-        className={`flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[10px] ${
-          running ? 'chip-running' : ''
-        }`}
+        className="flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[10px]"
         onClick={() => setOpen((o) => !o)}
       >
         <span className="text-fuchsia-400">{'\u29c9'}</span>
@@ -1017,7 +1001,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
                   className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${
                     t.result !== undefined
                       ? 'bg-zinc-800/70 text-zinc-400'
-                      : 'chip-running bg-zinc-700/60 text-zinc-200'
+                      : 'bg-zinc-700/60 text-zinc-200'
                   }`}
                 >
                   <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
@@ -4543,6 +4527,7 @@ function Composer() {
     startToolCall,
     appendToolOutput,
     finishToolCall,
+    appendTape,
     startSubAgent,
     subAgentTextDelta,
     subAgentToolStart,
@@ -5129,6 +5114,16 @@ function Composer() {
       setStatus('running-tool')
       startToolCall(bufKey, asstId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
+      // Telemetry tape: every tool event of the turn flows into one
+      // per-conversation line that survives gaps and turn boundaries.
+      {
+        const a = (ev.args ?? {}) as Record<string, unknown>
+        const head =
+          typeof a.command === 'string'
+            ? `${ev.name} ${a.command}`
+            : `${ev.name} ${toolTarget({ id: '', name: ev.name ?? '', args: a } as ToolCall) || JSON.stringify(a).slice(0, 100)}`
+        appendTape(bufKey, oneLine(`\n▸ ${head}`) + '    ')
+      }
       if (ev.name === 'ask_user') {
         const a = (ev.args ?? {}) as {
           question?: string
@@ -5150,10 +5145,28 @@ function Composer() {
         })
       }
     } else if (ev.type === 'tool_progress') {
-      if (ev.chunk) appendToolOutput(bufKey, asstId, ev.call_id ?? '', ev.chunk)
+      if (ev.chunk) {
+        appendToolOutput(bufKey, asstId, ev.call_id ?? '', ev.chunk)
+        appendTape(bufKey, oneLine(ev.chunk))
+      }
     } else if (ev.type === 'tool_result') {
       finishToolCall(bufKey, asstId, ev.call_id ?? '', ev.result)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
+      // Close the call's tape segment: response summary + client-measured time.
+      {
+        const callId = ev.call_id ?? ''
+        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === asstId)
+        const tc = msg?.toolCalls?.slice().reverse().find((t) => t.id === callId)
+        const res = ev.result as { output?: unknown } | null
+        let seg = ''
+        if (typeof res?.output === 'string') seg += oneLine(res.output).slice(0, 600)
+        else if (ev.result !== null && ev.result !== undefined) {
+          const r = JSON.stringify(ev.result)
+          if (r && r !== '{}') seg += '= ' + oneLine(r).slice(0, 200)
+        }
+        if (tc?.startedAt && tc?.finishedAt) seg += `  ✓ ${formatElapsed(tc.finishedAt - tc.startedAt)}`
+        appendTape(bufKey, (seg ? oneLine(seg) + '    ' : ''))
+      }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
       }
