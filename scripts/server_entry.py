@@ -134,7 +134,10 @@ def _handle_service_command(argv: list[str]) -> int | None:
             if exc.winerror == 1063:  # ERROR_FAILED_SERVICE_CONTROLLER_CONNECT
                 return _run_setup_wizard()
             raise
-    if argv[0] in verbs:
+    # HandleCommandLine's own convention puts flags BEFORE the verb
+    # (`exe --startup auto install --username …`), so look for the verb
+    # anywhere in argv, not just at the front.
+    if any(a in verbs for a in argv):
         win32serviceutil.HandleCommandLine(cls, argv=[""] + argv)
         return 0
     return None

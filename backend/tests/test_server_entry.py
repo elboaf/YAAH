@@ -8,6 +8,7 @@ protocol itself is covered by test_remote.py — none of it changes here.
 """
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -127,3 +128,20 @@ def test_entry_routes_service_verb_without_serving(entry, monkeypatch):
     monkeypatch.setattr(entry, "_handle_service_command", lambda a: 1)
     assert entry.entry(["install"]) == 1
     assert "bind" not in _uvicorn_calls
+
+
+def test_install_flags_before_verb_reach_handle_commandline(entry, monkeypatch):
+    """The setup wizard invokes `exe --startup auto install --username …`
+    (pywin32's convention: flags BEFORE the verb). That must route to
+    HandleCommandLine, not fall through to argparse (v0.16.4 bug)."""
+    import types
+
+    captured = {}
+    fake_mod = types.ModuleType("win32serviceutil")
+    fake_mod.HandleCommandLine = lambda cls, argv: captured.update(argv=argv)
+    monkeypatch.setattr(entry, "_service_class", lambda: object())
+    monkeypatch.setitem(sys.modules, "win32serviceutil", fake_mod)
+    argv = ["--startup", "auto", "install",
+            "--username", ".\\Administrator", "--password", "x"]
+    assert entry._handle_service_command(argv) == 0
+    assert captured["argv"] == [""] + argv
