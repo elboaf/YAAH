@@ -461,10 +461,7 @@ pub fn run() {
             // in the title bar so every screenshot/bug report identifies
             // the build (#14).
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_title(&format!(
-                    "YAAH v{} — AI Coding Agent",
-                    app.package_info().version
-                ));
+                let _ = win.set_title(&format!("YAAH v{}", app.package_info().version));
             }
             let handle = app.handle().clone();
             let shared = app.state::<Arc<BackendShared>>().inner().clone();
