@@ -457,6 +457,15 @@ pub fn run() {
             shutdown: AtomicBool::new(false),
         }))
         .setup(|app| {
+            // Surface the version (from tauri.conf.json via package_info)
+            // in the title bar so every screenshot/bug report identifies
+            // the build (#14).
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_title(&format!(
+                    "YAAH v{} — AI Coding Agent",
+                    app.package_info().version
+                ));
+            }
             let handle = app.handle().clone();
             let shared = app.state::<Arc<BackendShared>>().inner().clone();
             std::thread::spawn(move || supervise_backend(handle, shared));

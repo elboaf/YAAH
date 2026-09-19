@@ -7,6 +7,16 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Invoked by tag-on-bump.yml after it validates + pushes the version tag.
+  # GITHUB_TOKEN-created tags don't trigger other workflows (GitHub's
+  # recursion guard), so the release build is called directly instead of
+  # relying on the tag-push event.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Version tag to build and publish (e.g. v0.19.0)"
+        required: true
+        type: string
 
 jobs:
   build-tauri:
@@ -20,6 +30,25 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      # Tag/version drift guard (#14): the tag must match package.json
+      # (the canonical version). Without this a stale or hand-made tag
+      # ships installers that report a different version than they're
+      # labeled with. package.json is read with Node (no jq on Windows
+      # runners); a multi-line JSON strip means grep can't false-positive
+      # on a substring of a longer version.
+      - name: Guard — tag must match package.json version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          tag="$RELEASE_TAG"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "tag=$tag package.json=$pkg"
+          if [ "$tag" != "v$pkg" ]; then
+            echo "::error::tag/version drift: tag is '$tag' but package.json says '$pkg' (canonical). Bump package.json or fix the tag."
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -92,7 +121,7 @@ jobs:
       - if: failure()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: build-*.log
           overwrite_files: true
 
@@ -106,8 +135,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG:-${GITHUB_REF_NAME}}"
           # Exactly four artifacts: one setup exe + one setup deb per OS.
           # Desktop NSIS/deb are renamed from tauri's versioned names.
           if [ "$RUNNER_OS" = Windows ]; then

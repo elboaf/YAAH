@@ -1,0 +1,95 @@
+name: Tag on bump
+
+# Auto-release pipeline (#14): bump package.json (the canonical version) on
+# master and this pushes tag v<version>, then calls release.yml directly to
+# build + publish the installers.
+#
+# Why the direct call: a tag created with GITHUB_TOKEN does NOT trigger
+# other workflows (GitHub's recursion guard), so relying on release.yml's
+# `push: tags:` trigger would silently produce a tag with no release.
+#
+# Guards: fails the build if backend/_version.py or src-tauri/tauri.conf.json
+# disagree with package.json, and no-ops (release skipped) if the tag already
+# exists.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-on-bump
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Validate + push version tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      pushed: ${{ steps.push.outputs.pushed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read canonical version + cross-check the others
+        id: version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v$version"
+          py="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' backend/_version.py)"
+          conf="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "package.json=$version backend/_version.py=$py tauri.conf.json=$conf"
+          if [ -z "$py" ] || [ -z "$conf" ]; then
+            echo "::error::could not parse a version from backend/_version.py ('$py') or src-tauri/tauri.conf.json ('$conf')"
+            exit 1
+          fi
+          if [ "$version" != "$py" ] || [ "$version" != "$conf" ]; then
+            echo "::error::version drift — package.json ($version) is canonical: bump backend/_version.py ($py) and src-tauri/tauri.conf.json ($conf) to match"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if tag already exists
+        id: exists
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists — nothing to do (already released?)"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push tag
+        id: push
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          if git push origin "$TAG"; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            # Lost a race with a concurrent run: tag exists now, treat as done.
+            echo "$TAG was pushed by a concurrent run"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::failed to push $TAG and it does not exist on origin"
+            exit 1
+          fi
+
+  release:
+    name: Build + publish release
+    needs: tag
+    if: needs.tag.outputs.pushed == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    permissions:
+      contents: write
