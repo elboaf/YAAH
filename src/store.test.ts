@@ -41,11 +41,12 @@ describe('buildMessages plan split', () => {
       row(6, 'assistant', 'done!'),
     ])
     // Tool-result rows are absorbed into their assistant call's trace.
-    expect(msgs).toHaveLength(4)
+    // Issue #17: the final 'done!' emission is part of the same turn block
+    // as 'implementing' (one block, newline-joined) — live parity.
+    expect(msgs).toHaveLength(3)
     expect(msgs[1].implementsPlan).toBeUndefined()
     expect(msgs[2].implementsPlan).toBe('THE PLAN')
-    // Only the first execution message carries the flag.
-    expect(msgs[3].implementsPlan).toBeUndefined()
+    expect(msgs[2].content).toBe('implementing\ndone!')
   })
 
   it('does not split on a revised (unapproved) exit_plan', () => {
@@ -65,6 +66,52 @@ describe('buildMessages plan split', () => {
       callRow(2, 'c1', 'read_file', { content: 'x' }),
     ])
     expect(msgs.every((m) => m.implementsPlan === undefined)).toBe(true)
+  })
+})
+
+describe('buildMessages emission coalescing (#17)', () => {
+  it('joins consecutive emission rows of one turn with a single line feed', () => {
+    const msgs = buildMessages([
+      row(1, 'user', 'go'),
+      row(2, 'assistant', 'first emission', {
+        tool_calls: [{ id: 'c1', function: { name: 'bash', arguments: '{}' } }],
+      }),
+      callRow(3, 'c1', 'bash', { ok: true }),
+      row(4, 'assistant', 'second emission', {
+        tool_calls: [{ id: 'c2', function: { name: 'bash', arguments: '{}' } }],
+      }),
+      callRow(5, 'c2', 'bash', { ok: true }),
+      row(6, 'assistant', 'third emission'),
+    ])
+    // One turn block: all three emissions newline-joined, tool calls pooled.
+    expect(msgs).toHaveLength(2)
+    expect(msgs[1].content).toBe('first emission\nsecond emission\nthird emission')
+    expect(msgs[1].toolCalls?.map((t) => t.id)).toEqual(['c1', 'c2'])
+  })
+
+  it('starts a new block after a user row', () => {
+    const msgs = buildMessages([
+      row(1, 'user', 'q1'),
+      row(2, 'assistant', 'answer one'),
+      row(3, 'user', 'q2'),
+      row(4, 'assistant', 'answer two'),
+    ])
+    expect(msgs).toHaveLength(4)
+    expect(msgs[1].content).toBe('answer one')
+    expect(msgs[3].content).toBe('answer two')
+  })
+
+  it('keeps the planning emission split from the plan-approved implementation block', () => {
+    const msgs = buildMessages([
+      row(1, 'user', 'do it'),
+      row(2, 'assistant', 'planning...', { tool_calls: [exitPlanCall('c1', 'THE PLAN')] }),
+      callRow(3, 'c1', 'exit_plan', { decision: 'approved' }),
+      row(4, 'assistant', 'implementing'),
+    ])
+    expect(msgs).toHaveLength(3)
+    expect(msgs[1].content).toBe('planning...')
+    expect(msgs[2].implementsPlan).toBe('THE PLAN')
+    expect(msgs[2].content).toBe('implementing')
   })
 })
 

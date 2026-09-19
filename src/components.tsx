@@ -5191,16 +5191,25 @@ function Composer() {
    *  the execution half of the turn streams into its own message. */
   const handleStreamEvent = (bufKey: string, asstId: string) => {
     let curId = asstId
+    // True while text is allowed to flow without an emission separator: the
+    // stream starts mid-emission (first emission of a fresh message), and a
+    // tool event closes the emission — the next text opens a new one (#17).
+    let textSinceTool = true
     return (ev: AgentEvent) => {
     if (ev.type === 'text') {
       setStatus('thinking')
-      if (ev.text) appendTextDelta(bufKey, curId, ev.text)
+      if (ev.text) {
+        const text = textSinceTool ? ev.text : '\n' + ev.text
+        textSinceTool = true
+        appendTextDelta(bufKey, curId, text)
+      }
     } else if (ev.type === 'thinking') {
       setStatus('thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).
       if (ev.text) appendTape(bufKey, oneLine(ev.text) + ' ')
     } else if (ev.type === 'tool_start') {
       setStatus('running-tool')
+      textSinceTool = false
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       // Telemetry tape: every tool event of the turn flows into one
@@ -5264,7 +5273,11 @@ function Composer() {
         // Approved -> the rest of the turn is implementation: split the live
         // message so the pre-plan emission stays its own (foldable) block.
         const nid = splitAtPlanApproval(bufKey, curId)
-        if (nid) curId = nid
+        if (nid) {
+          curId = nid
+          // Fresh block: its first emission needs no separator line.
+          textSinceTool = true
+        }
       }
     } else if (ev.type === 'approval_request') {
       setStatus('running-tool')

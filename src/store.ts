@@ -731,6 +731,11 @@ export function lastAssistantId(key: string): string | null {
  * duplicated in tool_calls[0].name). Results merge into the owning assistant
  * turn's calls so a reloaded turn renders exactly like a finished live turn:
  * one collapsed trace, results inside it - not a second wall of tool blocks.
+ *
+ * Issue #17: one turn renders as ONE assistant block. Each model call's row
+ * is an emission; emissions join with single line feeds (live parity) and
+ * their tool calls pool into the block's trace. A message stays open across
+ * emissions until a user row (or a plan-approval boundary) closes it.
  */
 export function buildMessages(
   rows: Parameters<AgentState['loadHistory']>[1],
@@ -780,6 +785,34 @@ export function buildMessages(
   }
 
   const out: ChatMessage[] = []
+  // Issue #17 coalescing: an assistant turn block stays open across model
+  // calls until a user/system row (or a rendered standalone tool row) closes
+  // it. Emissions join with a single line feed (live parity); each call's
+  // tool calls pool into the block's trace. Plan-approval boundaries force
+  // a split (the plan message folds to a one-line header).
+  let open: ChatMessage | null = null
+  const closeOpen = () => {
+    open = null
+  }
+  /** Append an emission's text (+ images) to the open block, or open a new
+   *  one when forced (plan boundary) or none is open. */
+  const coalesce = (r: (typeof rows)[number], calls?: ChatMessage['toolCalls']) => {
+    if (!open) {
+      out.push({
+        id: `db${r.id}`,
+        role: 'assistant',
+        content: r.content,
+        images: r.images ?? undefined,
+        toolCalls: calls,
+        implementsPlan: pendingPlanText !== null ? pendingPlanText : undefined,
+      })
+      open = out[out.length - 1]
+      return
+    }
+    open.content = open.content ? `${open.content}\n${r.content}` : r.content
+    if (calls?.length) open.toolCalls = [...(open.toolCalls ?? []), ...calls]
+    if (r.images?.length) open.images = [...(open.images ?? []), ...r.images]
+  }
   // Plan-approval boundary: when an assistant row carries an exit_plan call
   // whose persisted result says approved, the NEXT assistant row (the rest
   // of the same turn) implements that plan — flag it so it renders with the
@@ -790,8 +823,10 @@ export function buildMessages(
       const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
       // Already absorbed into the assistant turn's trace; render
       // standalone only when orphaned (no matching call row) — e.g. the
-      // git commands the user ran from the status strip.
+      // git commands the user ran from the status strip. An absorbed row
+      // leaves the block open (its tools belong to this turn's trace).
       if (id && resultById.has(id) && calledIds.has(id)) continue
+      closeOpen()
       out.push({
         id: `db${r.id}`,
         role: 'tool',
@@ -816,17 +851,9 @@ export function buildMessages(
         result: c.id ? resultById.get(c.id) : undefined,
         subAgent: c.id ? subAgentById.get(c.id) : undefined,
       }))
-      out.push({
-        id: `db${r.id}`,
-        role: 'assistant',
-        content: r.content,
-        images: r.images ?? undefined,
-        toolCalls: calls,
-        implementsPlan:
-          pendingPlanText !== null
-            ? pendingPlanText
-            : undefined,
-      })
+      // A plan boundary always opens a fresh block; close the old one.
+      if (pendingPlanText !== null) closeOpen()
+      coalesce(r, calls)
       pendingPlanText = null
       for (const c of calls) {
         if (c.name !== 'exit_plan') continue
@@ -838,6 +865,14 @@ export function buildMessages(
       }
       continue
     }
+    if (r.role === 'assistant') {
+      if (pendingPlanText !== null) closeOpen()
+      coalesce(r)
+      pendingPlanText = null
+      continue
+    }
+    // User/system rows close the open turn block.
+    closeOpen()
     out.push({
       id: `db${r.id}`,
       role: r.role as Role,

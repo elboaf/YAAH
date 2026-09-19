@@ -7,6 +7,7 @@
 import { useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkBreaks from 'remark-breaks'
 import { highlightLine } from './codeview'
 
 // ---------------------------------------------------------------- code views
@@ -137,11 +138,13 @@ const components = {
   ),
 }
 
-/** Full markdown rendering for agent messages. */
+/** Full markdown rendering for agent messages. remark-breaks renders a
+ *  single \n as a line break (chat semantics) — the #17 emission separator
+ *  the stream writes is a bare \n and must stay visible. */
 export function AgentMarkdown({ content }: { content: string }) {
   return (
     <div className="space-y-1 break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={components}>
         {content}
       </ReactMarkdown>
     </div>
