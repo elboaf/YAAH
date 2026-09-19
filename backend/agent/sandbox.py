@@ -613,6 +613,31 @@ def _missing_command_hint(output: str) -> str | None:
     )
 
 
+def _ahk_hint(output: str) -> str | None:
+    """Nudge for in-VM GUI automation failures: AutoHotkey v2 is the
+    in-VM input layer (its input never touches the host), and the
+    background-input techniques have sharp edges that fail silently.
+    Fires on the output text, never the exit code."""
+    low = (output or "").lower()
+    if ("controlsend" not in low and "controlclick" not in low
+            and "autohotkey" not in low):
+        return None
+    return (
+        "AutoHotkey v2 is the in-VM GUI input layer (its input never "
+        "touches the host). Run scripts via Start-Process -Wait with "
+        "/ErrorStdOut — without it, script errors become modal dialogs "
+        "that hang the session. Background input needs explicit targets: "
+        "ControlClick 'x300 y200', hwnd, , 'Left', 1, 'NA' clicks a "
+        "background window without activating it; ControlSend keys, "
+        "'Edit1', hwnd types into a background window (window-level "
+        "ControlSend without a control target silently does nothing); "
+        "ControlGetText reads state. Never name a variable after an AHK "
+        "function (log, WinGetList). UIA-v2 "
+        "(github.com/Descolada/UIA-v2) adds UI Automation element "
+        "discovery + pattern actions to AHK."
+    )
+
+
 async def sandbox_run(workspace: str, command: str,
                       timeout_seconds: int = 120) -> dict:
     """Run one PowerShell command inside the live sandbox."""
@@ -632,6 +657,9 @@ async def sandbox_run(workspace: str, command: str,
     hint = _missing_command_hint(str(result.get("output") or ""))
     if hint:
         result["hint"] = hint
+    ahk = _ahk_hint(str(result.get("output") or ""))
+    if ahk:
+        result["hint"] = f"{result.get('hint', '')} {ahk}".strip()
     return result
 
 
@@ -677,6 +705,24 @@ def prompt_section() -> str:
         "write toolkit\\gitconfig containing '[safe]' + 'directory = *' "
         "and point GIT_CONFIG_GLOBAL at it (a toolkit\\bin\\git.cmd shim "
         "can set the variable before invoking the real git.exe).\n"
+        "- GUI automation inside the VM: AutoHotkey v2 is the in-VM "
+        "input layer — its input never touches the host (the VM has its "
+        "own input session; the host user is unaffected). Install once: "
+        "download the AutoHotkey zip from "
+        "https://www.autohotkey.com/download/2.0/ and expand to "
+        "toolkit\\ahk (persists to the host + future sandboxes). Run "
+        "scripts via Start-Process -Wait with /ErrorStdOut — WITHOUT "
+        "/ErrorStdOut, script errors become modal dialogs that hang the "
+        "session. Techniques (verified): ControlClick 'x300 y200', hwnd, "
+        ", 'Left', 1, 'NA' clicks a BACKGROUND window without activating "
+        "it; ControlSend keys, 'Edit1', hwnd types into a background "
+        "window but REQUIRES an explicit control target (window-level "
+        "ControlSend silently does nothing); ControlGetText reads state. "
+        "UIA-v2 (github.com/Descolada/UIA-v2) adds full UI Automation to "
+        "AHK for element discovery + pattern actions. AHK v2 traps: "
+        "never name a variable after a function (log, WinGetList fail "
+        "with 'This Func cannot be used as an output variable'); "
+        "ControlSend's signature is (Keys, Control, WinTitle).\n"
         "- If Windows Sandbox is not enabled in Windows, sandbox_test "
         "returns enablement instructions — relay them to the user.\n"
         "- Each sandbox_run round-trip costs ~1-3s of file polling: batch "
@@ -735,8 +781,12 @@ SANDBOX_TOOLS_SCHEMA = [
                 "into the toolkit (PATH inside the VM: toolkit, "
                 "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules"
                 "\\.bin; shim zipped tools' exe from toolkit\\bin\\<name>"
-                ".cmd). File-polling transport: each command costs ~1-3s "
-                "— batch work into fewer commands."
+                ".cmd). For GUI automation in the VM use AutoHotkey v2 "
+                "(in-VM input never touches the host): run via "
+                "Start-Process -Wait with /ErrorStdOut, and target "
+                "background windows with ControlClick 'NA' / ControlSend "
+                "with an explicit control. File-polling transport: each "
+                "command costs ~1-3s — batch work into fewer commands."
             ),
             "parameters": {
                 "type": "object",

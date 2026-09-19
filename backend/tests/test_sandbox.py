@@ -421,6 +421,27 @@ def test_tool_schema_carries_clean_image_knowledge(isolated):
         if t["function"]["name"] == "sandbox_run")
     assert "CLEAN WINDOWS IMAGE" in desc
     assert "toolkit\\bin" in desc
+    assert "AutoHotkey" in desc
+
+
+def test_prompt_section_carries_ahk_playbook(isolated):
+    """The AHK findings must transfer to clean installs: the prompt is the
+    only knowledge surface a binary install has."""
+    text = sb.prompt_section()
+    assert "AutoHotkey" in text
+    assert "/ErrorStdOut" in text
+    assert "ControlSend" in text
+    assert "UIA-v2" in text
+
+
+def test_ahk_hint_matches_real_failure_text():
+    """The hint keys on output text (exit codes stay 0 for cmdlet errors)."""
+    hint = sb._ahk_hint("ControlSend silently did nothing")
+    assert hint is not None
+    assert "/ErrorStdOut" in hint
+    assert "explicit" in hint.lower() or "Edit1" in hint
+    assert sb._ahk_hint("Get-Date") is None
+    assert sb._ahk_hint("") is None
 
 
 def test_missing_command_hint_matches_real_failure_text():
