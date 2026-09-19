@@ -251,6 +251,23 @@ Interview the user (ask_user tool):
 # Per-conversation cancellation flags checked between model/tool steps.
 _cancel_events: dict[int, asyncio.Event] = {}
 
+# Conversation ids with a turn in flight. A second concurrent run on the
+# same conversation would clobber its _cancel_events entry and interleave
+# two streams into one chat, so it is rejected.
+_running_convs: set[int] = set()
+
+
+def agent_is_running(conversation_id: int) -> bool:
+    return conversation_id in _running_convs
+
+
+def try_begin_run(conversation_id: int) -> bool:
+    """Atomically claim a conversation for a run; False if already claimed."""
+    if conversation_id in _running_convs:
+        return False
+    _running_convs.add(conversation_id)
+    return True
+
 # Pending ask_user calls: "conversation_id:call_id" -> Future carrying the
 # user's answer text. Resolved by the /answer API endpoint.
 _pending_answers: dict[str, asyncio.Future] = {}
@@ -700,6 +717,12 @@ async def run_agent(
     message is already stored and must not be duplicated."""
     # Persist the user message first (skipped on resume; the text still
     # reaches the model through the replayed history below).
+    if not try_begin_run(conversation_id):
+        yield _ndjson({
+            "type": "error",
+            "message": "a turn is already running in this conversation",
+        })
+        return
     if persist_user:
         await add_message(
             conversation_id, "user", user_text, images=image_paths or None
@@ -1181,3 +1204,4 @@ async def run_agent(
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
         _cancel_events.pop(conversation_id, None)
+        _running_convs.discard(conversation_id)

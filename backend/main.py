@@ -604,6 +604,13 @@ class ConfigUpdate(BaseModel):
 @app.post("/api/agent/{conversation_id}")
 async def api_agent_turn(conversation_id: int, body: AgentTurn):
     """Run one agent turn; stream JSON-line events."""
+    # One turn at a time per conversation: reject early so the UI can say so
+    # instead of interleaving two streams into one chat. (run_agent re-checks
+    # atomically in case of a race.)
+    from backend.agent.loop import agent_is_running
+
+    if agent_is_running(conversation_id):
+        raise HTTPException(status_code=409, detail="conversation already running")
     # Every turn runs in the workspace the UI has selected: remember it so the
     # sidebar restores the same folder after an app restart, and touch the
     # registry row so the dropdown/group order reflects recent activity.

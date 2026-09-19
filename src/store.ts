@@ -105,24 +105,34 @@ interface AgentState {
   messagesByConv: Record<string, ChatMessage[]>
   /** Key of the buffer on screen: conversationId ?? 'draft'. */
   bufferKey: () => string
-  status: AgentStatus
-  error: string | null
+  /**
+   * Per-conversation run status. Multiple chats can run at once (issue #10);
+   * everything that means "the run I'm looking at" derives from the on-screen
+   * conversation's entry via useStatus(). A stream writes its own
+   * conversation's entry, so a hidden turn never clobbers the visible one.
+   */
+  statusByConv: Record<string, AgentStatus>
+  setStatus: (key: string, s: AgentStatus) => void
+  /** Per-conversation stream/failed-send error (rendered by the owning chat). */
+  errorByConv: Record<string, string | null>
+  setError: (key: string, e: string | null) => void
   workspace: string
   log: LogEntry[]
   /** File currently open in the preview side panel (Q44). */
   previewPath: string | null
   setPreviewPath: (p: string | null) => void
 
-  /** Question the agent is currently waiting on (null = none). */
-  pendingQuestion: PendingQuestion | null
+  /** Question the agent is currently waiting on, per conversation (keyed by
+   *  convKey). Multiple chats can each have one waiting. */
+  pendingQuestions: Record<string, PendingQuestion>
   setPendingQuestion: (q: PendingQuestion | null | ((prev: PendingQuestion | null) => PendingQuestion | null)) => void
 
-  /** Tool call awaiting approve/deny under the access-mode gate. */
-  pendingApproval: PendingApproval | null
+  /** Tool call awaiting approve/deny under the access-mode gate, per conv. */
+  pendingApprovals: Record<string, PendingApproval>
   setPendingApproval: (a: PendingApproval | null | ((prev: PendingApproval | null) => PendingApproval | null)) => void
 
-  /** exit_plan call awaiting approve/revise under plan mode. */
-  pendingPlanApproval: PendingPlanApproval | null
+  /** exit_plan call awaiting approve/revise under plan mode, per conv. */
+  pendingPlanApprovals: Record<string, PendingPlanApproval>
   setPendingPlanApproval: (p: PendingPlanApproval | null | ((prev: PendingPlanApproval | null) => PendingPlanApproval | null)) => void
 
   /** Live copy of the configured access mode (loaded at startup, updated by
@@ -153,12 +163,12 @@ interface AgentState {
   /** First send of a new chat: re-key the live 'draft' buffer to the real
    * conversation id and follow it on screen, in one atomic update. */
   adoptDraft: (id: number) => void
-  setStatus: (s: AgentStatus) => void
-  setError: (e: string | null) => void
+  /** Abort controller per in-flight run, keyed by buffer key (issue #10:
+   *  several conversations can stream at once). */
+  abortByConv: Record<string, AbortController>
+  setAbortController: (key: string, c: AbortController | null) => void
   pushLog: (e: Omit<LogEntry, 'id' | 'time'>) => void
   clearLog: () => void
-  abortController: AbortController | null
-  setAbortController: (c: AbortController | null) => void
 
   appendUserMessage: (key: string, text: string, images?: string[], skills?: string[]) => string
   appendAssistantPlaceholder: (key: string) => string
@@ -215,6 +225,31 @@ interface AgentState {
 let nextId = 1
 const genId = () => `m${nextId++}`
 let nextLogId = 1
+
+/**
+ * Update one of the per-conversation pending-gate maps (ask_user question /
+ * access-mode approval / plan approval). Callers use the same shapes as
+ * before the multi-run change: an object (keyed by its convKey), null
+ * (clear all), or a reducer applied to each existing entry — a null return
+ * removes the entry, so the old `q && q.callId === x ? null : q` filters
+ * keep working unchanged.
+ */
+function applyPending<T extends { convKey: string }>(
+  map: Record<string, T>,
+  q: T | null | ((prev: T | null) => T | null),
+): Record<string, T> {
+  if (typeof q === 'function') {
+    const next = { ...map }
+    for (const k of Object.keys(next)) {
+      const r = q(next[k])
+      if (r === null || r === undefined) delete next[k]
+      else next[k] = r
+    }
+    return next
+  }
+  if (q === null) return {}
+  return { ...map, [q.convKey]: q }
+}
 
 const now = () =>
   new Date().toLocaleTimeString([], { hour12: false })
@@ -292,30 +327,25 @@ export const useAgent = create<AgentState>((set, get) => ({
     const id = get().conversationId
     return id === null ? 'draft' : String(id)
   },
-  status: 'idle',
-  error: null,
+  statusByConv: {},
+  setStatus: (key, status) =>
+    set((s) => ({ statusByConv: { ...s.statusByConv, [key]: status } })),
+  errorByConv: {},
+  setError: (key, error) =>
+    set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),
   log: [],
   previewPath: null,
   setPreviewPath: (previewPath) => set({ previewPath }),
-  pendingQuestion: null,
+  pendingQuestions: {},
   setPendingQuestion: (q) =>
-    set((s) => ({
-      pendingQuestion:
-        typeof q === 'function' ? q(s.pendingQuestion) : q,
-    })),
-  pendingApproval: null,
+    set((s) => ({ pendingQuestions: applyPending(s.pendingQuestions, q) })),
+  pendingApprovals: {},
   setPendingApproval: (a) =>
-    set((s) => ({
-      pendingApproval:
-        typeof a === 'function' ? a(s.pendingApproval) : a,
-    })),
-  pendingPlanApproval: null,
+    set((s) => ({ pendingApprovals: applyPending(s.pendingApprovals, a) })),
+  pendingPlanApprovals: {},
   setPendingPlanApproval: (p) =>
-    set((s) => ({
-      pendingPlanApproval:
-        typeof p === 'function' ? p(s.pendingPlanApproval) : p,
-    })),
+    set((s) => ({ pendingPlanApprovals: applyPending(s.pendingPlanApprovals, p) })),
   accessMode: 'ask',
   setAccessMode: (m) => set({ accessMode: m }),
 
@@ -350,11 +380,6 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({
       conversationId: null,
       messagesByConv: { ...s.messagesByConv, draft: [] },
-      status: 'idle',
-      error: null,
-      pendingQuestion: null,
-      pendingApproval: null,
-      pendingPlanApproval: null,
     }))
     persistConversationId(null)
   },
@@ -383,9 +408,6 @@ export const useAgent = create<AgentState>((set, get) => ({
     persistConversationId(id)
   },
 
-  setStatus: (status) => set({ status }),
-  setError: (error) => set({ error }),
-
   pushLog: (e) =>
     set((s) => ({
       log: [...s.log, { ...e, id: nextLogId++, time: now() }].slice(-200),
@@ -393,8 +415,14 @@ export const useAgent = create<AgentState>((set, get) => ({
 
   clearLog: () => set({ log: [] }),
 
-  abortController: null,
-  setAbortController: (c) => set({ abortController: c }),
+  abortByConv: {},
+  setAbortController: (key, c) =>
+    set((s) => {
+      const next = { ...s.abortByConv }
+      if (c === null) delete next[key]
+      else next[key] = c
+      return { abortByConv: next }
+    }),
 
   // ---- buffer mutation helpers ----
   // Every mutation takes an explicit buffer key: the send path captures its
@@ -706,13 +734,40 @@ export const useAgent = create<AgentState>((set, get) => ({
   },
 
   loadHistory: (convId, rows) =>
-    set((s) => ({
-      messagesByConv: {
-        ...s.messagesByConv,
-        [String(convId)]: buildMessages(rows),
-      },
-    })),
+    set((s) => {
+      const key = String(convId)
+      // A live run owns this buffer right now (issue #10): the in-flight
+      // message isn't persisted yet, so a wholesale reload would drop it and
+      // orphan every later delta. Skip — the live buffer is the truth.
+      const st = s.statusByConv[key]
+      if (st === 'thinking' || st === 'running-tool') return {}
+      return {
+        messagesByConv: {
+          ...s.messagesByConv,
+          [key]: buildMessages(rows),
+        },
+      }
+    }),
 }))
+
+/**
+ * The on-screen conversation's run status — the replacement for the old
+ * single global `status` now that several chats can run at once (issue #10).
+ */
+export function useStatus(): AgentStatus {
+  const key = useAgent(
+    (s) => (s.conversationId === null ? 'draft' : String(s.conversationId)),
+  )
+  return useAgent((s) => s.statusByConv[key] ?? 'idle')
+}
+
+/** The on-screen conversation's last stream/failed-send error, if any. */
+export function useError(): string | null {
+  const key = useAgent(
+    (s) => (s.conversationId === null ? 'draft' : String(s.conversationId)),
+  )
+  return useAgent((s) => s.errorByConv[key] ?? null)
+}
 
 /** Id of the last assistant message in a buffer — after a plan-approval
  *  split, turn-end writes ([stopped], sub-agent settle) belong to the tail,

@@ -351,6 +351,87 @@ async def test_agent_cancel(fake_model, tmp_path, monkeypatch):
     assert events[-1]["type"] == "stopped"
 
 
+# ---------------------------------------------------------------- concurrency
+
+@pytest.mark.asyncio
+async def test_second_run_same_conversation_rejected(fake_model, tmp_path):
+    """While a turn is in flight, a second run on the SAME conversation must
+    be refused (error event, no 'done') — two interleaved streams would
+    clobber each other's cancel event and message ordering."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-concurrent-same")
+    gate = asyncio.Event()
+
+    async def gated_chat(messages, tools=None, stream=True):
+        await gate.wait()  # hold the first run open until we release it
+        return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
+
+    original = loop.model_client.chat
+    loop.model_client.chat = gated_chat
+    try:
+        first = asyncio.create_task(collect(loop.run_agent(cid, "go", str(tmp_path))))
+        await asyncio.sleep(0.05)  # let the first run register + reach the model
+        assert loop.agent_is_running(cid)
+        second = await collect(loop.run_agent(cid, "again", str(tmp_path)))
+        assert second[-1]["type"] == "error"
+        assert "already running" in second[-1]["message"]
+        gate.set()
+        first_events = await first
+        assert first_events[-1]["type"] == "done"
+    finally:
+        loop.model_client.chat = original
+    assert not loop.agent_is_running(cid), "run must unregister in finally"
+
+
+@pytest.mark.asyncio
+async def test_two_conversations_run_concurrently(fake_model, tmp_path):
+    """Different conversations must not block each other: both turns
+    complete, each in its own stream."""
+    from backend.db.database import create_conversation
+
+    cids = [
+        await create_conversation("t-concurrent-a"),
+        await create_conversation("t-concurrent-b"),
+    ]
+    started = asyncio.Event()
+
+    async def slow_chat(messages, tools=None, stream=True):
+        if not started.is_set():
+            started.set()
+            await asyncio.sleep(0.1)  # first call stalls; second must proceed
+        return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
+
+    original = loop.model_client.chat
+    loop.model_client.chat = slow_chat
+    try:
+        results = await asyncio.gather(
+            collect(loop.run_agent(cids[0], "a", str(tmp_path))),
+            collect(loop.run_agent(cids[1], "b", str(tmp_path))),
+        )
+    finally:
+        loop.model_client.chat = original
+    for events in results:
+        assert events[-1]["type"] == "done"
+    for cid in cids:
+        assert not loop.agent_is_running(cid)
+
+
+@pytest.mark.asyncio
+async def test_try_begin_run_claim_semantics():
+    """try_begin_run claims once; the duplicate claim fails; discard resets."""
+    cid = 987654
+    loop._running_convs.discard(cid)  # isolation from other tests
+    try:
+        assert loop.try_begin_run(cid) is True
+        assert loop.agent_is_running(cid)
+        assert loop.try_begin_run(cid) is False
+        loop._running_convs.discard(cid)  # what run_agent's finally does
+        assert loop.try_begin_run(cid) is True
+    finally:
+        loop._running_convs.discard(cid)
+
+
 # ---------------------------------------------------------------- powershell
 
 import os
