@@ -2145,15 +2145,21 @@ function ConversationList() {
             deleteWorkspace(removeWsTarget.id)
               .then((r) => {
                 // If the open conversation was relocated, follow it to Default.
+                const moved =
+                  conversationId !== null &&
+                  !!convs.find(
+                    (c) => c.id === conversationId && c.workspace === removeWsTarget.path,
+                  )
                 if (conversationId !== null) {
                   getMessages(conversationId)
                     .then((rows) => loadHistory(conversationId, rows))
                     .catch(() => {})
-                  const moved = convs.find(
-                    (c) => c.id === conversationId && c.workspace === removeWsTarget.path,
-                  )
-                  if (moved) setWorkspace('')
                 }
+                // Removing the selected workspace clears the selection: keeping
+                // the stale path would re-persist it as last_workspace on the
+                // next turn, and the backend re-seeds the deleted row from
+                // that (issue #11).
+                if (moved || workspace === removeWsTarget.path) setWorkspace('')
                 refresh()
               })
               .catch((e) =>

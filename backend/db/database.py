@@ -35,6 +35,11 @@ DB_PATH = Path(
     or _default_data_dir() / "agent.db"
 )
 
+# migrate_workspaces seeds config.json's last_workspace into the registry once
+# per process (module global), not on every get_db() call — see the comment in
+# migrate_workspaces.
+_last_workspace_seeded = False
+
 
 def basename(path: str) -> str:
     """Display label for a workspace path (its final segment).
@@ -144,18 +149,26 @@ async def migrate_workspaces(db: aiosqlite.Connection):
         )
     # config.json's last_workspace (durable across a wiped DB) joins the
     # registry too, so the restored selection always exists in the dropdown.
-    from backend.agent.config import load_config
+    # This seed is ONCE PER PROCESS: migrate_workspaces runs on every get_db
+    # (i.e. every API call), and re-seeding per call resurrects a deleted
+    # workspace whenever config.json still names it — the mechanism behind
+    # issue #11. The durable case (restart) is covered by delete_workspace
+    # clearing last_workspace when its path is removed.
+    global _last_workspace_seeded
+    if not _last_workspace_seeded:
+        _last_workspace_seeded = True
+        from backend.agent.config import load_config
 
-    try:
-        last = (load_config().get("last_workspace") or "").strip()
-    except Exception:
-        last = ""
-    if last:
-        await db.execute(
-            "INSERT OR IGNORE INTO workspaces (path, label, last_opened_at) "
-            "VALUES (?, ?, datetime('now'))",
-            (last, basename(last)),
-        )
+        try:
+            last = (load_config().get("last_workspace") or "").strip()
+        except Exception:
+            last = ""
+        if last:
+            await db.execute(
+                "INSERT OR IGNORE INTO workspaces (path, label, last_opened_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (last, basename(last)),
+            )
     await db.commit()
 
 
@@ -269,6 +282,19 @@ async def delete_workspace(workspace_id: int) -> dict:
         relocated = cur.rowcount
         await db.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
         await db.commit()
+        # config.json's last_workspace is a registry seed source (migrate_workspaces
+        # re-inserts it on every get_db), so if it still names the deleted path the
+        # very next API call resurrects the deleted row (issue #11). Forget it.
+        # Case-folded compare: the registry dedupes paths case-insensitively
+        # (upsert_workspace), so C:\Proj and c:\proj are the same workspace.
+        from backend.agent.config import load_config, save_config
+
+        try:
+            last = (load_config().get("last_workspace") or "").strip()
+            if last.casefold() == (ws["path"] or "").strip().casefold():
+                save_config({"last_workspace": ""})
+        except OSError:
+            pass
         return {"relocated": relocated}
     finally:
         await db.close()
