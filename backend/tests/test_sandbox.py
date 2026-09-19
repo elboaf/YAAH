@@ -530,5 +530,5 @@ def test_system_prompt_offers_sandbox_tools_locally(isolated, monkeypatch):
                         lambda: {"access_mode": "full"})
     prompt = loop_mod._default_system_prompt("C:\\proj")
     assert "sandbox_test" in prompt
-    assert "# Windows Sandbox (live verification)" in prompt
+    assert "# Windows Sandbox (the default place to run things)" in prompt
     assert "persistent dev toolkit" in prompt

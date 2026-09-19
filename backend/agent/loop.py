@@ -170,7 +170,7 @@ def _default_system_prompt(workspace: str = "") -> str:
 
             tools += [
                 "sandbox_test (boot/reuse a disposable Windows Sandbox VM "
-                "for live verification of the workspace's app)",
+                "— the default place to run the workspace's app/tests)",
                 "sandbox_run (run a command inside that VM)",
                 "sandbox_status", "sandbox_stop",
             ]
@@ -193,10 +193,13 @@ Guidelines:
 - Explore before acting: use search_files and read files before editing.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
-- Verify your work: run tests/builds via bash (or powershell for Windows-native
-  tasks: registry, services, WMI) after changes when possible. Size the
-  timeout to the command; a full test suite that takes minutes needs a
-  large timeout_seconds or chunked runs (per directory/file), not retries.
+- Verify your work INSIDE the sandbox: run the workspace's app, tests and
+  builds via sandbox_run (boot it with sandbox_test first) — not on the
+  host. Host bash/powershell are for file ops, git, and non-executing
+  checks. Size the timeout to the command; a full test suite that takes
+  minutes needs a large timeout_seconds or chunked runs (per
+  directory/file), not retries. The VM is a clean image: install missing
+  tools into the toolkit (installs persist across sandboxes).
 - If a full-suite verification fails, separate YOUR change from the
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists

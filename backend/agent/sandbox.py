@@ -1,6 +1,7 @@
 """Windows Sandbox integration: disposable test VMs + a persistent toolkit.
 
-The model calls `sandbox_test` when live verification beats code review:
+The model calls `sandbox_test` to run the workspace's app, tests and
+builds inside a disposable VM (the default place to run things):
 run the workspace's app, reproduce a bug, exercise real behavior. That
 starts (or reuses) a Windows Sandbox VM built from a generated `.wsb`
 config that maps three host folders in:
@@ -582,7 +583,7 @@ def stop_sync() -> dict:
 # ---------------------------------------------------------------- executors
 
 async def sandbox_test(workspace: str, timeout_seconds: int = None) -> dict:
-    """Start or reuse the sandbox for live verification (model entry point)."""
+    """Start or reuse the sandbox (model entry point)."""
     if timeout_seconds is not None:
         try:
             int(timeout_seconds)
@@ -675,12 +676,12 @@ async def sandbox_stop(workspace: str) -> dict:
 
 def prompt_section() -> str:
     return (
-        "# Windows Sandbox (live verification)\n\n"
-        "- When code review alone would verify behavior less effectively "
-        "than running it — reproduce a bug, run the workspace's app, "
-        "exercise real UI/API behavior — use `sandbox_test` to boot a "
-        "disposable Windows Sandbox VM, then `sandbox_run` to execute "
-        "PowerShell commands inside it. `sandbox_status` reports state; "
+        "# Windows Sandbox (the default place to run things)\n\n"
+        "- Run the workspace's app, tests and builds INSIDE the sandbox: "
+        "boot it with `sandbox_test`, then `sandbox_run` to execute "
+        "PowerShell commands inside it. Host bash/powershell are for "
+        "file ops, git, and non-executing checks — not for running the "
+        "workspace's code. `sandbox_status` reports state; "
         "`sandbox_stop` disposes it.\n"
         "- The sandbox maps the workspace at C:\\Users\\WDAGUtilityAccount"
         "\\Desktop\\ws (your sandbox cwd) and the persistent dev toolkit "
@@ -744,12 +745,12 @@ SANDBOX_TOOLS_SCHEMA = [
         "function": {
             "name": "sandbox_test",
             "description": (
-                "Start (or reuse) a disposable Windows Sandbox VM for live "
-                "verification of the workspace's application: run it, "
-                "reproduce bugs, exercise real behavior when code review "
-                "alone would be less effective. Prompts the user in ask "
-                "mode. Returns once the sandbox is ready (first boot is a "
-                "slow cold start)."
+                "Start (or reuse) a disposable Windows Sandbox VM — the "
+                "default place to run the workspace's app, tests and "
+                "builds (host bash/powershell are for file ops, git and "
+                "non-executing checks). Prompts the user in ask mode. "
+                "Returns once the sandbox is ready (first boot is a slow "
+                "cold start)."
             ),
             "parameters": {
                 "type": "object",
