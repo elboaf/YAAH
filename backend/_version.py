@@ -6,4 +6,4 @@ stopped tracking releases (every /api/remote/info reported 0.7.9 for ten
 versions); it lives here so the bump can't miss it again.
 """
 
-__version__ = "0.18.2"
+__version__ = "0.18.3"
