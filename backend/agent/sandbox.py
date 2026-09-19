@@ -591,6 +591,28 @@ async def sandbox_test(workspace: str, timeout_seconds: int = None) -> dict:
     return await asyncio.to_thread(start_sync, workspace)
 
 
+def _missing_command_hint(output: str) -> str | None:
+    """Nudge for the guaranteed first-contact failure: the VM is a clean
+    Windows image, so the first git/python/node call throws
+    CommandNotFoundException — and, because PowerShell exit codes only
+    reflect native commands, it arrives with exit_code 0. Fires on the
+    output text, never the exit code."""
+    low = (output or "").lower()
+    if ("is not recognized as the name of a cmdlet" not in low
+            and "commandnotfoundexception" not in low):
+        return None
+    return (
+        "a command is missing inside the VM: it is a clean Windows "
+        "image and host tools do not propagate. Install it into the "
+        "toolkit, which persists to the host and is inherited by every "
+        "future sandbox. On PATH inside the VM: toolkit, toolkit\\bin, "
+        "toolkit\\Scripts, toolkit\\node_modules\\.bin. For a zipped "
+        "tool: expand into toolkit\\<name>, then shim its exe from "
+        "toolkit\\bin\\<name>.cmd when the archive has no bin-layout "
+        "entry point."
+    )
+
+
 async def sandbox_run(workspace: str, command: str,
                       timeout_seconds: int = 120) -> dict:
     """Run one PowerShell command inside the live sandbox."""
@@ -607,6 +629,9 @@ async def sandbox_run(workspace: str, command: str,
             "batch commands where you can: each sandbox round-trip costs "
             "~1-3s of file polling",
         )
+    hint = _missing_command_hint(str(result.get("output") or ""))
+    if hint:
+        result["hint"] = hint
     return result
 
 
@@ -636,6 +661,22 @@ def prompt_section() -> str:
         "sandbox (into the toolkit) are inherited by every future "
         "sandbox, so add missing dev tools there instead of skipping a "
         "verification step.\n"
+        "- The VM is a CLEAN WINDOWS IMAGE: git, python, node and other "
+        "dev tools are NOT preinstalled — expect 'is not recognized as "
+        "the name of a cmdlet' on first use. Install what you need into "
+        "the toolkit (see above) rather than concluding the task cannot "
+        "be verified.\n"
+        "- Toolkit dirs prepended to PATH inside the VM: toolkit, "
+        "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules\\.bin. For "
+        "a zipped tool: expand into toolkit\\<name>, then drop a .cmd "
+        "shim into toolkit\\bin when the archive has no bin-layout exe "
+        "(e.g. MinGit ships cmd\\git.exe, so bin\\git.cmd calls "
+        "..\\mingit\\cmd\\git.exe).\n"
+        "- git against the mapped workspace fails with 'dubious "
+        "ownership' (host SID vs VM user). Fix it once, permanently: "
+        "write toolkit\\gitconfig containing '[safe]' + 'directory = *' "
+        "and point GIT_CONFIG_GLOBAL at it (a toolkit\\bin\\git.cmd shim "
+        "can set the variable before invoking the real git.exe).\n"
         "- If Windows Sandbox is not enabled in Windows, sandbox_test "
         "returns enablement instructions — relay them to the user.\n"
         "- Each sandbox_run round-trip costs ~1-3s of file polling: batch "
@@ -688,8 +729,14 @@ SANDBOX_TOOLS_SCHEMA = [
                 "C:\\Users\\WDAGUtilityAccount\\Desktop\\ws (the sandbox "
                 "cwd) and the persistent dev toolkit at ...\\Desktop\\"
                 "toolkit (on PATH; installs there persist to the host and "
-                "every future sandbox). File-polling transport: each "
-                "command costs ~1-3s — batch work into fewer commands."
+                "every future sandbox). The VM is a CLEAN WINDOWS IMAGE: "
+                "git/python/node are not preinstalled — on 'is not "
+                "recognized as the name of a cmdlet', install the tool "
+                "into the toolkit (PATH inside the VM: toolkit, "
+                "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules"
+                "\\.bin; shim zipped tools' exe from toolkit\\bin\\<name>"
+                ".cmd). File-polling transport: each command costs ~1-3s "
+                "— batch work into fewer commands."
             ),
             "parameters": {
                 "type": "object",

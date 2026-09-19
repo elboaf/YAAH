@@ -400,6 +400,64 @@ def test_prompt_section_mentions_toolkit_and_gates(isolated):
     assert "ask mode" in text
 
 
+def test_prompt_section_carries_clean_image_knowledge(isolated):
+    """A clean yaah install has no yaah source to read: the prompt section
+    is the only place the model learns the VM is a bare image, where
+    toolkit-installed tools land on PATH, and how to shim zipped tools."""
+    text = sb.prompt_section()
+    assert "CLEAN WINDOWS IMAGE" in text
+    assert "toolkit\\bin" in text
+    assert "toolkit\\Scripts" in text
+    assert "dubious ownership" in text
+    assert "GIT_CONFIG_GLOBAL" in text
+
+
+def test_tool_schema_carries_clean_image_knowledge(isolated):
+    """Same constraint for the tool definitions: sandbox_run's description
+    must survive without source access."""
+    desc = next(
+        t["function"]["description"]
+        for t in sb.SANDBOX_TOOLS_SCHEMA
+        if t["function"]["name"] == "sandbox_run")
+    assert "CLEAN WINDOWS IMAGE" in desc
+    assert "toolkit\\bin" in desc
+
+
+def test_missing_command_hint_matches_real_failure_text():
+    """The real failure (observed live): CommandNotFoundException renders as
+    'X is not recognized as the name of a cmdlet' and arrives with
+    exit_code 0 — so the hint must key on output text, never exit code."""
+    real = ("git : The term 'git' is not recognized as the name of a "
+            "cmdlet, function, script file, or operable program. Check "
+            "the spelling of the name...")
+    hint = sb._missing_command_hint(real)
+    assert hint is not None
+    assert "toolkit" in hint
+    assert "persists" in hint
+    assert sb._missing_command_hint("CommandNotFoundException") is not None
+    assert sb._missing_command_hint("git version 2.55.0") is None
+    assert sb._missing_command_hint("") is None
+
+
+def test_sandbox_run_attaches_missing_command_hint(isolated, monkeypatch):
+    # run_sync is sync (the executor wraps it in to_thread), so the fake
+    # must be a plain function too.
+    def fake_run_sync(command, timeout):
+        return {"exit_code": 0, "timed_out": False,
+                "output": "python : The term 'python' is not recognized "
+                          "as the name of a cmdlet"}
+    monkeypatch.setattr(sb, "run_sync", fake_run_sync)
+    result = asyncio.run(sb.sandbox_run("C:\\proj", "python --version", 10))
+    assert "clean Windows image" in result["hint"]
+    assert result["exit_code"] == 0
+
+    def fake_run_sync_ok(command, timeout):
+        return {"exit_code": 0, "timed_out": False, "output": "ok"}
+    monkeypatch.setattr(sb, "run_sync", fake_run_sync_ok)
+    result = asyncio.run(sb.sandbox_run("C:\\proj", "Get-Date", 10))
+    assert "hint" not in result
+
+
 def test_status_shape(isolated, monkeypatch):
     monkeypatch.setattr(sb.config_mod, "load_config",
                         lambda: {"sandbox": {}})
