@@ -639,6 +639,24 @@ def _ahk_hint(output: str) -> str | None:
     )
 
 
+def _dialog_stall_hint(output: str, timed_out: bool) -> str | None:
+    """Nudge for the installer-dialog stall: an interactive installer run
+    unattended blocks on a permission dialog until the command times out
+    with no output. Fires on the timeout flag + empty output."""
+    if not timed_out or (output or "").strip():
+        return None
+    return (
+        "the command timed out with no output — likely an interactive "
+        "installer or command waiting on a dialog. Kill it (taskkill "
+        "/IM <name> /F), then redo it SILENTLY: python installer "
+        "'/quiet InstallAllUsers=1 PrependPath=1', 'msiexec /qn', "
+        "'winget install --silent', or use a zip/portable distribution "
+        "with no installer. Never run interactive installers unattended. "
+        "If a dialog is unavoidable, write a small AHK watcher (WinWait "
+        "loop clicking the accept button) instead of babysitting."
+    )
+
+
 async def sandbox_run(workspace: str, command: str,
                       timeout_seconds: int = 120) -> dict:
     """Run one PowerShell command inside the live sandbox."""
@@ -661,6 +679,10 @@ async def sandbox_run(workspace: str, command: str,
     ahk = _ahk_hint(str(result.get("output") or ""))
     if ahk:
         result["hint"] = f"{result.get('hint', '')} {ahk}".strip()
+    stall = _dialog_stall_hint(str(result.get("output") or ""),
+                               bool(result.get("timed_out")))
+    if stall:
+        result["hint"] = f"{result.get('hint', '')} {stall}".strip()
     return result
 
 
@@ -695,6 +717,16 @@ def prompt_section() -> str:
         "the name of a cmdlet' on first use. Install what you need into "
         "the toolkit (see above) rather than concluding the task cannot "
         "be verified.\n"
+        "- NEVER run interactive installers unattended — they stall the "
+        "session on a permission dialog. Use silent flags: python "
+        "installer '/quiet InstallAllUsers=1 PrependPath=1', 'msiexec "
+        "/qn', 'winget install --silent', or prefer zip/portable "
+        "distributions (no installer at all). If a command times out "
+        "with no output, assume a dialog stall: kill the process "
+        "(taskkill /IM <name> /F) and redo it silently. If a dialog is "
+        "truly unavoidable, write a small AHK watcher on demand (a "
+        "WinWait loop that clicks the accept button) instead of "
+        "babysitting the screen.\n"
         "- Toolkit dirs prepended to PATH inside the VM: toolkit, "
         "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules\\.bin. For "
         "a zipped tool: expand into toolkit\\<name>, then drop a .cmd "

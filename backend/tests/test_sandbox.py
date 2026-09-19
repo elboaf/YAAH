@@ -444,6 +444,29 @@ def test_ahk_hint_matches_real_failure_text():
     assert sb._ahk_hint("") is None
 
 
+def test_dialog_stall_hint_fires_on_timeout_with_no_output():
+    """The real stall signature: an unattended interactive installer blocks
+    on a dialog until the command times out with nothing on stdout."""
+    hint = sb._dialog_stall_hint("", True)
+    assert hint is not None
+    assert "/quiet" in hint
+    assert "taskkill" in hint
+    # output present = not a dialog stall (the command was working)
+    assert sb._dialog_stall_hint("Installing...", True) is None
+    # timed out but produced output = not a stall
+    assert sb._dialog_stall_hint("progress 50%", True) is None
+    # no timeout = not a stall
+    assert sb._dialog_stall_hint("", False) is None
+
+
+def test_prompt_section_carries_silent_install_rule(isolated):
+    """The installer-stall lesson must transfer to clean installs."""
+    text = sb.prompt_section()
+    assert "NEVER run interactive installers unattended" in text
+    assert "/quiet" in text
+    assert "--silent" in text
+
+
 def test_missing_command_hint_matches_real_failure_text():
     """The real failure (observed live): CommandNotFoundException renders as
     'X is not recognized as the name of a cmdlet' and arrives with
