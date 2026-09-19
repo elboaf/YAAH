@@ -2197,15 +2197,15 @@ function ConversationRow({
   return (
     <div className="group relative flex items-center">
       <button
-        className={`min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-xs ${
+        className={`flex min-w-0 flex-1 items-center rounded px-2 py-1.5 text-left text-xs ${
           active ? 'bg-blue-600 text-white' : 'text-zinc-300 hover:bg-zinc-800'
         }`}
         onClick={onOpen}
         title={conv.title}
       >
-        {conv.title}
+        <span className="min-w-0 flex-1 truncate">{conv.title}</span>
         <span
-          className={`ml-1.5 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
+          className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
         >
           {relTime(conv.updated_at)}
         </span>
