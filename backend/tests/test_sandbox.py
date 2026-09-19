@@ -100,6 +100,10 @@ def test_bootstrap_signals_ready_and_batches(isolated, monkeypatch):
     # (Set-Location alone does not move the process cwd)
     assert "[Environment]::CurrentDirectory = $cwd" in script
     assert "$psi.WorkingDirectory = $cwd" in script
+    # firewall off at boot, before the ready marker: a Defender allow
+    # dialog on a listening port would stall the session otherwise
+    assert "netsh advfirewall set allprofiles state off" in script
+    assert script.index("netsh advfirewall") < script.index("yaah-sandbox-ready")
 
 
 # ---------------------------------------------------------------- config
@@ -465,6 +469,12 @@ def test_prompt_section_carries_silent_install_rule(isolated):
     assert "NEVER run interactive installers unattended" in text
     assert "/quiet" in text
     assert "--silent" in text
+
+
+def test_prompt_section_documents_firewall_disable(isolated):
+    """Why listening ports never pop the Defender allow dialog."""
+    text = sb.prompt_section()
+    assert "firewall is disabled at boot" in text
 
 
 def test_missing_command_hint_matches_real_failure_text():

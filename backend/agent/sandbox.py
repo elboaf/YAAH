@@ -206,6 +206,12 @@ param([string]$ScriptPath)
 & $ScriptPath
 if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}
 '@, [System.Text.Encoding]::UTF8)
+# The VM is disposable and sits behind the host's NAT — nothing inside it
+# is worth protecting, and the Defender allow-dialog for a freshly bound
+# port would stall the session exactly like an installer wizard. The
+# sandbox user is admin without UAC, so this needs no elevation
+# (verified live: all three profiles go OFF, exit 0).
+netsh advfirewall set allprofiles state off | Out-Null
 "[$(Get-Date -Format o)] yaah-sandbox-ready" | Out-File -FilePath "$dir\\init.log" -Encoding utf8
 while ($true) {{
   $pending = Get-ChildItem -Path $dir -Filter 'cmd.*.ps1' -ErrorAction SilentlyContinue |
@@ -758,6 +764,10 @@ def prompt_section() -> str:
         "ControlSend's signature is (Keys, Control, WinTitle).\n"
         "- If Windows Sandbox is not enabled in Windows, sandbox_test "
         "returns enablement instructions — relay them to the user.\n"
+        "- The VM's Defender firewall is disabled at boot by the "
+        "bootstrap (the VM is disposable and behind the host's NAT), so "
+        "listening ports never trigger the Windows Security Alert "
+        "dialog.\n"
         "- Each sandbox_run round-trip costs ~1-3s of file polling: batch "
         "commands. The access-mode gate still applies: sandbox_test "
         "prompts in ask mode and sandbox_run is gated like bash."
