@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -443,6 +444,219 @@ async fn pick_workspace(app: tauri::AppHandle) -> Result<String, String> {
         .ok_or_else(|| "no folder selected".to_string())
 }
 
+// ---------------------------------------------------------------- update (#16)
+
+/// Download size cap for the installer. The desktop setup exe is ~110-240MB
+/// today; the cap exists so a bad CDN response can't fill the disk.
+const MAX_INSTALLER_BYTES: u64 = 700 * 1024 * 1024;
+
+/// Progress event piped into the webview as the `update-progress`
+/// CustomEvent, emitted from the download thread (mirrors
+/// emit_backend_status's eval dispatch).
+///   state: "downloading" (received/total bytes) | "done" (path) | "error" (message)
+fn emit_update_progress(app: &tauri::AppHandle, payload: serde_json::Value) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.eval(&format!(
+            "window.dispatchEvent(new CustomEvent('update-progress', {{detail: {}}}))",
+            payload
+        ));
+    }
+}
+
+/// In-app update (#16): download the latest desktop installer to a temp dir
+/// with progress events. The actual handoff is `prepare_update` — this only
+/// fetches the file so the download can happen while the UI stays up.
+#[tauri::command]
+async fn download_installer(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    // Filenames are sanitized: we only ever pass our own release asset URLs,
+    // but a hostile value here must not escape the temp dir on write.
+    let fname = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("yaah-desktop-setup.exe")
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("yaah-desktop-setup.exe")
+        .to_string();
+    let safe = fname
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !safe || fname.contains("..") {
+        return Err(format!("unusable installer filename: {fname}"));
+    }
+    let dest_dir = std::env::temp_dir().join("yaah-update");
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(&fname);
+    let dest_str = dest.display().to_string();
+    // The thread reports completion with the path; the command returns it
+    // too, so the closure gets its own copy.
+    let dest_for_thread = dest_str.clone();
+
+    // Blocking download on its own thread, progress via events. Returns the
+    // destination immediately; completion/failure arrives as an
+    // update-progress event ("done" / "error") so the chip can animate
+    // without holding the invoke open for minutes.
+    let url2 = url.clone();
+    std::thread::spawn(move || {
+        let emit = |received: u64, total: u64| {
+            emit_update_progress(
+                &app,
+                serde_json::json!({ "state": "downloading", "received": received, "total": total }),
+            );
+        };
+        match run_download(&url2, &dest, emit) {
+            Ok(()) => emit_update_progress(
+                &app,
+                serde_json::json!({ "state": "done", "path": dest_for_thread }),
+            ),
+            Err(e) => {
+                emit_update_progress(
+                    &app,
+                    serde_json::json!({ "state": "error", "message": e }),
+                );
+            }
+        }
+    });
+    Ok(dest_str)
+}
+
+/// Streaming GET to `dest` with periodic progress. Uses a 64KB buffer and
+/// reports every ~5% (or 5MB, whichever first) to keep events cheap.
+fn run_download(
+    url: &str,
+    dest: &std::path::Path,
+    notify: impl Fn(u64, u64),
+) -> Result<(), String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(300))
+        .build();
+    let res = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("download failed: {e}"))?;
+    if res.status() != 200 {
+        return Err(format!("download failed: HTTP {}", res.status()));
+    }
+    let total: u64 = res
+        .header("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut reader = res.into_reader();
+    let mut file = std::fs::File::create(dest)
+        .map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut received: u64 = 0;
+    let mut last_sent: u64 = 0;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("download interrupted: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        received += n as u64;
+        if received > MAX_INSTALLER_BYTES {
+            let _ = std::fs::remove_file(dest);
+            return Err("download exceeded size cap".to_string());
+        }
+        file.write_all(&buf[..n])
+            .map_err(|e| format!("write failed: {e}"))?;
+        // First event immediately (total may be 0 until headers land), then
+        // at most every 5MB or 5% of total.
+        let step = if total > 0 { total / 20 } else { 5 * 1024 * 1024 };
+        if received - last_sent >= step.max(1) {
+            last_sent = received;
+            notify(received, total);
+        }
+    }
+    if total > 0 && received != total {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!("incomplete download: {received}/{total} bytes"));
+    }
+    notify(received, total);
+    Ok(())
+}
+
+/// Prepare the handoff: copy the update shim out of the install dir into a
+/// temp dir (so the installer can replace it), then spawn it detached with
+/// the app's PID. The caller destroys the window right after this returns —
+/// the shim waits for that exit before running the installer.
+#[tauri::command]
+fn prepare_update(_app: tauri::AppHandle, installer_path: String) -> Result<(), String> {
+    if !std::path::Path::new(&installer_path).is_file() {
+        return Err(format!("installer not found: {installer_path}"));
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or("no exe dir")?.to_path_buf();
+    // The shim rides externalBin next to the app exe (staged by
+    // build_sidecar.sh for both dev and packaged builds). Missing = the
+    // build script was never run; block cleanly so the UI can say so.
+    let names = ["yaah-update-shim.exe", "yaah-update-shim"];
+    let Some(src) = names.iter().map(|n| dir.join(n)).find(|p| p.is_file()) else {
+        return Err("update shim not installed (dev build?)".to_string());
+    };
+    let stage = std::env::temp_dir().join("yaah-update");
+    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    let staged = stage.join("yaah-update-shim.exe");
+    std::fs::copy(&src, &staged).map_err(|e| format!("shim stage failed: {e}"))?;
+
+    // Detached + windowless: the shim must outlive the app and never flash
+    // a console during the handoff.
+    let mut cmd = std::process::Command::new(&staged);
+    cmd.args([
+        "--pid",
+        &std::process::id().to_string(),
+        "--installer",
+        &installer_path,
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    cmd.spawn().map_err(|e| format!("shim spawn failed: {e}"))?;
+    Ok(())
+}
+
+/// Linux (and any non-Windows OS) has no interactive-installer handoff in
+/// this iteration: the chip opens the releases page instead.
+#[tauri::command]
+fn open_releases_page(_app: tauri::AppHandle, url: String) -> Result<(), String> {
+    // Only our own releases URL is ever passed, but hard-gate the scheme.
+    if !url.starts_with("https://github.com/") {
+        return Err("refusing to open non-github url".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", &url])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 mod linux_media;
 
@@ -476,7 +690,13 @@ pub fn run() {
             linux_media::enable_microphone_access(app.handle());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pick_workspace, restart_backend])
+        .invoke_handler(tauri::generate_handler![
+            pick_workspace,
+            restart_backend,
+            download_installer,
+            prepare_update,
+            open_releases_page
+        ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let shared = window.app_handle().state::<Arc<BackendShared>>();

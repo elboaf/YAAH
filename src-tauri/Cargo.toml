@@ -24,6 +24,9 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
+# Installer download for in-app update (#16). Rustls: no OpenSSL linkage on
+# the Linux build; the default-tls variant would drag in native-tls.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # must stay version-compatible with the webkit2gtk tauri/wry pull in (~2.x)

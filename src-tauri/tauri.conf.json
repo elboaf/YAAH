@@ -39,7 +39,8 @@
       "../backend/bundled_skills/**/*"
     ],
     "externalBin": [
-      "binaries/backend"
+      "binaries/backend",
+      "binaries/yaah-update-shim"
     ],
     "linux": {
       "deb": {

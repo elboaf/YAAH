@@ -1,0 +1,18 @@
+[package]
+name = "yaah-update-shim"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone crate (NOT a workspace member of src-tauri) so staging it never
+# compiles the Tauri app: the shim is deliberately std-only, and building it
+# must not pull webkit/tauri or require any system libraries. release.yml and
+# test-build.yml call scripts/build_sidecar.sh, which builds this first.
+
+[[bin]]
+name = "yaah-update-shim"
+path = "src/main.rs"
+
+[profile.release]
+# Tiny, fast-to-build binary; panic messages go to stderr for diagnosis.
+panic = "abort"
+strip = true

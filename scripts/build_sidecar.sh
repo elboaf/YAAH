@@ -43,6 +43,19 @@ mkdir -p src-tauri/binaries
 cp "dist/backend$EXE" "src-tauri/binaries/backend-$TRIPLE$EXE"
 echo "sidecar: src-tauri/binaries/backend-$TRIPLE$EXE"
 
+# ---- update handoff shim (#16) ----
+# Std-only Rust binary spawned by the `prepare_update` command: it survives
+# the app closing, waits for the app PID + backend port to go away, then
+# runs the downloaded installer. Built from its own crate (src-tauri/shim)
+# with the toolchain the Tauri build fetched anyway — building it must not
+# compile the whole Tauri app. Staged next to the backend sidecar so
+# tauri.conf.json's externalBin ships it; `tauri dev` gets it too, so the
+# full handoff is exercisable locally.
+echo "building update shim"
+(cd src-tauri/shim && cargo build --release)
+cp "src-tauri/shim/target/release/yaah-update-shim$EXE" "src-tauri/binaries/yaah-update-shim$EXE"
+echo "update shim: src-tauri/binaries/yaah-update-shim$EXE"
+
 # ---- voice dictation: whisper.cpp CLI + pre-packaged ggml model ----
 # Built from source for every target and staged under backend/whisper/, which tauri.conf.json
 # ships as resources so it lands next to the bundled backend/*.py files.

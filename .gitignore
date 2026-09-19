@@ -32,3 +32,5 @@ backend/data/models/
 .impeccable/
 .zcode/
 README-server.txt
+# update shim build artifacts (#16)
+src-tauri/shim/target/

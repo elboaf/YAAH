@@ -57,6 +57,7 @@ import {
   type WorkspaceRow,
 } from './api'
 import { lastAssistantId, useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { useUpdateCheck } from './update'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
@@ -2256,6 +2257,41 @@ function ConversationRow({
   )
 }
 
+// ---------------------------------------------------------------- update chip (#16)
+
+/** Sidebar "update available" chip: check-for-update runs inside the hook
+ *  (on mount + every 6h, silent on failure). Clicking downloads the
+ *  installer via Rust, then hands off to the shim and closes the app —
+ *  the chip's last visible state is "installing…". */
+function UpdateChip() {
+  const { update, phase, progress, error, install } = useUpdateCheck()
+  if (phase === 'idle' || !update) return null
+  const pct = Math.round(progress * 100)
+  const label =
+    phase === 'ready'
+      ? `⬆ update to v${update.version}`
+      : phase === 'downloading'
+        ? `downloading ${pct}%`
+        : phase === 'installing'
+          ? 'installing… YAAH will close'
+          : 'update failed — click to retry'
+  return (
+    <button
+      className="mb-2 w-full overflow-hidden rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 text-left font-mono text-[10px] text-amber-300 hover:border-amber-500 disabled:opacity-60"
+      onClick={() => install()}
+      disabled={phase === 'downloading' || phase === 'installing'}
+      title={phase === 'error' && error ? `Update failed: ${error}` : `Install YAAH v${update.version} (github.com/elboaf/YAAH/releases/latest)`}
+    >
+      <span className="block truncate">{label}</span>
+      {phase === 'downloading' && (
+        <span className="mt-0.5 block h-0.5 w-full rounded bg-zinc-700">
+          <span className="block h-0.5 rounded bg-amber-500" style={{ width: `${pct}%` }} />
+        </span>
+      )}
+    </button>
+  )
+}
+
 export function Sidebar() {
   const { newConversation, workspace, setWorkspace, clearLog } = useAgent()
   const [model, setModel] = useState('...')
@@ -2377,6 +2413,7 @@ export function Sidebar() {
           + New chat
         </button>
         <ConversationList />
+        <UpdateChip />
         {/* Add workspace: a persistent, labeled action row — the affordance
             the old dropdown buried as a pseudo-option. */}
         <button
