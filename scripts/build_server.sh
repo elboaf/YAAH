@@ -16,6 +16,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# package.json is the one file a release bumps; re-derive the backend's
+# version from it (same as build_sidecar.sh) so /api/remote/info reports
+# the real version of the server that shipped.
+python scripts/sync_version.py
+
 pip install -r requirements.txt -r requirements-build.txt
 
 EXE=""

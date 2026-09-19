@@ -8,9 +8,10 @@ name: Tag on bump
 # other workflows (GitHub's recursion guard), so relying on release.yml's
 # `push: tags:` trigger would silently produce a tag with no release.
 #
-# Guards: fails the build if backend/_version.py or src-tauri/tauri.conf.json
-# disagree with package.json, and no-ops (release skipped) if the tag already
-# exists.
+# Version flow: package.json is the ONE file a release bumps. The Tauri app
+# reads its version from it (tauri.conf.json: "version": "../package.json")
+# and the PyInstaller builds regenerate backend/_version.py from it
+# (scripts/sync_version.py), so there is nothing else to keep in sync.
 
 on:
   push:
@@ -34,20 +35,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read canonical version + cross-check the others
+      - name: Read canonical version
         id: version
         run: |
           version="$(node -p "require('./package.json').version")"
           tag="v$version"
-          py="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' backend/_version.py)"
-          conf="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          echo "package.json=$version backend/_version.py=$py tauri.conf.json=$conf"
-          if [ -z "$py" ] || [ -z "$conf" ]; then
-            echo "::error::could not parse a version from backend/_version.py ('$py') or src-tauri/tauri.conf.json ('$conf')"
-            exit 1
-          fi
-          if [ "$version" != "$py" ] || [ "$version" != "$conf" ]; then
-            echo "::error::version drift — package.json ($version) is canonical: bump backend/_version.py ($py) and src-tauri/tauri.conf.json ($conf) to match"
+          echo "package.json=$version"
+          if [ -z "$version" ]; then
+            echo "::error::could not parse a version from package.json"
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -58,7 +53,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "$TAG already exists — nothing to do (already released?)"
+            echo "$TAG already exists - nothing to do (already released?)"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"

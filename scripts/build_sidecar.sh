@@ -7,6 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# package.json is the one file a release bumps; re-derive the backend's
+# version from it so the bundled exe reports the same version as the
+# installer it ships in (backend/_version.py is generated, never edited).
+python scripts/sync_version.py
+
 pip install -r requirements.txt -r requirements-build.txt
 
 TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
