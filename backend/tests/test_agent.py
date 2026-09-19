@@ -200,10 +200,12 @@ async def test_agent_tool_cycle(fake_model, tmp_path):
 
     events = await collect(loop.run_agent(cid, "go", str(tmp_path)))
     types = [e["type"] for e in events]
-    # tool_start(/tool_progress…) then tool_result, final text delta, done.
+    # tool_start(/tool_progress…) then tool_result, the step boundary
+    # (another model call follows — the UI pins this emission, issue #17),
+    # final text delta, done.
     # tool_progress chunks are filtered: fast commands emit a variable number.
     core = [t for t in types if t != "tool_progress"]
-    assert core == ["tool_start", "tool_result", "text", "done"]
+    assert core == ["tool_start", "tool_result", "step", "text", "done"]
     tr = next(e for e in events if e["type"] == "tool_result")
     assert tr["result"]["exit_code"] == 0
     assert "tool ran" in tr["result"]["output"]
@@ -243,6 +245,62 @@ async def test_agent_yields_tool_progress(fake_model, tmp_path):
     assert "streaming out" in "".join(e["chunk"] for e in progress)
     # tool_result still lands after the last progress chunk
     assert types.index("tool_progress") < types.index("tool_result") < types.index("done")
+
+
+@pytest.mark.asyncio
+async def test_step_boundary_delimits_emissions(fake_model, tmp_path):
+    """Issue #17: each model call of a turn is one emission. A `step` event
+    fires after a step's tool calls finish (only when another step follows),
+    so the UI can pin that emission's text + tool calls and start a fresh
+    block for the next one. A direct answer (no tool calls) emits none."""
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("t-step")
+    # Step 1: text + a tool call; step 2: silent tool call; step 3: final text.
+    fake_model.append([
+        {"type": "content", "text": "Let me look."},
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({"command": "echo one"})},
+            }],
+        },
+    ])
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c2",
+                "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({"command": "echo two"})},
+            }],
+        },
+    ])
+    fake_model.append([{"type": "content", "text": "All done."}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(tmp_path)))
+    types = [e["type"] for e in events]
+    core = [t for t in types if t != "tool_progress"]
+    # One boundary per completed step with a successor: after step 1 and
+    # step 2, none after step 3 (the turn ends there).
+    assert core == [
+        "text", "tool_start", "tool_result", "step",
+        "tool_start", "tool_result", "step",
+        "text", "done",
+    ]
+    # The boundary always trails its step's tool_result.
+    assert types.index("tool_result") < types.index("step")
+
+    # The persisted transcript was already segmented per model call: the
+    # UI's history reload renders the same grouping the live stream now does.
+    msgs = await get_messages(cid)
+    roles = [m["role"] for m in msgs]
+    assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
+    assert msgs[1]["content"] == "Let me look."
+    assert msgs[3]["content"] == ""  # silent step: tools only, no text
+    assert msgs[5]["content"] == "All done."
 
 
 # ---------------------------------------------------------------- new tools
@@ -591,7 +649,7 @@ async def test_ask_user_answer_resumes_loop(fake_model, tmp_path):
     results = await asyncio.gather(collect(agent), answer_when_asked())
     events = results[0]
     types = [e["type"] for e in events]
-    assert types == ["tool_start", "tool_result", "text", "done"]
+    assert types == ["tool_start", "tool_result", "step", "text", "done"]
     assert events[1]["name"] == "ask_user"
     assert events[1]["result"] == {"answer": "React"}
 

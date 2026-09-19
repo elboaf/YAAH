@@ -176,6 +176,13 @@ interface AgentState {
    *  the rest of the turn emits. Returns the new message id, or null when
    *  the call was not on msgId or was not approved (plan continues). */
   splitAtPlanApproval: (key: string, msgId: string) => string | null
+  /** At a step boundary (the backend's `step` event, emitted between two
+   *  model calls of one turn): close the current emission and open a fresh
+   *  assistant message, so each emission renders with only its own tool
+   *  calls instead of one turn-wide blob (issue #17). Returns the new
+   *  message id, or null when msgId is not the buffer's tail (a plan split
+   *  already advanced the stream past it — the tail is already fresh). */
+  splitAtStepBoundary: (key: string, msgId: string) => string | null
 
   /** Sub-agent live state (spawn_agent calls). */
   startSubAgent: (key: string, msgId: string, callId: string, agentId: number, agentType: string, prompt: string) => void
@@ -540,6 +547,25 @@ export const useAgent = create<AgentState>((set, get) => ({
         implementsPlan: typeof plan.plan === 'string' ? plan.plan : undefined,
       })
       return { messagesByConv: { ...s.messagesByConv, [key]: next } }
+    })
+    return newId
+  },
+
+  splitAtStepBoundary: (key, msgId) => {
+    let newId: string | null = null
+    set((s) => {
+      const msgs = s.messagesByConv[key] ?? []
+      // Only split when msgId is still the tail: after a plan-approval
+      // split the stream already writes into a fresh message, and a
+      // boundary must not stack an empty one on top of it.
+      if (!msgs.length || msgs[msgs.length - 1].id !== msgId) return {}
+      newId = genId()
+      return {
+        messagesByConv: {
+          ...s.messagesByConv,
+          [key]: [...msgs, { id: newId, role: 'assistant', content: '' }],
+        },
+      }
     })
     return newId
   },

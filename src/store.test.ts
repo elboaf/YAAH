@@ -2,6 +2,8 @@
 // splitAtPlanApproval action and the buildMessages history-load rule must
 // agree — the planning emission and the execution half render as separate
 // messages, the execution one flagged with the plan it implements.
+// Also covers splitAtStepBoundary (issue #17): the live stream pins each
+// model call's emission and opens a fresh message for the next one.
 
 import { describe, expect, it, beforeEach } from 'vitest'
 import { useAgent, buildMessages } from './store'
@@ -125,6 +127,70 @@ describe('splitAtPlanApproval (live)', () => {
       },
     }))
     expect(useAgent.getState().splitAtPlanApproval('t', 'a')).toBeNull()
+    expect(useAgent.getState().messagesByConv.t).toHaveLength(1)
+  })
+})
+
+describe('splitAtStepBoundary (live, issue #17)', () => {
+  beforeEach(() => {
+    useAgent.setState({ messagesByConv: {} })
+  })
+
+  it('closes the emission and opens a fresh assistant message', () => {
+    useAgent.setState((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        t: [
+          { id: 'u', role: 'user', content: 'go' },
+          {
+            id: 'a1',
+            role: 'assistant',
+            content: 'first emission',
+            toolCalls: [{ id: 'c1', name: 'bash', args: {}, result: { ok: 1 } }],
+          },
+        ],
+      },
+    }))
+    const newId = useAgent.getState().splitAtStepBoundary('t', 'a1')
+    expect(newId).toBeTruthy()
+    const msgs = useAgent.getState().messagesByConv.t
+    expect(msgs).toHaveLength(3)
+    // The finished emission keeps its text and its own tool calls...
+    expect(msgs[1].content).toBe('first emission')
+    expect(msgs[1].toolCalls).toHaveLength(1)
+    // ...and the next one starts empty for the following model call.
+    expect(msgs[2].id).toBe(newId)
+    expect(msgs[2].role).toBe('assistant')
+    expect(msgs[2].content).toBe('')
+    expect(msgs[2].toolCalls).toBeUndefined()
+  })
+
+  it('does not stack an empty message after a plan-approval split', () => {
+    // The stream advanced past msgId (splitAtPlanApproval opened a fresh
+    // tail); the boundary must leave that fresh tail alone.
+    useAgent.setState((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        t: [
+          { id: 'a1', role: 'assistant', content: 'planning' },
+          { id: 'a2', role: 'assistant', content: '', implementsPlan: 'P' },
+        ],
+      },
+    }))
+    expect(useAgent.getState().splitAtStepBoundary('t', 'a1')).toBeNull()
+    const msgs = useAgent.getState().messagesByConv.t
+    expect(msgs).toHaveLength(2)
+    expect(msgs[1].id).toBe('a2')
+  })
+
+  it('is a no-op for an unknown message id', () => {
+    useAgent.setState((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        t: [{ id: 'a1', role: 'assistant', content: 'x' }],
+      },
+    }))
+    expect(useAgent.getState().splitAtStepBoundary('t', 'missing')).toBeNull()
     expect(useAgent.getState().messagesByConv.t).toHaveLength(1)
   })
 })
