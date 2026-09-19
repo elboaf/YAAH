@@ -1,4 +1,4 @@
-"""App version — the single source the backend reports about itself.
+﻿"""App version â€” the single source the backend reports about itself.
 
 package.json is the canonical version; this file and
 src-tauri/tauri.conf.json must match it at every bump (tag-on-bump.yml
@@ -8,4 +8,4 @@ FastAPI(version="0.7.9") that silently stopped tracking releases (every
 bump can't miss it again.
 """
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
