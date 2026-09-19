@@ -617,7 +617,6 @@ export interface AgentEvent {
   type:
     | 'text'
     | 'thinking'
-    | 'step'
     | 'tool_start'
     | 'tool_progress'
     | 'tool_result'

@@ -4608,7 +4608,6 @@ function Composer() {
     appendToolOutput,
     finishToolCall,
     splitAtPlanApproval,
-    splitAtStepBoundary,
     appendTape,
     startSubAgent,
     subAgentTextDelta,
@@ -5188,9 +5187,8 @@ function Composer() {
   /** One shared stream-event handler for both a fresh send and a resume:
    *  everything keys off the in-flight assistant message id and the buffer
    *  captured at send time — a stream never writes to "what's on screen".
-   *  curId advances past an approved exit_plan (splitAtPlanApproval) and
-   *  across step boundaries (splitAtStepBoundary), so each emission of the
-   *  turn streams into its own message (issue #17). */
+   *  curId advances past an approved exit_plan (splitAtPlanApproval), so
+   *  the execution half of the turn streams into its own message. */
   const handleStreamEvent = (bufKey: string, asstId: string) => {
     let curId = asstId
     return (ev: AgentEvent) => {
@@ -5201,13 +5199,6 @@ function Composer() {
       setStatus('thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).
       if (ev.text) appendTape(bufKey, oneLine(ev.text) + ' ')
-    } else if (ev.type === 'step') {
-      // Step boundary (issue #17): the emission just streamed — its text
-      // and its tool calls — is complete. Freeze it and stream the next
-      // model call into a fresh message, so each emission renders with
-      // only its own tool calls instead of one turn-wide blob.
-      const nid = splitAtStepBoundary(bufKey, curId)
-      if (nid) curId = nid
     } else if (ev.type === 'tool_start') {
       setStatus('running-tool')
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)

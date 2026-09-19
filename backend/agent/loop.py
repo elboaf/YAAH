@@ -1149,12 +1149,6 @@ async def run_agent(
                         }
                     )
 
-            # This step's emission is complete: tell the UI to pin the text
-            # + tool calls just streamed and start a fresh block for the
-            # next model call (issue #17). Emitted after the tool rows
-            # persist, before the next step begins.
-            yield _ndjson({"type": "step"})
-
         budget_msg = (
             f"Step budget ({max_steps}) exhausted — raise it in "
             "Settings → Max steps (or config.json `max_steps`; 0 = unlimited)"
