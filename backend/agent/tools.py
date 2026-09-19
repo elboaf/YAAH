@@ -196,6 +196,23 @@ POWERSHELL_SCHEMA = {
     },
 }
 
+# Windows-only, agent-offered: appended by get_schemas() only when git is
+# missing AND the bundled installer shipped (backend/agent/gitenv.py).
+INSTALL_GIT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "install_git",
+        "description": (
+            "Install Git for Windows silently from the installer bundled "
+            "with YAAH (~minute-long setup, no windows). Offer this to "
+            "the user via ask_user when a git command or tool fails "
+            "because git is missing, and run it only after they agree. "
+            "Shells opened before the install need a restart to see git."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
 TOOLS_SCHEMA += [
     {
         "type": "function",
@@ -421,7 +438,11 @@ TOOLS_SCHEMA += [
         "type": "function",
         "function": {
             "name": "git_status",
-            "description": "Show git working tree status for the workspace.",
+            "description": (
+                "Show git working tree status for the workspace. If this "
+                "or any git tool fails because git is missing (Windows), "
+                "offer install_git to the user via ask_user."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -971,6 +992,13 @@ async def git_pull(workspace: str) -> dict:
 
 from backend.agent.webtools import view_image, web_fetch, web_search
 
+
+async def _install_git_executor(workspace: str) -> dict:
+    from backend.agent import gitenv
+
+    return await gitenv.run_install_git(workspace)
+
+
 EXECUTORS = {
     "bash": run_bash,
     "powershell": run_powershell,
@@ -990,6 +1018,7 @@ EXECUTORS = {
     "git_commit": git_commit,
     "git_push": git_push,
     "git_pull": git_pull,
+    "install_git": _install_git_executor,
 }
 
 # Computer use (Q2: Windows-only hard line, same pattern as powershell but
@@ -1037,6 +1066,9 @@ _READ_TOOLS = {
 _MUTATING_TOOLS = {
     "write_file", "edit_file", "create_file", "delete_file", "move_file",
     "git_add", "git_commit",
+    # installs software on the host (silently, but gated: prompts in ask
+    # mode, blocked in plan mode)
+    "install_git",
     # creates a disposable VM and maps the workspace R/W into it (prompts
     # in ask mode, blocked in plan mode)
     "sandbox_test",
@@ -1103,6 +1135,14 @@ def get_schemas() -> list:
     host = remote_mod.get_remote()
     windows = host.windows if host is not None else os.name == "nt"
     schemas = TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA
+    # install_git installs on THIS machine with the client's bundled
+    # installer, so it's only offered in local sessions when git is
+    # actually missing and the installer shipped in this build.
+    if host is None and os.name == "nt":
+        from backend.agent import gitenv
+
+        if not gitenv.find_git() and gitenv.find_installer():
+            schemas = schemas + [INSTALL_GIT_SCHEMA]
     # Sandbox tools drive the LOCAL machine's Windows Sandbox (they're in
     # TOOLS_SCHEMA only when os.name == "nt"): strip them whenever a remote
     # host is connected — a remote Windows host must not see the client's

@@ -4994,6 +4994,9 @@ function Composer() {
   }
 
   const applyPttHotkey = async (hk: string): Promise<void> => {
+    // Already bound to exactly this accelerator: re-registering would churn
+    // the OS shortcut and toast on every unrelated settings save.
+    if (hk === (registeredHotkeyRef.current ?? '')) return
     const gss = await import('@tauri-apps/plugin-global-shortcut')
     if (registeredHotkeyRef.current) {
       const old = registeredHotkeyRef.current

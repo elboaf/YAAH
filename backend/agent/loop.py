@@ -97,6 +97,11 @@ Computer use (desktop tools):
 - These tools exist for TESTING apps: launch the app under test via the
   shell tools, find it with list_windows, then drive and verify its UI.
   Do not move the user's mouse or type into windows outside the task.
+- These move the USER'S REAL mouse and keyboard. For an app running
+  inside the Windows Sandbox they are forbidden — the sandbox has its
+  own input session; use in-VM AutoHotkey via sandbox_run instead
+  (see the sandbox section). Host input here is only for apps running
+  on the host itself.
 - Prefer shell/file tools for anything reachable that way; computer use
   is for GUI behavior you must observe or exercise.
 - Structured first, pixels second: read_ui_tree gives exact element
@@ -200,6 +205,11 @@ Guidelines:
   minutes needs a large timeout_seconds or chunked runs (per
   directory/file), not retries. The VM is a clean image: install missing
   tools into the toolkit (installs persist across sandboxes).
+- Sandbox work stays IN the sandbox: every dependency the app under test
+  needs (runtimes, browsers, portable tools) is installed into the VM's
+  toolkit — never launch a host equivalent (e.g. the host browser) to
+  exercise the app, and never drive the app's GUI with the host
+  mouse/keyboard tools; in-VM AutoHotkey is the input layer for that.
 - If a full-suite verification fails, separate YOUR change from the
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists

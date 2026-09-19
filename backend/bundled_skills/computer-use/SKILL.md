@@ -11,6 +11,13 @@ The tools (`screenshot`, `list_windows`, `focus_window`, `read_ui_tree`,
 for the app under test. Mouse actions return a post-action crop by
 default (`observe: false` to skip).
 
+**Sandbox apps are off-limits to these input tools.** If the app under
+test runs inside the Windows Sandbox, `mouse_*`/`type_text`/`press_key`
+would move the user's real desktop cursor and type into whatever the
+user is doing. The VM has its own input session: drive its GUI with
+in-VM AutoHotkey via `sandbox_run` (see the sandbox-testing skill).
+Host computer use is only for apps running on the host itself.
+
 ## Structured first, pixels second
 
 `read_ui_tree(hwnd=...)` returns every element of a window — type, name,

@@ -130,3 +130,18 @@ if [ ! -f "backend/whisper/models/$WHISPER_MODEL" ]; then
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$WHISPER_MODEL"
 fi
 echo "whisper: backend/whisper/bin + backend/whisper/models"
+
+# Bundled Git for Windows installer (issue #12): full official installer,
+# GPLv2 — redistribution permitted. Windows-only resource; keep
+# GIT_INSTALLER_VERSION in backend/agent/gitenv.py in sync.
+GIT_VERSION="2.51.0"
+GIT_INSTALLER="Git-$GIT_VERSION-64-bit.exe"
+if [ ! -f "backend/installers/$GIT_INSTALLER" ]; then
+  echo "downloading $GIT_INSTALLER"
+  mkdir -p backend/installers
+  curl -sL --retry 3 -o "backend/installers/$GIT_INSTALLER" \
+    "https://github.com/git-for-windows/git/releases/download/v$GIT_VERSION.windows.1/$GIT_INSTALLER" \
+    || { echo "ERROR: git installer download failed"; exit 1; }
+fi
+ls -la backend/installers/
+echo "git installer: backend/installers/$GIT_INSTALLER"

@@ -26,6 +26,14 @@ WINDOWS = hasattr(ctypes, "windll")
 
 # ---------------------------------------------------------------- schemas
 
+# Real host input — the #19/#20 nudge, repeated on every input tool so it
+# survives schema-only context windows.
+_HOST_INPUT_NOTE = (
+    " This is the USER'S REAL mouse/keyboard — never use it to drive an "
+    "app running inside the Windows Sandbox; use in-VM AutoHotkey via "
+    "sandbox_run instead."
+)
+
 _OBSERVE = {
     "observe": {
         "type": "boolean",
@@ -178,6 +186,7 @@ COMPUTER_TOOLS_SCHEMA = [
                 "Move the mouse. x/y are relative to the given monitor's "
                 "origin (default 1 = primary). The result reports the REAL "
                 "cursor position afterwards — check it before clicking."
+                + _HOST_INPUT_NOTE
             ),
             "parameters": {
                 "type": "object",
@@ -200,7 +209,7 @@ COMPUTER_TOOLS_SCHEMA = [
                 "(default 1 = primary) — screenshot pixel coordinates of "
                 "monitor N pass through unchanged with monitor=N. The "
                 "result reports the REAL cursor position at click time. "
-                "The workhorse."
+                "The workhorse." + _HOST_INPUT_NOTE
             ),
             "parameters": {
                 "type": "object",
@@ -234,7 +243,7 @@ COMPUTER_TOOLS_SCHEMA = [
             "description": (
                 "Press at a start point, drag to an end point, release. "
                 "For sliders, drag-and-drop, and text selection. x/y are "
-                "relative to the given monitor's origin."
+                "relative to the given monitor's origin." + _HOST_INPUT_NOTE
             ),
             "parameters": {
                 "type": "object",
@@ -263,7 +272,7 @@ COMPUTER_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "mouse_scroll",
-            "description": "Scroll at a position (positive amount = up).",
+            "description": "Scroll at a position (positive amount = up)." + _HOST_INPUT_NOTE,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -281,7 +290,10 @@ COMPUTER_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "type_text",
-            "description": "Type unicode text into the focused window (focus first).",
+            "description": (
+                "Type unicode text into the focused window (focus first)."
+                + _HOST_INPUT_NOTE
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"text": {"type": "string"}, **_OBSERVE},
@@ -293,7 +305,10 @@ COMPUTER_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "press_key",
-            "description": 'Press a key or chord: "enter", "esc", "ctrl+s", "alt+f4".',
+            "description": (
+                'Press a key or chord: "enter", "esc", "ctrl+s", "alt+f4".'
+                + _HOST_INPUT_NOTE
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

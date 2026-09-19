@@ -25,6 +25,8 @@ src-tauri/binaries/
 
 # whisper.cpp engine + model staged by scripts/build_sidecar.sh (CI bundles them)
 backend/whisper/
+# Git-for-Windows installer staged by scripts/build_sidecar.sh (#12)
+backend/installers/
 backend/bin/
 backend/data/models/
 
