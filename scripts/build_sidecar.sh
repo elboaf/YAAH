@@ -58,8 +58,8 @@ echo "sidecar: src-tauri/binaries/backend-$TRIPLE$EXE"
 # full handoff is exercisable locally.
 echo "building update shim"
 (cd src-tauri/shim && cargo build --release)
-cp "src-tauri/shim/target/release/yaah-update-shim$EXE" "src-tauri/binaries/yaah-update-shim$EXE"
-echo "update shim: src-tauri/binaries/yaah-update-shim$EXE"
+cp "src-tauri/shim/target/release/yaah-update-shim$EXE" "src-tauri/binaries/yaah-update-shim-$TRIPLE$EXE"
+echo "update shim: src-tauri/binaries/yaah-update-shim-$TRIPLE$EXE"
 
 # ---- voice dictation: whisper.cpp CLI + pre-packaged ggml model ----
 # Built from source for every target and staged under backend/whisper/, which tauri.conf.json
