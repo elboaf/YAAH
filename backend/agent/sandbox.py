@@ -762,6 +762,10 @@ def prompt_section() -> str:
         "never name a variable after a function (log, WinGetList fail "
         "with 'This Func cannot be used as an output variable'); "
         "ControlSend's signature is (Keys, Control, WinTitle).\n"
+        "- Dispose the sandbox when the work is done: call "
+        "`sandbox_stop` after smoke tests, reproductions or testing "
+        "wrap up — the VM is an 8 GB window on the user's desktop, not "
+        "something to leave open.\n"
         "- If Windows Sandbox is not enabled in Windows, sandbox_test "
         "returns enablement instructions — relay them to the user.\n"
         "- The VM's Defender firewall is disabled at boot by the "
@@ -861,8 +865,11 @@ SANDBOX_TOOLS_SCHEMA = [
         "function": {
             "name": "sandbox_stop",
             "description": (
-                "Dispose the running sandbox. Everything written to the "
-                "workspace or toolkit mounts already persists on the host."
+                "Dispose the running sandbox when the work is done "
+                "(after smoke tests, reproductions, testing) — do not "
+                "leave the VM open on the user's desktop. Everything "
+                "written to the workspace or toolkit mounts already "
+                "persists on the host."
             ),
             "parameters": {"type": "object", "properties": {}},
         },

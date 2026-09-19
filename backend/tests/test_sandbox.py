@@ -477,6 +477,12 @@ def test_prompt_section_documents_firewall_disable(isolated):
     assert "firewall is disabled at boot" in text
 
 
+def test_prompt_section_says_dispose_when_done(isolated):
+    text = sb.prompt_section()
+    assert "sandbox_stop" in text
+    assert "Dispose the sandbox when the work is done" in text
+
+
 def test_missing_command_hint_matches_real_failure_text():
     """The real failure (observed live): CommandNotFoundException renders as
     'X is not recognized as the name of a cmdlet' and arrives with
