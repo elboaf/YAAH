@@ -2433,10 +2433,10 @@ function ConversationRow({
       <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onToggleRun && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
         {onToggleRun && (
           <button
-            className={`rounded px-1.5 py-0.5 text-[10px] ${
+            className={`flex h-[18px] w-[18px] items-center justify-center rounded border transition-colors ${
               running
-                ? 'bg-red-900/80 text-red-200 hover:bg-red-800'
-                : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                ? 'border-red-800 bg-red-950/40 text-red-300 hover:border-red-700 hover:bg-red-900/50'
+                : 'border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
             }`}
             aria-label={running ? 'Stop this run' : 'Run now'}
             title={running ? 'Stop this run' : 'Run now'}
@@ -2445,7 +2445,7 @@ function ConversationRow({
               onToggleRun()
             }}
           >
-            {running ? '■' : '▶'}
+            {running ? <StopIcon /> : <PlayIcon />}
           </button>
         )}
         <button
@@ -2974,6 +2974,24 @@ function PersonIcon({ className = '' }: { className?: string }) {
     >
       <circle cx="8" cy="4.5" r="2.8" />
       <path d="M2.5 14.5c0-3 2.5-5.2 5.5-5.2s5.5 2.2 5.5 5.2" />
+    </svg>
+  )
+}
+
+/** Run-now / stop glyphs for the agent row toggle: drawn, not unicode, so
+ *  weight matches the row's icon voice at 8px. */
+function PlayIcon() {
+  return (
+    <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">
+      <path d="M1.5 0.8 L7 4 L1.5 7.2 Z" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg width="7" height="7" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">
+      <rect x="0.8" y="0.8" width="6.4" height="6.4" rx="1" />
     </svg>
   )
 }
