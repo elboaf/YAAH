@@ -2332,7 +2332,7 @@ function ConversationRow({
 // ---------------------------------------------------------------- update chip (#16)
 
 /** Sidebar "update available" chip: check-for-update runs inside the hook
- *  (on mount + every 6h, silent on failure). Clicking downloads the
+ *  (on mount + every 5 min (#36), silent on failure). Clicking downloads the
  *  installer via Rust, then hands off to the shim and closes the app —
  *  the chip's last visible state is "installing…". */
 function UpdateChip() {

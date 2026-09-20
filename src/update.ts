@@ -43,11 +43,16 @@ export function tagToVersion(tag: string): string | null {
  * limit), the tag is unparseable, or the release is not newer than us.
  * Never throws — a failed check must not nag or break the sidebar.
  */
+/** Cap a single check (#36) so a hung connection can't stall the poll loop. */
+const CHECK_TIMEOUT_MS = 300 * 1000
+
 export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo | null> {
   if (!IS_TAURI) return null
   try {
     const res = await fetch('https://api.github.com/repos/elboaf/YAAH/releases/latest', {
       headers: { Accept: 'application/vnd.github+json' },
+      // Timed-out checks surface as AbortError -> caught below -> null.
+      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
     })
     if (!res.ok) return null
     const body = (await res.json()) as { tag_name?: string; html_url?: string }
@@ -64,7 +69,7 @@ export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo
 
 const DESKTOP_ASSET = 'yaah-desktop-setup.exe'
 const RELEASES_BASE = 'https://github.com/elboaf/YAAH/releases'
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+const CHECK_INTERVAL_MS = 5 * 60 * 1000
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000
 
 /**
@@ -84,7 +89,7 @@ export function isWindowsPlatform(): boolean {
 
 /**
  * Orchestration hook behind the sidebar chip. Mounts one poll loop (on
- * mount, then every 6h; errors leave the chip hidden — never nag), and
+ * mount, then every 5 min; errors leave the chip hidden — never nag), and
  * exposes the click-to-install action with live progress.
  */
 export function useUpdateCheck(): {

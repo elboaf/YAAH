@@ -83,4 +83,45 @@ describe('checkForUpdate', () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
     expect(await checkForUpdate('0.19.0')).toBeNull()
   })
+
+  // #36: the check is capped (300s) via AbortSignal.timeout -> fetch. A hung
+  // connection must surface as a rejected (aborted) fetch -> null, never a
+  // forever-pending promise that stalls the poll loop. The native timer behind
+  // AbortSignal.timeout ignores fake timers, so we pin the wiring (300s) and
+  // fire the abort ourselves — what the real timer would do.
+  it('caps the request at 300s and resolves null when it fires (#36)', async () => {
+    const controller = new AbortController()
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => controller.signal)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted.', 'AbortError')),
+          )
+        }),
+      ),
+    )
+    try {
+      const pending = checkForUpdate('0.19.0')
+      expect(timeoutSpy).toHaveBeenCalledWith(300 * 1000)
+      controller.abort()
+      expect(await pending).toBeNull()
+    } finally {
+      timeoutSpy.mockRestore()
+    }
+  })
+
+  it('passes a timeout signal on every check request (#36)', async () => {
+    const fetchMock = vi.fn(
+      async (_url: string, _init?: { signal?: AbortSignal }) =>
+        new Response(JSON.stringify({ tag_name: 'v0.19.0' }), { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await checkForUpdate('0.19.0')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const init = fetchMock.mock.calls[0][1] as { signal?: AbortSignal }
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+    expect(init?.signal?.aborted).toBe(false)
+  })
 })
