@@ -158,6 +158,12 @@ body,
 .run-dots i:nth-child(3) {
   animation-delay: 0.8s;
 }
+/* Stop pressed, waiting for the backend to settle: the dots freeze and dim
+   so the click visibly registered without losing the row's place. */
+.run-dots.stopping i {
+  animation: none;
+  opacity: 0.2;
+}
 @keyframes run-dots-cycle {
   0%,
   32% {

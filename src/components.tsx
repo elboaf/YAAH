@@ -1868,13 +1868,38 @@ function ConversationList() {
   // agent API without a lookup per click.
   const refreshAgents = useAgent((s) => s.refreshAgents)
   const agentByConv = new Map(agents.map((a) => [a.conversation_id, a]))
+  // Conversations whose run the user just asked to stop: the row dims its
+  // "working" signal right away (the click registered) and the toggle re-polls
+  // agents fast until the backend settles, instead of waiting out the 5s poll.
+  const [stoppingConvs, setStoppingConvs] = useState<Set<number>>(new Set())
+  const clearStopping = (id: number) =>
+    setStoppingConvs((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
   const toggleAgentRun = (c: { id: number }) => {
     const a = agentByConv.get(c.id)
     if (!a) return
     if (a.running) {
       // Same cancel path as an in-chat Stop: the turn ends after its current
       // step and the run settles normally.
+      setStoppingConvs((prev) => new Set(prev).add(c.id))
       cancelAgent(c.id).catch(() => {})
+      // The backend settles in well under a second; poll tightly so the row
+      // flips to "run now" the moment it does (bounded, then the normal 5s
+      // poll takes over as fallback).
+      const started = Date.now()
+      const settle = async () => {
+        await refreshAgents()
+        const still = useAgent
+          .getState()
+          .agents.some((x) => x.conversation_id === c.id && x.running)
+        if (!still || Date.now() - started > 10000) clearStopping(c.id)
+        else window.setTimeout(() => void settle(), 400)
+      }
+      window.setTimeout(() => void settle(), 400)
     } else {
       runAgentNow(a.id)
         .then(() => refreshAgents())
@@ -2067,6 +2092,7 @@ function ConversationList() {
       onSys={() => setSysTarget({ id: c.id, title: c.title })}
       onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
       onToggleRun={isAgent ? () => toggleAgentRun(c) : undefined}
+      stopping={stoppingConvs.has(c.id)}
       onAgentSettings={
         isAgent
           ? () => {
@@ -2353,6 +2379,7 @@ function ConversationRow({
   isAgent,
   onAgentSettings,
   onToggleRun,
+  stopping,
   menuOpen,
   setMenuOpen,
   onOpen,
@@ -2378,6 +2405,9 @@ function ConversationRow({
   /** Start/stop the agent's run (agent chats only). Present = the row shows
    *  the toggle; the icon follows the running state (■ stop / ▶ run now). */
   onToggleRun?: () => void
+  /** The user just clicked stop: dim the "working" signals until the
+   *  backend settles, so the click visibly registered. */
+  stopping?: boolean
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   onOpen: () => void
@@ -2408,7 +2438,11 @@ function ConversationRow({
         ) : finished === 'ok' ? (
           <span aria-hidden="true" className="run-bar run-bar-green mr-1.5 shrink-0" title="Run finished" />
         ) : running ? (
-          <span aria-hidden="true" className="run-dots mr-1.5 shrink-0" title="Working…">
+          <span
+            aria-hidden="true"
+            className={`run-dots mr-1.5 shrink-0 transition-opacity ${stopping ? 'stopping' : ''}`}
+            title={stopping ? 'Stopping…' : 'Working…'}
+          >
             <i />
             <i />
             <i />
@@ -2433,10 +2467,12 @@ function ConversationRow({
       <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onToggleRun && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
         {onToggleRun && (
           <button
-            className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-colors ${
-              running
-                ? 'text-zinc-300 hover:text-zinc-100'
-                : 'text-zinc-600 hover:text-zinc-300'
+            className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-opacity ${
+              stopping
+                ? 'opacity-30'
+                : running
+                  ? 'text-zinc-300 hover:text-zinc-100'
+                  : 'text-zinc-600 hover:text-zinc-300'
             }`}
             aria-label={running ? 'Stop this run' : 'Run now'}
             title={running ? 'Stop this run' : 'Run now'}
