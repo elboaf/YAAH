@@ -4,8 +4,9 @@ Status: scoped (2026-09-20). Scope picked by the user from the full open-issue t
 
 ## Scope
 
-**In (7 issues):** #34, #33, #25, #29, #31, #32, #6
-**Housekeeping (5 issues to close, no code):** #10, #12, #19, #20, #21 — all five already have merged implementation commits; the issues were never closed.
+**In (6 issues):** #34, #33, #29, #31, #32, #6
+**Shipped early in v1.0.1 (dropped from this scope):** #25 — the sidebar run-status indicator landed in `b2a7e13` (PR #35) alongside the v1.0.1 bump.
+**Housekeeping (5 issues closed 2026-09-20, no code):** #10, #12, #19, #20, #21 — all five had merged implementation commits; closed with comments pointing at them.
 
 | # | Title | Evidence already shipped |
 |---|-------|--------------------------|
@@ -36,14 +37,7 @@ One line under the title: **YAAH = Yet Another Agent/Harness**. Trivial docs cha
 ### 2. #33 — grilling skill renders questions twice
 Rewrite the round-format section of `backend/bundled_skills/grilling/SKILL.md` per the issue's suggested fix: drop the ❓ Q1 / ➡️ / `---` chat template entirely; state that each question reaches the user via one `ask_user` call (title + body in `question`, choices as `options`, recommended answer first) and that questions must **not** also be rendered as formatted text in chat. Keep rounds, frontier recomputation, and the facts-vs-decisions split unchanged. No code.
 
-### 3. #25 — sidebar three-dot working animation + green finish bar
-- `ConversationRow` (`src/components.tsx`): replace the single pulsing amber dot (`.run-pulse`) with three small dots cycling left→right, one lit at a time, same slot and footprint.
-- On run finish: dots become a solid green rounded pill (≈ the three-dot width), holds ~2 s, fades out.
-- Store: `justFinishedByConv` map set on the running→idle transition (today the entry is simply deleted from `statusByConv`, so the UI can't tell "finished a second ago" from "never ran"), cleared after ~2 s.
-- Nice-to-have: red pill when the run errored (`statusByConv` already distinguishes `error`).
-- `prefers-reduced-motion`: static amber dot while running, static green bar on finish (extend the existing media query in `src/index.css`). Keep the `title="Working…"` tooltip / aria semantics.
-
-### 4. #29 — notification chimes (run finished / question pending)
+### 3. #29 — notification chimes (run finished / question pending)
 - Two short distinct bundled chimes (WebAudio `AudioContext` or `<audio>`; no new dependency), moderate volume.
 - **Run finished:** fires on every conversation's `streaming → idle` transition — mirror the existing `wasStreamingRef` TTS pattern (~L4166) per conversation buffer, with the same guards so history loads / conversation switches stay silent. Fires even when focused, for every conversation when several run at once (#10).
 - **Question pending:** on `pendingQuestions[key]` appearance (store.ts), guarded per `call_id` (never on re-render / history load / conversation switch — same approach as `spokenQuestionRef` ~L4181), **only when Yaah is unfocused** (`document.hidden` or window blur).
@@ -52,7 +46,7 @@ Rewrite the round-format section of `backend/bundled_skills/grilling/SKILL.md` p
 - Plan defaults for the issue's open questions (flag if you disagree): errored/cancelled runs play the **same** run-finished chime (the status change is the signal; a distinct error sound can come later); **no** throttling when several conversations finish within a second (rare; mute exists).
 - Verify the Tauri webview has no autoplay-policy surprise with the window minimized/backgrounded.
 
-### 5. #6 — model thought level (design decided by user)
+### 4. #6 — model thought level (design decided by user)
 **Decision:** global Settings dropdown, matching the existing temperature/max_tokens pattern.
 - Settings gains a **Reasoning effort** select: **Default** (don't send the param) / Low / Medium / High.
 - Config key `reasoning_effort` (default `""`), saved through the existing settings flow (`updateConfig`); `load_config()` passes it through like `temperature`.
@@ -60,7 +54,7 @@ Rewrite the round-format section of `backend/bundled_skills/grilling/SKILL.md` p
 - Accepted hazard: an OpenAI-compatible server that hard-rejects unknown params will 400 when a level is selected; the fix is setting the dropdown back to Default. Documented in the Settings hint text ("only affects reasoning-capable models").
 - Test: payload-building unit test (param present iff set) alongside the existing model_client tests.
 
-### 6. #32 — destination card on the new-chat screen
+### 5. #32 — destination card on the new-chat screen
 - Draft state (empty state / above the composer) shows **"This chat will be saved to: \<workspace\>"** — precise identity, full path as secondary line / hover.
 - **Change…** affordance: picker over registered workspaces in the current scope (local registry while local; host's registry while remote, respecting `host::path` namespacing via `parseNsWorkspace`), plus an "Add workspace…" escape hatch reusing the existing flows (incl. Tauri `pick_workspace`).
 - **Decision (issue's open question): draft-local destination, hybrid default.** The card mirrors the live active workspace (open conversation / expand group / add workspace all update it — acceptance criterion 3) until the user explicitly picks via Change…, which pins a draft-local destination that survives further active-workspace churn. Draft-local keeps the core invariant ("the open conversation's workspace IS the active workspace") intact: nothing flips globally pre-send, and after first send, opening the new conversation aligns the active workspace to its filed home as today.
@@ -68,7 +62,7 @@ Rewrite the round-format section of `backend/bundled_skills/grilling/SKILL.md` p
 - Changing destination mid-draft keeps typed text + staged attachments intact — only the filing target changes.
 - Default (no-root) pseudo-workspace is a valid, shown destination.
 
-### 7. #31 — hyperlinks open in the OS default browser
+### 6. #31 — hyperlinks open in the OS default browser
 - `src-tauri/Cargo.toml`: add `tauri-plugin-opener`; grant `opener:allow-open-url` in `src-tauri/capabilities/default.json`.
 - Frontend: intercept clicks on the `a` override in `src/markdown.tsx` and the image-attachment link (`src/components.tsx` ~L1071) → `openUrl(href)` + `preventDefault()`, gated on running under Tauri; plain `<a target="_blank">` fallback for vite dev / vitest.
 - Keep the `safeHref` scheme allowlist (`https?:` / `mailto:`) as the gate on what reaches the OS; `javascript:` etc. stay inert.
@@ -77,7 +71,7 @@ Rewrite the round-format section of `backend/bundled_skills/grilling/SKILL.md` p
 ## Release mechanics
 
 - Version bump = `package.json` only (per `1507652` — it's the single version file a release bumps; `tauri.conf.json` references it).
-- Sequence: land items 1–6 → item 7 (Rust) → `npm run tsc` + `vite build` + vitest + pytest → bump to 1.0.2 → tag `v1.0.2` → build.
+- Sequence: land items 1–5 → item 6 (Rust) → `npm run tsc` + `vite build` + vitest + pytest → bump to 1.0.2 → tag `v1.0.2` → build.
 - The v1.0.1 build currently running is untouched; v1.0.2 work starts on master after it completes.
 - Housekeeping: close #10, #12, #19, #20, #21 with a comment each pointing at the merged commit.
 
