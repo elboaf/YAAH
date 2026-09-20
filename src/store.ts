@@ -1,4 +1,7 @@
 import { create } from 'zustand'
+import { listAgents, type ScheduledAgent } from './api'
+
+let toastSeq = 0
 
 export type Role = 'user' | 'assistant' | 'tool' | 'system'
 
@@ -65,6 +68,14 @@ export interface PendingQuestion {
 
 /** Access modes for the global tool-approval gate (PLAN-access-modes.md). */
 export type AccessMode = 'ask' | 'plan' | 'full'
+
+/** Transient toast (issue #41: scheduled-run failure/success notices). */
+export interface Toast {
+  id: number
+  kind: 'error' | 'success' | 'info'
+  title: string
+  body?: string
+}
 
 /** A tool call waiting for the user's approve/deny under ask mode. */
 export interface PendingApproval {
@@ -176,6 +187,20 @@ interface AgentState {
    */
   tapeByConv: Record<string, string>
   appendTape: (key: string, chunk: string) => void
+
+  // ---- scheduled agents (issue #41) ----
+  /** All agents, refreshed from /api/agents by the watcher + CRUD callers. */
+  agents: ScheduledAgent[]
+  /** conversation id (string key) -> agent id, for agent-chat composer gating. */
+  agentChatByConv: Record<string, string>
+  refreshAgents: () => Promise<void>
+  /** Per-agent last_finished_at already toasted, so the poller fires once. */
+  agentsToastedThrough: Record<string, string>
+  setAgentsToastedThrough: (agentId: string, iso: string) => void
+
+  toasts: Toast[]
+  pushToast: (t: Omit<Toast, 'id'>) => void
+  dismissToast: (id: number) => void
 
   setWorkspace: (ws: string) => void
   newConversation: () => void
@@ -416,6 +441,30 @@ export const useAgent = create<AgentState>((set, get) => ({
         },
       }
     }),
+
+  // ---- scheduled agents (issue #41) ----
+  agents: [],
+  agentChatByConv: {},
+  refreshAgents: async () => {
+    try {
+      const { agents } = await listAgents()
+      const byConv: Record<string, string> = {}
+      for (const a of agents) byConv[String(a.conversation_id)] = a.id
+      useAgent.setState({ agents, agentChatByConv: byConv })
+    } catch {
+      /* transient backend hiccup — the poller retries */
+    }
+  },
+  agentsToastedThrough: {},
+  setAgentsToastedThrough: (agentId, iso) =>
+    set((s) => ({ agentsToastedThrough: { ...s.agentsToastedThrough, [agentId]: iso } })),
+
+  toasts: [],
+  pushToast: (t) => {
+    const id = ++toastSeq
+    set((s) => ({ toasts: [...s.toasts.slice(-4), { ...t, id }] }))
+  },
+  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) })),
   setWorkspace: (ws) => {
     const norm = ws === '.' ? '' : ws
     set({ workspace: norm })

@@ -37,10 +37,17 @@ import {
   listAgents,
   addAgent,
   updateAgent,
-  removeAgent,
+  deleteAgent,
   runAgentNow,
+  setAgentRetry,
+  addAgentInstruction,
+  updateAgentInstruction,
+  deleteAgentInstruction,
   type ScheduledAgent,
   type AgentPolicy,
+  type AgentScheduleType,
+  type AgentBody,
+  type AgentInstruction,
   uploadAttachment,
   transcribeStatus,
   transcribeAudio,
@@ -63,7 +70,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useUpdateCheck } from './update'
 import { useTts } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
@@ -1821,7 +1828,7 @@ function ConversationList() {
   const pendingApprovals = useAgent((s) => s.pendingApprovals)
   const pendingPlanApprovals = useAgent((s) => s.pendingPlanApprovals)
   const finishedByConv = useAgent((s) => s.finishedByConv)
-  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; is_agent?: boolean }>>([])
+  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; chat_type?: 'chat' | 'agent' }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
   // collapsed groups show the header only. Persisted per workspace.
@@ -1912,11 +1919,12 @@ function ConversationList() {
     return scope.connected ? ns?.hostId === scope.hostId : ns === null
   }
   const visibleConvs = convs.filter((c) => inScope(c.workspace))
-  // Scheduled agents' pinned chats (issue #41): pulled out of the workspace
-  // grouping into a dedicated pinned "Agents" section at the top.
-  const agentConvs = visibleConvs.filter((c) => c.is_agent)
-  const chatConvs = visibleConvs.filter((c) => !c.is_agent)
   const localConvs = convs.filter((c) => parseNsWorkspace(c.workspace) === null)
+  // Scheduled agents (issue #41): each agent chat is pinned under its own
+  // workspace, above the workspace's normal chats. The composer gating map
+  // comes from the AgentRunWatcher's store slice.
+  const agentChatByConv = useAgent((s) => s.agentChatByConv)
+  const [agentsDialog, setAgentsDialog] = useState<{ ws: string | null; agentId: string | null } | null>(null)
 
   /** Open a conversation and adopt its workspace (the core invariant: the
    *  open conversation's workspace IS the active workspace, both ways).
@@ -1934,10 +1942,10 @@ function ConversationList() {
   // recent conversation activity in each group.
   const groups: Array<{ ws: WorkspaceRow; items: typeof convs }> = []
   for (const w of workspaces) {
-    groups.push({ ws: w, items: chatConvs.filter((c) => (c.workspace ?? null) === w.path) })
+    groups.push({ ws: w, items: visibleConvs.filter((c) => (c.workspace ?? null) === w.path) })
   }
   const knownPaths = new Set(workspaces.map((w) => w.path))
-  for (const c of chatConvs) {
+  for (const c of visibleConvs) {
     const p = c.workspace ?? null
     if (!knownPaths.has(p)) {
       // A conversation filed under a path the registry doesn't know yet
@@ -1967,62 +1975,65 @@ function ConversationList() {
     g.items.sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   }
 
+  const renderRow = (c: typeof convs[number], isAgent: boolean) => (
+    <ConversationRow
+      key={c.id}
+      conv={c}
+      active={c.id === conversationId}
+      running={
+        statusByConv[String(c.id)] === 'thinking' ||
+        statusByConv[String(c.id)] === 'running-tool'
+      }
+      blocked={Boolean(
+        pendingQuestions[String(c.id)] ||
+          pendingApprovals[String(c.id)] ||
+          pendingPlanApprovals[String(c.id)],
+      )}
+      finished={finishedByConv[String(c.id)] ?? null}
+      isAgent={isAgent}
+      menuOpen={menuOpenId === c.id}
+      setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
+      onOpen={() => openConversation(c)}
+      onExport={() =>
+        exportConversationMarkdown(c.id, c.title).catch((e) =>
+          setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
+        )
+      }
+      onSys={() => setSysTarget({ id: c.id, title: c.title })}
+      onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
+      onAgentSettings={
+        isAgent
+          ? () => {
+              const aid = agentChatByConv[String(c.id)]
+              if (aid) setAgentsDialog({ ws: c.workspace, agentId: aid })
+            }
+          : undefined
+      }
+    />
+  )
+
   return (
     <div className="flex-1 overflow-y-auto">
-      {agentConvs.length > 0 && (
-        <div className="mb-3 border-t border-zinc-800 pt-2 first:border-t-0 first:pt-0">
-          <p className="px-1 pb-1 font-mono text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
-            Agents
-            <span className="ml-1.5 font-mono text-[10px] font-normal text-zinc-600">
-              {agentConvs.length}
-            </span>
-          </p>
-          {agentConvs.map((c) => (
-            <ConversationRow
-              key={c.id}
-              conv={c}
-              active={c.id === conversationId}
-              running={
-                statusByConv[String(c.id)] === 'thinking' ||
-                statusByConv[String(c.id)] === 'running-tool'
-              }
-              blocked={Boolean(
-                pendingQuestions[String(c.id)] ||
-                  pendingApprovals[String(c.id)] ||
-                  pendingPlanApprovals[String(c.id)],
-              )}
-              finished={finishedByConv[String(c.id)] ?? null}
-              isAgent
-              menuOpen={menuOpenId === c.id}
-              setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
-              onOpen={() => openConversation(c)}
-              onExport={() =>
-                exportConversationMarkdown(c.id, c.title).catch((e) =>
-                  setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
-                )
-              }
-              onSys={() => setSysTarget({ id: c.id, title: c.title })}
-              onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
-            />
-          ))}
-        </div>
-      )}
       {groups.map(({ ws, items }) => {
         const key = expandKey(ws.path ?? '')
         const isExpanded = expanded[key] ?? true
         const isActiveWs = (ws.path ?? '') === (workspace || '')
+        // Agent chats pin above the workspace's normal chats (issue #41);
+        // the 5-cap and show-more stepping apply to normal chats only.
+        const wsAgents = items.filter((c) => c.chat_type === 'agent')
+        const chats = items.filter((c) => c.chat_type !== 'agent')
         // Capped view: the 5 most recent chats, plus the open conversation
         // appended whenever it ranks older (the list never hides what you're
         // looking at); "show more" steps +5 per click, session-only.
-        const activeIdx = items.findIndex((c) => c.id === conversationId)
-        const base = Math.min(5 + (extra[key] ?? 0), items.length)
-        const head = items.slice(0, base)
+        const activeIdx = chats.findIndex((c) => c.id === conversationId)
+        const base = Math.min(5 + (extra[key] ?? 0), chats.length)
+        const head = chats.slice(0, base)
         // The active chat sits outside the head block: append it (never a
         // duplicate — only when its index is past the head) so it stays
         // visible directly above the "show more" line.
         const visible =
-          activeIdx >= base ? [...head, items[activeIdx]] : head
-        const hidden = items.length - visible.length
+          activeIdx >= base ? [...head, chats[activeIdx]] : head
+        const hidden = chats.length - visible.length
         return (
           <div key={ws.path ?? 'default'} className="mb-3">
             {/* Workspace section: bold header, hairline top rule, chat count,
@@ -2058,6 +2069,16 @@ function ConversationList() {
               >
                 {items.length}
               </span>
+              {/* Agents dialogue (issue #41): on-hover silhouette on each
+                  workspace — lists the workspace's agents + new agent. */}
+              <button
+                className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-zinc-200 group-hover:opacity-100 focus:opacity-100"
+                aria-label={`Agents for ${ws.label}`}
+                title="Agents — scheduled recurring runs in this workspace"
+                onClick={() => setAgentsDialog({ ws: ws.path, agentId: null })}
+              >
+                <PersonIcon />
+              </button>
               {ws.path !== null && (
                 <button
                   className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover:opacity-100 focus:opacity-100"
@@ -2079,33 +2100,8 @@ function ConversationList() {
             {isExpanded &&
               (items.length > 0 ? (
                 <>
-                  {visible.map((c) => (
-                    <ConversationRow
-                      key={c.id}
-                      conv={c}
-                      active={c.id === conversationId}
-                      running={
-                        statusByConv[String(c.id)] === 'thinking' ||
-                        statusByConv[String(c.id)] === 'running-tool'
-                      }
-                      blocked={Boolean(
-                        pendingQuestions[String(c.id)] ||
-                          pendingApprovals[String(c.id)] ||
-                          pendingPlanApprovals[String(c.id)],
-                      )}
-                      finished={finishedByConv[String(c.id)] ?? null}
-                      menuOpen={menuOpenId === c.id}
-                      setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
-                      onOpen={() => openConversation(c)}
-                      onExport={() =>
-                        exportConversationMarkdown(c.id, c.title).catch((e) =>
-                          setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
-                        )
-                      }
-                      onSys={() => setSysTarget({ id: c.id, title: c.title })}
-                      onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
-                    />
-                  ))}
+                  {wsAgents.map((c) => renderRow(c, true))}
+                  {visible.map((c) => renderRow(c, false))}
                   {hidden > 0 && (
                     <button
                       className="block w-full px-3 py-1 text-left text-[11px] text-zinc-600 hover:text-zinc-300"
@@ -2114,6 +2110,11 @@ function ConversationList() {
                       Show more ({hidden} more)
                     </button>
                   )}
+                </>
+              ) : wsAgents.length > 0 ? (
+                <>
+                  {wsAgents.map((c) => renderRow(c, true))}
+                  <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
                 </>
               ) : (
                 <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
@@ -2166,6 +2167,13 @@ function ConversationList() {
       )}
 
       {/* in-app dialogs (replace native confirm/prompt/alert) */}
+      {agentsDialog && (
+        <AgentsDialog
+          wsPath={agentsDialog.ws}
+          editAgentId={agentsDialog.agentId}
+          onClose={() => setAgentsDialog(null)}
+        />
+      )}
       {notice && (
         <NoticeDialog
           title={notice.title}
@@ -2272,6 +2280,7 @@ function ConversationRow({
   blocked,
   finished,
   isAgent,
+  onAgentSettings,
   menuOpen,
   setMenuOpen,
   onOpen,
@@ -2290,8 +2299,10 @@ function ConversationRow({
   /** Finished-but-unacknowledged signal: 'ok' (green bar) | 'error' (red
    *  pill). Only set for background chats; cleared when the chat opens. */
   finished: 'ok' | 'error' | null
-  /** A scheduled agent's pinned chat (issue #41) — clock badge. */
+  /** A scheduled agent's pinned chat (issue #41) — silhouette badge. */
   isAgent?: boolean
+  /** Open the agent settings dialogue (agent chats only). */
+  onAgentSettings?: () => void
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   onOpen: () => void
@@ -2331,10 +2342,10 @@ function ConversationRow({
         {isAgent && (
           <span
             aria-hidden="true"
-            className={`mr-1.5 shrink-0 text-[10px] ${active ? 'text-blue-200' : 'text-zinc-500'}`}
+            className={`mr-1.5 shrink-0 ${active ? 'text-blue-200' : 'text-zinc-500'}`}
             title="Scheduled agent — runs on a repeating schedule"
           >
-            🕙
+            <PersonIcon />
           </span>
         )}
         <span className="min-w-0 flex-1 truncate">{conv.title}</span>
@@ -2374,6 +2385,17 @@ function ConversationRow({
             >
               System prompt override
             </button>
+            {onAgentSettings && (
+              <button
+                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => {
+                  setMenuOpen(false)
+                  onAgentSettings()
+                }}
+              >
+                Agent settings…
+              </button>
+            )}
             <button
               className="block w-full px-3 py-1.5 text-left text-xs text-red-400 hover:bg-zinc-800"
               onClick={() => {
@@ -2839,40 +2861,178 @@ function McpSection() {
   )
 }
 
-/** Scheduled agents (issue #41): recurring runs in pinned chats. Each row
- *  shows the schedule, policy and next fire time; Run-now triggers a turn
- *  immediately. Creation follows McpSection's inline-add pattern. */
-function AgentsSection() {
-  const [agents, setAgents] = useState<ScheduledAgent[]>([])
-  const [name, setName] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const [kind, setKind] = useState<ScheduledAgent['kind']>('interval')
-  const [intervalMin, setIntervalMin] = useState('60')
-  const [time, setTime] = useState('09:00')
-  const [weekday, setWeekday] = useState('0')
-  const [policy, setPolicy] = useState<AgentPolicy>('sandbox-only')
+/** Scheduled agents (issue #41): first-class recurring runs in pinned chats.
+ *  The dialogue opens from the on-hover silhouette icon on each workspace
+ *  (list + new) and as "Agent settings…" from the pinned chat's row menu.
+ *  Typed messages in an agent chat become standing instructions (the
+ *  Composer routes them to the API); they never trigger a run. */
+
+function PersonIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="11"
+      height="11"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="4.5" r="2.8" />
+      <path d="M2.5 14.5c0-3 2.5-5.2 5.5-5.2s5.5 2.2 5.5 5.2" />
+    </svg>
+  )
+}
+
+const agentInputCls =
+  'rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-blue-500 focus:outline-none'
+
+/** One standing instruction row: inline edit + delete (issue #41: the list
+ *  is editable and individually deletable). */
+function InstructionRow({ agentId, ins }: { agentId: string; ins: AgentInstruction }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(ins.content)
+  const [busy, setBusy] = useState(false)
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      await updateAgentInstruction(agentId, ins.id, draft.trim())
+      setEditing(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <li className="flex items-center gap-1.5">
+        <input
+          className={`min-w-0 flex-1 ${agentInputCls}`}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void save()
+            if (e.key === 'Escape') setEditing(false)
+          }}
+          autoFocus
+        />
+        <button
+          className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800"
+          disabled={busy}
+          onClick={() => void save()}
+        >
+          save
+        </button>
+        <button
+          className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+          onClick={() => {
+            setDraft(ins.content)
+            setEditing(false)
+          }}
+        >
+          cancel
+        </button>
+      </li>
+    )
+  }
+  return (
+    <li className="flex items-start gap-1.5">
+      <span className="min-w-0 flex-1 break-words text-[11px] text-zinc-300">{ins.content}</span>
+      <button
+        className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+        onClick={() => setEditing(true)}
+      >
+        edit
+      </button>
+      <button
+        className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
+        onClick={() => void deleteAgentInstruction(agentId, ins.id)}
+      >
+        ✕
+      </button>
+    </li>
+  )
+}
+
+/** Standing instructions block: shown for a saved agent. */
+function InstructionsEditor({ agent }: { agent: ScheduledAgent }) {
+  const [draft, setDraft] = useState('')
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  const add = async () => {
+    if (!draft.trim()) return
+    await addAgentInstruction(agent.id, draft.trim())
+    setDraft('')
+    await refreshAgents()
+  }
+  return (
+    <div>
+      <p className="mb-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+        Standing instructions — appended to the prompt at every fire
+      </p>
+      <ul className="mb-1.5 space-y-1">
+        {agent.instructions.map((ins) => (
+          <InstructionRow key={ins.id} agentId={agent.id} ins={ins} />
+        ))}
+        {agent.instructions.length === 0 && (
+          <li className="text-[10px] text-zinc-600">
+            None. Messages typed in the agent's chat also become standing instructions.
+          </li>
+        )}
+      </ul>
+      <div className="flex gap-1.5">
+        <input
+          className={`min-w-0 flex-1 ${agentInputCls}`}
+          value={draft}
+          placeholder="add an instruction…"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void add()
+          }}
+        />
+        <button
+          className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+          onClick={() => void add()}
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** The create/edit form. `agent` null = new agent in workspace `wsPath`. */
+function AgentForm({
+  agent,
+  wsPath,
+  onDone,
+  onCancel,
+}: {
+  agent: ScheduledAgent | null
+  wsPath: string | null
+  onDone: (saved: ScheduledAgent) => void
+  onCancel: () => void
+}) {
+  const [name, setName] = useState(agent?.name ?? '')
+  const [prompt, setPrompt] = useState(agent?.prompt ?? '')
+  const [scheduleType, setScheduleType] = useState<AgentScheduleType>(agent?.schedule_type ?? 'interval')
+  const [minutes, setMinutes] = useState(String(agent?.schedule_spec?.minutes ?? 60))
+  const [time, setTime] = useState(agent?.schedule_spec?.time ?? '09:00')
+  const [weekday, setWeekday] = useState(String(agent?.schedule_spec?.weekday ?? 0))
+  const [policy, setPolicy] = useState<AgentPolicy>(agent?.approval_policy ?? 'sandbox-only')
+  const [model, setModel] = useState(agent?.model ?? '')
+  const [effort, setEffort] = useState(agent?.effort ?? '')
+  const [memory, setMemory] = useState(agent?.memory_enabled ?? true)
+  const [retention, setRetention] = useState(String(agent?.retention ?? 0))
+  const [notify, setNotify] = useState(agent?.notify_on_success ?? false)
+  const [enabled, setEnabled] = useState(agent?.enabled ?? true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const refreshAgents = useAgent((s) => s.refreshAgents)
 
-  const refresh = useCallback(async () => {
-    try {
-      setAgents((await listAgents()).agents)
-    } catch {
-      /* transient backend hiccup */
-    }
-  }, [])
-
-  // Poll while Settings is open: next-run times tick down and "running"
-  // flags flip as the backend fires agents.
-  useEffect(() => {
-    void refresh()
-    const t = setInterval(() => {
-      void refresh()
-    }, 5000)
-    return () => clearInterval(t)
-  }, [refresh])
-
-  const add = async () => {
+  const save = async () => {
     setErr(null)
     if (!name.trim() || !prompt.trim()) {
       setErr('name and prompt are required')
@@ -2880,19 +3040,28 @@ function AgentsSection() {
     }
     setBusy(true)
     try {
-      await addAgent({
+      const body: AgentBody = {
+        workspace: wsPath ?? '',
         name: name.trim(),
         prompt: prompt.trim(),
-        kind,
-        interval_minutes: Math.max(5, parseInt(intervalMin, 10) || 60),
-        time: kind === 'interval' ? '09:00' : time,
-        weekday: parseInt(weekday, 10) || 0,
-        policy,
-        enabled: true,
-      })
-      setName('')
-      setPrompt('')
-      await refresh()
+        schedule_type: scheduleType,
+        schedule_spec:
+          scheduleType === 'interval'
+            ? { minutes: Math.max(5, parseInt(minutes, 10) || 60) }
+            : scheduleType === 'daily'
+              ? { time }
+              : { weekday: parseInt(weekday, 10) || 0, time },
+        approval_policy: policy,
+        model: model.trim(),
+        effort,
+        memory_enabled: memory,
+        retention: Math.max(0, parseInt(retention, 10) || 0),
+        notify_on_success: notify,
+        enabled,
+      }
+      const saved = agent ? await updateAgent(agent.id, body) : await addAgent(body)
+      await refreshAgents()
+      onDone(saved)
     } catch (e) {
       setErr(String((e as { message?: string }).message ?? e))
     } finally {
@@ -2900,37 +3069,451 @@ function AgentsSection() {
     }
   }
 
-  const mutate = async (fn: () => Promise<unknown>) => {
+  return (
+    <div className="space-y-2.5">
+      <div className="flex gap-2">
+        <label className="min-w-0 flex-1">
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Name</span>
+          <input className={`w-full ${agentInputCls}`} value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="w-44 shrink-0">
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Workspace</span>
+          <input
+            className={`w-full ${agentInputCls} text-zinc-500`}
+            value={wsPath ? wsBasename(wsPath) : 'Default (Home)'}
+            disabled
+          />
+        </label>
+      </div>
+      <label className="block">
+        <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">
+          Prompt — what the agent does on every run
+        </span>
+        <textarea
+          className={`w-full ${agentInputCls} min-h-[64px] resize-y`}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+      </label>
+      <div className="flex flex-wrap items-end gap-2">
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Schedule</span>
+          <select
+            className={agentInputCls}
+            value={scheduleType}
+            onChange={(e) => setScheduleType(e.target.value as AgentScheduleType)}
+          >
+            <option value="interval">every N min</option>
+            <option value="daily">daily</option>
+            <option value="weekly">weekly</option>
+          </select>
+        </label>
+        {scheduleType === 'interval' ? (
+          <label>
+            <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Minutes (min 5)</span>
+            <input className={`w-24 ${agentInputCls}`} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
+          </label>
+        ) : (
+          <>
+            <label>
+              <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Time</span>
+              <input className={`w-24 ${agentInputCls}`} value={time} onChange={(e) => setTime(e.target.value)} placeholder="09:00" />
+            </label>
+            {scheduleType === 'weekly' && (
+              <label>
+                <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Day</span>
+                <select className={agentInputCls} value={weekday} onChange={(e) => setWeekday(e.target.value)}>
+                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => (
+                    <option key={d} value={i}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </>
+        )}
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Approval policy</span>
+          <select className={agentInputCls} value={policy} onChange={(e) => setPolicy(e.target.value as AgentPolicy)}>
+            <option value="sandbox-only">sandbox-only</option>
+            <option value="autonomous">autonomous</option>
+          </select>
+        </label>
+      </div>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        {policy === 'sandbox-only'
+          ? 'Sandbox-only (default): tools that would need approval are skipped ("skipped: approval required") and the run continues — safe unattended.'
+          : 'Autonomous (opt-in): everything auto-approves, including shell commands and file edits — only for agents you trust.'}
+      </p>
+      <div className="flex flex-wrap items-end gap-2">
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Model (blank = active)</span>
+          <input className={`w-44 ${agentInputCls}`} value={model} onChange={(e) => setModel(e.target.value)} placeholder="default model" />
+        </label>
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Effort</span>
+          <select className={agentInputCls} value={effort} onChange={(e) => setEffort(e.target.value)}>
+            <option value="">default</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Retention (runs, 0 = all)</span>
+          <input className={`w-24 ${agentInputCls}`} value={retention} onChange={(e) => setRetention(e.target.value)} />
+        </label>
+      </div>
+      <div className="flex flex-wrap gap-4 text-[11px] text-zinc-400">
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={memory} onChange={(e) => setMemory(e.target.checked)} />
+          Memory — include transcript history in each fire
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
+          Notify on completion
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          Enabled
+        </label>
+      </div>
+      {agent && <InstructionsEditor agent={agent} />}
+      {err && <p className="text-xs text-red-400">{err}</p>}
+      <div className="flex justify-end gap-2 border-t border-zinc-800 pt-2.5">
+        <button
+          className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          className="rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void save()}
+        >
+          {agent ? 'Save agent' : 'Create agent'}
+        </button>
+      </div>
+      {!agent && (
+        <p className="text-[10px] text-zinc-600">
+          The first fire is never immediate — an interval agent runs one interval after save, a
+          daily/weekly agent at its next clock slot. Use "Run now" to test right away. Missed fires
+          while YAAH is closed are skipped.
+        </p>
+      )}
+    </div>
+  )
+}
+
+const AGENT_DLG_OVERLAY =
+  'fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4'
+
+/** The agents dialogue for one workspace: list of that workspace's agents +
+ *  "New agent", each with run-now / pause / edit / delete (delete removes the
+ *  pinned chat after a confirm). */
+function AgentsDialog({
+  wsPath,
+  editAgentId,
+  onClose,
+}: {
+  wsPath: string | null
+  editAgentId: string | null
+  onClose: () => void
+}) {
+  const agents = useAgent((s) => s.agents)
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  const pushToast = useAgent((s) => s.pushToast)
+  const openConversationId = useAgent((s) => s.setConversationId)
+  const loadHistory = useAgent((s) => s.loadHistory)
+  const setWorkspace = useAgent((s) => s.setWorkspace)
+  // null = list view; 'new' = creating; otherwise the agent id being edited.
+  const [editing, setEditing] = useState<string | null>(editAgentId ?? null)
+  const [deleteTarget, setDeleteTarget] = useState<ScheduledAgent | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void refreshAgents()
+  }, [refreshAgents])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !deleteTarget) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose, deleteTarget])
+
+  const wsAgents = agents
+    .filter((a) => (a.workspace || '') === (wsPath || ''))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const editingAgent = editing && editing !== 'new' ? agents.find((a) => a.id === editing) ?? null : null
+
+  const openChat = (a: ScheduledAgent) => {
+    setConversationSafe(openConversationId, loadHistory, setWorkspace, a)
+    onClose()
+  }
+
+  const runNow = async (a: ScheduledAgent) => {
     setBusy(true)
-    setErr(null)
     try {
-      await fn()
-      await refresh()
+      await runAgentNow(a.id)
+      await refreshAgents()
     } catch (e) {
-      setErr(String((e as { message?: string }).message ?? e))
+      pushToast({ kind: 'error', title: `Could not run "${a.name}"`, body: String((e as { message?: string }).message ?? e) })
     } finally {
       setBusy(false)
     }
   }
 
-  const scheduleText = (a: ScheduledAgent) =>
-    a.kind === 'interval'
-      ? `every ${a.interval_minutes} min`
-      : a.kind === 'daily'
-        ? `daily at ${a.time}`
-        : `weekly, ${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][a.weekday] ?? 'Mon'} at ${a.time}`
+  const togglePause = async (a: ScheduledAgent) => {
+    setBusy(true)
+    try {
+      await updateAgent(a.id, agentToBody(a, !a.enabled))
+      await refreshAgents()
+    } finally {
+      setBusy(false)
+    }
+  }
 
-  const policyColor = (p: AgentPolicy) =>
-    p === 'full' ? 'text-red-400' : p === 'ask' ? 'text-amber-400' : 'text-emerald-400'
+  return (
+    <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <h2 className="font-mono text-xs uppercase tracking-wider text-zinc-400">
+            Agents — {wsPath ? wsBasename(wsPath) : 'Default (Home)'}
+          </h2>
+          <button className="rounded px-2 text-zinc-500 hover:text-zinc-200" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {editing === null ? (
+            <div className="space-y-2">
+              {wsAgents.length === 0 && (
+                <p className="py-4 text-center text-xs text-zinc-600">
+                  No agents in this workspace yet. An agent runs its prompt on a repeating
+                  schedule, unattended, appending every run to its own pinned chat.
+                </p>
+              )}
+              {wsAgents.map((a) => (
+                <div key={a.id} className="rounded border border-zinc-800 bg-zinc-900/60 p-2.5">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`font-mono text-[10px] uppercase ${a.running ? 'text-blue-400' : a.enabled ? 'text-emerald-400' : 'text-zinc-500'}`}
+                    >
+                      {a.running ? 'running' : a.enabled ? 'on' : 'paused'}
+                    </span>
+                    <span className="truncate font-mono text-xs text-zinc-200">{a.name}</span>
+                    <span className="flex-1 truncate font-mono text-[10px] text-zinc-600">
+                      {a.schedule_text} · {a.approval_policy}
+                      {a.next_fire_at && a.enabled ? ` · next ${relTime(a.next_fire_at)}` : ''}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-[10px] text-zinc-500">{a.prompt}</p>
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                      disabled={busy || a.running}
+                      onClick={() => void runNow(a)}
+                    >
+                      run now
+                    </button>
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                      disabled={busy}
+                      onClick={() => void togglePause(a)}
+                    >
+                      {a.enabled ? 'pause' : 'resume'}
+                    </button>
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                      onClick={() => setEditing(a.id)}
+                    >
+                      edit
+                    </button>
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                      onClick={() => openChat(a)}
+                    >
+                      open chat
+                    </button>
+                    <button
+                      className="ml-auto rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
+                      onClick={() => setDeleteTarget(a)}
+                    >
+                      delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button
+                className="w-full rounded border border-dashed border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                onClick={() => setEditing('new')}
+              >
+                + New agent
+              </button>
+            </div>
+          ) : (
+            <AgentForm
+              agent={editingAgent}
+              wsPath={editingAgent ? editingAgent.workspace || null : wsPath}
+              onDone={() => setEditing(null)}
+              onCancel={() => setEditing(null)}
+            />
+          )}
+        </div>
+      </div>
+      {deleteTarget && (
+        <ConfirmDialog
+          title={`Delete agent "${deleteTarget.name}"?`}
+          body="The agent and its pinned chat (the full run transcript) will be removed. This cannot be undone."
+          confirmLabel="Delete agent"
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            setDeleteTarget(null)
+            await deleteAgent(deleteTarget.id, true)
+            await refreshAgents()
+          }}
+        />
+      )}
+    </div>
+  )
+}
 
-  const nextRun = (a: ScheduledAgent) => {
-    if (!a.enabled) return 'paused'
-    const t = Date.parse(a.next_run_at)
-    if (Number.isNaN(t)) return '—'
-    const mins = Math.round((t - Date.now()) / 60000)
-    if (mins <= 0) return a.running ? 'running now' : 'due'
-    if (mins < 60) return `in ${mins}m`
-    return `in ${Math.round(mins / 60)}h`
+/** Shared helpers for dialog rows (kept tiny on purpose). */
+function agentToBody(a: ScheduledAgent, enabled: boolean): AgentBody {
+  return {
+    workspace: a.workspace || '',
+    name: a.name,
+    prompt: a.prompt,
+    schedule_type: a.schedule_type,
+    schedule_spec: a.schedule_spec,
+    approval_policy: a.approval_policy,
+    model: a.model,
+    effort: a.effort,
+    memory_enabled: a.memory_enabled,
+    retention: a.retention,
+    notify_on_success: a.notify_on_success,
+    enabled,
+  }
+}
+
+async function setConversationSafe(
+  setConversationId: (id: number) => void,
+  loadHistory: (id: number, rows: Awaited<ReturnType<typeof getMessages>>) => void,
+  setWorkspace: (ws: string) => void,
+  a: ScheduledAgent,
+) {
+  setConversationId(a.conversation_id)
+  setWorkspace(a.workspace || '')
+  getMessages(a.conversation_id)
+    .then((rows) => loadHistory(a.conversation_id, rows))
+    .catch(() => {})
+}
+
+/** Bottom-right toast stack (issue #41): failure toasts for scheduled runs
+ *  always; success only for agents with notify-on-success. */
+function ToastCard({ toast }: { toast: Toast }) {
+  const dismiss = useAgent((s) => s.dismissToast)
+  useEffect(() => {
+    const t = window.setTimeout(() => dismiss(toast.id), 6000)
+    return () => window.clearTimeout(t)
+  }, [toast.id, dismiss])
+  const tone =
+    toast.kind === 'error'
+      ? 'border-red-800 bg-red-950/90 text-red-200'
+      : toast.kind === 'success'
+        ? 'border-emerald-800 bg-emerald-950/90 text-emerald-200'
+        : 'border-zinc-700 bg-zinc-800/95 text-zinc-200'
+  return (
+    <div className={`pointer-events-auto rounded border px-3 py-2 shadow-lg ${tone}`}>
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium">{toast.title}</p>
+          {toast.body && <p className="mt-0.5 text-[10px] opacity-80">{toast.body}</p>}
+        </div>
+        <button className="shrink-0 opacity-60 hover:opacity-100" onClick={() => dismiss(toast.id)} aria-label="Dismiss">
+          ✕
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export function ToastStack() {
+  const toasts = useAgent((s) => s.toasts)
+  if (toasts.length === 0) return null
+  return (
+    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2">
+      {toasts.map((t) => (
+        <ToastCard key={t.id} toast={t} />
+      ))}
+    </div>
+  )
+}
+
+/** Polls /api/agents: keeps the store's agent map fresh (the Composer gates
+ *  on it) and raises run toasts — failures always, successes per-agent. The
+ *  first pass after boot only marks, so old completions don't toast. */
+export function AgentRunWatcher() {
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  useEffect(() => {
+    let alive = true
+    const poll = async () => {
+      await refreshAgents()
+      if (!alive) return
+      const { agents, agentsToastedThrough, setAgentsToastedThrough, pushToast } =
+        useAgent.getState()
+      for (const a of agents) {
+        if (!a.last_finished_at || a.last_status === 'running') continue
+        const seen = agentsToastedThrough[a.id]
+        if (seen === undefined) {
+          setAgentsToastedThrough(a.id, a.last_finished_at)
+          continue
+        }
+        if (a.last_finished_at === seen) continue
+        setAgentsToastedThrough(a.id, a.last_finished_at)
+        if (a.last_status === 'error') {
+          pushToast({
+            kind: 'error',
+            title: `Agent "${a.name}" run failed`,
+            body: 'Open its pinned chat for the transcript.',
+          })
+        } else if (a.notify_on_success) {
+          pushToast({ kind: 'success', title: `Agent "${a.name}" run finished` })
+        }
+      }
+    }
+    void poll()
+    const t = window.setInterval(() => void poll(), 15000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+  }, [refreshAgents])
+  return null
+}
+
+/** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
+function AgentsSettingsSection() {
+  const [rc, setRc] = useState('2')
+  const [rb, setRb] = useState('5')
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    listAgents()
+      .then((p) => {
+        setRc(String(p.retry.retry_count))
+        setRb(String(p.retry.retry_backoff_minutes))
+      })
+      .catch(() => {})
+  }, [])
+
+  const save = async () => {
+    await setAgentRetry(parseInt(rc, 10) || 0, parseInt(rb, 10) || 5)
+    setSaved(true)
+    window.setTimeout(() => setSaved(false), 1500)
   }
 
   return (
@@ -2938,141 +3521,37 @@ function AgentsSection() {
       <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
         Scheduled agents
       </h3>
-      <div className="mb-2 space-y-1.5">
-        {agents.length === 0 && (
-          <p className="text-[10px] text-zinc-600">
-            No agents yet. A scheduled agent runs its prompt on a repeating schedule in its own
-            pinned chat — status checks, digests, watches. Default policy is sandbox-only:
-            approval-required tools are skipped, runs stay read-only.
-          </p>
-        )}
-        {agents.map((a) => (
-          <div key={a.id} className="rounded border border-zinc-800 bg-zinc-900/60 p-2">
-            <div className="flex items-center gap-2">
-              <span className={`font-mono text-[10px] uppercase ${a.enabled ? 'text-emerald-400' : 'text-zinc-500'}`}>
-                {a.running ? 'running' : a.enabled ? 'on' : 'paused'}
-              </span>
-              <span className="font-mono text-xs text-zinc-200">{a.name}</span>
-              <span className="flex-1 truncate font-mono text-[10px] text-zinc-600">
-                {scheduleText(a)} · next {nextRun(a)}
-              </span>
-              <span className={`font-mono text-[10px] ${policyColor(a.policy)}`}>{a.policy}</span>
-            </div>
-            <div className="mt-1.5 flex items-center gap-1.5">
-              <button
-                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
-                disabled={busy}
-                onClick={() => void mutate(() => updateAgent(a.id, {
-                  name: a.name, prompt: a.prompt, kind: a.kind,
-                  interval_minutes: a.interval_minutes, time: a.time,
-                  weekday: a.weekday, policy: a.policy, enabled: !a.enabled,
-                }))}
-              >
-                {a.enabled ? 'pause' : 'resume'}
-              </button>
-              <button
-                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
-                disabled={busy || a.running}
-                onClick={() => void mutate(() => runAgentNow(a.id))}
-              >
-                run now
-              </button>
-              <button
-                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
-                disabled={busy}
-                onClick={() => void mutate(() => removeAgent(a.id))}
-              >
-                remove
-              </button>
-            </div>
-            <p className="mt-1 line-clamp-2 text-[10px] text-zinc-600">{a.prompt}</p>
-          </div>
-        ))}
-        <div className="space-y-1.5 rounded border border-zinc-800 p-2">
-          <div className="flex gap-1.5">
-            <input
-              className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="name"
-              aria-label="Agent name"
-            />
-            <select
-              className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-1 py-1 font-mono text-xs"
-              value={kind}
-              onChange={(e) => setKind(e.target.value as ScheduledAgent['kind'])}
-              aria-label="Schedule kind"
-            >
-              <option value="interval">every N min</option>
-              <option value="daily">daily</option>
-              <option value="weekly">weekly</option>
-            </select>
-            {kind === 'interval' ? (
-              <input
-                className="w-20 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={intervalMin}
-                onChange={(e) => setIntervalMin(e.target.value)}
-                placeholder="min"
-                aria-label="Interval minutes"
-              />
-            ) : (
-              <>
-                <input
-                  className="w-20 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                  value={time}
-                  onChange={(e) => setTime(e.target.value)}
-                  placeholder="09:00"
-                  aria-label="Time of day"
-                />
-                {kind === 'weekly' && (
-                  <select
-                    className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-1 py-1 font-mono text-xs"
-                    value={weekday}
-                    onChange={(e) => setWeekday(e.target.value)}
-                    aria-label="Weekday"
-                  >
-                    {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => (
-                      <option key={d} value={i}>{d}</option>
-                    ))}
-                  </select>
-                )}
-              </>
-            )}
-            <select
-              className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-1 py-1 font-mono text-xs"
-              value={policy}
-              onChange={(e) => setPolicy(e.target.value as AgentPolicy)}
-              aria-label="Approval policy"
-            >
-              <option value="sandbox-only">sandbox-only</option>
-              <option value="ask">ask</option>
-              <option value="full">full</option>
-            </select>
-          </div>
-          <div className="flex gap-1.5">
-            <input
-              className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="what the agent should do on every run"
-              aria-label="Agent prompt"
-            />
-            <button
-              className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
-              disabled={busy}
-              onClick={() => void add()}
-            >
-              Add
-            </button>
-          </div>
-        </div>
-        <p className="text-[10px] text-zinc-600">
-          Runs fire only while YAAH (or the yaah-server service) is running; anything missed while
-          the app was closed runs once at startup. Each agent gets its own pinned chat in the
-          sidebar where every run's transcript lands.
-        </p>
+      <p className="mb-2 text-[10px] leading-relaxed text-zinc-600">
+        Agents are created from the silhouette icon on each workspace in the sidebar. Failed runs
+        retry with backoff, globally:
+      </p>
+      <div className="flex items-center gap-1.5">
+        <label className="text-[10px] text-zinc-500">
+          retry
+          <input
+            className={`ml-1 w-12 ${agentInputCls}`}
+            value={rc}
+            onChange={(e) => setRc(e.target.value)}
+            aria-label="Retry count"
+          />
+        </label>
+        <label className="text-[10px] text-zinc-500">
+          times, backoff
+          <input
+            className={`ml-1 w-12 ${agentInputCls}`}
+            value={rb}
+            onChange={(e) => setRb(e.target.value)}
+            aria-label="Backoff minutes"
+          />
+        </label>
+        <span className="text-[10px] text-zinc-500">min</span>
+        <button
+          className="ml-auto rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+          onClick={() => void save()}
+        >
+          {saved ? 'Saved ✓' : 'Save'}
+        </button>
       </div>
-      {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
     </>
   )
 }
@@ -3961,7 +4440,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               <McpSection />
             </SettingsCard>
             <SettingsCard title="Scheduled agents" className="col-span-4">
-              <AgentsSection />
+              <AgentsSettingsSection />
             </SettingsCard>
           </div>
         </div>
@@ -5259,6 +5738,11 @@ function Composer() {
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
+  // Agent chats (issue #41): the composer files standing instructions, it
+  // never starts a run.
+  const agentChatByConv = useAgent((s) => s.agentChatByConv)
+  const isAgentChat =
+    conversationId !== null && Boolean(agentChatByConv[String(conversationId)])
 
   // Collapse the auto-grown textarea back to its resting height whenever the
   // draft empties (send, skill pick, restore-on-error keeps content so no reset).
@@ -6025,6 +6509,31 @@ function Composer() {
         await new Promise<void>((r) => setTimeout(r, 50))
       }
     }
+    // Agent chat (issue #41): typed messages NEVER trigger a run — each one
+    // becomes a standing instruction the agent sees at every scheduled fire.
+    if (conversationId !== null && !isPtt) {
+      const agentId = useAgent.getState().agentChatByConv[String(conversationId)]
+      if (agentId) {
+        if (!text) return
+        try {
+          await addAgentInstruction(agentId, text)
+          appendUserMessage(String(conversationId), text)
+          useAgent.getState().pushToast({
+            kind: 'info',
+            title: 'Standing instruction saved',
+            body: 'Messages in an agent chat never start a run — this rides along at every fire.',
+          })
+        } catch (e) {
+          useAgent.getState().pushToast({
+            kind: 'error',
+            title: 'Could not save standing instruction',
+            body: String((e as Error).message ?? e),
+          })
+        }
+        setInput('')
+        return
+      }
+    }
     setSending(true)
     setSendError(null)
 
@@ -6398,7 +6907,11 @@ function Composer() {
           className="block w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 focus:outline-none"
           rows={2}
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
-          placeholder="Describe a task... (drop/paste/attach images or text files; type / to load a skill)"
+          placeholder={
+            isAgentChat
+              ? 'This is an agent chat — messages become standing instructions (they never start a run)'
+              : 'Describe a task... (drop/paste/attach images or text files; type / to load a skill)'
+          }
           aria-label="Message the agent"
           value={input}
           onChange={(e) => {

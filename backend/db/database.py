@@ -84,6 +84,42 @@ CREATE TABLE IF NOT EXISTS workspaces (
     last_opened_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Scheduled agents (issue #41): first-class recurring runs, one pinned
+-- conversation each. schedule_spec is JSON interpreted per schedule_type:
+-- interval -> {"minutes": N}; daily -> {"time": "HH:MM"};
+-- weekly -> {"weekday": 0-6 (Mon=0), "time": "HH:MM"}.
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    workspace TEXT NOT NULL,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    schedule_type TEXT NOT NULL DEFAULT 'interval',
+    schedule_spec TEXT NOT NULL DEFAULT '{}',
+    approval_policy TEXT NOT NULL DEFAULT 'sandbox-only',
+    model TEXT NOT NULL DEFAULT '',           -- '' = the active global model
+    effort TEXT NOT NULL DEFAULT '',          -- '' = don't send reasoning_effort
+    memory_enabled INTEGER NOT NULL DEFAULT 1,
+    retention INTEGER NOT NULL DEFAULT 0,     -- runs kept; 0 = unlimited
+    notify_on_success INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    next_fire_at TEXT,                        -- ISO local; skipped when in the past on boot
+    last_fired_at TEXT,
+    last_finished_at TEXT,
+    last_status TEXT,                         -- 'running' | 'ok' | 'error' (toast source)
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Standing instructions: typed messages in an agent chat never trigger a
+-- run; each becomes one row here, appended to the prompt at every fire.
+CREATE TABLE IF NOT EXISTS agent_instructions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -111,6 +147,12 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_tokens INTEGER")
     if "context_model" not in conv_cols:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_model TEXT")
+    if "chat_type" not in conv_cols:
+        # 'chat' = a normal conversation; 'agent' = a scheduled agent's pinned
+        # chat (issue #41). Existing rows are normal chats by default.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN chat_type TEXT NOT NULL DEFAULT 'chat'"
+        )
     await migrate_workspaces(db)
     return db
 
@@ -307,12 +349,14 @@ async def init_db():
 
 # ---- Conversation CRUD ----
 
-async def create_conversation(title: str = "New Task", workspace: str | None = None):
+async def create_conversation(
+    title: str = "New Task", workspace: str | None = None, chat_type: str = "chat"
+):
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO conversations (title, workspace) VALUES (?, ?)",
-            (title, workspace),
+            "INSERT INTO conversations (title, workspace, chat_type) VALUES (?, ?, ?)",
+            (title, workspace, chat_type),
         )
         await db.commit()
         return cur.lastrowid
@@ -447,5 +491,170 @@ async def get_messages(conversation_id: int):
                 else None
             )
         return rows
+    finally:
+        await db.close()
+
+# ---- Scheduled agents (issue #41) ----
+
+AGENT_FIELDS = (
+    "workspace", "name", "prompt", "schedule_type", "schedule_spec",
+    "approval_policy", "model", "effort", "memory_enabled", "retention",
+    "notify_on_success", "enabled", "conversation_id",
+    "next_fire_at", "last_fired_at", "last_finished_at", "last_status",
+)
+
+
+async def create_agent(fields: dict) -> dict:
+    """Insert one agent row; returns it as a dict. `id` may be supplied
+    (tests) or omitted (the API layer generates one)."""
+    allowed = {"id", *AGENT_FIELDS}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields.get("id"):
+        import uuid
+
+        fields["id"] = uuid.uuid4().hex[:12]
+    cols = ", ".join(fields)
+    marks = ", ".join("?" for _ in fields)
+    db = await get_db()
+    try:
+        await db.execute(
+            f"INSERT INTO agents ({cols}) VALUES ({marks})", tuple(fields.values())
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM agents WHERE id = ?", (fields["id"],))
+        return dict(await cur.fetchone())
+    finally:
+        await db.close()
+
+
+async def list_agents(workspace: str | None = None) -> list[dict]:
+    db = await get_db()
+    try:
+        if workspace is None:
+            cur = await db.execute("SELECT * FROM agents ORDER BY created_at")
+        else:
+            cur = await db.execute(
+                "SELECT * FROM agents WHERE workspace = ? ORDER BY created_at",
+                (workspace,),
+            )
+        return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def get_agent(agent_id: str) -> dict | None:
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def update_agent(agent_id: str, fields: dict) -> dict | None:
+    """Merge-update allowed columns; bumps updated_at. Returns the fresh row."""
+    fields = {k: v for k, v in fields.items() if k in AGENT_FIELDS}
+    if not fields:
+        return await get_agent(agent_id)
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    db = await get_db()
+    try:
+        await db.execute(
+            f"UPDATE agents SET {sets}, updated_at = datetime('now') WHERE id = ?",
+            (*fields.values(), agent_id),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def delete_agent(agent_id: str) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def list_instructions(agent_id: str) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM agent_instructions WHERE agent_id = ? ORDER BY id",
+            (agent_id,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def add_instruction(agent_id: str, content: str) -> dict:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT INTO agent_instructions (agent_id, content) VALUES (?, ?)",
+            (agent_id, content),
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT * FROM agent_instructions WHERE id = ?", (cur.lastrowid,)
+        )
+        return dict(await cur.fetchone())
+    finally:
+        await db.close()
+
+
+async def update_instruction(instruction_id: int, content: str) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "UPDATE agent_instructions SET content = ? WHERE id = ?",
+            (content, instruction_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def delete_instruction(instruction_id: int) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "DELETE FROM agent_instructions WHERE id = ?", (instruction_id,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def trim_agent_transcript(conversation_id: int, keep_runs: int):
+    """Per-agent retention (issue #41): keep only the most recent `keep_runs`
+    turns. A run starts at its (persisted) user message, so the transcript is
+    cut just before the Nth-from-last user row; delete_message-by-range keeps
+    tool/assistant rows attached to their run."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user' "
+            "ORDER BY id",
+            (conversation_id,),
+        )
+        user_rows = [r[0] for r in await cur.fetchall()]
+        if len(user_rows) <= keep_runs:
+            return
+        cutoff = user_rows[len(user_rows) - keep_runs]
+        await db.execute(
+            "DELETE FROM messages WHERE conversation_id = ? AND id < ?",
+            (conversation_id, cutoff),
+        )
+        await db.commit()
     finally:
         await db.close()

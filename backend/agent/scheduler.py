@@ -1,270 +1,326 @@
-"""Scheduled agents (issue #41): user-defined recurring agent runs.
+"""Scheduled agents (issue #41): first-class, user-scheduled recurring runs.
 
-Each agent lives in config.json under ``agents``: a list of
-{id, conversation_id, name, prompt, kind, interval_minutes, time, weekday,
-policy, enabled, last_run_at, next_run_at}. Every agent owns a pinned
-conversation (created with the agent); when its schedule comes due — and a
-backend process is alive, desktop or headless service — the scheduler fires
-one turn of ``prompt`` into that conversation.
+Agents live in the SQLite `agents` table (durable — the Tauri supervisor
+respawns the backend on crash, and schedules must survive that), each with a
+pinned conversation of chat_type='agent'. The scheduler is an asyncio task
+in the FastAPI lifespan: it ticks periodically, computes due agents from the
+database, and fires each as a turn via run_agent.
 
-Per-agent approval policy: "sandbox-only" (default) never blocks on the
-access-mode gate — approval-required tools are skipped with an explanatory
-note and the run continues; "ask" behaves like a normal chat turn; "full"
-runs ungated regardless of the global access mode.
+Spec decisions implemented here:
+- First fire is never immediate: it lands after the first interval / at the
+  next clock slot ("Run now" in the dialogue covers testing).
+- Missed fires while no backend was alive are SKIPPED silently — no
+  catch-up on launch; overdue next_fire_at values roll forward at boot.
+- Failed fires retry per the GLOBAL retry setting (config "agents":
+  retry_count / retry_backoff_minutes), not per-agent.
+- Runs fire in parallel with the user's turn and each other, unlimited.
+  The one guard that remains is per-conversation: a fire landing while that
+  same chat is mid-turn is postponed briefly rather than dropped on the
+  run-lock error (the spec's accepted collision risk is about the shared
+  working tree, not double-firing one chat).
 """
 import asyncio
 import contextlib
+import json
 import logging
-import uuid
 from datetime import datetime, timedelta
 
 from backend.agent.config import load_config, save_config
+from backend.db.database import (
+    get_conversation,
+    list_agents,
+    list_instructions,
+    trim_agent_transcript,
+    update_agent as _db_update_agent,
+)
+
+
+def _patch(agent_id: str, **fields) -> dict | None:
+    """Merge-update one agent row (dict-form wrapper over the DB layer)."""
+    return _db_update_agent(agent_id, fields)
 
 log = logging.getLogger("yaah.scheduler")
 
-VALID_KINDS = ("interval", "daily", "weekly")
-VALID_POLICIES = ("sandbox-only", "ask", "full")
+VALID_SCHEDULE_TYPES = ("interval", "daily", "weekly")
+VALID_POLICIES = ("sandbox-only", "autonomous")
+WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
-# Schedule sanity bounds: an interval below this would hammer the model
-# provider; above a month makes "next run" effectively meaningless.
+# Interval bounds: below this would hammer the model provider; above a
+# month makes "next fire" effectively meaningless.
 MIN_INTERVAL_MINUTES = 5
 MAX_INTERVAL_MINUTES = 60 * 24 * 30
 
-# How often the scheduler wakes up to look for due agents. A 30s tick means
-# a fire is at most half a minute late, which is plenty for human schedules.
+# How often the scheduler wakes up to look for due agents.
 TICK_SECONDS = 30
 
-# When an agent's conversation is mid-turn at fire time, retry after this
-# long instead of advancing the schedule (no run is silently dropped).
+# When an agent's conversation is mid-turn at fire time: retry after this
+# long instead of losing the run to the per-conversation run lock.
 BUSY_RETRY_SECONDS = 60
 
 _task: asyncio.Task | None = None
 
-
-# ---- agents config helpers -------------------------------------------------
-
-def get_agents(cfg: dict | None = None) -> list[dict]:
-    cfg = cfg if cfg is not None else load_config()
-    agents = cfg.get("agents")
-    return [a for a in agents if isinstance(a, dict)] if isinstance(agents, list) else []
+# Per-fire retry bookkeeping (in-memory on purpose: a restart resets retry
+# attempts, which matches "the schedule itself survives, attempts don't").
+# agent_id -> {"attempts": int, "scheduled_next": iso}
+_retry_state: dict[str, dict] = {}
 
 
-def _save_agents(agents: list[dict]):
-    save_config({"agents": agents})
+# ---- schedule math ----------------------------------------------------------
 
-
-def sanitize_agent(raw: dict) -> dict:
-    """Coerce one agent dict into a valid, fully-populated record. Unknown
-    fields are dropped so the config file stays clean."""
+def parse_schedule_spec(schedule_spec: str) -> dict:
     try:
-        conv_id = int(raw.get("conversation_id") or 0)
-    except (TypeError, ValueError):
-        conv_id = 0
-    name = str(raw.get("name") or "").strip() or "Agent"
-    kind = raw.get("kind") if raw.get("kind") in VALID_KINDS else "interval"
-    interval = 60
-    raw_interval = raw.get("interval_minutes")
-    if raw_interval not in (None, ""):
+        spec = json.loads(schedule_spec or "{}")
+        return spec if isinstance(spec, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def normalize_schedule(schedule_type: str, schedule_spec) -> tuple[str, str]:
+    """Validate a (type, spec) pair; returns the sanitized JSON spec string.
+    Accepts a dict or a JSON string (rows come back from SQLite as text).
+    Invalid pieces fall back to a 60-minute interval rather than poisoning
+    the fire computation every tick."""
+    if isinstance(schedule_spec, str):
+        schedule_spec = parse_schedule_spec(schedule_spec)
+    schedule_spec = schedule_spec or {}
+    stype = schedule_type if schedule_type in VALID_SCHEDULE_TYPES else "interval"
+    if stype == "interval":
         try:
-            interval = int(raw_interval)
+            minutes = int(schedule_spec.get("minutes"))
         except (TypeError, ValueError):
-            pass
-    interval = max(MIN_INTERVAL_MINUTES, min(MAX_INTERVAL_MINUTES, interval))
-    time_of_day = str(raw.get("time") or "09:00").strip()
-    # A malformed HH:MM falls back to the default rather than poisoning
-    # compute_next_run every tick.
+            minutes = 60
+        minutes = max(MIN_INTERVAL_MINUTES, min(MAX_INTERVAL_MINUTES, minutes))
+        return stype, json.dumps({"minutes": minutes})
+    time_of_day = str(schedule_spec.get("time") or "09:00").strip()
     try:
         datetime.strptime(time_of_day, "%H:%M")
     except ValueError:
         time_of_day = "09:00"
-    try:
-        weekday = int(raw.get("weekday") or 0)
-    except (TypeError, ValueError):
-        weekday = 0
-    weekday = max(0, min(6, weekday))  # 0 = Monday
-    policy = raw.get("policy") if raw.get("policy") in VALID_POLICIES else "sandbox-only"
-    aid = str(raw.get("id") or "").strip() or uuid.uuid4().hex[:12]
-    return {
-        "id": aid,
-        "conversation_id": conv_id,
-        "name": name,
-        "prompt": str(raw.get("prompt") or "").strip(),
-        "kind": kind,
-        "interval_minutes": interval,
-        "time": time_of_day,
-        "weekday": weekday,
-        "policy": policy,
-        "enabled": bool(raw.get("enabled", True)),
-        "last_run_at": str(raw.get("last_run_at") or ""),
-        "next_run_at": str(raw.get("next_run_at") or ""),
-    }
+    if stype == "weekly":
+        try:
+            weekday = int(schedule_spec.get("weekday"))
+        except (TypeError, ValueError):
+            weekday = 0
+        weekday = max(0, min(6, weekday))  # 0 = Monday
+        return stype, json.dumps({"weekday": weekday, "time": time_of_day})
+    return stype, json.dumps({"time": time_of_day})
 
 
-def compute_next_run(agent: dict, now: datetime | None = None) -> datetime:
-    """The agent's next fire time, local time. Interval kinds count from
-    `now` (schedule drift after sleeps/app-closures is fine for this use);
-    daily/weekly land on the next occurrence of the configured wall time."""
-    now = now or datetime.now()
-    if agent["kind"] == "interval":
-        return now + timedelta(minutes=agent["interval_minutes"])
-    scheduled = datetime.strptime(agent["time"], "%H:%M")
-    candidate = now.replace(hour=scheduled.hour, minute=scheduled.minute,
-                            second=0, microsecond=0)
-    if agent["kind"] == "weekly":
-        days_ahead = (agent["weekday"] - now.weekday()) % 7
-        candidate += timedelta(days=days_ahead)
-        # Same weekday but the time already passed: roll a full week.
-        if candidate <= now:
-            candidate += timedelta(days=7)
-        return candidate
-    # daily
-    if candidate <= now:
-        candidate += timedelta(days=1)
+def compute_next_fire(
+    schedule_type: str, schedule_spec: str, after: datetime | None = None
+) -> datetime:
+    """The next fire strictly AFTER `after` (local time) — the "never
+    immediately on save" rule falls out of this directly: save-time passes
+    `now`, so the earliest possible fire is one full interval / the next
+    clock slot away."""
+    after = after or datetime.now()
+    stype, spec_str = normalize_schedule(schedule_type, schedule_spec)
+    spec = parse_schedule_spec(spec_str)
+    if stype == "interval":
+        return after + timedelta(minutes=spec["minutes"])
+    scheduled = datetime.strptime(spec["time"], "%H:%M")
+    candidate = after.replace(hour=scheduled.hour, minute=scheduled.minute,
+                              second=0, microsecond=0)
+    if stype == "weekly":
+        candidate += timedelta(days=(spec["weekday"] - after.weekday()) % 7)
+    if candidate <= after:
+        candidate += timedelta(days=7 if stype == "weekly" else 1)
     return candidate
 
 
-def _iso(dt: datetime) -> str:
-    return dt.isoformat(timespec="seconds")
+def describe_schedule(schedule_type: str, schedule_spec: str) -> str:
+    stype, spec_str = normalize_schedule(schedule_type, schedule_spec)
+    spec = parse_schedule_spec(spec_str)
+    if stype == "interval":
+        minutes = spec["minutes"]
+        if minutes % 60 == 0:
+            n = minutes // 60
+            return f"every {n} hour{'s' if n != 1 else ''}"
+        return f"every {minutes} min"
+    if stype == "daily":
+        return f"daily at {spec['time']}"
+    return f"weekly {WEEKDAY_NAMES[spec['weekday']]} at {spec['time']}"
 
 
-def _parse_iso(s: str) -> datetime | None:
+# ---- global retry setting ---------------------------------------------------
+
+def get_retry_settings(cfg: dict | None = None) -> tuple[int, int]:
+    """(retry_count, backoff_minutes) from the global config "agents" block."""
+    cfg = cfg if cfg is not None else load_config()
+    block = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
     try:
-        return datetime.fromisoformat(s)
+        count = max(0, min(10, int(block.get("retry_count", 2))))
     except (TypeError, ValueError):
-        return None
-
-
-def upsert_agent(raw: dict) -> dict:
-    """Validate + insert (or update by id) one agent, recomputing
-    next_run_at. Returns the sanitized record as saved."""
-    agents = get_agents()
-    record = sanitize_agent(raw)
-    existing = None
-    if raw.get("id"):
-        existing = next((a for a in agents if a.get("id") == record["id"]), None)
-    # A schedule edit restarts the clock from now; an explicit next_run_at
-    # (tests, internal re-bookkeeping like the busy-postpone) wins; a record
-    # that never ran computes its first slot.
-    if raw.get("next_run_at"):
-        record["next_run_at"] = str(raw["next_run_at"])
-    elif existing and not any(k in raw for k in ("kind", "interval_minutes", "time", "weekday")):
-        record["next_run_at"] = existing.get("next_run_at") or _iso(
-            compute_next_run(record)
-        )
-    else:
-        record["next_run_at"] = _iso(compute_next_run(record))
-    if existing:
-        agents[agents.index(existing)] = record
-    else:
-        agents.append(record)
-    _save_agents(agents)
-    return record
-
-
-def remove_agent(agent_id: str) -> bool:
-    agents = get_agents()
-    remaining = [a for a in agents if a.get("id") != agent_id]
-    if len(remaining) == len(agents):
-        return False
-    _save_agents(remaining)
-    return True
-
-
-def _update_agent(agent_id: str, **fields):
-    agents = get_agents()
-    for i, a in enumerate(agents):
-        if a.get("id") == agent_id:
-            agents[i] = {**a, **fields}
-            _save_agents(agents)
-            return agents[i]
-    return None
-
-
-def agent_conversation_ids() -> set[int]:
-    return {a["conversation_id"] for a in get_agents() if a.get("conversation_id")}
-
-
-# ---- firing ----------------------------------------------------------------
-
-async def _drain_run(conversation_id: int, prompt: str, workspace: str, policy: str):
-    """Fire one scheduled turn: run the loop to completion, discarding the
-    event stream (the loop persists both sides of the conversation itself,
-    so the transcript simply appears in the pinned chat)."""
-    from backend.agent.loop import run_agent
-
+        count = 2
     try:
-        async for _line in run_agent(
-            conversation_id, prompt, workspace, policy=policy
-        ):
-            pass
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # noqa: BLE001 — a failed scheduled run must not kill the scheduler
-        log.exception("scheduled agent run failed (conversation %s)", conversation_id)
+        backoff = max(1, min(1440, int(block.get("retry_backoff_minutes", 5))))
+    except (TypeError, ValueError):
+        backoff = 5
+    return count, backoff
 
 
-async def fire_agent(agent: dict, advance_schedule: bool = True) -> bool:
-    """Trigger one run of `agent` now. Returns True when a run actually
-    started; False when the conversation was busy (schedule postponed) or
-    the conversation no longer exists."""
+def save_retry_settings(retry_count: int, retry_backoff_minutes: int):
+    save_config({"agents": {
+        "retry_count": max(0, min(10, int(retry_count))),
+        "retry_backoff_minutes": max(1, min(1440, int(retry_backoff_minutes))),
+    }})
+
+
+# ---- firing -----------------------------------------------------------------
+
+def _is_due(agent: dict, now: datetime) -> bool:
+    if not agent.get("enabled") or not (agent.get("prompt") or "").strip():
+        return False
+    nxt = agent.get("next_fire_at")
+    if not nxt:
+        return False
+    try:
+        return datetime.fromisoformat(nxt) <= now
+    except ValueError:
+        return False
+
+
+async def fire_agent(agent: dict, is_retry: bool = False) -> str:
+    """Trigger one run of `agent` now. Returns 'started' | 'busy' | 'gone'.
+
+    Schedule advance happens here, at fire time, from `now` — so "Run now"
+    (API) and a due tick behave identically. A retry fire keeps the regular
+    slot already parked in _retry_state instead of pushing it out again."""
     from backend.agent import loop as loop_mod
-    from backend.agent.config import CONFIG_PATH  # noqa: F401 — import cost only
-    from backend.db.database import get_conversation
 
+    aid = agent["id"]
     conv_id = agent.get("conversation_id") or 0
     conv = await get_conversation(conv_id) if conv_id else None
     if conv is None:
-        log.warning("agent %s: conversation %s is gone; disabling", agent["id"], conv_id)
-        _update_agent(agent["id"], enabled=False)
-        return False
+        log.warning("agent %s: conversation is gone; disabling", aid)
+        await _patch(aid, enabled=False, last_status="error",
+                           last_finished_at=datetime.now().isoformat(timespec="seconds"))
+        _retry_state.pop(aid, None)
+        return "gone"
     if loop_mod.agent_is_running(conv_id):
-        # Busy: retry soon rather than dropping the run. Not advancing
-        # last_run_at/next_run_at keeps the schedule anchored.
-        _update_agent(agent["id"], next_run_at=_iso(
-            datetime.now() + timedelta(seconds=BUSY_RETRY_SECONDS)
-        ))
-        return False
+        # Postpone instead of losing the run to the per-conversation lock.
+        await _patch(
+            aid, next_fire_at=(datetime.now() + timedelta(seconds=BUSY_RETRY_SECONDS))
+            .isoformat(timespec="seconds")
+        )
+        return "busy"
 
     now = datetime.now()
-    updates: dict = {"last_run_at": _iso(now)}
-    if advance_schedule:
-        updates["next_run_at"] = _iso(compute_next_run(agent, now))
-    _update_agent(agent["id"], **updates)
-
-    prompt = agent["prompt"] or f"Run your scheduled task: {agent['name']}"
-    # The scheduler-provided marker tells the model who is asking and why
-    # there is no human watching (matters for ask_user-style behavior).
-    prompt = (
-        f"[Scheduled run of agent “{agent['name']}” — no user is watching "
-        f"this chat right now.]\n\n{prompt}"
+    state = _retry_state.get(aid)
+    if not is_retry:
+        # Regular fire: park the schedule's next slot; retries reuse it.
+        state = {"attempts": 0,
+                 "scheduled_next": compute_next_fire(
+                     agent["schedule_type"], agent["schedule_spec"], now
+                 ).isoformat(timespec="seconds")}
+        _retry_state[aid] = state
+    await _patch(
+        aid,
+        last_fired_at=now.isoformat(timespec="seconds"),
+        last_status="running",
+        next_fire_at=state["scheduled_next"] if state else compute_next_fire(
+            agent["schedule_type"], agent["schedule_spec"], now
+        ).isoformat(timespec="seconds"),
     )
+
+    # Effective prompt (issue #41): the user's prompt verbatim + standing
+    # instructions. No auto-prepended context, no template variables.
+    instructions = await list_instructions(aid)
+    prompt = agent["prompt"]
+    if instructions:
+        lines = "\n".join(f"- {i['content']}" for i in instructions)
+        prompt = f"{prompt}\n\n# Standing instructions\n\n{lines}"
+
     asyncio.create_task(
-        _drain_run(conv_id, prompt, conv.get("workspace") or "", agent["policy"])
+        _run_and_settle(
+            aid,
+            conv_id,
+            prompt,
+            conv.get("workspace") or "",
+            agent["approval_policy"],
+            bool(agent["memory_enabled"]),
+            agent.get("model") or "",
+            agent.get("effort") or "",
+            agent.get("retention") or 0,
+        )
     )
-    return True
+    return "started"
 
 
-# ---- scheduler loop ---------------------------------------------------------
+async def _run_and_settle(
+    aid: str,
+    conv_id: int,
+    prompt: str,
+    workspace: str,
+    policy: str,
+    memory_enabled: bool,
+    model: str,
+    effort: str,
+    retention: int,
+):
+    """Consume one fire's run to completion, then settle the outcome:
+    status recording (the toast source), global retry scheduling, and the
+    per-agent retention trim."""
+    from backend.agent.loop import run_agent
 
-def _due(agent: dict, now: datetime) -> bool:
-    if not agent.get("enabled") or not agent.get("prompt"):
-        return False
-    nxt = _parse_iso(agent.get("next_run_at") or "")
-    return nxt is not None and nxt <= now
+    ok, error_text = True, ""
+    try:
+        async for line in run_agent(
+            conv_id,
+            prompt,
+            workspace,
+            policy=policy,
+            include_history=memory_enabled,
+            model_override=model,
+            effort_override=effort,
+        ):
+            # Drain the UI stream; the loop persists the transcript itself.
+            # An in-band error event (e.g. provider misconfigured) counts as
+            # a failed fire just like a raised exception.
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "error":
+                ok, error_text = False, str(event.get("message", "run failed"))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a failed fire must not kill the scheduler
+        ok, error_text = False, str(exc)
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    await _patch(aid, last_finished_at=now_iso, last_status="ok" if ok else "error")
+
+    if not ok:
+        log.warning("scheduled agent %s fire failed: %s", aid, error_text)
+        state = _retry_state.get(aid)
+        attempts = (state or {}).get("attempts", 0) + 1
+        retry_count, backoff = get_retry_settings()
+        if state is not None and attempts <= retry_count:
+            state["attempts"] = attempts
+            # The retry re-enters through the due-tick at now+backoff; the
+            # regular schedule slot stays parked in _retry_state.
+            retry_at = (datetime.now() + timedelta(minutes=backoff)).isoformat(
+                timespec="seconds"
+            )
+            await _patch(aid, next_fire_at=retry_at)
+            return
+    # Success, or retries exhausted: the parked slot becomes the schedule.
+    _retry_state.pop(aid, None)
+    if retention > 0:
+        with contextlib.suppress(Exception):
+            await trim_agent_transcript(conv_id, retention)
 
 
-async def _tick(catchup: bool = False):
-    """Fire every due enabled agent. Runs sequentially: two agents coming
-    due on the same tick start a few seconds apart instead of racing the
-    provider, and each fire is guarded so one failure can't skip the rest."""
+async def _tick():
+    """Fire every due enabled agent — each as its own task, so agents run
+    in parallel with each other and with the user's active turn."""
     now = datetime.now()
-    for agent in get_agents():
-        if not _due(agent, now):
-            continue
-        if agent.get("policy") not in VALID_POLICIES:
+    for agent in await list_agents():
+        if not _is_due(agent, now):
             continue
         try:
-            await fire_agent(agent, advance_schedule=not catchup)
+            await fire_agent(agent, is_retry=agent["id"] in _retry_state)
         except Exception:  # noqa: BLE001 — keep the tick alive
             log.exception("failed to fire agent %s", agent.get("id"))
 
@@ -278,21 +334,32 @@ async def _loop():
         raise
 
 
-async def startup_catchup():
-    """Fire agents whose next_run_at passed while no backend was running
-    (desktop app closed). One run each — no backlog replay."""
+async def startup_roll_forward():
+    """Skip-missed-fires semantics (issue #41): anything that came due while
+    no backend was alive is skipped SILENTLY — its next_fire_at rolls
+    forward to the next future slot. No catch-up fire."""
     now = datetime.now()
-    stale = [
-        a for a in get_agents()
-        if a.get("enabled") and a.get("prompt")
-        and (nxt := _parse_iso(a.get("next_run_at") or "")) is not None
-        and nxt <= now
-    ]
-    for agent in stale:
+    for agent in await list_agents():
+        nxt = agent.get("next_fire_at")
+        if not nxt:
+            await _patch(
+                agent["id"],
+                next_fire_at=compute_next_fire(
+                    agent["schedule_type"], agent["schedule_spec"], now
+                ).isoformat(timespec="seconds"),
+            )
+            continue
         try:
-            await fire_agent(agent)
-        except Exception:  # noqa: BLE001
-            log.exception("catch-up fire failed for agent %s", agent.get("id"))
+            overdue = datetime.fromisoformat(nxt) <= now
+        except ValueError:
+            overdue = True
+        if overdue:
+            await _patch(
+                agent["id"],
+                next_fire_at=compute_next_fire(
+                    agent["schedule_type"], agent["schedule_spec"], now
+                ).isoformat(timespec="seconds"),
+            )
 
 
 def start_scheduler() -> bool:
@@ -301,17 +368,30 @@ def start_scheduler() -> bool:
     global _task
     if _task is not None and not _task.done():
         return True
-    if not any(a.get("enabled") for a in get_agents()):
-        return False
+    # The DB is async; the mere presence check happens in the caller's loop
+    # via ensure_scheduled — here we only guard double-start and the
+    # config-only case where the API layer knows no agents exist yet.
     _task = asyncio.create_task(_loop())
     return True
 
 
-def ensure_scheduled():
-    """Re-check after agent CRUD: start the tick when the first agent
-    appears; no-op while agents exist (the tick reads config fresh each
-    pass, so new/edited agents are picked up without a restart)."""
-    start_scheduler()
+async def ensure_scheduled():
+    """Called after agent CRUD and at boot: roll overdue slots forward
+    (skip-missed) and make sure the tick task is running when at least one
+    agent exists. The tick re-reads the DB every pass, so new/edited agents
+    are picked up without a restart."""
+    if await start_if_needed():
+        await startup_roll_forward()
+
+
+async def start_if_needed() -> bool:
+    global _task
+    if _task is not None and not _task.done():
+        return True
+    if not await list_agents():
+        return False
+    _task = asyncio.create_task(_loop())
+    return True
 
 
 def stop_scheduler():
@@ -321,3 +401,4 @@ def stop_scheduler():
         with contextlib.suppress(asyncio.CancelledError):
             pass
     _task = None
+    _retry_state.clear()

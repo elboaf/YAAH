@@ -371,7 +371,8 @@ def _sandbox_only_note() -> str:
         "# Scheduled agent: sandbox-only policy\n\n"
         "This is an unattended scheduled run: every tool that normally "
         "requires user approval (file edits, shell commands and anything "
-        "else mutating) is unavailable and will be skipped with a note. Do "
+        "else mutating) is unavailable — calls come back as \"skipped: "
+        "approval required\". Do "
         "not attempt them or retry after a skip. Work read-only: gather "
         "information, check status, and report findings, keeping anything "
         "disruptive as a recommendation for the user to run themselves."
@@ -406,11 +407,13 @@ EXIT_PLAN_SCHEMA = {
 
 
 def _policy_skip_result(name: str) -> dict:
+    # The exact "skipped: approval required" wording is part of the issue #41
+    # contract: the model reads it, notes what it would have done, moves on.
     return {
         "error": (
-            f"{name} was skipped: this scheduled agent runs under the "
-            "sandbox-only policy, so approval-required tools are unavailable. "
-            "Continue with read-only work and note what you would have done."
+            "skipped: approval required — this scheduled agent runs under the "
+            f"sandbox-only policy, so {name} cannot execute. Continue with "
+            "read-only work and note what you would have done."
         )
     }
 
@@ -736,6 +739,9 @@ async def run_agent(
     skill_names: list | None = None,
     persist_user: bool = True,
     policy: str | None = None,
+    include_history: bool = True,
+    model_override: str = "",
+    effort_override: str = "",
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
@@ -745,8 +751,15 @@ async def run_agent(
     are injected into the system prompt for this turn only.
     persist_user: False when resuming an interrupted turn — the user
     message is already stored and must not be duplicated.
-    policy: per-run approval policy for scheduled agents ("sandbox-only" |
-    "ask" | "full"); None = normal chat turn driven by the global mode."""
+    policy: per-run approval policy for scheduled agents (issue #41),
+    "sandbox-only" (gated tools skip with a note) or "autonomous"
+    (everything auto-approved); None = normal chat turn driven by the
+    global access mode.
+    include_history: False = fresh context each fire (the agent's memory
+    toggle off) — the system prompt is built, but prior transcript rows
+    are not replayed into model context.
+    model_override / effort_override: the agent's per-agent model +
+    reasoning effort; blank = the active global settings."""
     # Persist the user message first (skipped on resume; the text still
     # reaches the model through the replayed history below).
     if not try_begin_run(conversation_id):
@@ -791,9 +804,15 @@ async def run_agent(
             f"{system_prompt}\n\n---\n\n{_sandbox_only_note()}"
         )
 
-    # Full context each turn: system prompt + persisted history
-    history = await load_history(conversation_id)
+    # Full context each turn: system prompt + persisted history. An agent
+    # with its memory toggle off (issue #41) gets a fresh context instead —
+    # the transcript still exists in the chat, it just doesn't feed the
+    # model, so the current turn's text is appended explicitly (it only
+    # reaches the model through the replayed history otherwise).
+    history = await load_history(conversation_id) if include_history else []
     messages = [{"role": "system", "content": system_prompt}] + history
+    if not include_history:
+        messages.append({"role": "user", "content": user_text})
 
     tools = get_schemas()
     # exit_plan exists only while plan mode is on (the schema is how the
@@ -835,7 +854,20 @@ async def run_agent(
                 state["finish"] = None
                 state["usage"] = None
                 acc: list[str] = []
-                stream = await model_client.chat(messages, tools=tools, stream=True)
+                # Per-agent model/effort overrides only ride along when an
+                # agent actually set them, so the default call path (and
+                # anything patching chat with the base signature) is
+                # unchanged.
+                if model_override or effort_override:
+                    stream = await model_client.chat(
+                        messages,
+                        tools=tools,
+                        stream=True,
+                        model=model_override,
+                        effort=effort_override,
+                    )
+                else:
+                    stream = await model_client.chat(messages, tools=tools, stream=True)
                 async for ev in stream:
                     if cancel_ev.is_set():
                         return
@@ -984,9 +1016,10 @@ async def run_agent(
                             result = {
                                 "answer": None,
                                 "note": (
-                                    "no user is available to answer (scheduled "
-                                    "sandbox-only run); decide yourself or note "
-                                    "the open question in your report"
+                                    "skipped: approval required — no user is "
+                                    "available to answer (scheduled sandbox-only "
+                                    "run); decide yourself or note the open "
+                                    "question in your report"
                                 ),
                             }
                         else:
@@ -1007,14 +1040,13 @@ async def run_agent(
                         # BEFORE the gate blocks: a generator cannot yield
                         # while it is awaiting the user's answer.
                         mode = current_access_mode()
-                        # A scheduled run's own policy overrides the global
-                        # mode: "full" runs ungated, "ask" gates even when the
-                        # global mode is full, and "sandbox-only" never blocks
-                        # (skip below).
-                        if policy == "full":
+                        # A scheduled run's approval policy overrides the
+                        # global mode (issue #41): autonomous auto-approves
+                        # everything (never emits a gate — the approval
+                        # deadlock must be unreachable unattended);
+                        # sandbox-only skips gated tools entirely (below).
+                        if policy == "autonomous":
                             mode = "full"
-                        elif policy == "ask":
-                            mode = "ask"
                         if tool_risk(name) == "read" or mode == "full":
                             box: dict = {}
                             async for pev in _execute_with_progress(
@@ -1136,13 +1168,18 @@ async def run_agent(
                 # gate: approval requests ride the batch's event queue to
                 # the stream, and the user's decision resolves the same
                 # future map (keyed by the sub-agent's own tool call id).
-                # A scheduled run's sandbox-only policy applies to its
-                # sub-agents too — they skip gated tools instead of
-                # blocking on an answer nobody will give.
+                # A scheduled run's policy applies to its sub-agents too:
+                # sandbox-only skips gated tools; autonomous passes None
+                # straight through (auto-approve, no gate events).
                 if policy == "sandbox-only":
 
                     def _sub_gate(name: str, args: dict, call_id: str):
                         return asyncio.sleep(0, result=_policy_skip_result(name))  # type: ignore[arg-type]
+
+                elif policy == "autonomous":
+
+                    def _sub_gate(name: str, args: dict, call_id: str):
+                        return asyncio.sleep(0, result=None)  # type: ignore[arg-type]
 
                 else:
 

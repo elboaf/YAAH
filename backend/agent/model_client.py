@@ -54,10 +54,19 @@ async def chat(
     messages: list,
     tools: list | None = None,
     stream: bool = False,
+    model: str = "",
+    effort: str = "",
 ) -> dict | AsyncIterator[dict]:
     """Call the model. Returns full response dict, or async iterator of
-    streaming deltas if stream=True."""
-    cfg = load_config()
+    streaming deltas if stream=True.
+
+    model/effort: per-call overrides for scheduled agents (issue #41) —
+    empty strings mean "use the active global model / effort setting"."""
+    cfg = dict(load_config())
+    if model:
+        cfg["model"] = model
+    if effort:
+        cfg["reasoning_effort"] = effort
     if not cfg["providers"]:
         raise ModelError(
             "No model provider configured. Open Settings and add a provider "
@@ -87,6 +96,8 @@ async def chat(
                      len((data.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []))
             return data
 
+    # The stream path re-reads config for the base URL only; the payload
+    # already carries the per-call model/effort overrides.
     return _stream_response(payload, headers)
 
 

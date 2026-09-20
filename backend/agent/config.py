@@ -85,6 +85,13 @@ DEFAULTS = {
     # "full" = run everything without confirmation. Read at gate time so a
     # header switch applies to the next tool call of a running turn.
     "access_mode": "ask",
+    # Scheduled agents (issue #41) GLOBAL settings: failed fires retry with
+    # backoff up to retry_count times. Per-agent settings live in the
+    # SQLite `agents` table, not here.
+    "agents": {
+        "retry_count": 2,
+        "retry_backoff_minutes": 5,
+    },
     # Windows Sandbox integration (backend/agent/sandbox.py): disposable
     # test VMs for live verification + a persistent dev toolkit mounted
     # read/write into every sandbox (installs there persist to the host).
