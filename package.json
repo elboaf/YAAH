@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k \"npm:dev:frontend\" \"npm:dev:backend\"",
     "dev:frontend": "vite",
-    "dev:backend": "python -m uvicorn backend.main:app --reload --port 8765",
+    "dev:backend": "python -m backend.dev_server",
     "build": "vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

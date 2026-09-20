@@ -198,13 +198,17 @@ Guidelines:
 - Explore before acting: use search_files and read files before editing.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
-- Verify your work INSIDE the sandbox: run the workspace's app, tests and
-  builds via sandbox_run (boot it with sandbox_test first) — not on the
-  host. Host bash/powershell are for file ops, git, and non-executing
-  checks. Size the timeout to the command; a full test suite that takes
-  minutes needs a large timeout_seconds or chunked runs (per
-  directory/file), not retries. The VM is a clean image: install missing
-  tools into the toolkit (installs persist across sandboxes).
+- Verify your work INSIDE the sandbox when the work is disruptive:
+  full test suites, builds, installs, servers, anything that writes
+  outside the workspace. Quick smoke checks — a single test
+  file, a typecheck, a lint pass, an import — may run host-side
+  when they are read-only and stay inside the workspace (smoke-test
+  rule). Boot the VM with sandbox_test and run commands via
+  sandbox_run. Size the timeout to the command; a full test suite
+  that takes minutes needs a large timeout_seconds or chunked runs
+  (per directory/file), not retries. The VM is a clean image:
+  install missing tools into the toolkit (installs persist across
+  sandboxes).
 - Sandbox work stays IN the sandbox: every dependency the app under test
   needs (runtimes, browsers, portable tools) is installed into the VM's
   toolkit — never launch a host equivalent (e.g. the host browser) to
@@ -359,6 +363,22 @@ def _plan_mode_note() -> str:
     )
 
 
+def _sandbox_only_note() -> str:
+    """System-prompt section injected for scheduled agents running with the
+    sandbox-only approval policy (issue #41): no user is watching, so
+    approval-required tools never execute."""
+    return (
+        "# Scheduled agent: sandbox-only policy\n\n"
+        "This is an unattended scheduled run: every tool that normally "
+        "requires user approval (file edits, shell commands and anything "
+        "else mutating) is unavailable — calls come back as \"skipped: "
+        "approval required\". Do "
+        "not attempt them or retry after a skip. Work read-only: gather "
+        "information, check status, and report findings, keeping anything "
+        "disruptive as a recommendation for the user to run themselves."
+    )
+
+
 # Only injected while plan mode is active (run_agent_turn below); in every
 # other mode the model has no exit_plan to call.
 EXIT_PLAN_SCHEMA = {
@@ -384,6 +404,18 @@ EXIT_PLAN_SCHEMA = {
         },
     },
 }
+
+
+def _policy_skip_result(name: str) -> dict:
+    # The exact "skipped: approval required" wording is part of the issue #41
+    # contract: the model reads it, notes what it would have done, moves on.
+    return {
+        "error": (
+            "skipped: approval required — this scheduled agent runs under the "
+            f"sandbox-only policy, so {name} cannot execute. Continue with "
+            "read-only work and note what you would have done."
+        )
+    }
 
 
 def _plan_block_result(name: str) -> dict:
@@ -520,13 +552,17 @@ def _ndjson(event: dict) -> str:
 
 
 async def _execute_with_progress(
-    name: str, args: dict, workspace: str, call_id: str, box: dict
+    name: str, args: dict, workspace: str, call_id: str, box: dict,
+    cancel_ev: asyncio.Event | None = None,
 ):
     """Run a tool, yielding tool_progress events with live output while it
     runs (only the shell executors actually stream; everything else emits
     nothing and behaves like a plain await). The final result lands in
     `box["result"]` because async-generator return values are awkward to
-    consume alongside `async for`."""
+    consume alongside `async for`. When `cancel_ev` fires mid-tool the tool
+    task is killed and the result is discarded — Stop must not have to wait
+    out a long-running command; the turn loop sees the cancelled event next
+    and ends the turn."""
     queue: asyncio.Queue = asyncio.Queue()
     _DONE = object()
 
@@ -542,17 +578,38 @@ async def _execute_with_progress(
             queue.put_nowait(_DONE)
 
     finisher = asyncio.create_task(_finisher())
+    # Races queue.get() against the Stop button so a cancelled tool unwinds
+    # immediately instead of at its natural end.
+    cancel_waiter = (
+        asyncio.create_task(cancel_ev.wait()) if cancel_ev is not None else None
+    )
+    cancelled = False
     try:
         while True:
-            item = await queue.get()
+            get_task = asyncio.create_task(queue.get())
+            waiters = [get_task] + ([cancel_waiter] if cancel_waiter else [])
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_waiter is not None and cancel_waiter in done:
+                get_task.cancel()
+                cancelled = True
+                break
+            item = get_task.result()
             if item is _DONE:
                 break
             yield {"type": "tool_progress", "call_id": call_id, "chunk": item}
+        if cancelled:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, finisher, return_exceptions=True)
+            box["result"] = {"error": "tool stopped by user (run cancelled)"}
+            return
         await finisher
         box["result"] = task.result()
     finally:
-        # If the turn is torn down mid-tool (client disconnect), don't leak
-        # a running tool task the way a bare create_task would.
+        if cancel_waiter is not None:
+            cancel_waiter.cancel()
+        # If the turn is torn down mid-tool (client disconnect, Stop),
+        # don't leak a running tool task the way a bare create_task would.
         if not task.done():
             task.cancel()
             await asyncio.gather(task, finisher, return_exceptions=True)
@@ -706,6 +763,10 @@ async def run_agent(
     image_paths: list | None = None,
     skill_names: list | None = None,
     persist_user: bool = True,
+    policy: str | None = None,
+    include_history: bool = True,
+    model_override: str = "",
+    effort_override: str = "",
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
@@ -714,7 +775,16 @@ async def run_agent(
     skill_names: skills the user invoked with /s or a chip; their bodies
     are injected into the system prompt for this turn only.
     persist_user: False when resuming an interrupted turn — the user
-    message is already stored and must not be duplicated."""
+    message is already stored and must not be duplicated.
+    policy: per-run approval policy for scheduled agents (issue #41),
+    "sandbox-only" (gated tools skip with a note) or "autonomous"
+    (everything auto-approved); None = normal chat turn driven by the
+    global access mode.
+    include_history: False = fresh context each fire (the agent's memory
+    toggle off) — the system prompt is built, but prior transcript rows
+    are not replayed into model context.
+    model_override / effort_override: the agent's per-agent model +
+    reasoning effort; blank = the active global settings."""
     # Persist the user message first (skipped on resume; the text still
     # reaches the model through the replayed history below).
     if not try_begin_run(conversation_id):
@@ -752,9 +822,22 @@ async def run_agent(
     if current_access_mode() == "plan":
         system_prompt = f"{system_prompt}\n\n---\n\n{_plan_mode_note()}"
 
-    # Full context each turn: system prompt + persisted history
-    history = await load_history(conversation_id)
+    # Scheduled-run policy note: same idea — say up front what is off-limits
+    # so the model doesn't burn steps discovering it via skip errors.
+    if policy == "sandbox-only":
+        system_prompt = (
+            f"{system_prompt}\n\n---\n\n{_sandbox_only_note()}"
+        )
+
+    # Full context each turn: system prompt + persisted history. An agent
+    # with its memory toggle off (issue #41) gets a fresh context instead —
+    # the transcript still exists in the chat, it just doesn't feed the
+    # model, so the current turn's text is appended explicitly (it only
+    # reaches the model through the replayed history otherwise).
+    history = await load_history(conversation_id) if include_history else []
     messages = [{"role": "system", "content": system_prompt}] + history
+    if not include_history:
+        messages.append({"role": "user", "content": user_text})
 
     tools = get_schemas()
     # exit_plan exists only while plan mode is on (the schema is how the
@@ -796,7 +879,20 @@ async def run_agent(
                 state["finish"] = None
                 state["usage"] = None
                 acc: list[str] = []
-                stream = await model_client.chat(messages, tools=tools, stream=True)
+                # Per-agent model/effort overrides only ride along when an
+                # agent actually set them, so the default call path (and
+                # anything patching chat with the base signature) is
+                # unchanged.
+                if model_override or effort_override:
+                    stream = await model_client.chat(
+                        messages,
+                        tools=tools,
+                        stream=True,
+                        model=model_override,
+                        effort=effort_override,
+                    )
+                else:
+                    stream = await model_client.chat(messages, tools=tools, stream=True)
                 async for ev in stream:
                     if cancel_ev.is_set():
                         return
@@ -938,9 +1034,23 @@ async def run_agent(
                         }
                     )
                     if name == "ask_user":
-                        result = await _ask_user(
-                            conversation_id, tc.get("id", ""), args, cancel_ev
-                        )
+                        if policy == "sandbox-only":
+                            # No user is watching a scheduled run; blocking on
+                            # an answer that may never come would wedge the
+                            # turn until max_steps.
+                            result = {
+                                "answer": None,
+                                "note": (
+                                    "skipped: approval required — no user is "
+                                    "available to answer (scheduled sandbox-only "
+                                    "run); decide yourself or note the open "
+                                    "question in your report"
+                                ),
+                            }
+                        else:
+                            result = await _ask_user(
+                                conversation_id, tc.get("id", ""), args, cancel_ev
+                            )
                     elif name == "exit_plan":
                         result = await _exit_plan(
                             conversation_id, tc.get("id", ""), args, cancel_ev
@@ -955,13 +1065,23 @@ async def run_agent(
                         # BEFORE the gate blocks: a generator cannot yield
                         # while it is awaiting the user's answer.
                         mode = current_access_mode()
+                        # A scheduled run's approval policy overrides the
+                        # global mode (issue #41): autonomous auto-approves
+                        # everything (never emits a gate — the approval
+                        # deadlock must be unreachable unattended);
+                        # sandbox-only skips gated tools entirely (below).
+                        if policy == "autonomous":
+                            mode = "full"
                         if tool_risk(name) == "read" or mode == "full":
                             box: dict = {}
                             async for pev in _execute_with_progress(
-                                name, args, workspace, tc.get("id", ""), box
+                                name, args, workspace, tc.get("id", ""), box,
+                                cancel_ev=cancel_ev,
                             ):
                                 yield _ndjson(pev)
                             result = box.get("result")
+                        elif policy == "sandbox-only":
+                            result = _policy_skip_result(name)
                         else:
                             if mode == "ask":
                                 yield _ndjson(
@@ -994,7 +1114,8 @@ async def run_agent(
                             if result is None:
                                 box = {}
                                 async for pev in _execute_with_progress(
-                                    name, args, workspace, tc.get("id", ""), box
+                                    name, args, workspace, tc.get("id", ""), box,
+                                    cancel_ev=cancel_ev,
                                 ):
                                     yield _ndjson(pev)
                                 result = box.get("result")
@@ -1074,15 +1195,30 @@ async def run_agent(
                 # gate: approval requests ride the batch's event queue to
                 # the stream, and the user's decision resolves the same
                 # future map (keyed by the sub-agent's own tool call id).
-                def _sub_gate(name: str, args: dict, call_id: str):
-                    return run_gate(
-                        name,
-                        args,
-                        call_id,
-                        conversation_id,
-                        cancel_ev,
-                        emit=_emit,
-                    )
+                # A scheduled run's policy applies to its sub-agents too:
+                # sandbox-only skips gated tools; autonomous passes None
+                # straight through (auto-approve, no gate events).
+                if policy == "sandbox-only":
+
+                    def _sub_gate(name: str, args: dict, call_id: str):
+                        return asyncio.sleep(0, result=_policy_skip_result(name))  # type: ignore[arg-type]
+
+                elif policy == "autonomous":
+
+                    def _sub_gate(name: str, args: dict, call_id: str):
+                        return asyncio.sleep(0, result=None)  # type: ignore[arg-type]
+
+                else:
+
+                    def _sub_gate(name: str, args: dict, call_id: str):
+                        return run_gate(
+                            name,
+                            args,
+                            call_id,
+                            conversation_id,
+                            cancel_ev,
+                            emit=_emit,
+                        )
 
                 batch = asyncio.create_task(
                     subagents_mod.spawn_batch(

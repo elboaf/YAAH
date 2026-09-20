@@ -34,6 +34,21 @@ import {
   removeMcpServer,
   reloadMcpServers,
   type McpServerInfo,
+  listAgents,
+  addAgent,
+  updateAgent,
+  deleteAgent,
+  runAgentNow,
+  getAgentTape,
+  setAgentRetry,
+  addAgentInstruction,
+  updateAgentInstruction,
+  deleteAgentInstruction,
+  type ScheduledAgent,
+  type AgentPolicy,
+  type AgentScheduleType,
+  type AgentBody,
+  type AgentInstruction,
   uploadAttachment,
   transcribeStatus,
   transcribeAudio,
@@ -56,7 +71,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useUpdateCheck } from './update'
 import { useTts } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
@@ -791,6 +806,40 @@ function LiveTelemetry() {
  *  become wide separators so the tape never wraps or stacks. */
 function oneLine(s: string): string {
   return s.replace(/[\r\n]+/g, '    ').replace(/\t/g, '  ')
+}
+
+/** The tape segment for one UI-stream event — shared by the interactive
+ *  stream handler and the agent-chat live poll (which feeds the same
+ *  events from the backend's tape buffer). `elapsed` is the client-measured
+ *  tool duration when known; the polled path omits it. Returns null for
+ *  events that carry no tape text. */
+function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | null {
+  if (ev.type === 'thinking') {
+    return ev.text ? oneLine(ev.text) + ' ' : null
+  }
+  if (ev.type === 'tool_start') {
+    const a = (ev.args ?? {}) as Record<string, unknown>
+    const head =
+      typeof a.command === 'string'
+        ? `${ev.name} ${a.command}`
+        : `${ev.name} ${toolTarget({ id: '', name: ev.name ?? '', args: a } as ToolCall) || JSON.stringify(a).slice(0, 100)}`
+    return oneLine(`\n▸ ${head}`) + '    '
+  }
+  if (ev.type === 'tool_progress') {
+    return ev.chunk ? oneLine(ev.chunk) : null
+  }
+  if (ev.type === 'tool_result') {
+    const res = ev.result as { output?: unknown } | null
+    let seg = ''
+    if (typeof res?.output === 'string') seg += oneLine(res.output).slice(0, 600)
+    else if (ev.result !== null && ev.result !== undefined) {
+      const r = JSON.stringify(ev.result)
+      if (r && r !== '{}') seg += '= ' + oneLine(r).slice(0, 200)
+    }
+    if (elapsed) seg += `  ✓ ${elapsed}`
+    return seg ? oneLine(seg) + '    ' : ''
+  }
+  return null
 }
 
 /** Live, ephemeral stream of calls while the agent works. Newest chip appears
@@ -1808,13 +1857,67 @@ function ConversationList() {
   // Per-conversation run status: rows with an in-flight turn show a spinner
   // (issue #10). Reference-stable selector — only re-renders on status writes.
   const statusByConv = useAgent((s) => s.statusByConv)
+  // Scheduled runs (issue #41) never write statusByConv — they stream inside
+  // the backend — so the row spinner also keys off the agents poller's live
+  // `running` flag, mapped by pinned conversation.
+  const agents = useAgent((s) => s.agents)
+  const agentRunningConvs = new Set(
+    agents.filter((a) => a.running).map((a) => a.conversation_id),
+  )
+  // Row start/stop: conversation id -> agent, so the toggle can reach the
+  // agent API without a lookup per click.
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  const agentByConv = new Map(agents.map((a) => [a.conversation_id, a]))
+  // Conversations whose run the user just asked to stop: the row dims its
+  // "working" signal right away (the click registered) and the toggle re-polls
+  // agents fast until the backend settles, instead of waiting out the 5s poll.
+  const [stoppingConvs, setStoppingConvs] = useState<Set<number>>(new Set())
+  const clearStopping = (id: number) =>
+    setStoppingConvs((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  const toggleAgentRun = (c: { id: number }) => {
+    const a = agentByConv.get(c.id)
+    if (!a) return
+    if (a.running) {
+      // Same cancel path as an in-chat Stop: the turn ends after its current
+      // step and the run settles normally.
+      setStoppingConvs((prev) => new Set(prev).add(c.id))
+      cancelAgent(c.id).catch(() => {})
+      // The backend settles in well under a second; poll tightly so the row
+      // flips to "run now" the moment it does (bounded, then the normal 5s
+      // poll takes over as fallback).
+      const started = Date.now()
+      const settle = async () => {
+        await refreshAgents()
+        const still = useAgent
+          .getState()
+          .agents.some((x) => x.conversation_id === c.id && x.running)
+        if (!still || Date.now() - started > 10000) clearStopping(c.id)
+        else window.setTimeout(() => void settle(), 400)
+      }
+      window.setTimeout(() => void settle(), 400)
+    } else {
+      runAgentNow(a.id)
+        .then(() => refreshAgents())
+        .catch((e) =>
+          setNotice({
+            title: `Could not run "${a.name}"`,
+            message: String((e as { message?: string }).message ?? e),
+          }),
+        )
+    }
+  }
   // Issue #25 sidebar signals: needs-you (any user-blocking gate) and the
   // finished-but-unacknowledged map (set by setStatus, cleared on open).
   const pendingQuestions = useAgent((s) => s.pendingQuestions)
   const pendingApprovals = useAgent((s) => s.pendingApprovals)
   const pendingPlanApprovals = useAgent((s) => s.pendingPlanApprovals)
   const finishedByConv = useAgent((s) => s.finishedByConv)
-  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
+  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; chat_type?: 'chat' | 'agent' }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
   // collapsed groups show the header only. Persisted per workspace.
@@ -1906,6 +2009,11 @@ function ConversationList() {
   }
   const visibleConvs = convs.filter((c) => inScope(c.workspace))
   const localConvs = convs.filter((c) => parseNsWorkspace(c.workspace) === null)
+  // Scheduled agents (issue #41): each agent chat is pinned under its own
+  // workspace, above the workspace's normal chats. The composer gating map
+  // comes from the AgentRunWatcher's store slice.
+  const agentChatByConv = useAgent((s) => s.agentChatByConv)
+  const [agentsDialog, setAgentsDialog] = useState<{ ws: string | null; agentId: string | null } | null>(null)
 
   /** Open a conversation and adopt its workspace (the core invariant: the
    *  open conversation's workspace IS the active workspace, both ways).
@@ -1956,24 +2064,68 @@ function ConversationList() {
     g.items.sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   }
 
+  const renderRow = (c: typeof convs[number], isAgent: boolean) => (
+    <ConversationRow
+      key={c.id}
+      conv={c}
+      active={c.id === conversationId}
+      running={
+        statusByConv[String(c.id)] === 'thinking' ||
+        statusByConv[String(c.id)] === 'running-tool' ||
+        agentRunningConvs.has(c.id)
+      }
+      blocked={Boolean(
+        pendingQuestions[String(c.id)] ||
+          pendingApprovals[String(c.id)] ||
+          pendingPlanApprovals[String(c.id)],
+      )}
+      finished={finishedByConv[String(c.id)] ?? null}
+      isAgent={isAgent}
+      menuOpen={menuOpenId === c.id}
+      setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
+      onOpen={() => openConversation(c)}
+      onExport={() =>
+        exportConversationMarkdown(c.id, c.title).catch((e) =>
+          setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
+        )
+      }
+      onSys={() => setSysTarget({ id: c.id, title: c.title })}
+      onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
+      onToggleRun={isAgent ? () => toggleAgentRun(c) : undefined}
+      stopping={stoppingConvs.has(c.id)}
+      onAgentSettings={
+        isAgent
+          ? () => {
+              const aid = agentChatByConv[String(c.id)]
+              if (aid) setAgentsDialog({ ws: c.workspace, agentId: aid })
+            }
+          : undefined
+      }
+    />
+  )
+
   return (
     <div className="flex-1 overflow-y-auto">
       {groups.map(({ ws, items }) => {
         const key = expandKey(ws.path ?? '')
         const isExpanded = expanded[key] ?? true
         const isActiveWs = (ws.path ?? '') === (workspace || '')
+        // Agent chats pin above the workspace's normal chats (issue #41);
+        // the 5-cap and show-more stepping apply to normal chats only.
+        const wsAgents = items.filter((c) => c.chat_type === 'agent')
+        const chats = items.filter((c) => c.chat_type !== 'agent')
         // Capped view: the 5 most recent chats, plus the open conversation
         // appended whenever it ranks older (the list never hides what you're
         // looking at); "show more" steps +5 per click, session-only.
-        const activeIdx = items.findIndex((c) => c.id === conversationId)
-        const base = Math.min(5 + (extra[key] ?? 0), items.length)
-        const head = items.slice(0, base)
+        const activeIdx = chats.findIndex((c) => c.id === conversationId)
+        const base = Math.min(5 + (extra[key] ?? 0), chats.length)
+        const head = chats.slice(0, base)
         // The active chat sits outside the head block: append it (never a
         // duplicate — only when its index is past the head) so it stays
         // visible directly above the "show more" line.
         const visible =
-          activeIdx >= base ? [...head, items[activeIdx]] : head
-        const hidden = items.length - visible.length
+          activeIdx >= base ? [...head, chats[activeIdx]] : head
+        const hidden = chats.length - visible.length
         return (
           <div key={ws.path ?? 'default'} className="mb-3">
             {/* Workspace section: bold header, hairline top rule, chat count,
@@ -2009,6 +2161,16 @@ function ConversationList() {
               >
                 {items.length}
               </span>
+              {/* Agents dialogue (issue #41): on-hover silhouette on each
+                  workspace — lists the workspace's agents + new agent. */}
+              <button
+                className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-zinc-200 group-hover:opacity-100 focus:opacity-100"
+                aria-label={`Agents for ${ws.label}`}
+                title="Agents — scheduled recurring runs in this workspace"
+                onClick={() => setAgentsDialog({ ws: ws.path, agentId: null })}
+              >
+                <PersonIcon />
+              </button>
               {ws.path !== null && (
                 <button
                   className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover:opacity-100 focus:opacity-100"
@@ -2030,33 +2192,8 @@ function ConversationList() {
             {isExpanded &&
               (items.length > 0 ? (
                 <>
-                  {visible.map((c) => (
-                    <ConversationRow
-                      key={c.id}
-                      conv={c}
-                      active={c.id === conversationId}
-                      running={
-                        statusByConv[String(c.id)] === 'thinking' ||
-                        statusByConv[String(c.id)] === 'running-tool'
-                      }
-                      blocked={Boolean(
-                        pendingQuestions[String(c.id)] ||
-                          pendingApprovals[String(c.id)] ||
-                          pendingPlanApprovals[String(c.id)],
-                      )}
-                      finished={finishedByConv[String(c.id)] ?? null}
-                      menuOpen={menuOpenId === c.id}
-                      setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
-                      onOpen={() => openConversation(c)}
-                      onExport={() =>
-                        exportConversationMarkdown(c.id, c.title).catch((e) =>
-                          setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
-                        )
-                      }
-                      onSys={() => setSysTarget({ id: c.id, title: c.title })}
-                      onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
-                    />
-                  ))}
+                  {wsAgents.map((c) => renderRow(c, true))}
+                  {visible.map((c) => renderRow(c, false))}
                   {hidden > 0 && (
                     <button
                       className="block w-full px-3 py-1 text-left text-[11px] text-zinc-600 hover:text-zinc-300"
@@ -2065,6 +2202,11 @@ function ConversationList() {
                       Show more ({hidden} more)
                     </button>
                   )}
+                </>
+              ) : wsAgents.length > 0 ? (
+                <>
+                  {wsAgents.map((c) => renderRow(c, true))}
+                  <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
                 </>
               ) : (
                 <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
@@ -2117,6 +2259,18 @@ function ConversationList() {
       )}
 
       {/* in-app dialogs (replace native confirm/prompt/alert) */}
+      {agentsDialog && (
+        <AgentsDialog
+          wsPath={agentsDialog.ws}
+          editAgentId={agentsDialog.agentId}
+          onClose={() => {
+            setAgentsDialog(null)
+            // Renames sync the pinned chat's title server-side; re-pull so
+            // the sidebar row shows it without a manual reload.
+            refresh()
+          }}
+        />
+      )}
       {notice && (
         <NoticeDialog
           title={notice.title}
@@ -2222,6 +2376,10 @@ function ConversationRow({
   running,
   blocked,
   finished,
+  isAgent,
+  onAgentSettings,
+  onToggleRun,
+  stopping,
   menuOpen,
   setMenuOpen,
   onOpen,
@@ -2240,6 +2398,16 @@ function ConversationRow({
   /** Finished-but-unacknowledged signal: 'ok' (green bar) | 'error' (red
    *  pill). Only set for background chats; cleared when the chat opens. */
   finished: 'ok' | 'error' | null
+  /** A scheduled agent's pinned chat (issue #41) — silhouette badge. */
+  isAgent?: boolean
+  /** Open the agent settings dialogue (agent chats only). */
+  onAgentSettings?: () => void
+  /** Start/stop the agent's run (agent chats only). Present = the row shows
+   *  the toggle; the icon follows the running state (■ stop / ▶ run now). */
+  onToggleRun?: () => void
+  /** The user just clicked stop: dim the "working" signals until the
+   *  backend settles, so the click visibly registered. */
+  stopping?: boolean
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   onOpen: () => void
@@ -2270,12 +2438,25 @@ function ConversationRow({
         ) : finished === 'ok' ? (
           <span aria-hidden="true" className="run-bar run-bar-green mr-1.5 shrink-0" title="Run finished" />
         ) : running ? (
-          <span aria-hidden="true" className="run-dots mr-1.5 shrink-0" title="Working…">
+          <span
+            aria-hidden="true"
+            className={`run-dots mr-1.5 shrink-0 transition-opacity ${stopping ? 'stopping' : ''}`}
+            title={stopping ? 'Stopping…' : 'Working…'}
+          >
             <i />
             <i />
             <i />
           </span>
         ) : null}
+        {isAgent && (
+          <span
+            aria-hidden="true"
+            className={`mr-1.5 shrink-0 ${active ? 'text-blue-200' : 'text-zinc-500'}`}
+            title="Scheduled agent — runs on a repeating schedule"
+          >
+            <PersonIcon />
+          </span>
+        )}
         <span className="min-w-0 flex-1 truncate">{conv.title}</span>
         <span
           className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
@@ -2283,7 +2464,26 @@ function ConversationRow({
           {relTime(conv.updated_at)}
         </span>
       </button>
-      <div className={`absolute right-1 ${menuOpen ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onToggleRun && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+        {onToggleRun && (
+          <button
+            className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-opacity ${
+              stopping
+                ? 'opacity-30'
+                : running
+                  ? 'text-zinc-300 hover:text-zinc-100'
+                  : 'text-zinc-600 hover:text-zinc-300'
+            }`}
+            aria-label={running ? 'Stop this run' : 'Run now'}
+            title={running ? 'Stop this run' : 'Run now'}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleRun()
+            }}
+          >
+            {running ? <StopIcon /> : <PlayIcon />}
+          </button>
+        )}
         <button
           className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-700"
           aria-label="Conversation actions"
@@ -2313,6 +2513,17 @@ function ConversationRow({
             >
               System prompt override
             </button>
+            {onAgentSettings && (
+              <button
+                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => {
+                  setMenuOpen(false)
+                  onAgentSettings()
+                }}
+              >
+                Agent settings…
+              </button>
+            )}
             <button
               className="block w-full px-3 py-1.5 text-left text-xs text-red-400 hover:bg-zinc-800"
               onClick={() => {
@@ -2774,6 +2985,817 @@ function McpSection() {
         </p>
       </div>
       {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
+    </>
+  )
+}
+
+/** Scheduled agents (issue #41): first-class recurring runs in pinned chats.
+ *  The dialogue opens from the on-hover silhouette icon on each workspace
+ *  (list + new) and as "Agent settings…" from the pinned chat's row menu.
+ *  Typed messages in an agent chat become standing instructions (the
+ *  Composer routes them to the API); they never trigger a run. */
+
+function PersonIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="11"
+      height="11"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="4.5" r="2.8" />
+      <path d="M2.5 14.5c0-3 2.5-5.2 5.5-5.2s5.5 2.2 5.5 5.2" />
+    </svg>
+  )
+}
+
+/** Run-now / stop glyphs for the agent row toggle: drawn, not unicode, so
+ *  weight matches the row's icon voice at 8px. */
+function PlayIcon() {
+  return (
+    <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">
+      <path d="M1.5 0.8 L7 4 L1.5 7.2 Z" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg width="7" height="7" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">
+      <rect x="0.8" y="0.8" width="6.4" height="6.4" rx="1" />
+    </svg>
+  )
+}
+
+const agentInputCls =
+  'rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-blue-500 focus:outline-none'
+
+/** One standing instruction row: inline edit + delete (issue #41: the list
+ *  is editable and individually deletable). */
+function InstructionRow({ agentId, ins }: { agentId: string; ins: AgentInstruction }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(ins.content)
+  const [busy, setBusy] = useState(false)
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      await updateAgentInstruction(agentId, ins.id, draft.trim())
+      setEditing(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <li className="flex items-center gap-1.5">
+        <input
+          className={`min-w-0 flex-1 ${agentInputCls}`}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void save()
+            if (e.key === 'Escape') setEditing(false)
+          }}
+          autoFocus
+        />
+        <button
+          className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800"
+          disabled={busy}
+          onClick={() => void save()}
+        >
+          save
+        </button>
+        <button
+          className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+          onClick={() => {
+            setDraft(ins.content)
+            setEditing(false)
+          }}
+        >
+          cancel
+        </button>
+      </li>
+    )
+  }
+  return (
+    <li className="flex items-start gap-1.5">
+      <span className="min-w-0 flex-1 break-words text-[11px] text-zinc-300">{ins.content}</span>
+      <button
+        className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+        onClick={() => setEditing(true)}
+      >
+        edit
+      </button>
+      <button
+        className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
+        onClick={() => void deleteAgentInstruction(agentId, ins.id)}
+      >
+        ✕
+      </button>
+    </li>
+  )
+}
+
+/** Standing instructions block: shown for a saved agent. */
+function InstructionsEditor({ agent }: { agent: ScheduledAgent }) {
+  const [draft, setDraft] = useState('')
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  const add = async () => {
+    if (!draft.trim()) return
+    await addAgentInstruction(agent.id, draft.trim())
+    setDraft('')
+    await refreshAgents()
+  }
+  return (
+    <div>
+      <p className="mb-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+        Standing instructions — appended to the prompt at every fire
+      </p>
+      <ul className="mb-1.5 space-y-1">
+        {agent.instructions.map((ins) => (
+          <InstructionRow key={ins.id} agentId={agent.id} ins={ins} />
+        ))}
+        {agent.instructions.length === 0 && (
+          <li className="text-[10px] text-zinc-600">
+            None. Messages typed in the agent's chat also become standing instructions.
+          </li>
+        )}
+      </ul>
+      <div className="flex gap-1.5">
+        <input
+          className={`min-w-0 flex-1 ${agentInputCls}`}
+          value={draft}
+          placeholder="add an instruction…"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void add()
+          }}
+        />
+        <button
+          className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+          onClick={() => void add()}
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** The create/edit form. `agent` null = new agent in workspace `wsPath`. */
+function AgentForm({
+  agent,
+  wsPath,
+  onDone,
+  onCancel,
+}: {
+  agent: ScheduledAgent | null
+  wsPath: string | null
+  onDone: (saved: ScheduledAgent) => void
+  onCancel: () => void
+}) {
+  const [name, setName] = useState(agent?.name ?? '')
+  const [prompt, setPrompt] = useState(agent?.prompt ?? '')
+  const [scheduleType, setScheduleType] = useState<AgentScheduleType>(agent?.schedule_type ?? 'interval')
+  const [minutes, setMinutes] = useState(String(agent?.schedule_spec?.minutes ?? 60))
+  const [time, setTime] = useState(agent?.schedule_spec?.time ?? '09:00')
+  const [weekday, setWeekday] = useState(String(agent?.schedule_spec?.weekday ?? 0))
+  const [policy, setPolicy] = useState<AgentPolicy>(agent?.approval_policy ?? 'sandbox-only')
+  const [model, setModel] = useState(agent?.model ?? '')
+  const [effort, setEffort] = useState(agent?.effort ?? '')
+  const [memory, setMemory] = useState(agent?.memory_enabled ?? true)
+  const [retention, setRetention] = useState(String(agent?.retention ?? 0))
+  const [notify, setNotify] = useState(agent?.notify_on_success ?? false)
+  const [enabled, setEnabled] = useState(agent?.enabled ?? true)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  // Model suggestions across every configured provider. A per-agent override
+  // may be a bare id (= active provider, unchanged behavior) or
+  // "provider::model" to route the run at a specific provider — the backend
+  // resolves both (model_client.chat swaps base/key/model as needed).
+  const [modelChoices, setModelChoices] = useState<{ value: string; label: string }[]>([])
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+
+  useEffect(() => {
+    let alive = true
+    listAvailableModels()
+      .then((r) => {
+        if (!alive) return
+        const choices: { value: string; label: string }[] = []
+        for (const [name, pm] of Object.entries(r.providers)) {
+          for (const m of pm.models) {
+            choices.push(
+              name === r.active_provider
+                ? { value: m, label: m }
+                : { value: `${name}::${m}`, label: `${m} (${name})` },
+            )
+          }
+        }
+        setModelChoices(choices)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const save = async () => {
+    setErr(null)
+    if (!name.trim() || !prompt.trim()) {
+      setErr('name and prompt are required')
+      return
+    }
+    setBusy(true)
+    try {
+      const body: AgentBody = {
+        workspace: wsPath ?? '',
+        name: name.trim(),
+        prompt: prompt.trim(),
+        schedule_type: scheduleType,
+        schedule_spec:
+          scheduleType === 'interval'
+            ? { minutes: Math.max(5, parseInt(minutes, 10) || 60) }
+            : scheduleType === 'daily'
+              ? { time }
+              : { weekday: parseInt(weekday, 10) || 0, time },
+        approval_policy: policy,
+        model: model.trim(),
+        effort,
+        memory_enabled: memory,
+        retention: Math.max(0, parseInt(retention, 10) || 0),
+        notify_on_success: notify,
+        enabled,
+      }
+      const saved = agent ? await updateAgent(agent.id, body) : await addAgent(body)
+      await refreshAgents()
+      onDone(saved)
+    } catch (e) {
+      setErr(String((e as { message?: string }).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <div className="flex gap-2">
+        <label className="min-w-0 flex-1">
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Name</span>
+          <input className={`w-full ${agentInputCls}`} value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="w-44 shrink-0">
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Workspace</span>
+          <input
+            className={`w-full ${agentInputCls} text-zinc-500`}
+            value={wsPath ? wsBasename(wsPath) : 'Default (Home)'}
+            disabled
+          />
+        </label>
+      </div>
+      <label className="block">
+        <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">
+          Prompt — what the agent does on every run
+        </span>
+        <textarea
+          className={`w-full ${agentInputCls} min-h-[64px] resize-y`}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+      </label>
+      <div className="flex flex-wrap items-end gap-2">
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Schedule</span>
+          <select
+            className={agentInputCls}
+            value={scheduleType}
+            onChange={(e) => setScheduleType(e.target.value as AgentScheduleType)}
+          >
+            <option value="interval">every N min</option>
+            <option value="daily">daily</option>
+            <option value="weekly">weekly</option>
+          </select>
+        </label>
+        {scheduleType === 'interval' ? (
+          <label>
+            <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Minutes (min 5)</span>
+            <input className={`w-24 ${agentInputCls}`} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
+          </label>
+        ) : (
+          <>
+            <label>
+              <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Time</span>
+              <input className={`w-24 ${agentInputCls}`} value={time} onChange={(e) => setTime(e.target.value)} placeholder="09:00" />
+            </label>
+            {scheduleType === 'weekly' && (
+              <label>
+                <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Day</span>
+                <select className={agentInputCls} value={weekday} onChange={(e) => setWeekday(e.target.value)}>
+                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => (
+                    <option key={d} value={i}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </>
+        )}
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Approval policy</span>
+          <select className={agentInputCls} value={policy} onChange={(e) => setPolicy(e.target.value as AgentPolicy)}>
+            <option value="sandbox-only">sandbox-only</option>
+            <option value="autonomous">autonomous</option>
+          </select>
+        </label>
+      </div>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        {policy === 'sandbox-only'
+          ? 'Sandbox-only (default): tools that would need approval are skipped ("skipped: approval required") and the run continues — safe unattended.'
+          : 'Autonomous (opt-in): everything auto-approves, including shell commands and file edits — only for agents you trust.'}
+      </p>
+      <div className="flex flex-wrap items-end gap-2">
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Model (blank = active)</span>
+          <input
+            className={`w-44 ${agentInputCls}`}
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="default model"
+            list="agent-model-choices"
+          />
+          <datalist id="agent-model-choices">
+            {modelChoices.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
+            ))}
+          </datalist>
+        </label>
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Effort</span>
+          <select className={agentInputCls} value={effort} onChange={(e) => setEffort(e.target.value)}>
+            <option value="">default</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Retention (runs, 0 = all)</span>
+          <input className={`w-24 ${agentInputCls}`} value={retention} onChange={(e) => setRetention(e.target.value)} />
+        </label>
+      </div>
+      <div className="flex flex-wrap gap-4 text-[11px] text-zinc-400">
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={memory} onChange={(e) => setMemory(e.target.checked)} />
+          Memory — include transcript history in each fire
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
+          Notify on completion
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          Enabled
+        </label>
+      </div>
+      {agent && <InstructionsEditor agent={agent} />}
+      {err && <p className="text-xs text-red-400">{err}</p>}
+      <div className="flex justify-end gap-2 border-t border-zinc-800 pt-2.5">
+        <button
+          className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          className="rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void save()}
+        >
+          {agent ? 'Save agent' : 'Create agent'}
+        </button>
+      </div>
+      {!agent && (
+        <p className="text-[10px] text-zinc-600">
+          The first fire is never immediate — an interval agent runs one interval after save, a
+          daily/weekly agent at its next clock slot. Use "Run now" to test right away. Missed fires
+          while YAAH is closed are skipped.
+        </p>
+      )}
+    </div>
+  )
+}
+
+const AGENT_DLG_OVERLAY =
+  'fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4'
+
+/** The agents dialogue for one workspace: list of that workspace's agents +
+ *  "New agent", each with run-now / pause / edit / delete (delete removes the
+ *  pinned chat after a confirm). */
+function AgentsDialog({
+  wsPath,
+  editAgentId,
+  onClose,
+}: {
+  wsPath: string | null
+  editAgentId: string | null
+  onClose: () => void
+}) {
+  const agents = useAgent((s) => s.agents)
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  const pushToast = useAgent((s) => s.pushToast)
+  const openConversationId = useAgent((s) => s.setConversationId)
+  const loadHistory = useAgent((s) => s.loadHistory)
+  const setWorkspace = useAgent((s) => s.setWorkspace)
+  // null = list view; 'new' = creating; otherwise the agent id being edited.
+  const [editing, setEditing] = useState<string | null>(editAgentId ?? null)
+  const [deleteTarget, setDeleteTarget] = useState<ScheduledAgent | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void refreshAgents()
+  }, [refreshAgents])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !deleteTarget) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose, deleteTarget])
+
+  const wsAgents = agents
+    .filter((a) => (a.workspace || '') === (wsPath || ''))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const editingAgent = editing && editing !== 'new' ? agents.find((a) => a.id === editing) ?? null : null
+
+  const openChat = (a: ScheduledAgent) => {
+    setConversationSafe(openConversationId, loadHistory, setWorkspace, a)
+    onClose()
+  }
+
+  const runNow = async (a: ScheduledAgent) => {
+    setBusy(true)
+    try {
+      await runAgentNow(a.id)
+      await refreshAgents()
+    } catch (e) {
+      pushToast({ kind: 'error', title: `Could not run "${a.name}"`, body: String((e as { message?: string }).message ?? e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const togglePause = async (a: ScheduledAgent) => {
+    setBusy(true)
+    try {
+      await updateAgent(a.id, agentToBody(a, !a.enabled))
+      await refreshAgents()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <h2 className="font-mono text-xs uppercase tracking-wider text-zinc-400">
+            Agents — {wsPath ? wsBasename(wsPath) : 'Default (Home)'}
+          </h2>
+          <button className="rounded px-2 text-zinc-500 hover:text-zinc-200" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {editing === null ? (
+            <div className="space-y-2">
+              {wsAgents.length === 0 && (
+                <p className="py-4 text-center text-xs text-zinc-600">
+                  No agents in this workspace yet. An agent runs its prompt on a repeating
+                  schedule, unattended, appending every run to its own pinned chat.
+                </p>
+              )}
+              {wsAgents.map((a) => (
+                <div key={a.id} className="rounded border border-zinc-800 bg-zinc-900/60 p-2.5">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`font-mono text-[10px] uppercase ${a.running ? 'text-blue-400' : a.enabled ? 'text-emerald-400' : 'text-zinc-500'}`}
+                    >
+                      {a.running ? 'running' : a.enabled ? 'on' : 'paused'}
+                    </span>
+                    <span className="truncate font-mono text-xs text-zinc-200">{a.name}</span>
+                    <span className="flex-1 truncate font-mono text-[10px] text-zinc-600">
+                      {a.schedule_text} · {a.approval_policy}
+                      {a.next_fire_at && a.enabled ? ` · next ${relTime(a.next_fire_at)}` : ''}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-[10px] text-zinc-500">{a.prompt}</p>
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                      disabled={busy || a.running}
+                      onClick={() => void runNow(a)}
+                    >
+                      run now
+                    </button>
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                      disabled={busy}
+                      onClick={() => void togglePause(a)}
+                    >
+                      {a.enabled ? 'pause' : 'resume'}
+                    </button>
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                      onClick={() => setEditing(a.id)}
+                    >
+                      edit
+                    </button>
+                    <button
+                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                      onClick={() => openChat(a)}
+                    >
+                      open chat
+                    </button>
+                    <button
+                      className="ml-auto rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
+                      onClick={() => setDeleteTarget(a)}
+                    >
+                      delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button
+                className="w-full rounded border border-dashed border-zinc-700 px-3 py-2 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                onClick={() => setEditing('new')}
+              >
+                + New agent
+              </button>
+            </div>
+          ) : (
+            <AgentForm
+              agent={editingAgent}
+              wsPath={editingAgent ? editingAgent.workspace || null : wsPath}
+              onDone={() => setEditing(null)}
+              onCancel={() => setEditing(null)}
+            />
+          )}
+        </div>
+      </div>
+      {deleteTarget && (
+        <ConfirmDialog
+          title={`Delete agent "${deleteTarget.name}"?`}
+          body="The agent and its pinned chat (the full run transcript) will be removed. This cannot be undone."
+          confirmLabel="Delete agent"
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            setDeleteTarget(null)
+            await deleteAgent(deleteTarget.id, true)
+            await refreshAgents()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Shared helpers for dialog rows (kept tiny on purpose). */
+function agentToBody(a: ScheduledAgent, enabled: boolean): AgentBody {
+  return {
+    workspace: a.workspace || '',
+    name: a.name,
+    prompt: a.prompt,
+    schedule_type: a.schedule_type,
+    schedule_spec: a.schedule_spec,
+    approval_policy: a.approval_policy,
+    model: a.model,
+    effort: a.effort,
+    memory_enabled: a.memory_enabled,
+    retention: a.retention,
+    notify_on_success: a.notify_on_success,
+    enabled,
+  }
+}
+
+async function setConversationSafe(
+  setConversationId: (id: number) => void,
+  loadHistory: (id: number, rows: Awaited<ReturnType<typeof getMessages>>) => void,
+  setWorkspace: (ws: string) => void,
+  a: ScheduledAgent,
+) {
+  setConversationId(a.conversation_id)
+  setWorkspace(a.workspace || '')
+  getMessages(a.conversation_id)
+    .then((rows) => loadHistory(a.conversation_id, rows))
+    .catch(() => {})
+}
+
+/** Bottom-right toast stack (issue #41): failure toasts for scheduled runs
+ *  always; success only for agents with notify-on-success. */
+function ToastCard({ toast }: { toast: Toast }) {
+  const dismiss = useAgent((s) => s.dismissToast)
+  useEffect(() => {
+    const t = window.setTimeout(() => dismiss(toast.id), 6000)
+    return () => window.clearTimeout(t)
+  }, [toast.id, dismiss])
+  const tone =
+    toast.kind === 'error'
+      ? 'border-red-800 bg-red-950/90 text-red-200'
+      : toast.kind === 'success'
+        ? 'border-emerald-800 bg-emerald-950/90 text-emerald-200'
+        : 'border-zinc-700 bg-zinc-800/95 text-zinc-200'
+  return (
+    <div className={`pointer-events-auto rounded border px-3 py-2 shadow-lg ${tone}`}>
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium">{toast.title}</p>
+          {toast.body && <p className="mt-0.5 text-[10px] opacity-80">{toast.body}</p>}
+        </div>
+        <button className="shrink-0 opacity-60 hover:opacity-100" onClick={() => dismiss(toast.id)} aria-label="Dismiss">
+          ✕
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export function ToastStack() {
+  const toasts = useAgent((s) => s.toasts)
+  if (toasts.length === 0) return null
+  return (
+    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2">
+      {toasts.map((t) => (
+        <ToastCard key={t.id} toast={t} />
+      ))}
+    </div>
+  )
+}
+
+/** Polls /api/agents: keeps the store's agent map fresh (the Composer gates
+ *  on it) and raises run toasts — failures always, successes per-agent. The
+ *  first pass after boot only marks, so old completions don't toast. */
+export function AgentRunWatcher() {
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  useEffect(() => {
+    let alive = true
+    const poll = async () => {
+      await refreshAgents()
+      if (!alive) return
+      const { agents, agentsToastedThrough, setAgentsToastedThrough, pushToast } =
+        useAgent.getState()
+      for (const a of agents) {
+        if (!a.last_finished_at || a.last_status === 'running') continue
+        const seen = agentsToastedThrough[a.id]
+        if (seen === undefined) {
+          setAgentsToastedThrough(a.id, a.last_finished_at)
+          continue
+        }
+        if (a.last_finished_at === seen) continue
+        setAgentsToastedThrough(a.id, a.last_finished_at)
+        if (a.last_status === 'error') {
+          pushToast({
+            kind: 'error',
+            title: `Agent "${a.name}" run failed`,
+            body: 'Open its pinned chat for the transcript.',
+          })
+        } else if (a.notify_on_success) {
+          pushToast({ kind: 'success', title: `Agent "${a.name}" run finished` })
+        }
+      }
+    }
+    void poll()
+    const t = window.setInterval(() => void poll(), 5000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+  }, [refreshAgents])
+  return null
+}
+
+/**
+ * Live follow for agent chats: a scheduled run streams inside the backend —
+ * nothing pushes its events to the frontend — so the open chat only updates
+ * by reloading history. While the pinned agent of the on-screen chat is
+ * mid-run, re-pull the transcript at a fast clip and drain the backend's
+ * tape buffer into the live telemetry tape (getAgentTape resumes by offset,
+ * so only new events flow). One final pull of each when the run ends, so
+ * the closing summary isn't cut off by the interval boundary. loadHistory
+ * skips the reload while a user-started run owns the buffer.
+ */
+export function AgentChatLiveFollow() {
+  const conversationId = useAgent((s) => s.conversationId)
+  const agents = useAgent((s) => s.agents)
+  const running =
+    conversationId !== null &&
+    agents.some((a) => a.running && a.conversation_id === conversationId)
+  useEffect(() => {
+    if (!running || conversationId === null) return
+    let alive = true
+    // Fresh fire: drop the previous run's tape before the new events land.
+    useAgent.getState().resetTape(String(conversationId))
+    let offset = 0
+    const drainTape = async (final = false) => {
+      const res = await getAgentTape(conversationId, offset)
+      // `final` still lands after cleanup flipped `alive` — the closing
+      // tool_result events must reach the tape too.
+      if (!alive && !final) return
+      offset = res.offset
+      const appendTape = useAgent.getState().appendTape
+      for (const ev of res.events) {
+        const chunk = tapeChunkForEvent(ev as AgentEvent)
+        if (chunk) appendTape(String(conversationId), chunk)
+      }
+    }
+    const pull = () =>
+      getMessages(conversationId)
+        .then((rows) => {
+          if (alive) useAgent.getState().loadHistory(conversationId, rows)
+        })
+        .catch(() => {})
+    void pull()
+    void drainTape().catch(() => {})
+    const t = window.setInterval(pull, 2500)
+    const tapeTimer = window.setInterval(() => void drainTape().catch(() => {}), 500)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+      window.clearInterval(tapeTimer)
+      getMessages(conversationId)
+        .then((rows) => useAgent.getState().loadHistory(conversationId, rows))
+        .catch(() => {})
+      void drainTape(true).catch(() => {})
+    }
+  }, [running, conversationId])
+  return null
+}
+
+/** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
+function AgentsSettingsSection() {
+  const [rc, setRc] = useState('2')
+  const [rb, setRb] = useState('5')
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    listAgents()
+      .then((p) => {
+        setRc(String(p.retry.retry_count))
+        setRb(String(p.retry.retry_backoff_minutes))
+      })
+      .catch(() => {})
+  }, [])
+
+  const save = async () => {
+    await setAgentRetry(parseInt(rc, 10) || 0, parseInt(rb, 10) || 5)
+    setSaved(true)
+    window.setTimeout(() => setSaved(false), 1500)
+  }
+
+  return (
+    <>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+        Scheduled agents
+      </h3>
+      <p className="mb-2 text-[10px] leading-relaxed text-zinc-600">
+        Agents are created from the silhouette icon on each workspace in the sidebar. Failed runs
+        retry with backoff, globally:
+      </p>
+      <div className="flex items-center gap-1.5">
+        <label className="text-[10px] text-zinc-500">
+          retry
+          <input
+            className={`ml-1 w-12 ${agentInputCls}`}
+            value={rc}
+            onChange={(e) => setRc(e.target.value)}
+            aria-label="Retry count"
+          />
+        </label>
+        <label className="text-[10px] text-zinc-500">
+          times, backoff
+          <input
+            className={`ml-1 w-12 ${agentInputCls}`}
+            value={rb}
+            onChange={(e) => setRb(e.target.value)}
+            aria-label="Backoff minutes"
+          />
+        </label>
+        <span className="text-[10px] text-zinc-500">min</span>
+        <button
+          className="ml-auto rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+          onClick={() => void save()}
+        >
+          {saved ? 'Saved ✓' : 'Save'}
+        </button>
+      </div>
     </>
   )
 }
@@ -3661,6 +4683,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             <SettingsCard title="MCP tool servers" className="col-span-4">
               <McpSection />
             </SettingsCard>
+            <SettingsCard title="Scheduled agents" className="col-span-4">
+              <AgentsSettingsSection />
+            </SettingsCard>
           </div>
         </div>
 
@@ -4334,9 +5359,17 @@ export function ChatPanel() {
   })
   const bottomRef = useRef<HTMLDivElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
+  // A scheduled agent run streams inside the backend — no live buffer, the
+  // messages arrive by history reload — but its ticker/tape should still
+  // show on the newest message while the run is going.
+  const agents = useAgent((s) => s.agents)
+  const agentRunLive =
+    conversationId !== null &&
+    agents.some((a) => a.running && a.conversation_id === conversationId)
   // Only the in-flight assistant message shows the ephemeral ticker; every
   // finished turn collapses to the one-line trace.
-  const liveId = streaming && messages.length > 0 ? messages[messages.length - 1].id : null
+  const liveId =
+    (streaming || agentRunLive) && messages.length > 0 ? messages[messages.length - 1].id : null
 
   // ---- session metadata: context size + git branch (status strip) ----
   const setContext = useAgent((s) => s.setContext)
@@ -4957,6 +5990,11 @@ function Composer() {
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
+  // Agent chats (issue #41): the composer files standing instructions, it
+  // never starts a run.
+  const agentChatByConv = useAgent((s) => s.agentChatByConv)
+  const isAgentChat =
+    conversationId !== null && Boolean(agentChatByConv[String(conversationId)])
 
   // Collapse the auto-grown textarea back to its resting height whenever the
   // draft empties (send, skill pick, restore-on-error keeps content so no reset).
@@ -5539,7 +6577,8 @@ function Composer() {
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).
-      if (ev.text) appendTape(bufKey, oneLine(ev.text) + ' ')
+      const chunk = tapeChunkForEvent(ev)
+      if (chunk) appendTape(bufKey, chunk)
     } else if (ev.type === 'tool_start') {
       setStatus(bufKey, 'running-tool')
       textSinceTool = false
@@ -5547,14 +6586,7 @@ function Composer() {
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       // Telemetry tape: every tool event of the turn flows into one
       // per-conversation line that survives gaps and turn boundaries.
-      {
-        const a = (ev.args ?? {}) as Record<string, unknown>
-        const head =
-          typeof a.command === 'string'
-            ? `${ev.name} ${a.command}`
-            : `${ev.name} ${toolTarget({ id: '', name: ev.name ?? '', args: a } as ToolCall) || JSON.stringify(a).slice(0, 100)}`
-        appendTape(bufKey, oneLine(`\n▸ ${head}`) + '    ')
-      }
+      appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
       if (ev.name === 'ask_user') {
         const a = (ev.args ?? {}) as {
           question?: string
@@ -5578,7 +6610,7 @@ function Composer() {
     } else if (ev.type === 'tool_progress') {
       if (ev.chunk) {
         appendToolOutput(bufKey, curId, ev.call_id ?? '', ev.chunk)
-        appendTape(bufKey, oneLine(ev.chunk))
+        appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
       }
     } else if (ev.type === 'tool_result') {
       finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result)
@@ -5588,15 +6620,11 @@ function Composer() {
         const callId = ev.call_id ?? ''
         const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
         const tc = msg?.toolCalls?.slice().reverse().find((t) => t.id === callId)
-        const res = ev.result as { output?: unknown } | null
-        let seg = ''
-        if (typeof res?.output === 'string') seg += oneLine(res.output).slice(0, 600)
-        else if (ev.result !== null && ev.result !== undefined) {
-          const r = JSON.stringify(ev.result)
-          if (r && r !== '{}') seg += '= ' + oneLine(r).slice(0, 200)
-        }
-        if (tc?.startedAt && tc?.finishedAt) seg += `  ✓ ${formatElapsed(tc.finishedAt - tc.startedAt)}`
-        appendTape(bufKey, (seg ? oneLine(seg) + '    ' : ''))
+        const elapsed =
+          tc?.startedAt && tc?.finishedAt
+            ? formatElapsed(tc.finishedAt - tc.startedAt)
+            : undefined
+        appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
       }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
@@ -5721,6 +6749,31 @@ function Composer() {
       for (let i = 0; i < 100; i++) {
         if (!useAgent.getState().abortByConv[ivKey]) break
         await new Promise<void>((r) => setTimeout(r, 50))
+      }
+    }
+    // Agent chat (issue #41): typed messages NEVER trigger a run — each one
+    // becomes a standing instruction the agent sees at every scheduled fire.
+    if (conversationId !== null && !isPtt) {
+      const agentId = useAgent.getState().agentChatByConv[String(conversationId)]
+      if (agentId) {
+        if (!text) return
+        try {
+          await addAgentInstruction(agentId, text)
+          appendUserMessage(String(conversationId), text)
+          useAgent.getState().pushToast({
+            kind: 'info',
+            title: 'Standing instruction saved',
+            body: 'Messages in an agent chat never start a run — this rides along at every fire.',
+          })
+        } catch (e) {
+          useAgent.getState().pushToast({
+            kind: 'error',
+            title: 'Could not save standing instruction',
+            body: String((e as Error).message ?? e),
+          })
+        }
+        setInput('')
+        return
       }
     }
     setSending(true)
@@ -6096,7 +7149,11 @@ function Composer() {
           className="block w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 focus:outline-none"
           rows={2}
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
-          placeholder="Describe a task... (drop/paste/attach images or text files; type / to load a skill)"
+          placeholder={
+            isAgentChat
+              ? 'This is an agent chat — messages become standing instructions (they never start a run)'
+              : 'Describe a task... (drop/paste/attach images or text files; type / to load a skill)'
+          }
           aria-label="Message the agent"
           value={input}
           onChange={(e) => {

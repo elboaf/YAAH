@@ -58,6 +58,8 @@ export interface ConversationRow {
   workspace: string | null
   created_at: string
   updated_at: string
+  /** 'agent' = a scheduled agent's pinned chat (issue #41). */
+  chat_type?: 'chat' | 'agent'
 }
 
 export interface ContextInfo {
@@ -432,6 +434,138 @@ export const removeMcpServer = (name: string) =>
 
 export const reloadMcpServers = () =>
   api<{ servers: McpServerInfo[] }>('/api/mcp/reload', { method: 'POST' })
+
+// ---- Scheduled agents (issue #41) ----
+
+export type AgentPolicy = 'sandbox-only' | 'autonomous'
+export type AgentScheduleType = 'interval' | 'daily' | 'weekly'
+export interface AgentScheduleSpec {
+  minutes?: number
+  time?: string
+  weekday?: number
+}
+
+export interface AgentInstruction {
+  id: number
+  agent_id: string
+  content: string
+  created_at: string
+}
+
+export interface ScheduledAgent {
+  id: string
+  workspace: string
+  name: string
+  prompt: string
+  schedule_type: AgentScheduleType
+  schedule_spec: AgentScheduleSpec
+  schedule_text: string
+  approval_policy: AgentPolicy
+  model: string
+  effort: string
+  memory_enabled: boolean
+  retention: number
+  notify_on_success: boolean
+  enabled: boolean
+  conversation_id: number
+  next_fire_at: string
+  last_fired_at: string
+  last_finished_at: string
+  last_status: string
+  running: boolean
+  instructions: AgentInstruction[]
+  chat_title: string
+}
+
+export interface AgentsPayload {
+  agents: ScheduledAgent[]
+  retry: { retry_count: number; retry_backoff_minutes: number }
+}
+
+/** The edit/create form payload — the dialogue edits the whole record. */
+export type AgentBody = Omit<
+  ScheduledAgent,
+  'id' | 'schedule_spec' | 'schedule_text' | 'running' | 'instructions' | 'chat_title' |
+    'conversation_id' | 'next_fire_at' | 'last_fired_at' | 'last_finished_at' | 'last_status'
+> & { schedule_spec: AgentScheduleSpec }
+
+export const listAgents = (workspace?: string) =>
+  api<AgentsPayload>(
+    '/api/agents' + (workspace !== undefined ? `?workspace=${encodeURIComponent(workspace)}` : ''),
+  )
+
+/** One live UI-stream event of a scheduled agent run (see getAgentTape). */
+export interface AgentTapeEvent {
+  type: string
+  text?: string
+  name?: string
+  command?: string
+  chunk?: string
+  result?: string
+  message?: string
+}
+
+/** Poll the in-backend event buffer of the agent run in this conversation:
+ * pass back `offset` from the previous call to get only new events. */
+export const getAgentTape = (conversationId: number, after: number) =>
+  api<{ running: boolean; offset: number; events: AgentTapeEvent[] }>(
+    `/api/agents/tape?conversation_id=${conversationId}&after=${after}`,
+  )
+
+export const addAgent = (body: AgentBody) =>
+  api<ScheduledAgent>('/api/agents', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+export const updateAgent = (id: string, body: AgentBody) =>
+  api<ScheduledAgent>(`/api/agents/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+export const deleteAgent = (id: string, deleteChat = true) =>
+  api<{ ok: boolean }>(
+    `/api/agents/${encodeURIComponent(id)}?delete_chat=${deleteChat ? 'true' : 'false'}`,
+    { method: 'DELETE' },
+  )
+
+export const runAgentNow = (id: string) =>
+  api<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/run`, { method: 'POST' })
+
+// Standing instructions: typed messages in an agent chat become these; they
+// never trigger a run — they ride along with the prompt at every fire.
+export const addAgentInstruction = (agentId: string, content: string) =>
+  api<AgentInstruction>(`/api/agents/${encodeURIComponent(agentId)}/instructions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+
+export const updateAgentInstruction = (agentId: string, instructionId: number, content: string) =>
+  api<{ ok: boolean }>(
+    `/api/agents/${encodeURIComponent(agentId)}/instructions/${instructionId}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    },
+  )
+
+export const deleteAgentInstruction = (agentId: string, instructionId: number) =>
+  api<{ ok: boolean }>(
+    `/api/agents/${encodeURIComponent(agentId)}/instructions/${instructionId}`,
+    { method: 'DELETE' },
+  )
+
+export const setAgentRetry = (retry_count: number, retry_backoff_minutes: number) =>
+  api<{ ok: boolean }>('/api/agents/retry', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ retry_count, retry_backoff_minutes }),
+  })
 
 /** Stage an attached text file inside the workspace; returns the
  *  workspace-relative path the agent's read_file tool can open. */
