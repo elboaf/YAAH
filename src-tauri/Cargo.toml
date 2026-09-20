@@ -24,6 +24,9 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
+# Hyperlinks open in the OS default browser (#31): the webview swallows
+# target=_blank navigation, so the frontend hands approved hrefs to this.
+tauri-plugin-opener = "2"
 # Installer download for in-app update (#16). Rustls: no OpenSSL linkage on
 # the Linux build; the default-tls variant would drag in native-tls.
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }

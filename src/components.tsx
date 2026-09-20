@@ -60,6 +60,7 @@ import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type C
 import { useUpdateCheck } from './update'
 import { useTts } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
+import { openExternal } from './openExternal'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
 import { CodeBlock, AgentMarkdown } from './markdown'
@@ -1069,7 +1070,13 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
           {msg.images?.length ? (
             <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
               {msg.images.map((rel, i) => (
-                <a key={i} href={imageSrc(rel)} target="_blank" rel="noreferrer">
+                <a
+                  key={i}
+                  href={imageSrc(rel)}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => openExternal(imageSrc(rel), e)}
+                >
                   <img
                     src={imageSrc(rel)}
                     alt="attachment"

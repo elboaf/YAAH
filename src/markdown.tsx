@@ -9,6 +9,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
 import { highlightLine } from './codeview'
+import { openExternal } from './openExternal'
 
 // ---------------------------------------------------------------- code views
 
@@ -95,6 +96,7 @@ const components = {
         href={safe}
         target="_blank"
         rel="noreferrer"
+        onClick={(e) => openExternal(safe, e)}
         className="text-sky-400 underline decoration-sky-400/40 underline-offset-2 hover:text-sky-300"
       >
         {children}
