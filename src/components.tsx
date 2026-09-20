@@ -1800,6 +1800,12 @@ function ConversationList() {
   // Per-conversation run status: rows with an in-flight turn show a spinner
   // (issue #10). Reference-stable selector — only re-renders on status writes.
   const statusByConv = useAgent((s) => s.statusByConv)
+  // Issue #25 sidebar signals: needs-you (any user-blocking gate) and the
+  // finished-but-unacknowledged map (set by setStatus, cleared on open).
+  const pendingQuestions = useAgent((s) => s.pendingQuestions)
+  const pendingApprovals = useAgent((s) => s.pendingApprovals)
+  const pendingPlanApprovals = useAgent((s) => s.pendingPlanApprovals)
+  const finishedByConv = useAgent((s) => s.finishedByConv)
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
@@ -2025,6 +2031,12 @@ function ConversationList() {
                         statusByConv[String(c.id)] === 'thinking' ||
                         statusByConv[String(c.id)] === 'running-tool'
                       }
+                      blocked={Boolean(
+                        pendingQuestions[String(c.id)] ||
+                          pendingApprovals[String(c.id)] ||
+                          pendingPlanApprovals[String(c.id)],
+                      )}
+                      finished={finishedByConv[String(c.id)] ?? null}
                       menuOpen={menuOpenId === c.id}
                       setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
                       onOpen={() => openConversation(c)}
@@ -2200,6 +2212,8 @@ function ConversationRow({
   conv,
   active,
   running,
+  blocked,
+  finished,
   menuOpen,
   setMenuOpen,
   onOpen,
@@ -2211,6 +2225,13 @@ function ConversationRow({
   active: boolean
   /** A turn is streaming in this conversation right now (issue #10). */
   running: boolean
+  /** The run is paused on the user: ask_user question, tool approval or plan
+   *  approval (issue #25, grilling round 1: all three gates, orange beats
+   *  the working dots since the run is frozen, not progressing). */
+  blocked: boolean
+  /** Finished-but-unacknowledged signal: 'ok' (green bar) | 'error' (red
+   *  pill). Only set for background chats; cleared when the chat opens. */
+  finished: 'ok' | 'error' | null
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   onOpen: () => void
@@ -2227,15 +2248,26 @@ function ConversationRow({
         onClick={onOpen}
         title={conv.title}
       >
-        {running && (
+        {/* Issue #25: one status slot left of the title, same footprint for
+            every state so the row never shifts. Precedence: needs-you (orange,
+            pulsing) > finished (green bar / red pill) > working dots. */}
+        {blocked ? (
           <span
             aria-hidden="true"
-            className="run-pulse mr-1.5 shrink-0 text-amber-400"
-            title="Working…"
-          >
-            ●
+            className="run-bar run-bar-orange mr-1.5 shrink-0"
+            title="Waiting for you — a question or approval is pausing this run"
+          />
+        ) : finished === 'error' ? (
+          <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
+        ) : finished === 'ok' ? (
+          <span aria-hidden="true" className="run-bar run-bar-green mr-1.5 shrink-0" title="Run finished" />
+        ) : running ? (
+          <span aria-hidden="true" className="run-dots mr-1.5 shrink-0" title="Working…">
+            <i />
+            <i />
+            <i />
           </span>
-        )}
+        ) : null}
         <span className="min-w-0 flex-1 truncate">{conv.title}</span>
         <span
           className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}

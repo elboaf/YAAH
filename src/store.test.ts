@@ -266,3 +266,66 @@ describe('concurrent chats (issue #10)', () => {
     expect(useAgent.getState().messagesByConv['5'].map((m) => m.id)).toEqual(['db1'])
   })
 })
+
+describe('sidebar finish signal (issue #25)', () => {
+  beforeEach(() => {
+    useAgent.setState({ statusByConv: {}, finishedByConv: {}, conversationId: null })
+  })
+
+  it('sets an ok signal when a background chat finishes', () => {
+    useAgent.setState({ statusByConv: { '7': 'running-tool' }, conversationId: null })
+    useAgent.getState().setStatus('7', 'idle')
+    expect(useAgent.getState().finishedByConv['7']).toBe('ok')
+  })
+
+  it('sets an error signal when a background chat fails', () => {
+    useAgent.setState({ statusByConv: { '7': 'running-tool' }, conversationId: null })
+    useAgent.getState().setStatus('7', 'error')
+    expect(useAgent.getState().finishedByConv['7']).toBe('error')
+  })
+
+  it('does not signal when the run finishes in the on-screen chat (Q4/Q8)', () => {
+    useAgent.setState({ statusByConv: { '7': 'thinking' }, conversationId: 7 })
+    useAgent.getState().setStatus('7', 'idle')
+    expect(useAgent.getState().finishedByConv['7']).toBeUndefined()
+  })
+
+  it('does not signal retroactively on switch-away (Q8)', () => {
+    // Finish watched on-screen -> no signal; opening another chat afterwards
+    // must not manufacture one.
+    useAgent.setState({ statusByConv: { '7': 'thinking' }, conversationId: 7 })
+    useAgent.getState().setStatus('7', 'idle')
+    useAgent.getState().setConversationId(5)
+    expect(useAgent.getState().finishedByConv['7']).toBeUndefined()
+  })
+
+  it('does not signal when there was no run to finish (abort-style status delete)', () => {
+    useAgent.setState({ statusByConv: {}, conversationId: null })
+    useAgent.getState().setStatus('7', 'idle')
+    expect(useAgent.getState().finishedByConv['7']).toBeUndefined()
+  })
+
+  it('does not signal for keys without a sidebar row (draft buffers)', () => {
+    useAgent.setState({ statusByConv: { draft: 'thinking' }, conversationId: null })
+    useAgent.getState().setStatus('draft', 'idle')
+    expect(useAgent.getState().finishedByConv['draft']).toBeUndefined()
+  })
+
+  it('clears the signal when the chat is opened', () => {
+    useAgent.setState({ statusByConv: { '7': 'idle' }, finishedByConv: { '7': 'ok' }, conversationId: null })
+    useAgent.getState().setConversationId(7)
+    expect(useAgent.getState().finishedByConv['7']).toBeUndefined()
+  })
+
+  it('keeps signals isolated per conversation', () => {
+    useAgent.setState({
+      statusByConv: { '7': 'running-tool', '9': 'running-tool' },
+      conversationId: null,
+    })
+    useAgent.getState().setStatus('7', 'idle')
+    useAgent.getState().setStatus('9', 'error')
+    expect(useAgent.getState().finishedByConv).toEqual({ '7': 'ok', '9': 'error' })
+    useAgent.getState().setConversationId(7)
+    expect(useAgent.getState().finishedByConv).toEqual({ '9': 'error' })
+  })
+})

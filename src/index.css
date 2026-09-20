@@ -106,10 +106,82 @@ body,
   animation: caret-blink 1s steps(1) infinite;
 }
 
+/* Issue #25 sidebar status slot: one shape, three states.
+   .run-bar-orange pulsing = the run is parked waiting on the user (question,
+   tool approval, or plan approval) - attention, not failure.
+   .run-bar-green / .run-bar-red = finished-but-unacknowledged (bar) / failed
+   (pill), shown until the chat is opened. */
+.run-bar {
+  display: inline-block;
+  width: 14px;
+  height: 5px;
+  border-radius: 3px;
+}
+.run-bar-orange {
+  background: #fb923c;
+  animation: run-bar-pulse 1.4s ease-in-out infinite;
+}
+.run-bar-green {
+  background: #10b981;
+}
+.run-bar-red {
+  background: #ef4444;
+}
+@keyframes run-bar-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Working: three amber dots, exactly one lit at a time, cycling left to
+   right (lit window 1/3 of the cycle, staggered a third apart). */
+.run-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.run-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #fbbf24;
+  opacity: 0.25;
+  animation: run-dots-cycle 1.2s linear infinite;
+}
+.run-dots i:nth-child(2) {
+  animation-delay: 0.4s;
+}
+.run-dots i:nth-child(3) {
+  animation-delay: 0.8s;
+}
+@keyframes run-dots-cycle {
+  0%,
+  32% {
+    opacity: 1;
+  }
+  34%,
+  98% {
+    opacity: 0.25;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chip-in,
   .run-pulse,
-  .stream-caret {
+  .stream-caret,
+  .run-bar-orange,
+  .run-dots i {
     animation: none;
+  }
+  /* Reduced motion falls back to the old single static amber dot (issue #25). */
+  .run-dots i {
+    opacity: 1;
+  }
+  .run-dots i:nth-child(n + 2) {
+    display: none;
   }
 }

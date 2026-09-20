@@ -113,6 +113,15 @@ interface AgentState {
    */
   statusByConv: Record<string, AgentStatus>
   setStatus: (key: string, s: AgentStatus) => void
+  /**
+   * Sidebar finish signal, keyed by convKey (issue #25): 'ok' | 'error'. Set
+   * by setStatus when a turn ends (running -> idle/error) while its chat is
+   * in the background; ConversationRow renders a green bar / red pill until
+   * the chat is opened. Not persisted - a finish signal from a previous
+   * session is stale the moment the app restarts.
+   */
+  finishedByConv: Record<string, 'ok' | 'error'>
+  clearFinished: (key: string) => void
   /** Per-conversation stream/failed-send error (rendered by the owning chat). */
   errorByConv: Record<string, string | null>
   setError: (key: string, e: string | null) => void
@@ -329,7 +338,32 @@ export const useAgent = create<AgentState>((set, get) => ({
   },
   statusByConv: {},
   setStatus: (key, status) =>
-    set((s) => ({ statusByConv: { ...s.statusByConv, [key]: status } })),
+    set((s) => {
+      const prev = s.statusByConv[key]
+      // Issue #25: a turn that ends (running -> idle/error) while its chat is
+      // NOT on screen leaves a sidebar signal (green bar / red pill). A run
+      // watched in its own chat doesn't signal - the transcript IS the
+      // signal, and Q4/Q8: no retroactive bar on switch-away. Draft and
+      // non-numeric keys have no sidebar row, so they never signal.
+      const wasRunning = prev === 'thinking' || prev === 'running-tool'
+      const ended = status === 'idle' || status === 'error'
+      const idNum = Number(key)
+      if (wasRunning && ended && Number.isFinite(idNum) && s.conversationId !== idNum) {
+        return {
+          statusByConv: { ...s.statusByConv, [key]: status },
+          finishedByConv: { ...s.finishedByConv, [key]: status === 'error' ? 'error' : 'ok' },
+        }
+      }
+      return { statusByConv: { ...s.statusByConv, [key]: status } }
+    }),
+  finishedByConv: {},
+  clearFinished: (key) =>
+    set((s) => {
+      if (!(key in s.finishedByConv)) return s
+      const finishedByConv = { ...s.finishedByConv }
+      delete finishedByConv[key]
+      return { finishedByConv }
+    }),
   errorByConv: {},
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
@@ -386,6 +420,8 @@ export const useAgent = create<AgentState>((set, get) => ({
 
   setConversationId: (id) => {
     persistConversationId(id)
+    // Opening a chat acknowledges its sidebar finish signal (issue #25).
+    if (id !== null) get().clearFinished(String(id))
     set({ conversationId: id })
   },
 
