@@ -3030,7 +3030,25 @@ function AgentForm({
   const [enabled, setEnabled] = useState(agent?.enabled ?? true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // Model suggestions: the active provider's models (a per-agent override is
+  // a bare model id sent to the active provider — model_client only swaps
+  // cfg["model"], so ids from other providers would be meaningless here).
+  const [modelChoices, setModelChoices] = useState<string[]>([])
   const refreshAgents = useAgent((s) => s.refreshAgents)
+
+  useEffect(() => {
+    let alive = true
+    listAvailableModels()
+      .then((r) => {
+        if (!alive) return
+        const active = r.providers[r.active_provider]?.models ?? []
+        setModelChoices(active.length ? active : Object.values(r.providers).flatMap((p) => p.models))
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
 
   const save = async () => {
     setErr(null)
@@ -3149,7 +3167,18 @@ function AgentForm({
       <div className="flex flex-wrap items-end gap-2">
         <label>
           <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Model (blank = active)</span>
-          <input className={`w-44 ${agentInputCls}`} value={model} onChange={(e) => setModel(e.target.value)} placeholder="default model" />
+          <input
+            className={`w-44 ${agentInputCls}`}
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="default model"
+            list="agent-model-choices"
+          />
+          <datalist id="agent-model-choices">
+            {modelChoices.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
         </label>
         <label>
           <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Effort</span>
@@ -3492,6 +3521,42 @@ export function AgentRunWatcher() {
       window.clearInterval(t)
     }
   }, [refreshAgents])
+  return null
+}
+
+/**
+ * Live follow for agent chats: a scheduled run streams inside the backend —
+ * nothing pushes its events to the frontend — so the open chat only updates
+ * by reloading history. While the pinned agent of the on-screen chat is
+ * mid-run, re-pull the transcript at a fast clip; one final pull when the
+ * run ends, so the closing summary isn't cut off by the interval boundary.
+ * loadHistory skips the reload while a user-started run owns the buffer.
+ */
+export function AgentChatLiveFollow() {
+  const conversationId = useAgent((s) => s.conversationId)
+  const agents = useAgent((s) => s.agents)
+  const running =
+    conversationId !== null &&
+    agents.some((a) => a.running && a.conversation_id === conversationId)
+  useEffect(() => {
+    if (!running || conversationId === null) return
+    let alive = true
+    const pull = () =>
+      getMessages(conversationId)
+        .then((rows) => {
+          if (alive) useAgent.getState().loadHistory(conversationId, rows)
+        })
+        .catch(() => {})
+    void pull()
+    const t = window.setInterval(pull, 2500)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+      getMessages(conversationId)
+        .then((rows) => useAgent.getState().loadHistory(conversationId, rows))
+        .catch(() => {})
+    }
+  }, [running, conversationId])
   return null
 }
 

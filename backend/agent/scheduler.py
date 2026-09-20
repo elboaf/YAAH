@@ -64,6 +64,12 @@ _task: asyncio.Task | None = None
 # agent_id -> {"attempts": int, "scheduled_next": iso}
 _retry_state: dict[str, dict] = {}
 
+# Strong refs to the run tasks. The event loop holds only weak refs to
+# tasks, so an unreferenced create_task can be garbage-collected mid-run
+# at its next await — the run silently vanishes (no error, no finally),
+# leaving last_status="running" forever. This set is what keeps them alive.
+_fire_tasks: set[asyncio.Task] = set()
+
 
 # ---- schedule math ----------------------------------------------------------
 
@@ -231,7 +237,7 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
         lines = "\n".join(f"- {i['content']}" for i in instructions)
         prompt = f"{prompt}\n\n# Standing instructions\n\n{lines}"
 
-    asyncio.create_task(
+    task = asyncio.create_task(
         _run_and_settle(
             aid,
             conv_id,
@@ -244,6 +250,8 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
             agent.get("retention") or 0,
         )
     )
+    _fire_tasks.add(task)
+    task.add_done_callback(_fire_tasks.discard)
     return "started"
 
 
@@ -340,6 +348,12 @@ async def startup_roll_forward():
     forward to the next future slot. No catch-up fire."""
     now = datetime.now()
     for agent in await list_agents():
+        # A restart orphans nothing (runs live in this process), so a row
+        # still marked "running" is a crash/interrupt leftover — record it
+        # as such instead of leaving the UI showing a run that never ended.
+        if agent.get("last_status") == "running":
+            await _patch(agent["id"], last_status="error",
+                         last_finished_at=now.isoformat(timespec="seconds"))
         nxt = agent.get("next_fire_at")
         if not nxt:
             await _patch(
