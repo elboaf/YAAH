@@ -169,19 +169,8 @@ body,
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .chip-in,
-  .run-pulse,
-  .stream-caret,
-  .run-bar-orange,
-  .run-dots i {
-    animation: none;
-  }
-  /* Reduced motion falls back to the old single static amber dot (issue #25). */
-  .run-dots i {
-    opacity: 1;
-  }
-  .run-dots i:nth-child(n + 2) {
-    display: none;
-  }
-}
+/* Deliberate: no prefers-reduced-motion gating. The app owns its behavior —
+   status indicators (working dots, bars, caret) are state, not decoration,
+   and they render identically regardless of the OS animation setting.
+   Do not re-add a reduced-motion fallback that collapses the dots to one:
+   that read as "feature missing" (issue #25 follow-up). */
