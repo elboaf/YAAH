@@ -399,13 +399,41 @@ async def run_sub_agent(
     status = "completed"
     error: str | None = None
     turns = 0
+    grace_note: str | None = None
 
     try:
-        for turn in range(defn.max_turns):
+        # One grace turn past the budget: when the loop exhausts max_turns
+        # without a final answer, the model gets exactly one more call with
+        # tools still available, told to converge NOW — so an explore-heavy
+        # run can still write its deliverable instead of dying on tool calls.
+        grace = False
+        for turn in range(max(defn.max_turns, 1)):
             turns = turn + 1
             if cancel_ev.is_set():
                 status = "cancelled"
                 break
+
+            # Budget awareness: near the end of the budget, tell the model
+            # to start converging (it cannot course-correct on a budget it
+            # does not know exists).
+            remaining = defn.max_turns - turns
+            if (
+                not grace
+                and remaining >= 0
+                and remaining < max(3, defn.max_turns // 5)
+            ):
+                if remaining == 0:
+                    note = (
+                        "This is the final budgeted turn. Produce your final "
+                        "answer now."
+                    )
+                else:
+                    note = (
+                        f"{remaining} turn{'s' if remaining != 1 else ''} "
+                        "remain. Start converging now: complete the "
+                        "deliverable and produce your final answer."
+                    )
+                messages.append({"role": "system", "content": note})
 
             state: dict = {"content": "", "tool_calls": None, "finish": None}
             acc: list[str] = []
@@ -538,13 +566,119 @@ async def run_sub_agent(
             if status == "cancelled":
                 break
         else:
-            # for-else: loop exhausted the turn budget without a final answer
+            # for-else: loop exhausted the turn budget without a final answer.
+            # One grace turn: force convergence with tools still available so
+            # the deliverable (e.g. the file) actually gets written. Hard
+            # bound: exactly one extra model call.
             if status == "completed":
                 status = "max_turns"
-                final_text = (
-                    content
-                    or "[sub-agent hit its turn budget without a final answer]"
+                grace = True
+                turns += 1
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Turn budget exhausted. Produce your final answer "
+                            "NOW — finish/complete any pending deliverable "
+                            "(e.g. write the file) with what you have. No "
+                            "further exploration."
+                        ),
+                    }
                 )
+                state = {"content": "", "tool_calls": None, "finish": None}
+                acc = []
+                try:
+                    stream = await model_client.chat(messages, tools=tools, stream=True)
+                    async for ev in stream:
+                        if cancel_ev.is_set():
+                            break
+                        if ev["type"] == "content":
+                            acc.append(ev["text"])
+                            if on_event:
+                                on_event({"type": "text", "text": ev["text"]})
+                        elif ev["type"] == "tool_calls":
+                            state["tool_calls"] = ev["tool_calls"]
+                        elif ev["type"] == "finish":
+                            state["finish"] = ev.get("reason")
+                except model_client.ModelError as e:
+                    status = "error"
+                    error = f"{type(e).__name__}: {e}"
+                if cancel_ev.is_set():
+                    status = "cancelled"
+                content = "".join(acc)
+                tool_calls = state["tool_calls"]
+                _record("assistant", content, tool_calls=tool_calls,
+                        note="grace turn (budget exhausted)")
+                if tool_calls:
+                    # Execute the grace turn's tool calls, then stop
+                    # regardless — the grace turn is the last one.
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": tool_calls,
+                        }
+                    )
+                    for tc in tool_calls:
+                        name = tc["function"]["name"]
+                        try:
+                            args = json.loads(tc["function"]["arguments"] or "{}")
+                        except json.JSONDecodeError as e:
+                            result = {"error": f"Invalid JSON arguments: {e}"}
+                        else:
+                            if on_event:
+                                on_event({"type": "tool_start", "name": name, "args": args})
+                            if name == "load_skill":
+                                result = skill_registry.load_skill_into_messages(
+                                    args, loaded_skills, messages
+                                )
+                            else:
+                                if gate is not None:
+                                    result = await gate(name, args, tc.get("id", ""))
+                                else:
+                                    result = None
+                                if result is None:
+                                    from backend.agent.tools import execute_tool
+
+                                    result = await execute_tool(name, args, workspace)
+                            if on_event:
+                                on_event({"type": "tool_result", "name": name, "result": result})
+                        result_str = json.dumps(result)
+                        if len(result_str) > MAX_RESULT_CHARS:
+                            result_str = result_str[:MAX_RESULT_CHARS] + "…[truncated]"
+                        _record(
+                            "tool",
+                            result_str,
+                            tool_call_id=tc.get("id", ""),
+                            name=name,
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": result_str,
+                            }
+                        )
+                    status = "max_turns"
+                    final_text = content or (
+                        "[sub-agent hit its turn budget; grace turn ended on "
+                        "tool calls without a final answer]"
+                    )
+                    grace_note = (
+                        "hit turn budget; grace turn ended on tool calls "
+                        "without a final answer"
+                    )
+                else:
+                    if content:
+                        grace_note = (
+                            "hit turn budget; produced output in a final "
+                            "wrap-up turn"
+                        )
+                    else:
+                        grace_note = "hit turn budget without a final answer"
+                    final_text = content or (
+                        "[sub-agent hit its turn budget without a final answer]"
+                    )
     except Exception as e:  # noqa: BLE001 — a sub-agent must never kill the parent
         status = "error"
         error = f"{type(e).__name__}: {e}"
@@ -566,6 +700,7 @@ async def run_sub_agent(
         "turns": turns,
         "output": final_text or (f"error: {error}" if error else ""),
         **({"error": error} if error else {}),
+        **({"note": grace_note} if grace_note else {}),
         "transcript": transcript,
     }
 

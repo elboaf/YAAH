@@ -107,12 +107,21 @@ class FakeStream:
         return self._events.pop(0)
 
 
+class Scripted(list):
+    """Script queue; .messages records the messages fed to each chat call."""
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[list[dict]] = []
+
+
 @pytest.fixture
 def fake_model(monkeypatch):
     """Scripted responses per model_client.chat call."""
-    scripts: list[list[dict]] = []
+    scripts = Scripted()
 
     async def fake_chat(messages, tools=None, stream=True):
+        scripts.messages.append(messages)
         events = scripts.pop(0) if scripts else [{"type": "finish"}]
         return FakeStream(events)
 
@@ -219,7 +228,9 @@ async def test_sub_agent_max_turns(fake_model, tmp_path):
         ])
     result = await subagents.run_sub_agent(defn, "loop forever", str(tmp_path))
     assert result["status"] == "max_turns"
-    assert result["turns"] == 2
+    # 2 budget turns + exactly one grace turn (which produced nothing here).
+    assert result["turns"] == 3
+    assert result["note"] == "hit turn budget without a final answer"
 
 
 @pytest.mark.asyncio
@@ -640,3 +651,127 @@ async def test_spawn_agent_costs_parent_one_step(fake_model_single, tmp_path):
     assert len(parent_texts) == 1
     progress = [e for e in events if e["type"] == "sub_agent_progress"]
     assert any(e.get("text") == "sub result" for e in progress)
+
+
+# ------------------------------------------------- turn budget (issue #15B)
+
+
+@pytest.mark.asyncio
+async def test_budget_warning_note_near_end(fake_model, tmp_path):
+    """A system note tells the model to converge near the budget's end."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=3)
+    for _ in range(3):
+        fake_model.append([
+            {"type": "tool_calls", "tool_calls": [{
+                "id": "c", "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }]},
+            {"type": "finish", "reason": "tool_calls"},
+        ])
+    fake_model.append([
+        {"type": "content", "text": "converged"},
+        {"type": "finish"},
+    ])
+    result = await subagents.run_sub_agent(defn, "loop", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["output"] == "converged"
+    messages_arg = fake_model.messages
+    # The grace turn's system note is the last message fed to the model.
+    assert messages_arg[-1][-1]["role"] == "system"
+    assert "budget" in messages_arg[-1][-1]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_grace_turn_executes_tool_and_stops(fake_model, tmp_path):
+    """Grace turn: exactly one extra model call; its tool call runs; the
+    run stops regardless; the note says output was produced."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=1)
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c2", "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps({
+                "path": "out.txt", "content": "deliverable",
+            })},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    result = await subagents.run_sub_agent(defn, "write it", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 2  # budget turn + exactly one grace turn
+    assert result["note"] == (
+        "hit turn budget; grace turn ended on tool calls without a final answer"
+    )
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "deliverable"
+    roles = [e["role"] for e in result["transcript"]]
+    assert roles == ["user", "assistant", "tool", "assistant", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_grace_turn_text_becomes_output(fake_model, tmp_path):
+    """Grace turn ends with text: that text is the output, status max_turns."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=1)
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "content", "text": "here is the final answer"},
+        {"type": "finish"},
+    ])
+    result = await subagents.run_sub_agent(defn, "wrap up", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 2
+    assert result["output"] == "here is the final answer"
+    assert result["note"] == (
+        "hit turn budget; produced output in a final wrap-up turn"
+    )
+
+
+@pytest.mark.asyncio
+async def test_grace_turn_empty_output_note(fake_model, tmp_path):
+    """Grace turn produces nothing: the note says so, output falls back."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=1)
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([{"type": "finish"}])
+    result = await subagents.run_sub_agent(defn, "nothing", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 2
+    assert result["output"] == (
+        "[sub-agent hit its turn budget without a final answer]"
+    )
+    assert result["note"] == "hit turn budget without a final answer"
+
+
+@pytest.mark.asyncio
+async def test_no_warning_note_early_in_budget(fake_model, tmp_path):
+    """No convergence note while plenty of budget remains."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=10)
+    fake_model.append([
+        {"type": "content", "text": "quick answer"},
+        {"type": "finish"},
+    ])
+    result = await subagents.run_sub_agent(defn, "quick", str(tmp_path))
+    assert result["status"] == "completed"
+    assert "note" not in result
+    messages_arg = fake_model.messages
+    assert all(
+        not (m["role"] == "system" and "turns remain" in m.get("content", ""))
+        for messages in messages_arg
+        for m in messages
+    )
