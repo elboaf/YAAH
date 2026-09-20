@@ -5346,8 +5346,23 @@ function Composer() {
   const [rejects, setRejects] = useState<string[]>([])
   const [sendError, setSendError] = useState<string | null>(null)
   // A turn that died mid-stream: the banner offers Resume (continue the same
-  // turn server-side, no duplicate user message) and dismiss.
-  const [turnError, setTurnError] = useState<string | null>(null)
+  // turn server-side, no duplicate user message) and dismiss. Keyed by the
+  // failing conversation's buffer (issue #39): the banner belongs to the chat
+  // that failed, so switching chats must hide it — and Resume must target the
+  // failed conversation, not whichever chat happens to be on screen.
+  const [turnErrorByConv, setTurnErrorByConv] = useState<Record<string, string>>({})
+  const screenKey = conversationId === null ? 'draft' : String(conversationId)
+  const turnError = turnErrorByConv[screenKey] ?? null
+  const setTurnError = (key: string, message: string | null) =>
+    setTurnErrorByConv((m) => {
+      if (message === null) {
+        if (!(key in m)) return m
+        const next = { ...m }
+        delete next[key]
+        return next
+      }
+      return { ...m, [key]: message }
+    })
   const pushReject = useCallback((msg: string) => {
     setRejects((r) => [...r.slice(-3), msg])
     // Auto-clear after 6s; each new rejection resets the timer.
@@ -5645,7 +5660,7 @@ function Composer() {
     } else if (ev.type === 'error') {
       setStatus(bufKey, 'error')
       setError(bufKey, ev.message ?? 'Unknown agent error')
-      setTurnError(ev.message ?? 'Unknown agent error')
+      setTurnError(bufKey, ev.message ?? 'Unknown agent error')
       settleSubAgents(bufKey, curId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
@@ -5831,14 +5846,18 @@ function Composer() {
   sendRef.current = send
 
   /** Continue a turn that died mid-stream: same conversation, same prompt,
-   *  no duplicate user message (backend resume flag). */
+   *  no duplicate user message (backend resume flag). The banner only renders
+   *  for the conversation that failed (#39), so the key captured here IS the
+   *  failed chat — the guard keeps a mid-click chat switch from resuming a
+   *  turn into the wrong buffer. */
   const resumeTurn = async () => {
     if (conversationId === null || sending) return
     const bufKey = String(conversationId)
+    if (turnErrorByConv[bufKey] === undefined) return
     setSending(true)
     setSendingKey(bufKey)
     setSendError(null)
-    setTurnError(null)
+    setTurnError(bufKey, null)
     setError(bufKey, null)
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
@@ -5865,7 +5884,7 @@ function Composer() {
         settleSubAgents(bufKey, tailId)
       } else {
         setStatus(bufKey, 'error')
-        setTurnError(String((e as Error).message ?? e))
+        setTurnError(bufKey, String((e as Error).message ?? e))
         settleSubAgents(bufKey, lastAssistantId(bufKey) ?? asstId)
       }
     } finally {
@@ -6066,7 +6085,7 @@ function Composer() {
             </button>
             <button
               className="shrink-0 text-[10px] text-red-400 hover:text-red-200"
-              onClick={() => setTurnError(null)}
+              onClick={() => setTurnError(screenKey, null)}
             >
               dismiss
             </button>
