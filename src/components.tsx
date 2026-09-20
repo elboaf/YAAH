@@ -4144,6 +4144,164 @@ function ContextChip({ info }: { info: { tokens: number; window: number | null; 
   )
 }
 
+export /**
+ * Destination card (issue #32): on a draft chat, state exactly which
+ * workspace the first send will file the conversation under, and let the
+ * user change it without leaving the screen. Mirrors the live active
+ * workspace until the user pins a destination via Change…; the pin survives
+ * active-workspace churn until first send (draft-local, per the plan).
+ * Disappears once the chat is saved — the sidebar grouping takes over.
+ */
+function DraftDestinationCard() {
+  const workspace = useAgent((s) => s.workspace)
+  const draftDestination = useAgent((s) => s.draftDestination)
+  const pinDraftDestination = useAgent((s) => s.pinDraftDestination)
+  const scope = useRemote((s) => s.scope)
+  const [open, setOpen] = useState(false)
+  const [rows, setRows] = useState<WorkspaceRow[]>([])
+  const [remoteAdd, setRemoteAdd] = useState(false)
+  const [remotePath, setRemotePath] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+
+  // The live destination: pinned value, else the active workspace ('' =
+  // Default, the no-root pseudo-workspace).
+  const dest = draftDestination ?? workspace
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    const load = scope.connected ? listWorkspaces() : listLocalWorkspaces()
+    load
+      .then((r) => {
+        if (!cancelled) setRows(r)
+      })
+      .catch(() => {
+        if (!cancelled) setRows([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, scope.connected])
+
+  const pick = (path: string) => {
+    pinDraftDestination(path)
+    setOpen(false)
+    setErr(null)
+  }
+
+  const addFolder = async () => {
+    if (scope.connected) {
+      setRemoteAdd(true)
+      return
+    }
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const picked = await invoke<string | null>('pick_workspace')
+      if (picked) {
+        await addWorkspace(picked).catch(() => null)
+        pick(picked)
+      }
+    } catch {
+      setErr('Folder picking needs the desktop app.')
+    }
+  }
+
+  const addRemote = async () => {
+    const path = remotePath.trim()
+    if (!path) return
+    try {
+      await addWorkspace(path)
+      pick(path)
+      setRemoteAdd(false)
+      setRemotePath('')
+    } catch (e) {
+      setErr(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
+    }
+  }
+
+  return (
+    <div className="mx-auto mt-3 w-full max-w-md rounded border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+      {open ? (
+        <div>
+          <p className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+            Save this chat to
+          </p>
+          <div className="max-h-48 space-y-0.5 overflow-y-auto">
+            <button
+              className="block w-full rounded px-2 py-1 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+              onClick={() => pick('')}
+            >
+              Default (no folder)
+            </button>
+            {rows.map((w) => (
+              <button
+                key={w.path ?? ''}
+                className="block w-full truncate rounded px-2 py-1 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                title={w.path ?? ''}
+                onClick={() => pick(w.path ?? '')}
+              >
+                {w.label}
+              </button>
+            ))}
+          </div>
+          {remoteAdd ? (
+            <div className="mt-1.5 rounded border border-zinc-700 bg-zinc-800 p-2">
+              <input
+                autoFocus
+                className="mb-1.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs"
+                placeholder="folder path on the host, e.g. C:/repos/proj"
+                value={remotePath}
+                onChange={(e) => setRemotePath(e.target.value)}
+                onKeyDown={(e) => e.key === 'Escape' && setRemoteAdd(false)}
+                aria-label="Folder path on the host"
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-900"
+                  onClick={() => setRemoteAdd(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50"
+                  disabled={!remotePath.trim()}
+                  onClick={() => void addRemote()}
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              className="mt-1.5 block w-full rounded border border-dashed border-zinc-700 px-2 py-1 text-left text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+              onClick={() => void addFolder()}
+            >
+              <span aria-hidden="true" className="mr-1 text-sm leading-none text-zinc-500">+</span>
+              {scope.connected ? 'Add folder on host…' : 'Add workspace…'}
+            </button>
+          )}
+          {err && <p className="mt-1 text-[10px] text-red-400">{err}</p>}
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-2">
+          <p className="min-w-0 truncate text-xs text-zinc-400">
+            This chat will be saved to{' '}
+            <span className="font-medium text-zinc-200" title={dest || 'Default (no folder)'}>
+              {dest ? wsBasename(dest) : 'Default (no folder)'}
+            </span>
+          </p>
+          <button
+            className="shrink-0 rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            onClick={() => setOpen(true)}
+          >
+            Change…
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ChatPanel() {
   const conversationId = useAgent((s) => s.conversationId)
   const messages = useAgent(
@@ -4279,6 +4437,9 @@ export function ChatPanel() {
   return (
     <main className="flex min-w-0 flex-1 flex-col">
       <div className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
+        {conversationId === null && (
+          <DraftDestinationCard />
+        )}
         {messages.length === 0 && (
           <div className="mt-12 text-center">
             <p className="text-sm text-zinc-300">
@@ -5599,7 +5760,10 @@ function Composer() {
     try {
       let cid: number
       if (conversationId === null) {
-        const created = await createConversation(fullText.slice(0, 40) || 'New chat', workspace)
+        // #32: a pinned draft destination wins over the live active
+        // workspace; null = follow the active workspace as before.
+        const dest = useAgent.getState().draftDestination
+        const created = await createConversation(fullText.slice(0, 40) || 'New chat', dest ?? workspace)
         cid = created.id
         // Atomic: re-key the draft buffer (optimistic messages included)
         // to the new id and move the panel onto it. bufKey follows so the

@@ -331,6 +331,23 @@ describe('sidebar finish signal (issue #25)', () => {
   })
 })
 
+describe('draft destination (#32)', () => {
+  it('pin survives active-workspace churn; cleared on adopt and new chat', () => {
+    useAgent.setState({ draftDestination: null, conversationId: null })
+    useAgent.getState().pinDraftDestination('C:/repos/other')
+    // Flipping the active workspace must not move a pinned destination.
+    useAgent.getState().setWorkspace('C:/repos/active')
+    expect(useAgent.getState().draftDestination).toBe('C:/repos/other')
+    // A fresh draft follows the active workspace again.
+    useAgent.getState().newConversation()
+    expect(useAgent.getState().draftDestination).toBeNull()
+    // Pinning again, then filing the draft clears it.
+    useAgent.getState().pinDraftDestination('C:/repos/other')
+    useAgent.getState().adoptDraft(42)
+    expect(useAgent.getState().draftDestination).toBeNull()
+  })
+})
+
 describe('notification chimes (#29) - pure helpers', () => {
   it('chimes on running -> idle and running -> error, not on idle -> idle', () => {
     expect(shouldChimeFinish('thinking', 'idle')).toBe(true)

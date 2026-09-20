@@ -126,6 +126,17 @@ interface AgentState {
   errorByConv: Record<string, string | null>
   setError: (key: string, e: string | null) => void
   workspace: string
+  /**
+   * Draft destination (issue #32): where the next first-send will file the
+   * draft chat. null = follow the live active workspace (open conversation,
+   * expand group, add workspace all update what the card shows); a string =
+   * the user pinned a destination via the card's Change… picker, which
+   * survives active-workspace churn until first send. Cleared on adopt
+   * (the chat is filed) and on newConversation (a fresh draft follows the
+   * active workspace again).
+   */
+  draftDestination: string | null
+  pinDraftDestination: (ws: string | null) => void
   log: LogEntry[]
   /** File currently open in the preview side panel (Q44). */
   previewPath: string | null
@@ -337,6 +348,8 @@ export const useAgent = create<AgentState>((set, get) => ({
     return id === null ? 'draft' : String(id)
   },
   statusByConv: {},
+  draftDestination: null,
+  pinDraftDestination: (ws) => set({ draftDestination: ws }),
   setStatus: (key, status) =>
     set((s) => {
       const prev = s.statusByConv[key]
@@ -414,6 +427,9 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({
       conversationId: null,
       messagesByConv: { ...s.messagesByConv, draft: [] },
+      // A fresh draft follows the active workspace again (#32): any pinned
+      // destination belonged to the previous draft.
+      draftDestination: null,
     }))
     persistConversationId(null)
   },
@@ -439,6 +455,8 @@ export const useAgent = create<AgentState>((set, get) => ({
           [String(id)]: [...(rest[String(id)] ?? []), ...draft],
           draft: [],
         },
+        // The draft is filed now (#32): the destination card's job is done.
+        draftDestination: null,
       }
     })
     persistConversationId(id)
