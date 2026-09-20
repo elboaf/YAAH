@@ -76,9 +76,14 @@ _SANDBOX_DEFAULTS = {
     "toolkit_dir": "",
     "networking": "Enable",
     "memory_mb": 8192,
-    "vgpu": "Default",
+    # "auto" (issue #27): Disable on multi-GPU hosts (the vGPU crash class),
+    # Default otherwise. Explicit "Default"/"Disable" wins.
+    "vgpu": "auto",
     "map_workspace": True,
     "startup_timeout": 180,
+    # One transparent sandbox_test reboot on detected mid-session VM death
+    # (0x80072746-class crash); state loss is fine for a disposable VM.
+    "auto_reboot_on_crash": True,
 }
 
 
@@ -139,6 +144,80 @@ def sandbox_available() -> bool:
     return sandbox_exe() is not None
 
 
+def _gpu_adapter_count() -> int:
+    """Number of display adapters on the host (best effort; 1 if unknown).
+    Used by vgpu='auto': >1 adapter is the 0x80072746 crash class."""
+    if os.name != "nt":
+        return 1
+    try:
+        out = subprocess.run(
+            ["wmic", "path", "Win32_VideoController", "get", "Name", "/NH"],
+            capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
+            timeout=15,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return 1
+    return len([ln for ln in out.splitlines() if ln.strip()]) or 1
+
+
+def effective_vgpu() -> str:
+    """Resolve the vGPU setting for wsb generation. 'auto' disables the
+    paravirtualized GPU on multi-GPU hosts (microsoft/Windows-Sandbox#64:
+    vGPU sandboxes crash ~30-120 s after boot with 0x80072746 there) and
+    keeps Default otherwise. An explicit Default/Disable passes through."""
+    raw = str(_cfg().get("vgpu") or "Default")
+    if raw.lower() == "auto":
+        return "Disable" if _gpu_adapter_count() > 1 else "Default"
+    return raw
+
+
+def _snapshot_crash_diagnostics(logs: Path) -> str | None:
+    """On suspected mid-session VM death, copy the crash evidence into the
+    session logs dir before the next boot overwrites init.log, and return a
+    short evidence summary for the error text. Best effort throughout."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    snap_dir = logs / f"crash-{stamp}"
+    lines = [f"sandbox crash diagnostics snapshot: {snap_dir}"]
+    try:
+        snap_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"crash diagnostics unavailable ({e})"
+    for name in ("init.log", "output.txt"):
+        src = logs / name
+        if src.exists():
+            try:
+                (snap_dir / name).write_text(
+                    src.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8")
+                lines.append(f"copied {name}")
+            except OSError as e:
+                lines.append(f"could not copy {name}: {e}")
+    if os.name == "nt":
+        # Last VmSwitch NIC events: the issue's evidence table showed the
+        # sandbox NIC disconnect+delete at the moment of death.
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-"
+                 "Hyper-V-VmSwitch-Admin'; StartTime="
+                 "(Get-Date).AddHours(-1)} -MaxEvents 20 -ErrorAction "
+                 "Stop | Select-Object TimeCreated, Id | Format-Table -Hide"
+                 "TableHeaders | Out-String"],
+                capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
+                timeout=30,
+            )
+            events = (out.stdout or "").strip()
+            if events:
+                (snap_dir / "vmswitch-events.txt").write_text(
+                    events, encoding="utf-8")
+                lines.append("copied last VmSwitch events")
+        except Exception:  # noqa: BLE001
+            lines.append("VmSwitch event query failed (best effort)")
+    lines.append("note: init.log in the snapshot is from the crashed boot; "
+                 "the next sandbox_test overwrites the live copy")
+    return "; ".join(lines)
+
+
 # ---------------------------------------------------------------- wsb generation
 
 def _esc(path: Path) -> str:
@@ -171,7 +250,7 @@ def generate_wsb(workspace_root: Path, toolkit: Path, logs: Path) -> str:
         "<Configuration>\n"
         f"  <Networking>{cfg.get('networking', 'Enable')}</Networking>\n"
         f"  <MemoryInMB>{int(cfg.get('memory_mb') or 8192)}</MemoryInMB>\n"
-        f"  <vGPU>{cfg.get('vgpu', 'Default')}</vGPU>\n"
+        f"  <vGPU>{_xml_escape(effective_vgpu())}</vGPU>\n"
         f"  <MappedFolders>\n{mapped}  </MappedFolders>\n"
         f"  <LogonCommand>\n    <Command>{logon}</Command>\n"
         f"  </LogonCommand>\n"
@@ -276,6 +355,14 @@ while ($true) {{
 # "dir": Path, "logs": Path, "workspace": str, "adopted": bool}
 _SESSION: dict | None = None
 _lock = threading.Lock()
+# Workspace of the last started session, kept across a crash-clear so the
+# one-shot auto reboot (issue #27) knows what to restart.
+_LAST_WORKSPACE: str | None = None
+
+
+def _set_last_workspace(workspace: str | None) -> None:
+    global _LAST_WORKSPACE
+    _LAST_WORKSPACE = workspace
 
 
 def _alive() -> bool:
@@ -391,6 +478,7 @@ def start_sync(workspace: str) -> dict:
         if _try_adopt(logs):
             _SESSION = {"proc": None, "pid": None, "dir": sdir, "logs": logs,
                         "workspace": workspace, "adopted": True}
+            _set_last_workspace(workspace)
             return _session_info("re-attached to the running sandbox")
         return {
             "error": "a Windows Sandbox is already running but is not "
@@ -402,6 +490,7 @@ def start_sync(workspace: str) -> dict:
     proc = _spawn(exe, wsb, logs)
     _SESSION = {"proc": proc, "pid": proc.pid, "dir": sdir, "logs": logs,
                 "workspace": workspace, "adopted": False}
+    _set_last_workspace(workspace)
 
     deadline = time.time() + max(15, int(cfg.get("startup_timeout") or 180))
     while time.time() < deadline:
@@ -482,12 +571,57 @@ def _session_info(note: str | None = None) -> dict:
     return info
 
 
-def run_sync(command: str, timeout: int) -> dict:
-    """Execute one PowerShell command inside the live sandbox. Blocking."""
+# Crash-classified failures (issue #27): the VM dies silently mid-session
+# (0x80072746 / WSAECONNRESET on the host's RDP/HCS channel) and the next
+# command must get a specific, actionable error — not a generic "dead".
+_CRASH_CLOSED = ("error", "the sandbox VM crashed mid-session (0x80072746-class: "
+                 "the host-sandbox connection was forcibly closed). VM state is "
+                 "lost; toolkit and workspace writes persist. A fresh sandbox "
+                 "boot was attempted — call sandbox_test again if it did not "
+                 "come up.")
+_CRASH_DEAD = ("error", "no acknowledgement from the sandbox runner and the VM "
+               "process is gone — the sandbox crashed mid-session (0x80072746-"
+               "class). A fresh sandbox boot was attempted — call sandbox_test "
+               "again if it did not come up.")
+
+
+def _proc_died_during_run() -> bool:
+    """The Popen we own exited while a command was outstanding. An adopted
+    session (no Popen) cannot be checked this way — PID liveness there is
+    too expensive per poll."""
+    return bool(_SESSION and _SESSION.get("proc") is not None
+                and _SESSION["proc"].poll() is not None)
+
+
+def _session_vm_gone(session: dict) -> bool:
+    """True when the session's VM process has vanished (crash class)."""
+    if not session:
+        return False
+    proc = session.get("proc")
+    if proc is not None:
+        return proc.poll() is not None
+    pid = session.get("pid")
+    return bool(pid) and pid not in _sandbox_pids()
+
+
+def _crash_result(logs: Path | None, message: str) -> dict:
+    """Crash-classified error with a best-effort diagnostics snapshot."""
+    result: dict = {"error": message, "crashed": True}
+    if logs is not None:
+        diag = _snapshot_crash_diagnostics(logs)
+        if diag:
+            result["crash_diagnostics"] = diag
+    return result
+
+
+def _run_command(command: str, timeout: int) -> dict:
+    """One command round-trip; no reboot logic (run_sync wraps it)."""
     global _SESSION
     if not _alive():
-        if _SESSION:
-            _SESSION = None
+        session = _SESSION
+        _SESSION = None
+        if session and _session_vm_gone(session):
+            return _crash_result(session.get("logs"), _CRASH_CLOSED[1])
         return {"error": "no sandbox session; call sandbox_test first"}
     logs: Path = _SESSION["logs"]
     with _lock:
@@ -506,13 +640,18 @@ def run_sync(command: str, timeout: int) -> dict:
     while time.time() < deadline:
         if done_file.exists():
             break
-        if _SESSION and _SESSION.get("proc") is not None \
-                and _SESSION["proc"].poll() is not None:
+        if _proc_died_during_run():
             _SESSION = None
-            return {"error": "the sandbox was closed while the command ran"}
+            return _crash_result(logs, _CRASH_CLOSED[1])
         time.sleep(POLL_INTERVAL)
     else:
+        # Timeout with no ack. Classify: a VM still in the process list is
+        # a hung command channel; a vanished VM is the crash class. Either
+        # way the session is over — but only the crash gets diagnostics.
+        crashed = _session_vm_gone(_SESSION or {})
         _SESSION = None
+        if crashed:
+            return _crash_result(logs, _CRASH_DEAD[1])
         return {"error": "no acknowledgement from the sandbox runner; the "
                          "session looks dead — call sandbox_test to start "
                          "a fresh sandbox"}
@@ -539,6 +678,39 @@ def run_sync(command: str, timeout: int) -> dict:
         "output": output,
         **({"truncated": True} if truncated else {}),
     }
+
+
+def run_sync(command: str, timeout: int) -> dict:
+    """Execute one PowerShell command inside the live sandbox. Blocking.
+
+    On a detected mid-session VM death (issue #27 crash class), snapshot
+    crash diagnostics and — once — transparently reboot via start_sync
+    (state loss is acceptable for a disposable VM) instead of leaving the
+    model with a dead session and a generic error."""
+    global _SESSION
+    result = _run_command(command, timeout)
+    if not result.get("crashed"):
+        return result
+    diag = result.pop("crash_diagnostics", None)
+    if diag:
+        result["crash_diagnostics"] = diag
+    if not _cfg().get("auto_reboot_on_crash", True):
+        return result
+    workspace = None
+    # _run_command cleared _SESSION on every crash path; recover the
+    # workspace root from the session dir naming is unreliable, so the
+    # reboot uses the workspace captured at start time — saved on the
+    # session before the crash cleared it, mirrored here.
+    workspace = _LAST_WORKSPACE
+    if not workspace:
+        return result
+    reboot = start_sync(workspace)
+    if "error" in reboot:
+        result["reboot"] = f"automatic reboot failed: {reboot['error']}"
+    else:
+        result["reboot"] = "sandbox rebooted automatically; run the " \
+                           "command again (in-VM state was lost)"
+    return result
 
 
 def status_sync() -> dict:

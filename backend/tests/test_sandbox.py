@@ -24,6 +24,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(sb, "_base_dir", lambda: tmp_path / "sb")
     monkeypatch.setattr(sb, "toolkit_dir", lambda: tmp_path / "toolkit")
     monkeypatch.setattr(sb, "_SESSION", None)
+    # A real WindowsSandbox.exe may be live on the dev host (issue #27's
+    # crash tests ran one); the adoption branch would hijack these tests,
+    # so default to "no VMs running". Tests exercising adoption override.
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
     return tmp_path
 
 
@@ -571,3 +575,125 @@ def test_system_prompt_offers_sandbox_tools_locally(isolated, monkeypatch):
     assert "sandbox_test" in prompt
     assert "# Windows Sandbox (the default place to run things)" in prompt
     assert "persistent dev toolkit" in prompt
+
+
+# ------------------------------------------------- mid-session crash (issue #27)
+
+
+def _start_session(isolated, monkeypatch, proc):
+    def fake_spawn(exe, wsb, logs_path):
+        (logs_path / "init.log").write_text("yaah-sandbox-ready",
+                                            encoding="utf-8")
+        return proc
+
+    monkeypatch.setattr(sb, "_spawn", fake_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
+    sb.start_sync("C:\\proj")
+
+
+def test_run_detects_vm_death_as_crash_class(isolated, monkeypatch):
+    """Popen exits while a command is outstanding: the error must name the
+    crash class (0x80072746), not the old generic closed-channel text."""
+    proc = _FakeProc()
+    _start_session(isolated, monkeypatch, proc)
+    proc._rc = 1  # the VM dies right after start
+    result = sb.run_sync("Get-Date", 10)
+    assert result.get("crashed") is True
+    assert "0x80072746" in result["error"]
+
+
+def test_run_dead_vm_ack_timeout_is_crash_class(isolated, monkeypatch):
+    """Adopted session (no Popen): the VM's PID vanishes from the process
+    list while a command is outstanding — crash classification plus a
+    diagnostics snapshot in the session logs dir."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {}})
+    logs = isolated / "sb" / "ws-abc" / "logs"
+    _start_session(isolated, monkeypatch, _FakeProc())
+    (logs / "init.log").write_text("crashed boot", encoding="utf-8")
+    # Swap to an adopted-style session: liveness = PID in the process list.
+    pids = [999]
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: pids)
+    monkeypatch.setattr(sb, "_SESSION", {
+        "proc": None, "pid": 999, "dir": logs.parent, "logs": logs,
+        "workspace": "C:\\proj", "adopted": True})
+    sb._set_last_workspace("C:\\proj")
+    pids.clear()  # the VM dies before the command is written
+    result = sb.run_sync("Get-Date", 1)
+    assert result.get("crashed") is True
+    assert "0x80072746" in result["error"]
+    assert "crash_diagnostics" in result
+    snaps = list(logs.glob("crash-*/init.log"))
+    assert snaps and snaps[0].read_text(encoding="utf-8") == "crashed boot"
+
+
+def test_run_hung_vm_ack_timeout_is_not_crash_class(isolated, monkeypatch):
+    """No ack but the VM still listed: the classic hung-channel error (a
+    reboot would not help, and must not fire)."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {}})
+    _start_session(isolated, monkeypatch, _FakeProc())
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [999])  # VM alive
+    result = sb.run_sync("Start-Sleep 999", 1)
+    assert "crashed" not in result
+    assert "session looks dead" in result["error"]
+
+
+def test_crash_triggers_one_shot_auto_reboot(isolated, monkeypatch):
+    """On a detected crash, run_sync transparently re-runs start_sync once
+    (state loss is fine for a disposable VM) and reports the reboot."""
+    proc = _FakeProc()
+    _start_session(isolated, monkeypatch, proc)
+    proc._rc = 1
+    booted = []
+
+    def fake_start(workspace):
+        booted.append(workspace)
+        return {"status": "running"}
+
+    monkeypatch.setattr(sb, "start_sync", fake_start)
+    result = sb.run_sync("Get-Date", 10)
+    assert booted == ["C:\\proj"]
+    assert "rebooted automatically" in result["reboot"]
+
+
+def test_auto_reboot_can_be_disabled(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"auto_reboot_on_crash": False}})
+    proc = _FakeProc()
+    _start_session(isolated, monkeypatch, proc)
+    proc._rc = 1
+
+    def boom(workspace):
+        raise AssertionError("reboot must not fire when disabled")
+
+    monkeypatch.setattr(sb, "start_sync", boom)
+    result = sb.run_sync("Get-Date", 10)
+    assert result.get("crashed") is True
+    assert "reboot" not in result
+
+
+def test_vgpu_auto_disables_on_multi_gpu_host(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"vgpu": "auto"}})
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 3)
+    assert sb.effective_vgpu() == "Disable"
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 1)
+    assert sb.effective_vgpu() == "Default"
+
+
+def test_vgpu_explicit_setting_wins_over_auto(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"vgpu": "Disable"}})
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 1)
+    assert sb.effective_vgpu() == "Disable"
+
+
+def test_wsb_uses_effective_vgpu(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"vgpu": "auto"}})
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 2)
+    wsb = sb.generate_wsb(Path(r"C:\proj"), Path(r"C:\tk"), Path(r"C:\logs"))
+    assert "<vGPU>Disable</vGPU>" in wsb
