@@ -2433,10 +2433,10 @@ function ConversationRow({
       <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onToggleRun && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
         {onToggleRun && (
           <button
-            className={`flex h-[18px] w-[18px] items-center justify-center rounded border transition-colors ${
+            className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-colors ${
               running
-                ? 'border-red-800 bg-red-950/40 text-red-300 hover:border-red-700 hover:bg-red-900/50'
-                : 'border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'
+                ? 'text-zinc-300 hover:text-zinc-100'
+                : 'text-zinc-600 hover:text-zinc-300'
             }`}
             aria-label={running ? 'Stop this run' : 'Run now'}
             title={running ? 'Stop this run' : 'Run now'}
