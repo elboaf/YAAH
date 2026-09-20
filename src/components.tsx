@@ -1829,6 +1829,28 @@ function ConversationList() {
   const agentRunningConvs = new Set(
     agents.filter((a) => a.running).map((a) => a.conversation_id),
   )
+  // Row start/stop: conversation id -> agent, so the toggle can reach the
+  // agent API without a lookup per click.
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  const agentByConv = new Map(agents.map((a) => [a.conversation_id, a]))
+  const toggleAgentRun = (c: { id: number }) => {
+    const a = agentByConv.get(c.id)
+    if (!a) return
+    if (a.running) {
+      // Same cancel path as an in-chat Stop: the turn ends after its current
+      // step and the run settles normally.
+      cancelAgent(c.id).catch(() => {})
+    } else {
+      runAgentNow(a.id)
+        .then(() => refreshAgents())
+        .catch((e) =>
+          setNotice({
+            title: `Could not run "${a.name}"`,
+            message: String((e as { message?: string }).message ?? e),
+          }),
+        )
+    }
+  }
   // Issue #25 sidebar signals: needs-you (any user-blocking gate) and the
   // finished-but-unacknowledged map (set by setStatus, cleared on open).
   const pendingQuestions = useAgent((s) => s.pendingQuestions)
@@ -2009,6 +2031,7 @@ function ConversationList() {
       }
       onSys={() => setSysTarget({ id: c.id, title: c.title })}
       onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
+      onToggleRun={isAgent ? () => toggleAgentRun(c) : undefined}
       onAgentSettings={
         isAgent
           ? () => {
@@ -2294,6 +2317,7 @@ function ConversationRow({
   finished,
   isAgent,
   onAgentSettings,
+  onToggleRun,
   menuOpen,
   setMenuOpen,
   onOpen,
@@ -2316,6 +2340,9 @@ function ConversationRow({
   isAgent?: boolean
   /** Open the agent settings dialogue (agent chats only). */
   onAgentSettings?: () => void
+  /** Start/stop the agent's run (agent chats only). Present = the row shows
+   *  the toggle; the icon follows the running state (■ stop / ▶ run now). */
+  onToggleRun?: () => void
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   onOpen: () => void
@@ -2368,7 +2395,24 @@ function ConversationRow({
           {relTime(conv.updated_at)}
         </span>
       </button>
-      <div className={`absolute right-1 ${menuOpen ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onToggleRun && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+        {onToggleRun && (
+          <button
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
+              running
+                ? 'bg-red-900/80 text-red-200 hover:bg-red-800'
+                : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+            }`}
+            aria-label={running ? 'Stop this run' : 'Run now'}
+            title={running ? 'Stop this run' : 'Run now'}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleRun()
+            }}
+          >
+            {running ? '■' : '▶'}
+          </button>
+        )}
         <button
           className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-700"
           aria-label="Conversation actions"
