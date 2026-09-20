@@ -494,6 +494,24 @@ export const listAgents = (workspace?: string) =>
     '/api/agents' + (workspace !== undefined ? `?workspace=${encodeURIComponent(workspace)}` : ''),
   )
 
+/** One live UI-stream event of a scheduled agent run (see getAgentTape). */
+export interface AgentTapeEvent {
+  type: string
+  text?: string
+  name?: string
+  command?: string
+  chunk?: string
+  result?: string
+  message?: string
+}
+
+/** Poll the in-backend event buffer of the agent run in this conversation:
+ * pass back `offset` from the previous call to get only new events. */
+export const getAgentTape = (conversationId: number, after: number) =>
+  api<{ running: boolean; offset: number; events: AgentTapeEvent[] }>(
+    `/api/agents/tape?conversation_id=${conversationId}&after=${after}`,
+  )
+
 export const addAgent = (body: AgentBody) =>
   api<ScheduledAgent>('/api/agents', {
     method: 'POST',

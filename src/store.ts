@@ -187,6 +187,7 @@ interface AgentState {
    */
   tapeByConv: Record<string, string>
   appendTape: (key: string, chunk: string) => void
+  resetTape: (key: string) => void
 
   // ---- scheduled agents (issue #41) ----
   /** All agents, refreshed from /api/agents by the watcher + CRUD callers. */
@@ -440,6 +441,13 @@ export const useAgent = create<AgentState>((set, get) => ({
           [key]: merged.length > TAPE_CAP ? merged.slice(-TAPE_CAP) : merged,
         },
       }
+    }),
+  resetTape: (key) =>
+    set((s) => {
+      if (!(key in s.tapeByConv)) return s
+      const next = { ...s.tapeByConv }
+      delete next[key]
+      return { tapeByConv: next }
     }),
 
   // ---- scheduled agents (issue #41) ----

@@ -39,6 +39,7 @@ import {
   updateAgent,
   deleteAgent,
   runAgentNow,
+  getAgentTape,
   setAgentRetry,
   addAgentInstruction,
   updateAgentInstruction,
@@ -805,6 +806,40 @@ function LiveTelemetry() {
  *  become wide separators so the tape never wraps or stacks. */
 function oneLine(s: string): string {
   return s.replace(/[\r\n]+/g, '    ').replace(/\t/g, '  ')
+}
+
+/** The tape segment for one UI-stream event — shared by the interactive
+ *  stream handler and the agent-chat live poll (which feeds the same
+ *  events from the backend's tape buffer). `elapsed` is the client-measured
+ *  tool duration when known; the polled path omits it. Returns null for
+ *  events that carry no tape text. */
+function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | null {
+  if (ev.type === 'thinking') {
+    return ev.text ? oneLine(ev.text) + ' ' : null
+  }
+  if (ev.type === 'tool_start') {
+    const a = (ev.args ?? {}) as Record<string, unknown>
+    const head =
+      typeof a.command === 'string'
+        ? `${ev.name} ${a.command}`
+        : `${ev.name} ${toolTarget({ id: '', name: ev.name ?? '', args: a } as ToolCall) || JSON.stringify(a).slice(0, 100)}`
+    return oneLine(`\n▸ ${head}`) + '    '
+  }
+  if (ev.type === 'tool_progress') {
+    return ev.chunk ? oneLine(ev.chunk) : null
+  }
+  if (ev.type === 'tool_result') {
+    const res = ev.result as { output?: unknown } | null
+    let seg = ''
+    if (typeof res?.output === 'string') seg += oneLine(res.output).slice(0, 600)
+    else if (ev.result !== null && ev.result !== undefined) {
+      const r = JSON.stringify(ev.result)
+      if (r && r !== '{}') seg += '= ' + oneLine(r).slice(0, 200)
+    }
+    if (elapsed) seg += `  ✓ ${elapsed}`
+    return seg ? oneLine(seg) + '    ' : ''
+  }
+  return null
 }
 
 /** Live, ephemeral stream of calls while the agent works. Newest chip appears
@@ -3597,9 +3632,11 @@ export function AgentRunWatcher() {
  * Live follow for agent chats: a scheduled run streams inside the backend —
  * nothing pushes its events to the frontend — so the open chat only updates
  * by reloading history. While the pinned agent of the on-screen chat is
- * mid-run, re-pull the transcript at a fast clip; one final pull when the
- * run ends, so the closing summary isn't cut off by the interval boundary.
- * loadHistory skips the reload while a user-started run owns the buffer.
+ * mid-run, re-pull the transcript at a fast clip and drain the backend's
+ * tape buffer into the live telemetry tape (getAgentTape resumes by offset,
+ * so only new events flow). One final pull of each when the run ends, so
+ * the closing summary isn't cut off by the interval boundary. loadHistory
+ * skips the reload while a user-started run owns the buffer.
  */
 export function AgentChatLiveFollow() {
   const conversationId = useAgent((s) => s.conversationId)
@@ -3610,6 +3647,21 @@ export function AgentChatLiveFollow() {
   useEffect(() => {
     if (!running || conversationId === null) return
     let alive = true
+    // Fresh fire: drop the previous run's tape before the new events land.
+    useAgent.getState().resetTape(String(conversationId))
+    let offset = 0
+    const drainTape = async (final = false) => {
+      const res = await getAgentTape(conversationId, offset)
+      // `final` still lands after cleanup flipped `alive` — the closing
+      // tool_result events must reach the tape too.
+      if (!alive && !final) return
+      offset = res.offset
+      const appendTape = useAgent.getState().appendTape
+      for (const ev of res.events) {
+        const chunk = tapeChunkForEvent(ev as AgentEvent)
+        if (chunk) appendTape(String(conversationId), chunk)
+      }
+    }
     const pull = () =>
       getMessages(conversationId)
         .then((rows) => {
@@ -3617,13 +3669,17 @@ export function AgentChatLiveFollow() {
         })
         .catch(() => {})
     void pull()
+    void drainTape().catch(() => {})
     const t = window.setInterval(pull, 2500)
+    const tapeTimer = window.setInterval(() => void drainTape().catch(() => {}), 500)
     return () => {
       alive = false
       window.clearInterval(t)
+      window.clearInterval(tapeTimer)
       getMessages(conversationId)
         .then((rows) => useAgent.getState().loadHistory(conversationId, rows))
         .catch(() => {})
+      void drainTape(true).catch(() => {})
     }
   }, [running, conversationId])
   return null
@@ -5249,9 +5305,17 @@ export function ChatPanel() {
   })
   const bottomRef = useRef<HTMLDivElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
+  // A scheduled agent run streams inside the backend — no live buffer, the
+  // messages arrive by history reload — but its ticker/tape should still
+  // show on the newest message while the run is going.
+  const agents = useAgent((s) => s.agents)
+  const agentRunLive =
+    conversationId !== null &&
+    agents.some((a) => a.running && a.conversation_id === conversationId)
   // Only the in-flight assistant message shows the ephemeral ticker; every
   // finished turn collapses to the one-line trace.
-  const liveId = streaming && messages.length > 0 ? messages[messages.length - 1].id : null
+  const liveId =
+    (streaming || agentRunLive) && messages.length > 0 ? messages[messages.length - 1].id : null
 
   // ---- session metadata: context size + git branch (status strip) ----
   const setContext = useAgent((s) => s.setContext)
@@ -6459,7 +6523,8 @@ function Composer() {
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).
-      if (ev.text) appendTape(bufKey, oneLine(ev.text) + ' ')
+      const chunk = tapeChunkForEvent(ev)
+      if (chunk) appendTape(bufKey, chunk)
     } else if (ev.type === 'tool_start') {
       setStatus(bufKey, 'running-tool')
       textSinceTool = false
@@ -6467,14 +6532,7 @@ function Composer() {
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       // Telemetry tape: every tool event of the turn flows into one
       // per-conversation line that survives gaps and turn boundaries.
-      {
-        const a = (ev.args ?? {}) as Record<string, unknown>
-        const head =
-          typeof a.command === 'string'
-            ? `${ev.name} ${a.command}`
-            : `${ev.name} ${toolTarget({ id: '', name: ev.name ?? '', args: a } as ToolCall) || JSON.stringify(a).slice(0, 100)}`
-        appendTape(bufKey, oneLine(`\n▸ ${head}`) + '    ')
-      }
+      appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
       if (ev.name === 'ask_user') {
         const a = (ev.args ?? {}) as {
           question?: string
@@ -6498,7 +6556,7 @@ function Composer() {
     } else if (ev.type === 'tool_progress') {
       if (ev.chunk) {
         appendToolOutput(bufKey, curId, ev.call_id ?? '', ev.chunk)
-        appendTape(bufKey, oneLine(ev.chunk))
+        appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
       }
     } else if (ev.type === 'tool_result') {
       finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result)
@@ -6508,15 +6566,11 @@ function Composer() {
         const callId = ev.call_id ?? ''
         const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
         const tc = msg?.toolCalls?.slice().reverse().find((t) => t.id === callId)
-        const res = ev.result as { output?: unknown } | null
-        let seg = ''
-        if (typeof res?.output === 'string') seg += oneLine(res.output).slice(0, 600)
-        else if (ev.result !== null && ev.result !== undefined) {
-          const r = JSON.stringify(ev.result)
-          if (r && r !== '{}') seg += '= ' + oneLine(r).slice(0, 200)
-        }
-        if (tc?.startedAt && tc?.finishedAt) seg += `  ✓ ${formatElapsed(tc.finishedAt - tc.startedAt)}`
-        appendTape(bufKey, (seg ? oneLine(seg) + '    ' : ''))
+        const elapsed =
+          tc?.startedAt && tc?.finishedAt
+            ? formatElapsed(tc.finishedAt - tc.startedAt)
+            : undefined
+        appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
       }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))

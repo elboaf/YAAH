@@ -896,6 +896,14 @@ class AgentBody(BaseModel):
     enabled: bool = True
 
 
+@app.get("/api/agents/tape")
+async def api_agents_tape(conversation_id: int, after: int = 0):
+    """Live UI-stream events of the agent run currently executing in this
+    conversation, for the open chat's telemetry tape. `after` resumes a
+    poll without re-fetching events the client already has."""
+    return scheduler_mod.tape_snapshot(conversation_id, after)
+
+
 @app.get("/api/agents")
 async def api_agents(workspace: str | None = None):
     """All agents (or one workspace's), each with its standing instructions

@@ -70,6 +70,46 @@ _retry_state: dict[str, dict] = {}
 # leaving last_status="running" forever. This set is what keeps them alive.
 _fire_tasks: set[asyncio.Task] = set()
 
+# UI stream events of the run currently executing in each conversation,
+# so the open agent chat can show the live telemetry tape (a scheduled
+# run never flows through the frontend's stream handler). Process-local
+# on purpose: runs live in this process, like _retry_state. Each entry
+# is {"seq": int, "running": bool, "events": [trimmed event dicts]} —
+# seq is the total appended so far (the frontend polls with `after`).
+# The buffer resets at the start of each fire.
+TAPE_EVENT_CAP = 400
+_tape_buffers: dict[int, dict] = {}
+
+_TAPE_FIELDS = ("type", "text", "name", "command", "chunk", "result", "message")
+_TAPE_VALUE_CAP = 2000
+
+
+def tape_snapshot(conv_id: int, after: int = 0) -> dict:
+    """Events appended to conv_id's buffer after index `after`, plus the
+    run state. `offset` lets the caller resume without re-fetching."""
+    buf = _tape_buffers.get(conv_id)
+    if buf is None:
+        return {"running": False, "offset": after, "events": []}
+    return {
+        "running": buf["running"],
+        "offset": buf["seq"],
+        "events": buf["events"][max(0, after - (buf["seq"] - len(buf["events"]))):],
+    }
+
+
+def _tape_append(conv_id: int, event: dict):
+    buf = _tape_buffers.setdefault(
+        conv_id, {"seq": 0, "running": False, "events": []}
+    )
+    trimmed = {k: v for k in _TAPE_FIELDS if (v := event.get(k)) is not None}
+    for k, v in trimmed.items():
+        if isinstance(v, str) and len(v) > _TAPE_VALUE_CAP:
+            trimmed[k] = v[:_TAPE_VALUE_CAP]
+    buf["events"].append(trimmed)
+    buf["seq"] += 1
+    if len(buf["events"]) > TAPE_EVENT_CAP:
+        del buf["events"][: len(buf["events"]) - TAPE_EVENT_CAP]
+
 
 # ---- schedule math ----------------------------------------------------------
 
@@ -272,6 +312,7 @@ async def _run_and_settle(
     from backend.agent.loop import run_agent
 
     ok, error_text = True, ""
+    _tape_buffers[conv_id] = {"seq": 0, "running": True, "events": []}
     try:
         async for line in run_agent(
             conv_id,
@@ -282,19 +323,26 @@ async def _run_and_settle(
             model_override=model,
             effort_override=effort,
         ):
-            # Drain the UI stream; the loop persists the transcript itself.
-            # An in-band error event (e.g. provider misconfigured) counts as
-            # a failed fire just like a raised exception.
+            # The loop persists the transcript itself; here we only relay
+            # the events into the per-conversation tape buffer so the open
+            # chat can poll them for its live telemetry. An in-band error
+            # event (e.g. provider misconfigured) counts as a failed fire
+            # just like a raised exception.
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(event, dict):
+                _tape_append(conv_id, event)
             if event.get("type") == "error":
                 ok, error_text = False, str(event.get("message", "run failed"))
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 — a failed fire must not kill the scheduler
         ok, error_text = False, str(exc)
+    finally:
+        if conv_id in _tape_buffers:
+            _tape_buffers[conv_id]["running"] = False
 
     now_iso = datetime.now().isoformat(timespec="seconds")
     await _patch(aid, last_finished_at=now_iso, last_status="ok" if ok else "error")
