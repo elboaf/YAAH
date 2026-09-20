@@ -3030,10 +3030,11 @@ function AgentForm({
   const [enabled, setEnabled] = useState(agent?.enabled ?? true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  // Model suggestions: the active provider's models (a per-agent override is
-  // a bare model id sent to the active provider — model_client only swaps
-  // cfg["model"], so ids from other providers would be meaningless here).
-  const [modelChoices, setModelChoices] = useState<string[]>([])
+  // Model suggestions across every configured provider. A per-agent override
+  // may be a bare id (= active provider, unchanged behavior) or
+  // "provider::model" to route the run at a specific provider — the backend
+  // resolves both (model_client.chat swaps base/key/model as needed).
+  const [modelChoices, setModelChoices] = useState<{ value: string; label: string }[]>([])
   const refreshAgents = useAgent((s) => s.refreshAgents)
 
   useEffect(() => {
@@ -3041,8 +3042,17 @@ function AgentForm({
     listAvailableModels()
       .then((r) => {
         if (!alive) return
-        const active = r.providers[r.active_provider]?.models ?? []
-        setModelChoices(active.length ? active : Object.values(r.providers).flatMap((p) => p.models))
+        const choices: { value: string; label: string }[] = []
+        for (const [name, pm] of Object.entries(r.providers)) {
+          for (const m of pm.models) {
+            choices.push(
+              name === r.active_provider
+                ? { value: m, label: m }
+                : { value: `${name}::${m}`, label: `${m} (${name})` },
+            )
+          }
+        }
+        setModelChoices(choices)
       })
       .catch(() => {})
     return () => {
@@ -3175,8 +3185,10 @@ function AgentForm({
             list="agent-model-choices"
           />
           <datalist id="agent-model-choices">
-            {modelChoices.map((m) => (
-              <option key={m} value={m} />
+            {modelChoices.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
             ))}
           </datalist>
         </label>

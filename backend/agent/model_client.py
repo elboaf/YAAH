@@ -61,10 +61,24 @@ async def chat(
     streaming deltas if stream=True.
 
     model/effort: per-call overrides for scheduled agents (issue #41) —
-    empty strings mean "use the active global model / effort setting"."""
+    empty strings mean "use the active global model / effort setting".
+    A per-agent model may be "provider::model" to route the run at a
+    specific configured provider (per-agent model picker); a bare id
+    keeps the active provider and only swaps the model name."""
     cfg = dict(load_config())
     if model:
-        cfg["model"] = model
+        provider_name, sep, model_id = model.partition("::")
+        if sep:
+            prov = (cfg.get("providers") or {}).get(provider_name)
+            if not prov:
+                raise ModelError(
+                    f"Unknown provider '{provider_name}' in model override "
+                    f"'{model}'. Check Settings → Providers.")
+            cfg["api_base"] = prov.get("api_base") or ""
+            cfg["api_key"] = prov.get("api_key") or ""
+            cfg["model"] = model_id
+        else:
+            cfg["model"] = model
     if effort:
         cfg["reasoning_effort"] = effort
     if not cfg["providers"]:
@@ -96,18 +110,24 @@ async def chat(
                      len((data.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []))
             return data
 
-    # The stream path re-reads config for the base URL only; the payload
-    # already carries the per-call model/effort overrides.
-    return _stream_response(payload, headers)
+    # The payload already carries the per-call model/effort overrides; the
+    # resolved api_base rides along explicitly so a provider::model override
+    # targets the right host (the old re-read would have hit the active one).
+    return _stream_response(payload, headers, cfg["api_base"])
 
 
-async def _stream_response(payload: dict, headers: dict) -> AsyncIterator[dict]:
+async def _stream_response(
+    payload: dict, headers: dict, api_base: str | None = None
+) -> AsyncIterator[dict]:
     """Yield parsed SSE chunks: content deltas, tool_call deltas, and a final
-    assembled message."""
+    assembled message. api_base None = resolve from the live config (legacy
+    direct callers)."""
+    if api_base is None:
+        api_base = load_config()["api_base"]
     async with httpx.AsyncClient(timeout=300) as client:
         async with client.stream(
             "POST",
-            f"{load_config()['api_base'].rstrip('/')}/chat/completions",
+            f"{api_base.rstrip('/')}/chat/completions",
             json=payload,
             headers=headers,
         ) as r:

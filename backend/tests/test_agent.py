@@ -842,3 +842,64 @@ async def test_run_agent_injects_agents_notes(fake_model, tmp_path):
     finally:
         loop.model_client.chat = orig
     assert "know-fails: 3" in captured["system"]
+
+
+async def test_chat_provider_model_override(monkeypatch):
+    """A 'provider::model' per-agent override routes the call at that
+    provider (base + key), not the active one; a bare id keeps the active
+    provider and only swaps the model name."""
+    import backend.agent.model_client as mc
+
+    monkeypatch.setattr(mc, "load_config", lambda: {
+        "providers": {
+            "openrouter": {"api_base": "https://openrouter.ai/api/v1",
+                           "api_key": "k-or", "model": "z-ai/glm-5.3-flash"},
+            "llamacpp": {"api_base": "http://192.168.1.170:8080/v1",
+                         "api_key": "", "model": "qwen.gguf"},
+        },
+        "active_provider": "openrouter",
+        "api_base": "https://openrouter.ai/api/v1",
+        "api_key": "k-or",
+        "model": "z-ai/glm-5.3-flash",
+        "reasoning_effort": "",
+        "max_tokens": 0,
+        "temperature": 0.7,
+    })
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["model"] = json["model"]
+            captured["auth"] = headers.get("Authorization")
+            raise RuntimeError("stop here")
+
+    monkeypatch.setattr(mc.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        await mc.chat([{"role": "user", "content": "hi"}],
+                      model="llamacpp::qwen.gguf")
+    assert captured["url"].startswith("http://192.168.1.170:8080/v1")
+    assert captured["model"] == "qwen.gguf"
+    assert "Authorization" not in (captured["auth"] or "")
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        await mc.chat([{"role": "user", "content": "hi"}],
+                      model="bare-id")
+    assert captured["url"].startswith("https://openrouter.ai/api/v1")
+    assert captured["model"] == "bare-id"
+    assert captured["auth"] == "Bearer k-or"
+
+    with pytest.raises(mc.ModelError, match="Unknown provider"):
+        await mc.chat([{"role": "user", "content": "hi"}],
+                      model="nope::m")
