@@ -125,6 +125,15 @@ interface AgentState {
   statusByConv: Record<string, AgentStatus>
   setStatus: (key: string, s: AgentStatus) => void
   /**
+   * Live model-call state per conversation (issue #43): set when the backend
+   * emits `model_call` (a chat call dispatched, no response yet), cleared on
+   * the first non-thinking stream activity. The status strip renders
+   * "waiting for <provider> · <elapsed>s" from it so a silent turn is
+   * answerable — network vs provider vs quietly working — at a glance.
+   */
+  modelCallByConv: Record<string, { provider: string; model: string; startedAt: number } | null>
+  setModelCall: (key: string, mc: { provider: string; model: string; startedAt: number } | null) => void
+  /**
    * Sidebar finish signal, keyed by convKey (issue #25): 'ok' | 'error'. Set
    * by setStatus when a turn ends (running -> idle/error) while its chat is
    * in the background; ConversationRow renders a green bar / red pill until
@@ -374,6 +383,9 @@ export const useAgent = create<AgentState>((set, get) => ({
     return id === null ? 'draft' : String(id)
   },
   statusByConv: {},
+  modelCallByConv: {},
+  setModelCall: (key, mc) =>
+    set((s) => ({ modelCallByConv: { ...s.modelCallByConv, [key]: mc } })),
   draftDestination: null,
   pinDraftDestination: (ws) => set({ draftDestination: ws }),
   setStatus: (key, status) =>
