@@ -1,6 +1,6 @@
 # Plan: Release v1.0.2
 
-Status: scoped (2026-09-20). Scope picked by the user from the full open-issue triage; the one open design question (#6 control placement) was answered by the user. Triage covered all 20 open issues at the time of writing.
+Status: **shipped 2026-09-20** (tag `v1.0.2`, master `372d742`). All six items landed and their issues closed; #25 shipped early in v1.0.1. Scope picked by the user from the full open-issue triage; the one open design question (#6 control placement) was answered by the user.
 
 ## Scope
 
