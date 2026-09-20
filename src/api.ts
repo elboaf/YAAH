@@ -162,6 +162,8 @@ export interface AgentConfig {
   temperature?: number
   max_tokens?: number
   max_steps?: number
+  /** Reasoning effort (#6): "" = don't send the param; low | medium | high. */
+  reasoning_effort?: string
   /** Workspace used last, restored into the sidebar on startup. */
   last_workspace?: string
   /** Access mode gating tool execution: ask | plan | full. */
@@ -208,6 +210,7 @@ export const updateConfig = (
     temperature: number
     max_tokens: number
     max_steps: number
+    reasoning_effort: string
     ui_scale: number
     access_mode: 'ask' | 'plan' | 'full'
     context_window_overrides: Record<string, number | null>

@@ -2805,6 +2805,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [temperature, setTemperature] = useState<number | ''>('')
   const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
+  // Reasoning effort (#6): '' = don't send the param (Default).
+  const [reasoningEffort, setReasoningEffort] = useState('')
   // Per-model context-window overrides (model id -> tokens); blank = auto.
   const [ctxOverrides, setCtxOverrides] = useState<Record<string, number>>({})
   const [ctxModelDraft, setCtxModelDraft] = useState('')
@@ -2888,6 +2890,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setTemperature(c.temperature ?? '')
           setMaxTokens(c.max_tokens ? c.max_tokens : '')
           setMaxSteps(c.max_steps ?? '')
+          setReasoningEffort(c.reasoning_effort ?? '')
           setCtxOverrides(c.context_window_overrides ?? {})
           setUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
@@ -3034,6 +3037,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
+        reasoning_effort: reasoningEffort,
         context_window_overrides: ctxOverrides,
         ui_scale: uiScale,
         voice: {
@@ -3224,7 +3228,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             </SettingsCard>
 
             <SettingsCard title="Generation" className="col-span-2">
-              <div className="grid grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label className="mb-1 block text-[10px] text-zinc-500">Temperature</label>
                   <input
@@ -3258,6 +3262,23 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                     onChange={(e) => setMaxSteps(e.target.value === '' ? '' : Number(e.target.value))}
                   />
                   <p className="mt-1 text-[10px] text-zinc-600">0 = unlimited (Stop still works)</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] text-zinc-500">Reasoning effort</label>
+                  <select
+                    className={`${settingsInputCls} w-full`}
+                    value={reasoningEffort}
+                    onChange={(e) => setReasoningEffort(e.target.value)}
+                    aria-label="Reasoning effort"
+                  >
+                    <option value="">Default</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                  <p className="mt-1 text-[10px] text-zinc-600">
+                    Default = param not sent. Only affects reasoning-capable models.
+                  </p>
                 </div>
               </div>
 

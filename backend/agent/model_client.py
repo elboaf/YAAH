@@ -21,6 +21,35 @@ class ModelError(Exception):
     pass
 
 
+def _build_payload(cfg: dict, tools: list | None, stream: bool) -> dict:
+    """The chat-completions request body. Pure so the param-gating rules are
+    unit-testable without HTTP."""
+    payload = {
+        "model": cfg["model"],
+        "messages": [],
+        "temperature": cfg["temperature"],
+        "stream": stream,
+    }
+    # 0/blank = no limit: let the provider use the model's full output cap
+    if cfg["max_tokens"] and cfg["max_tokens"] > 0:
+        payload["max_tokens"] = cfg["max_tokens"]
+    # Reasoning effort (#6): "" = don't send the param at all, so providers
+    # that hard-reject unknown fields are unaffected until the user opts in
+    # (Settings: Default / low / medium / high). Only reasoning-capable
+    # models react to it; others ignore or 400 — documented in Settings.
+    effort = (cfg.get("reasoning_effort") or "").strip().lower()
+    if effort in ("low", "medium", "high"):
+        payload["reasoning_effort"] = effort
+    if stream:
+        # Ask for exact usage (usage.prompt_tokens = what this call actually
+        # fed the model) even in streaming mode. OpenAI-compatible servers
+        # that don't know the option just ignore it.
+        payload["stream_options"] = {"include_usage": True}
+    if tools:
+        payload["tools"] = tools
+    return payload
+
+
 async def chat(
     messages: list,
     tools: list | None = None,
@@ -36,22 +65,8 @@ async def chat(
     if not cfg["api_key"] and "openai.com" in cfg["api_base"]:
         raise ModelError("No API key configured. Set AGENT_API_KEY or edit data/config.json")
 
-    payload = {
-        "model": cfg["model"],
-        "messages": messages,
-        "temperature": cfg["temperature"],
-        "stream": stream,
-    }
-    # 0/blank = no limit: let the provider use the model's full output cap
-    if cfg["max_tokens"] and cfg["max_tokens"] > 0:
-        payload["max_tokens"] = cfg["max_tokens"]
-    if stream:
-        # Ask for exact usage (usage.prompt_tokens = what this call actually
-        # fed the model) even in streaming mode. OpenAI-compatible servers
-        # that don't know the option just ignore it.
-        payload["stream_options"] = {"include_usage": True}
-    if tools:
-        payload["tools"] = tools
+    payload = _build_payload(cfg, tools, stream)
+    payload["messages"] = messages
     log.info("model call: base=%s model=%s tools_sent=%d stream=%s",
              cfg["api_base"], cfg["model"], len(tools or []), stream)
 

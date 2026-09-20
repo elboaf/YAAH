@@ -594,6 +594,8 @@ class ConfigUpdate(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     max_steps: int | None = None
+    # Reasoning effort (#6): "" = don't send the param; low/medium/high send it.
+    reasoning_effort: str | None = None
     voice: dict | None = None
     remote: dict | None = None
     ui_scale: float | None = None
@@ -1073,6 +1075,8 @@ async def api_get_config():
         "temperature": cfg.get("temperature"),
         "max_tokens": cfg.get("max_tokens"),
         "max_steps": cfg.get("max_steps"),
+        # Reasoning effort (#6): "" = don't send the param to the provider.
+        "reasoning_effort": cfg.get("reasoning_effort") or "",
         "last_workspace": cfg.get("last_workspace") or "",
         # Interface scale (CSS zoom): 1.0 = the terminal-grade default ramp.
         "ui_scale": cfg.get("ui_scale", 1.0),
