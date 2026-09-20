@@ -56,7 +56,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { lastAssistantId, useAgent, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useUpdateCheck } from './update'
 import { useTts } from './speech'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
@@ -1314,7 +1314,8 @@ function patchChildren(tree: FileEntry[], path: string, entries: FileEntry[]): F
 }
 
 export function FilesPanel() {
-  const { workspace, previewPath, setPreviewPath, status } = useAgent()
+  const { workspace, previewPath, setPreviewPath } = useAgent()
+  const status = useStatus()
   const scope = useRemote((s) => s.scope)
   const [tree, setTree] = useState<FileEntry[]>([])
   const [menu, setMenu] = useState<{ entry: FileEntry; x: number; y: number } | null>(null)
@@ -1796,6 +1797,9 @@ function buildLocalGroups(
 
 function ConversationList() {
   const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation, workspace } = useAgent()
+  // Per-conversation run status: rows with an in-flight turn show a spinner
+  // (issue #10). Reference-stable selector — only re-renders on status writes.
+  const statusByConv = useAgent((s) => s.statusByConv)
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
@@ -2017,6 +2021,10 @@ function ConversationList() {
                       key={c.id}
                       conv={c}
                       active={c.id === conversationId}
+                      running={
+                        statusByConv[String(c.id)] === 'thinking' ||
+                        statusByConv[String(c.id)] === 'running-tool'
+                      }
                       menuOpen={menuOpenId === c.id}
                       setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
                       onOpen={() => openConversation(c)}
@@ -2119,6 +2127,18 @@ function ConversationList() {
           onConfirm={() => {
             deleteConversation(deleteTarget.id)
               .then(() => {
+                // Drop the conversation's per-run state, if any survived.
+                useAgent.setState((s) => {
+                  const key = String(deleteTarget.id)
+                  const statusByConv = { ...s.statusByConv }
+                  delete statusByConv[key]
+                  const abortByConv = { ...s.abortByConv }
+                  abortByConv[key]?.abort()
+                  delete abortByConv[key]
+                  const errorByConv = { ...s.errorByConv }
+                  delete errorByConv[key]
+                  return { statusByConv, abortByConv, errorByConv }
+                })
                 if (deleteTarget.id === conversationId) {
                   newConversation()
                 } else {
@@ -2179,6 +2199,7 @@ function ConversationList() {
 function ConversationRow({
   conv,
   active,
+  running,
   menuOpen,
   setMenuOpen,
   onOpen,
@@ -2188,6 +2209,8 @@ function ConversationRow({
 }: {
   conv: { id: number; title: string; updated_at: string }
   active: boolean
+  /** A turn is streaming in this conversation right now (issue #10). */
+  running: boolean
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   onOpen: () => void
@@ -2204,6 +2227,15 @@ function ConversationRow({
         onClick={onOpen}
         title={conv.title}
       >
+        {running && (
+          <span
+            aria-hidden="true"
+            className="run-pulse mr-1.5 shrink-0 text-amber-400"
+            title="Working…"
+          >
+            ●
+          </span>
+        )}
         <span className="min-w-0 flex-1 truncate">{conv.title}</span>
         <span
           className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
@@ -4039,25 +4071,23 @@ export function ChatPanel() {
   const messages = useAgent(
     (s) => s.messagesByConv[s.conversationId === null ? 'draft' : String(s.conversationId)] ?? [],
   )
-  const { status, error } = useAgent()
+  const status = useStatus()
+  const error = useError()
   const pendingQuestion = useAgent((s) => {
-    if (s.pendingQuestion === null) return null
     const key = s.conversationId === null ? 'draft' : String(s.conversationId)
     // A question belongs to the turn that asked it: only render when its
     // conversation is on screen (a hidden turn's ask must not leak here).
-    return s.pendingQuestion.convKey === key ? s.pendingQuestion : null
+    return s.pendingQuestions[key] ?? null
   })
   const pendingApproval = useAgent((s) => {
-    if (s.pendingApproval === null) return null
     const key = s.conversationId === null ? 'draft' : String(s.conversationId)
     // Same screen-scoping as questions: a hidden turn's approval request
     // must not render over an unrelated conversation.
-    return s.pendingApproval.convKey === key ? s.pendingApproval : null
+    return s.pendingApprovals[key] ?? null
   })
   const pendingPlanApproval = useAgent((s) => {
-    if (s.pendingPlanApproval === null) return null
     const key = s.conversationId === null ? 'draft' : String(s.conversationId)
-    return s.pendingPlanApproval.convKey === key ? s.pendingPlanApproval : null
+    return s.pendingPlanApprovals[key] ?? null
   })
   const bottomRef = useRef<HTMLDivElement>(null)
   const streaming = status === 'thinking' || status === 'running-tool'
@@ -4636,7 +4666,6 @@ function HostSwitcher({ disabled }: { disabled: boolean }) {
 function Composer() {
   const {
     conversationId,
-    status,
     workspace,
     appendUserMessage,
     appendAssistantPlaceholder,
@@ -4664,16 +4693,19 @@ function Composer() {
     setAbortController,
     removeMessage,
   } = useAgent()
-  const abortController = useAgent((s) => s.abortController)
+  const status = useStatus()
   // Live ask_user card, for PTT question routing (mirror kept in a ref below
   // so the global-hotkey handlers never go stale).
   const pendingQuestion = useAgent((s) => {
-    if (s.pendingQuestion === null) return null
     const key = s.conversationId === null ? 'draft' : String(s.conversationId)
-    return s.pendingQuestion.convKey === key ? s.pendingQuestion : null
+    return s.pendingQuestions[key] ?? null
   })
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  // Buffer key of the conversation with a send closure in flight (issue #10:
+  // several chats can run at once — gates and the Stop button are scoped to
+  // the conversation they belong to, not to the whole app).
+  const [sendingKey, setSendingKey] = useState<string | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [images, setImages] = useState<ImageAttachment[]>([])
   const [dragOver, setDragOver] = useState(false)
@@ -4815,7 +4847,7 @@ function Composer() {
   // still shield its turn from the interrupt below.
   const pendingQuestionRef = useRef<PendingQuestion | null>(null)
   const anyQuestionRef = useRef<PendingQuestion | null>(null)
-  const anyQuestion = useAgent((s) => s.pendingQuestion)
+  const anyQuestion = useAgent((s) => Object.values(s.pendingQuestions)[0] ?? null)
   useEffect(() => {
     anyQuestionRef.current = anyQuestion
   }, [anyQuestion])
@@ -4824,14 +4856,14 @@ function Composer() {
   // an approval in a background conversation must still shield its turn from
   // the interrupt below.
   const anyApprovalRef = useRef<PendingApproval | null>(null)
-  const anyApproval = useAgent((s) => s.pendingApproval)
+  const anyApproval = useAgent((s) => Object.values(s.pendingApprovals)[0] ?? null)
   useEffect(() => {
     anyApprovalRef.current = anyApproval
   }, [anyApproval])
   // Live exit_plan card (same ref pattern): a plan waiting for approval must
   // shield its turn from the PTT interrupt, and a dictated answer resolves it.
   const anyPlanRef = useRef<PendingPlanApproval | null>(null)
-  const anyPlan = useAgent((s) => s.pendingPlanApproval)
+  const anyPlan = useAgent((s) => Object.values(s.pendingPlanApprovals)[0] ?? null)
   useEffect(() => {
     anyPlanRef.current = anyPlan
   }, [anyPlan])
@@ -5237,18 +5269,18 @@ function Composer() {
     let textSinceTool = true
     return (ev: AgentEvent) => {
     if (ev.type === 'text') {
-      setStatus('thinking')
+      setStatus(bufKey, 'thinking')
       if (ev.text) {
         const text = textSinceTool ? ev.text : '\n' + ev.text
         textSinceTool = true
         appendTextDelta(bufKey, curId, text)
       }
     } else if (ev.type === 'thinking') {
-      setStatus('thinking')
+      setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).
       if (ev.text) appendTape(bufKey, oneLine(ev.text) + ' ')
     } else if (ev.type === 'tool_start') {
-      setStatus('running-tool')
+      setStatus(bufKey, 'running-tool')
       textSinceTool = false
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
@@ -5320,7 +5352,7 @@ function Composer() {
         }
       }
     } else if (ev.type === 'approval_request') {
-      setStatus('running-tool')
+      setStatus(bufKey, 'running-tool')
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       setPendingApproval({
@@ -5332,7 +5364,7 @@ function Composer() {
     } else if (ev.type === 'approval_decision') {
       setPendingApproval((a) => (a && a.callId === ev.call_id ? null : a))
     } else if (ev.type === 'sub_agent_spawned') {
-      setStatus('running-tool')
+      setStatus(bufKey, 'running-tool')
       startSubAgent(
         bufKey,
         curId,
@@ -5349,7 +5381,7 @@ function Composer() {
       } else if (ev.kind === 'tool_result') {
         subAgentToolResult(bufKey, curId, ev.call_id ?? '', ev.result)
       } else if (ev.kind === 'approval_request') {
-        setStatus('running-tool')
+        setStatus(bufKey, 'running-tool')
         setPendingApproval({
           // The forwarded event's call_id is the namespaced gate key
           // (spawnCallId:toolCallId) the /answer endpoint must echo.
@@ -5365,22 +5397,22 @@ function Composer() {
       finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0)
       pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
     } else if (ev.type === 'error') {
-      setStatus('error')
-      setError(ev.message ?? 'Unknown agent error')
+      setStatus(bufKey, 'error')
+      setError(bufKey, ev.message ?? 'Unknown agent error')
       setTurnError(ev.message ?? 'Unknown agent error')
       settleSubAgents(bufKey, curId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'stopped') {
-      setStatus('idle')
+      setStatus(bufKey, 'idle')
       appendTextDelta(bufKey, curId, '\n[stopped]')
       settleSubAgents(bufKey, curId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'done') {
-      setStatus('idle')
+      setStatus(bufKey, 'idle')
       // A completed turn must leave no block pulsing: settle anything the
       // stream ended without a sub_agent_done for (defensive; the backend
       // always emits done events in the normal path).
@@ -5412,7 +5444,10 @@ function Composer() {
     const isPtt = pttText !== undefined
     const interrupting = isPtt && opts?.interrupt === true
     const text = (pttText ?? input).trim()
-    if ((!text && (isPtt || (attachments.length === 0 && images.length === 0))) || (sending && !interrupting))
+    if (
+      (!text && (isPtt || (attachments.length === 0 && images.length === 0))) ||
+      (sendingKey === (conversationId === null ? 'draft' : String(conversationId)) && !interrupting)
+    )
       return
     // PTT interrupt: the hotkey press already cancelled the running turn
     // (stopRef → Stop-button path). That turn's stream is still winding down
@@ -5421,8 +5456,9 @@ function Composer() {
     // AbortController before touching any shared state. Bounded at 5s; the
     // abort makes the in-flight fetch throw immediately, so this is fast.
     if (interrupting) {
+      const ivKey = conversationId === null ? 'draft' : String(conversationId)
       for (let i = 0; i < 100; i++) {
-        if (!useAgent.getState().abortController) break
+        if (!useAgent.getState().abortByConv[ivKey]) break
         await new Promise<void>((r) => setTimeout(r, 50))
       }
     }
@@ -5469,17 +5505,19 @@ function Composer() {
       setImages([])
       setPickedSkills([])
     }
-    setError(null)
     // Capture the turn's target buffer now: everything this turn writes —
     // optimistic messages, stream deltas, tool traces — goes there, even if
     // the user switches to another conversation mid-stream (Q11: free).
     // `let` because adopting a newly created conversation re-keys the
     // buffer: events before adoption target 'draft', after it the real id.
     let bufKey = conversationId === null ? 'draft' : String(conversationId)
+    const entryKey = bufKey
+    setError(bufKey, null)
+    setSendingKey(bufKey)
     const userId = appendUserMessage(bufKey, fullText, imageDataUrls, invokedSkills.length ? invokedSkills : undefined)
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
-    setAbortController(ac)
+    setAbortController(bufKey, ac)
     try {
       let cid: number
       if (conversationId === null) {
@@ -5490,10 +5528,14 @@ function Composer() {
         // stream keeps writing where the panel is now looking.
         adoptDraft(cid)
         bufKey = String(cid)
+        // Move the run's abort handle and in-flight marker to the new key.
+        setAbortController(bufKey, ac)
+        setAbortController(entryKey, null)
+        setSendingKey(bufKey)
       } else {
         cid = conversationId
       }
-      setStatus('thinking')
+      setStatus(bufKey, 'thinking')
       await streamAgentTurn(
         cid,
         fullText,
@@ -5503,11 +5545,11 @@ function Composer() {
         imageDataUrls,
         invokedSkills,
       )
-      if (useAgent.getState().status !== 'error') setStatus('idle')
+      if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
-        setStatus('idle')
+        setStatus(bufKey, 'idle')
         const tailId = lastAssistantId(bufKey) ?? asstId
         appendTextDelta(bufKey, tailId, '\n[stopped]')
         // Stop pressed mid-delegation: settle any still-running sub-agent
@@ -5524,7 +5566,7 @@ function Composer() {
         setAttachments(draft.attachments)
         setImages(draft.images)
         setPickedSkills(draft.pickedSkills)
-        setStatus('error')
+        setStatus(bufKey, 'error')
         setSendError(
           `Message not sent — the agent could not be reached. Your draft was restored.`,
         )
@@ -5532,7 +5574,8 @@ function Composer() {
       }
     } finally {
       setSending(false)
-      setAbortController(null)
+      setAbortController(bufKey, null)
+      setSendingKey((k) => (k === entryKey || k === bufKey ? null : k))
     }
   }
   // Keep the PTT handlers pointed at the latest send (stale-closure shield).
@@ -5542,16 +5585,17 @@ function Composer() {
    *  no duplicate user message (backend resume flag). */
   const resumeTurn = async () => {
     if (conversationId === null || sending) return
+    const bufKey = String(conversationId)
     setSending(true)
+    setSendingKey(bufKey)
     setSendError(null)
     setTurnError(null)
-    setError(null)
-    const bufKey = String(conversationId)
+    setError(bufKey, null)
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
-    setAbortController(ac)
+    setAbortController(bufKey, ac)
     try {
-      setStatus('thinking')
+      setStatus(bufKey, 'thinking')
       await streamAgentTurn(
         conversationId,
         'resume',
@@ -5562,29 +5606,33 @@ function Composer() {
         [],
         true,
       )
-      if (useAgent.getState().status !== 'error') setStatus('idle')
+      if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
-        setStatus('idle')
+        setStatus(bufKey, 'idle')
         const tailId = lastAssistantId(bufKey) ?? asstId
         appendTextDelta(bufKey, tailId, '\n[stopped]')
         settleSubAgents(bufKey, tailId)
       } else {
-        setStatus('error')
+        setStatus(bufKey, 'error')
         setTurnError(String((e as Error).message ?? e))
         settleSubAgents(bufKey, lastAssistantId(bufKey) ?? asstId)
       }
     } finally {
       setSending(false)
-      setAbortController(null)
+      setAbortController(bufKey, null)
+      setSendingKey((k) => (k === bufKey ? null : k))
     }
   }
 
   const stop = () => {
-    // Cancel server-side (mid-loop) and abort the client stream
+    // Cancel server-side (mid-loop) and abort the client stream — both
+    // scoped to the conversation on screen (issue #10: a background chat's
+    // run must keep running).
     if (conversationId !== null) void cancelAgent(conversationId).catch(() => {})
-    abortController?.abort()
+    const key = conversationId === null ? 'draft' : String(conversationId)
+    useAgent.getState().abortByConv[key]?.abort()
   }
   // Keep the PTT handlers pointed at the latest stop (stale-closure shield).
   stopRef.current = stop
@@ -5922,7 +5970,7 @@ function Composer() {
                 )}
               </button>
             )}
-            {sending ? (
+            {streaming || sendingKey === (conversationId === null ? 'draft' : String(conversationId)) ? (
               <button
                 className="rounded border border-red-700 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950"
                 onClick={stop}

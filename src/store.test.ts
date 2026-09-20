@@ -175,3 +175,94 @@ describe('splitAtPlanApproval (live)', () => {
     expect(useAgent.getState().messagesByConv.t).toHaveLength(1)
   })
 })
+
+// ------------------------------------------------------------------ #10
+// Multiple concurrent chats: per-conversation status, per-conversation
+// abort handles, per-conversation pending gates, and loadHistory refusing
+// to clobber a buffer a live run owns.
+
+describe('concurrent chats (issue #10)', () => {
+  beforeEach(() => {
+    useAgent.setState({
+      messagesByConv: {},
+      statusByConv: {},
+      errorByConv: {},
+      abortByConv: {},
+      pendingQuestions: {},
+      pendingApprovals: {},
+      pendingPlanApprovals: {},
+    })
+  })
+
+  it('keeps run status isolated per conversation', () => {
+    useAgent.getState().setStatus('1', 'thinking')
+    useAgent.getState().setStatus('2', 'running-tool')
+    useAgent.getState().setStatus('1', 'idle')
+    expect(useAgent.getState().statusByConv['1']).toBe('idle')
+    expect(useAgent.getState().statusByConv['2']).toBe('running-tool')
+  })
+
+  it('scopes abort controllers to their conversation', () => {
+    const a = new AbortController()
+    const b = new AbortController()
+    useAgent.getState().setAbortController('1', a)
+    useAgent.getState().setAbortController('2', b)
+    expect(useAgent.getState().abortByConv['1']).toBe(a)
+    useAgent.getState().setAbortController('1', null)
+    expect(useAgent.getState().abortByConv['1']).toBeUndefined()
+    // The other conversation's run is untouched.
+    expect(useAgent.getState().abortByConv['2']).toBe(b)
+  })
+
+  it('keeps pending ask_user questions isolated per conversation', () => {
+    useAgent.getState().setPendingQuestion({
+      callId: 'c1',
+      question: 'q?',
+      options: [],
+      convKey: '1',
+    })
+    expect(Object.keys(useAgent.getState().pendingQuestions)).toEqual(['1'])
+    // Clearing by callId leaves other conversations' gates alone.
+    useAgent.getState().setPendingQuestion((q) => (q && q.callId === 'nope' ? null : q))
+    expect(useAgent.getState().pendingQuestions['1']).toBeDefined()
+    useAgent.getState().setPendingQuestion((q) => (q && q.callId === 'c1' ? null : q))
+    expect(useAgent.getState().pendingQuestions['1']).toBeUndefined()
+  })
+
+  it('keeps pending plan approvals isolated per conversation', () => {
+    useAgent.getState().setPendingPlanApproval({
+      callId: 'p1',
+      plan: 'do it',
+      convKey: '7',
+    })
+    useAgent.getState().setPendingPlanApproval({
+      callId: 'p2',
+      plan: 'also',
+      convKey: '8',
+    })
+    expect(Object.keys(useAgent.getState().pendingPlanApprovals).sort()).toEqual(['7', '8'])
+    useAgent.getState().setPendingPlanApproval((p) => (p && p.callId === 'p1' ? null : p))
+    expect(useAgent.getState().pendingPlanApprovals['7']).toBeUndefined()
+    expect(useAgent.getState().pendingPlanApprovals['8']).toBeDefined()
+  })
+
+  it('loadHistory skips the reload while a run owns the buffer', () => {
+    useAgent.setState({
+      statusByConv: { '5': 'thinking' },
+      messagesByConv: {
+        '5': [{ id: 'live1', role: 'assistant', content: 'streaming…' }],
+      },
+    })
+    useAgent.getState().loadHistory(5, [
+      { id: 1, role: 'user', content: 'old', images: null, sub_agent_transcript: null, tool_call_id: null, tool_calls: null },
+    ])
+    // The live in-flight message survives — history must not clobber it.
+    expect(useAgent.getState().messagesByConv['5'].map((m) => m.id)).toEqual(['live1'])
+    // Once the run is over, the same reload goes through.
+    useAgent.getState().setStatus('5', 'idle')
+    useAgent.getState().loadHistory(5, [
+      { id: 1, role: 'user', content: 'old', images: null, sub_agent_transcript: null, tool_call_id: null, tool_calls: null },
+    ])
+    expect(useAgent.getState().messagesByConv['5'].map((m) => m.id)).toEqual(['db1'])
+  })
+})
