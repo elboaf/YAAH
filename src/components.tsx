@@ -2179,7 +2179,12 @@ function ConversationList() {
         <AgentsDialog
           wsPath={agentsDialog.ws}
           editAgentId={agentsDialog.agentId}
-          onClose={() => setAgentsDialog(null)}
+          onClose={() => {
+            setAgentsDialog(null)
+            // Renames sync the pinned chat's title server-side; re-pull so
+            // the sidebar row shows it without a manual reload.
+            refresh()
+          }}
         />
       )}
       {notice && (
