@@ -552,13 +552,17 @@ def _ndjson(event: dict) -> str:
 
 
 async def _execute_with_progress(
-    name: str, args: dict, workspace: str, call_id: str, box: dict
+    name: str, args: dict, workspace: str, call_id: str, box: dict,
+    cancel_ev: asyncio.Event | None = None,
 ):
     """Run a tool, yielding tool_progress events with live output while it
     runs (only the shell executors actually stream; everything else emits
     nothing and behaves like a plain await). The final result lands in
     `box["result"]` because async-generator return values are awkward to
-    consume alongside `async for`."""
+    consume alongside `async for`. When `cancel_ev` fires mid-tool the tool
+    task is killed and the result is discarded — Stop must not have to wait
+    out a long-running command; the turn loop sees the cancelled event next
+    and ends the turn."""
     queue: asyncio.Queue = asyncio.Queue()
     _DONE = object()
 
@@ -574,17 +578,38 @@ async def _execute_with_progress(
             queue.put_nowait(_DONE)
 
     finisher = asyncio.create_task(_finisher())
+    # Races queue.get() against the Stop button so a cancelled tool unwinds
+    # immediately instead of at its natural end.
+    cancel_waiter = (
+        asyncio.create_task(cancel_ev.wait()) if cancel_ev is not None else None
+    )
+    cancelled = False
     try:
         while True:
-            item = await queue.get()
+            get_task = asyncio.create_task(queue.get())
+            waiters = [get_task] + ([cancel_waiter] if cancel_waiter else [])
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_waiter is not None and cancel_waiter in done:
+                get_task.cancel()
+                cancelled = True
+                break
+            item = get_task.result()
             if item is _DONE:
                 break
             yield {"type": "tool_progress", "call_id": call_id, "chunk": item}
+        if cancelled:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, finisher, return_exceptions=True)
+            box["result"] = {"error": "tool stopped by user (run cancelled)"}
+            return
         await finisher
         box["result"] = task.result()
     finally:
-        # If the turn is torn down mid-tool (client disconnect), don't leak
-        # a running tool task the way a bare create_task would.
+        if cancel_waiter is not None:
+            cancel_waiter.cancel()
+        # If the turn is torn down mid-tool (client disconnect, Stop),
+        # don't leak a running tool task the way a bare create_task would.
         if not task.done():
             task.cancel()
             await asyncio.gather(task, finisher, return_exceptions=True)
@@ -1050,7 +1075,8 @@ async def run_agent(
                         if tool_risk(name) == "read" or mode == "full":
                             box: dict = {}
                             async for pev in _execute_with_progress(
-                                name, args, workspace, tc.get("id", ""), box
+                                name, args, workspace, tc.get("id", ""), box,
+                                cancel_ev=cancel_ev,
                             ):
                                 yield _ndjson(pev)
                             result = box.get("result")
@@ -1088,7 +1114,8 @@ async def run_agent(
                             if result is None:
                                 box = {}
                                 async for pev in _execute_with_progress(
-                                    name, args, workspace, tc.get("id", ""), box
+                                    name, args, workspace, tc.get("id", ""), box,
+                                    cancel_ev=cancel_ev,
                                 ):
                                     yield _ndjson(pev)
                                 result = box.get("result")

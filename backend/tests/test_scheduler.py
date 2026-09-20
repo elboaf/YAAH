@@ -398,3 +398,38 @@ async def test_memory_toggle_off_builds_fresh_context(fake_model, tmp_path, monk
     await _collect(loop.run_agent(cid, "fresh fire", str(tmp_path), include_history=False))
     assert seen["roles"] == ["system", "user"]
     assert "earlier conversation" not in seen["user_texts"]
+
+
+@pytest.mark.asyncio
+async def test_stop_kills_inflight_tool_of_scheduled_run(fake_model, tmp_path, monkeypatch):
+    """Stop must not wait out a long-running tool: cancelling mid-tool kills
+    the tool task, the run settles at once, and the model gets no follow-up
+    call. Regression for the row stop button looking like a no-op."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv, approval_policy="autonomous"))
+    sleep_call = [{
+        "type": "tool_calls",
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": json.dumps({"command": "sleep 60"})},
+        }],
+    }, {"type": "finish", "reason": "tool_calls"}]
+    scripts = [sleep_call, [{"type": "content", "text": "never streamed"}, {"type": "finish"}]]
+
+    async def fake_chat(messages, tools=None, stream=True, model="", effort=""):
+        return FakeStream(scripts.pop(0) if scripts else [{"type": "finish"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+
+    assert await sched.fire_agent(agent_row) == "started"
+    await asyncio.sleep(2)  # the 60s sleep tool is now in flight
+    t0 = asyncio.get_running_loop().time()
+    loop.cancel_agent(conv)
+    while (await get_agent(agent_row["id"]))["last_status"] == "running":
+        await asyncio.sleep(0.1)
+        assert asyncio.get_running_loop().time() - t0 < 10, "run did not stop after cancel"
+    assert asyncio.get_running_loop().time() - t0 < 5
+    # The cancelled turn must not continue to a follow-up model call.
+    assert len(scripts) >= 1
