@@ -58,6 +58,8 @@ export interface ConversationRow {
   workspace: string | null
   created_at: string
   updated_at: string
+  /** Set for a scheduled agent's pinned chat (sidebar "Agents" group). */
+  is_agent?: boolean
 }
 
 export interface ContextInfo {
@@ -432,6 +434,48 @@ export const removeMcpServer = (name: string) =>
 
 export const reloadMcpServers = () =>
   api<{ servers: McpServerInfo[] }>('/api/mcp/reload', { method: 'POST' })
+
+// ---- Scheduled agents (issue #41) ----
+
+export type AgentPolicy = 'sandbox-only' | 'ask' | 'full'
+
+export interface ScheduledAgent {
+  id: string
+  conversation_id: number
+  name: string
+  prompt: string
+  kind: 'interval' | 'daily' | 'weekly'
+  interval_minutes: number
+  time: string
+  weekday: number
+  policy: AgentPolicy
+  enabled: boolean
+  last_run_at: string
+  next_run_at: string
+  running?: boolean
+}
+
+export const listAgents = () => api<{ agents: ScheduledAgent[] }>('/api/agents')
+
+export const addAgent = (body: Omit<ScheduledAgent, 'id' | 'conversation_id' | 'last_run_at' | 'next_run_at' | 'running'>) =>
+  api<ScheduledAgent>('/api/agents', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+export const updateAgent = (id: string, body: Omit<ScheduledAgent, 'id' | 'conversation_id' | 'last_run_at' | 'next_run_at' | 'running'>) =>
+  api<ScheduledAgent>(`/api/agents/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+export const removeAgent = (id: string) =>
+  api<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+export const runAgentNow = (id: string) =>
+  api<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/run`, { method: 'POST' })
 
 /** Stage an attached text file inside the workspace; returns the
  *  workspace-relative path the agent's read_file tool can open. */

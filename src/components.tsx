@@ -34,6 +34,13 @@ import {
   removeMcpServer,
   reloadMcpServers,
   type McpServerInfo,
+  listAgents,
+  addAgent,
+  updateAgent,
+  removeAgent,
+  runAgentNow,
+  type ScheduledAgent,
+  type AgentPolicy,
   uploadAttachment,
   transcribeStatus,
   transcribeAudio,
@@ -1814,7 +1821,7 @@ function ConversationList() {
   const pendingApprovals = useAgent((s) => s.pendingApprovals)
   const pendingPlanApprovals = useAgent((s) => s.pendingPlanApprovals)
   const finishedByConv = useAgent((s) => s.finishedByConv)
-  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string }>>([])
+  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; is_agent?: boolean }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
   // collapsed groups show the header only. Persisted per workspace.
@@ -1905,6 +1912,10 @@ function ConversationList() {
     return scope.connected ? ns?.hostId === scope.hostId : ns === null
   }
   const visibleConvs = convs.filter((c) => inScope(c.workspace))
+  // Scheduled agents' pinned chats (issue #41): pulled out of the workspace
+  // grouping into a dedicated pinned "Agents" section at the top.
+  const agentConvs = visibleConvs.filter((c) => c.is_agent)
+  const chatConvs = visibleConvs.filter((c) => !c.is_agent)
   const localConvs = convs.filter((c) => parseNsWorkspace(c.workspace) === null)
 
   /** Open a conversation and adopt its workspace (the core invariant: the
@@ -1923,10 +1934,10 @@ function ConversationList() {
   // recent conversation activity in each group.
   const groups: Array<{ ws: WorkspaceRow; items: typeof convs }> = []
   for (const w of workspaces) {
-    groups.push({ ws: w, items: visibleConvs.filter((c) => (c.workspace ?? null) === w.path) })
+    groups.push({ ws: w, items: chatConvs.filter((c) => (c.workspace ?? null) === w.path) })
   }
   const knownPaths = new Set(workspaces.map((w) => w.path))
-  for (const c of visibleConvs) {
+  for (const c of chatConvs) {
     const p = c.workspace ?? null
     if (!knownPaths.has(p)) {
       // A conversation filed under a path the registry doesn't know yet
@@ -1958,6 +1969,44 @@ function ConversationList() {
 
   return (
     <div className="flex-1 overflow-y-auto">
+      {agentConvs.length > 0 && (
+        <div className="mb-3 border-t border-zinc-800 pt-2 first:border-t-0 first:pt-0">
+          <p className="px-1 pb-1 font-mono text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+            Agents
+            <span className="ml-1.5 font-mono text-[10px] font-normal text-zinc-600">
+              {agentConvs.length}
+            </span>
+          </p>
+          {agentConvs.map((c) => (
+            <ConversationRow
+              key={c.id}
+              conv={c}
+              active={c.id === conversationId}
+              running={
+                statusByConv[String(c.id)] === 'thinking' ||
+                statusByConv[String(c.id)] === 'running-tool'
+              }
+              blocked={Boolean(
+                pendingQuestions[String(c.id)] ||
+                  pendingApprovals[String(c.id)] ||
+                  pendingPlanApprovals[String(c.id)],
+              )}
+              finished={finishedByConv[String(c.id)] ?? null}
+              isAgent
+              menuOpen={menuOpenId === c.id}
+              setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
+              onOpen={() => openConversation(c)}
+              onExport={() =>
+                exportConversationMarkdown(c.id, c.title).catch((e) =>
+                  setNotice({ title: 'Export failed', message: String(e?.message ?? e) }),
+                )
+              }
+              onSys={() => setSysTarget({ id: c.id, title: c.title })}
+              onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
+            />
+          ))}
+        </div>
+      )}
       {groups.map(({ ws, items }) => {
         const key = expandKey(ws.path ?? '')
         const isExpanded = expanded[key] ?? true
@@ -2222,6 +2271,7 @@ function ConversationRow({
   running,
   blocked,
   finished,
+  isAgent,
   menuOpen,
   setMenuOpen,
   onOpen,
@@ -2240,6 +2290,8 @@ function ConversationRow({
   /** Finished-but-unacknowledged signal: 'ok' (green bar) | 'error' (red
    *  pill). Only set for background chats; cleared when the chat opens. */
   finished: 'ok' | 'error' | null
+  /** A scheduled agent's pinned chat (issue #41) — clock badge. */
+  isAgent?: boolean
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
   onOpen: () => void
@@ -2276,6 +2328,15 @@ function ConversationRow({
             <i />
           </span>
         ) : null}
+        {isAgent && (
+          <span
+            aria-hidden="true"
+            className={`mr-1.5 shrink-0 text-[10px] ${active ? 'text-blue-200' : 'text-zinc-500'}`}
+            title="Scheduled agent — runs on a repeating schedule"
+          >
+            🕙
+          </span>
+        )}
         <span className="min-w-0 flex-1 truncate">{conv.title}</span>
         <span
           className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
@@ -2771,6 +2832,244 @@ function McpSection() {
         <p className="text-[10px] text-zinc-600">
           Runs locally with your permissions — registering a server trusts it. Its tools appear to
           the agent as mcp_&lt;name&gt;_&lt;tool&gt;. Config is stored in config.json (mcpServers).
+        </p>
+      </div>
+      {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
+    </>
+  )
+}
+
+/** Scheduled agents (issue #41): recurring runs in pinned chats. Each row
+ *  shows the schedule, policy and next fire time; Run-now triggers a turn
+ *  immediately. Creation follows McpSection's inline-add pattern. */
+function AgentsSection() {
+  const [agents, setAgents] = useState<ScheduledAgent[]>([])
+  const [name, setName] = useState('')
+  const [prompt, setPrompt] = useState('')
+  const [kind, setKind] = useState<ScheduledAgent['kind']>('interval')
+  const [intervalMin, setIntervalMin] = useState('60')
+  const [time, setTime] = useState('09:00')
+  const [weekday, setWeekday] = useState('0')
+  const [policy, setPolicy] = useState<AgentPolicy>('sandbox-only')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      setAgents((await listAgents()).agents)
+    } catch {
+      /* transient backend hiccup */
+    }
+  }, [])
+
+  // Poll while Settings is open: next-run times tick down and "running"
+  // flags flip as the backend fires agents.
+  useEffect(() => {
+    void refresh()
+    const t = setInterval(() => {
+      void refresh()
+    }, 5000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  const add = async () => {
+    setErr(null)
+    if (!name.trim() || !prompt.trim()) {
+      setErr('name and prompt are required')
+      return
+    }
+    setBusy(true)
+    try {
+      await addAgent({
+        name: name.trim(),
+        prompt: prompt.trim(),
+        kind,
+        interval_minutes: Math.max(5, parseInt(intervalMin, 10) || 60),
+        time: kind === 'interval' ? '09:00' : time,
+        weekday: parseInt(weekday, 10) || 0,
+        policy,
+        enabled: true,
+      })
+      setName('')
+      setPrompt('')
+      await refresh()
+    } catch (e) {
+      setErr(String((e as { message?: string }).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const mutate = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await fn()
+      await refresh()
+    } catch (e) {
+      setErr(String((e as { message?: string }).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const scheduleText = (a: ScheduledAgent) =>
+    a.kind === 'interval'
+      ? `every ${a.interval_minutes} min`
+      : a.kind === 'daily'
+        ? `daily at ${a.time}`
+        : `weekly, ${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][a.weekday] ?? 'Mon'} at ${a.time}`
+
+  const policyColor = (p: AgentPolicy) =>
+    p === 'full' ? 'text-red-400' : p === 'ask' ? 'text-amber-400' : 'text-emerald-400'
+
+  const nextRun = (a: ScheduledAgent) => {
+    if (!a.enabled) return 'paused'
+    const t = Date.parse(a.next_run_at)
+    if (Number.isNaN(t)) return '—'
+    const mins = Math.round((t - Date.now()) / 60000)
+    if (mins <= 0) return a.running ? 'running now' : 'due'
+    if (mins < 60) return `in ${mins}m`
+    return `in ${Math.round(mins / 60)}h`
+  }
+
+  return (
+    <>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+        Scheduled agents
+      </h3>
+      <div className="mb-2 space-y-1.5">
+        {agents.length === 0 && (
+          <p className="text-[10px] text-zinc-600">
+            No agents yet. A scheduled agent runs its prompt on a repeating schedule in its own
+            pinned chat — status checks, digests, watches. Default policy is sandbox-only:
+            approval-required tools are skipped, runs stay read-only.
+          </p>
+        )}
+        {agents.map((a) => (
+          <div key={a.id} className="rounded border border-zinc-800 bg-zinc-900/60 p-2">
+            <div className="flex items-center gap-2">
+              <span className={`font-mono text-[10px] uppercase ${a.enabled ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                {a.running ? 'running' : a.enabled ? 'on' : 'paused'}
+              </span>
+              <span className="font-mono text-xs text-zinc-200">{a.name}</span>
+              <span className="flex-1 truncate font-mono text-[10px] text-zinc-600">
+                {scheduleText(a)} · next {nextRun(a)}
+              </span>
+              <span className={`font-mono text-[10px] ${policyColor(a.policy)}`}>{a.policy}</span>
+            </div>
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <button
+                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                disabled={busy}
+                onClick={() => void mutate(() => updateAgent(a.id, {
+                  name: a.name, prompt: a.prompt, kind: a.kind,
+                  interval_minutes: a.interval_minutes, time: a.time,
+                  weekday: a.weekday, policy: a.policy, enabled: !a.enabled,
+                }))}
+              >
+                {a.enabled ? 'pause' : 'resume'}
+              </button>
+              <button
+                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
+                disabled={busy || a.running}
+                onClick={() => void mutate(() => runAgentNow(a.id))}
+              >
+                run now
+              </button>
+              <button
+                className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
+                disabled={busy}
+                onClick={() => void mutate(() => removeAgent(a.id))}
+              >
+                remove
+              </button>
+            </div>
+            <p className="mt-1 line-clamp-2 text-[10px] text-zinc-600">{a.prompt}</p>
+          </div>
+        ))}
+        <div className="space-y-1.5 rounded border border-zinc-800 p-2">
+          <div className="flex gap-1.5">
+            <input
+              className="w-28 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="name"
+              aria-label="Agent name"
+            />
+            <select
+              className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-1 py-1 font-mono text-xs"
+              value={kind}
+              onChange={(e) => setKind(e.target.value as ScheduledAgent['kind'])}
+              aria-label="Schedule kind"
+            >
+              <option value="interval">every N min</option>
+              <option value="daily">daily</option>
+              <option value="weekly">weekly</option>
+            </select>
+            {kind === 'interval' ? (
+              <input
+                className="w-20 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={intervalMin}
+                onChange={(e) => setIntervalMin(e.target.value)}
+                placeholder="min"
+                aria-label="Interval minutes"
+              />
+            ) : (
+              <>
+                <input
+                  className="w-20 shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+                  value={time}
+                  onChange={(e) => setTime(e.target.value)}
+                  placeholder="09:00"
+                  aria-label="Time of day"
+                />
+                {kind === 'weekly' && (
+                  <select
+                    className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-1 py-1 font-mono text-xs"
+                    value={weekday}
+                    onChange={(e) => setWeekday(e.target.value)}
+                    aria-label="Weekday"
+                  >
+                    {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => (
+                      <option key={d} value={i}>{d}</option>
+                    ))}
+                  </select>
+                )}
+              </>
+            )}
+            <select
+              className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-1 py-1 font-mono text-xs"
+              value={policy}
+              onChange={(e) => setPolicy(e.target.value as AgentPolicy)}
+              aria-label="Approval policy"
+            >
+              <option value="sandbox-only">sandbox-only</option>
+              <option value="ask">ask</option>
+              <option value="full">full</option>
+            </select>
+          </div>
+          <div className="flex gap-1.5">
+            <input
+              className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="what the agent should do on every run"
+              aria-label="Agent prompt"
+            />
+            <button
+              className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              disabled={busy}
+              onClick={() => void add()}
+            >
+              Add
+            </button>
+          </div>
+        </div>
+        <p className="text-[10px] text-zinc-600">
+          Runs fire only while YAAH (or the yaah-server service) is running; anything missed while
+          the app was closed runs once at startup. Each agent gets its own pinned chat in the
+          sidebar where every run's transcript lands.
         </p>
       </div>
       {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
@@ -3660,6 +3959,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
             <SettingsCard title="MCP tool servers" className="col-span-4">
               <McpSection />
+            </SettingsCard>
+            <SettingsCard title="Scheduled agents" className="col-span-4">
+              <AgentsSection />
             </SettingsCard>
           </div>
         </div>

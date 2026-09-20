@@ -54,8 +54,17 @@ async def lifespan(app: FastAPI):
         from backend.agent import computer
 
         computer.start_background()
+    # Scheduled agents (issue #41): fire any run missed while no backend
+    # was alive (once — no backlog), then start the due-run tick. Only
+    # runs while a backend process is alive: desktop open, or the
+    # headless yaah-server service.
+    from backend.agent import scheduler
+
+    await scheduler.startup_catchup()
+    scheduler.start_scheduler()
     yield
     await mcp_client.manager.shutdown()
+    scheduler.stop_scheduler()
     discovery.stop_advertising()
 
 
@@ -283,7 +292,14 @@ async def api_delete_workspace(workspace_id: int):
 
 @app.get("/api/conversations")
 async def api_list_conversations():
-    return await list_conversations()
+    rows = await list_conversations()
+    # Pinned agent chats (issue #41): the sidebar renders a dedicated
+    # "Agents" group from this flag.
+    agent_convs = scheduler_mod.agent_conversation_ids()
+    for row in rows:
+        if row.get("id") in agent_convs:
+            row["is_agent"] = True
+    return rows
 
 
 @app.get("/api/conversations/{conversation_id}")
@@ -815,6 +831,103 @@ async def api_mcp_reload():
     """Re-read config and reconcile sessions (restart changed, stop removed)."""
     _mcp.manager.start_all()
     return await api_mcp_servers()
+
+
+# ---- Scheduled agents (issue #41) ----
+
+from backend.agent import scheduler as scheduler_mod
+
+
+class AgentBody(BaseModel):
+    name: str
+    prompt: str
+    # "interval" (every interval_minutes), "daily" or "weekly" at `time`.
+    kind: str = "interval"
+    interval_minutes: int = 60
+    time: str = "09:00"  # HH:MM local
+    weekday: int = 0  # 0 = Monday, used by kind="weekly"
+    policy: str = "sandbox-only"
+    enabled: bool = True
+    # Omit on create: the endpoint pins a freshly created conversation.
+    conversation_id: int | None = None
+
+
+def _agent_view(a: dict) -> dict:
+    from backend.agent.loop import agent_is_running
+
+    return {**a, "running": agent_is_running(a.get("conversation_id") or 0)}
+
+
+@app.get("/api/agents")
+async def api_agents():
+    return {"agents": [_agent_view(a) for a in scheduler_mod.get_agents()]}
+
+
+@app.post("/api/agents")
+async def api_agents_add(body: AgentBody):
+    """Create an agent and its pinned conversation (title = agent name,
+    workspace = the user's last workspace so it starts somewhere sensible)."""
+    from backend.db.database import create_conversation
+
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    if not body.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required")
+    conv_id = await create_conversation(title=body.name.strip())
+    record = scheduler_mod.upsert_agent({
+        **body.model_dump(),
+        "conversation_id": body.conversation_id or conv_id,
+    })
+    scheduler_mod.ensure_scheduled()
+    return _agent_view(record)
+
+
+@app.patch("/api/agents/{agent_id}")
+async def api_agents_update(agent_id: str, body: AgentBody):
+    """Replace the agent's definition (the UI edits the whole record).
+    A rename keeps the pinned chat's title in sync."""
+    from backend.db.database import update_conversation
+
+    existing = next(
+        (a for a in scheduler_mod.get_agents() if a.get("id") == agent_id), None
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    record = scheduler_mod.upsert_agent({
+        **body.model_dump(),
+        "id": agent_id,
+        "conversation_id": existing["conversation_id"],
+    })
+    if record["name"] != existing.get("name"):
+        await update_conversation(existing["conversation_id"], title=record["name"])
+    scheduler_mod.ensure_scheduled()
+    return _agent_view(record)
+
+
+@app.delete("/api/agents/{agent_id}")
+async def api_agents_remove(agent_id: str):
+    """Delete the agent. The pinned conversation survives as a normal chat —
+    its history is the run log and deleting it silently would lose that."""
+    if not scheduler_mod.remove_agent(agent_id):
+        raise HTTPException(status_code=404, detail="agent not found")
+    return {"ok": True}
+
+
+@app.post("/api/agents/{agent_id}/run")
+async def api_agents_run(agent_id: str):
+    """Run an agent right now (schedule advances from this fire)."""
+    agent = next(
+        (a for a in scheduler_mod.get_agents() if a.get("id") == agent_id), None
+    )
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    started = await scheduler_mod.fire_agent(agent)
+    if not started:
+        raise HTTPException(
+            status_code=409,
+            detail="conversation is busy or its chat was deleted",
+        )
+    return {"ok": True}
 
 
 # ---- Provider / model discovery ----
