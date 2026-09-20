@@ -182,6 +182,8 @@ export interface AgentConfig {
     tts_enabled?: boolean
     tts_voice?: string
     tts_speed?: number
+    /** Notification chimes (#29): run-finished + question-pending sounds. */
+    sounds_enabled?: boolean
   }
   /** LAN hosting (this instance as a host). */
   remote?: {
@@ -218,6 +220,7 @@ export const updateConfig = (
       tts_enabled?: boolean
       tts_voice?: string
       tts_speed?: number
+      sounds_enabled?: boolean
     }
     remote?: {
       hosting_enabled?: boolean

@@ -1,5 +1,7 @@
 # YAAH
 
+**YAAH** = **Y**et **A**nother **A**gent/**H**arness.
+
 YAAH is a desktop AI coding agent: a model with real tools on your machine —
 shell, files, git, search — and every tool call shown transparently. See
 `PRODUCT.md` for the product framing.

@@ -59,6 +59,7 @@ import {
 import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useUpdateCheck } from './update'
 import { useTts } from './speech'
+import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
 import { CodeBlock, AgentMarkdown } from './markdown'
@@ -2833,6 +2834,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   // Read-aloud (TTS): voice + speed drafts; model download state.
   const [ttsVoiceDraft, setTtsVoiceDraft] = useState('af_heart')
   const [ttsSpeedDraft, setTtsSpeedDraft] = useState(1.0)
+  // Notification chimes (#29): mute toggle, default ON.
+  const [soundsEnabled, setSoundsUi] = useState(true)
   const [ttsModelReady, setTtsModelReady] = useState(false)
   const [ttsDownloading, setTtsDownloading] = useState(false)
   const [ttsDlPct, setTtsDlPct] = useState<number | null>(null)
@@ -2895,6 +2898,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setPttHotkeyDraft(v?.ptt_hotkey ?? '')
           setTtsVoiceDraft(v?.tts_voice || 'af_heart')
           setTtsSpeedDraft(v?.tts_speed ?? 1.0)
+          setSoundsUi(v?.sounds_enabled !== false)
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
           setRemoteHost(c.remote?.hosting_enabled ?? true)
@@ -3042,6 +3046,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           ptt_hotkey: pttHotkeyDraft,
           tts_voice: ttsVoiceDraft,
           tts_speed: ttsSpeedDraft,
+          sounds_enabled: soundsEnabled,
         },
         remote: {
           hosting_enabled: remoteHost,
@@ -3420,6 +3425,26 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                   question card up, the transcript answers it. Esc cancels capture; "off" disables.
                 </p>
               </div>
+            </SettingsCard>
+
+            <SettingsCard title="Notification sounds" className="col-span-2">
+              <label className="flex items-center gap-2 text-xs text-zinc-300">
+                <input
+                  type="checkbox"
+                  className="accent-blue-600"
+                  checked={soundsEnabled}
+                  onChange={(e) => {
+                    setSoundsEnabled(e.target.checked)
+                    setSoundsUi(e.target.checked)
+                  }}
+                />
+                Chime when a run finishes and when a question needs an answer
+              </label>
+              <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-600">
+                Run-finished chimes for every chat, background ones included. The
+                question chime only plays while the window is unfocused — when
+                focused, the card itself is the signal.
+              </p>
             </SettingsCard>
 
             <SettingsCard title="Read aloud" className="col-span-2">

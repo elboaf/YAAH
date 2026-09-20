@@ -5,6 +5,7 @@
 
 import { describe, expect, it, beforeEach } from 'vitest'
 import { useAgent, buildMessages } from './store'
+import { shouldChimeFinish, isUnfocused } from './NotificationSounds'
 
 const row = (id: number, role: string, content: string, extra: Record<string, unknown> = {}) => ({
   id,
@@ -327,5 +328,24 @@ describe('sidebar finish signal (issue #25)', () => {
     expect(useAgent.getState().finishedByConv).toEqual({ '7': 'ok', '9': 'error' })
     useAgent.getState().setConversationId(7)
     expect(useAgent.getState().finishedByConv).toEqual({ '9': 'error' })
+  })
+})
+
+describe('notification chimes (#29) - pure helpers', () => {
+  it('chimes on running -> idle and running -> error, not on idle -> idle', () => {
+    expect(shouldChimeFinish('thinking', 'idle')).toBe(true)
+    expect(shouldChimeFinish('running-tool', 'error')).toBe(true)
+    expect(shouldChimeFinish('idle', 'idle')).toBe(false)
+    expect(shouldChimeFinish('idle', 'thinking')).toBe(false)
+    expect(shouldChimeFinish(undefined, 'idle')).toBe(false)
+  })
+
+  it('unfocused = hidden document or lost window focus', () => {
+    const doc = (hidden: boolean) => ({ hidden }) as Document
+    const win = (focused: boolean) =>
+      ({ document: { hasFocus: () => focused } }) as unknown as Window
+    expect(isUnfocused(doc(true), win(true))).toBe(true)
+    expect(isUnfocused(doc(false), win(false))).toBe(true)
+    expect(isUnfocused(doc(false), win(true))).toBe(false)
   })
 })
