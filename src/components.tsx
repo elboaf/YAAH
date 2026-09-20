@@ -1822,6 +1822,13 @@ function ConversationList() {
   // Per-conversation run status: rows with an in-flight turn show a spinner
   // (issue #10). Reference-stable selector — only re-renders on status writes.
   const statusByConv = useAgent((s) => s.statusByConv)
+  // Scheduled runs (issue #41) never write statusByConv — they stream inside
+  // the backend — so the row spinner also keys off the agents poller's live
+  // `running` flag, mapped by pinned conversation.
+  const agents = useAgent((s) => s.agents)
+  const agentRunningConvs = new Set(
+    agents.filter((a) => a.running).map((a) => a.conversation_id),
+  )
   // Issue #25 sidebar signals: needs-you (any user-blocking gate) and the
   // finished-but-unacknowledged map (set by setStatus, cleared on open).
   const pendingQuestions = useAgent((s) => s.pendingQuestions)
@@ -1982,7 +1989,8 @@ function ConversationList() {
       active={c.id === conversationId}
       running={
         statusByConv[String(c.id)] === 'thinking' ||
-        statusByConv[String(c.id)] === 'running-tool'
+        statusByConv[String(c.id)] === 'running-tool' ||
+        agentRunningConvs.has(c.id)
       }
       blocked={Boolean(
         pendingQuestions[String(c.id)] ||
@@ -3527,7 +3535,7 @@ export function AgentRunWatcher() {
       }
     }
     void poll()
-    const t = window.setInterval(() => void poll(), 15000)
+    const t = window.setInterval(() => void poll(), 5000)
     return () => {
       alive = false
       window.clearInterval(t)
