@@ -1,4 +1,5 @@
-import { IS_TAURI } from './api'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import { useAgent } from './store'
 
 /**
  * Open a link in the OS default browser (#31). The Tauri webview swallows
@@ -8,11 +9,27 @@ import { IS_TAURI } from './api'
  *
  * Callers must gate on the same scheme allowlist as before (safeHref:
  * https?/mailto) — this helper decides HOW to open, never WHETHER.
+ *
+ * Issue #59: the previous version gated on IS_TAURI at module-eval time,
+ * dynamically imported the plugin glue, and swallowed every failure with
+ * `.catch(() => {})` — so a misfired gate or a failed import died silently
+ * and clicking a link did nothing. Now the Tauri check happens at call time
+ * (module eval order can't bite it), the import is static, and failures log
+ * and toast instead of vanishing.
  */
 export function openExternal(href: string, event: { preventDefault(): void }): void {
-  if (!IS_TAURI) return
+  // Re-checked at call time on purpose: under plain vite dev / vitest there
+  // is no opener plugin to call, so those surfaces keep native navigation.
+  if (!('__TAURI_INTERNALS__' in window)) return
   event.preventDefault()
-  void import('@tauri-apps/plugin-opener')
-    .then(({ openUrl }) => openUrl(href))
-    .catch(() => {})
+  openUrl(href).catch((e: unknown) => {
+    // No longer silent (#59): a failed open must be diagnosable from the
+    // console and visible to the user.
+    console.error('[openExternal] failed to open', href, e)
+    useAgent.getState().pushToast({
+      kind: 'error',
+      title: 'Could not open link',
+      body: href.slice(0, 120),
+    })
+  })
 }
