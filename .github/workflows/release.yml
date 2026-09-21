@@ -29,7 +29,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        # Self-hosted runners (#62 follow-up): "Linux" matches only the herp
+        # runner, "windows-desktop" only the Windows runner (GitHub-hosted
+        # runners never carry these labels). Release builds run on our own
+        # pushes/tags only — fork PRs never reach this workflow.
+        os: [Linux, windows-desktop]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -72,12 +76,15 @@ jobs:
           python-version: "3.12"
 
       - name: Install Linux system deps
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
 
       - name: Install frontend deps
+        # bash, not the Windows runner's default PowerShell (its execution
+        # policy blocks script execution entirely).
+        shell: bash
         run: npm ci
 
       # Standalone backend executable (PyInstaller) so the installer needs

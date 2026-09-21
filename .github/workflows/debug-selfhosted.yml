@@ -1,0 +1,39 @@
+name: Debug self-hosted
+
+# One-off diagnostic probe for the self-hosted Linux runners: shows the
+# python/pip environment and runs the MCP demo fixture directly so its
+# stderr (the real crash reason behind "Connection closed") is visible.
+# Dispatch-only; delete after diagnosis.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: Linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Environment
+        run: |
+          python --version
+          which python
+          pip --version
+          pip show mcp || echo "mcp NOT INSTALLED"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: MCP SDK import check
+        run: |
+          python -c "import mcp; print('mcp version:', mcp.__version__ if hasattr(mcp, '__version__') else 'unknown')"
+          python -c "from mcp.server.mcpserver import MCPServer; print('fixture import path OK')"
+
+      - name: Run the demo fixture directly (capture stderr)
+        run: |
+          timeout 5 python -u backend/tests/mcp_fixtures/demo_server.py 2>&1 | head -40
+          echo "exit: $?"

@@ -9,7 +9,10 @@ on:
 jobs:
   frontend:
     name: Frontend build
-    runs-on: ubuntu-latest
+    # herp only: the Windows runner's default shell is PowerShell and its
+    # execution policy blocks even `npm ci` — and these are bash-flavored
+    # jobs. GitHub-hosted runners never carry the bare "Linux" label.
+    runs-on: Linux
     steps:
       - uses: actions/checkout@v4
 
@@ -35,7 +38,8 @@ jobs:
 
   backend:
     name: Backend tests
-    runs-on: ubuntu-latest
+    # herp only (see frontend note).
+    runs-on: Linux
     steps:
       - uses: actions/checkout@v4
 
