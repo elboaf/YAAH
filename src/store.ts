@@ -145,6 +145,13 @@ interface AgentState {
   /** Per-conversation stream/failed-send error (rendered by the owning chat). */
   errorByConv: Record<string, string | null>
   setError: (key: string, e: string | null) => void
+  /**
+   * Spoken briefing of the last finished turn, per conversation (#66): the
+   * backend's `say` event text, captured by the stream handler and consumed
+   * by the read-aloud trigger. Speech-only — never rendered.
+   */
+  sayByConv: Record<string, string | undefined>
+  setSay: (key: string, say: string | undefined) => void
   workspace: string
   /**
    * Draft destination (issue #32): where the next first-send will file the
@@ -416,6 +423,8 @@ export const useAgent = create<AgentState>((set, get) => ({
       return { finishedByConv }
     }),
   errorByConv: {},
+  sayByConv: {},
+  setSay: (key, say) => set((s) => ({ sayByConv: { ...s.sayByConv, [key]: say } })),
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),

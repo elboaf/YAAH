@@ -172,7 +172,7 @@ async def test_agent_direct_answer(fake_model, tmp_path):
 
     events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
     types = [e["type"] for e in events]
-    assert types == ["text", "done"]
+    assert types == ["text", "say", "done"]
 
     msgs = await get_messages(cid)
     roles = [m["role"] for m in msgs]
@@ -203,7 +203,7 @@ async def test_agent_tool_cycle(fake_model, tmp_path):
     # tool_start(/tool_progress…) then tool_result, final text delta, done.
     # tool_progress chunks are filtered: fast commands emit a variable number.
     core = [t for t in types if t != "tool_progress"]
-    assert core == ["tool_start", "tool_result", "text", "done"]
+    assert core == ["tool_start", "tool_result", "text", "say", "done"]
     tr = next(e for e in events if e["type"] == "tool_result")
     assert tr["result"]["exit_code"] == 0
     assert "tool ran" in tr["result"]["output"]
@@ -672,7 +672,7 @@ async def test_ask_user_answer_resumes_loop(fake_model, tmp_path):
     results = await asyncio.gather(collect(agent), answer_when_asked())
     events = results[0]
     types = [e["type"] for e in events]
-    assert types == ["tool_start", "tool_result", "text", "done"]
+    assert types == ["tool_start", "tool_result", "text", "say", "done"]
     assert events[1]["name"] == "ask_user"
     assert events[1]["result"] == {"answer": "React"}
 

@@ -35,8 +35,7 @@ function stripEmoji(text: string): string {
 /** Markdown → speakable prose: code fences and indented blocks become
  *  pauses (dropped), tables drop, links keep their label, emphasis strips.
  *  Mirrors speak.prose_for_speech. */
-export function proseForSpeech(md: string, maxChars = 4000): string {
-  if (!md) return ''
+export function proseForSpeech(md: string, maxChars = 4000): string {  if (!md) return ''
   let t = md
   t = t.replace(/```[\s\S]*?```/g, '\n\n')
   t = t.replace(/^(?:    |\t).*(?:\n|$)+/gm, '\n\n')
@@ -61,6 +60,63 @@ export function proseForSpeech(md: string, maxChars = 4000): string {
   const cut = t.slice(0, 4000)
   const last = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '))
   return (last > 2000 ? cut.slice(0, last + 1) : cut).trim()
+}
+
+// ---------------------------------------------------------------- briefing
+// Two-channel split (#66): the spoken line is a briefing, not a read-aloud.
+// Mirrors speak.py's SAY_MAX_CHARS / spoken_line / heuristic_briefing — the
+// cap lives in one place per side and both sides stay in sync.
+
+export const SAY_MAX_CHARS = 400
+
+const SENT_END = /([.!?]+["')\]]?)\s+/g
+
+/** Last-resort sentence-boundary truncation at the briefing budget. */
+function clip(text: string, maxChars = SAY_MAX_CHARS): string {
+  if (text.length <= maxChars) return text
+  const cut = text.slice(0, maxChars)
+  let last = -1
+  for (const m of cut.matchAll(/([.!?]+["')\]]?)\s+/g)) last = m.index + m[0].length
+  return (last > maxChars / 2 ? cut.slice(0, last) : cut).trim()
+}
+
+/** Fallback briefing without a model call: first sentence of the first
+ *  paragraph plus the final sentence, clipped to the budget. Mirrors
+ *  speak.heuristic_briefing. */
+export function heuristicBriefing(md: string, maxChars = SAY_MAX_CHARS): string {
+  const prose = proseForSpeech(md, Number.MAX_SAFE_INTEGER)
+  const paras = prose.split('\n').map((p) => p.trim()).filter(Boolean)
+  if (!paras.length) return ''
+  const first = paras[0]
+  const openEnd = first.match(/^[^]*?([.!?]+["')\]]?)(\s+|$)/)
+  const opening = (openEnd && openEnd.index !== undefined ? first.slice(0, openEnd.index + openEnd[1].length) : first).trim()
+  const tail = paras[paras.length - 1]
+  let closeEnd = -1
+  let closeLen = 0
+  for (const m of tail.matchAll(/([.!?]+["')\]]?)(\s+|$)/g)) {
+    closeEnd = m.index
+    closeLen = m[1].length
+  }
+  const closing = (closeEnd >= 0 ? tail.slice(0, closeEnd + closeLen) : tail).trim()
+  if (closing && closing !== opening && opening.length + closing.length + 1 <= maxChars) {
+    return `${opening} ${closing}`
+  }
+  return clip(opening.length >= closing.length ? opening : closing, maxChars)
+}
+
+/** The final TTS input for a turn: the model-emitted briefing when present,
+ *  else the heuristic, else the old truncated verbatim prose. Mirrors
+ *  speak.spoken_line — everything passes through proseForSpeech and the
+ *  hard cap is enforced here. */
+export function spokenLine(briefing: string | null | undefined, md: string): string {
+  const prose = proseForSpeech(md, Number.MAX_SAFE_INTEGER)
+  const source = (briefing ?? '').trim()
+  if (source) {
+    const line = proseForSpeech(source, Number.MAX_SAFE_INTEGER)
+    if (line.length <= SAY_MAX_CHARS) return line
+    return heuristicBriefing(line) || clip(line)
+  }
+  return heuristicBriefing(prose) || clip(prose)
 }
 
 const ABBREV = new Set([
@@ -299,8 +355,10 @@ interface TtsState {
   setEnabled: (on: boolean) => void
   setReady: (ready: boolean) => void
   setError: (e: string | null) => void
-  /** Speak an assistant message's prose (replaces any current utterance). */
-  speakMessage: (msgId: string, markdown: string) => void
+  /** Speak an assistant message (replaces any current utterance). `briefing`
+   *  is the backend's spoken line (#66) when one arrived; the markdown is
+   *  the fallback path (heuristic briefing, then truncated verbatim). */
+  speakMessage: (msgId: string, markdown: string, briefing?: string | null) => void
   /** Speak an ask_user question; options stay visual. */
   speakQuestion: (callId: string, question: string) => void
   stop: () => void
@@ -341,10 +399,10 @@ export const useTts = create<TtsState>((set, get) => {
     },
     setReady: (ready) => set({ ready }),
     setError: (error) => set({ error }),
-    speakMessage: (msgId, markdown) => {
+    speakMessage: (msgId, markdown, briefing) => {
       const { enabled, ready } = useTts.getState()
       if (!enabled || !ready) return
-      const prose = proseForSpeech(markdown)
+      const prose = spokenLine(briefing, markdown)
       const chunks = splitSentences(prose)
       if (!chunks.length) return
       void speechPlayer.speak(msgId, chunks, fail)
