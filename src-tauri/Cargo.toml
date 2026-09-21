@@ -37,3 +37,7 @@ webkit2gtk = { version = "2", features = ["v2_4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# open_external (#59): ShellExecuteW without going through cmd.exe.
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation"] }

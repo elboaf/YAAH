@@ -630,6 +630,51 @@ fn prepare_update(_app: tauri::AppHandle, installer_path: String) -> Result<(), 
     Ok(())
 }
 
+/// Open a URL in the OS default browser from Rust (#59). The opener
+/// plugin's JS binding fails in the packaged app (the #59 toast proved the
+/// failure is in the JS->plugin IPC layer), while this shell-free path is
+/// what open_releases_page has used successfully since the update chip
+/// shipped. ShellExecuteW directly — no cmd.exe, no metacharacter surface —
+/// with a scheme allowlist, because chat links are model-generated and
+/// unlike open_releases_page's github-only gate, cannot be trusted.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let allowed = url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("mailto:");
+    if !allowed {
+        return Err(format!("refusing to open non-allowlisted url: {url}"));
+    }
+    #[cfg(windows)]
+    {
+        const SW_SHOWNORMAL: i32 = 1;
+        let url_w: Vec<u16> = url.encode_utf16().collect();
+        url_w.push(0);
+        let verb_w: Vec<u16> = "open\0".encode_utf16().collect();
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb_w.as_ptr(),
+                url_w.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(format!("ShellExecuteW failed (code {})", result as isize));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Linux (and any non-Windows OS) has no interactive-installer handoff in
 /// this iteration: the chip opens the releases page instead.
 #[tauri::command]
@@ -696,7 +741,8 @@ pub fn run() {
             restart_backend,
             download_installer,
             prepare_update,
-            open_releases_page
+            open_releases_page,
+            open_external
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
