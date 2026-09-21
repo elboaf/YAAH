@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 
 from backend.agent.config import load_config, save_config
 from backend.db.database import (
+    get_agent,
     get_conversation,
     list_agents,
     list_instructions,
@@ -243,6 +244,11 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
                            last_finished_at=datetime.now().isoformat(timespec="seconds"))
         _retry_state.pop(aid, None)
         return "gone"
+    if not agent.get("enabled"):
+        # Defense in depth: the tick already skips disabled agents, but a
+        # run-now on a paused agent must not start (or resurrect a past slot)
+        # either. Any stale next_fire_at stays stale until the agent resumes.
+        return "disabled"
     if loop_mod.agent_is_running(conv_id):
         # Postpone instead of losing the run to the per-conversation lock.
         await _patch(
@@ -363,9 +369,52 @@ async def _run_and_settle(
             return
     # Success, or retries exhausted: the parked slot becomes the schedule.
     _retry_state.pop(aid, None)
+    await _ensure_future_slot(aid)
     if retention > 0:
         with contextlib.suppress(Exception):
             await trim_agent_transcript(conv_id, retention)
+
+
+async def _ensure_future_slot(aid: str):
+    """Roll a run's slot forward if it lands in the past at settle time.
+
+    While a run is in flight, every due tick busy-postpones next_fire_at to
+    ~60s ahead; a run that outlives its schedule (or a stop) leaves that
+    slot in the past, and without this roll the next tick would immediately
+    re-fire the run the user just stopped. Missed slots collapse into the
+    single next future slot — there is deliberately no backlog."""
+    row = await get_agent(aid)
+    if row is None:
+        return
+    nxt = row.get("next_fire_at")
+    try:
+        overdue = not nxt or datetime.fromisoformat(nxt) <= datetime.now()
+    except (TypeError, ValueError):
+        overdue = True
+    if overdue:
+        await _patch(
+            aid,
+            next_fire_at=compute_next_fire(
+                row.get("schedule_type") or "interval",
+                row.get("schedule_spec") or "{}",
+                datetime.now(),
+            ).isoformat(timespec="seconds"),
+        )
+
+
+def cancel_agent_run(conversation_id: int):
+    """Ask the in-flight run in this conversation to stop after its current
+    step. Scheduler-side wrapper so callers (API layer) don't reach into the
+    loop module directly."""
+    from backend.agent import loop as loop_mod
+
+    loop_mod.cancel_agent(conversation_id)
+
+
+def clear_retry_state(agent_id: str):
+    """Drop pending retry bookkeeping for an agent — used when it is paused
+    or deleted, so a scheduled retry can't resurrect it."""
+    _retry_state.pop(agent_id, None)
 
 
 async def _tick():

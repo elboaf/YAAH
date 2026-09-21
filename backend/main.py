@@ -985,6 +985,14 @@ async def api_agents_update(agent_id: str, body: AgentBody):
     if record["name"] != existing["name"] and existing.get("conversation_id"):
         # Keep the pinned chat's title in sync with the agent name.
         await update_conversation(existing["conversation_id"], title=record["name"])
+    if existing.get("enabled") and not record.get("enabled"):
+        # Pausing a mid-run agent stops that run too: the user unchecking
+        # "enabled" expects the agent to go quiet now, not after the current
+        # turn winds down (the run settles through its normal cancel path).
+        conv_id = record.get("conversation_id")
+        if conv_id and agent_is_running(conv_id):
+            scheduler_mod.cancel_agent_run(conv_id)
+            scheduler_mod.clear_retry_state(agent_id)
     await scheduler_mod.ensure_scheduled()
     return await _agent_view(record)
 
@@ -1014,6 +1022,8 @@ async def api_agents_run(agent_id: str):
     outcome = await scheduler_mod.fire_agent(agent)
     if outcome == "gone":
         raise HTTPException(status_code=409, detail="agent chat was deleted")
+    if outcome == "disabled":
+        raise HTTPException(status_code=409, detail="agent is disabled (resume it to run)")
     if outcome == "busy":
         raise HTTPException(status_code=409, detail="agent chat is mid-turn")
     return {"ok": True}
