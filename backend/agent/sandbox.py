@@ -52,6 +52,10 @@ POLL_INTERVAL = 0.5
 ADOPT_TIMEOUT = 30
 
 MAX_RUN_TIMEOUT = 900
+
+# How long a second caller waits for the sandbox mutex before getting a
+# busy error (sandbox.busy_wait_seconds; the config value overrides).
+BUSY_WAIT_DEFAULT = 10
 MAX_OUTPUT_CHARS = 20_000
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -76,9 +80,17 @@ _SANDBOX_DEFAULTS = {
     "toolkit_dir": "",
     "networking": "Enable",
     "memory_mb": 8192,
-    "vgpu": "Default",
+    # issue #27 sandbox mutex: how long a second chat's sandbox call waits
+    # for the single-instance VM before getting a busy error.
+    "busy_wait_seconds": BUSY_WAIT_DEFAULT,
+    # "auto" (issue #27): Disable on multi-GPU hosts (the vGPU crash class),
+    # Default otherwise. Explicit "Default"/"Disable" wins.
+    "vgpu": "auto",
     "map_workspace": True,
     "startup_timeout": 180,
+    # One transparent sandbox_test reboot on detected mid-session VM death
+    # (0x80072746-class crash); state loss is fine for a disposable VM.
+    "auto_reboot_on_crash": True,
 }
 
 
@@ -139,6 +151,80 @@ def sandbox_available() -> bool:
     return sandbox_exe() is not None
 
 
+def _gpu_adapter_count() -> int:
+    """Number of display adapters on the host (best effort; 1 if unknown).
+    Used by vgpu='auto': >1 adapter is the 0x80072746 crash class."""
+    if os.name != "nt":
+        return 1
+    try:
+        out = subprocess.run(
+            ["wmic", "path", "Win32_VideoController", "get", "Name", "/NH"],
+            capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
+            timeout=15,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return 1
+    return len([ln for ln in out.splitlines() if ln.strip()]) or 1
+
+
+def effective_vgpu() -> str:
+    """Resolve the vGPU setting for wsb generation. 'auto' disables the
+    paravirtualized GPU on multi-GPU hosts (microsoft/Windows-Sandbox#64:
+    vGPU sandboxes crash ~30-120 s after boot with 0x80072746 there) and
+    keeps Default otherwise. An explicit Default/Disable passes through."""
+    raw = str(_cfg().get("vgpu") or "Default")
+    if raw.lower() == "auto":
+        return "Disable" if _gpu_adapter_count() > 1 else "Default"
+    return raw
+
+
+def _snapshot_crash_diagnostics(logs: Path) -> str | None:
+    """On suspected mid-session VM death, copy the crash evidence into the
+    session logs dir before the next boot overwrites init.log, and return a
+    short evidence summary for the error text. Best effort throughout."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    snap_dir = logs / f"crash-{stamp}"
+    lines = [f"sandbox crash diagnostics snapshot: {snap_dir}"]
+    try:
+        snap_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"crash diagnostics unavailable ({e})"
+    for name in ("init.log", "output.txt"):
+        src = logs / name
+        if src.exists():
+            try:
+                (snap_dir / name).write_text(
+                    src.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8")
+                lines.append(f"copied {name}")
+            except OSError as e:
+                lines.append(f"could not copy {name}: {e}")
+    if os.name == "nt":
+        # Last VmSwitch NIC events: the issue's evidence table showed the
+        # sandbox NIC disconnect+delete at the moment of death.
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-"
+                 "Hyper-V-VmSwitch-Admin'; StartTime="
+                 "(Get-Date).AddHours(-1)} -MaxEvents 20 -ErrorAction "
+                 "Stop | Select-Object TimeCreated, Id | Format-Table -Hide"
+                 "TableHeaders | Out-String"],
+                capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW,
+                timeout=30,
+            )
+            events = (out.stdout or "").strip()
+            if events:
+                (snap_dir / "vmswitch-events.txt").write_text(
+                    events, encoding="utf-8")
+                lines.append("copied last VmSwitch events")
+        except Exception:  # noqa: BLE001
+            lines.append("VmSwitch event query failed (best effort)")
+    lines.append("note: init.log in the snapshot is from the crashed boot; "
+                 "the next sandbox_test overwrites the live copy")
+    return "; ".join(lines)
+
+
 # ---------------------------------------------------------------- wsb generation
 
 def _esc(path: Path) -> str:
@@ -171,7 +257,7 @@ def generate_wsb(workspace_root: Path, toolkit: Path, logs: Path) -> str:
         "<Configuration>\n"
         f"  <Networking>{cfg.get('networking', 'Enable')}</Networking>\n"
         f"  <MemoryInMB>{int(cfg.get('memory_mb') or 8192)}</MemoryInMB>\n"
-        f"  <vGPU>{cfg.get('vgpu', 'Default')}</vGPU>\n"
+        f"  <vGPU>{_xml_escape(effective_vgpu())}</vGPU>\n"
         f"  <MappedFolders>\n{mapped}  </MappedFolders>\n"
         f"  <LogonCommand>\n    <Command>{logon}</Command>\n"
         f"  </LogonCommand>\n"
@@ -276,6 +362,14 @@ while ($true) {{
 # "dir": Path, "logs": Path, "workspace": str, "adopted": bool}
 _SESSION: dict | None = None
 _lock = threading.Lock()
+# Workspace of the last started session, kept across a crash-clear so the
+# one-shot auto reboot (issue #27) knows what to restart.
+_LAST_WORKSPACE: str | None = None
+
+
+def _set_last_workspace(workspace: str | None) -> None:
+    global _LAST_WORKSPACE
+    _LAST_WORKSPACE = workspace
 
 
 def _alive() -> bool:
@@ -378,52 +472,66 @@ def start_sync(workspace: str) -> dict:
     if _alive():
         return _session_info("sandbox already running")
 
-    sdir = session_dir(workspace)
-    from backend.agent.tools import workspace_root
+    # Booting (or adopting) mutates the shared session; serialize it the
+    # same way commands are. A concurrent boot keeps the second caller
+    # waiting only for busy_wait_seconds before a busy error.
+    wait = _busy_wait_seconds()
+    if not _lock.acquire(timeout=wait):
+        return {"error": _BUSY_ERROR.format(wait=wait), "busy": True}
+    try:
+        if _alive():
+            return _session_info("sandbox already running")
 
-    ws_root = workspace_root(workspace)
-    wsb, _boot, logs = _write_session_files(sdir, ws_root)
+        sdir = session_dir(workspace)
+        from backend.agent.tools import workspace_root
 
-    # A sandbox left running from a previous app session: adopt it only if
-    # its bootstrap answers a nonce handshake on OUR mapped dir (proving
-    # it watches this session's files). Otherwise refuse a second VM.
-    if _sandbox_pids():
-        if _try_adopt(logs):
-            _SESSION = {"proc": None, "pid": None, "dir": sdir, "logs": logs,
-                        "workspace": workspace, "adopted": True}
-            return _session_info("re-attached to the running sandbox")
-        return {
-            "error": "a Windows Sandbox is already running but is not "
-                     "answering yaah's command channel (it maps a different "
-                     "workspace, or was started by hand). Close it and call "
-                     "sandbox_test again."
-        }
+        ws_root = workspace_root(workspace)
+        wsb, _boot, logs = _write_session_files(sdir, ws_root)
 
-    proc = _spawn(exe, wsb, logs)
-    _SESSION = {"proc": proc, "pid": proc.pid, "dir": sdir, "logs": logs,
-                "workspace": workspace, "adopted": False}
+        # A sandbox left running from a previous app session: adopt it only if
+        # its bootstrap answers a nonce handshake on OUR mapped dir (proving
+        # it watches this session's files). Otherwise refuse a second VM.
+        if _sandbox_pids():
+            if _try_adopt(logs):
+                _SESSION = {"proc": None, "pid": None, "dir": sdir, "logs": logs,
+                            "workspace": workspace, "adopted": True}
+                _set_last_workspace(workspace)
+                return _session_info("re-attached to the running sandbox")
+            return {
+                "error": "a Windows Sandbox is already running but is not "
+                         "answering yaah's command channel (it maps a different "
+                         "workspace, or was started by hand). Close it and call "
+                         "sandbox_test again."
+            }
 
-    deadline = time.time() + max(15, int(cfg.get("startup_timeout") or 180))
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            _SESSION = None
-            return {"error": f"Windows Sandbox exited during startup "
-                             f"(exit code {proc.poll()}); check the "
-                             f"Windows Sandbox feature is fully enabled"}
-        init = logs / "init.log"
-        if init.exists():
-            try:
-                if "yaah-sandbox-ready" in init.read_text(
-                        encoding="utf-8", errors="replace"):
-                    return _session_info()
-            except OSError:
-                pass
-        time.sleep(POLL_INTERVAL)
-    # Leave the VM alone (it may still be booting for the user); the next
-    # sandbox_test/sandbox_status call re-checks and can adopt it.
-    return {"error": f"the sandbox did not signal readiness within "
-                     f"{int(cfg.get('startup_timeout') or 180)}s (first "
-                     f"boot can be slow); try sandbox_status in a moment"}
+        proc = _spawn(exe, wsb, logs)
+        _SESSION = {"proc": proc, "pid": proc.pid, "dir": sdir, "logs": logs,
+                    "workspace": workspace, "adopted": False}
+        _set_last_workspace(workspace)
+
+        deadline = time.time() + max(15, int(cfg.get("startup_timeout") or 180))
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                _SESSION = None
+                return {"error": f"Windows Sandbox exited during startup "
+                                 f"(exit code {proc.poll()}); check the "
+                                 f"Windows Sandbox feature is fully enabled"}
+            init = logs / "init.log"
+            if init.exists():
+                try:
+                    if "yaah-sandbox-ready" in init.read_text(
+                            encoding="utf-8", errors="replace"):
+                        return _session_info()
+                except OSError:
+                    pass
+            time.sleep(POLL_INTERVAL)
+        # Leave the VM alone (it may still be booting for the user); the next
+        # sandbox_test/sandbox_status call re-checks and can adopt it.
+        return {"error": f"the sandbox did not signal readiness within "
+                         f"{int(cfg.get('startup_timeout') or 180)}s (first "
+                         f"boot can be slow); try sandbox_status in a moment"}
+    finally:
+        _lock.release()
 
 
 def _try_adopt(logs: Path) -> bool:
@@ -482,15 +590,95 @@ def _session_info(note: str | None = None) -> dict:
     return info
 
 
-def run_sync(command: str, timeout: int) -> dict:
-    """Execute one PowerShell command inside the live sandbox. Blocking."""
+# Crash-classified failures (issue #27): the VM dies silently mid-session
+# (0x80072746 / WSAECONNRESET on the host's RDP/HCS channel) and the next
+# command must get a specific, actionable error — not a generic "dead".
+_CRASH_CLOSED = ("error", "the sandbox VM crashed mid-session (0x80072746-class: "
+                 "the host-sandbox connection was forcibly closed). VM state is "
+                 "lost; toolkit and workspace writes persist. A fresh sandbox "
+                 "boot was attempted — call sandbox_test again if it did not "
+                 "come up.")
+_CRASH_DEAD = ("error", "no acknowledgement from the sandbox runner and the VM "
+               "process is gone — the sandbox crashed mid-session (0x80072746-"
+               "class). A fresh sandbox boot was attempted — call sandbox_test "
+               "again if it did not come up.")
+
+
+def _proc_died_during_run() -> bool:
+    """The Popen we own exited while a command was outstanding. An adopted
+    session (no Popen) cannot be checked this way — PID liveness there is
+    too expensive per poll."""
+    return bool(_SESSION and _SESSION.get("proc") is not None
+                and _SESSION["proc"].poll() is not None)
+
+
+def _session_vm_gone(session: dict) -> bool:
+    """True when the session's VM process has vanished (crash class)."""
+    if not session:
+        return False
+    proc = session.get("proc")
+    if proc is not None:
+        return proc.poll() is not None
+    pid = session.get("pid")
+    return bool(pid) and pid not in _sandbox_pids()
+
+
+def _crash_result(logs: Path | None, message: str) -> dict:
+    """Crash-classified error with a best-effort diagnostics snapshot."""
+    result: dict = {"error": message, "crashed": True}
+    if logs is not None:
+        diag = _snapshot_crash_diagnostics(logs)
+        if diag:
+            result["crash_diagnostics"] = diag
+    return result
+
+
+def _busy_wait_seconds() -> float:
+    """How long a second caller waits for the sandbox before giving up with
+    a busy error (sandbox.busy_wait_seconds; clamped 0-120)."""
+    raw = _cfg().get("busy_wait_seconds", BUSY_WAIT_DEFAULT)
+    try:
+        return max(0, min(120, float(raw)))
+    except (TypeError, ValueError):
+        return float(BUSY_WAIT_DEFAULT)
+
+
+_BUSY_ERROR = (
+    "the sandbox is single-instance and busy with a command from another "
+    "conversation (waited {wait:.0f}s). Do NOT call sandbox_test — retry "
+    "sandbox_run in a little while, or continue with work that does not "
+    "need the sandbox."
+)
+
+
+def _run_command(command: str, timeout: int) -> dict:
+    """One command round-trip; no reboot logic (run_sync wraps it).
+
+    The whole round-trip runs under the sandbox mutex (issue #27): the VM
+    is single-instance and its answer channel is shared (one output.txt,
+    one runtime.json), so concurrent commands from multiple chats would
+    read each other's output. A second caller waits up to
+    sandbox.busy_wait_seconds, then gets a busy error instead of silently
+    interleaving."""
     global _SESSION
     if not _alive():
-        if _SESSION:
-            _SESSION = None
+        session = _SESSION
+        _SESSION = None
+        if session and _session_vm_gone(session):
+            return _crash_result(session.get("logs"), _CRASH_CLOSED[1])
         return {"error": "no sandbox session; call sandbox_test first"}
     logs: Path = _SESSION["logs"]
-    with _lock:
+    wait = _busy_wait_seconds()
+    if not _lock.acquire(timeout=wait):
+        return {"error": _BUSY_ERROR.format(wait=wait), "busy": True}
+    try:
+        # The session may have ended (crash, stop) while we waited.
+        if not _alive():
+            session = _SESSION
+            _SESSION = None
+            if session and _session_vm_gone(session):
+                return _crash_result(session.get("logs"), _CRASH_CLOSED[1])
+            return {"error": "no sandbox session; call sandbox_test first"}
         n = _next_seq(logs)
         cmd_file = logs / f"cmd.{n}.ps1"
         done_file = logs / f"done.{n}"
@@ -499,23 +687,30 @@ def run_sync(command: str, timeout: int) -> dict:
             json.dumps({"command_timeout_seconds": timeout}), encoding="utf-8")
         cmd_file.write_text(command, encoding="utf-8")
 
-    # The sandbox enforces the deadline itself and still reports partial
-    # output; the host waits out that timeout plus a grace window before
-    # declaring the channel dead.
-    deadline = time.time() + timeout + 30
-    while time.time() < deadline:
-        if done_file.exists():
-            break
-        if _SESSION and _SESSION.get("proc") is not None \
-                and _SESSION["proc"].poll() is not None:
+        # The sandbox enforces the deadline itself and still reports partial
+        # output; the host waits out that timeout plus a grace window before
+        # declaring the channel dead.
+        deadline = time.time() + timeout + 30
+        while time.time() < deadline:
+            if done_file.exists():
+                break
+            if _proc_died_during_run():
+                _SESSION = None
+                return _crash_result(logs, _CRASH_CLOSED[1])
+            time.sleep(POLL_INTERVAL)
+        else:
+            # Timeout with no ack. Classify: a VM still in the process list is
+            # a hung command channel; a vanished VM is the crash class. Either
+            # way the session is over — but only the crash gets diagnostics.
+            crashed = _session_vm_gone(_SESSION or {})
             _SESSION = None
-            return {"error": "the sandbox was closed while the command ran"}
-        time.sleep(POLL_INTERVAL)
-    else:
-        _SESSION = None
-        return {"error": "no acknowledgement from the sandbox runner; the "
-                         "session looks dead — call sandbox_test to start "
-                         "a fresh sandbox"}
+            if crashed:
+                return _crash_result(logs, _CRASH_DEAD[1])
+            return {"error": "no acknowledgement from the sandbox runner; the "
+                             "session looks dead — call sandbox_test to start "
+                             "a fresh sandbox"}
+    finally:
+        _lock.release()
 
     meta: dict = {}
     try:
@@ -541,6 +736,39 @@ def run_sync(command: str, timeout: int) -> dict:
     }
 
 
+def run_sync(command: str, timeout: int) -> dict:
+    """Execute one PowerShell command inside the live sandbox. Blocking.
+
+    On a detected mid-session VM death (issue #27 crash class), snapshot
+    crash diagnostics and — once — transparently reboot via start_sync
+    (state loss is acceptable for a disposable VM) instead of leaving the
+    model with a dead session and a generic error."""
+    global _SESSION
+    result = _run_command(command, timeout)
+    if not result.get("crashed"):
+        return result
+    diag = result.pop("crash_diagnostics", None)
+    if diag:
+        result["crash_diagnostics"] = diag
+    if not _cfg().get("auto_reboot_on_crash", True):
+        return result
+    workspace = None
+    # _run_command cleared _SESSION on every crash path; recover the
+    # workspace root from the session dir naming is unreliable, so the
+    # reboot uses the workspace captured at start time — saved on the
+    # session before the crash cleared it, mirrored here.
+    workspace = _LAST_WORKSPACE
+    if not workspace:
+        return result
+    reboot = start_sync(workspace)
+    if "error" in reboot:
+        result["reboot"] = f"automatic reboot failed: {reboot['error']}"
+    else:
+        result["reboot"] = "sandbox rebooted automatically; run the " \
+                           "command again (in-VM state was lost)"
+    return result
+
+
 def status_sync() -> dict:
     cfg = _cfg()
     exe = sandbox_exe()
@@ -560,30 +788,44 @@ def stop_sync() -> dict:
     if not _alive():
         _SESSION = None
         return {"stopped": False, "note": "no live sandbox session"}
-    proc = _SESSION.get("proc")
-    pid = _SESSION.get("pid")
+    # Stopping mid-command would strand another chat's waiter on a session
+    # that vanishes under it; take the mutex (bounded) so stop lands
+    # between commands. A long wait means a command is mid-flight.
+    wait = _busy_wait_seconds()
+    if not _lock.acquire(timeout=wait):
+        return {"stopped": False,
+                "note": "the sandbox is busy with a command from another "
+                        "conversation; try sandbox_stop again in a moment"}
     try:
-        if proc is not None:
-            if os.name == "nt":
+        if not _alive():
+            _SESSION = None
+            return {"stopped": False, "note": "no live sandbox session"}
+        proc = _SESSION.get("proc")
+        pid = _SESSION.get("pid")
+        try:
+            if proc is not None:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True, creationflags=_CREATE_NO_WINDOW,
+                        timeout=15,
+                    )
+                else:
+                    proc.terminate()
+            elif pid:
                 subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
                     capture_output=True, creationflags=_CREATE_NO_WINDOW,
                     timeout=15,
                 )
-            else:
-                proc.terminate()
-        elif pid:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True, creationflags=_CREATE_NO_WINDOW,
-                timeout=15,
-            )
-    except Exception as e:  # noqa: BLE001 — PID may already be gone
+        except Exception as e:  # noqa: BLE001 — PID may already be gone
+            _SESSION = None
+            return {"stopped": False, "note": f"stop attempt failed: {e}"}
         _SESSION = None
-        return {"stopped": False, "note": f"stop attempt failed: {e}"}
-    _SESSION = None
-    return {"stopped": True, "note": "sandbox disposed; toolkit and "
-                                     "workspace writes persist on the host"}
+        return {"stopped": True, "note": "sandbox disposed; toolkit and "
+                                         "workspace writes persist on the host"}
+    finally:
+        _lock.release()
 
 
 # ---------------------------------------------------------------- executors

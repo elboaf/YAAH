@@ -5,6 +5,8 @@ risk classes and the run protocol are exercised through fakes (YAAH_SANDBOX_EXE
 override + fake spawn), so the suite is green on Linux CI too.
 """
 import asyncio
+import threading
+import time
 import json
 import re
 from pathlib import Path
@@ -24,6 +26,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(sb, "_base_dir", lambda: tmp_path / "sb")
     monkeypatch.setattr(sb, "toolkit_dir", lambda: tmp_path / "toolkit")
     monkeypatch.setattr(sb, "_SESSION", None)
+    # A real WindowsSandbox.exe may be live on the dev host (issue #27's
+    # crash tests ran one); the adoption branch would hijack these tests,
+    # so default to "no VMs running". Tests exercising adoption override.
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
     return tmp_path
 
 
@@ -571,3 +577,228 @@ def test_system_prompt_offers_sandbox_tools_locally(isolated, monkeypatch):
     assert "sandbox_test" in prompt
     assert "# Windows Sandbox (the default place to run things)" in prompt
     assert "persistent dev toolkit" in prompt
+
+
+# ------------------------------------------------- mid-session crash (issue #27)
+
+
+def _start_session(isolated, monkeypatch, proc):
+    def fake_spawn(exe, wsb, logs_path):
+        (logs_path / "init.log").write_text("yaah-sandbox-ready",
+                                            encoding="utf-8")
+        return proc
+
+    monkeypatch.setattr(sb, "_spawn", fake_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
+    sb.start_sync("C:\\proj")
+
+
+def test_run_detects_vm_death_as_crash_class(isolated, monkeypatch):
+    """Popen exits while a command is outstanding: the error must name the
+    crash class (0x80072746), not the old generic closed-channel text."""
+    proc = _FakeProc()
+    _start_session(isolated, monkeypatch, proc)
+    proc._rc = 1  # the VM dies right after start
+    result = sb.run_sync("Get-Date", 10)
+    assert result.get("crashed") is True
+    assert "0x80072746" in result["error"]
+
+
+def test_run_dead_vm_ack_timeout_is_crash_class(isolated, monkeypatch):
+    """Adopted session (no Popen): the VM's PID vanishes from the process
+    list while a command is outstanding — crash classification plus a
+    diagnostics snapshot in the session logs dir."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {}})
+    logs = isolated / "sb" / "ws-abc" / "logs"
+    _start_session(isolated, monkeypatch, _FakeProc())
+    (logs / "init.log").write_text("crashed boot", encoding="utf-8")
+    # Swap to an adopted-style session: liveness = PID in the process list.
+    pids = [999]
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: pids)
+    monkeypatch.setattr(sb, "_SESSION", {
+        "proc": None, "pid": 999, "dir": logs.parent, "logs": logs,
+        "workspace": "C:\\proj", "adopted": True})
+    sb._set_last_workspace("C:\\proj")
+    pids.clear()  # the VM dies before the command is written
+    result = sb.run_sync("Get-Date", 1)
+    assert result.get("crashed") is True
+    assert "0x80072746" in result["error"]
+    assert "crash_diagnostics" in result
+    snaps = list(logs.glob("crash-*/init.log"))
+    assert snaps and snaps[0].read_text(encoding="utf-8") == "crashed boot"
+
+
+def test_run_hung_vm_ack_timeout_is_not_crash_class(isolated, monkeypatch):
+    """No ack but the VM still listed: the classic hung-channel error (a
+    reboot would not help, and must not fire)."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {}})
+    _start_session(isolated, monkeypatch, _FakeProc())
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [999])  # VM alive
+    result = sb.run_sync("Start-Sleep 999", 1)
+    assert "crashed" not in result
+    assert "session looks dead" in result["error"]
+
+
+def test_crash_triggers_one_shot_auto_reboot(isolated, monkeypatch):
+    """On a detected crash, run_sync transparently re-runs start_sync once
+    (state loss is fine for a disposable VM) and reports the reboot."""
+    proc = _FakeProc()
+    _start_session(isolated, monkeypatch, proc)
+    proc._rc = 1
+    booted = []
+
+    def fake_start(workspace):
+        booted.append(workspace)
+        return {"status": "running"}
+
+    monkeypatch.setattr(sb, "start_sync", fake_start)
+    result = sb.run_sync("Get-Date", 10)
+    assert booted == ["C:\\proj"]
+    assert "rebooted automatically" in result["reboot"]
+
+
+def test_auto_reboot_can_be_disabled(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"auto_reboot_on_crash": False}})
+    proc = _FakeProc()
+    _start_session(isolated, monkeypatch, proc)
+    proc._rc = 1
+
+    def boom(workspace):
+        raise AssertionError("reboot must not fire when disabled")
+
+    monkeypatch.setattr(sb, "start_sync", boom)
+    result = sb.run_sync("Get-Date", 10)
+    assert result.get("crashed") is True
+    assert "reboot" not in result
+
+
+def test_vgpu_auto_disables_on_multi_gpu_host(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"vgpu": "auto"}})
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 3)
+    assert sb.effective_vgpu() == "Disable"
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 1)
+    assert sb.effective_vgpu() == "Default"
+
+
+def test_vgpu_explicit_setting_wins_over_auto(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"vgpu": "Disable"}})
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 1)
+    assert sb.effective_vgpu() == "Disable"
+
+
+def test_wsb_uses_effective_vgpu(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"vgpu": "auto"}})
+    monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 2)
+    wsb = sb.generate_wsb(Path(r"C:\proj"), Path(r"C:\tk"), Path(r"C:\logs"))
+    assert "<vGPU>Disable</vGPU>" in wsb
+
+
+def _session_up(isolated, monkeypatch, cfg=None):
+    """Start a fake-VM session; returns the logs dir."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": cfg or {}})
+
+    def fake_spawn(exe, wsb, logs_path):
+        (logs_path / "init.log").write_text("yaah-sandbox-ready",
+                                            encoding="utf-8")
+        return _FakeProc()
+
+    monkeypatch.setattr(sb, "_spawn", fake_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    start = sb.start_sync("C:\proj")
+    assert start["status"] == "running"
+    return isolated / "sb" / "ws-abc" / "logs"
+
+
+def test_concurrent_run_gets_busy_error_not_interleaving(isolated, monkeypatch):
+    """Issue #27 mutex: while one chat's command is in flight (mutex held),
+    a second chat's sandbox_run waits busy_wait_seconds and then fails with
+    a busy error — it must never interleave on the shared output channel."""
+    logs = _session_up(isolated, monkeypatch, {"busy_wait_seconds": 0})
+
+    # Simulate chat A's command mid-flight: hold the mutex like _run_command
+    # does for the whole round-trip.
+    assert sb._lock.acquire(timeout=1)
+    try:
+        result = sb.run_sync("echo b", 5)
+        assert result.get("busy") is True
+        assert "busy" in result["error"]
+        assert "sandbox_test" in result["error"]  # anti-pattern warning
+        # The refused command never reached the shared channel.
+        assert not (logs / "cmd.1.ps1").exists()
+    finally:
+        sb._lock.release()
+
+    # Once the mutex is free, chat B's command goes through normally.
+    _write_done(logs, 1, output="ok")
+    result = sb.run_sync("echo b", 5)
+    assert result.get("exit_code") == 0
+    assert (logs / "cmd.1.ps1").exists()
+
+
+def test_busy_wait_zero_means_immediate_refusal(isolated, monkeypatch):
+    _session_up(isolated, monkeypatch, {"busy_wait_seconds": 0})
+    assert sb._lock.acquire(timeout=1)
+    try:
+        t0 = time.monotonic()
+        result = sb.run_sync("echo b", 5)
+        assert time.monotonic() - t0 < 1  # no long block on the busy path
+    finally:
+        sb._lock.release()
+    assert result.get("busy") is True
+
+
+def test_stop_while_busy_defers_instead_of_stranding(isolated, monkeypatch):
+    """sandbox_stop during another chat's command doesn't kill the session
+    out from under the waiter; it reports busy and leaves the VM alone."""
+    logs = _session_up(isolated, monkeypatch, {"busy_wait_seconds": 0})
+    assert sb._lock.acquire(timeout=1)
+    try:
+        result = sb.stop_sync()
+        assert result["stopped"] is False
+        assert "busy" in result["note"]
+        assert sb._alive()  # session untouched
+    finally:
+        sb._lock.release()
+
+
+def test_start_sync_while_booting_reports_busy(isolated, monkeypatch):
+    """Two chats calling sandbox_test at once: the loser gets the busy
+    error, not a second spawned VM."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"busy_wait_seconds": 0}})
+    spawned = []
+
+    def slow_spawn(exe, wsb, logs_path):
+        spawned.append(wsb)
+        time.sleep(0.3)  # boot in progress
+        (logs_path / "init.log").write_text("yaah-sandbox-ready",
+                                            encoding="utf-8")
+        return _FakeProc()
+
+    monkeypatch.setattr(sb, "_spawn", slow_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
+
+    holder = threading.Thread(target=sb.start_sync, args=(r"C:proj",))
+    holder.start()
+    time.sleep(0.1)  # let the holder take the mutex
+    try:
+        second = sb.start_sync("C:\proj")
+        assert second.get("busy") is True
+    finally:
+        holder.join()
+    assert len(spawned) == 1  # never a second VM

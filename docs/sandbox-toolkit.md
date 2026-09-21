@@ -86,9 +86,22 @@ with existing toolkit files. The toolkit is a cache, not a trust boundary.
 | `toolkit_dir`     | `~/.yaah/toolkit`   | Persistent toolkit mounted R/W into every VM    |
 | `networking`      | `"Enable"`          | `.wsb` networking (`Enable` / `Disable`)        |
 | `memory_mb`       | `8192`              | VM memory                                       |
-| `vgpu`            | `"Default"`         | `.wsb` vGPU setting                             |
+| `vgpu`            | `"auto"`            | `.wsb` vGPU setting; `auto` = `Disable` on multi-GPU hosts (the 0x80072746 crash class, microsoft/Windows-Sandbox#64), `Default` otherwise; explicit `Default`/`Disable` wins |
 | `map_workspace`   | `true`              | Mount the workspace R/W at `Desktop\ws`         |
 | `startup_timeout` | `180`               | Seconds `sandbox_test` waits for first boot     |
+| `auto_reboot_on_crash` | `true`         | One transparent `sandbox_test` reboot when the VM dies mid-session (0x80072746-class); in-VM state is lost, toolkit/workspace writes persist |
+
+## Mid-session VM crash (0x80072746)
+
+Windows Sandbox can die silently mid-session on some hosts (notably
+multi-GPU machines with vGPU enabled): the host-sandbox connection is
+forcibly closed and every subsequent `sandbox_run` would fail generically.
+YAAH classifies this failure: the error names the crash class
+(`0x80072746`), a diagnostics snapshot (`init.log` + last VmSwitch events)
+is copied into the session `logs/crash-<timestamp>/` dir before the next
+boot overwrites it, and — by default — one transparent reboot is attempted
+via `sandbox_test`. The result carries `crashed: true` and a `reboot` note;
+run the command again after a successful reboot.
 
 ## When the Windows feature is missing
 

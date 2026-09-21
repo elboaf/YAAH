@@ -105,7 +105,10 @@ DEFAULTS = {
         # .wsb knobs.
         "networking": "Enable",
         "memory_mb": 8192,
-        "vgpu": "Default",
+        # "auto" disables vGPU on multi-GPU hosts (0x80072746 crash class).
+        "vgpu": "auto",
+        # Transparent one-shot reboot when the VM dies mid-session.
+        "auto_reboot_on_crash": True,
         # Map the workspace into the sandbox (R/W) at Desktop\ws.
         "map_workspace": True,
         # How long sandbox_test waits for the first boot to signal ready.
