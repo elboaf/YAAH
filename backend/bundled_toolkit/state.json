@@ -1,0 +1,16 @@
+{
+  "tools": {
+    "vm-capture": {
+      "version": "1.0",
+      "kind": "script",
+      "check": "Test-Path '<toolkit>\\bin\\vm-capture.ps1'",
+      "installed_at": "bundled"
+    },
+    "git-shim": {
+      "version": "1.0",
+      "kind": "script",
+      "check": "Test-Path '<toolkit>\\bin\\git.cmd'",
+      "installed_at": "bundled"
+    }
+  }
+}

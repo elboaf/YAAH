@@ -148,7 +148,11 @@ TOOLS_SCHEMA = [
                 "instead (e.g. Start-Process with redirect, or nohup with "
                 "stdout/stderr redirected to a file). For a test suite longer "
                 "than the timeout cap, run it in chunks (per directory or "
-                "file) instead of one monolithic run."
+                "file) instead of one monolithic run. git must never open its "
+                "editor: pass -m '<message>' to git commit and use "
+                "GIT_EDITOR=true for git rebase --continue / tag -a / "
+                "commit --amend - an interactive editor blocks the tool "
+                "until it times out."
             ),
             "parameters": {
                 "type": "object",
@@ -180,7 +184,11 @@ POWERSHELL_SCHEMA = {
             "time out. Never shell-background a long-running process "
             "(trailing &): the child outlives the tool call, keeps the "
             "output pipe open, and wedges the session. Servers and watchers "
-            "need Start-Process (optionally -WindowStyle Hidden) instead."
+            "need Start-Process (optionally -WindowStyle Hidden) instead. "
+            "git must never open its editor: pass -m '<message>' to git "
+            "commit and use GIT_EDITOR=true for git rebase --continue / "
+            "commit --amend - an interactive editor blocks the tool "
+            "until it times out."
         ),
         "parameters": {
             "type": "object",
@@ -263,7 +271,12 @@ TOOLS_SCHEMA += [
                 "Download an image from a URL and attach it so you can see "
                 "it (requires a vision-capable model). Use after "
                 "web_search or web_fetch — web_fetch lists the page's "
-                "image URLs under 'IMAGES ON PAGE'."
+                "image URLs under 'IMAGES ON PAGE'. Also accepts LOCAL "
+                "images: a host file path, a file:/// URL, or a path "
+                "relative to the workspace root - e.g. a VM screenshot "
+                "written to the toolkit mount by sandbox_run "
+                "(~/.yaah/toolkit/vm-screen.png) or any chart/render "
+                "produced in the workspace."
             ),
             "parameters": {
                 "type": "object",

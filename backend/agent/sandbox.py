@@ -30,7 +30,9 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -106,6 +108,78 @@ def toolkit_dir() -> Path:
     raw = str(_cfg().get("toolkit_dir") or "").strip()
     p = Path(raw).expanduser() if raw else Path.home() / ".yaah" / "toolkit"
     return p
+
+
+def bundled_toolkit_source() -> Path | None:
+    """Directory holding the toolkit baseline shipped with the app
+    (backend/bundled_toolkit in the repo; <exe>/_up_/backend/
+    bundled_toolkit in the installed layout — same _up_ convention as
+    bundled_skills, see skills.bundled_source_dir)."""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).parent
+        candidates += [exe / "_up_" / "backend" / "bundled_toolkit",
+                       exe / "bundled_toolkit",
+                       Path.cwd() / "backend" / "bundled_toolkit"]
+    candidates.append(Path(__file__).parent.parent / "bundled_toolkit")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def ensure_toolkit_seed() -> list[str]:
+    """Seed the toolkit with yaah's shipped baseline (helper scripts,
+    gitconfig, README, state manifest) so a FRESH INSTALL works out of the
+    box — before the first VM ever boots. Copy-once semantics: an existing
+    file is never overwritten, so tools the user (or a sandbox session)
+    installed into the toolkit survive app upgrades. state.json is merged
+    instead: bundled entries are added, user-added entries are kept.
+    Returns the list of files written (empty when everything was present)."""
+    written: list[str] = []
+    src = bundled_toolkit_source()
+    if src is None:
+        return written
+    tk = toolkit_dir()
+
+    def _copy(rel: str) -> None:
+        s, t = src / rel, tk / rel
+        if t.exists():
+            return
+        try:
+            t.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(s, t)
+            written.append(rel)
+        except OSError:
+            pass  # best-effort; the VM is still perfectly usable
+
+    try:
+        for p in sorted(src.rglob("*")):
+            if p.is_file():
+                _copy(p.relative_to(src).as_posix())
+    except OSError:
+        return written
+
+    # Merge the bundled state.json entries into an existing toolkit manifest
+    # (copy-once above skips it when present, but user tools must survive).
+    state = tk / "state.json"
+    try:
+        bundled = json.loads((src / "state.json").read_text(encoding="utf-8"))
+        current = (json.loads(state.read_text(encoding="utf-8"))
+                   if state.exists() else {})
+        tools = dict(current.get("tools") or {})
+        for name, meta in (bundled.get("tools") or {}).items():
+            if name not in tools:
+                tools[name] = meta
+        if tools != (current.get("tools") or {}):
+            current["tools"] = tools
+            state.write_text(
+                json.dumps(current, indent=2) + "\n", encoding="utf-8")
+            if "state.json" not in written:
+                written.append("state.json")
+    except (OSError, ValueError):
+        pass
+    return written
 
 
 def _base_dir() -> Path:
@@ -276,6 +350,13 @@ $tk  = '{SB_TOOLKIT}'
 $ws  = '{SB_WS}'
 $processed = @{{}}
 $env:Path = "$tk;$tk\\bin;$tk\\Scripts;$tk\\node_modules\\.bin;$env:Path"
+# git must never open an interactive editor inside the VM: the command
+# channel would hang until the host-side timeout (an editor-less `git
+# commit` must fail fast with 'empty message' instead). true.exe ships
+# with Git for Windows; exit 0 also satisfies --amend and rebase --continue.
+$env:GIT_EDITOR = 'C:\\Program Files\\Git\\usr\\bin\\true.exe'
+$env:EDITOR = 'C:\\Program Files\\Git\\usr\\bin\\true.exe'
+$env:VISUAL = 'C:\\Program Files\\Git\\usr\\bin\\true.exe'
 $cwd = $dir
 if (Test-Path $ws) {{ $cwd = $ws }}
 Set-Location $cwd
@@ -439,6 +520,11 @@ def _next_seq(logs: Path) -> int:
 def _write_session_files(sdir: Path, workspace_root: Path) -> tuple[Path, Path, Path]:
     toolkit = toolkit_dir()
     toolkit.mkdir(parents=True, exist_ok=True)
+    # Baseline seeding runs on EVERY boot (not just the first): a fresh
+    # install gets its toolkit baseline here, and an upgraded app ships new
+    # baseline files the same way. Copy-once per file — user-modified or
+    # session-installed content is never overwritten.
+    ensure_toolkit_seed()
     logs = sdir / "logs"
     _clean_logs(logs)
     (sdir / "sandbox.wsb").write_text(
@@ -971,9 +1057,19 @@ def prompt_section() -> str:
         "the sandbox.\n"
         "- The VM is a CLEAN WINDOWS IMAGE: git, python, node and other "
         "dev tools are NOT preinstalled — expect 'is not recognized as "
-        "the name of a cmdlet' on first use. Install what you need into "
-        "the toolkit (see above) rather than concluding the task cannot "
-        "be verified.\n"
+        "the name of a cmdlet' on first use. BEFORE downloading anything, "
+        "read toolkit\\state.json (one round-trip): it lists what the "
+        "toolkit already contains and how to check each tool. Install what "
+        "you need into the toolkit (see above) rather than concluding the "
+        "task cannot be verified, and add what you installed to "
+        "state.json so future sessions skip the re-download.\n"
+        "- Something look wedged (a command produced nothing / timed out "
+        "with no output)? The VM can screenshot ITSELF: run "
+        "toolkit\\bin\\vm-capture.ps1 via sandbox_run and view_image the "
+        "PNG it writes (host side: ~/.yaah/toolkit/vm-screen.png). A modal "
+        "dialog left by a failed AHK/installer run is invisible to "
+        "sandbox_run output; vm-capture makes it visible in one "
+        "round-trip, then kill the offending window/process by title.\n"
         "- NEVER run interactive installers unattended — they stall the "
         "session on a permission dialog. Use silent flags: python "
         "installer '/quiet InstallAllUsers=1 PrependPath=1', 'msiexec "
@@ -995,6 +1091,13 @@ def prompt_section() -> str:
         "write toolkit\\gitconfig containing '[safe]' + 'directory = *' "
         "and point GIT_CONFIG_GLOBAL at it (a toolkit\\bin\\git.cmd shim "
         "can set the variable before invoking the real git.exe).\n"
+        "- git must never open its interactive editor in the VM (it "
+        "hangs the command channel until the timeout): pass -m "
+        "'<message>' to git commit and set GIT_EDITOR=true for "
+        "editor-requiring commands (rebase --continue, tag -a, "
+        "commit --amend). The bootstrap points GIT_EDITOR/EDITOR/"
+        "VISUAL at a no-op, so an editor-less commit fails fast with "
+        "'empty message' instead of hanging.\n"
         "- GUI automation inside the VM: AutoHotkey v2 is the in-VM "
         "input layer — its input never touches the host (the VM has its "
         "own input session; the host user is unaffected). Install once: "
@@ -1078,6 +1181,10 @@ SANDBOX_TOOLS_SCHEMA = [
                 "cwd) and the persistent dev toolkit at ...\\Desktop\\"
                 "toolkit (on PATH; installs there persist to the host and "
                 "every future sandbox). The VM is a CLEAN WINDOWS IMAGE: "
+                "check toolkit\\state.json FIRST - it lists the tools "
+                "already present (plus bundled helpers like "
+                "toolkit\\bin\\vm-capture.ps1, which screenshots the VM "
+                "itself when a command wedges), "
                 "git/python/node are not preinstalled — on 'is not "
                 "recognized as the name of a cmdlet', install the tool "
                 "into the toolkit (PATH inside the VM: toolkit, "
