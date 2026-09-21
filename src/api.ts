@@ -765,6 +765,7 @@ export interface AgentEvent {
     | 'sub_agent_spawned'
     | 'sub_agent_progress'
     | 'sub_agent_done'
+    | 'model_call'
     | 'done'
     | 'error'
     | 'stopped'
@@ -778,6 +779,8 @@ export interface AgentEvent {
   chunk?: string
   /** Sub-agent identity (sub_agent_* events). */
   agent_id?: number
+  /** Provider + model a pending chat call is waiting on (model_call, #43). */
+  provider?: string
   agent_type?: string
   prompt?: string
   status?: string
@@ -786,6 +789,9 @@ export interface AgentEvent {
   kind?: string
   /** Exact context size (usage.prompt_tokens) of the turn's final model call. */
   usage_tokens?: number
+  /** The provider+model this turn's chat call is waiting on (model_call).
+   *  Unset between the response arriving and the next call of the turn. */
+  modelCall?: { provider: string; model: string; startedAt: number }
   model?: string
 }
 
@@ -801,7 +807,12 @@ export async function streamAgentTurn(
   images: string[] = [],
   skills: string[] = [],
   resume = false,
+  /** Fires as soon as the POST is dispatched and each time a model_call
+   *  event arrives — feeds the "waiting for <provider>" elapsed readout,
+   *  which must tick between events, not just on them. */
+  onModelCall?: (mc: { provider: string; model: string; startedAt: number } | null) => void,
 ): Promise<void> {
+  onModelCall?.(null)
   let res: Response
   try {
     res = await fetch(url(`/api/agent/${conversationId}`), {
@@ -829,7 +840,21 @@ export async function streamAgentTurn(
     while ((idx = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, idx).trim()
       buf = buf.slice(idx + 1)
-      if (line) onEvent(JSON.parse(line))
+      if (!line) continue
+      const ev = JSON.parse(line) as AgentEvent
+      if (ev.type === 'model_call') {
+        onModelCall?.({
+          provider: ev.provider ?? '',
+          model: ev.model ?? '',
+          startedAt: Date.now(),
+        })
+      } else if (ev.type !== 'thinking') {
+        // Any other stream activity means the call is no longer pending —
+        // thinking deltas still mean "the call hasn't spoken yet", so the
+        // waiting readout stays up while reasoning streams.
+        onModelCall?.(null)
+      }
+      onEvent(ev)
     }
   }
 }

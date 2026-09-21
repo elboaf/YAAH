@@ -4,6 +4,8 @@ Runs until the model produces a final answer or the step budget is exhausted.
 Emits JSON-line events for the frontend:
   {'type': 'text', 'text': ...}             - assistant text delta
   {'type': 'thinking', 'text': ...}         - model reasoning delta (UI-only)
+  {'type': 'model_call', 'provider', 'model'} - chat call dispatched, awaiting
+                                             first response byte (issue #43)
   {'type': 'tool_start', 'name', 'args'}    - tool execution beginning
   {'type': 'tool_progress', 'call_id', 'chunk'} - live shell output while a tool runs
   {'type': 'tool_result', 'name', 'result'} - tool output
@@ -896,7 +898,17 @@ async def run_agent(
                 async for ev in stream:
                     if cancel_ev.is_set():
                         return
-                    if ev["type"] == "content":
+                    if ev["type"] == "model_call":
+                        # Issue #43: the chat call is dispatched and nothing
+                        # has come back yet — surface who we're waiting on.
+                        yield _ndjson(
+                            {
+                                "type": "model_call",
+                                "provider": ev.get("provider") or "",
+                                "model": ev.get("model") or "",
+                            }
+                        )
+                    elif ev["type"] == "content":
                         acc.append(ev["text"])
                         yield _ndjson({"type": "text", "text": ev["text"]})
                     elif ev["type"] == "thinking":

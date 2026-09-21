@@ -802,6 +802,27 @@ function LiveTelemetry() {
   )
 }
 
+/** The "waiting for <provider>" readout (issue #43): renders in the in-flight
+ *  assistant message while a chat call is pending — no first token, no tool
+ *  output yet — so a silent turn is answerable at a glance. Elapsed ticks on
+ *  the shared 100ms clock; amber past 30s ("still waiting") distinguishes a
+ *  hung/slow provider from a paused run. */
+function ModelCallWaiting() {
+  const mc = useAgent((s) => s.modelCallByConv[s.bufferKey()] ?? null)
+  const now = useNow()
+  if (!mc) return null
+  const ms = Math.max(0, now - mc.startedAt)
+  const slow = ms >= 30_000
+  return (
+    <div className={`my-1 font-mono text-[10px] ${slow ? 'text-amber-400' : 'text-zinc-500'}`}>
+      waiting for {mc.provider || 'provider'}
+      {mc.model ? ` · ${mc.model}` : ''} ·{' '}
+      <span className="tabular-nums">{formatElapsed(ms)}</span>
+      {slow ? ' · still waiting…' : ''}
+    </div>
+  )
+}
+
 /** Collapse a chunk of tool output to one flowing tape line: line endings
  *  become wide separators so the tape never wraps or stacks. */
 function oneLine(s: string): string {
@@ -1180,6 +1201,9 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
       {!msg.content && !msg.toolCalls?.length && (
         <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
       )}
+      {/* Issue #43: live "waiting for <provider> · <elapsed>s" while the
+          chat call is pending (the dots above stop being the whole story). */}
+      {live && <ModelCallWaiting />}
     </>
   )
 
@@ -5961,6 +5985,7 @@ function Composer() {
     finishSubAgent,
     settleSubAgents,
     setStatus,
+    setModelCall,
     setError,
     setConversationId,
     adoptDraft,
@@ -6709,6 +6734,11 @@ function Composer() {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
+    } else if (ev.type === 'model_call') {
+      // Issue #43: a chat call is dispatched and nothing has come back yet.
+      // The waiting readout is driven by streamAgentTurn's onModelCall hook;
+      // this branch only keeps the status dot honest.
+      setStatus(bufKey, 'thinking')
     } else if (ev.type === 'usage') {
       // Exact context size of the turn's final model call, straight from
       // the provider's usage report. Numeric conversation ids only — the
@@ -6865,6 +6895,8 @@ function Composer() {
         ac.signal,
         imageDataUrls,
         invokedSkills,
+        false,
+        (mc) => setModelCall(bufKey, mc),
       )
       if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {
@@ -6930,6 +6962,7 @@ function Composer() {
         [],
         [],
         true,
+        (mc) => setModelCall(bufKey, mc),
       )
       if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {

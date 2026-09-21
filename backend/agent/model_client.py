@@ -5,6 +5,7 @@ Supports both blocking and streaming responses.
 """
 import json
 import logging
+import time
 from typing import AsyncIterator
 
 import httpx
@@ -19,6 +20,38 @@ log = logging.getLogger("yaah.model")
 
 class ModelError(Exception):
     pass
+
+
+class ModelTimeout(ModelError):
+    """The provider never responded within the timeout window (issue #43):
+    rendered as "no response from <provider> after <n>s" instead of a raw
+    httpx error string, so a hung call is distinguishable from any other
+    API failure."""
+
+
+def _provider_from_base(api_base: str) -> str:
+    """A short provider label for UI readouts, derived from the API base."""
+    try:
+        host = api_base.split("//", 1)[-1].split("/", 1)[0].lower()
+    except (AttributeError, IndexError):
+        return api_base or "provider"
+    if "openrouter" in host:
+        return "openrouter"
+    if "openai" in host:
+        return "openai"
+    if "anthropic" in host:
+        return "anthropic"
+    if "ollama" in host or "localhost" in host or "127.0.0.1" in host:
+        return "local"
+    return host or "provider"
+
+
+def _classify_timeout(e: Exception, provider: str, started: float) -> ModelTimeout:
+    elapsed = int(time.monotonic() - started)
+    return ModelTimeout(
+        f"no response from {provider} after {elapsed}s "
+        f"(timeout) — the provider may be hung, offline, or unreachable"
+    )
 
 
 def _build_payload(cfg: dict, tools: list | None, stream: bool) -> dict:
@@ -96,19 +129,27 @@ async def chat(
     headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else {}
 
     if not stream:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(
-                f"{cfg['api_base'].rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
-            if r.status_code != 200:
-                raise ModelError(f"Model API error {r.status_code}: {r.text[:500]}")
-            data = r.json()
-            log.info("model reply: finish=%s tool_calls=%d",
-                     (data.get("choices") or [{}])[0].get("finish_reason"),
-                     len((data.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []))
-            return data
+        started = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                r = await client.post(
+                    f"{cfg['api_base'].rstrip('/')}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+        except httpx.TimeoutException as e:
+            raise _classify_timeout(
+                e,
+                cfg.get("active_provider") or _provider_from_base(cfg["api_base"]),
+                started,
+            ) from e
+        if r.status_code != 200:
+            raise ModelError(f"Model API error {r.status_code}: {r.text[:500]}")
+        data = r.json()
+        log.info("model reply: finish=%s tool_calls=%d",
+                 (data.get("choices") or [{}])[0].get("finish_reason"),
+                 len((data.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []))
+        return data
 
     # The payload already carries the per-call model/effort overrides; the
     # resolved api_base rides along explicitly so a provider::model override
@@ -121,95 +162,106 @@ async def _stream_response(
 ) -> AsyncIterator[dict]:
     """Yield parsed SSE chunks: content deltas, tool_call deltas, and a final
     assembled message. api_base None = resolve from the live config (legacy
-    direct callers)."""
+    direct callers). Opens with a model_call event (issue #43) so the UI can
+    show "waiting for <provider>" between send and first token."""
     if api_base is None:
         api_base = load_config()["api_base"]
-    async with httpx.AsyncClient(timeout=300) as client:
-        async with client.stream(
-            "POST",
-            f"{api_base.rstrip('/')}/chat/completions",
-            json=payload,
-            headers=headers,
-        ) as r:
-            if r.status_code != 200:
-                body = (await r.aread()).decode("utf-8", errors="replace")
-                raise ModelError(f"Model API error {r.status_code}: {body[:500]}")
+    cfg = load_config()
+    provider = cfg.get("active_provider") or _provider_from_base(api_base)
+    yield {"type": "model_call", "provider": provider, "model": cfg["model"]}
+    started = time.monotonic()
+    tool_calls: dict[int, dict] = {}
+    finish_reason = None
+    usage: dict | None = None
+    n_content_chars = 0
+    saw_done = False
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            async with client.stream(
+                "POST",
+                f"{api_base.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as r:
+                if r.status_code != 200:
+                    body = (await r.aread()).decode("utf-8", errors="replace")
+                    raise ModelError(f"Model API error {r.status_code}: {body[:500]}")
 
-            tool_calls: dict[int, dict] = {}
-            finish_reason = None
-            usage: dict | None = None
-            n_content_chars = 0
-            saw_done = False
-            async for line in r.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data.strip() == "[DONE]":
-                    saw_done = True
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                # OpenAI (with stream_options.include_usage) sends a final
-                # choices-less chunk carrying usage; Ollama puts usage on the
-                # last chunk alongside finish_reason. Capture either.
-                if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
-                    usage = chunk["usage"]
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
+                async for line in r.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data.strip() == "[DONE]":
+                        saw_done = True
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    # OpenAI (with stream_options.include_usage) sends a final
+                    # choices-less chunk carrying usage; Ollama puts usage on the
+                    # last chunk alongside finish_reason. Capture either.
+                    if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+                        usage = chunk["usage"]
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
 
-                if delta.get("content"):
-                    n_content_chars += len(delta["content"])
-                    yield {"type": "content", "text": delta["content"]}
+                    if delta.get("content"):
+                        n_content_chars += len(delta["content"])
+                        yield {"type": "content", "text": delta["content"]}
 
-                # Reasoning models (GLM, DeepSeek-R1, ...) stream their
-                # thinking as reasoning_content/reasoning deltas. Not kept
-                # for the transcript — the UI telemetry tape consumes them.
-                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                if reasoning and isinstance(reasoning, str):
-                    yield {"type": "thinking", "text": reasoning}
+                    # Reasoning models (GLM, DeepSeek-R1, ...) stream their
+                    # thinking as reasoning_content/reasoning deltas. Not kept
+                    # for the transcript \u2014 the UI telemetry tape consumes them.
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if reasoning and isinstance(reasoning, str):
+                        yield {"type": "thinking", "text": reasoning}
 
-                for tc in delta.get("tool_calls") or []:
-                    idx = tc.get("index", 0)
-                    slot = tool_calls.setdefault(
-                        idx,
-                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
-                    )
-                    if tc.get("id"):
-                        slot["id"] = tc["id"]
-                    fn = tc.get("function") or {}
-                    if fn.get("name"):
-                        slot["function"]["name"] += fn["name"]
-                    if fn.get("arguments"):
-                        slot["function"]["arguments"] += fn["arguments"]
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        slot = tool_calls.setdefault(
+                            idx,
+                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["function"]["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            slot["function"]["arguments"] += fn["arguments"]
 
-                finish = choices[0].get("finish_reason")
-                if finish:
-                    finish_reason = finish
-                    yield {"type": "finish", "reason": finish}
+                    finish = choices[0].get("finish_reason")
+                    if finish:
+                        finish_reason = finish
+                        yield {"type": "finish", "reason": finish}
+    except httpx.TimeoutException as e:
+        # Issue #43: a provider that never answers (hung, offline,
+        # unreachable) classified as its own failure mode instead of
+        # a raw httpx error string.
+        raise _classify_timeout(e, provider, started) from e
 
-            log.info(
-                "model reply: finish=%s content_chars=%d tool_calls=%d prompt_tokens=%s (%s)",
-                finish_reason, n_content_chars, len(tool_calls),
-                (usage or {}).get("prompt_tokens"),
-                ", ".join(t["function"]["name"] for t in tool_calls.values()) or "-",
-            )
-            if not saw_done and finish_reason is None:
-                # The connection closed before the model finished (no [DONE],
-                # no finish_reason). Treating this as a completed answer used
-                # to end the turn silently with whatever partial content
-                # arrived; surface it as a retryable error instead.
-                raise ModelError(
-                    "model stream ended without a finish reason — the "
-                    "connection was likely dropped mid-response"
-                )
-            if usage and usage.get("prompt_tokens") is not None:
-                yield {"type": "usage", "usage": usage}
-            if tool_calls:
-                yield {
-                    "type": "tool_calls",
-                    "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
-                }
+    log.info(
+        "model reply: finish=%s content_chars=%d tool_calls=%d prompt_tokens=%s (%s)",
+        finish_reason, n_content_chars, len(tool_calls),
+        (usage or {}).get("prompt_tokens"),
+        ", ".join(t["function"]["name"] for t in tool_calls.values()) or "-",
+    )
+    if not saw_done and finish_reason is None:
+        # The connection closed before the model finished (no [DONE],
+        # no finish_reason). Treating this as a completed answer used
+        # to end the turn silently with whatever partial content
+        # arrived; surface it as a retryable error instead.
+        raise ModelError(
+            "model stream ended without a finish reason \u2014 the "
+            "connection was likely dropped mid-response"
+        )
+    if usage and usage.get("prompt_tokens") is not None:
+        yield {"type": "usage", "usage": usage}
+    if tool_calls:
+        yield {
+            "type": "tool_calls",
+            "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
+        }
