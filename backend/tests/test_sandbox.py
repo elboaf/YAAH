@@ -802,3 +802,108 @@ def test_start_sync_while_booting_reports_busy(isolated, monkeypatch):
     finally:
         holder.join()
     assert len(spawned) == 1  # never a second VM
+
+
+# ---------------------------------------------------------------- toolkit seeding
+
+
+def test_ensure_toolkit_seed_copies_bundled_baseline(isolated, monkeypatch):
+    """A fresh install (empty toolkit) gets the shipped baseline: helpers,
+    gitconfig, README and the state manifest land before the first boot."""
+    src = isolated / "bundled"
+    (src / "bin").mkdir(parents=True)
+    (src / "bin" / "vm-capture.ps1").write_text("# capture", encoding="utf-8")
+    (src / "bin" / "git.cmd").write_text("# shim", encoding="utf-8")
+    (src / "gitconfig").write_text("[safe]\n\tdirectory = *\n", encoding="utf-8")
+    (src / "README.md").write_text("# toolkit", encoding="utf-8")
+    (src / "state.json").write_text(
+        json.dumps({"tools": {"vm-capture": {"version": "1.0"}}}),
+        encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    written = sb.ensure_toolkit_seed()
+
+    tk = sb.toolkit_dir()
+    for rel in ("bin/vm-capture.ps1", "bin/git.cmd", "gitconfig",
+                "README.md", "state.json"):
+        assert (tk / rel).is_file(), rel
+    assert sorted(written) == sorted(["bin/vm-capture.ps1", "bin/git.cmd",
+                                      "gitconfig", "README.md", "state.json"])
+
+
+def test_ensure_toolkit_seed_never_overwrites_user_files(isolated, monkeypatch):
+    """Copy-once semantics: a user-modified gitconfig (or any file) survives
+    app upgrades and re-seeds untouched."""
+    src = isolated / "bundled"
+    src.mkdir()
+    (src / "gitconfig").write_text("[safe]\n\tdirectory = *\n", encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "gitconfig").write_text("# user's own config", encoding="utf-8")
+
+    written = sb.ensure_toolkit_seed()
+
+    assert written == []
+    assert (tk / "gitconfig").read_text(encoding="utf-8") == "# user's own config"
+
+
+def test_ensure_toolkit_seed_merges_state_manifest(isolated, monkeypatch):
+    """User-registered tools in state.json survive; bundled entries are
+    added; existing entries (possibly version-bumped by a session) win."""
+    src = isolated / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "vm-capture": {"version": "1.0"},
+        "new-bundled": {"version": "2.0"},
+    }}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {
+        "vm-capture": {"version": "9.9", "kind": "script"},
+        "user-tool": {"version": "0.1"},
+    }}), encoding="utf-8")
+
+    sb.ensure_toolkit_seed()
+
+    merged = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert merged["vm-capture"]["version"] == "9.9"   # existing entry wins
+    assert merged["user-tool"]["version"] == "0.1"    # user entry kept
+    assert merged["new-bundled"]["version"] == "2.0"  # new bundle added
+
+
+def test_ensure_toolkit_seed_tolerates_missing_bundle(isolated, monkeypatch):
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: None)
+    assert sb.ensure_toolkit_seed() == []
+
+
+def test_write_session_files_seeds_toolkit(isolated, monkeypatch):
+    """The seeding is wired into boot prep: every sandbox start guarantees
+    the baseline exists (idempotent, copy-once)."""
+    src = isolated / "bundled"
+    (src / "bin").mkdir(parents=True)
+    (src / "bin" / "vm-capture.ps1").write_text("# capture", encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+
+    sdir = isolated / "sb" / "ws-abc"
+    sb._write_session_files(sdir, Path(r"C:\proj"))
+
+    assert (sb.toolkit_dir() / "bin" / "vm-capture.ps1").is_file()
+    # second run: nothing new to write
+    assert sb.ensure_toolkit_seed() == []
+
+
+def test_bundled_toolkit_payload_is_valid():
+    """The shipped payload itself: every repo file parses and the manifest
+    matches the files actually present."""
+    src = sb.bundled_toolkit_source()
+    assert src is not None, "backend/bundled_toolkit missing from the repo"
+    state = json.loads((src / "state.json").read_text(encoding="utf-8"))
+    assert "vm-capture" in state["tools"]
+    assert (src / "bin" / "vm-capture.ps1").is_file()
+    assert (src / "gitconfig").is_file()
+    assert "[safe]" in (src / "gitconfig").read_text(encoding="utf-8")

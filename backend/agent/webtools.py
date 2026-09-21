@@ -282,33 +282,64 @@ async def web_fetch(url, max_chars=20000, workspace=None):
 # ---------------------------------------------------------------- images
 
 async def view_image(url, workspace=None):
-    """Download an image from a URL, store it on disk, and attach it so a
-    vision-capable model can see it. The returned dict carries the stored
-    image's rel path; the agent loop turns that into an image_url part."""
+    """Attach an image so a vision-capable model can see it. Sources:
+    an http(s) URL (downloaded), a file:/// URL, or a LOCAL image path
+    (host absolute path, or a path resolved against the workspace root).
+    The returned dict carries the stored image's rel path; the agent loop
+    turns that into an image_url part."""
     import base64
     import re
+    import urllib.parse
     import urllib.request
+    from pathlib import Path
 
     from backend.agent.imagedata import save_bytes
 
-    if not re.match(r"^https?://", url):
-        url = "https://" + url
-    req = urllib.request.Request(url, headers={
-        "User-Agent": _WEB_UA,
-        "Accept": "image/*,*/*;q=0.8",
-    })
+    s = str(url or "").strip()
+    raw = b""
+    ctype = ""
 
     def _download():
         with urllib.request.urlopen(req, timeout=20) as resp:
-            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
-            raw = resp.read(6_000_001)
-        return ctype, raw
+            rtype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+            return rtype, resp.read(6_000_001)
 
-    ctype, raw = await asyncio.to_thread(_download)
+    def _read_local(p: Path) -> bytes:
+        return p.read_bytes()[:6_000_001]
+
+    if re.match(r"^https?://", s):
+        req = urllib.request.Request(s, headers={
+            "User-Agent": _WEB_UA,
+            "Accept": "image/*,*/*;q=0.8",
+        })
+        ctype, raw = await asyncio.to_thread(_download)
+    else:
+        # Local file: file:/// URL, ~-expanded absolute path, or a path
+        # resolved against the workspace root (tool screenshots, VM
+        # captures, chart renders \u2014 no web round-trip involved).
+        if s.startswith("file:///") or s.startswith("file:"):
+            p = Path(urllib.request.url2pathname(
+                urllib.parse.urlparse(s).path))
+        else:
+            p = Path(s).expanduser()
+            if not p.is_absolute() and workspace:
+                try:
+                    from backend.agent.tools import workspace_root
+
+                    cand = Path(workspace_root(workspace)) / p
+                    if cand.is_file():
+                        p = cand
+                except Exception:  # noqa: BLE001 - workspace resolution is best-effort
+                    pass
+        if not p.is_file():
+            return {"error": f"local image file not found: {s}", "url": s}
+        raw = await asyncio.to_thread(_read_local, p)
+
     if len(raw) > 5_000_000:
-        return {"error": "image larger than 5 MB", "url": url}
+        return {"error": "image larger than 5 MB", "url": s}
     if not ctype.startswith("image/"):
         # some servers serve octet-stream; sniff magic bytes as a fallback
+        # (also the ONLY sniff for local files, which have no content-type)
         if raw[:8] == b"\x89PNG\r\n\x1a\n":
             ctype = "image/png"
         elif raw[:3] == b"\xff\xd8\xff":
@@ -316,13 +347,14 @@ async def view_image(url, workspace=None):
         elif raw[:6] in (b"GIF87a", b"GIF89a"):
             ctype = "image/gif"
         else:
-            return {"error": f"not an image (content-type {ctype!r})",
-                    "url": url}
+            return {"error": f"not an image (content-type {ctype or 'unknown'!r})",
+                    "url": s}
     ctype = ctype.split("/")[1].lower()
     rel = save_bytes(raw, "jpg" if ctype == "jpeg" else ctype, subdir="agent")
+    src_note = ("loaded from the local file" if not re.match(r"^https?://", s)
+                else "downloaded from the URL above")
     return {
         "image": rel,
-        "url": url,
-        "note": ("Image downloaded from the URL above and attached below "
-                 "for viewing."),
+        "url": s,
+        "note": f"Image {src_note} and attached below for viewing.",
     }

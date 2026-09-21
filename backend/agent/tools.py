@@ -263,7 +263,12 @@ TOOLS_SCHEMA += [
                 "Download an image from a URL and attach it so you can see "
                 "it (requires a vision-capable model). Use after "
                 "web_search or web_fetch — web_fetch lists the page's "
-                "image URLs under 'IMAGES ON PAGE'."
+                "image URLs under 'IMAGES ON PAGE'. Also accepts LOCAL "
+                "images: a host file path, a file:/// URL, or a path "
+                "relative to the workspace root - e.g. a VM screenshot "
+                "written to the toolkit mount by sandbox_run "
+                "(~/.yaah/toolkit/vm-screen.png) or any chart/render "
+                "produced in the workspace."
             ),
             "parameters": {
                 "type": "object",
