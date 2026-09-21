@@ -1219,6 +1219,9 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
         <MessageStopButton msgId={msg.id} />
       </div>
       {msg.implementsPlan && <PlanBanner plan={msg.implementsPlan} />}
+      {msg.toolCalls?.some((t) => t.name === 'ask_user' && t.result !== undefined) && (
+        <QuestionAnchor calls={msg.toolCalls} />
+      )}
       {body}
     </div>
   )
@@ -1248,6 +1251,62 @@ function PlanningFold({ msg, body }: { msg: ChatMessage; body: ReactNode }) {
         </span>
       </button>
       {open && <div className="mt-0.5">{body}</div>}
+    </div>
+  )
+}
+
+/** Issue #63: persistent anchor for an answered mid-run ask_user question.
+ *  The live AskUserCard above the composer vanishes the moment the answer
+ *  arrives, and the Q&A then hides inside the collapsed trace — so every
+ *  answered question renders as this inline card at the top of its turn:
+ *  the question + the chosen answer (AskUserTrace), and a one-line summary
+ *  of what the agent did next (the tool calls after it in the same turn).
+ *  Open by default, collapsible; works live and after reload. */
+function QuestionAnchor({ calls }: { calls: ToolCall[] }) {
+  const [open, setOpen] = useState(true)
+  const askIdx = calls.findIndex((t) => t.name === 'ask_user' && t.result !== undefined)
+  if (askIdx === -1) return null
+  const tc = calls[askIdx]
+  const after = calls.slice(askIdx + 1)
+  const byName = new Map<string, number>()
+  for (const t of after) byName.set(t.name, (byName.get(t.name) ?? 0) + 1)
+  const result = (tc.result ?? {}) as { answer?: string | null }
+  const answer =
+    typeof result.answer === 'string' && result.answer ? result.answer : null
+  return (
+    <div className="mb-2 rounded border border-orange-800/60 bg-orange-950/20">
+      <button
+        className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[10px] uppercase tracking-widest text-orange-400"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-orange-600">{open ? '▼' : '▸'}</span>
+        <span>question · answered</span>
+        {answer && (
+          <span className="truncate tracking-normal normal-case text-zinc-400">
+            {answer}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 tracking-normal text-zinc-600 normal-case">
+          {open ? 'hide' : 'show'}
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-orange-800/40 px-2.5 py-2">
+          <AskUserTrace tc={tc} />
+          {after.length > 0 && (
+            <p className="mt-1.5 truncate font-mono text-[11px] text-zinc-500">
+              <span className="mr-1.5 text-zinc-600">→ did next:</span>
+              {[...byName].map(([n, c], i) => (
+                <span key={n}>
+                  {i > 0 && <span className="text-zinc-700"> · </span>}
+                  <span className={toolGlyphColor(n)}>{toolGlyph(n)}</span> {n}
+                  {c > 1 ? ` ×${c}` : ''}
+                </span>
+              ))}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
