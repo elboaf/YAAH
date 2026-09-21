@@ -648,7 +648,7 @@ fn open_external(url: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         const SW_SHOWNORMAL: i32 = 1;
-        let url_w: Vec<u16> = url.encode_utf16().collect();
+        let mut url_w: Vec<u16> = url.encode_utf16().collect();
         url_w.push(0);
         let verb_w: Vec<u16> = "open\0".encode_utf16().collect();
         let result = unsafe {
