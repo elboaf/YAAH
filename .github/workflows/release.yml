@@ -17,6 +17,11 @@ on:
         description: "Version tag to build and publish (e.g. v0.19.0)"
         required: true
         type: string
+      prerelease:
+        description: "Publish as a GitHub pre-release (RC channel, #62)"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-tauri:
@@ -45,6 +50,7 @@ jobs:
           tag="$RELEASE_TAG"
           pkg="$(node -p "require('./package.json').version")"
           echo "tag=$tag package.json=$pkg"
+          # Full-string compare: an -rc.N suffix (#62) must match too.
           if [ "$tag" != "v$pkg" ]; then
             echo "::error::tag/version drift: tag is '$tag' but package.json says '$pkg' (canonical). Bump package.json or fix the tag."
             exit 1
@@ -149,7 +155,8 @@ jobs:
           fi
           echo "assets:"; echo "$files"
           gh release view "$tag" >/dev/null 2>&1 || \
-            gh release create "$tag" --title "$tag" --generate-notes || true
+            gh release create "$tag" --title "$tag" --generate-notes \
+              ${{ inputs.prerelease == true && '--prerelease' || '' }} || true
           rc=0
           for f in $files; do
             ok=0
