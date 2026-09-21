@@ -433,3 +433,88 @@ async def test_stop_kills_inflight_tool_of_scheduled_run(fake_model, tmp_path, m
     assert asyncio.get_running_loop().time() - t0 < 5
     # The cancelled turn must not continue to a follow-up model call.
     assert len(scripts) >= 1
+
+
+@pytest.mark.asyncio
+async def test_stop_or_overrun_does_not_refire_immediately(fake_model, tmp_path):
+    """A run that outlives its schedule (busy-postpones roll next_fire_at
+    ~60s ahead every tick) leaves the slot in the past at settle time.
+    Settling must roll it forward to the next real slot — otherwise the
+    next tick immediately re-fires the run the user just stopped."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv,
+        schedule_spec=json.dumps({"minutes": 5})))
+
+    hang = asyncio.Event()
+
+    async def fake_chat(messages, tools=None, stream=True, model="", effort=""):
+        await hang.wait()
+        return FakeStream([{"type": "finish"}])
+
+    loop.model_client.chat = fake_chat
+
+    assert await sched.fire_agent(agent_row) == "started"
+    while not loop.agent_is_running(conv):
+        await asyncio.sleep(0.05)  # the model call is in flight
+    # Simulate the long-run state: the slot kept being busy-postponed and
+    # the user stops; at settle time the slot sits in the past.
+    past = (datetime.now() - timedelta(minutes=2)).isoformat(timespec="seconds")
+    await update_agent(agent_row["id"], {"next_fire_at": past})
+    hang.set()
+    while (await get_agent(agent_row["id"]))["last_status"] == "running":
+        await asyncio.sleep(0.05)
+
+    row = await get_agent(agent_row["id"])
+    nxt = datetime.fromisoformat(row["next_fire_at"])
+    assert nxt > datetime.now(), "settled slot still in the past -> immediate refire"
+    # And it rolled to a FULL interval from now, not a busy-postpone minute.
+    assert nxt >= datetime.now() + timedelta(minutes=4)
+
+
+@pytest.mark.asyncio
+async def test_paused_agent_never_fires_and_run_now_refuses(fake_model, tmp_path):
+    """Disabling an agent is a hard gate: the tick skips it and even an
+    explicit run-now is refused instead of resurrecting it."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv, enabled=0))
+    # Slot in the past: a paused agent must stay paused regardless.
+    past = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
+    await update_agent(agent_row["id"], {"next_fire_at": past})
+
+    due = [a for a in await list_agents() if sched._is_due(a, datetime.now())]
+    assert due == [], "tick fired a disabled agent"
+
+    assert await sched.fire_agent(agent_row) == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_pausing_mid_run_cancels_and_clears_retry(fake_model, tmp_path, monkeypatch):
+    """Unchecking 'enabled' while a run is in flight stops that run and
+    drops pending retries — the agent goes quiet immediately."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv))
+
+    hang = asyncio.Event()
+
+    async def fake_chat(messages, tools=None, stream=True, model="", effort=""):
+        await hang.wait()
+        return FakeStream([{"type": "finish"}])
+
+    loop.model_client.chat = fake_chat
+    assert await sched.fire_agent(agent_row) == "started"
+    while not loop.agent_is_running(conv):
+        await asyncio.sleep(0.05)
+
+    # The edit path (main.py) calls these two on enabled -> disabled.
+    assert loop.agent_is_running(conv)
+    sched.cancel_agent_run(conv)
+    sched.clear_retry_state(agent_row["id"])
+    hang.set()
+    while loop.agent_is_running(conv):
+        await asyncio.sleep(0.05)
+    row = await get_agent(agent_row["id"])
+    assert row["last_status"] == "ok"
+    assert agent_row["id"] not in sched._retry_state
