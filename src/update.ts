@@ -17,23 +17,59 @@ export interface UpdateInfo {
 export type UpdatePhase = 'idle' | 'ready' | 'downloading' | 'installing' | 'error'
 
 /**
- * Numeric semver comparison (major.minor.patch). Non-numeric parts compare
- * as 0 — release tags are plain vNN.N.N (tag-on-bump guarantees it), and a
- * garbage tag should never produce a false "update available".
+ * Prerelease-aware semver comparison (#62): major.minor.patch, then the
+ * -rc.N suffix. An RC is older than its stable (1.0.7 > 1.0.7-rc.1) and a
+ * higher rc.N is newer than a lower one (1.0.7-rc.2 > 1.0.7-rc.1).
+ * Unparseable versions fall back to the legacy numeric-prefix comparison
+ * (junk segments as 0 — a garbage tag must never produce a false
+ * "update available").
  */
 export function compareVersions(a: string, b: string): number {
-  const pa = a.split('.').map((p) => parseInt(p, 10) || 0)
-  const pb = b.split('.').map((p) => parseInt(p, 10) || 0)
-  for (let i = 0; i < 3; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0)
-    if (d !== 0) return d
+  const parse = (v: string) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/.exec(v.trim())
+    return m
+      ? { maj: +m[1], min: +m[2], pat: +m[3], rc: m[4] === undefined ? null : +m[4] }
+      : null
   }
-  return 0
+  const pa = parse(a)
+  const pb = parse(b)
+  if (!pa || !pb) {
+    // Legacy path (pre-#62 behavior): numeric prefix only, junk as 0.
+    const na = a.split('.').map((p) => parseInt(p, 10) || 0)
+    const nb = b.split('.').map((p) => parseInt(p, 10) || 0)
+    for (let i = 0; i < 3; i++) {
+      const d = (na[i] || 0) - (nb[i] || 0)
+      if (d !== 0) return d
+    }
+    return 0
+  }
+  for (const k of ['maj', 'min', 'pat'] as const) {
+    if (pa[k] !== pb[k]) return pa[k] - pb[k]
+  }
+  if (pa.rc === null && pb.rc === null) return 0
+  if (pa.rc === null) return 1 // stable > any rc of the same X.Y.Z
+  if (pb.rc === null) return -1
+  return pa.rc - pb.rc
+}
+
+/** "1.0.7-rc.2" -> true; stable and junk versions -> false (#62). */
+export function isRcVersion(version: string): boolean {
+  return /^\d+\.\d+\.\d+-rc\.\d+$/.test(version.trim())
 }
 
 /** "v0.20.1" -> "0.20.1"; anything without a numeric core stays null. */
 export function tagToVersion(tag: string): string | null {
   const m = /^v?(\d+\.\d+\.\d+)$/.exec(tag.trim())
+  return m ? m[1] : null
+}
+
+/**
+ * RC-tolerant variant used only by the RC channel check (#62): also accepts
+ * `-rc.N` tags, which the strict parser must keep rejecting so a stable
+ * install can never be offered a pre-release.
+ */
+export function tagToVersionWithRc(tag: string): string | null {
+  const m = /^v?(\d+\.\d+\.\d+(?:-rc\.\d+)?)$/.exec(tag.trim())
   return m ? m[1] : null
 }
 
@@ -60,6 +96,41 @@ export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo
     if (!version) return null
     if (compareVersions(version, currentVersion) <= 0) return null
     return { version, htmlUrl: body.html_url ?? 'https://github.com/elboaf/YAAH/releases/latest' }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * RC-aware check for installs running an -rc.N version (#62): the newest
+ * entry across stable AND pre-releases, prerelease-ordered. An RC install
+ * follows rc.1 -> rc.2 -> ... and is moved onto the stable when it lands;
+ * a stable install never takes this path (releases/latest already excludes
+ * pre-releases, and tagToVersion keeps rejecting -rc tags — the core #62
+ * guarantee is those two layers, not this function).
+ */
+export async function checkForRcUpdate(currentVersion: string): Promise<UpdateInfo | null> {
+  if (!IS_TAURI) return null
+  try {
+    const res = await fetch('https://api.github.com/repos/elboaf/YAAH/releases?per_page=10', {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+    })
+    if (!res.ok) return null
+    const body = (await res.json()) as Array<{ tag_name?: string; html_url?: string }>
+    // /releases is newest-first by created date, not version order — an
+    // out-of-order stable bump could sit below an older rc. Pick the
+    // version-wise newest parseable entry instead of trusting position.
+    let best: { version: string; htmlUrl: string } | null = null
+    for (const rel of body) {
+      const version = rel.tag_name ? tagToVersionWithRc(rel.tag_name) : null
+      if (!version) continue
+      const htmlUrl = rel.html_url ?? `https://github.com/elboaf/YAAH/releases/tag/${rel.tag_name}`
+      if (!best || compareVersions(version, best.version) > 0) best = { version, htmlUrl }
+    }
+    if (!best) return null
+    if (compareVersions(best.version, currentVersion) <= 0) return null
+    return best
   } catch {
     return null
   }
@@ -119,7 +190,10 @@ export function useUpdateCheck(): {
     const tick = async () => {
       const cur = await getVersion().catch(() => null)
       if (!cur || cancelled) return
-      const found = await checkForUpdate(cur)
+      // #62: an install running an -rc.N version follows the RC channel
+      // (newest across stable + pre-releases); stable installs keep the
+      // releases/latest check, which never sees an RC.
+      const found = isRcVersion(cur) ? await checkForRcUpdate(cur) : await checkForUpdate(cur)
       if (cancelled) return
       setUpdate(found)
       // Phase transitions only across idle<->ready so a re-check can never
