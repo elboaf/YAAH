@@ -6827,6 +6827,10 @@ function Composer() {
     let bufKey = conversationId === null ? 'draft' : String(conversationId)
     const entryKey = bufKey
     setError(bufKey, null)
+    // A new send supersedes a failed turn: drop the stale mid-stream banner
+    // (#39) so it doesn't linger above the composer during the replacement
+    // turn. (Resume remains for when the user wants the same turn continued.)
+    setTurnError(bufKey, null)
     setSendingKey(bufKey)
     const userId = appendUserMessage(bufKey, fullText, imageDataUrls, invokedSkills.length ? invokedSkills : undefined)
     const asstId = appendAssistantPlaceholder(bufKey)
