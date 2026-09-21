@@ -5,6 +5,8 @@ risk classes and the run protocol are exercised through fakes (YAAH_SANDBOX_EXE
 override + fake spawn), so the suite is green on Linux CI too.
 """
 import asyncio
+import threading
+import time
 import json
 import re
 from pathlib import Path
@@ -697,3 +699,106 @@ def test_wsb_uses_effective_vgpu(isolated, monkeypatch):
     monkeypatch.setattr(sb, "_gpu_adapter_count", lambda: 2)
     wsb = sb.generate_wsb(Path(r"C:\proj"), Path(r"C:\tk"), Path(r"C:\logs"))
     assert "<vGPU>Disable</vGPU>" in wsb
+
+
+def _session_up(isolated, monkeypatch, cfg=None):
+    """Start a fake-VM session; returns the logs dir."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": cfg or {}})
+
+    def fake_spawn(exe, wsb, logs_path):
+        (logs_path / "init.log").write_text("yaah-sandbox-ready",
+                                            encoding="utf-8")
+        return _FakeProc()
+
+    monkeypatch.setattr(sb, "_spawn", fake_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    start = sb.start_sync("C:\proj")
+    assert start["status"] == "running"
+    return isolated / "sb" / "ws-abc" / "logs"
+
+
+def test_concurrent_run_gets_busy_error_not_interleaving(isolated, monkeypatch):
+    """Issue #27 mutex: while one chat's command is in flight (mutex held),
+    a second chat's sandbox_run waits busy_wait_seconds and then fails with
+    a busy error — it must never interleave on the shared output channel."""
+    logs = _session_up(isolated, monkeypatch, {"busy_wait_seconds": 0})
+
+    # Simulate chat A's command mid-flight: hold the mutex like _run_command
+    # does for the whole round-trip.
+    assert sb._lock.acquire(timeout=1)
+    try:
+        result = sb.run_sync("echo b", 5)
+        assert result.get("busy") is True
+        assert "busy" in result["error"]
+        assert "sandbox_test" in result["error"]  # anti-pattern warning
+        # The refused command never reached the shared channel.
+        assert not (logs / "cmd.1.ps1").exists()
+    finally:
+        sb._lock.release()
+
+    # Once the mutex is free, chat B's command goes through normally.
+    _write_done(logs, 1, output="ok")
+    result = sb.run_sync("echo b", 5)
+    assert result.get("exit_code") == 0
+    assert (logs / "cmd.1.ps1").exists()
+
+
+def test_busy_wait_zero_means_immediate_refusal(isolated, monkeypatch):
+    _session_up(isolated, monkeypatch, {"busy_wait_seconds": 0})
+    assert sb._lock.acquire(timeout=1)
+    try:
+        t0 = time.monotonic()
+        result = sb.run_sync("echo b", 5)
+        assert time.monotonic() - t0 < 1  # no long block on the busy path
+    finally:
+        sb._lock.release()
+    assert result.get("busy") is True
+
+
+def test_stop_while_busy_defers_instead_of_stranding(isolated, monkeypatch):
+    """sandbox_stop during another chat's command doesn't kill the session
+    out from under the waiter; it reports busy and leaves the VM alone."""
+    logs = _session_up(isolated, monkeypatch, {"busy_wait_seconds": 0})
+    assert sb._lock.acquire(timeout=1)
+    try:
+        result = sb.stop_sync()
+        assert result["stopped"] is False
+        assert "busy" in result["note"]
+        assert sb._alive()  # session untouched
+    finally:
+        sb._lock.release()
+
+
+def test_start_sync_while_booting_reports_busy(isolated, monkeypatch):
+    """Two chats calling sandbox_test at once: the loser gets the busy
+    error, not a second spawned VM."""
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {"busy_wait_seconds": 0}})
+    spawned = []
+
+    def slow_spawn(exe, wsb, logs_path):
+        spawned.append(wsb)
+        time.sleep(0.3)  # boot in progress
+        (logs_path / "init.log").write_text("yaah-sandbox-ready",
+                                            encoding="utf-8")
+        return _FakeProc()
+
+    monkeypatch.setattr(sb, "_spawn", slow_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
+
+    holder = threading.Thread(target=sb.start_sync, args=(r"C:proj",))
+    holder.start()
+    time.sleep(0.1)  # let the holder take the mutex
+    try:
+        second = sb.start_sync("C:\proj")
+        assert second.get("busy") is True
+    finally:
+        holder.join()
+    assert len(spawned) == 1  # never a second VM
