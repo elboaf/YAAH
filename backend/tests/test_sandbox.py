@@ -112,6 +112,36 @@ def test_bootstrap_signals_ready_and_batches(isolated, monkeypatch):
     assert script.index("netsh advfirewall") < script.index("yaah-sandbox-ready")
 
 
+def test_bootstrap_neuters_interactive_git_editor(isolated, monkeypatch):
+    """An editor-opening git command (commit without -m, rebase --continue)
+    hangs the VM command channel until the host-side timeout: the bootstrap
+    must point GIT_EDITOR/EDITOR/VISUAL at a no-op BEFORE the ready marker,
+    so an editor-less commit fails fast with 'empty message' instead."""
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    script = sb._bootstrap_script()
+    for var in ("GIT_EDITOR", "EDITOR", "VISUAL"):
+        assert f"$env:{var}" in script, var
+    assert "true.exe" in script
+    # the no-op editor must be set before the VM signals readiness
+    assert script.index("true.exe") < script.index("yaah-sandbox-ready")
+
+
+def test_prompt_and_schemas_warn_against_git_editor(isolated, monkeypatch):
+    """The nudge must live in the tool text the model actually sees: the
+    sandbox prompt section and the bash/powershell schema descriptions."""
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    assert "git must never open its interactive editor" in sb.prompt_section()
+
+    from backend.agent.tools import POWERSHELL_SCHEMA, TOOLS_SCHEMA
+
+    bash = next(s for s in TOOLS_SCHEMA
+                if s["function"]["name"] == "bash")
+    for desc in (bash["function"]["description"],
+                 POWERSHELL_SCHEMA["function"]["description"]):
+        assert "git must never open its editor" in desc
+        assert "GIT_EDITOR=true" in desc
+
+
 # ---------------------------------------------------------------- config
 
 

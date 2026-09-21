@@ -350,6 +350,13 @@ $tk  = '{SB_TOOLKIT}'
 $ws  = '{SB_WS}'
 $processed = @{{}}
 $env:Path = "$tk;$tk\\bin;$tk\\Scripts;$tk\\node_modules\\.bin;$env:Path"
+# git must never open an interactive editor inside the VM: the command
+# channel would hang until the host-side timeout (an editor-less `git
+# commit` must fail fast with 'empty message' instead). true.exe ships
+# with Git for Windows; exit 0 also satisfies --amend and rebase --continue.
+$env:GIT_EDITOR = 'C:\\Program Files\\Git\\usr\\bin\\true.exe'
+$env:EDITOR = 'C:\\Program Files\\Git\\usr\\bin\\true.exe'
+$env:VISUAL = 'C:\\Program Files\\Git\\usr\\bin\\true.exe'
 $cwd = $dir
 if (Test-Path $ws) {{ $cwd = $ws }}
 Set-Location $cwd
@@ -1084,6 +1091,13 @@ def prompt_section() -> str:
         "write toolkit\\gitconfig containing '[safe]' + 'directory = *' "
         "and point GIT_CONFIG_GLOBAL at it (a toolkit\\bin\\git.cmd shim "
         "can set the variable before invoking the real git.exe).\n"
+        "- git must never open its interactive editor in the VM (it "
+        "hangs the command channel until the timeout): pass -m "
+        "'<message>' to git commit and set GIT_EDITOR=true for "
+        "editor-requiring commands (rebase --continue, tag -a, "
+        "commit --amend). The bootstrap points GIT_EDITOR/EDITOR/"
+        "VISUAL at a no-op, so an editor-less commit fails fast with "
+        "'empty message' instead of hanging.\n"
         "- GUI automation inside the VM: AutoHotkey v2 is the in-VM "
         "input layer — its input never touches the host (the VM has its "
         "own input session; the host user is unaffected). Install once: "
