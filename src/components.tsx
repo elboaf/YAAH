@@ -12,6 +12,9 @@ import {
   streamAgentTurn,
   type AgentEvent,
   cancelAgent,
+  queueMessage,
+  removeQueued,
+  steerAgent,
   getFileTree,
   getFileChildren,
   previewFile,
@@ -1137,7 +1140,18 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   if (isUser) {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded border border-zinc-700/70 bg-zinc-800/60 px-3 py-2 text-sm text-zinc-100">
+        <div
+          className={`max-w-[85%] rounded border px-3 py-2 text-sm ${
+            msg.queued
+              ? 'border-dashed border-amber-600/70 bg-amber-950/20 text-amber-100'
+              : 'border-zinc-700/70 bg-zinc-800/60 text-zinc-100'
+          }`}
+        >
+          {msg.queued && (
+            <div className="mb-1 text-right font-mono text-[10px] uppercase tracking-widest text-amber-500">
+              queued · lands next boundary
+            </div>
+          )}
           {msg.images?.length ? (
             <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
               {msg.images.map((rel, i) => (
@@ -6236,6 +6250,15 @@ function Composer() {
   })
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  // Issue #7 queue: echoes of messages queued during this run (transcript
+  // rows marked queued) + pill open state + steer-in-flight flag.
+  const bufKeyForQueue = conversationId === null ? 'draft' : String(conversationId)
+  const queueEchoes = useAgent((s) => s.queueEchoByConv[bufKeyForQueue])
+  const setQueueEcho = useAgent((s) => s.setQueueEcho)
+  const dropQueuedEcho = useAgent((s) => s.dropQueuedEcho)
+  const steering = useAgent((s) => s.steerByConv[bufKeyForQueue] ?? false)
+  const setSteerFlag = useAgent((s) => s.setSteer)
+  const [queueOpen, setQueueOpen] = useState(false)
   // Buffer key of the conversation with a send closure in flight (issue #10:
   // several chats can run at once — gates and the Stop button are scoped to
   // the conversation they belong to, not to the whole app).
@@ -6959,6 +6982,9 @@ function Composer() {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
+      // Hard Stop holds the queue (#7): the queued echoes stay in the
+      // transcript marked queued until the user sends or discards them.
+      // No count state - the pill renders from queueEchoByConv.
     } else if (ev.type === 'done') {
       setStatus(bufKey, 'idle')
       // A completed turn must leave no block pulsing: settle anything the
@@ -6968,6 +6994,20 @@ function Composer() {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
+    } else if (ev.type === 'user_injected') {
+      // Soft injection landed (#7): promote the optimistic echo (matched
+      // by the backend's queued-item id) into a real message.
+      const echoes = useAgent.getState().queueEchoByConv[bufKey] ?? []
+      const echo = echoes.find((e) => e.id === ev.user_injected_id)
+      if (echo) useAgent.getState().reconcileInjected(bufKey, echo.tempId)
+      setQueueEcho(
+        bufKey,
+        echoes.filter((e) => e.id !== ev.user_injected_id),
+      )
+    } else if (ev.type === 'queued_autosend') {
+      // The run ended (naturally or on error) with messages still queued
+      // (#7): the backend hands them back - fire them as fresh turns.
+      void drainQueueOnEnd(bufKey, ev.queued_autosend_items ?? [])
     } else if (ev.type === 'model_call') {
       // Issue #43: a chat call is dispatched and nothing has come back yet.
       // The waiting readout is driven by streamAgentTurn's onModelCall hook;
@@ -7231,6 +7271,66 @@ function Composer() {
   // Keep the PTT handlers pointed at the latest stop (stale-closure shield).
   stopRef.current = stop
 
+  /** Queue the current composer draft into the running turn (#7): POST it
+   *  to the server queue (persisted with the run), echo it optimistically
+   *  into the transcript marked queued, and clear the composer. */
+  const queueInput = async () => {
+    const text = input.trim()
+    if (!text || conversationId === null) return
+    try {
+      const res = await queueMessage(conversationId, text)
+      const tempId = `q${res.item.id}-${Date.now()}`
+      appendUserMessage(bufKeyForQueue, text)
+      const echoes = [
+        ...(useAgent.getState().queueEchoByConv[bufKeyForQueue] ?? []),
+        { id: res.item.id, tempId, text },
+      ]
+      setQueueEcho(bufKeyForQueue, echoes)
+      setInput('')
+    } catch (e) {
+      useAgent.getState().pushToast({
+        kind: 'error',
+        title: 'Could not queue message',
+        body: String((e as Error).message ?? e),
+      })
+    }
+  }
+
+  /** Steer (#7): interrupt the in-flight step so queued messages land at
+   *  the next boundary now; the run continues with full context. */
+  const steerNow = async () => {
+    if (conversationId === null) return
+    setSteerFlag(bufKeyForQueue, true)
+    try {
+      await steerAgent(conversationId)
+    } catch (e) {
+      useAgent.getState().pushToast({
+        kind: 'error',
+        title: 'Could not steer',
+        body: String((e as Error).message ?? e),
+      })
+    } finally {
+      // The flag clears when the injection lands (user_injected) or when
+      // the run ends; this is just a safety reset if the POST failed.
+      setTimeout(() => setSteerFlag(bufKeyForQueue, false), 3000)
+    }
+  }
+
+  /** Fire queued messages as fresh turns after the run ended with them
+   *  still queued (#7: auto-send on natural completion or error). */
+  const drainQueueOnEnd = async (
+    key: string,
+    items: Array<{ id: number; text: string }>,
+  ) => {
+    const echoes = useAgent.getState().queueEchoByConv[key] ?? []
+    for (const it of items) {
+      const echo = echoes.find((e) => e.id === it.id)
+      if (echo) dropQueuedEcho(key, echo.tempId)
+      await sendRef.current?.(it.text)
+    }
+    setQueueEcho(key, [])
+  }
+
   return (
     <div
       className="p-3"
@@ -7484,6 +7584,15 @@ function Composer() {
             }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
+              // Queuing (#7): while a run streams in this conversation,
+              // plain Enter queues the message instead of sending - it
+              // lands at the next step boundary (or auto-sends at run
+              // end). Agent chats are excluded above; the draft never
+              // streams, so it always takes the normal send path.
+              if (streaming && conversationId !== null) {
+                void queueInput()
+                return
+              }
               void send()
             }
           }}
@@ -7498,6 +7607,64 @@ function Composer() {
             e.target.value = ''
           }}
         />
+        {/* Queued messages pill (#7): sits above the composer while a run
+            streams. Shows the count; expands to per-message rows with
+            remove buttons; Steer interrupts the current step so the queue
+            lands now. Rendered only while there is something queued. */}
+        {queueEchoes?.length ? (
+          <div className="mb-2 rounded border border-amber-700/60 bg-amber-950/20">
+            <button
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left font-mono text-[10px] uppercase tracking-widest text-amber-400"
+              onClick={() => setQueueOpen((o) => !o)}
+            >
+              <span className="text-amber-600">{queueOpen ? '▼' : '▸'}</span>
+              <span>
+                {queueEchoes.length} queued message{queueEchoes.length === 1 ? '' : 's'}
+              </span>
+              <span className="ml-auto flex items-center gap-2 tracking-normal normal-case">
+                {streaming && conversationId !== null && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void steerNow()
+                    }}
+                    className="rounded bg-amber-600/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-zinc-950 hover:bg-amber-500"
+                  >
+                    {steering ? 'steering…' : 'steer'}
+                  </span>
+                )}
+                <span className="text-zinc-600">{queueOpen ? 'hide' : 'show'}</span>
+              </span>
+            </button>
+            {queueOpen && (
+              <div className="border-t border-amber-800/40 px-2.5 py-1.5">
+                {queueEchoes.map((q) => (
+                  <div key={q.tempId} className="flex items-center gap-2 py-0.5">
+                    <span className="min-w-0 flex-1 truncate text-xs text-amber-100">
+                      {q.text}
+                    </span>
+                    <button
+                      title="Discard queued message"
+                      className="rounded px-1 text-amber-700 hover:bg-amber-900/40 hover:text-amber-300"
+                      onClick={() => {
+                        dropQueuedEcho(bufKeyForQueue, q.tempId)
+                        setQueueEcho(
+                          bufKeyForQueue,
+                          (queueEchoes ?? []).filter((x) => x.id !== q.id),
+                        )
+                        void removeQueued(conversationId ?? 0, q.id).catch(() => {})
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
         {/* Unified toolbar: host + mode on the left, attach/mic/send on the
             right — one hairline-separated row inside the composer card. */}
         <div className="flex items-center gap-1 border-t border-zinc-700/70 px-1.5 py-1.5">

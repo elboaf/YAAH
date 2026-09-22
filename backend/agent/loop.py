@@ -346,6 +346,72 @@ def cancel_agent(conversation_id: int):
         ev.set()
 
 
+# ---- Message queue + steering (issue #7) ------------------------------------
+# Messages typed while a run is in flight, held server-side per conversation
+# (in-memory, same lifetime as the run itself). The loop drains the queue at
+# step boundaries - soft injection: the run continues with full context. A
+# steer interrupts the current in-flight gated tool so the boundary arrives
+# NOW. Endings: natural completion and errors auto-send whatever is left
+# (queued meant "this matters regardless"); a hard Stop holds the queue.
+_message_queues: dict[int, list[dict]] = {}
+_steer_flags: dict[int, asyncio.Event] = {}
+_queue_seq = 0
+
+
+def enqueue_message(
+    conversation_id: int,
+    text: str,
+    skills: list[str] | None = None,
+) -> dict:
+    """Queue a user message for the running conversation; returns the item."""
+    global _queue_seq
+    _queue_seq += 1
+    item = {"id": _queue_seq, "text": text, "skills": skills or []}
+    _message_queues.setdefault(conversation_id, []).append(item)
+    return item
+
+
+def queue_items(conversation_id: int) -> list[dict]:
+    return list(_message_queues.get(conversation_id, []))
+
+
+def remove_queued(conversation_id: int, item_id: int) -> bool:
+    q = _message_queues.get(conversation_id) or []
+    for it in q:
+        if it["id"] == item_id:
+            q.remove(it)
+            return True
+    return False
+
+
+def steer_agent(conversation_id: int) -> bool:
+    """Interrupt the current in-flight step so the next boundary lands now.
+    False when the conversation has no run to steer."""
+    ev = _steer_flags.get(conversation_id)
+    if ev is None:
+        return False
+    ev.set()
+    return True
+
+
+def _drain_queue(conversation_id: int) -> list[dict]:
+    items = _message_queues.get(conversation_id) or []
+    if items:
+        _message_queues[conversation_id] = []
+    return items
+
+
+async def _take_injections(conversation_id: int) -> list[dict]:
+    """Drain queued messages at a step boundary and persist each as a user
+    row (the transcript reads chronologically; replay feeds them to the
+    model in order). Caller emits the user_injected events and appends the
+    in-memory messages entries."""
+    items = _drain_queue(conversation_id)
+    for it in items:
+        await add_message(conversation_id, "user", it["text"])
+    return items
+
+
 # ---- access-mode gate (PLAN-access-modes.md) -------------------------------
 
 _VALID_MODES = ("ask", "plan", "full")
@@ -568,6 +634,7 @@ def _ndjson(event: dict) -> str:
 async def _execute_with_progress(
     name: str, args: dict, workspace: str, call_id: str, box: dict,
     cancel_ev: asyncio.Event | None = None,
+    steer_ev: asyncio.Event | None = None,
 ):
     """Run a tool, yielding tool_progress events with live output while it
     runs (only the shell executors actually stream; everything else emits
@@ -597,31 +664,60 @@ async def _execute_with_progress(
     cancel_waiter = (
         asyncio.create_task(cancel_ev.wait()) if cancel_ev is not None else None
     )
+    steer_waiter = (
+        asyncio.create_task(steer_ev.wait()) if steer_ev is not None else None
+    )
     cancelled = False
+    steered = False
     try:
         while True:
             get_task = asyncio.create_task(queue.get())
-            waiters = [get_task] + ([cancel_waiter] if cancel_waiter else [])
+            waiters = [get_task]
+            if cancel_waiter:
+                waiters.append(cancel_waiter)
+            if steer_waiter:
+                waiters.append(steer_waiter)
             done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
             if cancel_waiter is not None and cancel_waiter in done:
                 get_task.cancel()
                 cancelled = True
+                break
+            if steer_waiter is not None and steer_waiter in done:
+                get_task.cancel()
+                cancelled = True
+                steered = True
                 break
             item = get_task.result()
             if item is _DONE:
                 break
             yield {"type": "tool_progress", "call_id": call_id, "chunk": item}
         if cancelled:
+            # A steer (#7) interrupts the tool but NOT the turn: the result
+            # tells the model the user stepped in; the caller continues to
+            # the injection boundary. A plain Stop (cancel_ev) still ends
+            # the turn.
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, finisher, return_exceptions=True)
-            box["result"] = {"error": "tool stopped by user (run cancelled)"}
+            box["result"] = (
+                {
+                    "error": (
+                        "interrupted by the user (steered): the user has queued a "
+                        "message that will be delivered now - expect it next."
+                    )
+                }
+                if steered
+                else {"error": "tool stopped by user (run cancelled)"}
+            )
+            box["steered"] = steered
             return
         await finisher
         box["result"] = task.result()
     finally:
         if cancel_waiter is not None:
             cancel_waiter.cancel()
+        if steer_waiter is not None:
+            steer_waiter.cancel()
         # If the turn is torn down mid-tool (client disconnect, Stop),
         # don't leak a running tool task the way a bare create_task would.
         if not task.done():
@@ -860,6 +956,8 @@ async def run_agent(
         tools = tools + [EXIT_PLAN_SCHEMA]
     cancel_ev = asyncio.Event()
     _cancel_events[conversation_id] = cancel_ev
+    steer_ev = asyncio.Event()
+    _steer_flags[conversation_id] = steer_ev
 
     # Skills the model has loaded mid-turn via load_skill (deduped, order
     # preserved). Their bodies are appended to the system prompt so every
@@ -1067,6 +1165,11 @@ async def run_agent(
                             "model": load_config().get("model") or None,
                         }
                     )
+                # Natural-completion auto-send (#7): anything still queued
+                # rides home as a queued_autosend hand-off before done.
+                remaining = _drain_queue(conversation_id)
+                if remaining:
+                    yield _ndjson({"type": "queued_autosend", "items": remaining})
                 yield _ndjson({"type": "done"})
                 return
 
@@ -1077,6 +1180,16 @@ async def run_agent(
                     "tool_calls": tool_calls,
                 }
             )
+
+            # Steer boundary (#7): a steer with no tool calls in flight
+            # (the model went straight to tools / the step ended early)
+            # lands here - before the next model call. Same persistence
+            # + announcement as the tool-result boundary.
+            for inj in await _take_injections(conversation_id):
+                yield _ndjson(
+                    {"type": "user_injected", "text": inj["text"], "id": inj["id"]}
+                )
+                messages.append({"role": "user", "content": inj["text"]})
 
             # Partition this step's tool calls: spawn_agent delegations run
             # in parallel (foreground — the parent blocks until all finish);
@@ -1160,7 +1273,7 @@ async def run_agent(
                             box: dict = {}
                             async for pev in _execute_with_progress(
                                 name, args, workspace, tc.get("id", ""), box,
-                                cancel_ev=cancel_ev,
+                                cancel_ev=cancel_ev, steer_ev=steer_ev,
                             ):
                                 yield _ndjson(pev)
                             result = box.get("result")
@@ -1199,10 +1312,28 @@ async def run_agent(
                                 box = {}
                                 async for pev in _execute_with_progress(
                                     name, args, workspace, tc.get("id", ""), box,
-                                    cancel_ev=cancel_ev,
+                                    cancel_ev=cancel_ev, steer_ev=steer_ev,
                                 ):
                                     yield _ndjson(pev)
                                 result = box.get("result")
+
+                # Steering (#7): a steer interrupt lands the queued message
+                # NOW. Replace the tool result's error text, clear the flag,
+                # and skip the old cancel check below so the run continues
+                # to the injection boundary. `box` only exists on the paths
+                # that ran _execute_with_progress; the gated-tool path that
+                # never reached execution carries its result dict directly.
+                _steered_here = bool(box.get("steered")) if "box" in dir() else False
+                if _steered_here:
+                    steer_ev.clear()
+                elif steer_ev.is_set():
+                    steer_ev.clear()
+                    result = {
+                        "error": (
+                            "interrupted by the user (steered): the user has queued "
+                            "a message that will be delivered now - expect it next."
+                        )
+                    }
 
                 result_str = _clip_result_str(result)
                 # A tool that attached an image (view_image) becomes a
@@ -1241,6 +1372,16 @@ async def run_agent(
                     tool_call_id=tc.get("id", ""),
                     images=[image_rel] if image_rel else None,
                 )
+
+                # Steer boundary (#7): the queued message lands after the
+                # interrupted (or completed) tool result, before the next
+                # model call. Injected rows are real user turns - persisted,
+                # replayed from history, announced to the UI.
+                for inj in await _take_injections(conversation_id):
+                    yield _ndjson(
+                        {"type": "user_injected", "text": inj["text"], "id": inj["id"]}
+                    )
+                    messages.append({"role": "user", "content": inj["text"]})
 
             # Run every spawn_agent delegation of this step in parallel.
             # Progress events flow through a queue so the generator can
@@ -1412,6 +1553,18 @@ async def run_agent(
             "message": budget_msg,
         })
 
+        # Steering hand-off (#7): drain a POST-run boundary first. Whatever
+        # remains belongs to the ending: natural completion and errors
+        # auto-send (queued meant "this matters regardless"), a hard Stop
+        # holds the queue so explicit silence wins.
+        for inj in await _take_injections(conversation_id):
+            yield _ndjson(
+                {"type": "user_injected", "text": inj["text"], "id": inj["id"]}
+            )
+        remaining = _drain_queue(conversation_id)
+        if remaining and not cancel_ev.is_set():
+            yield _ndjson({"type": "queued_autosend", "items": remaining})
+
     except model_client.ModelError as e:
         # The user message is already stored; without a record of the
         # failure the transcript would read as if the turn never happened.
@@ -1424,4 +1577,5 @@ async def run_agent(
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
         _cancel_events.pop(conversation_id, None)
+        _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)
