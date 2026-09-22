@@ -713,6 +713,57 @@ async def api_agent_cancel(conversation_id: int):
     return {"ok": True}
 
 
+# ---- Message queue + steering (issue #7) ----
+
+class QueueBody(BaseModel):
+    message: str
+    skills: list[str] | None = None
+
+
+@app.post("/api/agent/{conversation_id}/queue")
+async def api_agent_queue(conversation_id: int, body: QueueBody):
+    """Queue a message while a run is in flight (#7). Held server-side with
+    the running loop; drained at the next step boundary (soft injection)."""
+    from backend.agent.loop import agent_is_running, enqueue_message
+
+    if not agent_is_running(conversation_id):
+        raise HTTPException(status_code=409, detail="conversation is not running")
+    text = body.message.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="message must not be empty")
+    item = enqueue_message(conversation_id, text, body.skills)
+    return {"ok": True, "item": item}
+
+
+@app.get("/api/agent/{conversation_id}/queue")
+async def api_agent_queue_list(conversation_id: int):
+    from backend.agent.loop import queue_items
+
+    return {"items": queue_items(conversation_id)}
+
+
+@app.delete("/api/agent/{conversation_id}/queue/{item_id}")
+async def api_agent_queue_remove(conversation_id: int, item_id: int):
+    from backend.agent.loop import remove_queued
+
+    if not remove_queued(conversation_id, item_id):
+        raise HTTPException(status_code=404, detail="queued item not found")
+    return {"ok": True}
+
+
+@app.post("/api/agent/{conversation_id}/steer")
+async def api_agent_steer(conversation_id: int):
+    """Interrupt the in-flight step so queued messages land now (#7).
+    The run continues at the next boundary with full context."""
+    from backend.agent.loop import agent_is_running, steer_agent
+
+    if not agent_is_running(conversation_id):
+        raise HTTPException(status_code=409, detail="conversation is not running")
+    if not steer_agent(conversation_id):
+        raise HTTPException(status_code=409, detail="nothing to steer")
+    return {"ok": True}
+
+
 class AnswerBody(BaseModel):
     call_id: str
     answer: str

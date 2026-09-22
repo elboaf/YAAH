@@ -381,6 +381,30 @@ export async function exportConversationMarkdown(id: number, title: string) {
 export const cancelAgent = (id: number) =>
   api<{ ok: boolean }>(`/api/agent/${id}/cancel`, { method: 'POST' })
 
+// ---- Message queue + steering (issue #7) ----
+
+export interface QueuedItem {
+  id: number
+  text: string
+  skills: string[]
+}
+
+export const queueMessage = (id: number, message: string, skills: string[] = []) =>
+  api<{ ok: boolean; item: QueuedItem }>(`/api/agent/${id}/queue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, skills }),
+  })
+
+export const fetchQueue = (id: number) =>
+  api<{ items: QueuedItem[] }>(`/api/agent/${id}/queue`)
+
+export const removeQueued = (id: number, itemId: number) =>
+  api<{ ok: boolean }>(`/api/agent/${id}/queue/${itemId}`, { method: 'DELETE' })
+
+export const steerAgent = (id: number) =>
+  api<{ ok: boolean }>(`/api/agent/${id}/steer`, { method: 'POST' })
+
 /** Answer a pending ask_user question; the blocked agent loop resumes. */
 export const submitAnswer = (id: number, callId: string, answer: string) =>
   api<{ ok: boolean }>(`/api/conversations/${id}/answer`, {
@@ -757,6 +781,8 @@ export interface AgentEvent {
   type:
     | 'text'
     | 'say'
+    | 'user_injected'
+    | 'queued_autosend'
     | 'thinking'
     | 'tool_start'
     | 'tool_progress'
@@ -778,6 +804,10 @@ export interface AgentEvent {
   call_id?: string
   /** Spoken briefing for read-aloud (#66) — speech-only, never rendered. */
   say?: string
+  /** Soft injection landed (#7): the queued message is now a real turn. */
+  user_injected_id?: number
+  /** Run ended with messages still queued (#7): auto-send them. */
+  queued_autosend_items?: Array<{ id: number; text: string }>
   /** Live output chunk while a shell tool runs (tool_progress). */
   chunk?: string
   /** Sub-agent identity (sub_agent_* events). */

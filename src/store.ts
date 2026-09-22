@@ -57,6 +57,10 @@ export interface ChatMessage {
    *  never rendered. Captured live so the narrator can prefer it over the
    *  emission's verbatim sentences; not persisted on the backend. */
   say?: string
+  /** Client-side echo of a message queued during this run (#7): rendered
+   *  optimistically when queued; the backend's user_injected event (which
+   *  persists the row) reconciles it into a real message at the boundary. */
+  queued?: boolean
   /** The approved plan this message implements (set at the exit_plan
    *  approval boundary; rendered as a header above the execution). */
   implementsPlan?: string
@@ -153,6 +157,15 @@ interface AgentState {
   /** Per-conversation stream/failed-send error (rendered by the owning chat). */
   errorByConv: Record<string, string | null>
   setError: (key: string, e: string | null) => void
+  /** Client-side echo of messages queued during a run (#7): tempId links
+   *  the optimistic transcript row to the backend's queued item id, so the
+   *  user_injected event can promote the right echo into a real message. */
+  queueEchoByConv: Record<string, Array<{ id: number; tempId: string; text: string }>>
+  setQueueEcho: (key: string, items: Array<{ id: number; tempId: string; text: string }>) => void
+  /** True while a steer interrupt is in flight (#7) - the pill's button
+   *  shows "steering..." until the injection lands. */
+  steerByConv: Record<string, boolean>
+  setSteer: (key: string, on: boolean) => void
   workspace: string
   /**
    * Draft destination (issue #32): where the next first-send will file the
@@ -238,6 +251,12 @@ interface AgentState {
   /** Capture a `say` briefing onto its message (#66): speech-only, never
    *  rendered; consumed by the narrator when the emission completes. */
   setSay: (key: string, msgId: string, say: string) => void
+  /** Reconcile one injected queued message (#7): the optimistic `queued`
+   *  echo becomes a real user message at the injection point. */
+  reconcileInjected: (key: string, tempId: string) => void
+  /** Remove a queued echo that never landed (hard Stop held the queue,
+   *  user removed it from the pill). */
+  dropQueuedEcho: (key: string, tempId: string) => void
   /** UI-generated rows outside the streaming protocol (git command trace
    *  rows). Persisted by the backend; live list only. */
   appendRawMessage: (key: string, msg: ChatMessage) => void
@@ -427,6 +446,11 @@ export const useAgent = create<AgentState>((set, get) => ({
       return { finishedByConv }
     }),
   errorByConv: {},
+  queueEchoByConv: {},
+  setQueueEcho: (key, items) =>
+    set((s) => ({ queueEchoByConv: { ...s.queueEchoByConv, [key]: items } })),
+  steerByConv: {},
+  setSteer: (key, on) => set((s) => ({ steerByConv: { ...s.steerByConv, [key]: on } })),
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),
@@ -604,6 +628,27 @@ export const useAgent = create<AgentState>((set, get) => ({
         [key]: (s.messagesByConv[key] ?? []).map((m) =>
           m.id === msgId ? { ...m, say } : m,
         ),
+      },
+    }))
+  },
+
+  reconcileInjected: (key, tempId) => {
+    set((s) => {
+      const msgs = s.messagesByConv[key] ?? []
+      const echo = msgs.find((m) => m.id === tempId)
+      if (!echo) return {}
+      const patched = msgs.map((m) =>
+        m.id === tempId ? { ...m, id: `inj${m.id}`, queued: false } : m,
+      )
+      return { messagesByConv: { ...s.messagesByConv, [key]: patched } }
+    })
+  },
+
+  dropQueuedEcho: (key, tempId) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).filter((m) => m.id !== tempId),
       },
     }))
   },
