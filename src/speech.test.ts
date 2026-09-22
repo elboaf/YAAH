@@ -200,6 +200,26 @@ describe('#83 speech process queue', () => {
     await until(() => !p.current.speaking)
     expect(ttsStopMock).toHaveBeenCalled()
   })
+  it('an open stream utterance never starves the event loop (#83 OOM regression)', async () => {
+    const p = await fresh()
+    const feed = p.beginStream('a')
+    feed.append('a1')
+    await until(() => playingCount() === 1)
+    releaseCurrent() // a1 finishes; no more appends, feed never end()ed.
+    // The drain-wait now sits with a settled chain and an open stream.
+    // Regression: the old Promise.race([chain, sleep]) resolves in
+    // microtasks when chain is settled, so the loop spun forever and
+    // macrotask timers (this test's setTimeouts included) never fired.
+    let ticks = 0
+    const t0 = Date.now()
+    while (Date.now() - t0 < 100) {
+      await new Promise((r) => setTimeout(r, 16))
+      ticks += 1
+    }
+    expect(ticks).toBeGreaterThanOrEqual(3)
+    p.stop(0)
+    await until(() => !p.current.speaking)
+  })
 })
 
 // The player is a singleton, but tests hand-build a fresh instance per
