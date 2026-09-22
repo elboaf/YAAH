@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 # installer it ships in (backend/_version.py is generated, never edited).
 python scripts/sync_version.py
 
-pip install -r requirements.txt -r requirements-build.txt
+python -m pip install -r requirements.txt -r requirements-build.txt
 
 TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
 EXE=""
@@ -37,7 +37,11 @@ if [ "$(uname -s)" = "MINGW" ] || [ "$(uname -s)" = "Windows_NT" ]; then
              --collect-all PIL)
 fi
 
-pyinstaller --noconfirm --clean --onefile --noconsole \
+# Anchored to the interpreter setup-python put on PATH: a bare `pip` /
+# `pyinstaller` can resolve to a different Python (copied runner tool caches
+# ship stale Scripts\*.exe shims embedding another install's absolute path —
+# the "pyinstaller: command not found" CI failure of 2026-09-22).
+python -m PyInstaller --noconfirm --clean --onefile --noconsole \
   --name backend \
   --paths . \
   "${COLLECTS[@]}" \

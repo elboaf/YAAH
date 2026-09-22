@@ -80,6 +80,7 @@ import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
 import { CodeBlock, AgentMarkdown } from './markdown'
 import { VoiceRecorder } from './voice'
+import { useStickToBottom } from './useStickToBottom'
 
 // ---------------------------------------------------------------- code views
 
@@ -1028,12 +1029,11 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
  *  transcript carries the streaming caret. */
 function SubAgentBlock({ run }: { run: SubAgentRun }) {
   const [open, setOpen] = useState(true)
-  const textRef = useRef<HTMLDivElement>(null)
   const running = run.status === 'running'
-  useEffect(() => {
-    const el = textRef.current
-    if (el && running) el.scrollTop = el.scrollHeight
-  }, [run.text, running])
+  // #52: follow the sub-agent transcript only while the reader is already at
+  // (near) its bottom — a block scrolled up to re-read must not be yanked
+  // back on every streamed chunk. Same 50px tolerance as the main transcript.
+  const { containerRef: textRef, onScroll } = useStickToBottom(false, [run.text, running])
   const statusLabel =
     run.status === 'running'
       ? 'running'
@@ -1089,6 +1089,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
           {run.text && (
             <div
               ref={textRef}
+              onScroll={onScroll}
               className={`whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-zinc-400 ${
                 running ? 'max-h-40 overflow-auto' : ''
               }`}
@@ -5381,7 +5382,13 @@ export function ChatPanel() {
     const key = s.conversationId === null ? 'draft' : String(s.conversationId)
     return s.pendingPlanApprovals[key] ?? null
   })
-  const bottomRef = useRef<HTMLDivElement>(null)
+  // #52: the transcript scrolls in THIS container (the bottomRef div is its
+  // last child), so the scroll listener lives here. Force-snap when input is
+  // required (question / approval / plan) — that is when the user's eyes are.
+  const { containerRef: transcriptRef, onScroll: onTranscriptScroll } = useStickToBottom(
+    Boolean(pendingQuestion || pendingApproval || pendingPlanApproval),
+    [messages],
+  )
   const streaming = status === 'thinking' || status === 'running-tool'
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
@@ -5494,13 +5501,13 @@ export function ChatPanel() {
     updateConfig({ voice: { tts_enabled: next } }).catch(() => {})
   }
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
-
   return (
     <main className="flex min-w-0 flex-1 flex-col">
-      <div className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4">
+      <div
+        ref={transcriptRef}
+        onScroll={onTranscriptScroll}
+        className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4"
+      >
         {conversationId === null && (
           <DraftDestinationCard />
         )}
@@ -5532,7 +5539,6 @@ export function ChatPanel() {
         {messages.map((m) => (
           <MessageView key={m.id} msg={m} live={m.id === liveId} />
         ))}
-        <div ref={bottomRef} />
       </div>
       {error && (
         <div className="border-t border-red-900 bg-red-950/60 px-4 py-2 text-xs text-red-300">
