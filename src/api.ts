@@ -687,8 +687,15 @@ export async function ttsSynthesize(
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    const err = new Error(body.detail || `synthesis failed (${res.status})`) as Error & { status?: number }
+    const err = new Error(body.detail || `synthesis failed (${res.status})`) as Error & {
+      status?: number
+      superseded?: boolean
+    }
     err.status = res.status
+    // A superseded 409 is the queue's benign hand-off signal (an utterance
+    // was floored away), not a missing-model error — tag it so the store's
+    // failure path stays silent instead of flipping `ready` off.
+    if (res.status === 409 && body.detail === 'superseded') err.superseded = true
     throw err
   }
   return res.blob()

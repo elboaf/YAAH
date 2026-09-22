@@ -5635,9 +5635,11 @@ export function ChatPanel() {
   // briefing per emission, not a read-aloud. If an emission completes
   // without a usable tag, the held sentences flush verbatim at the swap
   // (before the next emission's utterance claims the player) or at run end
-  // — never silence. One live utterance per run (#75): the epoch machinery
-  // makes appended chunks part of the same utterance (no self-supersede);
-  // any speak()/stop() from elsewhere supersedes the whole stream.
+  // — never silence. The emission lane is serialized (#83): each emission
+  // is one stream utterance queued on the player's process queue — an
+  // emission arriving mid-briefing waits for the current utterance to
+  // drain instead of cutting it off mid-word. Only a hard stop (mute /
+  // per-message) kills current audio and drops queued emissions.
   const lastMsg = messages.length ? messages[messages.length - 1] : null
   const lastAssistantId = lastMsg && lastMsg.role === 'assistant' ? lastMsg.id : null
   const lastAssistantContent = lastMsg && lastMsg.role === 'assistant' ? lastMsg.content : ''
@@ -5657,9 +5659,10 @@ export function ChatPanel() {
     let n = narrationRef.current
     if (!n || n.msgId !== lastAssistantId) {
       // Emission swap: flush the previous emission's held sentences (it
-      // ended without a usable tag) BEFORE the new utterance claims the
-      // player - beginStream supersedes our epoch, so the flush must run
-      // while the old feed can still take chunks.
+      // ended without a usable tag) BEFORE the new utterance is announced.
+      // beginStream no longer supersedes (#83): the player queues the new
+      // emission until the current utterance drains, so the flushed
+      // sentences play through and the new voice starts right after.
       const prev = n
       if (prev) {
         const prevMsg = messages.find((m) => m.id === prev.msgId)

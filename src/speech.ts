@@ -3,9 +3,14 @@
  *  Composer hooks share.
  *
  *  Division of labor: the backend turns prose into WAV (Kokoro via
- *  sherpa-onnx); this module owns playback â€” chunk queue with one-chunk
- *  prefetch so long reads play gaplessly, replace semantics (a new utterance
- *  cuts the old one off mid-word), and hard stop. Markdown â†’ prose and
+ *  sherpa-onnx); this module owns playback with TWO lanes (#83): the speech
+ *  queue is the chunk loop inside one utterance (one-chunk prefetch so long
+ *  reads play gaplessly); the process queue serializes between-emissions
+ *  handoffs - a new emission WAITS for the current utterance to drain
+ *  instead of superseding it mid-word, and back-to-back emissions are
+ *  narrated strictly in arrival order. User intent (mute, per-message
+ *  stop, hard stop) still cuts instantly and drops the pending lane.
+ *  Markdown â†’ prose and
  *  sentence chunking mirror backend/agent/speak.py (the frontend has the raw
  *  markdown; shipping it to the server for string munging would be a
  *  roundtrip with no upside). */
@@ -192,6 +197,30 @@ type Phase = { speaking: boolean; msgId: string | null }
  *  means the model went missing. */
 type SynthError = Error & { superseded?: boolean; status?: number }
 
+/** Safety cap on the process queue (#83): briefings are <=400 chars so the
+ *  lane stays short, but a pathological run must not build unbounded speech
+ *  latency. Drop-oldest beyond this many PENDING emissions; the newest
+ *  (plus its later appends) always survives. */
+const MAX_PENDING_EMISSIONS = 3
+
+/** One emission waiting in the process queue. `chunks` holds everything
+ *  announced before the utterance actually starts (deferral buffering);
+ *  once it starts they are replayed through the same serialized queue the
+ *  live feed appends onto. */
+interface PendingUtterance {
+  msgId: string
+  onError?: (e: SynthError, status?: number) => void
+  opts?: { voice?: string; speed?: number }
+  /** Pre-start buffer (stream entries) or the full one-shot chunk list. */
+  chunks: string[]
+  /** Stream entries wait for feed end(); one-shots are done from birth. */
+  isStream: boolean
+  done: boolean
+  /** The real feed handle, wired by startUtterance when the utterance
+   *  begins. Null while still queued. */
+  feed: { append: (chunk: string) => void; end: () => void } | null
+}
+
 class SpeechPlayer {
   private ctx: AudioContext | null = null
   private sources: AudioBufferSourceNode[] = []
@@ -206,6 +235,9 @@ class SpeechPlayer {
    *  hard-stop paths floor the backend at this so the stopped utterance's
    *  own in-flight chunks abort too. */
   private activeEpoch = 0
+  /** The process queue (#83): emissions waiting for the current utterance
+   *  to drain, strictly in arrival order. */
+  private pending: PendingUtterance[] = []
 
   subscribe(fn: (p: Phase) => void): () => void {
     this.listeners.add(fn)
@@ -267,8 +299,9 @@ class SpeechPlayer {
 
   /** Stop whatever is playing/queued right now (replace semantics). Pings
    *  the backend with `floor`: every utterance generation <= floor aborts
-   *  at its next sentence boundary. Pass the CURRENT utterance's id to stop
-   *  it, or (newId - 1) when replacing so only older ones die. */
+   *  at its next sentence boundary. Also drops the whole pending lane (#83
+   *  point 4): nothing is more wrong than a queue that keeps talking after
+   *  Stop — the lane is cleared BEFORE any drain could claim it. */
   stop(nextFloor = 0): void {
     this.generation++
     const hadAudio = this.sources.length > 0
@@ -280,6 +313,8 @@ class SpeechPlayer {
       }
     }
     this.sources = []
+    for (const p of this.pending) p.done = true
+    this.pending = []
     if (this.phase.speaking || hadAudio) ttsStop(nextFloor)
     if (this.phase.speaking) this.set(false, null)
   }
@@ -296,97 +331,164 @@ class SpeechPlayer {
   }
 
   /** Speak a list of prose chunks in order, prefetching one chunk ahead so
-   *  playback is gapless as long as synthesis keeps up (it does: per-chunk
-   *  synthesis is faster than that chunk's playback). Resolves when the
-   *  utterance finishes or is replaced/stopped. */
+ *  playback is gapless as long as synthesis keeps up (it does: per-chunk
+ *  synthesis is faster than that chunk's playback). Resolves when the
+ *  utterance finishes or is replaced/stopped. One-shot utterances QUEUE
+ *  behind anything already playing (#83) instead of superseding it. */
   async speak(
     msgId: string,
     chunks: string[],
     onError?: (e: SynthError, status?: number) => void,
     opts?: { voice?: string; speed?: number },
   ): Promise<void> {
-    // Claim this utterance's generation first, then floor the backend at
-    // everything OLDER (superseded(e) == e <= floor): previous utterance's
-    // in-flight chunks abort; our own (id = floor + 1) survive.
-    const epoch = ++this.utteranceId
-    this.stop(epoch - 1)
     if (!chunks.length) return
+    this.enqueue({ msgId, onError, opts, chunks, isStream: false, done: false, feed: null })
+  }
+
+  /** Put an emission on the player: idle -> start now, busy -> process
+   *  queue (FIFO, drop-oldest past the backlog cap). */
+  private enqueue(p: PendingUtterance): void {
+    if (!this.phase.speaking && this.pending.length === 0) {
+      this.startUtterance(p)
+      return
+    }
+    while (this.pending.length >= MAX_PENDING_EMISSIONS) this.pending.shift()
+    this.pending.push(p)
+  }
+
+  /** Claim an epoch and run one utterance to completion, then pull the
+   *  next pending emission. The ONLY place a generation is claimed: the
+   *  finished previous utterance is floored away (kills nothing audible,
+   *  it is done) rather than cut mid-word. */
+  private startUtterance(p: PendingUtterance): void {
+    const epoch = ++this.utteranceId
+    ttsStop(epoch - 1)
+    if (!p.chunks.length && p.done) {
+      this.drain()
+      return
+    }
     const gen = ++this.generation
     this.activeEpoch = epoch
-    this.set(true, msgId)
-    try {
-      let prefetch: Promise<AudioBuffer> | null = this.fetchBuffer(
-        chunks[0],
-        undefined,
-        opts,
-        epoch,
-      )
-      for (let i = 0; i < chunks.length; i++) {
-        const current = prefetch
-        prefetch =
-          i + 1 < chunks.length ? this.fetchBuffer(chunks[i + 1], undefined, opts, epoch) : null
-        if (!current) break
+    this.set(true, p.msgId)
+    // Live feed: appends chain onto a serialized promise queue that the
+    // tail of the chunk loop awaits, so the pre-start buffer and live
+    // appends stay strictly in order; end() lets the loop finish once the
+    // chain drains.
+    let chain: Promise<void> = Promise.resolve()
+    const pushChunk = (text: string) => {
+      chain = chain.then(async () => {
         let buf: AudioBuffer
         try {
-          buf = await current
+          buf = await this.fetchBuffer(text, undefined, p.opts, epoch)
         } catch (e) {
           const err = e as SynthError
           if (err.name === 'AbortError' || gen !== this.generation) return
           if (err.superseded) return // replaced mid-fetch: benign, stay silent
-          onError?.(err, err.status)
+          p.onError?.(err, err.status)
           return
         }
         if (gen !== this.generation) return
         await this.play(buf, gen)
-      }
-    } finally {
-      this.activeEpoch = 0
-      if (gen === this.generation) this.set(false, null)
+      })
     }
-  }
-
-  /** Live narration: one appendable utterance per run. `begin` claims the
-   *  epoch and starts the chunk loop on an empty queue; `append` feeds the
-   *  NEXT completed sentence-chunk (chunks handed in one at a time, so the
-   *  one-chunk prefetch stays intact); `end` (optional) stops feeding \u2014
-   *  playback drains naturally. Appended chunks share the utterance's
-   *  epoch so they never self-supersede; any speak()/stop() from elsewhere
-   *  supersedes the whole stream (generation check in the queue loop). */
-  beginStream(msgId: string, onError?: (e: SynthError, status?: number) => void) {
-    const epoch = ++this.utteranceId
-    this.stop(epoch - 1)
-    const gen = ++this.generation
-    this.activeEpoch = epoch
-    this.set(true, msgId)
-    let queue: Promise<void> = Promise.resolve()
-    let done = false
-    const loop = async (text: string) => {
-      let buf: AudioBuffer
-      try {
-        buf = await this.fetchBuffer(text, undefined, undefined, epoch)
-      } catch (e) {
-        const err = e as SynthError
-        if (err.name === 'AbortError' || gen !== this.generation) return
-        if (err.superseded) return
-        onError?.(err, err.status)
-        return
-      }
-      if (gen !== this.generation) return
-      await this.play(buf, gen)
-    }
-    return {
+    p.feed = {
       append: (chunk: string) => {
-        if (done || gen !== this.generation || !chunk.trim()) return
-        queue = queue.then(() => loop(chunk))
+        if (p.done || gen !== this.generation || !chunk.trim()) return
+        pushChunk(chunk)
       },
       end: () => {
-        done = true
-        void queue.then(() => {
-          this.activeEpoch = 0
-          if (gen === this.generation) this.set(false, null)
-        })
+        p.done = true
       },
     }
+    void (async () => {
+      try {
+        // Replay the pre-start buffer with one-chunk prefetch.
+        let prefetch: Promise<AudioBuffer> | null =
+          p.chunks.length > 0 ? this.fetchBuffer(p.chunks[0], undefined, p.opts, epoch) : null
+        for (let i = 0; i < p.chunks.length; i++) {
+          const current = prefetch
+          prefetch =
+            i + 1 < p.chunks.length ? this.fetchBuffer(p.chunks[i + 1], undefined, p.opts, epoch) : null
+          if (!current) break
+          let buf: AudioBuffer
+          try {
+            buf = await current
+          } catch (e) {
+            const err = e as SynthError
+            if (err.name === 'AbortError' || gen !== this.generation) return
+            if (err.superseded) return
+            p.onError?.(err, err.status)
+            return
+          }
+          if (gen !== this.generation) return
+          await this.play(buf, gen)
+        }
+        // Pre-start buffer done. Streams wait until end() + chain drain;
+        // one-shots are already complete here.
+        while (p.isStream && !p.done) {
+          await chain
+          if (gen !== this.generation) return
+        }
+        await chain
+        if (gen !== this.generation) return
+      } finally {
+        this.activeEpoch = 0
+        if (gen === this.generation) this.set(false, null)
+        this.drain()
+      }
+    })()
+  }
+
+  /** Claim the next pending emission, if any. Natural end-of-utterance
+   *  only — stop() clears the lane before this could hand one a claim. */
+  private drain(): void {
+    const next = this.pending.shift()
+    if (!next) return
+    if (next.done && !next.chunks.length) {
+      this.drain()
+      return
+    }
+    this.startUtterance(next)
+  }
+
+  /** Live narration: one appendable utterance per emission. When the player
+   *  is busy the new emission's claim is DEFERRED into the process queue
+   *  (#83): the returned feed buffers appends until the utterance actually
+   *  starts, so the previous emission plays to natural completion first —
+   *  no mid-word cut, no silent gap, strict arrival order. Appended chunks
+   *  share the utterance's epoch so they never self-supersede; only a hard
+   *  stop() (mute / per-message) kills a stream. */
+  beginStream(msgId: string, onError?: (e: SynthError, status?: number) => void) {
+    const p: PendingUtterance = {
+      msgId,
+      onError,
+      opts: undefined,
+      chunks: [],
+      isStream: true,
+      done: false,
+      feed: null,
+    }
+    const busy = this.phase.speaking || this.pending.length > 0
+    this.enqueue(p)
+    const feed = {
+      append: (chunk: string) => {
+        if (busy && !p.feed) {
+          // Still queued: buffer the chunk; startUtterance replays the
+          // pre-start buffer before any live appends.
+          if (chunk.trim() && !p.done) p.chunks.push(chunk)
+          return
+        }
+        p.feed?.append(chunk)
+      },
+      end: () => {
+        if (busy && !p.feed) {
+          p.done = true
+          return
+        }
+        p.feed?.end()
+      },
+    }
+    return feed
   }
 }
 
@@ -415,7 +517,8 @@ interface TtsState {
     append: (chunk: string) => void
     end: () => void
   } | null
-  /** Speak an assistant message (replaces any current utterance). `briefing`
+  /** Speak an assistant message (queues behind a playing utterance, #83).
+   *  `briefing`
    *  is the backend's spoken line (#66) when one arrived; the markdown is
    *  the fallback path (heuristic briefing, then truncated verbatim). */
   speakMessage: (msgId: string, markdown: string, briefing?: string | null) => void
@@ -481,7 +584,8 @@ export const useTts = create<TtsState>((set, get) => {
     },
     stop: () => {
       // Hard stop (mute toggle, per-message stop): floor at the utterance
-      // that is playing so its own in-flight chunks abort as well.
+      // that is playing so its own in-flight chunks abort as well. The
+      // player drops the pending lane too - the queue never outlives Stop.
       speechPlayer.stop(speechPlayer.currentEpoch)
       speechPlayer.clearActiveEpoch()
     },
