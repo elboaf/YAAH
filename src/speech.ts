@@ -221,7 +221,7 @@ interface PendingUtterance {
   feed: { append: (chunk: string) => void; end: () => void } | null
 }
 
-class SpeechPlayer {
+export class SpeechPlayer {
   private ctx: AudioContext | null = null
   private sources: AudioBufferSourceNode[] = []
   private generation = 0
@@ -424,9 +424,12 @@ class SpeechPlayer {
           await this.play(buf, gen)
         }
         // Pre-start buffer done. Streams wait until end() + chain drain;
-        // one-shots are already complete here.
+        // one-shots are already complete here. The tick matters: with the
+        // chain settled (agent thinking between sentences) a bare
+        // `await chain` spins microtasks and starves the event loop —
+        // timers never fire, the page freezes. Sleep-poll instead.
         while (p.isStream && !p.done) {
-          await chain
+          await Promise.race([chain, new Promise((r) => setTimeout(r, 16))])
           if (gen !== this.generation) return
         }
         await chain

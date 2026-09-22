@@ -10,7 +10,7 @@ vi.mock('./api', () => ({
 }))
 
 import { ttsStop, ttsSynthesize } from './api'
-import { speechPlayer } from './speech'
+import { SpeechPlayer } from './speech'
 
 const ttsStopMock = vi.mocked(ttsStop)
 const synthMock = vi.mocked(ttsSynthesize)
@@ -112,7 +112,9 @@ describe('#83 speech process queue', () => {
       await until(() => playingCount() === 0)
     }
     expect(order).toEqual(['c0', 'c1', 'c2', 'c3'])
-    expect(p.current.speaking).toBe(false)
+    // speaking flips false a few microtasks after the last onended —
+    // poll for it instead of asserting synchronously.
+    await until(() => !p.current.speaking)
   })
 
   it('stop() kills current audio AND drops the whole pending lane', async () => {
@@ -152,6 +154,8 @@ describe('#83 speech process queue', () => {
     await until(() => synthMock.mock.calls.some((c) => c[0] === 'b2'))
     await until(() => playingCount() === 1)
     releaseCurrent()
+    // feed was already end()ed while queued; after b2 the utterance
+    // completes on its own.
     await until(() => !p.current.speaking)
     expect(playingCount()).toBe(0)
   })
@@ -189,6 +193,7 @@ describe('#83 speech process queue', () => {
     releaseCurrent()
     await until(() => synthMock.mock.calls.some((c) => c[0] === 'b1'))
     await until(() => playingCount() === 1)
+    feedB.end()
     const calls = synthMock.mock.calls.map((c) => c[0])
     expect(calls.indexOf('a-flush')).toBeLessThan(calls.indexOf('b1'))
     releaseCurrent()
@@ -197,11 +202,9 @@ describe('#83 speech process queue', () => {
   })
 })
 
-// The player is a singleton with closed-over state; hand each test a
-// pristine instance by resetting the module registry.
-async function fresh(): Promise<typeof speechPlayer> {
-  vi.resetModules()
-  vi.doMock('./api', () => ({ ttsStop: vi.fn(), ttsSynthesize: synthMock }))
-  const mod = (await import('./speech')) as typeof import('./speech')
-  return mod.speechPlayer
+// The player is a singleton, but tests hand-build a fresh instance per
+// test so no closed-over queue/generation state leaks between cases
+// (module-reset + dynamic re-import deadlocks the vitest 5 worker).
+function fresh(): SpeechPlayer {
+  return new SpeechPlayer()
 }
