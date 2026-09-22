@@ -5515,6 +5515,8 @@ export function ChatPanel() {
   const lastMsg = messages.length ? messages[messages.length - 1] : null
   const lastAssistantId = lastMsg && lastMsg.role === 'assistant' ? lastMsg.id : null
   const lastAssistantContent = lastMsg && lastMsg.role === 'assistant' ? lastMsg.content : ''
+  // The turn's spoken briefing (#66), captured from the stream's `say` event.
+  const say = useAgent((s) => s.sayByConv[s.bufferKey()])
   const wasStreamingRef = useRef(false)
   const lastSpokenRef = useRef<string | null>(null)
   const narrationRef = useRef<{
@@ -5564,8 +5566,8 @@ export function ChatPanel() {
     if (!ttsEnabled || !ttsReady || !lastAssistantId) return
     if (lastSpokenRef.current === lastAssistantId) return
     lastSpokenRef.current = lastAssistantId
-    speakMessage(lastAssistantId, lastAssistantContent)
-  }, [streaming, lastAssistantId, lastAssistantContent, ttsEnabled, ttsReady, speakMessage])
+    speakMessage(lastAssistantId, lastAssistantContent, say)
+  }, [streaming, lastAssistantId, lastAssistantContent, say, ttsEnabled, ttsReady, speakMessage])
   // ask_user appears → speak the question (options stay visual).
   const spokenQuestionRef = useRef<string | null>(null)
   useEffect(() => {
@@ -6061,6 +6063,7 @@ function Composer() {
     appendUserMessage,
     appendAssistantPlaceholder,
     appendTextDelta,
+    setSay,
     startToolCall,
     appendToolOutput,
     finishToolCall,
@@ -6675,6 +6678,8 @@ function Composer() {
    *  the execution half of the turn streams into its own message. */
   const handleStreamEvent = (bufKey: string, asstId: string) => {
     let curId = asstId
+    // Spoken briefing captured from the turn's `say` event (#66).
+    setSay(bufKey, undefined)
     // True while text is allowed to flow without an emission separator: the
     // stream starts mid-emission (first emission of a fresh message), and a
     // tool event closes the emission — the next text opens a new one (#17).
@@ -6687,6 +6692,9 @@ function Composer() {
         textSinceTool = true
         appendTextDelta(bufKey, curId, text)
       }
+    } else if (ev.type === 'say') {
+      // Spoken briefing (#66): captured for read-aloud, never rendered.
+      setSay(bufKey, ev.say ?? '')
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).

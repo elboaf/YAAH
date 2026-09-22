@@ -756,6 +756,7 @@ export const disconnectRemote = () =>
 export interface AgentEvent {
   type:
     | 'text'
+    | 'say'
     | 'thinking'
     | 'tool_start'
     | 'tool_progress'
@@ -775,6 +776,8 @@ export interface AgentEvent {
   result?: unknown
   message?: string
   call_id?: string
+  /** Spoken briefing for read-aloud (#66) — speech-only, never rendered. */
+  say?: string
   /** Live output chunk while a shell tool runs (tool_progress). */
   chunk?: string
   /** Sub-agent identity (sub_agent_* events). */

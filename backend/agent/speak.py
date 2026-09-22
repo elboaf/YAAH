@@ -365,6 +365,114 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
     return pcm.tobytes(), audio.sample_rate
 
 
+# ---- Spoken briefing (two-channel split, #66) ---------------------------------
+# The chat transcript and the TTS input are deliberately DIFFERENT texts. The
+# agent emits a condensed spoken line as a <say> tag at the end of its final
+# answer (system prompt asks for it); the backend strips the tag from the
+# transcript and ships the line separately as a `say` stream event. When the
+# tag is missing or useless, a local heuristic derives a briefing from the
+# prose itself — the fallback is today's truncated verbatim read, never
+# silence.
+
+SAY_TAG = re.compile(r"<say>(.*?)</say>\s*$", re.S)
+# The model may also emit a say tag mid-message (it belongs at the end, but
+# don't let a stray tag leak into the chat transcript or the speech).
+SAY_TAG_ANY = re.compile(r"<say>(.*?)</say>", re.S)
+
+# Hard cap for the spoken line, in ONE place per side (mirrored in speech.ts).
+# ~400 chars ≈ 20–30 s of audio, far under the old 4000-char verbatim cap.
+SAY_MAX_CHARS = 400
+
+# Char budget the heuristic (and the cap on a model-emitted line) aims for.
+_BRIEFING_MAX = SAY_MAX_CHARS
+
+
+def extract_say(content: str) -> tuple[str, str | None]:
+    """Split a final assistant message into (chat text, spoken line).
+
+    Returns the chat transcript with every <say> tag removed (byte-identical
+    to a message that never contained one, modulo the tag itself) and the
+    last emitted briefing — or None when the model omitted the field. The
+    raw tag text is returned un-clipped; the caller runs it through
+    prose_for_speech / the cap.
+    """
+    said: str | None = None
+    for m in SAY_TAG_ANY.finditer(content):
+        if m.group(1).strip():
+            said = m.group(1).strip()
+    chat = SAY_TAG_ANY.sub("", content).rstrip()
+    return chat, said
+
+
+def strip_say_tags(content: str) -> str:
+    """Chat-transcript view of a message: <say> tags removed."""
+    return SAY_TAG_ANY.sub("", content).rstrip()
+
+
+def heuristic_briefing(md: str, max_chars: int = _BRIEFING_MAX) -> str:
+    """Fallback briefing without a model call: the first paragraph's first
+    sentence plus the final sentence of the prose, whichever fits the
+    budget. Semantic but cheap — 'what did this turn conclude' approximated
+    by 'how did it open and close'."""
+    prose = prose_for_speech(md, max_chars=10**9)  # formatting only, no cap
+    if not prose:
+        return ""
+    paras = [p.strip() for p in prose.split("\n") if p.strip()]
+    if not paras:
+        return ""
+    first = paras[0]
+    m = _SENT_END_ANY.search(first)
+    opening = first[: m.end(1)].strip() if m else first
+    tail = paras[-1]
+    m = None
+    for m in _SENT_END_ANY.finditer(tail):
+        pass
+    closing = tail[: m.end(1)].strip() if m else tail
+    if closing and closing != opening and len(opening) + len(closing) + 1 <= max_chars:
+        return f"{opening} {closing}".strip()
+    # One of the two alone, clipped at a sentence boundary under the cap.
+    pick = opening if len(opening) >= len(closing) else closing
+    if len(pick) <= max_chars:
+        return pick
+    cut = pick[:max_chars]
+    m2 = None
+    for m2 in _SENT_END.finditer(cut):
+        pass
+    if m2 and m2.end() > max_chars // 2:
+        cut = cut[: m2.end()]
+    return cut.strip()
+
+
+def spoken_line(briefing: str | None, md: str, max_chars: int = _BRIEFING_MAX) -> str:
+    """The final TTS input for a turn: the model-emitted briefing when
+    usable, else the heuristic, else the old truncated verbatim prose (the
+    fallback is today's behavior, never silence). Everything passes through
+    prose_for_speech so no markdown junk reaches the synthesizer, and the
+    hard cap is enforced here — in one place."""
+    prose = prose_for_speech(md, max_chars=10**9)
+    source = (briefing or "").strip()
+    if source:
+        line = prose_for_speech(source, max_chars=10**9)
+        if len(line) <= max_chars:
+            return line
+        return heuristic_briefing(line, max_chars) or _clip(line, max_chars)
+    return heuristic_briefing(prose, max_chars) or _clip(prose, max_chars)
+
+
+def _clip(text: str, max_chars: int) -> str:
+    """Last-resort sentence-boundary truncation (the old 4000-cap behavior,
+    at the briefing budget)."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    m = None
+    for m in _SENT_END.finditer(cut):
+        pass
+    if m and m.end() > max_chars // 2:
+        cut = cut[: m.end()]
+    return cut.strip()
+
+
 # ---- Text preparation --------------------------------------------------------
 
 _ABBREV = {
@@ -430,7 +538,9 @@ def split_sentences(text: str, min_len: int = 80, max_len: int = 300) -> list[st
     return [s for s in out if s]
 
 
+_SENT_END_ANY = re.compile(r"([.!?]+[\"')\]]?)(\s+|$)")
 _FENCE = re.compile(r"```.*?```", re.S)
+
 _INDENT_BLOCK = re.compile(r"(?m)^(?:    |\t).*(?:\n|$)+")
 _INLINE_CODE = re.compile(r"`([^`]+)`")
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
@@ -478,7 +588,9 @@ def prose_for_speech(md: str, max_chars: int = 4000) -> str:
     """Reduce an assistant markdown message to speakable prose: fenced and
     indented code blocks become pauses (dropped), tables drop, links keep
     their label, emphasis markers strip. Long reads truncate at a sentence
-    boundary — the full text stays on screen."""
+    boundary — the full text stays on screen. (The verbatim read's 4000-char
+    cap is now only the last-resort fallback path; the spoken line normally
+    comes from spoken_line() at the briefing budget.)"""
     if not md:
         return ""
     t = _FENCE.sub("\n\n", md)

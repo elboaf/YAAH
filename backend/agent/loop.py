@@ -230,6 +230,16 @@ Guidelines:
   hang. Never hold all your prose back for one final dump.
 - Paths are relative to the workspace root.
 
+Spoken briefing (voice read-aloud):
+- If the user has read-aloud enabled, your final answer is SPOKEN, not read
+  verbatim. End your final answer (the message with no tool calls) with a
+  <say> tag containing a 1-3 sentence spoken briefing of what just happened
+  — under 400 characters, plain prose, no markdown, no lists, no code.
+  Write what the user most needs to hear: the outcome and the next step.
+  The tag is stripped from the chat transcript; the chat text itself stays
+  as detailed as you like. Omit the tag when read-aloud is off or the turn
+  ended in a question (ask_user questions are spoken verbatim already).
+
 Interview the user (ask_user tool):
 - Do not make assumptions about a plan, decision, or idea. Put each
   decision to the user with ask_user and wait for the answer.
@@ -881,6 +891,14 @@ async def run_agent(
                 state["finish"] = None
                 state["usage"] = None
                 acc: list[str] = []
+                # <say> suppression (#66): the briefing tag may stream as
+                # ordinary text deltas. A tail buffer holds back the last
+                # chunk of a possible "<say>...</say>" so the tag never
+                # reaches the UI or the transcript; whatever is not part of
+                # a complete tag is flushed verbatim.
+                tail = ""
+                say_open = False
+                say_buf = ""
                 # Per-agent model/effort overrides only ride along when an
                 # agent actually set them, so the default call path (and
                 # anything patching chat with the base signature) is
@@ -910,7 +928,35 @@ async def run_agent(
                         )
                     elif ev["type"] == "content":
                         acc.append(ev["text"])
-                        yield _ndjson({"type": "text", "text": ev["text"]})
+                        tail += ev["text"]
+                        if not say_open:
+                            i = tail.find("<say>")
+                            if i >= 0:
+                                # Tag opens: flush what precedes it, hold the rest.
+                                if i > 0:
+                                    yield _ndjson({"type": "text", "text": tail[:i]})
+                                say_open = True
+                                say_buf = tail[i + 5 :]
+                                tail = ""
+                            elif "<say" in tail[-12:]:
+                                # Possible partial "<say" split across chunks:
+                                # hold it back until the next chunk decides.
+                                k = tail.rindex("<say")
+                                yield _ndjson({"type": "text", "text": tail[:k]})
+                                tail = tail[k:]
+                            else:
+                                yield _ndjson({"type": "text", "text": tail})
+                                tail = ""
+                        else:
+                            j = say_buf.find("</say>")
+                            if j >= 0:
+                                # Tag closed: the briefing stays in acc (it is
+                                # stripped from the transcript below) but is
+                                # never streamed to the UI.
+                                say_open = False
+                                tail = say_buf[j + 6 :]
+                                say_buf = ""
+                            # else: still inside the tag, hold everything.
                     elif ev["type"] == "thinking":
                         # Model reasoning stream: UI-only (telemetry tape),
                         # never stored in the transcript.
@@ -921,6 +967,10 @@ async def run_agent(
                         state["finish"] = ev.get("reason")
                     elif ev["type"] == "usage":
                         state["usage"] = ev.get("usage")
+                # Flush the tail: whatever is held back at stream end that is
+                # not inside an (unclosed) tag is chat text.
+                if tail and not say_open:
+                    yield _ndjson({"type": "text", "text": tail})
                 state["content"] = "".join(acc)
 
             attempt = 0
@@ -963,7 +1013,16 @@ async def run_agent(
                     )
                 )
 
+            # Two-channel split (#66): the <say> briefing is speech-only —
+            # it is stripped from the stored transcript, and the spoken line
+            # ships as its own `say` event (never as chat text). Fallbacks
+            # (heuristic first/last-sentence line, then the old truncated
+            # verbatim read) live in speak.spoken_line; the frontend plays
+            # `say` when present and degrades to the old path otherwise.
+            from backend.agent import speak as _speak
+
             assistant_content = state["content"]
+            assistant_content, said = _speak.extract_say(assistant_content)
             tool_calls = state["tool_calls"]
             finish_reason = state["finish"]
 
@@ -977,6 +1036,12 @@ async def run_agent(
 
             # No tool calls => final answer; turn complete
             if not tool_calls:
+                yield _ndjson(
+                    {
+                        "type": "say",
+                        "text": _speak.spoken_line(said, assistant_content),
+                    }
+                )
                 if finish_reason == "length":
                     yield _ndjson(
                         {
