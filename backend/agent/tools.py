@@ -624,6 +624,18 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(proc.wait(), timeout=5)
     except asyncio.TimeoutError:
         pass
+    # The killed tree may never deliver stdout EOF (write handles died
+    # unread), so the pipe transports stay open with a read pending. Left
+    # to the GC they __del__ after the loop is closed and raise
+    # RuntimeError('Event loop is closed') as a
+    # PytestUnraisableExceptionWarning (#82) — close them here, while a
+    # live loop can still service the close.
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        try:
+            transport.close()
+        except Exception:  # noqa: BLE001 — already closed is fine
+            pass
 
 
 def _clamp_note(requested: int) -> str | None:
@@ -676,6 +688,20 @@ async def _run_capturing(
         # can hang forever. wait() only needs the exit.
         await _reap(proc)
         return f"[timed out after {timeout}s]", True
+    except asyncio.CancelledError:
+        # Run stopped mid-tool (#82): without this, nobody kills or reaps
+        # the proc — its transport is later GC'd after the loop closed and
+        # its __del__ raises RuntimeError('Event loop is closed') as a
+        # PytestUnraisableExceptionWarning (red annotation on green CI).
+        _kill_tree(proc, job)
+        await _reap(proc)
+        raise
+    except Exception:
+        # Any other unwind (broken pipe mid-read, ...) must also leave no
+        # abandoned transport behind (#82).
+        _kill_tree(proc, job)
+        await _reap(proc)
+        raise
 
 
 async def run_bash(

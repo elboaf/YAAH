@@ -79,6 +79,7 @@ async def run_install_git(workspace: str) -> dict:
         rc = await asyncio.wait_for(proc.wait(), timeout=900)
     except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()  # reap the transport, not just the process (#82)
         return {"error": "Git installer timed out after 900s; aborted."}
     if rc != 0:
         return {"error": f"Git installer exited {rc} (setup logs: "
