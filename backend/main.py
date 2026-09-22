@@ -571,7 +571,7 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
             return {"ok": False, "error": "checkout target is empty"}
         result = await _run_ui_git(root, "checkout", branch)
 
-    invalidate_git_caches(root)
+    invalidate(root)
     await _post_git_trace(conversation_id, action, result)
     return {"ok": "error" not in result, **result}
 
