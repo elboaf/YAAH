@@ -73,7 +73,7 @@ import {
 } from './api'
 import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useUpdateCheck } from './update'
-import { useTts, splitSentences, liveProse } from './speech'
+import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
 import { openExternal } from './openExternal'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
@@ -5504,14 +5504,16 @@ export function ChatPanel() {
       .then((s) => ttsSync({ available: s.available, tts_enabled: s.tts_enabled }))
       .catch(() => {})
   }, [ttsSync])
-  // Mid-run narration (#75): one appendable utterance per run. As each
-  // sentence completes in the live stream it is appended as a chunk of the
-  // still-playing utterance, so first audio lands ~1-2 sentences after the
-  // model starts talking and narration keeps pace with the run. The epoch
-  // machinery makes appended chunks part of the same utterance (no
-  // self-supersede); any speak()/stop() from elsewhere supersedes the
-  // whole stream. Narrated msgIds are tracked so the end-of-run effect
-  // below never re-speaks them (no double narration).
+  // Briefing-first narration (#66 + #75): while an emission streams, its
+  // completed sentences are HELD (counted, not appended). When the backend's
+  // per-emission `say` briefing arrives, the held verbatim sentences are
+  // discarded and only the briefing is appended — the voice channel is a
+  // briefing per emission, not a read-aloud. If an emission completes
+  // without a usable tag, the held sentences flush verbatim at the swap
+  // (before the next emission's utterance claims the player) or at run end
+  // — never silence. One live utterance per run (#75): the epoch machinery
+  // makes appended chunks part of the same utterance (no self-supersede);
+  // any speak()/stop() from elsewhere supersedes the whole stream.
   const lastMsg = messages.length ? messages[messages.length - 1] : null
   const lastAssistantId = lastMsg && lastMsg.role === 'assistant' ? lastMsg.id : null
   const lastAssistantContent = lastMsg && lastMsg.role === 'assistant' ? lastMsg.content : ''
@@ -5520,6 +5522,7 @@ export function ChatPanel() {
   const narrationRef = useRef<{
     msgId: string
     spoken: number
+    said: boolean
     feed: { append: (chunk: string) => void; end: () => void }
   } | null>(null)
   const beginNarration = useTts((s) => s.beginNarration)
@@ -5529,19 +5532,36 @@ export function ChatPanel() {
     if (!ttsEnabled || !ttsReady || !lastAssistantId || !lastAssistantContent) return
     let n = narrationRef.current
     if (!n || n.msgId !== lastAssistantId) {
+      // Emission swap: flush the previous emission's held sentences (it
+      // ended without a usable tag) BEFORE the new utterance claims the
+      // player - beginStream supersedes our epoch, so the flush must run
+      // while the old feed can still take chunks.
+      const prev = n
+      if (prev) {
+        const prevMsg = messages.find((m) => m.id === prev.msgId)
+        const chunks = splitSentences(liveProse(prevMsg?.content ?? ''))
+        for (let i = prev.spoken; i < chunks.length; i++) prev.feed.append(chunks[i])
+      }
       const feed = beginNarration(lastAssistantId)
       if (!feed) return
-      n = { msgId: lastAssistantId, spoken: 0, feed }
+      n = { msgId: lastAssistantId, spoken: 0, said: false, feed }
       narrationRef.current = n
       lastSpokenRef.current = lastAssistantId
     }
-    // Feed every completed sentence the live text now contains. Chunks are
-    // handed over one at a time in play order, so the player's one-chunk
-    // prefetch stays intact; the live prose variant drops a still-open
-    // code fence (the narrator never reads half a code block).
+    if (n.said) return
+    const msgSay = messages.find((m) => m.id === lastAssistantId)?.say
+    if (msgSay != null) {
+      // Briefing arrived: drop the held verbatim sentences, speak the
+      // briefing alone (spokenLine clamps it to the cap; markdown-free).
+      n.said = true
+      n.feed.append(spokenLine(msgSay, lastAssistantContent))
+      return
+    }
+    // No tag yet: hold. Only the COUNT tracks here - chunks stay unappended
+    // so they can be discarded wholesale when the briefing lands.
     const chunks = splitSentences(liveProse(lastAssistantContent))
-    while (n.spoken < chunks.length) n.feed.append(chunks[n.spoken++])
-  }, [streaming, lastAssistantId, lastAssistantContent, ttsEnabled, ttsReady, beginNarration])
+    n.spoken = chunks.length
+  }, [streaming, lastAssistantId, lastAssistantContent, messages, ttsEnabled, ttsReady, beginNarration])
   // Run finished → close the live narration; fall back to the classic
   // end-of-run read ONLY when nothing was narrated live (e.g. TTS was
   // enabled mid-run). Fires on the streaming→idle transition only (a
@@ -5557,6 +5577,13 @@ export function ChatPanel() {
     wasStreamingRef.current = false
     const n = narrationRef.current
     if (n) {
+      if (!n.said) {
+        // The last emission ended without a briefing: flush its held
+        // sentences so the fallback stays verbatim, never silence.
+        const msg = messages.find((m) => m.id === n.msgId)
+        const chunks = splitSentences(liveProse(msg?.content ?? ''))
+        for (let i = n.spoken; i < chunks.length; i++) n.feed.append(chunks[i])
+      }
       n.feed.end() // playback drains; nothing new is fed
       narrationRef.current = null
       return
@@ -5564,8 +5591,12 @@ export function ChatPanel() {
     if (!ttsEnabled || !ttsReady || !lastAssistantId) return
     if (lastSpokenRef.current === lastAssistantId) return
     lastSpokenRef.current = lastAssistantId
-    speakMessage(lastAssistantId, lastAssistantContent)
-  }, [streaming, lastAssistantId, lastAssistantContent, ttsEnabled, ttsReady, speakMessage])
+    speakMessage(
+      lastAssistantId,
+      lastAssistantContent,
+      messages.find((m) => m.id === lastAssistantId)?.say,
+    )
+  }, [streaming, lastAssistantId, lastAssistantContent, messages, ttsEnabled, ttsReady, speakMessage])
   // ask_user appears → speak the question (options stay visual).
   const spokenQuestionRef = useRef<string | null>(null)
   useEffect(() => {
@@ -6061,6 +6092,7 @@ function Composer() {
     appendUserMessage,
     appendAssistantPlaceholder,
     appendTextDelta,
+    setSay,
     startToolCall,
     appendToolOutput,
     finishToolCall,
@@ -6687,6 +6719,10 @@ function Composer() {
         textSinceTool = true
         appendTextDelta(bufKey, curId, text)
       }
+    } else if (ev.type === 'say') {
+      // Spoken briefing (#66): captured on its message for read-aloud,
+      // never rendered.
+      setSay(bufKey, curId, ev.say ?? '')
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).

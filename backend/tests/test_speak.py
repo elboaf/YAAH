@@ -326,3 +326,65 @@ def test_real_engine_synthesizes_with_abort_callback():
     )
     assert rate == 24000
     assert len(pcm) > 24000  # at least a second of 16-bit mono audio
+
+
+# ---- spoken briefing (#66): two-channel split ----
+
+def test_extract_say_splits_channels():
+    chat, said = speak.extract_say(
+        "Fixed the bug, tests pass.\n\n<say>Fixed the login bug, all tests pass.</say>"
+    )
+    assert "login bug" in said
+    assert "<say>" not in chat
+    assert "Fixed the bug, tests pass." in chat
+
+
+def test_extract_say_without_tag_returns_none():
+    chat, said = speak.extract_say("Just a plain answer.")
+    assert chat == "Just a plain answer."
+    assert said is None
+
+
+def test_extract_say_keeps_last_tag():
+    chat, said = speak.extract_say("<say>stale</say> body <say>final line</say>")
+    assert said == "final line"
+    assert "<say>" not in chat
+
+
+def test_heuristic_briefing_first_and_last_sentence():
+    md = "The build is fixed and green. " + (
+        "Middle detail that nobody needs spoken aloud about modules. " * 10
+    ) + "\n\nAll 23 tests pass now."
+    out = speak.heuristic_briefing(md)
+    assert out.startswith("The build is fixed and green.")
+    assert out.endswith("All 23 tests pass now.")
+    assert len(out) <= speak.SAY_MAX_CHARS
+
+
+def test_heuristic_briefing_respects_cap():
+    md = ("word " * 500).strip() + "."
+    out = speak.heuristic_briefing(md)
+    assert len(out) <= speak.SAY_MAX_CHARS
+
+
+def test_spoken_line_prefers_model_briefing():
+    md = "Long chat answer. " * 200
+    out = speak.spoken_line("Short spoken summary.", md)
+    assert out == "Short spoken summary."
+
+
+def test_spoken_line_falls_back_to_heuristic_without_tag():
+    md = "First sentence is the headline. Middle filler. Final sentence concludes."
+    out = speak.spoken_line(None, md)
+    assert out.startswith("First sentence is the headline.")
+    assert "concludes" in out
+
+
+def test_spoken_line_caps_overlong_briefing():
+    long_say = "A sentence. " + "Filler sentence about details. " * 60
+    out = speak.spoken_line(long_say, "chat body")
+    assert len(out) <= speak.SAY_MAX_CHARS
+
+
+def test_spoken_line_never_silent():
+    assert speak.spoken_line(None, "Hello.") == "Hello."

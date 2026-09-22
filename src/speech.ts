@@ -1,11 +1,11 @@
-/** Read-aloud playback: queue the backend's WAV chunks through Web Audio,
+﻿/** Read-aloud playback: queue the backend's WAV chunks through Web Audio,
  *  plus the tiny zustand store the header toggle, per-message stop, and
  *  Composer hooks share.
  *
  *  Division of labor: the backend turns prose into WAV (Kokoro via
- *  sherpa-onnx); this module owns playback — chunk queue with one-chunk
+ *  sherpa-onnx); this module owns playback â€” chunk queue with one-chunk
  *  prefetch so long reads play gaplessly, replace semantics (a new utterance
- *  cuts the old one off mid-word), and hard stop. Markdown → prose and
+ *  cuts the old one off mid-word), and hard stop. Markdown â†’ prose and
  *  sentence chunking mirror backend/agent/speak.py (the frontend has the raw
  *  markdown; shipping it to the server for string munging would be a
  *  roundtrip with no upside). */
@@ -18,8 +18,8 @@ import { ttsStop, ttsSynthesize } from './api'
 
 // Emoji: espeak-ng (Kokoro's text front-end) looks emoji up in its
 // dictionary and SPEAKS THEIR NAMES (~0.8-1.7s each, probe-verified), so
-// they are stripped before synthesis. Same ranges as speak.py; →/←
-// (U+2190-21FF) deliberately kept — legitimate technical prose.
+// they are stripped before synthesis. Same ranges as speak.py; â†’/â†
+// (U+2190-21FF) deliberately kept â€” legitimate technical prose.
 const EMOJI =
   /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}]+/gu
 
@@ -32,11 +32,10 @@ function stripEmoji(text: string): string {
     .trim()
 }
 
-/** Markdown → speakable prose: code fences and indented blocks become
+/** Markdown â†’ speakable prose: code fences and indented blocks become
  *  pauses (dropped), tables drop, links keep their label, emphasis strips.
  *  Mirrors speak.prose_for_speech. */
-export function proseForSpeech(md: string, maxChars = 4000): string {
-  if (!md) return ''
+export function proseForSpeech(md: string, maxChars = 4000): string {  if (!md) return ''
   let t = md
   t = t.replace(/```[\s\S]*?```/g, '\n\n')
   t = t.replace(/^(?:    |\t).*(?:\n|$)+/gm, '\n\n')
@@ -73,13 +72,69 @@ export function liveProse(md: string): string {
   if (parts.length % 2 === 0) md = parts.slice(0, -1).join('```')
   return proseForSpeech(md)
 }
+// ---------------------------------------------------------------- briefing
+// Two-channel split (#66): the spoken line is a briefing, not a read-aloud.
+// Mirrors speak.py's SAY_MAX_CHARS / spoken_line / heuristic_briefing â€” the
+// cap lives in one place per side and both sides stay in sync.
+
+export const SAY_MAX_CHARS = 400
+
+const SENT_END = /([.!?]+["')\]]?)\s+/g
+
+/** Last-resort sentence-boundary truncation at the briefing budget. */
+function clip(text: string, maxChars = SAY_MAX_CHARS): string {
+  if (text.length <= maxChars) return text
+  const cut = text.slice(0, maxChars)
+  let last = -1
+  for (const m of cut.matchAll(/([.!?]+["')\]]?)\s+/g)) last = m.index + m[0].length
+  return (last > maxChars / 2 ? cut.slice(0, last) : cut).trim()
+}
+
+/** Fallback briefing without a model call: first sentence of the first
+ *  paragraph plus the final sentence, clipped to the budget. Mirrors
+ *  speak.heuristic_briefing. */
+export function heuristicBriefing(md: string, maxChars = SAY_MAX_CHARS): string {
+  const prose = proseForSpeech(md, Number.MAX_SAFE_INTEGER)
+  const paras = prose.split('\n').map((p) => p.trim()).filter(Boolean)
+  if (!paras.length) return ''
+  const first = paras[0]
+  const openEnd = first.match(/^[^]*?([.!?]+["')\]]?)(\s+|$)/)
+  const opening = (openEnd && openEnd.index !== undefined ? first.slice(0, openEnd.index + openEnd[1].length) : first).trim()
+  const tail = paras[paras.length - 1]
+  let closeEnd = -1
+  let closeLen = 0
+  for (const m of tail.matchAll(/([.!?]+["')\]]?)(\s+|$)/g)) {
+    closeEnd = m.index
+    closeLen = m[1].length
+  }
+  const closing = (closeEnd >= 0 ? tail.slice(0, closeEnd + closeLen) : tail).trim()
+  if (closing && closing !== opening && opening.length + closing.length + 1 <= maxChars) {
+    return `${opening} ${closing}`
+  }
+  return clip(opening.length >= closing.length ? opening : closing, maxChars)
+}
+
+/** The final TTS input for a turn: the model-emitted briefing when present,
+ *  else the heuristic, else the old truncated verbatim prose. Mirrors
+ *  speak.spoken_line â€” everything passes through proseForSpeech and the
+ *  hard cap is enforced here. */
+export function spokenLine(briefing: string | null | undefined, md: string): string {
+  const prose = proseForSpeech(md, Number.MAX_SAFE_INTEGER)
+  const source = (briefing ?? '').trim()
+  if (source) {
+    const line = proseForSpeech(source, Number.MAX_SAFE_INTEGER)
+    if (line.length <= SAY_MAX_CHARS) return line
+    return heuristicBriefing(line) || clip(line)
+  }
+  return heuristicBriefing(prose) || clip(prose)
+}
 
 const ABBREV = new Set([
   'e.g', 'i.e', 'etc', 'vs', 'cf', 'dr', 'mr', 'mrs', 'ms', 'prof', 'st',
   'sr', 'jr', 'fig', 'no', 'vol', 'ch', 'sec', 'approx', 'inc', 'ltd', 'co',
 ])
 
-/** Prose → synthesis chunks: sentences merged up to ~80 chars for natural
+/** Prose â†’ synthesis chunks: sentences merged up to ~80 chars for natural
  *  prosody, hard-split at ~300 so first audio arrives fast. Mirrors
  *  speak.split_sentences. */
 export function splitSentences(text: string, minLen = 80, maxLen = 300): string[] {
@@ -143,7 +198,7 @@ class SpeechPlayer {
   private generation = 0
   /** Monotonic utterance generation, sent with every chunk request: chunks
    *  of one utterance share it, so concurrent prefetch never supersedes a
-   *  live chunk — only stop(floor) raises the backend's floor past it. */
+   *  live chunk â€” only stop(floor) raises the backend's floor past it. */
   private utteranceId = 0
   private listeners = new Set<(p: Phase) => void>()
   private phase: Phase = { speaking: false, msgId: null }
@@ -354,14 +409,16 @@ interface TtsState {
   setEnabled: (on: boolean) => void
   setReady: (ready: boolean) => void
   setError: (e: string | null) => void
-  /** Speak an assistant message's prose (replaces any current utterance). */
-  speakMessage: (msgId: string, markdown: string) => void
   /** Begin a live mid-run narration; returns the feed handle, or null when
    *  TTS is off/not ready (the narrate effect skips everything). */
   beginNarration: (msgId: string) => {
     append: (chunk: string) => void
     end: () => void
   } | null
+  /** Speak an assistant message (replaces any current utterance). `briefing`
+   *  is the backend's spoken line (#66) when one arrived; the markdown is
+   *  the fallback path (heuristic briefing, then truncated verbatim). */
+  speakMessage: (msgId: string, markdown: string, briefing?: string | null) => void
   /** Speak an ask_user question; options stay visual. */
   speakQuestion: (callId: string, question: string) => void
   stop: () => void
@@ -374,13 +431,13 @@ export const useTts = create<TtsState>((set, get) => {
     set({ speaking, speakingMsgId: msgId })
   })
   /** Shared playback-failure path: a superseded 409 is benign (a newer
-   *  utterance replaced this one — stay silent, no error UI); any other 409
-   *  means the model went missing — flip ready so the UI offers the
+   *  utterance replaced this one â€” stay silent, no error UI); any other 409
+   *  means the model went missing â€” flip ready so the UI offers the
    *  download again. */
   const fail = (e: SynthError, status?: number) => {
     if (e.superseded) return
     set({
-      error: status === 409 ? 'voice model missing — enable it in Settings' : e.message,
+      error: status === 409 ? 'voice model missing â€” enable it in Settings' : e.message,
       ...(status === 409 ? { ready: false } : {}),
     })
     setTimeout(() => set({ error: null }), 8000)
@@ -402,10 +459,10 @@ export const useTts = create<TtsState>((set, get) => {
     },
     setReady: (ready) => set({ ready }),
     setError: (error) => set({ error }),
-    speakMessage: (msgId, markdown) => {
+    speakMessage: (msgId, markdown, briefing) => {
       const { enabled, ready } = useTts.getState()
       if (!enabled || !ready) return
-      const prose = proseForSpeech(markdown)
+      const prose = spokenLine(briefing, markdown)
       const chunks = splitSentences(prose)
       if (!chunks.length) return
       void speechPlayer.speak(msgId, chunks, fail)
