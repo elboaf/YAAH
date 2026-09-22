@@ -231,14 +231,16 @@ Guidelines:
 - Paths are relative to the workspace root.
 
 Spoken briefing (voice read-aloud):
-- If the user has read-aloud enabled, your final answer is SPOKEN, not read
-  verbatim. End your final answer (the message with no tool calls) with a
-  <say> tag containing a 1-3 sentence spoken briefing of what just happened
-  — under 400 characters, plain prose, no markdown, no lists, no code.
+- If the user has read-aloud enabled, your words are SPOKEN, not read
+  verbatim. End EVERY text emission with a <say> tag containing a 1-3
+  sentence spoken briefing of what just happened — under 400 characters,
+  plain prose, no markdown, no lists, no code. That includes each interim
+  text block you emit between tool calls while a run is in progress (the
+  voice keeps pace with the run), not only the final answer.
   Write what the user most needs to hear: the outcome and the next step.
   The tag is stripped from the chat transcript; the chat text itself stays
-  as detailed as you like. Omit the tag when read-aloud is off or the turn
-  ended in a question (ask_user questions are spoken verbatim already).
+  as detailed as you like. Omit the tag when read-aloud is off or when the
+  emission is a question (ask_user questions are spoken verbatim already).
 
 Interview the user (ask_user tool):
 - Do not make assumptions about a plan, decision, or idea. Put each
@@ -1034,14 +1036,19 @@ async def run_agent(
                 tool_calls=tool_calls,
             )
 
+            # Briefing-first, per emission (#66): EVERY completed model
+            # emission with content speaks — mid-run emissions included — so
+            # the voice channel keeps pace with the run instead of waiting
+            # for the final answer. spoken_line falls back (heuristic, then
+            # clipped verbatim) when the emission carried no usable <say>
+            # tag. Text-less emissions (a bare tool_calls message) say
+            # nothing rather than emitting an empty briefing.
+            _said = _speak.spoken_line(said, assistant_content)
+            if _said:
+                yield _ndjson({"type": "say", "text": _said})
+
             # No tool calls => final answer; turn complete
             if not tool_calls:
-                yield _ndjson(
-                    {
-                        "type": "say",
-                        "text": _speak.spoken_line(said, assistant_content),
-                    }
-                )
                 if finish_reason == "length":
                     yield _ndjson(
                         {

@@ -49,6 +49,10 @@ export interface ChatMessage {
   toolCalls?: ToolCall[]
   /** Sub-agent run snapshot (persisted spawn_agent result, history load). */
   subAgent?: SubAgentRun
+  /** Spoken briefing from the stream's `say` event (#66): speech-only,
+   *  never rendered. Captured live so the narrator can prefer it over the
+   *  emission's verbatim sentences; not persisted on the backend. */
+  say?: string
   /** The approved plan this message implements (set at the exit_plan
    *  approval boundary; rendered as a header above the execution). */
   implementsPlan?: string
@@ -145,13 +149,6 @@ interface AgentState {
   /** Per-conversation stream/failed-send error (rendered by the owning chat). */
   errorByConv: Record<string, string | null>
   setError: (key: string, e: string | null) => void
-  /**
-   * Spoken briefing of the last finished turn, per conversation (#66): the
-   * backend's `say` event text, captured by the stream handler and consumed
-   * by the read-aloud trigger. Speech-only — never rendered.
-   */
-  sayByConv: Record<string, string | undefined>
-  setSay: (key: string, say: string | undefined) => void
   workspace: string
   /**
    * Draft destination (issue #32): where the next first-send will file the
@@ -234,6 +231,9 @@ interface AgentState {
 
   appendUserMessage: (key: string, text: string, images?: string[], skills?: string[]) => string
   appendAssistantPlaceholder: (key: string) => string
+  /** Capture a `say` briefing onto its message (#66): speech-only, never
+   *  rendered; consumed by the narrator when the emission completes. */
+  setSay: (key: string, msgId: string, say: string) => void
   /** UI-generated rows outside the streaming protocol (git command trace
    *  rows). Persisted by the backend; live list only. */
   appendRawMessage: (key: string, msg: ChatMessage) => void
@@ -423,8 +423,6 @@ export const useAgent = create<AgentState>((set, get) => ({
       return { finishedByConv }
     }),
   errorByConv: {},
-  sayByConv: {},
-  setSay: (key, say) => set((s) => ({ sayByConv: { ...s.sayByConv, [key]: say } })),
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),
@@ -593,6 +591,17 @@ export const useAgent = create<AgentState>((set, get) => ({
       },
     }))
     return id
+  },
+
+  setSay: (key, msgId, say) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) =>
+          m.id === msgId ? { ...m, say } : m,
+        ),
+      },
+    }))
   },
 
   appendRawMessage: (key, msg) => {
