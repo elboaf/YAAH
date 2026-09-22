@@ -6506,31 +6506,51 @@ function Composer() {
       void rec.stop().catch(() => {})
       return
     }
+    // The release is the commit point (#88): capture the draft's
+    // destination NOW — before the seconds-long transcription window — so
+    // switching chats or categories while whisper runs can neither re-file
+    // the new chat nor retarget the send. Consumed by send's first-send
+    // branch; cleared below on every outcome that does not send.
+    useAgent.getState().pinDraftDestination(useAgent.getState().workspace)
+    // Release-time snapshot for the cleanup paths: only a release that was
+    // committed on an UNFILED draft owns the pin — clearing must never
+    // stomp a pin made later on a different draft (or an adopted chat).
+    const ownedUnfiledDraft = useAgent.getState().conversationId === null
+    const clearOrphanedDraftPin = () => {
+      if (!ownedUnfiledDraft) return
+      useAgent.getState().clearOrphanedDraftPin()
+    }
     setVoiceState('transcribing')
     pttBusyRef.current = true
     try {
       const blob = await rec.stop()
       const { text, language } = await transcribeAudio(blob)
       if (!text) {
-        // Empty transcript after real speech: whisper heard noise — stay quiet.
+        // Empty transcript after real speech: whisper heard noise — stay
+        // quiet. The release-time pin must not survive (#88): no draft
+        // was filed, so the next typed draft follows the live workspace.
+        useAgent.getState().clearOrphanedDraftPin()
         return
       }
       const q = pendingQuestionRef.current
       if (q) {
         const picked = matchOptionLabel(text, q.options.map((o) => o.label), language)
         if (picked === false) {
+          clearOrphanedDraftPin()
           pushReject(
             `Heard "${text.trim().slice(0, 40)}" — dictated in a different language than the options; use one of the labels or Something else…`,
           )
           return
         }
         if (picked !== null) {
+          clearOrphanedDraftPin()
           window.dispatchEvent(
             new CustomEvent('yaah-answer-ask', { detail: { callId: q.callId, answer: picked } }),
           )
           return
         }
         // No option matched: the transcript IS the free-text answer.
+        clearOrphanedDraftPin()
         window.dispatchEvent(
           new CustomEvent('yaah-answer-ask', { detail: { callId: q.callId, answer: text.trim() } }),
         )
@@ -6541,6 +6561,7 @@ function Composer() {
       const ap = anyApprovalRef.current
       if (ap) {
         const t = text.trim().toLowerCase()
+        clearOrphanedDraftPin()
         if (/^(approve|approve it|allow|yes|ok|go ahead|confirmed)\b/.test(t)) {
           window.dispatchEvent(
             new CustomEvent('yaah-answer-ask', { detail: { callId: ap.callId, answer: 'approve' } }),
@@ -6560,6 +6581,7 @@ function Composer() {
         const decision = /^(approve|approve it|approved|allow|yes|ok|go ahead|confirmed|looks good)\b/.test(t)
           ? 'approve'
           : text.trim()
+        clearOrphanedDraftPin()
         window.dispatchEvent(
           new CustomEvent('yaah-answer-plan', { detail: { callId: pl.callId, answer: decision } }),
         )
@@ -6567,6 +6589,9 @@ function Composer() {
       }
       void sendRef.current(text)
     } catch (e) {
+      // Transcription failed: nothing was filed, so the release-time pin
+      // must not leak into the next typed draft (#88).
+      clearOrphanedDraftPin()
       pushReject(`Dictation failed: ${(e as Error).message}`)
     } finally {
       recorderRef.current = null
@@ -7145,11 +7170,15 @@ function Composer() {
     setAbortController(bufKey, ac)
     try {
       let cid: number
+      // The effective destination for a first send (#94): the pinned draft
+      // destination — which newConversation/pttRelease set as the commit
+      // point (#88) and the card's Change… picker can override (#32) —
+      // else the live active workspace. BOTH the conversation row and the
+      // turn below must use this same value: creating the row under Y
+      // while streaming the turn against X misfiles the run.
+      const dest = useAgent.getState().draftDestination ?? workspace
       if (conversationId === null) {
-        // #32: a pinned draft destination wins over the live active
-        // workspace; null = follow the active workspace as before.
-        const dest = useAgent.getState().draftDestination
-        const created = await createConversation(fullText.slice(0, 40) || 'New chat', dest ?? workspace)
+        const created = await createConversation(fullText.slice(0, 40) || 'New chat', dest)
         cid = created.id
         // Atomic: re-key the draft buffer (optimistic messages included)
         // to the new id and move the panel onto it. bufKey follows so the
@@ -7167,7 +7196,7 @@ function Composer() {
       await streamAgentTurn(
         cid,
         fullText,
-        workspace,
+        dest,
         handleStreamEvent(bufKey, asstId),
         ac.signal,
         imageDataUrls,
@@ -7200,6 +7229,10 @@ function Composer() {
         setSendError(
           `Message not sent — the agent could not be reached. Your draft was restored.`,
         )
+        // A first send that never started filed nothing (#88): drop the
+        // release-time pin so the restored draft follows the live
+        // workspace again instead of freezing on the old one.
+        useAgent.getState().clearOrphanedDraftPin()
         textareaRef.current?.focus()
       }
     } finally {

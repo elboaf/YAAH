@@ -396,20 +396,43 @@ describe('sidebar finish signal (issue #25)', () => {
   })
 })
 
-describe('draft destination (#32)', () => {
-  it('pin survives active-workspace churn; cleared on adopt and new chat', () => {
-    useAgent.setState({ draftDestination: null, conversationId: null })
-    useAgent.getState().pinDraftDestination('C:/repos/other')
-    // Flipping the active workspace must not move a pinned destination.
-    useAgent.getState().setWorkspace('C:/repos/active')
-    expect(useAgent.getState().draftDestination).toBe('C:/repos/other')
-    // A fresh draft follows the active workspace again.
+describe('draft destination (#32/#88/#94)', () => {
+  it('newConversation pins the draft to the workspace active at creation; explicit pin overrides', () => {
+    useAgent.setState({ draftDestination: null, conversationId: null, workspace: 'C:/repos/active' })
+    // A draft chat is born pinned to its category (#88): the pin survives
+    // active-workspace churn until the first send files it.
     useAgent.getState().newConversation()
-    expect(useAgent.getState().draftDestination).toBeNull()
-    // Pinning again, then filing the draft clears it.
+    expect(useAgent.getState().draftDestination).toBe('C:/repos/active')
+    // Flipping the active workspace must not move a pinned destination.
+    useAgent.getState().setWorkspace('C:/repos/elsewhere')
+    expect(useAgent.getState().draftDestination).toBe('C:/repos/active')
+    // The card's Change… picker overrides the default pin (#32).
     useAgent.getState().pinDraftDestination('C:/repos/other')
+    expect(useAgent.getState().draftDestination).toBe('C:/repos/other')
+  })
+
+  it('pin is cleared when the draft is filed (adopt consumes it)', () => {
+    useAgent.setState({ draftDestination: null, conversationId: null, workspace: 'C:/repos/active' })
+    useAgent.getState().newConversation()
+    expect(useAgent.getState().draftDestination).toBe('C:/repos/active')
+    // Filing the draft consumes the pin: the card's job is done.
     useAgent.getState().adoptDraft(42)
     expect(useAgent.getState().draftDestination).toBeNull()
+  })
+
+  it('clearOrphanedDraftPin drops an unfiled draft pin, never a filed chat pin', () => {
+    useAgent.setState({ draftDestination: null, conversationId: null, workspace: 'C:/repos/active' })
+    // Orphaned pin: a release committed on an unfiled draft, but the send
+    // never happened (empty transcript, routing, transcription failure).
+    useAgent.getState().newConversation()
+    useAgent.getState().clearOrphanedDraftPin()
+    expect(useAgent.getState().draftDestination).toBeNull()
+    // A late cleanup arriving AFTER the draft was filed must not stomp a
+    // pin that now belongs to the filed conversation's own state.
+    useAgent.getState().pinDraftDestination('C:/repos/pinned')
+    useAgent.setState({ conversationId: 7 })
+    useAgent.getState().clearOrphanedDraftPin()
+    expect(useAgent.getState().draftDestination).toBe('C:/repos/pinned')
   })
 })
 

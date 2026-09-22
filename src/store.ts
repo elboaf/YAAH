@@ -168,13 +168,16 @@ interface AgentState {
   setSteer: (key: string, on: boolean) => void
   workspace: string
   /**
-   * Draft destination (issue #32): where the next first-send will file the
-   * draft chat. null = follow the live active workspace (open conversation,
-   * expand group, add workspace all update what the card shows); a string =
-   * the user pinned a destination via the card's Change… picker, which
-   * survives active-workspace churn until first send. Cleared on adopt
-   * (the chat is filed) and on newConversation (a fresh draft follows the
-   * active workspace again).
+   * Draft destination (issues #32/#88/#94): which workspace the draft chat
+   * files under AND runs its first turn in. newConversation pins the draft
+   * to the workspace active at creation (every entry point selects its
+   * category first), and pttRelease re-pins at the release — the commit
+   * point — so the seconds-long transcription window can neither re-file
+   * the chat nor retarget the send. The destination card's Change… picker
+   * overrides; the pin survives active-workspace churn until the first
+   * send. Cleared on adopt (the chat is filed) and after a failed PTT send
+   * (nothing was filed — the next typed draft must not inherit it). null =
+   * follow the live workspace (pre-draft resets only).
    */
   draftDestination: string | null
   pinDraftDestination: (ws: string | null) => void
@@ -239,6 +242,10 @@ interface AgentState {
   /** First send of a new chat: re-key the live 'draft' buffer to the real
    * conversation id and follow it on screen, in one atomic update. */
   adoptDraft: (id: number) => void
+  /** After a failed PTT send on an unfiled draft: drop the release-time
+   *  destination pin (#88) so the next typed draft follows the live
+   *  workspace again. */
+  clearOrphanedDraftPin: () => void
   /** Abort controller per in-flight run, keyed by buffer key (issue #10:
    *  several conversations can stream at once). */
   abortByConv: Record<string, AbortController>
@@ -418,6 +425,10 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({ modelCallByConv: { ...s.modelCallByConv, [key]: mc } })),
   draftDestination: null,
   pinDraftDestination: (ws) => set({ draftDestination: ws }),
+  clearOrphanedDraftPin: () => {
+    if (get().conversationId !== null) return
+    set({ draftDestination: null })
+  },
   setStatus: (key, status) =>
     set((s) => {
       const prev = s.statusByConv[key]
@@ -531,9 +542,11 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({
       conversationId: null,
       messagesByConv: { ...s.messagesByConv, draft: [] },
-      // A fresh draft follows the active workspace again (#32): any pinned
-      // destination belonged to the previous draft.
-      draftDestination: null,
+      // The new draft belongs to the workspace selected BEFORE this call:
+      // every entry point (sidebar group click, add-workspace flows, the
+      // New chat button after setWorkspace) sets s.workspace first, and the
+      // first send both files the chat and streams its turn here (#88/#94).
+      draftDestination: s.workspace,
     }))
     persistConversationId(null)
   },
