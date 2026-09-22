@@ -61,9 +61,15 @@ async def lifespan(app: FastAPI):
     from backend.agent import scheduler
 
     await scheduler.ensure_scheduled()
+    # Issue #58: the worktree reaper (salvage-before-delete for worktrees
+    # orphaned by crashed/aborted runs, then TTL pruning).
+    from backend.agent import worktrees as _worktrees
+
+    _worktrees.start_reaper()
     yield
     await mcp_client.manager.shutdown()
     scheduler.stop_scheduler()
+    _worktrees.stop_reaper()
     discovery.stop_advertising()
 
 
@@ -390,6 +396,8 @@ async def api_conversation_git_branches(conversation_id: int):
     from backend.agent.gitinfo import list_local_branches
     from backend.agent.tools import workspace_root
 
+    from backend.agent import worktrees
+
     ws = conv.get("workspace") or ""
     if not ws.strip() or ws.startswith("remote:"):
         return {"branches": []}
@@ -397,7 +405,10 @@ async def api_conversation_git_branches(conversation_id: int):
         root = workspace_root(ws)
     except ValueError:
         return {"branches": []}
-    return {"branches": await list_local_branches(root)}
+    branches = await list_local_branches(root)
+    # Issue #58 hygiene: `agent/*` merge-back branches are harness
+    # artifacts, not checkout targets — never offer them to the user.
+    return {"branches": worktrees.filter_agent_branches(branches)}
 
 
 class GitCommandBody(BaseModel):
@@ -492,6 +503,8 @@ async def api_conversation_git_command(conversation_id: int, body: GitCommandBod
     conversation as a trace row."""
     from backend.agent.gitinfo import invalidate_git_caches
 
+    from backend.agent import worktrees
+
     action = body.action
     if action not in _GIT_ACTIONS:
         from fastapi import HTTPException
@@ -502,6 +515,29 @@ async def api_conversation_git_command(conversation_id: int, body: GitCommandBod
     if root is None:
         return {"ok": False, "error": "no local git workspace"}
 
+    # Issue #58 (review decision 3): UI git operations are writers too —
+    # they run under the same merge mutex so a checkout/pull/commit can
+    # never interleave with an agent merge-back. Mutating actions only;
+    # `status` stays lock-free.
+    if action != "status":
+        try:
+            async with worktrees.merge_mutex(root):
+                return await _ui_git_locked(
+                    root, conversation_id, action, body, invalidate_git_caches
+                )
+        except TimeoutError:
+            return {
+                "ok": False,
+                "error": "another agent merge or git operation is in progress; try again",
+            }
+    return await _ui_git_locked(
+        root, conversation_id, action, body, invalidate_git_caches
+    )
+
+
+async def _ui_git_locked(root, conversation_id: int, action: str, body: GitCommandBody, invalidate) -> dict:
+    """The git-command body, run while holding the merge mutex (or for
+    read-only `status`). Ends with the standard invalidate+trace+return."""
     if action == "status":
         result = await _run_ui_git(root, "status", "--short", "--branch")
     elif action == "commit":
