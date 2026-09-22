@@ -424,13 +424,16 @@ export class SpeechPlayer {
           await this.play(buf, gen)
         }
         // Pre-start buffer done. Streams wait until end() + chain drain;
-        // one-shots are already complete here. The tick matters: with the
-        // chain settled (agent thinking between sentences) a bare
-        // `await chain` spins microtasks and starves the event loop —
-        // timers never fire, the page freezes. Sleep-poll instead.
+        // one-shots are already complete here. The sleep must come FIRST
+        // and unconditionally: racing a settled `chain` against a timer
+        // resolves in microtasks, so the timer never fires and the loop
+        // spins — starving the event loop (timers, input, rendering) and
+        // churning allocations until the renderer OOMs. Sleep on the
+        // macrotask clock, then drain whatever the chain picked up.
         while (p.isStream && !p.done) {
-          await Promise.race([chain, new Promise((r) => setTimeout(r, 16))])
+          await new Promise((r) => setTimeout(r, 16))
           if (gen !== this.generation) return
+          await chain
         }
         await chain
         if (gen !== this.generation) return
