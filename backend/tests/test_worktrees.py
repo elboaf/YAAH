@@ -2,9 +2,9 @@
 
 Covers the harness contract end to end on real temp git repos: rebinding
 (ensure_isolated), merge-back refusal rules (dirty worktree, zero commits,
-dirty main tree, conflict abort), self_merge lifecycle, sub-agent result
-finalization (branch on the first line), the reaper's salvage-before-
-delete, and the UI hygiene filters.
+dirty overlap with the merge, conflict abort), self_merge lifecycle,
+sub-agent result finalization (branch on the first line), the reaper's
+salvage-before-delete, and the UI hygiene filters.
 """
 
 import asyncio
@@ -156,18 +156,45 @@ async def test_merge_back_lands_committed_work(repo: Path):
     assert info["branch"] in _git(repo, "branch", "--list", info["branch"])
 
 
-async def test_merge_back_refuses_dirty_main(repo: Path):
+async def test_merge_back_merges_around_unrelated_dirty_main(repo: Path):
+    """Revisit of issue #58 decision 1 (docs/adr/0001): dirt that does not
+    collide with the merge must not veto it — git's own overlap-aware
+    pre-flight is the gate."""
     wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     (Path(wt) / "f.txt").write_text("x\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
     _git(Path(wt), "commit", "-q", "-m", "x")
-    # user (or another agent) left the main tree dirty — never stash it
+    # user (or another agent) left the main tree dirty with UNRELATED work
     (repo / "user-draft.txt").write_text("mine\n", encoding="utf-8")
+    (repo / "hello.txt").write_text("v1 edited\n", encoding="utf-8")
+    result = await worktrees.merge_back(repo, info["branch"])
+    assert result["merged"] is True
+    assert "unrelated" in result.get("note", "")
+    # the WIP survives untouched next to the merged file
+    assert (repo / "user-draft.txt").read_text(encoding="utf-8") == "mine\n"
+    assert (repo / "hello.txt").read_text(encoding="utf-8") == "v1 edited\n"
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "x\n"
+
+
+async def test_merge_back_refuses_dirty_overlap(repo: Path):
+    """Uncommitted main-tree files the merge must update still refuse —
+    git would clobber them, and YAAH never stashes user work."""
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
+    info = worktrees.binding_for("1")
+    (Path(wt) / "hello.txt").write_text("branch edit\n", encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "branch edit")
+    # the user's uncommitted edit is to the SAME file the branch changes
+    (repo / "hello.txt").write_text("my unfinished edit\n", encoding="utf-8")
     result = await worktrees.merge_back(repo, info["branch"])
     assert result["merged"] is False
-    assert "uncommitted" in result["reason"]
-    assert (repo / "user-draft.txt").read_text(encoding="utf-8") == "mine\n"
+    assert "hello.txt" in result["reason"]
+    assert result["dirty_overlap"] == ["hello.txt"]
+    # the WIP is intact and nothing from the branch landed
+    assert (repo / "hello.txt").read_text(encoding="utf-8") == (
+        "my unfinished edit\n"
+    )
 
 
 async def test_merge_back_conflict_aborts_clean(repo: Path):

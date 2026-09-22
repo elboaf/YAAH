@@ -25,9 +25,11 @@ Merge rules (issue decisions 1-6):
   their final message (results are clipped; the parent must always be
   able to act on the branch name).
 - Top-level chat agents self-merge at end of turn under the mutex.
-- Merge-back refuses a dirty worktree, zero new commits, a dirty main
-  tree (never stash), mid-merge state, and merge conflicts (aborting) —
-  surfaced, never papered over.
+- Merge-back refuses a dirty worktree, zero new commits, uncommitted
+  main-tree files that the merge would overwrite (dirty *overlap* —
+  never stash), mid-merge state, and merge conflicts (aborting) —
+  surfaced, never papered over. Unrelated WIP does not block a merge:
+  git's own overlap-aware pre-flight decides (see docs/adr/0001).
 - The worktree directory is deleted after merge-back; the `agent/*`
   branch is kept a few days (the reaper prunes it).
 """
@@ -186,7 +188,9 @@ def _git_exe() -> str:
     return _GIT_EXE
 
 
-async def _git(cwd: Path | str, *args: str, timeout: float = 30.0) -> tuple[int, str]:
+async def _git(
+    cwd: Path | str, *args: str, timeout: float = 30.0, raw: bool = False
+) -> tuple[int, str]:
     from backend.agent.tools import _NEW_SESSION, _NO_WINDOW
 
     try:
@@ -207,7 +211,12 @@ async def _git(cwd: Path | str, *args: str, timeout: float = 30.0) -> tuple[int,
         proc.kill()
         await proc.wait()
         return 124, "git timed out"
-    return proc.returncode or 0, out.decode("utf-8", errors="replace").strip()
+    return (
+        proc.returncode or 0,
+        out.decode("utf-8", errors="replace")
+        if raw
+        else out.decode("utf-8", errors="replace").strip(),
+    )
 
 
 async def main_repo_root(workspace: str) -> Path | None:
@@ -234,6 +243,45 @@ async def main_repo_root(workspace: str) -> Path | None:
 async def _dirty(repo: Path | str) -> bool:
     rc, out = await _git(repo, "status", "--porcelain")
     return rc == 0 and bool(out.strip())
+
+
+async def _dirty_paths(repo: Path | str) -> list[str]:
+    """The uncommitted paths behind `_dirty`: tracked edits AND untracked
+    files, parsed from `--porcelain -z` (NUL-delimited, so path text is
+    exact — no column math against status letters, no quoting)."""
+    rc, out = await _git(repo, "status", "--porcelain", "-z", raw=True)
+    if rc != 0:
+        return []
+    fields = out.split("\0")
+    paths: list[str] = []
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        xy, name = entry[:2], entry[3:]
+        if "R" in xy or "C" in xy:
+            # rename/copy: the second path follows as its own NUL field —
+            # skip it (the new path is already the one we captured above)
+            i += 1
+        if name:
+            paths.append(name)
+    return paths
+
+
+async def _dirty_overlap(root: Path, branch: str, dirty: list[str]) -> list[str]:
+    """Which uncommitted files this merge would need to update: the dirty
+    paths intersected with the paths the branch changes relative to the
+    merge base. Empty means git can merge around the dirt (its own rule:
+    a merge only refuses when local changes collide with files it writes)."""
+    rc, base = await _git(root, "merge-base", "HEAD", branch)
+    spec = base.strip() if rc == 0 and base.strip() else "HEAD"
+    rc, out = await _git(root, "diff", "--name-only", spec, branch)
+    if rc != 0:
+        return []  # cannot judge — git is the backstop at merge time
+    touched = {line.strip() for line in out.splitlines() if line.strip()}
+    return sorted(set(dirty) & touched)
 
 
 def _exclude_worktrees(root: Path) -> None:
@@ -463,9 +511,14 @@ async def _salvage(root: Path, wt: Path, branch: str, why: str) -> str:
 async def merge_back(root: Path, branch: str) -> dict:
     """Merge `branch` into the main tree under the merge mutex.
 
-    Refuses (and says why) on: a branch with no commits beyond HEAD, a
-    dirty main tree (never stash — issue decision 1), mid-merge state, and
-    merge conflicts (aborted; the shared tree is left clean)."""
+    Refuses (and says why) on: a branch with no commits beyond HEAD,
+    uncommitted main-tree files the merge would overwrite (dirty overlap
+    — never stash — issue decision 1), mid-merge state, and merge
+    conflicts (aborted; the shared tree is left clean). Unrelated
+    uncommitted work in the main tree does NOT block the merge: git's
+    own overlap-aware pre-flight is the gate (docs/adr/0001), and a
+    successful merge around unrelated dirt is noted in the result.
+    """
     rc_head, _ = await _git(root, "rev-parse", "--verify", "HEAD")
     if rc_head != 0:
         return {"merged": False, "reason": "main tree has no commits to merge into"}
@@ -487,28 +540,56 @@ async def merge_back(root: Path, branch: str) -> dict:
             }
         if count < 0:
             return {"merged": False, "reason": f"cannot inspect branch {branch}"}
+        dirty_note = ""
         if await _dirty(root):
-            return {
-                "merged": False,
-                "reason": (
-                    "main tree has uncommitted changes — commit or stash them "
-                    "first; YAAH never stashes user work to force a merge "
-                    "(issue #58 decision 1)"
-                ),
-            }
+            dirty = await _dirty_paths(root)
+            overlap = await _dirty_overlap(root, branch, dirty)
+            if overlap:
+                return {
+                    "merged": False,
+                    "reason": (
+                        "main tree has uncommitted changes to file(s) this "
+                        f"merge must update: {', '.join(overlap)} — commit "
+                        "or stash them first; YAAH never stashes user work "
+                        "to force a merge (issue #58 decision 1)"
+                    ),
+                    "dirty_overlap": overlap,
+                }
+            # Dirt exists but none of it collides with the merge: git's
+            # own pre-flight is overlap-aware and would allow this merge,
+            # so the dirt must not veto it (revisit of issue #58 decision
+            # 1: blanket dirty refusals blocked every merge whenever the
+            # human had unrelated WIP). If the human dirties a colliding
+            # file while the merge runs, git refuses atomically and the
+            # failure is surfaced below — never papered over, never a
+            # stash. Untracked files are effectively untouched: an
+            # untracked dirty path only lands in `overlap` when the
+            # branch modifies that same path, which git also refuses on
+            # ("untracked working tree files would be overwritten").
+            dirty_note = (
+                f"merged around {len(dirty)} unrelated uncommitted "
+                "file(s) in the main tree"
+            )
         rc, out = await _git(root, "merge", "--no-edit", branch, timeout=120)
         if rc != 0:
             with contextlib.suppress(Exception):
                 await _git(root, "merge", "--abort")
+            # git's own refusal ("local changes ... would be overwritten")
+            # means the human dirtied a colliding file mid-merge — a veto,
+            # not a content conflict. Surface git's message naming the file.
+            refused = "would be overwritten" in (out or "")
             return {
                 "merged": False,
-                "conflict": True,
+                "conflict": not refused,
                 "reason": out or "merge failed (aborted)",
             }
     from backend.agent import gitinfo
 
     gitinfo.invalidate_git_caches(root)
-    return {"merged": True, "commits": count, "branch": branch}
+    result: dict = {"merged": True, "commits": count, "branch": branch}
+    if dirty_note:
+        result["note"] = dirty_note
+    return result
 
 
 async def self_merge(chat_id: str) -> dict:
