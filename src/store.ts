@@ -15,6 +15,10 @@ export interface ToolCall {
   /** Client clock ms when the call started / finished (liveness UI). */
   startedAt?: number
   finishedAt?: number
+  /** Content length of the owning message when the call started (#63):
+   *  lets the renderer place answered ask_user cards in chronological
+   *  order, between the emissions before and after the question. */
+  contentOffset?: number
   /** Live sub-agent run state (spawn_agent calls only). */
   subAgent?: SubAgentRun
 }
@@ -639,6 +643,7 @@ export const useAgent = create<AgentState>((set, get) => ({
                     name,
                     args,
                     startedAt: Date.now(),
+                    contentOffset: m.content.length,
                   },
                 ],
               }
@@ -999,14 +1004,24 @@ export function buildMessages(
         role: 'assistant',
         content: r.content,
         images: r.images ?? undefined,
-        toolCalls: calls,
+        // Issue #63: stamp where each call sits in the block's text so
+        // answered ask_user cards reload in chronological order (a call
+        // follows its emission's text, so the offset is end-of-emission).
+        toolCalls: calls?.map((c) => ({ ...c, contentOffset: (r.content ?? '').length })),
         implementsPlan: pendingPlanText !== null ? pendingPlanText : undefined,
       })
       open = out[out.length - 1]
       return
     }
+    const base = open.content.length
     open.content = open.content ? `${open.content}\n${r.content}` : r.content
-    if (calls?.length) open.toolCalls = [...(open.toolCalls ?? []), ...calls]
+    if (calls?.length) {
+      const at = open.content ? base + 1 + (r.content ?? '').length : base
+      open.toolCalls = [
+        ...(open.toolCalls ?? []),
+        ...calls.map((c) => ({ ...c, contentOffset: at })),
+      ]
+    }
     if (r.images?.length) open.images = [...(open.images ?? []), ...r.images]
   }
   // Plan-approval boundary: when an assistant row carries an exit_plan call
