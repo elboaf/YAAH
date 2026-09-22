@@ -1212,6 +1212,46 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
     return <PlanningFold msg={msg} body={body} />
   }
 
+  // Issue #63: answered ask_user questions render as anchor cards in
+  // chronological order, interleaved with the turn's emission text at the
+  // call's contentOffset (where the question was asked relative to the
+  // block's text). Every answered question gets its own card - a turn with
+  // two questions renders two cards. Rows recorded before offsets existed
+  // fall back to card(s) above the body, preserving the old top-anchor look.
+  const allCalls = msg.toolCalls ?? []
+  const asks = allCalls.filter((t) => t.name === 'ask_user' && t.result !== undefined)
+  const ordered = [...asks].sort(
+    (a, b) => (a.contentOffset ?? -1) - (b.contentOffset ?? -1),
+  )
+  const chronological =
+    ordered.length > 0 && ordered.every((t) => (t.contentOffset ?? -1) >= 0)
+  const anchorFor = (t: ToolCall) => (
+    <QuestionAnchor key={t.id} tc={t} after={allCalls.slice(allCalls.indexOf(t) + 1)} />
+  )
+  const segments: ReactNode[] = []
+  if (chronological) {
+    let cursor = 0
+    for (const t of ordered) {
+      const cut = Math.min(Math.max(t.contentOffset ?? 0, cursor), msg.content.length)
+      if (cut > cursor) {
+        segments.push(
+          <div key={`qa-seg-${cursor}`} className="text-sm leading-relaxed text-zinc-200">
+            <MessageBody content={msg.content.slice(cursor, cut)} />
+          </div>,
+        )
+        cursor = cut
+      }
+      segments.push(anchorFor(t))
+    }
+    if (cursor < msg.content.length) {
+      segments.push(
+        <div key={`qa-seg-${cursor}`} className="text-sm leading-relaxed text-zinc-200">
+          <MessageBody content={msg.content.slice(cursor)} />
+        </div>,
+      )
+    }
+  }
+
   return (
     <div className="border-l-2 border-zinc-700/70 pl-3">
       <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-600">
@@ -1220,10 +1260,24 @@ function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
         <MessageStopButton msgId={msg.id} />
       </div>
       {msg.implementsPlan && <PlanBanner plan={msg.implementsPlan} />}
-      {msg.toolCalls?.some((t) => t.name === 'ask_user' && t.result !== undefined) && (
-        <QuestionAnchor calls={msg.toolCalls} />
+      {chronological ? (
+        <>
+          {segments}
+          {allCalls.length ? (
+            live ? (
+              <ToolTicker calls={allCalls} />
+            ) : (
+              <TraceLine calls={allCalls} />
+            )
+          ) : null}
+          {live && <ModelCallWaiting />}
+        </>
+      ) : (
+        <>
+          {ordered.map(anchorFor)}
+          {body}
+        </>
       )}
-      {body}
     </div>
   )
 }
@@ -1259,16 +1313,13 @@ function PlanningFold({ msg, body }: { msg: ChatMessage; body: ReactNode }) {
 /** Issue #63: persistent anchor for an answered mid-run ask_user question.
  *  The live AskUserCard above the composer vanishes the moment the answer
  *  arrives, and the Q&A then hides inside the collapsed trace — so every
- *  answered question renders as this inline card at the top of its turn:
- *  the question + the chosen answer (AskUserTrace), and a one-line summary
- *  of what the agent did next (the tool calls after it in the same turn).
+ *  answered question renders as an inline card at its chronological spot
+ *  (the caller slices the turn text at the call's contentOffset): the
+ *  question + the chosen answer (AskUserTrace), and a one-line summary of
+ *  what the agent did next (the calls after it in the same turn).
  *  Open by default, collapsible; works live and after reload. */
-function QuestionAnchor({ calls }: { calls: ToolCall[] }) {
+function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
   const [open, setOpen] = useState(true)
-  const askIdx = calls.findIndex((t) => t.name === 'ask_user' && t.result !== undefined)
-  if (askIdx === -1) return null
-  const tc = calls[askIdx]
-  const after = calls.slice(askIdx + 1)
   const byName = new Map<string, number>()
   for (const t of after) byName.set(t.name, (byName.get(t.name) ?? 0) + 1)
   const result = (tc.result ?? {}) as { answer?: string | null }

@@ -70,6 +70,71 @@ describe('buildMessages plan split', () => {
   })
 })
 
+describe('buildMessages ask_user contentOffsets (#63)', () => {
+  const askCall = (callId: string, q: string) => ({
+    id: callId,
+    function: { name: 'ask_user', arguments: JSON.stringify({ question: q }) },
+  })
+
+  it('stamps each call with its position in the coalesced block text', () => {
+    const msgs = buildMessages([
+      row(1, 'user', 'go'),
+      row(2, 'assistant', 'before one', { tool_calls: [askCall('q1', 'first?')] }),
+      callRow(3, 'q1', 'ask_user', { answer: 'Option A' }),
+      row(4, 'assistant', 'between'),
+      row(5, 'assistant', 'before two', { tool_calls: [askCall('q2', 'second?')] }),
+      callRow(6, 'q2', 'ask_user', { answer: 'Option X' }),
+      row(7, 'assistant', 'after two'),
+    ])
+    const turn = msgs[1]
+    // Both questions survive the coalesce; the block text is newline-joined.
+    expect(turn.toolCalls?.map((t) => t.name)).toEqual(['ask_user', 'ask_user'])
+    expect(turn.content).toBe('before one\nbetween\nbefore two\nafter two')
+    // Offsets land where each call started: after its emission's text.
+    const c1 = turn.toolCalls?.[0].contentOffset ?? -1
+    const c2 = turn.toolCalls?.[1].contentOffset ?? -1
+    expect(c1).toBe('before one'.length)
+    expect(c2).toBe('before one\nbetween\nbefore two'.length)
+    // And the offsets are strictly increasing slice points inside the text.
+    expect(c1).toBeGreaterThan(0)
+    expect(c2).toBeGreaterThan(c1)
+    expect(c2).toBeLessThan(turn.content.length)
+  })
+
+  it('renders question cards chronologically, one per answered ask_user (regression: rc.5 rendered only the first, at the top of the turn)', () => {
+    const msgs = buildMessages([
+      row(1, 'user', 'go'),
+      row(2, 'assistant', 'before one', { tool_calls: [askCall('q1', 'first?')] }),
+      callRow(3, 'q1', 'ask_user', { answer: 'Option A' }),
+      row(4, 'assistant', 'between'),
+      row(5, 'assistant', 'before two', { tool_calls: [askCall('q2', 'second?')] }),
+      callRow(6, 'q2', 'ask_user', { answer: 'Option X' }),
+      row(7, 'assistant', 'after two'),
+    ])
+    const turn = msgs[1]
+    const asks = (turn.toolCalls ?? []).filter(
+      (t) => t.name === 'ask_user' && t.result !== undefined,
+    )
+    expect(asks).toHaveLength(2)
+    // Chronology is derivable: both offsets exist and slice cleanly.
+    const ordered = [...asks].sort((a, b) => (a.contentOffset ?? -1) - (b.contentOffset ?? -1))
+    expect(ordered.every((t) => (t.contentOffset ?? -1) >= 0)).toBe(true)
+    const before = turn.content.slice(0, ordered[0].contentOffset ?? 0).trim()
+    expect(before).toBe('before one')
+  })
+
+  it('leaves offsets undefined for rows persisted before the field existed', () => {
+    const msgs = buildMessages([
+      row(1, 'user', 'go'),
+      row(2, 'assistant', 'emission', {
+        tool_calls: [askCall('q1', 'only?')],
+      }),
+      callRow(3, 'q1', 'ask_user', { answer: 'nope' }),
+    ])
+    expect(msgs[1].toolCalls?.[0].contentOffset).toBe((  'emission').length)
+  })
+})
+
 describe('buildMessages emission coalescing (#17)', () => {
   it('joins consecutive emission rows of one turn with a single line feed', () => {
     const msgs = buildMessages([
