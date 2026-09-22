@@ -73,7 +73,7 @@ import {
 } from './api'
 import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useUpdateCheck } from './update'
-import { useTts } from './speech'
+import { useTts, splitSentences, liveProse } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
 import { openExternal } from './openExternal'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
@@ -5461,17 +5461,50 @@ export function ChatPanel() {
       .then((s) => ttsSync({ available: s.available, tts_enabled: s.tts_enabled }))
       .catch(() => {})
   }, [ttsSync])
-  // Turn finished → speak its prose. Fires on the streaming→idle transition
-  // only (a history load or conversation switch also lands here with
-  // streaming=false, but lastSpokenRef guards against re-speaking anything
-  // that already played). A turn that ended in an ask_user speaks the
-  // question instead — the answer text is still streaming when the card
-  // appears, and the question is what the user is waiting on.
+  // Mid-run narration (#75): one appendable utterance per run. As each
+  // sentence completes in the live stream it is appended as a chunk of the
+  // still-playing utterance, so first audio lands ~1-2 sentences after the
+  // model starts talking and narration keeps pace with the run. The epoch
+  // machinery makes appended chunks part of the same utterance (no
+  // self-supersede); any speak()/stop() from elsewhere supersedes the
+  // whole stream. Narrated msgIds are tracked so the end-of-run effect
+  // below never re-speaks them (no double narration).
   const lastMsg = messages.length ? messages[messages.length - 1] : null
   const lastAssistantId = lastMsg && lastMsg.role === 'assistant' ? lastMsg.id : null
   const lastAssistantContent = lastMsg && lastMsg.role === 'assistant' ? lastMsg.content : ''
   const wasStreamingRef = useRef(false)
   const lastSpokenRef = useRef<string | null>(null)
+  const narrationRef = useRef<{
+    msgId: string
+    spoken: number
+    feed: { append: (chunk: string) => void; end: () => void }
+  } | null>(null)
+  const beginNarration = useTts((s) => s.beginNarration)
+  useEffect(() => {
+    if (!streaming) return
+    wasStreamingRef.current = true
+    if (!ttsEnabled || !ttsReady || !lastAssistantId || !lastAssistantContent) return
+    let n = narrationRef.current
+    if (!n || n.msgId !== lastAssistantId) {
+      const feed = beginNarration(lastAssistantId)
+      if (!feed) return
+      n = { msgId: lastAssistantId, spoken: 0, feed }
+      narrationRef.current = n
+      lastSpokenRef.current = lastAssistantId
+    }
+    // Feed every completed sentence the live text now contains. Chunks are
+    // handed over one at a time in play order, so the player's one-chunk
+    // prefetch stays intact; the live prose variant drops a still-open
+    // code fence (the narrator never reads half a code block).
+    const chunks = splitSentences(liveProse(lastAssistantContent))
+    while (n.spoken < chunks.length) n.feed.append(chunks[n.spoken++])
+  }, [streaming, lastAssistantId, lastAssistantContent, ttsEnabled, ttsReady, beginNarration])
+  // Run finished → close the live narration; fall back to the classic
+  // end-of-run read ONLY when nothing was narrated live (e.g. TTS was
+  // enabled mid-run). Fires on the streaming→idle transition only (a
+  // history load or conversation switch also lands here with
+  // streaming=false, but lastSpokenRef guards against re-speaking
+  // anything that already played).
   useEffect(() => {
     if (streaming) {
       wasStreamingRef.current = true
@@ -5479,6 +5512,12 @@ export function ChatPanel() {
     }
     if (!wasStreamingRef.current) return // idle at mount / history load: stay silent
     wasStreamingRef.current = false
+    const n = narrationRef.current
+    if (n) {
+      n.feed.end() // playback drains; nothing new is fed
+      narrationRef.current = null
+      return
+    }
     if (!ttsEnabled || !ttsReady || !lastAssistantId) return
     if (lastSpokenRef.current === lastAssistantId) return
     lastSpokenRef.current = lastAssistantId

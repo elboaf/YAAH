@@ -63,6 +63,17 @@ export function proseForSpeech(md: string, maxChars = 4000): string {
   return (last > 2000 ? cut.slice(0, last + 1) : cut).trim()
 }
 
+/** Live-stream variant of proseForSpeech: a code fence still open in the
+ *  stream (odd ``` count) is not speech-eligible yet \u2014 drop everything
+ *  from the last fence opener on so the narrator never reads half a code
+ *  block. At emission end the fence closes and proseForSpeech sees it. */
+export function liveProse(md: string): string {
+  if (!md) return ''
+  const parts = md.split('```')
+  if (parts.length % 2 === 0) md = parts.slice(0, -1).join('```')
+  return proseForSpeech(md)
+}
+
 const ABBREV = new Set([
   'e.g', 'i.e', 'etc', 'vs', 'cf', 'dr', 'mr', 'mrs', 'ms', 'prof', 'st',
   'sr', 'jr', 'fig', 'no', 'vol', 'ch', 'sec', 'approx', 'inc', 'ltd', 'co',
@@ -278,6 +289,50 @@ class SpeechPlayer {
       if (gen === this.generation) this.set(false, null)
     }
   }
+
+  /** Live narration: one appendable utterance per run. `begin` claims the
+   *  epoch and starts the chunk loop on an empty queue; `append` feeds the
+   *  NEXT completed sentence-chunk (chunks handed in one at a time, so the
+   *  one-chunk prefetch stays intact); `end` (optional) stops feeding \u2014
+   *  playback drains naturally. Appended chunks share the utterance's
+   *  epoch so they never self-supersede; any speak()/stop() from elsewhere
+   *  supersedes the whole stream (generation check in the queue loop). */
+  beginStream(msgId: string, onError?: (e: SynthError, status?: number) => void) {
+    const epoch = ++this.utteranceId
+    this.stop(epoch - 1)
+    const gen = ++this.generation
+    this.activeEpoch = epoch
+    this.set(true, msgId)
+    let queue: Promise<void> = Promise.resolve()
+    let done = false
+    const loop = async (text: string) => {
+      let buf: AudioBuffer
+      try {
+        buf = await this.fetchBuffer(text, undefined, undefined, epoch)
+      } catch (e) {
+        const err = e as SynthError
+        if (err.name === 'AbortError' || gen !== this.generation) return
+        if (err.superseded) return
+        onError?.(err, err.status)
+        return
+      }
+      if (gen !== this.generation) return
+      await this.play(buf, gen)
+    }
+    return {
+      append: (chunk: string) => {
+        if (done || gen !== this.generation || !chunk.trim()) return
+        queue = queue.then(() => loop(chunk))
+      },
+      end: () => {
+        done = true
+        void queue.then(() => {
+          this.activeEpoch = 0
+          if (gen === this.generation) this.set(false, null)
+        })
+      },
+    }
+  }
 }
 
 export const speechPlayer = new SpeechPlayer()
@@ -301,6 +356,12 @@ interface TtsState {
   setError: (e: string | null) => void
   /** Speak an assistant message's prose (replaces any current utterance). */
   speakMessage: (msgId: string, markdown: string) => void
+  /** Begin a live mid-run narration; returns the feed handle, or null when
+   *  TTS is off/not ready (the narrate effect skips everything). */
+  beginNarration: (msgId: string) => {
+    append: (chunk: string) => void
+    end: () => void
+  } | null
   /** Speak an ask_user question; options stay visual. */
   speakQuestion: (callId: string, question: string) => void
   stop: () => void
@@ -348,6 +409,11 @@ export const useTts = create<TtsState>((set, get) => {
       const chunks = splitSentences(prose)
       if (!chunks.length) return
       void speechPlayer.speak(msgId, chunks, fail)
+    },
+    beginNarration: (msgId) => {
+      const { enabled, ready } = useTts.getState()
+      if (!enabled || !ready) return null
+      return speechPlayer.beginStream(msgId, fail)
     },
     speakQuestion: (callId, question) => {
       const { enabled, ready } = useTts.getState()
