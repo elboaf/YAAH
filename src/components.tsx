@@ -1904,6 +1904,21 @@ function ConversationList() {
       next.delete(id)
       return next
     })
+  // Issue #81: pause/resume the agent's schedule straight from the row menu —
+  // same full-record PATCH (agentToBody + enabled flipped) the AgentsDialog's
+  // pause/resume button uses, then refresh so the row label flips.
+  const toggleAgentEnable = (c: { id: number }) => {
+    const a = agentByConv.get(c.id)
+    if (!a) return
+    updateAgent(a.id, agentToBody(a, !a.enabled))
+      .then(() => refreshAgents())
+      .catch((e) =>
+        setNotice({
+          title: `Could not update "${a.name}"`,
+          message: String((e as { message?: string }).message ?? e),
+        }),
+      )
+  }
   const toggleAgentRun = (c: { id: number }) => {
     const a = agentByConv.get(c.id)
     if (!a) return
@@ -2126,6 +2141,8 @@ function ConversationList() {
             }
           : undefined
       }
+      onToggleEnable={isAgent ? () => toggleAgentEnable(c) : undefined}
+      agentEnabled={agentByConv.get(c.id)?.enabled}
     />
   )
 
@@ -2403,6 +2420,8 @@ function ConversationRow({
   finished,
   isAgent,
   onAgentSettings,
+  onToggleEnable,
+  agentEnabled,
   onToggleRun,
   stopping,
   menuOpen,
@@ -2427,6 +2446,11 @@ function ConversationRow({
   isAgent?: boolean
   /** Open the agent settings dialogue (agent chats only). */
   onAgentSettings?: () => void
+  /** Pause/resume the agent's schedule (agent chats only) — issue #81: same
+   *  toggle the AgentsDialog row has, reachable without the full dialog. */
+  onToggleEnable?: () => void
+  /** Current enabled state, for the menu item's label (with onToggleEnable). */
+  agentEnabled?: boolean
   /** Start/stop the agent's run (agent chats only). Present = the row shows
    *  the toggle; the icon follows the running state (■ stop / ▶ run now). */
   onToggleRun?: () => void
@@ -2547,6 +2571,17 @@ function ConversationRow({
                 }}
               >
                 Agent settings…
+              </button>
+            )}
+            {onToggleEnable && (
+              <button
+                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => {
+                  setMenuOpen(false)
+                  onToggleEnable()
+                }}
+              >
+                {agentEnabled === false ? 'Resume agent' : 'Pause agent'}
               </button>
             )}
             <button
