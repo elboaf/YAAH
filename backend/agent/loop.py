@@ -24,6 +24,7 @@ from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
+from backend.agent import worktrees
 from backend.agent.tools import execute_tool, get_schemas, tool_risk, workspace_root
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.db.database import (
@@ -220,6 +221,11 @@ Guidelines:
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists
   before assuming your change caused them.
+- Write isolation is automatic (#58): your first write rebinds you to
+  your own git worktree — edit/verify there freely; at end of turn the
+  harness merges your committed work back. Commit what you want kept
+  BEFORE finishing: uncommitted changes are refused and salvaged, never
+  merged. Shell commands run with cwd inside your worktree.
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
 - Commit meaningful work with git_add/git_commit when the user asks for it.
@@ -903,6 +909,15 @@ async def run_agent(
             "message": "a turn is already running in this conversation",
         })
         return
+
+    # Issue #58: nothing is created up front — the shared workspace stays
+    # untouched until the first write-capable tool call (read-only turns
+    # never pay for isolation). `turn_workspace` is the (possibly rebound)
+    # workspace every tool call and spawn_batch sees from then on.
+    turn_workspace = str(workspace)
+    _isolated = False
+    _merge_result: dict | None = None
+
     if persist_user:
         await add_message(
             conversation_id, "user", user_text, images=image_paths or None
@@ -1270,13 +1285,29 @@ async def run_agent(
                         if policy == "autonomous":
                             mode = "full"
                         if tool_risk(name) == "read" or mode == "full":
-                            box: dict = {}
-                            async for pev in _execute_with_progress(
-                                name, args, workspace, tc.get("id", ""), box,
-                                cancel_ev=cancel_ev, steer_ev=steer_ev,
-                            ):
-                                yield _ndjson(pev)
-                            result = box.get("result")
+                            # Issue #58 rebinding seam: before the first
+                            # write-capable call, rebind the turn to its own
+                            # worktree (refusal surfaces as the tool's error
+                            # result — never a dead turn).
+                            _refused = False
+                            if tool_risk(name) != "read" and not _isolated:
+                                try:
+                                    turn_workspace = await worktrees.ensure_isolated(
+                                        workspace, chat_id=str(conversation_id)
+                                    )
+                                    _isolated = True
+                                    workspace = turn_workspace
+                                except worktrees.IsolationRefused as e:
+                                    result = {"error": str(e)}
+                                    _refused = True
+                            if not _refused:
+                                box: dict = {}
+                                async for pev in _execute_with_progress(
+                                    name, args, turn_workspace, tc.get("id", ""), box,
+                                    cancel_ev=cancel_ev, steer_ev=steer_ev,
+                                ):
+                                    yield _ndjson(pev)
+                                result = box.get("result")
                         elif policy == "sandbox-only":
                             result = _policy_skip_result(name)
                         else:
@@ -1309,13 +1340,24 @@ async def run_agent(
                             # Approved (None) -> execute for real now; a
                             # denial/plan-block carries its own error result.
                             if result is None:
-                                box = {}
-                                async for pev in _execute_with_progress(
-                                    name, args, workspace, tc.get("id", ""), box,
-                                    cancel_ev=cancel_ev, steer_ev=steer_ev,
-                                ):
-                                    yield _ndjson(pev)
-                                result = box.get("result")
+                                # Issue #58 rebinding seam (gated path):
+                                if tool_risk(name) != "read" and not _isolated:
+                                    try:
+                                        turn_workspace = await worktrees.ensure_isolated(
+                                            workspace, chat_id=str(conversation_id)
+                                        )
+                                        _isolated = True
+                                        workspace = turn_workspace
+                                    except worktrees.IsolationRefused as e:
+                                        result = {"error": str(e)}
+                                if result is None:
+                                    box = {}
+                                    async for pev in _execute_with_progress(
+                                        name, args, turn_workspace, tc.get("id", ""), box,
+                                        cancel_ev=cancel_ev, steer_ev=steer_ev,
+                                    ):
+                                        yield _ndjson(pev)
+                                    result = box.get("result")
 
                 # Steering (#7): a steer interrupt lands the queued message
                 # NOW. Replace the tool result's error text, clear the flag,
@@ -1447,7 +1489,7 @@ async def run_agent(
 
                 batch = asyncio.create_task(
                     subagents_mod.spawn_batch(
-                        calls, workspace, cancel_ev, on_event=_emit, gate=_sub_gate
+                        calls, turn_workspace, cancel_ev, on_event=_emit, gate=_sub_gate
                     )
                 )
 
@@ -1576,6 +1618,37 @@ async def run_agent(
         )
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
+        # Issue #58 decision 5: a top-level chat agent self-merges at end
+        # of turn — under the merge mutex, whatever exit the turn took
+        # (done, error, cancelled). A generator's finally may not resume
+        # arbitrarily deep awaits on abort, so the merge is wrapped in
+        # shield+wait_for; refusal/cancellation marks the worktree for the
+        # reaper (salvage-before-delete), nothing is ever lost silently.
+        if _isolated:
+            try:
+                _merge_result = await asyncio.wait_for(
+                    asyncio.shield(worktrees.self_merge(str(conversation_id))),
+                    timeout=60,
+                )
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                _merge_result = {
+                    "merged": False,
+                    "reason": "self-merge did not complete; worktree left for the reaper",
+                }
+            if not _merge_result.get("noop"):
+                await add_message(
+                    conversation_id,
+                    "system",
+                    json.dumps({"worktree_merge": _merge_result}, default=str),
+                )
+                yield _ndjson(
+                    {
+                        "type": "tool_result",
+                        "name": "git_merge_back",
+                        "call_id": f"merge-back-{conversation_id}",
+                        "result": _merge_result,
+                    }
+                )
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

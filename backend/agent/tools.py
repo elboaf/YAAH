@@ -501,6 +501,24 @@ TOOLS_SCHEMA += [
     {
         "type": "function",
         "function": {
+            "name": "git_merge_back",
+            "description": (
+                "Merge an agent worktree branch (reported as 'changes are on "
+                "branch agent/...' by a spawned sub-agent) into this agent's "
+                "tree. Refuses and reports — never guesses — when the source "
+                "branch has no commits, the target tree is dirty, or the "
+                "merge conflicts (the merge is aborted; nothing is left dirty)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"branch": {"type": "string"}},
+                "required": ["branch"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git_push",
             "description": "Push commits to the remote.",
             "parameters": {"type": "object", "properties": {}},
@@ -865,6 +883,9 @@ async def edit_file(workspace: str, path: str, old_text: str, new_text: str) -> 
 IGNORED_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "dist",
     "build", ".pytest_cache", ".mypy_cache", "target", ".next",
+    # issue #58 R7: sibling agents' half-finished worktrees are search
+    # noise — the model must never wade into another run's tree
+    ".yaah",
 }
 
 
@@ -1019,6 +1040,22 @@ async def git_commit(workspace: str, message: str) -> dict:
     return await _git(workspace, "commit", "-m", message)
 
 
+async def git_merge_back(workspace: str, branch: str) -> dict:
+    """Issue #58: merge an `agent/*` worktree branch into the tree this
+    tool runs in (the parent's worktree for a nested agent, the main tree
+    for the chat agent). Full refusal rules live in
+    worktrees.merge_back (dirty/zero-commit/conflict all refuse)."""
+    from backend.agent import worktrees as wt
+
+    if not branch.strip():
+        return {"error": "merge branch is empty"}
+    root = wt.worktree_of(workspace) or workspace
+    real = await wt.main_repo_root(root)
+    if real is None:
+        real = workspace_root(workspace)
+    return await wt.merge_back(real, branch.strip())
+
+
 async def git_push(workspace: str) -> dict:
     return await _git(workspace, "push")
 
@@ -1055,6 +1092,7 @@ EXECUTORS = {
     "git_diff": git_diff,
     "git_add": git_add,
     "git_commit": git_commit,
+    "git_merge_back": git_merge_back,
     "git_push": git_push,
     "git_pull": git_pull,
     "install_git": _install_git_executor,
@@ -1105,6 +1143,9 @@ _READ_TOOLS = {
 _MUTATING_TOOLS = {
     "write_file", "edit_file", "create_file", "delete_file", "move_file",
     "git_add", "git_commit",
+    # merges an agent worktree branch back into the shared tree (#58) —
+    # mutating: it changes the target tree (refusal rules apply)
+    "git_merge_back",
     # installs software on the host (silently, but gated: prompts in ask
     # mode, blocked in plan mode)
     "install_git",

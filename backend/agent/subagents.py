@@ -18,7 +18,10 @@ Execution contract (v1):
   - no nesting: a sub-agent cannot spawn sub-agents;
   - no ask_user: a sub-agent must decide for itself and report the
     assumption in its final message;
-  - shared workspace: sub-agents read and write the parent's folder;
+  - isolated writes (issue #58): sub-agents read the parent's folder;
+    the first write-capable tool call rebinds a writing sub-agent to
+    its own git worktree — the branch is reported on the first line of
+    the result and the parent/chat merges it (sub-agents never merge);
   - parent cancellation cancels children; a child failure returns a
     structured error result and never kills the parent's turn.
 """
@@ -32,7 +35,8 @@ from pathlib import Path
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
-from backend.agent.tools import get_schemas, workspace_root
+from backend.agent import worktrees
+from backend.agent.tools import execute_tool, get_schemas, workspace_root
 
 # ------------------------------------------------------------------ registry
 
@@ -368,6 +372,7 @@ async def run_sub_agent(
     cancel_ev: asyncio.Event | None = None,
     on_event=None,
     gate=None,
+    run_label: str = "",
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
@@ -380,6 +385,31 @@ async def run_sub_agent(
     permissions.
     """
     cancel_ev = cancel_ev or asyncio.Event()
+    # Issue #58: the sub-agent starts on the workspace it was handed (the
+    # parent's tree, or the parent's own worktree for nested fan-out). The
+    # first write-capable tool call rebinds `run_workspace` to this
+    # agent's own worktree; every tool call goes through _exec so file,
+    # shell, and git tools all follow the rebinding in one place.
+    run_workspace = str(workspace)
+    _isolation_note: str | None = None
+
+    async def _exec(name: str, args: dict) -> dict:
+        nonlocal run_workspace, _isolation_note, _used_worktree
+        if _used_worktree is None and name in worktrees.WRITER_TRIGGERS:
+            try:
+                run_workspace = await worktrees.ensure_isolated(
+                    run_workspace, chat_id=run_label or f"sub-{id(defn):x}"
+                )
+            except worktrees.IsolationRefused as e:
+                _isolation_note = str(e)
+                return {"error": str(e)}
+            else:
+                _used_worktree = run_workspace
+        return await execute_tool(name, args, run_workspace)
+
+    _used_worktree: str | None = None
+
+    _used_worktree: str | None = None
     messages = [
         {"role": "system", "content": _sub_agent_system_prompt(defn, workspace)},
         {"role": "user", "content": prompt},
@@ -541,9 +571,7 @@ async def run_sub_agent(
                         else:
                             result = None
                         if result is None:
-                            from backend.agent.tools import execute_tool
-
-                            result = await execute_tool(name, args, workspace)
+                            result = await _exec(name, args)
                     if on_event:
                         on_event({"type": "tool_result", "name": name, "result": result})
 
@@ -638,9 +666,7 @@ async def run_sub_agent(
                                 else:
                                     result = None
                                 if result is None:
-                                    from backend.agent.tools import execute_tool
-
-                                    result = await execute_tool(name, args, workspace)
+                                    result = await _exec(name, args)
                             if on_event:
                                 on_event({"type": "tool_result", "name": name, "result": result})
                         result_str = json.dumps(result)
@@ -694,7 +720,11 @@ async def run_sub_agent(
         )
         transcript = [{"note": "transcript too large to store"}]
 
-    return {
+    # Issue #58: the sub-agent's worktree never merges itself — the branch
+    # goes on the first line of the final message (clipped results must
+    # still carry it), uncommitted work is salvaged, the directory is
+    # removed, the branch is kept for the parent to merge.
+    result: dict = {
         "agent_type": defn.name,
         "status": status,
         "turns": turns,
@@ -703,6 +733,14 @@ async def run_sub_agent(
         **({"note": grace_note} if grace_note else {}),
         "transcript": transcript,
     }
+    if _used_worktree is not None:
+        try:
+            result = await worktrees.finalize_sub_agent(_used_worktree, result)
+        except Exception:  # noqa: BLE001 — reporting must not kill the parent
+            result["worktree_note"] = "worktree finalization failed; branch kept"
+    elif _isolation_note:
+        result["worktree_note"] = _isolation_note
+    return result
 
 
 # ------------------------------------------------------------------ batch
@@ -782,6 +820,7 @@ async def spawn_batch(
                 cancel_ev=cancel_ev,
                 on_event=_forward if on_event else None,
                 gate=agent_gate,
+                run_label=call_id,
             )
             if on_event:
                 on_event(
