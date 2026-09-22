@@ -3201,11 +3201,13 @@ function AgentForm({
   const [enabled, setEnabled] = useState(agent?.enabled ?? true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  // Model suggestions across every configured provider. A per-agent override
+  // Model list across every configured provider, grouped per provider for the
+  // same provider-grouped select the sidebar footer uses. A per-agent override
   // may be a bare id (= active provider, unchanged behavior) or
   // "provider::model" to route the run at a specific provider — the backend
   // resolves both (model_client.chat swaps base/key/model as needed).
-  const [modelChoices, setModelChoices] = useState<{ value: string; label: string }[]>([])
+  const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
+  const [activeProvider, setActiveProvider] = useState('')
   const refreshAgents = useAgent((s) => s.refreshAgents)
 
   useEffect(() => {
@@ -3213,17 +3215,8 @@ function AgentForm({
     listAvailableModels()
       .then((r) => {
         if (!alive) return
-        const choices: { value: string; label: string }[] = []
-        for (const [name, pm] of Object.entries(r.providers)) {
-          for (const m of pm.models) {
-            choices.push(
-              name === r.active_provider
-                ? { value: m, label: m }
-                : { value: `${name}::${m}`, label: `${m} (${name})` },
-            )
-          }
-        }
-        setModelChoices(choices)
+        setByProvider(r.providers)
+        setActiveProvider(r.active_provider)
       })
       .catch(() => {})
     return () => {
@@ -3347,21 +3340,36 @@ function AgentForm({
       </p>
       <div className="flex flex-wrap items-end gap-2">
         <label>
-          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Model (blank = active)</span>
-          <input
-            className={`w-44 ${agentInputCls}`}
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Model</span>
+          <select
+            className={agentInputCls}
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder="default model"
-            list="agent-model-choices"
-          />
-          <datalist id="agent-model-choices">
-            {modelChoices.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
+            aria-label="Model override"
+            title={model || 'default (inherit active model)'}
+          >
+            {/* head option: this field is an override — blank = active model */}
+            <option value="">default (inherit active model)</option>
+            {Object.entries(byProvider).map(([name, pm]) => (
+              <optgroup
+                key={name}
+                label={pm.error ? `${name} (${pm.error})` : name}
+              >
+                {pm.models.map((m) => (
+                  <option key={`${name}::${m}`} value={name === activeProvider ? m : `${name}::${m}`}>
+                    {m}
+                  </option>
+                ))}
+              </optgroup>
             ))}
-          </datalist>
+            {/* saved override isn't in any group (e.g. its provider is down or removed) */}
+            {model !== '' && !Object.values(byProvider).some((pm) => pm.models.includes(model)) && (
+              <option value={model}>{model}</option>
+            )}
+            {Object.keys(byProvider).length === 0 && model !== '' && (
+              <option value={model}>{model}</option>
+            )}
+          </select>
         </label>
         <label>
           <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Effort</span>
