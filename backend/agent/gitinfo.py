@@ -80,6 +80,10 @@ async def current_git_branch(root: Path | str) -> str | None:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=_GIT_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
+            # Reap: an unreaped proc leaves its transport to the GC, whose
+            # __del__ pings the (by then closed) loop after the test/app
+            # cycle ends — PytestUnraisableExceptionWarning (#82).
+            await proc.wait()
             out = b""
         if proc.returncode == 0:
             text = out.decode("utf-8", errors="replace").strip()
