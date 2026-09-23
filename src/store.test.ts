@@ -517,8 +517,9 @@ describe('agentBranch persistence (branch-first chip)', () => {
 
     // an explicit merge keeps the binding but flips the chip to merged
     const cur = useAgent.getState().agentBranchByConv['c1']
+    if (!cur) throw new Error('c1 binding missing')
     useAgent.getState().setAgentBranch('c1', { ...cur, merged: true })
-    expect(useAgent.getState().agentBranchByConv['c1'].merged).toBe(true)
+    expect(useAgent.getState().agentBranchByConv['c1']?.merged).toBe(true)
 
     // release removes the entry from the mirror too — no stale chips
     useAgent.getState().setAgentBranch('c2', null)
