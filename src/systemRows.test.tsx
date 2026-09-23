@@ -101,6 +101,43 @@ describe('persisted merge-back system rows', () => {
     expect(chip!.className).not.toContain('text-red-300')
   })
 
+  it('explains where session commits live and names the merge target accurately', () => {
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            worktree_status: {
+              branch: 'agent/221/work',
+              commits: 2,
+              dirty: false,
+            },
+          }),
+        )}
+      />,
+    )
+    expect(screen.getByText(/committed work is only on the session branch/)).toBeTruthy()
+    expect(screen.getByText(/shared repo's currently checked-out branch/)).toBeTruthy()
+    expect(screen.getByText(/push the session branch to its remote/)).toBeTruthy()
+    expect(screen.queryByText(/master untouched/)).toBeNull()
+  })
+
+  it('warns that uncommitted changes are not included in branch merge or push', () => {
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            worktree_status: {
+              branch: 'agent/221/work',
+              commits: 1,
+              dirty: true,
+            },
+          }),
+        )}
+      />,
+    )
+    expect(screen.getByText(/uncommitted changes stay on the session branch/)).toBeTruthy()
+  })
+
   it('keeps genuine failure markers red (⚠ + turn failed)', () => {
     render(<MessageView msg={sys('turn failed: RuntimeError: provider down')} />)
     expect(screen.getByText(/turn failed/)).toBeTruthy()

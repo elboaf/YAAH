@@ -116,8 +116,10 @@ export interface PendingPlanApproval {
 export interface AgentBranchInfo {
   branch: string
   boundAt: number
-  /** An explicit git_merge_back landed this branch's work in the main
-   *  tree; the session stays bound but the chip drops to neutral. */
+  /** The session has commits not yet merged into the shared repository. */
+  pendingMerge?: boolean
+  /** An explicit git_merge_back landed this branch's work in the shared
+   *  repository; the session stays bound but the chip drops to neutral. */
   merged?: boolean
 }
 
