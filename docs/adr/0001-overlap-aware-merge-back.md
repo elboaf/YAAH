@@ -1,5 +1,12 @@
 # Merge-back is overlap-aware: git decides when dirt blocks a merge
 
+> **Status:** the merge primitives described here (merge_back /
+> git_merge_back, dirty-overlap refusal, trash contract) are still
+> current — but their AUTOMATIC per-turn invocation is gone. Since the
+> adr/0003 revision (2026-09-23, branch-first) master moves only on an
+> explicit user-requested git_merge_back; turn end never merges.
+
+
 Issue #58 originally refused every merge-back into a dirty main tree
 (decision 1: "never stash user work"). The no-stash half is the real
 invariant — stashing someone's WIP is the "silently rewrote reality"

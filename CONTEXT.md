@@ -8,15 +8,21 @@ work is isolated and how it re-enters the shared tree.
 
 ### Isolation
 
-**Agent worktree**:
-A short-lived git worktree the harness gives a writing agent for the
-duration of its run, on a scoped branch. The agent's tools are rebound
-to it, so its changes never touch the shared tree mid-run.
-_Avoid_: sandbox, isolated copy, side-branch
+**Session worktree**:
+A git worktree the harness gives a chat for its whole session, on an
+`agent/*` branch named after the chat. The first write-capable tool
+call creates it (lazy — read-only turns never pay for isolation), and
+it persists across turns: turn N+1 works in exactly the tree turn N
+left behind. A quiesced session (branch has no commits, tree is clean)
+is drained at turn end; the next turn runs on the main tree and
+re-isolates on demand.
+_Avoid_: sandbox, isolated copy, side-branch, ephemeral worktree (it
+is neither ephemeral nor per-run)
 
 **Main tree**:
 The workspace's primary checkout, shared by every chat and by the
-human; the destination all work re-enters through.
+human. Master moves only when the user merges deliberately — never as
+a side effect of an agent turn ending.
 _Avoid_: root workspace, master copy
 
 **Shared-writer refusal**:
@@ -26,23 +32,39 @@ tree.
 
 ### Getting work back
 
-**Merge-back**:
-The end-of-turn handshake that merges an agent's scoped branch into the
-main tree under the merge mutex. Refusals are surfaced, never papered
-over.
-_Avoid_: sync, check-in, promote
+**Branch-first**:
+The contract: the agent's `agent/*` branch is the work's home. Turn
+end never merges. Master moves only by explicit user decision —
+`git_merge_back`, or plain git. Pushing publishes the agent branch,
+which is correct, not a misfire.
+_Avoid_: auto-merge, merge-back at turn end (the superseded contract)
+
+**git_merge_back**:
+The explicit merge of an `agent/*` branch into the main tree, invoked
+when the user asks for it ("merge it"). Refusals are surfaced, never
+papered over.
+_Avoid_: sync, check-in, promote, auto-merge
 
 **Dirty overlap**:
-Uncommitted main-tree files that a merge would overwrite. The only dirt
-that vetoes a merge-back; unrelated WIP merges around.
+Uncommitted main-tree files that a merge would overwrite. The only
+dirt that vetoes a git_merge_back; unrelated WIP merges around.
 _Avoid_: dirty tree (ambiguous — whose dirt, and does it collide?)
 
 **Salvage**:
-Capturing an agent's uncommitted worktree changes to a patch before its
-worktree is destroyed, so a crashed or refused run loses nothing.
+Capturing an agent's uncommitted worktree changes to a patch before
+its worktree is destroyed, so a crashed or released session loses
+nothing authored. Provably machine-generated files (redirect captures,
+log-shaped output) are dropped instead — with a patch of their own
+when the classification is heuristic.
 _Avoid_: backup, stash
 
+**Drain**:
+Session-end teardown of a session that carries no work: worktree
+removed, zero-commit branch deleted, binding released. Sessions with
+commits or authored dirt are never drained.
+_Avoid_: cleanup, garbage collection
+
 **Merge mutex**:
-The per-workspace lock that serializes every merge into the main tree —
-agent merge-backs and UI git operations alike.
+The per-workspace lock that serializes every merge into the main tree
+— git_merge_back and UI git operations alike.
 _Avoid_: git lock, merge lock file

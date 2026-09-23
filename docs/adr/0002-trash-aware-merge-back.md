@@ -1,5 +1,12 @@
 # Merge-back drops harness-generated trash; a refusal is a task for the agent, not a chat status
 
+> **Status:** the merge primitives described here (merge_back /
+> git_merge_back, dirty-overlap refusal, trash contract) are still
+> current — but their AUTOMATIC per-turn invocation is gone. Since the
+> adr/0003 revision (2026-09-23, branch-first) master moves only on an
+> explicit user-requested git_merge_back; turn end never merges.
+
+
 Observed 2026-09-22, shipping v1.0.9-rc.8: an agent merged PR #96 and
 bumped the version in its worktree, committed everything, and reported
 success. At end of turn, merge-back **refused** — the worktree held one
