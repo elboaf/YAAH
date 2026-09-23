@@ -1204,7 +1204,12 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
     if (!msg.content) return null
     let merge: { worktree_merge?: Record<string, unknown> } | null = null
     let status: {
-      worktree_status?: { branch?: string; commits?: number; dirty?: boolean }
+      worktree_status?: {
+        branch?: string
+        commits?: number
+        dirty?: boolean
+        worktree?: string
+      }
     } | null = null
     try {
       const parsed: unknown = JSON.parse(msg.content)
@@ -1216,7 +1221,12 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         'worktree_status' in (parsed as object)
       ) {
         status = parsed as {
-          worktree_status: { branch?: string; commits?: number; dirty?: boolean }
+          worktree_status: {
+            branch?: string
+            commits?: number
+            dirty?: boolean
+            worktree?: string
+          }
         }
       }
     } catch {
@@ -1227,6 +1237,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       // persisted line IS the record of where the work lives.
       const s = status.worktree_status ?? {}
       const bits: string[] = [`${s.commits ?? 0} commit(s) on branch ${s.branch ?? '?'}`]
+      if (s.worktree) bits.push(`worktree ${s.worktree}`)
       if (s.dirty) bits.push('plus uncommitted changes')
       bits.push('master untouched — say "merge it" to merge, or push the branch as-is')
       return (
@@ -5679,6 +5690,9 @@ function GitChipCluster({
   // the session drains. Sub-agents are excluded — the parent turn owns
   // the binding (worktree_bound fires only at the top-level seam).
   const showAgentBranch = Boolean(agentBranch)
+  // An explicit git_merge_back landed the branch in the main tree: same
+  // chip, neutral color — "working here" (amber) vs "merged" (tick).
+  const agentMerged = Boolean(agentBranch?.merged)
   const branchLabel = showAgentBranch ? agentBranch!.branch : info.branch
   const pairAway = info.ahead > 0 || info.behind > 0
   const pairDiverged = info.ahead > 0 && info.behind > 0
@@ -5697,13 +5711,15 @@ function GitChipCluster({
       <button
         className={
           'flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] ' +
-          (showAgentBranch
+          (showAgentBranch && !agentMerged
             ? 'border-amber-500/60 bg-amber-500/10 text-amber-300'
             : 'border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:border-zinc-500')
         }
         title={
           showAgentBranch
-            ? `session worktree branch ${agentBranch!.branch} — the work lives here until you merge it into ${info.branch} (say "merge it") or delete the chat`
+            ? agentMerged
+              ? `session worktree branch ${agentBranch!.branch} — merged into ${info.branch}; session still bound until the chat is deleted`
+              : `session worktree branch ${agentBranch!.branch} — the work lives here until you merge it into ${info.branch} (say "merge it") or delete the chat`
             : 'Current git branch — click to switch'
         }
         aria-label={showAgentBranch ? 'Agent worktree branch' : 'Switch git branch'}
@@ -5722,7 +5738,10 @@ function GitChipCluster({
                 : undefined
           }
         />
-        <span className="min-w-0 max-w-[10rem] truncate">{branchLabel}</span>
+        <span className="min-w-0 max-w-[10rem] truncate">
+          {agentMerged ? '✓ ' : ''}
+          {branchLabel}
+        </span>
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
@@ -7671,6 +7690,7 @@ function Composer() {
         content: JSON.stringify({
           worktree_status: {
             branch: ev.branch ?? '',
+            worktree: ev.worktree ?? '',
             commits: ev.commits ?? 0,
             dirty: ev.dirty ?? false,
           },
@@ -7680,6 +7700,11 @@ function Composer() {
       // Only fires when the session actually released (drained, chat
       // deleted) — not every turn end.
       setAgentBranch(bufKey, null)
+      pushLog({
+        kind: 'system',
+        name: 'worktree',
+        result: { released: true, note: 'session worktree removed' },
+      })
     } else if (ev.type === 'tool_progress') {
       if (ev.chunk) {
         appendToolOutput(bufKey, curId, ev.call_id ?? '', ev.chunk)
@@ -7698,6 +7723,14 @@ function Composer() {
             ? formatElapsed(tc.finishedAt - tc.startedAt)
             : undefined
         appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
+      }
+      if (ev.name === 'git_merge_back') {
+        // An explicit merge landed the session branch in the main tree:
+        // the chip drops from amber to neutral but keeps the branch name
+        // (the session stays bound even though the work is merged).
+        const r = ev.result as { merged?: boolean } | undefined
+        const cur = useAgent.getState().agentBranchByConv[bufKey]
+        if (r?.merged && cur) setAgentBranch(bufKey, { ...cur, merged: true })
       }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))

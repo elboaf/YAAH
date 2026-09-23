@@ -1293,3 +1293,72 @@ async def test_worktree_bound_released_events(fake_model, tmp_path, monkeypatch)
     assert events2.index(released[0]) > events2.index(
         next(e for e in events2 if e["type"] == "done")
     )
+
+
+@pytest.mark.asyncio
+async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
+    """Branch-first transparency: an isolated turn injects the
+    `# Session worktree isolation` system note into the model's messages
+    (it must never guess its location again), and turn end emits
+    worktree_status with the branch, the worktree path, and the commit
+    count ' instead of merging anything into the main tree."""
+    from backend.db.database import create_conversation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "master")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "init")
+
+    seen_messages: list[list[dict]] = []
+
+    async def fake_chat(messages, tools=None, stream=True):
+        seen_messages.append([dict(m) for m in messages])
+        events = scripts.pop(0) if scripts else [{"type": "finish"}]
+        return FakeStream(events)
+
+    scripts: list[list[dict]] = []
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+
+    cid = await create_conversation("wt-note")
+    scripts.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": json.dumps(
+                        {"command": "echo work > f.txt && git add f.txt && git commit -m w"}
+                    ),
+                },
+            }],
+        },
+    ])
+    scripts.append([{"type": "content", "text": "committed on my branch"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(repo)))
+
+    # the model saw the isolation note as a system message
+    notes = [
+        m for call in seen_messages for m in call
+        if m.get("role") == "system" and "Session worktree isolation" in str(m.get("content", ""))
+    ]
+    assert notes, "model must be told about its session worktree"
+    note_text = notes[0]["content"]
+    assert "agent/" in note_text and ".yaah" in note_text
+
+    # turn end: honest status event, nothing merged
+    statuses = [e for e in events if e.get("type") == "worktree_status"]
+    assert len(statuses) == 1
+    st = statuses[0]
+    assert st["commits"] == 1
+    assert st["branch"].startswith("agent/")
+    assert ".yaah" in st["worktree"]
+    assert not (repo / "f.txt").exists(), "master must be untouched"
+    # no fake git_merge_back pill at turn end any more
+    assert not [e for e in events if e.get("name") == "git_merge_back" and e.get("type") == "tool_result"]

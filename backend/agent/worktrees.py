@@ -1088,6 +1088,7 @@ async def turn_end(chat_id: str) -> dict:
             return {
                 "drained": True,
                 "branch": branch,
+                "worktree": wt_str,
                 "commits_ahead": 0,
                 "dirty": False,
             }
@@ -1095,6 +1096,7 @@ async def turn_end(chat_id: str) -> dict:
     return {
         "drained": False,
         "branch": branch,
+        "worktree": wt_str,
         "commits_ahead": max(commits, 0),
         "dirty": bool(await _dirty(wt)),
     }

@@ -116,6 +116,9 @@ export interface PendingPlanApproval {
 export interface AgentBranchInfo {
   branch: string
   boundAt: number
+  /** An explicit git_merge_back landed this branch's work in the main
+   *  tree; the session stays bound but the chip drops to neutral. */
+  merged?: boolean
 }
 
 const AGENT_BRANCH_KEY = 'yaah-agent-branch-by-conv'

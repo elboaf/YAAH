@@ -879,6 +879,8 @@ export interface AgentEvent {
    *  the session branch, master untouched. */
   commits?: number
   dirty?: boolean
+  /** Session worktree path (worktree_status). */
+  worktree?: string
   /** Sub-agent identity (sub_agent_* events). */
   agent_id?: number
   /** Provider + model a pending chat call is waiting on (model_call, #43). */

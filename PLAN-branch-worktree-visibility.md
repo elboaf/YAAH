@@ -1,5 +1,15 @@
 # Plan: branch + worktree visibility in the status strip
 
+> **SUPERSEDED in part, 2026-09-23.** Decision 1 below (— auto merge-back STAYS) was
+> REVERSED by the branch-first revision of adr/0003 (commit 19da635, field incident:
+> chat bound to its worktree pushed the agent branch instead of master). Turn end now
+> NEVER merges; master moves only on explicit user decision. Decision 2's two-chip shape
+> became ONE chip with two states: amber while the session branch has unmerged work,
+> neutral '✓ <branch>' after an explicit git_merge_back (the session stays bound either
+> way; the chip persists across turns and reloads). Decision 3's chip-drop is now the
+> DRAIN event (quiesced session) or chat deletion. The open-question resolutions below
+> remain in force where they are not about auto-merge.
+
 *From the #48 handoff (session worktree/branch visibility design). Motivation, verified
 current state, and the decided design. Status: all open questions settled 2026-02-07
 (this session); ready to implement.*
@@ -137,3 +147,15 @@ silently; the chip switches to it and stays for the session.
    dropdown absence.
 6. **ADR note**: amend `docs/adr/0003` — chip semantics change (sticky branch chip,
    worktree chip tracks unmerged commits), worktree *lifetime* unchanged.
+
+
+## Addendum (2026-09-23): model-side transparency
+
+The #48 design made the chip honest to the USER. The #95 incident showed the MODEL is
+equally in the dark: it never learns it is in a worktree, so 'what's your working
+directory' gets a half-truth and pushes/merges get improvised. Every isolated turn now
+injects a `# Session worktree isolation` system note (loop._worktree_note) stating the
+worktree path + branch, the main workspace, who is allowed to move master
+(only an explicit user-requested git_merge_back), that git_push publishes the agent
+branch, and that completed-work reports must name the branch and say the main branch is
+untouched.

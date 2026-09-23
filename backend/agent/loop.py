@@ -115,6 +115,27 @@ def _agents_notes(workspace: str) -> str:
     )
 
 
+def _worktree_note(wt_path: str, info: dict, main_workspace: str) -> str:
+    """Branch-first transparency for the model: isolation is invisible
+    plumbing to the file tools, but branch/ref semantics leak into every
+    push, merge, and 'where are you' answer — so say the relationship
+    out loud instead of letting the model guess it from tool output."""
+    branch = info.get("branch", "")
+    main_root = info.get("root") or main_workspace
+    return (
+        "# Session worktree isolation\n\n"
+        f"Your working directory is this chat's session worktree `{wt_path}` "
+        f"on branch `{branch}`. The user's main workspace is `{main_root}`.\n"
+        "- Commits stay on YOUR branch. The main tree moves only when the "
+        "user asks you to merge (git_merge_back) — never merge on your own "
+        "initiative.\n"
+        "- `git push` publishes YOUR branch (it sets its upstream "
+        "automatically); that is usually the right push.\n"
+        "- When reporting completed work, name the branch and state that "
+        "the main branch is untouched."
+    )
+
+
 def _computer_use_prompt() -> str:
     """Computer-use section for the system prompt (Windows local only).
     General principles only — tool mechanics live in the tool schemas,
@@ -1417,6 +1438,16 @@ async def run_agent(
                                                 "branch": _binfo.get("branch", ""),
                                             }
                                         )
+                                        messages.append(
+                                            {
+                                                "role": "system",
+                                                "content": _worktree_note(
+                                                    turn_workspace,
+                                                    _binfo,
+                                                    original_workspace,
+                                                ),
+                                            }
+                                        )
                                 except worktrees.IsolationRefused as e:
                                     result = {"error": str(e)}
                                     _refused = True
@@ -1476,6 +1507,16 @@ async def run_agent(
                                                 {
                                                     "type": "worktree_bound",
                                                     "branch": _binfo.get("branch", ""),
+                                                }
+                                            )
+                                            messages.append(
+                                                {
+                                                    "role": "system",
+                                                    "content": _worktree_note(
+                                                        turn_workspace,
+                                                        _binfo,
+                                                        original_workspace,
+                                                    ),
                                                 }
                                             )
                                     except worktrees.IsolationRefused as e:
@@ -1778,6 +1819,7 @@ async def run_agent(
                 # lives on the branch until the user says otherwise.
                 _note = {
                     "branch": _settle.get("branch", ""),
+                    "worktree": _settle.get("worktree", ""),
                     "commits": _settle["commits_ahead"],
                     "dirty": bool(_settle.get("dirty")),
                 }
