@@ -163,6 +163,7 @@ from backend.db.database import (
     get_workspace_by_path,
     list_conversations,
     list_workspaces,
+    move_conversation,
     touch_workspace,
     update_conversation,
     delete_conversation,
@@ -179,6 +180,14 @@ class ConversationUpdate(BaseModel):
     title: str | None = None
     workspace: str | None = None
     system_prompt_override: str | None = None
+
+
+class ConversationMove(BaseModel):
+    # Destination workspace path; null = the Default pseudo-workspace
+    # (no root directory). The turn endpoint derives the working directory
+    # from the conversation row, so THIS is what makes the move real —
+    # the sidebar grouping alone would only relabel it (issue #8).
+    workspace: str | None = None
 
 
 class NewMessage(BaseModel):
@@ -587,6 +596,47 @@ async def api_update_conversation(conversation_id: int, body: ConversationUpdate
     return {"ok": ok}
 
 
+@app.post("/api/conversations/{conversation_id}/move")
+async def api_move_conversation(conversation_id: int, body: ConversationMove):
+    """Move a chat to another workspace (issue #8).
+
+    Re-files the conversation row under the target — which is also what the
+    turn endpoint uses as the working directory for every future turn, so
+    the chat's next message RUNS in the target workspace, not just sits
+    under its group in the sidebar. Refuses while a run is streaming (the
+    in-flight turn's tools already point at the old workspace; a move
+    mid-run would strand the merge-back in the wrong tree) or while
+    messages sit queued on that run (they were written against the old
+    workspace's context)."""
+    from fastapi import HTTPException
+
+    from backend.agent.loop import agent_is_running, queue_items
+
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    if agent_is_running(conversation_id):
+        raise HTTPException(
+            status_code=409,
+            detail="a run is active in this chat — stop it before moving",
+        )
+    if queue_items(conversation_id):
+        raise HTTPException(
+            status_code=409,
+            detail="this chat has queued messages — send or discard them before moving",
+        )
+    result = await move_conversation(conversation_id, body.workspace)
+    if result is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    # Touch the destination so it re-sorts to the top of the sidebar picker.
+    await touch_workspace(result["workspace"])
+    return {
+        "ok": True,
+        "workspace": result["workspace"],
+        "target_id": result["target_id"],
+    }
+
+
 @app.delete("/api/conversations/{conversation_id}")
 async def api_delete_conversation(conversation_id: int):
     ok = await delete_conversation(conversation_id)
@@ -659,11 +709,18 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
 
     if agent_is_running(conversation_id):
         raise HTTPException(status_code=409, detail="conversation already running")
-    # Every turn runs in the workspace the UI has selected: remember it so the
-    # sidebar restores the same folder after an app restart, and touch the
-    # registry row so the dropdown/group order reflects recent activity.
-    set_last_workspace(body.workspace)
-    await touch_workspace(body.workspace or None)
+    # Working directory for this turn (issue #8): the conversation row's
+    # workspace — the same column the sidebar groups by, so a moved chat's
+    # next message runs inside the workspace it was moved TO, and a stale
+    # client (or a hand-rolled request) can never stream the chat against
+    # a directory it is no longer filed under.
+    conv = await get_conversation(conversation_id)
+    turn_workspace = (conv or {}).get("workspace") or ""
+    # Remember it so the sidebar restores the same folder after an app
+    # restart, and touch the registry row so the dropdown/group order
+    # reflects recent activity.
+    set_last_workspace(turn_workspace)
+    await touch_workspace(turn_workspace or None)
     # Attached images: decode data URLs to files on disk up front; only the
     # rel paths travel into the agent loop and the database.
     from backend.agent.imagedata import save_data_url
@@ -674,7 +731,7 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
         if rel:
             image_paths.append(rel)
     return StreamingResponse(
-        run_agent(conversation_id, body.message, body.workspace,
+        run_agent(conversation_id, body.message, turn_workspace,
                   image_paths=image_paths, skill_names=body.skills,
                   persist_user=not body.resume),
         media_type="application/x-ndjson",
