@@ -16,11 +16,14 @@ def test_get_help_known_tool_returns_schema_and_notes():
     res = asyncio.run(
         tools.execute_tool("get_help", {"tool_name": "screenshot"}, workspace="")
     )
+    if tools.os.name != "nt":
+        # Computer-use tools don't exist off-Windows; get_help must say so.
+        assert "Unknown tool" in res["error"]
+        return
     assert res["name"] == "screenshot"
     assert "properties" in res["schema"]
-    # Windows: the trimmed screenshot caveats live in the help notes.
-    if tools.os.name == "nt":
-        assert "ruler" in res["notes"]
+    # The trimmed screenshot caveats live in the help notes.
+    assert "ruler" in res["notes"]
 
 
 def test_get_help_unknown_tool_errors_with_hint():
