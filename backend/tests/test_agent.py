@@ -242,6 +242,90 @@ async def test_agent_direct_answer(fake_model, tmp_path):
     assert msgs[1]["content"] == "Hello!"
 
 
+# ------------------------------------------------- auto titles (issue #60)
+
+@pytest.mark.asyncio
+async def test_first_turn_generates_model_title(fake_model, tmp_path, monkeypatch):
+    """After the first turn of a fresh chat the mechanical title slice is
+    replaced by a model-generated one, and a 'title' event is emitted."""
+    from backend.db.database import create_conversation, get_conversation
+
+    cid = await create_conversation("help me fix the flaky test suite")  # <40 chars: exact slice
+    # Title call = the non-stream chat; the turn call stays on the fixture's
+    # scripted stream. Route by the `stream` flag the two paths differ in.
+    async def fake_title_chat(messages, tools=None, stream=False):
+        assert stream is False
+        assert any("title" in (m.get("content") or "") for m in messages)
+        return {"choices": [{"message": {"content": '"Flaky Test Suite Triage"'}}]}
+
+    real_chat = loop.model_client.chat
+
+    async def routed(messages, tools=None, stream=True):
+        if stream:
+            return await real_chat(messages, tools=tools, stream=True)
+        return await fake_title_chat(messages, tools=tools, stream=False)
+
+    monkeypatch.setattr(loop.model_client, "chat", routed)
+
+    fake_model.append([{"type": "content", "text": "On it."}, {"type": "finish"}])
+    events = await collect(loop.run_agent(cid, "help me fix the flaky test suite", str(tmp_path)))
+    title_events = [e for e in events if e["type"] == "title"]
+    assert title_events and title_events[0]["title"] == "Flaky Test Suite Triage"
+    conv = await get_conversation(cid)
+    assert conv["title"] == "Flaky Test Suite Triage"
+
+
+@pytest.mark.asyncio
+async def test_title_skips_renamed_and_agent_chats(fake_model, tmp_path, monkeypatch):
+    """A manually renamed (or agent-pinned) title is never overwritten — no
+    title event, no model call for the title."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("my custom name")
+    calls = []
+
+    async def routed(messages, tools=None, stream=True):
+        if not stream:
+            calls.append("title-call")
+            return {"choices": [{"message": {"content": "should not happen"}}]}
+        return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", routed)
+    events = await collect(loop.run_agent(cid, "hello there agent", str(tmp_path)))
+    assert not [e for e in events if e["type"] == "title"]
+    assert calls == []
+
+    # Agent chats are explicitly excluded even when their title happens to
+    # match the mechanical prompt slice.
+    cid2 = await create_conversation("agent prompt", chat_type="agent")
+    events2 = await collect(loop.run_agent(cid2, "agent prompt", str(tmp_path)))
+    assert not [e for e in events2 if e["type"] == "title"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_title_failure_keeps_slice_and_retries_next_turn(fake_model, tmp_path, monkeypatch):
+    """A failed title call is silent (slice stays) and the next turn retries."""
+    from backend.db.database import create_conversation, get_conversation
+
+    cid = await create_conversation("debug crash on startup")
+    state = {"calls": 0}
+
+    async def routed(messages, tools=None, stream=True):
+        if not stream:
+            state["calls"] += 1
+            raise RuntimeError("provider down")
+        return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", routed)
+    for prompt in ("debug crash on startup", "I have another detail"):
+        events = await collect(loop.run_agent(cid, prompt, str(tmp_path)))
+        assert not [e for e in events if e["type"] == "title"]
+    conv = await get_conversation(cid)
+    assert conv["title"] == "debug crash on startup"  # slice intact
+    assert state["calls"] == 2  # retried against the original user message title
+
+
 @pytest.mark.asyncio
 async def test_agent_tool_cycle(fake_model, tmp_path):
     from backend.db.database import create_conversation, get_messages

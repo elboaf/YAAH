@@ -33,7 +33,53 @@ from backend.db.database import (
     get_conversation,
     get_messages,
     set_conversation_usage,
+    update_conversation,
 )
+
+
+AUTO_TITLE_MAX_CHARS = 60
+
+
+async def _generate_conversation_title(conversation_id: int, user_text: str) -> str | None:
+    """Replace the generated first-message slice with a concise model title.
+
+    Runs after the first successful turn. Manual titles and pinned agent chat
+    names are left alone; provider errors or unusable responses are best-effort.
+    """
+    conv = await get_conversation(conversation_id)
+    if (conv or {}).get("chat_type") == "agent":
+        return None
+    current = (conv or {}).get("title") or ""
+    history = await get_messages(conversation_id)
+    first_user_text = next(
+        (str(message.get("content") or "") for message in history if message.get("role") == "user"),
+        user_text,
+    )
+    if current != "New chat" and current != first_user_text[:40]:
+        return None
+
+    title_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "Generate a concise title for this conversation. Reply with only "
+                "the title: 3-6 words, no quotes or period, in the user's language."
+            ),
+        },
+        {"role": "user", "content": first_user_text[:2000]},
+    ]
+    try:
+        data = await model_client.chat(title_prompt, tools=None, stream=False)
+        title = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    except Exception:  # noqa: BLE001 — title generation must not fail the turn
+        return None
+
+    title = " ".join(title.split()).strip().strip('"').strip().removeprefix("#").strip()
+    title = title[:AUTO_TITLE_MAX_CHARS].strip()
+    if not title:
+        return None
+    await update_conversation(conversation_id, title=title)
+    return title
 
 
 async def _maybe_compact(
@@ -1286,6 +1332,12 @@ async def run_agent(
                             ),
                         }
                     )
+                # Replace the mechanical first-message title after a successful
+                # turn. Failures are silent/best-effort; the sidebar receives
+                # the event before the next conversation-list refresh.
+                title = await _generate_conversation_title(conversation_id, user_text)
+                if title:
+                    yield _ndjson({"type": "title", "title": title})
                 # Natural-completion auto-send (#7): anything still queued
                 # rides home as a queued_autosend hand-off before done.
                 remaining = _drain_queue(conversation_id)

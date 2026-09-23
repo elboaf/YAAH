@@ -855,6 +855,7 @@ export interface AgentEvent {
     | 'compacted'
     | 'compaction_failed'
     | 'model_call'
+    | 'title'
     | 'done'
     | 'error'
     | 'stopped'
@@ -885,6 +886,8 @@ export interface AgentEvent {
   agent_id?: number
   /** Provider + model a pending chat call is waiting on (model_call, #43). */
   provider?: string
+  /** Model-generated chat title (title event, issue #60). */
+  title?: string
   agent_type?: string
   prompt?: string
   status?: string

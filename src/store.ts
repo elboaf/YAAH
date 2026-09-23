@@ -288,6 +288,15 @@ interface AgentState {
   setContext: (convId: number, tokens: number, window: number | null, model: string | null) => void
 
   /**
+   * Live model-generated chat titles (issue #60), keyed by convKey. The
+   * backend emits a `title` event after the first turn of a fresh chat;
+   * ConversationRow reads this slice before the row's own (stale) title,
+   * so the sidebar follows without waiting for a list refetch.
+   */
+  titleByConv: Record<string, string>
+  setTitle: (convId: number, title: string) => void
+
+  /**
    * Per-conversation telemetry tape: one ever-growing line that every tool
    * event of the session appends into (call, arguments, streamed output,
    * response, timing). Survives individual tool calls, thinking gaps, and
@@ -653,6 +662,10 @@ export const useAgent = create<AgentState>((set, get) => ({
         [String(convId)]: { tokens, window, model },
       },
     })),
+
+  titleByConv: {},
+  setTitle: (convId, title) =>
+    set((s) => ({ titleByConv: { ...s.titleByConv, [String(convId)]: title } })),
 
   tapeByConv: {},
   appendTape: (key, chunk) =>

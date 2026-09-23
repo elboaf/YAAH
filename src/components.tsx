@@ -2518,7 +2518,10 @@ function ConversationList() {
   const [localWorkspaces, setLocalWorkspaces] = useState<WorkspaceRow[]>([])
 
   const refresh = useCallback(() => {
-    listConversations().then(setConvs).catch(() => setConvs([]))
+    listConversations().then((rows) => {
+      setConvs(rows)
+      useAgent.setState({ titleByConv: {} })
+    }).catch(() => setConvs([]))
     // Scope-aware: the backend returns the HOST's registry (namespaced)
     // while connected, this machine's otherwise.
     listWorkspaces()
@@ -3041,6 +3044,7 @@ function ConversationRow({
    *  welded to the agent's workspace row, so it is not movable. */
   onMove?: () => void
 }) {
+  const liveTitle = useAgent((s) => s.titleByConv[String(conv.id)])
   return (
     <div className="group relative flex items-center">
       <button
@@ -3048,7 +3052,7 @@ function ConversationRow({
           active ? 'bg-blue-600 text-white' : 'text-zinc-300 hover:bg-zinc-800'
         }`}
         onClick={onOpen}
-        title={conv.title}
+        title={liveTitle ?? conv.title}
       >
         {/* Issue #25: one status slot left of the title, same footprint for
             every state so the row never shifts. Precedence: needs-you (orange,
@@ -3083,7 +3087,7 @@ function ConversationRow({
             <PersonIcon />
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate">{conv.title}</span>
+        <span className="min-w-0 flex-1 truncate">{liveTitle ?? conv.title}</span>
         <span
           className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
         >
@@ -7818,6 +7822,11 @@ function Composer() {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
+    } else if (ev.type === 'title') {
+      const convId = Number(bufKey)
+      if (ev.title && Number.isInteger(convId) && convId > 0) {
+        useAgent.getState().setTitle(convId, ev.title)
+      }
     } else if (ev.type === 'user_injected') {
       // Soft injection landed (#7): promote the optimistic echo (matched
       // by the backend's queued-item id) into a real message.
