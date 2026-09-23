@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
-import { AgentChatLiveFollow, AgentRunWatcher, ChatPanel, PreviewModal, Sidebar, ToastStack } from './components'
+import { AgentChatLiveFollow, AgentRunWatcher, ChatPanel, ImageLightbox, PreviewModal, Sidebar, ToastStack } from './components'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
 
@@ -192,6 +192,7 @@ export default function App() {
           <FilesPanel /> */}
       <ChatPanel />
       <PreviewModal />
+      <ImageLightbox />
       <ToastStack />
     </div>
   )
