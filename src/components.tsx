@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Re
 import {
   listConversations,
   createConversation,
+  getConversation,
   getMessages,
   getConfig,
   updateConfig,
@@ -41,6 +42,7 @@ import {
   listAgents,
   addAgent,
   updateAgent,
+  updateAgentModelEffort,
   deleteAgent,
   runAgentNow,
   getAgentTape,
@@ -3183,9 +3185,68 @@ function UpdateChip() {
   )
 }
 
+/** #51/#76 — shared select-option groups for every model picker. */
+export function ModelOptions({
+  byProvider,
+  value,
+}: {
+  byProvider: Record<string, ProviderModels>
+  value: string
+}) {
+  const [provider, modelId] = value.split('::')
+  return (
+    <>
+      {Object.entries(byProvider).map(([name, pm]) => (
+        <optgroup key={name} label={pm.error ? `${name} (${pm.error})` : name}>
+          {pm.models.map((m) => (
+            <option key={`${name}::${m}`} value={`${name}::${m}`}>
+              {m}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+      {/* value isn't in any group (provider down / removed): keep it visible+selectable */}
+      {!Object.values(byProvider).some((pm) => pm.models.includes(modelId)) && (
+        <option value={value}>{modelId}</option>
+      )}
+      {Object.keys(byProvider).length === 0 && (
+        <option value={value}>No provider configured — open Settings</option>
+      )}
+    </>
+  )
+}
+
+/** #51 — hook: the provider-grouped model list shared by both pickers. */
+export function useModelList() {
+  const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
+  const refresh = useCallback(() => {
+    listAvailableModels()
+      .then((r) => setByProvider(r.providers))
+      .catch(() => {})
+  }, [])
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+  return { byProvider, refresh }
+}
+
+/** #76 — hook: the reasoning-effort options + '' semantics tooltip. */
+export function EffortOptions() {
+  return (
+    <>
+      <option value="">Default</option>
+      <option value="low">Low</option>
+      <option value="medium">Medium</option>
+      <option value="high">High</option>
+    </>
+  )
+}
+
+export const EFFORT_HINT = 'Default = param not sent. Only affects reasoning-capable models.'
+
 export function Sidebar() {
-  const { newConversation, workspace, setWorkspace, clearLog } = useAgent()
-  const [model, setModel] = useState('...')
+  const { newConversation, workspace, setWorkspace, clearLog, refreshGlobals } = useAgent()
+  const globalModel = useAgent((s) => s.globalModel)
   const [activeProvider, setActiveProvider] = useState('')
   // name -> {models, error?} for every configured provider
   const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
@@ -3218,20 +3279,16 @@ export function Sidebar() {
       .then((r) => {
         setByProvider(r.providers)
         setActiveProvider(r.active_provider)
-        setModel(r.model)
       })
       .catch(() => {})
   }, [])
 
   useEffect(() => {
-    getConfig()
-      .then((c) => {
-        setModel(c.model)
-        setActiveProvider(c.active_provider)
-      })
-      .catch(() => {})
+    // #51: the sidebar picker is now the DEFAULT for new chats (the store's
+    // globalModel drives both this select and fresh drafts' header pickers).
+    refreshGlobals()
     refreshModels()
-  }, [refreshModels])
+  }, [refreshGlobals, refreshModels])
 
   // value encoding "provider::model" keeps providers with clashing ids apart
   const pickModel = (value: string) => {
@@ -3239,11 +3296,11 @@ export function Sidebar() {
     if (idx < 0) return
     const provider = value.slice(0, idx)
     const m = value.slice(idx + 2)
-    if (!m || (m === model && provider === activeProvider)) return
+    if (!m || (m === globalModel && provider === activeProvider)) return
     setSavingModel(true)
-    setModel(m)
     setActiveProvider(provider)
     setActiveModel(provider, m)
+      .then(refreshGlobals)
       .then(refreshModels)
       .finally(() => setSavingModel(false))
   }
@@ -3343,37 +3400,22 @@ export function Sidebar() {
         )}
         {/* Footer strip: configuration lives at the bottom, pinned — the
             conversation list owns the column. Model readout in mono (the
-            machine's voice), gear for Settings. */}
+            machine's voice), gear for Settings. #51: this picker sets the
+            DEFAULT for new chats; each chat's header picker overrides it. */}
         <div className="mt-auto border-t border-zinc-800 pt-2">
+          <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
+            Default model for new chats
+          </p>
           <div className="flex items-center gap-1">
             <select
-              className="min-w-0 flex-1 truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none"
-              value={`${activeProvider}::${model}`}
+              className="min-w-0 flex-1 truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+              value={`${activeProvider}::${globalModel}`}
               onChange={(e) => pickModel(e.target.value)}
-              aria-label="Model"
-              title={model}
+              disabled={savingModel}
+              aria-label="Default model for new chats"
+              title="Default model for new chats — saved chats use their own picker"
             >
-            {Object.entries(byProvider).map(([name, pm]) => (
-              <optgroup
-                key={name}
-                label={pm.error ? `${name} (${pm.error})` : name}
-              >
-                {pm.models.map((m) => (
-                  <option key={`${name}::${m}`} value={`${name}::${m}`}>
-                    {m}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-            {/* active model isn't in any group (e.g. its provider is down) */}
-            {!Object.values(byProvider).some((pm) => pm.models.includes(model)) && (
-              <option value={`${activeProvider}::${model}`}>{model}</option>
-            )}
-            {Object.keys(byProvider).length === 0 && (
-              <option value={`${activeProvider}::${model}`}>
-                No provider configured — open Settings
-              </option>
-            )}
+              <ModelOptions byProvider={byProvider} value={`${activeProvider}::${globalModel}`} />
           </select>
             <button
               className="shrink-0 rounded border border-zinc-700 p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
@@ -3409,7 +3451,8 @@ export function Sidebar() {
         <SettingsModal
           onClose={() => {
             setShowSettings(false)
-            getConfig().then((c) => { setModel(c.model); setActiveProvider(c.active_provider) }).catch(() => {})
+            getConfig().then((c) => setActiveProvider(c.active_provider)).catch(() => {})
+            refreshGlobals()
             refreshModels()
           }}
         />
@@ -4736,6 +4779,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
       // Live-apply the interface scale (App's UiScale listens and re-zooms).
       window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: uiScale } }))
+      // #76: Settings' effort (and any provider/model change) is the DEFAULT
+      // for new chats — resync the store globals the header pickers inherit.
+      useAgent.getState().refreshGlobals()
       setSaved(true)
       setTimeout(onClose, 600)
     } catch (e) {
@@ -4937,7 +4983,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                   <p className="mt-1 text-[10px] text-zinc-600">0 = unlimited (Stop still works)</p>
                 </div>
                 <div>
-                  <label className="mb-1 block text-[10px] text-zinc-500">Reasoning effort</label>
+                  <label className="mb-1 block text-[10px] text-zinc-500">
+                    Reasoning effort <span className="text-zinc-600">(default for new chats — #76)</span>
+                  </label>
                   <select
                     className={`${settingsInputCls} w-full`}
                     value={reasoningEffort}
@@ -4951,6 +4999,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                   </select>
                   <p className="mt-1 text-[10px] text-zinc-600">
                     Default = param not sent. Only affects reasoning-capable models.
+                    Existing chats keep their own header selector.
                   </p>
                 </div>
               </div>
@@ -6004,6 +6053,185 @@ function DraftDestinationCard() {
   )
 }
 
+/** #51/#76 — the per-chat model + effort pickers, rendered in the ChatPanel
+ *  header. One component for drafts and saved chats alike:
+ *  - draft (conversationId null): edits go to the store's draftScope, which
+ *    the first send writes into the new conversation row.
+ *  - normal chat: edits PATCH /api/conversations/{id} (model/effort columns).
+ *  - agent-pinned chat: edits write through to the owning agent
+ *    (PATCH /api/agents/{id}/model-effort) — the chat cannot desync.
+ *  Selectors disable while this chat streams (a turn always finishes on what
+ *  it started with) or while a write is in flight. Provider-down turns fail
+ *  visibly in the transcript; the down notes show right in the picker row. */
+export function ChatScopePickers() {
+  const conversationId = useAgent((s) => s.conversationId)
+  const status = useStatus()
+  const streaming = status === 'thinking' || status === 'running-tool'
+  const agents = useAgent((s) => s.agents)
+  const refreshAgents = useAgent((s) => s.refreshAgents)
+  const owner = conversationId === null ? null : agents.find((a) => a.conversation_id === conversationId && a.id) ?? null
+  const isAgentChat = owner !== null
+  // Agent chats stay editable (write-through) — only a LIVE agent run locks.
+  const agentRunLive = isAgentChat && Boolean(owner?.running)
+  const locked = streaming || agentRunLive
+
+  const draftScope = useAgent((s) => s.draftScope)
+  const setDraftScope = useAgent((s) => s.setDraftScope)
+  const globalModel = useAgent((s) => s.globalModel)
+  const globalEffort = useAgent((s) => s.globalEffort)
+
+  const { byProvider, refresh } = useModelList()
+
+  // The conversation row's pinned scope, refreshed on chat switch and after
+  // each turn (an agent run may have written through the agent).
+  const [rowScope, setRowScope] = useState<{ model: string; effort: string } | null>(null)
+  useEffect(() => {
+    setRowScope(null)
+    if (conversationId === null) return
+    let cancelled = false
+    getConversation(conversationId)
+      .then((c) => {
+        if (!cancelled) setRowScope({ model: c.model || '', effort: c.effort || '' })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId, streaming])
+
+  const model =
+    conversationId === null
+      ? draftScope?.model ?? globalModel
+      : isAgentChat
+        ? owner?.model ?? ''
+        : rowScope?.model ?? globalModel
+  const effort =
+    conversationId === null
+      ? draftScope?.effort ?? globalEffort
+      : isAgentChat
+        ? owner?.effort ?? ''
+        : rowScope?.effort ?? globalEffort
+
+  const activeProviderFor = (m: string) => {
+    for (const [name, pm] of Object.entries(byProvider)) {
+      if (pm.models.includes(m)) return name
+    }
+    return ''
+  }
+  const shownProvider = model.includes('::') ? model.split('::')[0] : activeProviderFor(model)
+  const shownModel = model.includes('::') ? model.split('::')[2] ?? '' : model
+
+  const [savingModel, setSavingModel] = useState(false)
+  const [savingEffort, setSavingEffort] = useState(false)
+
+  const applyModel = (value: string) => {
+    const idx = value.indexOf('::')
+    if (idx < 0) return
+    const provider = value.slice(0, idx)
+    const m = value.slice(idx + 2)
+    if (!m || (m === shownModel && provider === shownProvider)) return
+    if (conversationId === null) {
+      setDraftScope({ model: `${provider}::${m}` })
+      return
+    }
+    setSavingModel(true)
+    const write = isAgentChat
+      ? updateAgentModelEffort(owner.id, `${provider}::${m}`, effort)
+      : updateConversation(conversationId, { model: `${provider}::${m}` })
+    write
+      .then(() => {
+        if (isAgentChat) refreshAgents()
+      })
+      .catch(() => {})
+      .finally(() => setSavingModel(false))
+  }
+
+  const applyEffort = (e: string) => {
+    if (e === effort) return
+    if (conversationId === null) {
+      setDraftScope({ effort: e })
+      return
+    }
+    setSavingEffort(true)
+    const write = isAgentChat
+      ? updateAgentModelEffort(owner.id, model, e)
+      : updateConversation(conversationId, { effort: e })
+    write
+      .then(() => {
+        if (isAgentChat) refreshAgents()
+      })
+      .catch(() => {})
+      .finally(() => setSavingEffort(false))
+  }
+
+  const saving = savingModel || savingEffort
+  const noProvider = Object.keys(byProvider).length === 0
+  const downNotes = Object.entries(byProvider).filter(([, pm]) => pm.error)
+
+  return (
+    <div className="flex flex-col gap-0.5 border-b border-zinc-800 bg-zinc-900/60 px-4 py-1.5">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-zinc-600">model</span>
+        <select
+          className="min-w-0 max-w-[16rem] flex-1 truncate rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+          value={`${shownProvider}::${shownModel}`}
+          onChange={(e) => applyModel(e.target.value)}
+          disabled={locked || saving || noProvider}
+          aria-label="Chat model"
+          title={
+            isAgentChat
+              ? "This chat's model (writes through to the owning agent)"
+              : conversationId === null
+                ? "This chat's model (pinned at first send)"
+                : 'Model for this chat — other chats are unaffected'
+          }
+        >
+          <ModelOptions byProvider={byProvider} value={`${shownProvider}::${shownModel}`} />
+        </select>
+        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">effort</span>
+        <select
+          className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+          value={effort}
+          onChange={(e) => applyEffort(e.target.value)}
+          disabled={locked || saving}
+          aria-label="Chat reasoning effort"
+          title={`${EFFORT_HINT}${isAgentChat ? ' (writes through to the owning agent)' : ''}`}
+        >
+          <EffortOptions />
+        </select>
+        {isAgentChat && (
+          <span
+            className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400"
+            title="This chat belongs to a scheduled agent — changes apply to the agent"
+          >
+            agent
+          </span>
+        )}
+        {(savingModel || savingEffort) && (
+          <span className="text-[10px] text-zinc-500">saving…</span>
+        )}
+        {locked && !saving && (
+          <span className="text-[10px] text-amber-400">
+            {agentRunLive ? 'locked while the agent runs' : 'locked mid-run'}
+          </span>
+        )}
+      </div>
+      {/* Provider-state affordances (#51): moved here from the sidebar so
+          they sit next to the picker that needs them. */}
+      {noProvider && (
+        <p className="text-[10px] leading-relaxed text-amber-400">
+          No model provider configured — add one in Settings to start.
+        </p>
+      )}
+      {downNotes.map(([name, pm]) => (
+        <p key={name} className="text-[10px] leading-relaxed text-amber-400">
+          {name}: {pm.error}
+        </p>
+      ))}
+    </div>
+  )
+}
+
 export function ChatPanel() {
   const conversationId = useAgent((s) => s.conversationId)
   const messages = useAgent(
@@ -6222,6 +6450,8 @@ export function ChatPanel() {
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
+      {/* #51/#76: per-chat model + effort pickers — the chat's own scope. */}
+      <ChatScopePickers />
       <div
         ref={transcriptRef}
         onScroll={onTranscriptScroll}
@@ -7690,7 +7920,15 @@ function Composer() {
       // while streaming the turn against X misfiles the run.
       const dest = useAgent.getState().draftDestination ?? workspace
       if (conversationId === null) {
-        const created = await createConversation(fullText.slice(0, 40) || 'New chat', dest)
+        // #51/#76: the draft's header pickers pin the new chat's scope —
+        // written into the row at creation so the first turn already
+        // resolves through the conversation (the header values ARE what
+        // runs). Falls back to the current defaults when untouched.
+        const ds = useAgent.getState().draftScope
+        const created = await createConversation(fullText.slice(0, 40) || 'New chat', dest, {
+          model: ds?.model ?? useAgent.getState().globalModel,
+          effort: ds?.effort ?? useAgent.getState().globalEffort,
+        })
         cid = created.id
         // Atomic: re-key the draft buffer (optimistic messages included)
         // to the new id and move the panel onto it. bufKey follows so the

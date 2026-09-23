@@ -60,6 +60,10 @@ export interface ConversationRow {
   updated_at: string
   /** 'agent' = a scheduled agent's pinned chat (issue #41). */
   chat_type?: 'chat' | 'agent'
+  /** #51/#76: the chat's pinned scope. model: bare id or "provider::model";
+   *  effort: '' = Default (reasoning_effort param not sent). */
+  model?: string
+  effort?: string
 }
 
 export interface ContextInfo {
@@ -123,10 +127,23 @@ export const runGitCommand = (id: number, action: GitAction, opts?: { message?: 
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
 
-export const createConversation = (title: string, workspace?: string | null) =>
+/** One conversation row (404s throw; includes model/effort since #51/#76). */
+export const getConversation = (id: number) =>
+  api<ConversationRow>(`/api/conversations/${id}`)
+
+export const createConversation = (
+  title: string,
+  workspace?: string | null,
+  scope?: { model?: string; effort?: string },
+) =>
   api<{ id: number }>('/api/conversations', {
     method: 'POST',
-    body: JSON.stringify({ title, workspace: workspace ?? null }),
+    body: JSON.stringify({
+      title,
+      workspace: workspace ?? null,
+      model: scope?.model ?? '',
+      effort: scope?.effort ?? '',
+    }),
   })
 
 export const getMessages = (id: number) =>
@@ -323,7 +340,14 @@ export const exportConversationUrl = (id: number) =>
 
 export const updateConversation = (
   id: number,
-  fields: { title?: string; workspace?: string | null; system_prompt_override?: string | null },
+  fields: {
+    title?: string
+    workspace?: string | null
+    system_prompt_override?: string | null
+    /** #51/#76: the chat's pinned scope; '' = Default (param not sent). */
+    model?: string
+    effort?: string
+  },
 ) =>
   api<{ ok: boolean }>(`/api/conversations/${id}`, {
     method: 'PATCH',
@@ -565,6 +589,15 @@ export const updateAgent = (id: string, body: AgentBody) =>
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  })
+
+/** #51/#76: the header selectors of an agent-pinned chat write through to
+ *  the owning agent (targeted field patch — no schedule-clock reset). */
+export const updateAgentModelEffort = (id: string, model: string, effort: string) =>
+  api<ScheduledAgent>(`/api/agents/${encodeURIComponent(id)}/model-effort`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, effort }),
   })
 
 export const deleteAgent = (id: string, deleteChat = true) =>

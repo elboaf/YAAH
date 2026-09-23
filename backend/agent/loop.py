@@ -910,7 +910,7 @@ async def run_agent(
     allow_ask_user: bool = False,
     include_history: bool = True,
     model_override: str = "",
-    effort_override: str = "",
+    effort_override: str | None = None,
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
@@ -931,8 +931,11 @@ async def run_agent(
     include_history: False = fresh context each fire (the agent's memory
     toggle off) — the system prompt is built, but prior transcript rows
     are not replayed into model context.
-    model_override / effort_override: the agent's per-agent model +
-    reasoning effort; blank = the active global settings."""
+    model_override / effort_override: per-chat model + effort (#51/#76) or
+    the agent's per-agent values (#41). model: "" = active global model;
+    bare id or "provider::model" swaps model (and provider). effort: "" =
+    inherit the global reasoning_effort setting; None = send no param at
+    all (the chat's explicit Default); low/medium/high override."""
     # Persist the user message first (skipped on resume; the text still
     # reaches the model through the replayed history below).
     if not try_begin_run(conversation_id):
@@ -1067,11 +1070,12 @@ async def run_agent(
                 tail = ""
                 say_open = False
                 say_buf = ""
-                # Per-agent model/effort overrides only ride along when an
-                # agent actually set them, so the default call path (and
+                # Per-agent / per-chat model + effort overrides (#41, #51/#76)
+                # only ride along when set, so the default call path (and
                 # anything patching chat with the base signature) is
-                # unchanged.
-                if model_override or effort_override:
+                # unchanged. effort None = explicitly send no reasoning_effort
+                # param this call; "" = inherit the global setting.
+                if model_override or effort_override is not None:
                     stream = await model_client.chat(
                         messages,
                         tools=tools,
@@ -1174,7 +1178,14 @@ async def run_agent(
             # updated_at (a readout must not re-sort the session list).
             usage = state.get("usage") or {}
             if usage.get("prompt_tokens") is not None:
-                _model_id = load_config().get("model") or None
+                # The context chip must resolve against the model THIS chat
+                # actually ran on (#51) — the global default is only the
+                # fallback for override-less callers (e.g. old callers).
+                _model_id = (
+                    model_override
+                    or load_config().get("model")
+                    or None
+                )
                 asyncio.create_task(
                     set_conversation_usage(
                         conversation_id, int(usage["prompt_tokens"]), _model_id
@@ -1235,7 +1246,11 @@ async def run_agent(
                         {
                             "type": "usage",
                             "prompt_tokens": usage["prompt_tokens"],
-                            "model": load_config().get("model") or None,
+                            "model": (
+                                model_override
+                                or load_config().get("model")
+                                or None
+                            ),
                         }
                     )
                 # Natural-completion auto-send (#7): anything still queued

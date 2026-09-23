@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     title TEXT NOT NULL DEFAULT 'New Task',
     workspace TEXT,
     system_prompt_override TEXT,
+    model TEXT NOT NULL DEFAULT '',
+    effort TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -154,6 +156,19 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN chat_type TEXT NOT NULL DEFAULT 'chat'"
         )
+    if "model" not in conv_cols or "effort" not in conv_cols:
+        # #51/#76: per-chat model + reasoning effort, mirroring the agents
+        # columns. NOT NULL DEFAULT '' = follow the global default — the
+        # pre-per-chat behavior for existing rows.
+        if "model" not in conv_cols:
+            await db.execute(
+                "ALTER TABLE conversations ADD COLUMN model TEXT NOT NULL DEFAULT ''"
+            )
+        if "effort" not in conv_cols:
+            await db.execute(
+                "ALTER TABLE conversations ADD COLUMN effort TEXT NOT NULL DEFAULT ''"
+            )
+        await _stamp_conversation_scopes(db)
     cur = await db.execute("PRAGMA table_info(agents)")
     agent_cols = {r[1] for r in await cur.fetchall()}
     if "allow_ask_user" not in agent_cols:
@@ -162,6 +177,43 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE agents ADD COLUMN allow_ask_user INTEGER NOT NULL DEFAULT 0")
     await migrate_workspaces(db)
     return db
+
+
+_stamp_scope_done = False
+
+
+async def _stamp_conversation_scopes(db: aiosqlite.Connection):
+    """One-time stamp of every conversations row with the then-current global
+    model + effort (issue #51/#76 "inherit = stamp on upgrade").
+
+    Runs only on the upgrade that ADDS the columns: from then on every row
+    carries its own explicit value, and `''` in the wild means the chat's
+    owner set Default deliberately (never "inherit whatever the global is
+    right now"). Agent-pinned chats are skipped — their selectors write
+    through to the owning agent, so the agent's model/effort IS the chat's.
+    Idempotent via the module flag (get_db runs on every API call).
+    """
+    global _stamp_scope_done
+    if _stamp_scope_done:
+        return
+    _stamp_scope_done = True
+    from backend.agent.config import load_config
+
+    cfg = load_config()
+    global_model = cfg.get("model") or ""
+    global_effort = cfg.get("reasoning_effort") or ""
+    await db.execute(
+        "UPDATE conversations SET model = ?, effort = ?"
+        " WHERE chat_type != 'agent' AND (model = '' OR effort = '')",
+        (global_model, global_effort),
+    )
+    # Agent-pinned chats resolve through their agent at send time; stamp the
+    # rows anyway so the header can display the agent's values directly and
+    # the resolve helper never sees a blank it might mistake for a choice.
+    await db.execute(
+        "UPDATE conversations SET model = '', effort = '' WHERE chat_type = 'agent'"
+    )
+    await db.commit()
 
 
 async def migrate_workspaces(db: aiosqlite.Connection):
@@ -357,13 +409,30 @@ async def init_db():
 # ---- Conversation CRUD ----
 
 async def create_conversation(
-    title: str = "New Task", workspace: str | None = None, chat_type: str = "chat"
+    title: str = "New Task",
+    workspace: str | None = None,
+    chat_type: str = "chat",
+    model: str | None = None,
+    effort: str | None = None,
 ):
+    """Create a conversation. model/effort: the chat's pinned scope (#51/#76).
+    Blank strings are legal writes (the chat's deliberate Default); None
+    stamps the current global default (drafts already carry explicit picks,
+    so None is the "unspecified" path for API callers)."""
+    if model is None or effort is None:
+        from backend.agent.config import load_config
+
+        cfg = load_config()
+        if model is None:
+            model = cfg.get("model") or ""
+        if effort is None:
+            effort = cfg.get("reasoning_effort") or ""
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO conversations (title, workspace, chat_type) VALUES (?, ?, ?)",
-            (title, workspace, chat_type),
+            "INSERT INTO conversations (title, workspace, chat_type, model, effort)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (title, workspace, chat_type, model, effort),
         )
         await db.commit()
         return cur.lastrowid
@@ -408,8 +477,9 @@ async def delete_conversation(conversation_id: int) -> bool:
 
 
 async def update_conversation(conversation_id: int, **fields):
-    """Update allowed conversation fields (title, workspace, system_prompt_override)."""
-    allowed = {"title", "workspace", "system_prompt_override"}
+    """Update allowed conversation fields (title, workspace,
+    system_prompt_override, model, effort)."""
+    allowed = {"title", "workspace", "system_prompt_override", "model", "effort"}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
@@ -650,6 +720,23 @@ async def get_agent(agent_id: str) -> dict | None:
     db = await get_db()
     try:
         cur = await db.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def get_agent_for_conversation(conversation_id: int) -> dict | None:
+    """The scheduled agent that owns a pinned chat, or None (#51/#76).
+
+    Agent chats' model/effort resolve through their agent at send time and
+    their header selectors write through to the agent, so the agent's
+    values ARE the chat's."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM agents WHERE conversation_id = ?", (conversation_id,)
+        )
         row = await cur.fetchone()
         return dict(row) if row else None
     finally:
