@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { listAgents, type ScheduledAgent } from './api'
+import { getConfig, listAgents, type ScheduledAgent } from './api'
 
 let toastSeq = 0
 
@@ -182,6 +182,16 @@ interface AgentState {
   setAgentBranch: (key: string, info: AgentBranchInfo | null) => void
   workspace: string
   /**
+   * #51/#76: the current global defaults, hydrated from /api/config by
+   * refreshGlobals. The sidebar picker sets the model (POST active-model),
+   * Settings sets the effort — both are defaults for NEW chats only;
+   * saved chats never follow them.
+   */
+  globalModel: string
+  globalEffort: string
+  /** Refresh the global defaults from the backend (picker/save points). */
+  refreshGlobals: () => Promise<void>
+  /**
    * Draft destination (issues #32/#88/#94): which workspace the draft chat
    * files under AND runs its first turn in. newConversation pins the draft
    * to the workspace active at creation (every entry point selects its
@@ -195,6 +205,15 @@ interface AgentState {
    */
   draftDestination: string | null
   pinDraftDestination: (ws: string | null) => void
+  /**
+   * #51/#76: the draft chat's pinned model + effort, held client-side until
+   * the first send (a draft has no row yet). Same lifecycle as
+   * draftDestination: pinned from the sidebar/Settings defaults at
+   * draft creation, editable by the header pickers, written into the
+   * conversation row at createConversation, cleared on adopt.
+   */
+  draftScope: { model: string; effort: string } | null
+  setDraftScope: (scope: { model?: string; effort?: string }) => void
   log: LogEntry[]
   /** File currently open in the preview side panel (Q44). */
   previewPath: string | null
@@ -501,6 +520,19 @@ export const useAgent = create<AgentState>((set, get) => ({
     if (get().conversationId !== null) return
     set({ draftDestination: null })
   },
+  draftScope: null,
+  globalModel: '',
+  globalEffort: '',
+  refreshGlobals: async () => {
+    try {
+      const c = await getConfig()
+      set({ globalModel: c.model || '', globalEffort: c.reasoning_effort || '' })
+    } catch {
+      /* offline/off-provider: keep the last known defaults */
+    }
+  },
+  setDraftScope: (scope) =>
+    set((s) => ({ draftScope: { ...(s.draftScope ?? { model: '', effort: '' }), ...scope } })),
   setStatus: (key, status) =>
     set((s) => {
       const prev = s.statusByConv[key]
@@ -648,6 +680,10 @@ export const useAgent = create<AgentState>((set, get) => ({
       // New chat button after setWorkspace) sets s.workspace first, and the
       // first send both files the chat and streams its turn here (#88/#94).
       draftDestination: s.workspace,
+      // #51/#76: the fresh draft inherits the CURRENT defaults (sidebar
+      // model / Settings effort) — the picker values it shows are what the
+      // first send will pin into the new conversation row.
+      draftScope: { model: get().globalModel, effort: get().globalEffort },
     }))
     persistConversationId(null)
   },
@@ -675,6 +711,8 @@ export const useAgent = create<AgentState>((set, get) => ({
         },
         // The draft is filed now (#32): the destination card's job is done.
         draftDestination: null,
+        // #51/#76: the draft-held model/effort are in the row now.
+        draftScope: null,
       }
     })
     persistConversationId(id)

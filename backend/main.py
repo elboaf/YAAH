@@ -180,12 +180,20 @@ from backend.db.database import (
 class NewConversation(BaseModel):
     title: str = "New Task"
     workspace: str | None = None
+    # Per-chat scope (#51/#76): the chat's pinned model ("provider::model" or
+    # bare id) and effort ('' = param not sent). Blank strings are legal —
+    # they are the chat's deliberate Default, distinct from "unspecified".
+    model: str = ""
+    effort: str = ""
 
 
 class ConversationUpdate(BaseModel):
     title: str | None = None
     workspace: str | None = None
     system_prompt_override: str | None = None
+    # #51/#76: the header pickers write these; '' = Default (param not sent).
+    model: str | None = None
+    effort: str | None = None
 
 
 class ConversationMove(BaseModel):
@@ -205,7 +213,9 @@ class NewMessage(BaseModel):
 
 @app.post("/api/conversations")
 async def api_create_conversation(body: NewConversation):
-    cid = await create_conversation(body.title, body.workspace)
+    cid = await create_conversation(
+        body.title, body.workspace, model=body.model, effort=body.effort
+    )
     return {"id": cid}
 
 
@@ -342,7 +352,13 @@ async def api_conversation_context(conversation_id: int):
     from backend.agent.context_window import get_context_window
 
     cfg = load_config()
-    model = cfg.get("model")
+    # The chip resolves against the model THIS chat actually uses (#51) —
+    # the conversation's pinned model, falling back to the global default
+    # (pre-upgrade rows). "provider::model" pins strip to the bare id: the
+    # window depends on the model, not the provider routing.
+    model = conv.get("model") or cfg.get("model") or None
+    if model and "::" in model:
+        model = model.partition("::")[2] or model
     return {
         "context_tokens": conv.get("context_tokens"),
         "context_model": conv.get("context_model"),
@@ -593,12 +609,28 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
 
 @app.patch("/api/conversations/{conversation_id}")
 async def api_update_conversation(conversation_id: int, body: ConversationUpdate):
-    ok = await update_conversation(
-        conversation_id,
-        title=body.title,
-        workspace=body.workspace,
-        system_prompt_override=body.system_prompt_override,
-    )
+    from fastapi import HTTPException
+
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    # #51/#76: a pinned agent chat must never silently diverge from its
+    # agent — the header selectors there write through PATCH /api/agents/{id}
+    # instead (the UI routes them; a stale client gets told where to write).
+    if (conv.get("chat_type") or "chat") == "agent" and (
+        body.model is not None or body.effort is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="this chat is owned by a scheduled agent — change the "
+            "agent's model/effort, not the chat's",
+        )
+    fields = {}
+    for name in ("title", "workspace", "system_prompt_override", "model", "effort"):
+        val = getattr(body, name)
+        if val is not None:
+            fields[name] = val
+    ok = await update_conversation(conversation_id, **fields)
     return {"ok": ok}
 
 
@@ -694,6 +726,40 @@ class AgentTurn(BaseModel):
     resume: bool = False
 
 
+def _resolve_turn_scope(
+    conv: dict | None, agent: dict | None = None
+) -> tuple[str, str | None]:
+    """Per-chat model + effort resolution (#51/#76): what a turn in this
+    conversation runs on, before any streaming starts.
+
+    - Normal chat: the conversation row pins both — the sidebar default and
+      the Settings effort were stamped in at first send and only change when
+      the chat's own pickers change them. effort '' (the chat's explicit
+      Default) becomes the None sentinel so the reasoning_effort param is
+      NOT sent even if the global setting would send it.
+    - Agent-pinned chat: resolve through the owning agent — the header
+      selectors write through to the agent, so its values ARE the chat's.
+      Agent effort '' means inherit-global here, matching the semantics the
+      scheduler uses when it fires the same agent (an interactive turn in
+      the pinned chat can't diverge from a scheduled one).
+    - Unstamped rows (conv.model blank from a pre-upgrade row the stamp
+      never reached) resolve to the global defaults: "" model, None effort.
+
+    Returns (model_override, effort_override) for run_agent. Provider-down
+    fails the turn visibly in model_client — no fallback is substituted.
+    """
+    if agent is not None:
+        return (
+            agent.get("model") or "",
+            (agent.get("effort") or "").strip().lower(),
+        )
+    if conv is not None:
+        model = conv.get("model") or ""
+        raw_effort = (conv.get("effort") or "").strip().lower()
+        return model, (raw_effort or None)
+    return "", None
+
+
 class ProviderEntry(BaseModel):
     api_base: str | None = None
     api_key: str | None = None
@@ -732,6 +798,12 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
     # a directory it is no longer filed under.
     conv = await get_conversation(conversation_id)
     turn_workspace = (conv or {}).get("workspace") or ""
+    # Per-chat model + effort (#51/#76): resolve what this turn runs on.
+    agent = None
+    if conv is not None and (conv.get("chat_type") or "chat") == "agent":
+        agent = await get_agent_for_conversation(conversation_id)
+    turn_model, turn_effort = _resolve_turn_scope(conv, agent)
+    set_last_workspace(turn_workspace)
     # Remember it so the sidebar restores the same folder after an app
     # restart, and touch the registry row so the dropdown/group order
     # reflects recent activity.
@@ -749,7 +821,8 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
     return StreamingResponse(
         run_agent(conversation_id, body.message, turn_workspace,
                   image_paths=image_paths, skill_names=body.skills,
-                  persist_user=not body.resume),
+                  persist_user=not body.resume,
+                  model_override=turn_model, effort_override=turn_effort),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -998,6 +1071,7 @@ from backend.db.database import (
     delete_conversation,
     delete_instruction,
     get_agent as db_get_agent,
+    get_agent_for_conversation,
     list_agents as db_list_agents,
     list_instructions,
     update_agent as db_update_agent,
@@ -1115,6 +1189,37 @@ async def api_agents_add(body: AgentBody):
         "next_fire_at": scheduler_mod.compute_next_fire(stype, spec).isoformat(timespec="seconds"),
     })
     await scheduler_mod.ensure_scheduled()
+    return await _agent_view(record)
+
+
+class AgentModelEffort(BaseModel):
+    """#51/#76 write-through body: the pinned chat's header selectors."""
+    model: str = ""
+    effort: str = ""
+
+
+@app.patch("/api/agents/{agent_id}/model-effort")
+async def api_agents_model_effort(agent_id: str, body: AgentModelEffort):
+    """#51/#76: the header selectors of an agent-pinned chat write through
+    to the owning agent's model/effort — the chat can never silently
+    diverge from the agent that owns it. A targeted field patch, NOT the
+    full-record replace (which would recompute next_fire from now); a live
+    run refuses, matching the move-chat contract."""
+    from backend.agent.loop import agent_is_running
+
+    existing = await db_get_agent(agent_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    conv_id = existing.get("conversation_id")
+    if conv_id and agent_is_running(conv_id):
+        raise HTTPException(
+            status_code=409,
+            detail="the agent is running — stop it before changing its model/effort",
+        )
+    record = await db_update_agent(
+        agent_id,
+        {"model": body.model.strip(), "effort": body.effort.strip()},
+    )
     return await _agent_view(record)
 
 

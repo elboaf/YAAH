@@ -83,22 +83,20 @@ def _build_payload(cfg: dict, tools: list | None, stream: bool) -> dict:
     return payload
 
 
-async def chat(
-    messages: list,
-    tools: list | None = None,
-    stream: bool = False,
-    model: str = "",
-    effort: str = "",
-) -> dict | AsyncIterator[dict]:
-    """Call the model. Returns full response dict, or async iterator of
-    streaming deltas if stream=True.
+def _resolve_call_cfg(cfg: dict, model: str = "", effort: str | None = "") -> dict:
+    """Apply per-call model/effort overrides to a config copy. Pure so the
+    precedence rules are unit-testable without HTTP.
 
-    model/effort: per-call overrides for scheduled agents (issue #41) —
-    empty strings mean "use the active global model / effort setting".
-    A per-agent model may be "provider::model" to route the run at a
-    specific configured provider (per-agent model picker); a bare id
-    keeps the active provider and only swaps the model name."""
-    cfg = dict(load_config())
+    model: "" = the active global model; a bare id swaps the model name and
+    keeps the active provider; "provider::model" routes the call at that
+    configured provider (base + key + model all swap).
+
+    effort: "" = inherit the global reasoning_effort setting; None = THIS
+    call explicitly sends no reasoning_effort param (#51/#76 — a chat whose
+    stamped effort is '' chose Default deliberately; blank must not drag
+    the global back in); "low"/"medium"/"high" override the global.
+    """
+    cfg = dict(cfg)
     if model:
         provider_name, sep, model_id = model.partition("::")
         if sep:
@@ -112,8 +110,28 @@ async def chat(
             cfg["model"] = model_id
         else:
             cfg["model"] = model
-    if effort:
-        cfg["reasoning_effort"] = effort
+    if effort is None:
+        cfg["reasoning_effort"] = ""
+    elif effort:
+        cfg["reasoning_effort"] = effort.strip().lower()
+    return cfg
+
+
+async def chat(
+    messages: list,
+    tools: list | None = None,
+    stream: bool = False,
+    model: str = "",
+    effort: str | None = "",
+) -> dict | AsyncIterator[dict]:
+    """Call the model. Returns full response dict, or async iterator of
+    streaming deltas if stream=True.
+
+    model/effort: per-call overrides for scheduled agents (issue #41) and,
+    since #51/#76, for per-chat scoping — see _resolve_call_cfg for the
+    precedence (effort None = the reasoning_effort param is explicitly NOT
+    sent this call, regardless of the global setting)."""
+    cfg = _resolve_call_cfg(dict(load_config()), model, effort)
     if not cfg["providers"]:
         raise ModelError(
             "No model provider configured. Open Settings and add a provider "
