@@ -88,6 +88,7 @@ import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
 import { parseModelScope } from './modelScope'
+import { sortWorkspaceGroups } from './workspaceGroupOrder'
 
 // ---------------------------------------------------------------- code views
 
@@ -2639,14 +2640,8 @@ function ConversationList() {
       knownPaths.add(p)
     }
   }
-  groups.sort((a, b) => {
-    if ((a.ws.path ?? null) === null) return -1
-    if ((b.ws.path ?? null) === null) return 1
-    const at = a.items[0]?.updated_at ?? a.ws.last_opened_at ?? ''
-    const bt = b.items[0]?.updated_at ?? b.ws.last_opened_at ?? ''
-    return bt.localeCompare(at)
-  })
-  for (const g of groups) {
+  const orderedGroups = sortWorkspaceGroups(groups)
+  for (const g of orderedGroups) {
     g.items.sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   }
 
@@ -2699,7 +2694,7 @@ function ConversationList() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      {groups.map(({ ws, items }) => {
+      {orderedGroups.map(({ ws, items }) => {
         const key = expandKey(ws.path ?? '')
         const isExpanded = expanded[key] ?? true
         const isActiveWs = (ws.path ?? '') === (workspace || '')
