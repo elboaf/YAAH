@@ -62,6 +62,33 @@ _MONITOR_PARAM = {
     }
 }
 
+# Full documentation for get_help — the schema descriptions stay short;
+# what lives here reaches the model only when it asks for a tool's docs.
+COMPUTER_HELP_DOCS = {
+    "read_ui_tree": (
+        "A result with \"truncated\": true is NOT exhaustive — never "
+        "conclude an element doesn't exist from a depth- or node-limited "
+        "read; raise max_depth/max_nodes or screenshot instead. Falls "
+        "back to screenshot for pixel-only surfaces (games, remote "
+        "streams) that expose no tree."
+    ),
+    "screenshot": (
+        "Read the coordinate ruler nearest your target and pass that "
+        "value to a mouse tool with the same monitor number — never "
+        "estimate pixel positions visually. With x/y/w/h the capture is "
+        "just that region (desktop coordinates) — use it for precision "
+        "targeting and close-ups. Results carry the monitor's "
+        "\"origin\": pixel (px,py) in the image is desktop "
+        "(origin.x + px, origin.y + py). Without hwnd/region/monitor, "
+        "captures monitor 1 (primary). Never screenshot just to inspect "
+        "the user's other work."
+    ),
+    "mouse_drag": (
+        "For sliders, drag-and-drop, and text selection. A slow duration "
+        "(up to 3s) helps apps that need real drag momentum."
+    ),
+}
+
 COMPUTER_TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -70,15 +97,8 @@ COMPUTER_TOOLS_SCHEMA = [
             "description": (
                 "Read a window's UI Automation tree: every visible element "
                 "with type, name, value, rect and center coordinates. The "
-                "PREFERRED way to locate controls and verify UI state — "
-                "far more reliable than screenshotting and guessing pixel "
-                "positions. Click an element's center with mouse_click. "
-                "A result with \"truncated\": true is NOT exhaustive — "
-                "never conclude an element doesn't exist from a "
-                "depth- or node-limited read; raise the limits or "
-                "screenshot instead. Falls back to screenshot for "
-                "pixel-only surfaces (games, remote streams) that expose "
-                "no tree."
+                "preferred way to locate controls and verify UI state — "
+                "click an element's center with mouse_click."
             ),
             "parameters": {
                 "type": "object",
@@ -105,20 +125,14 @@ COMPUTER_TOOLS_SCHEMA = [
         "function": {
             "name": "screenshot",
             "description": (
-                "Capture a screen (or a region of it) and attach it so a "
-                "vision-capable model can see it. Captures carry labeled "
-                "coordinate rulers: read the ruler value nearest the "
-                "target and pass it to mouse_click with this monitor "
-                "number — never estimate pixel positions visually. With "
-                "hwnd, captures the monitor that window lives on. With "
-                "x/y/w/h, captures just that region (desktop coordinates) "
-                "— use it for precision targeting and close-ups. Without "
-                "either, captures monitor 1 (primary) unless monitor says "
-                "otherwise. Results carry the monitor's \"origin\": pixel "
-                "(px,py) in the image is desktop (origin.x + px, "
-                "origin.y + py). Only screenshot when the task requires "
-                "seeing the screen — never to inspect the user's other "
-                "work. Screenshots go to the model provider."
+                "Capture a screen (or an x/y/w/h region) and attach it so "
+                "a vision-capable model can see it. Captures carry labeled "
+                "coordinate rulers — read the ruler, don't estimate. With "
+                "hwnd, captures the monitor that window lives on; with "
+                "elements=true, draws numbered boxes on its UIA elements "
+                "(set-of-marks) and returns id -> name/type/center. Only "
+                "screenshot when the task requires seeing the screen. "
+                "Screenshots go to the model provider."
             ),
             "parameters": {
                 "type": "object",
@@ -183,9 +197,9 @@ COMPUTER_TOOLS_SCHEMA = [
         "function": {
             "name": "mouse_move",
             "description": (
-                "Move the mouse. x/y are relative to the given monitor's "
-                "origin (default 1 = primary). The result reports the REAL "
-                "cursor position afterwards — check it before clicking."
+                "Move the mouse; x/y are monitor-local (default primary). "
+                "The result reports the REAL cursor position afterwards — "
+                "check it before clicking."
                 + _HOST_INPUT_NOTE
             ),
             "parameters": {
@@ -205,11 +219,10 @@ COMPUTER_TOOLS_SCHEMA = [
         "function": {
             "name": "mouse_click",
             "description": (
-                "Click. x/y are relative to the given monitor's origin "
-                "(default 1 = primary) — screenshot pixel coordinates of "
-                "monitor N pass through unchanged with monitor=N. The "
-                "result reports the REAL cursor position at click time. "
-                "The workhorse." + _HOST_INPUT_NOTE
+                "Click at x/y (monitor-local; screenshot coords of monitor "
+                "N pass through unchanged with monitor=N). The result "
+                "reports the REAL cursor position at click time."
+                + _HOST_INPUT_NOTE
             ),
             "parameters": {
                 "type": "object",
@@ -242,8 +255,8 @@ COMPUTER_TOOLS_SCHEMA = [
             "name": "mouse_drag",
             "description": (
                 "Press at a start point, drag to an end point, release. "
-                "For sliders, drag-and-drop, and text selection. x/y are "
-                "relative to the given monitor's origin." + _HOST_INPUT_NOTE
+                "x/y are monitor-local."
+                + _HOST_INPUT_NOTE
             ),
             "parameters": {
                 "type": "object",

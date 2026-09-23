@@ -215,6 +215,7 @@ def _default_system_prompt(workspace: str = "") -> str:
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
         "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull)",
+        "get_help (full docs for any tool; call with no argument to list them)",
         "spawn_agent (delegate self-contained work to a sub-agent; see the "
         "sub-agents index below)",
     ]

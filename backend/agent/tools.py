@@ -221,6 +221,57 @@ INSTALL_GIT_SCHEMA = {
     },
 }
 
+# Extended, lazy-loaded documentation. The schemas above stay short; what
+# lives here only reaches the model when it calls get_help("tool_name").
+HELP_DOCS: dict = {}
+
+GET_HELP_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_help",
+        "description": (
+            "Full documentation for a tool: usage notes, caveats and "
+            "examples beyond the short schema description. Call with no "
+            "argument to list every available tool with a one-line "
+            "summary. Use it before first use of an unfamiliar tool or "
+            "when a call errored unexpectedly."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Tool to document; omit to list all tools",
+                },
+            },
+        },
+    },
+}
+
+
+async def get_help(workspace: str = "", tool_name: str = "") -> dict:
+    name = (tool_name or "").strip()
+    schemas = {s["function"]["name"]: s for s in get_schemas()}
+    if not name:
+        lines = [
+            f"- {n}: {s['function'].get('description', '').split('. ')[0]}"
+            for n, s in sorted(schemas.items())
+        ]
+        return {"tools": "\n".join(lines)}
+    schema = schemas.get(name)
+    if schema is None:
+        close = [n for n in schemas if name.lower() in n.lower()]
+        hint = f" Similar: {close}" if close else ""
+        return {"error": f"Unknown tool: {name}.{hint}"}
+    doc = {"name": name, "schema": schema["function"]["parameters"]}
+    notes = HELP_DOCS.get(name)
+    if notes:
+        doc["notes"] = notes
+    return doc
+
+
+TOOLS_SCHEMA += [GET_HELP_SCHEMA]
+
 TOOLS_SCHEMA += [
     {
         "type": "function",
@@ -1096,16 +1147,18 @@ EXECUTORS = {
     "git_push": git_push,
     "git_pull": git_pull,
     "install_git": _install_git_executor,
+    "get_help": get_help,
 }
 
 # Computer use (Q2: Windows-only hard line, same pattern as powershell but
 # unconditional — non-Windows never imports this module, so the tools don't
 # exist for the model there). The executors import pynput/mss lazily.
 if os.name == "nt":
-    from backend.agent.computer import COMPUTER_EXECUTORS, COMPUTER_TOOLS_SCHEMA
+    from backend.agent.computer import COMPUTER_EXECUTORS, COMPUTER_HELP_DOCS, COMPUTER_TOOLS_SCHEMA
 
     TOOLS_SCHEMA += COMPUTER_TOOLS_SCHEMA
     EXECUTORS.update(COMPUTER_EXECUTORS)
+    HELP_DOCS.update(COMPUTER_HELP_DOCS)
 
 # Windows Sandbox tools (disposable test VMs + persistent dev toolkit,
 # see backend/agent/sandbox.py): Windows-only for the same reason, and
@@ -1136,6 +1189,8 @@ _READ_TOOLS = {
     "screenshot", "list_windows", "read_ui_tree", "wait",
     # pure observation: availability, enabled, session state
     "sandbox_status",
+    # documentation lookup — reads only the schema set
+    "get_help",
     # delegation is free in all modes: the sub-agent's own tool calls hit
     # the same gate, so spawning cannot launder permissions
     "spawn_agent",
