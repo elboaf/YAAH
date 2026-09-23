@@ -79,7 +79,6 @@ import { lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch
 import { useUpdateCheck } from './update'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
-import { openExternal } from './openExternal'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
 import { CodeBlock, AgentMarkdown } from './markdown'
@@ -989,15 +988,31 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
     if (tc.name === 'edit_file' && typeof args.old_text === 'string' && typeof args.new_text === 'string') {
       return <DiffBlock oldText={args.old_text} newText={args.new_text} />
     }
-    if (tc.name === 'view_image' && tc.result && typeof tc.result === 'object') {
-      const rel = (tc.result as { image?: string }).image
-      if (typeof rel === 'string' && rel) {
+    // #50: ANY tool result that carries a stored image renders it — not just
+    // view_image. The backend stores every computer-use capture (screenshot,
+    // the observe-crops from mouse_move/click/drag/scroll) and webtool/MCP
+    // downloads the same way ({image: rel} / {images: [rels]}), so the audit
+    // trail can show what the agent actually saw. Falls through to the JSON
+    // dump when the field is absent so error results keep their text.
+    const resultObj = tc.result && typeof tc.result === 'object' ? (tc.result as Record<string, unknown>) : null
+    if (resultObj) {
+      const rel = resultObj.image
+      const rels = Array.isArray(resultObj.images) ? resultObj.images.filter((v): v is string => typeof v === 'string' && !!v) : []
+      const images = typeof rel === 'string' && rel ? [rel, ...rels] : rels
+      if (images.length > 0) {
         return (
-          <img
-            src={imageUrl(rel)}
-            alt="view_image result"
-            className="max-h-64 rounded border border-zinc-700"
-          />
+          <div className="flex flex-wrap gap-2">
+            {images.map((imgRel, i) => (
+              <img
+                key={i}
+                src={imageSrc(imgRel)}
+                alt={`${tc.name} result`}
+                title="click to open full size"
+                className={`max-h-64 cursor-zoom-in rounded border border-zinc-700`}
+                onClick={() => useAgent.getState().setLightboxSrc(imgRel)}
+              />
+            ))}
+          </div>
         )
       }
     }
@@ -1086,20 +1101,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
           {run.tools.length > 0 && (
             <div className="mb-1 flex flex-wrap gap-1">
               {run.tools.map((t) => (
-                <span
-                  key={t.id}
-                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${
-                    t.result !== undefined
-                      ? 'bg-zinc-800/70 text-zinc-400'
-                      : 'bg-zinc-700/60 text-zinc-200'
-                  }`}
-                >
-                  <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
-                  <span>{t.name}</span>
-                  {t.result === undefined && (
-                    <span className="run-pulse text-amber-300">{'\u25cf'}</span>
-                  )}
-                </span>
+                <SubAgentToolRow key={t.id} t={t} />
               ))}
             </div>
           )}
@@ -1115,6 +1117,44 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
               {running && <span className="stream-caret" />}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** #50: one sub-agent tool row — the old chip, plus inline rendering of any
+ *  stored images the result carries ({image}/{images}, same contract as the
+ *  main trace's ToolCallRow). The result's text still shows via the JSON
+ *  dump so nothing is lost when a picture is attached. */
+function SubAgentToolRow({ t }: { t: { id: string; name: string; args?: unknown; result?: unknown } }) {
+  const resultObj = t.result && typeof t.result === 'object' ? (t.result as Record<string, unknown>) : null
+  const rel = resultObj?.image
+  const rels = Array.isArray(resultObj?.images) ? (resultObj!.images as unknown[]).filter((v): v is string => typeof v === 'string' && !!v) : []
+  const images = typeof rel === 'string' && rel ? [rel, ...rels] : rels
+  return (
+    <div>
+      <span
+        className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+          t.result !== undefined ? 'bg-zinc-800/70 text-zinc-400' : 'bg-zinc-700/60 text-zinc-200'
+        }`}
+      >
+        <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
+        <span>{t.name}</span>
+        {t.result === undefined && <span className="run-pulse text-amber-300">{'\u25cf'}</span>}
+      </span>
+      {images.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-2">
+          {images.map((imgRel, i) => (
+            <img
+              key={i}
+              src={imageSrc(imgRel)}
+              alt={`${t.name} result`}
+              title="click to open full size"
+              className="max-h-64 cursor-zoom-in rounded border border-zinc-700"
+              onClick={() => useAgent.getState().setLightboxSrc(imgRel)}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -1196,19 +1236,14 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
           {msg.images?.length ? (
             <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
               {msg.images.map((rel, i) => (
-                <a
+                <img
                   key={i}
-                  href={imageSrc(rel)}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={(e) => openExternal(imageSrc(rel), e)}
-                >
-                  <img
-                    src={imageSrc(rel)}
-                    alt="attachment"
-                    className="max-h-40 rounded border border-zinc-700"
-                  />
-                </a>
+                  src={imageSrc(rel)}
+                  alt="attachment"
+                  title="click to open full size"
+                  className="max-h-40 cursor-zoom-in rounded border border-zinc-700"
+                  onClick={() => useAgent.getState().setLightboxSrc(rel)}
+                />
               ))}
             </div>
           ) : null}
@@ -1832,6 +1867,160 @@ export function PreviewModal() {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- image viewer (#50)
+
+/** Zoom factors cycled by the +/- buttons (1x = fit). */
+const LIGHTBOX_ZOOMS = [1, 2, 4]
+
+/** Clamp a pan offset to ±max so a zoomed image can't be dragged clean out
+ *  of view (max 0 = no overflow on that axis = no panning there). */
+const clampPan = (v: number, max: number) => Math.min(max, Math.max(-max, v))
+
+/**
+ * Full-resolution image viewer (#50): a lightbox that opens IN-APP instead of
+ * the previous external-browser hop. Two entry points feed it via the global
+ * `lightboxSrc` store field:
+ *  - chat attachment thumbnails (data: URL or stored rel path)
+ *  - any tool-result image rendered in the audit trail (screenshot /
+ *    observe-crop / view_image / fetch_image / MCP images)
+ * One shared instance is mounted in App, exactly like PreviewModal.
+ */
+export function ImageLightbox() {
+  const { lightboxSrc, setLightboxSrc } = useAgent()
+  const [zoom, setZoom] = useState(0) // index into LIGHTBOX_ZOOMS; 0 = fit-to-screen
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const drag = useRef<{ sx: number; sy: number; ox: number; oy: number; maxX: number; maxY: number } | null>(null)
+
+  // Any (re)open resets to fit — a stale zoom from a previous image must not
+  // carry into the next one.
+  useEffect(() => {
+    setZoom(0)
+    setPan({ x: 0, y: 0 })
+  }, [lightboxSrc])
+
+  // Back at fit there is no overflow, so a stale pan offset from a previous
+  // zoom level would visibly re-apply on the next zoom-in. Zero it here —
+  // covers both the − button reaching 1x and the + cycle wrapping.
+  useEffect(() => {
+    if (zoom === 0) setPan({ x: 0, y: 0 })
+  }, [zoom])
+
+  // Esc closes, matching PreviewModal and the dialog shells.
+  useEffect(() => {
+    if (!lightboxSrc) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightboxSrc(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightboxSrc, setLightboxSrc])
+
+  if (!lightboxSrc) return null
+  const src = imageSrc(lightboxSrc)
+  const zoomed = zoom > 0
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center overflow-hidden bg-black/90 p-6"
+      onPointerDown={(e) => {
+        if (e.target === e.currentTarget) setLightboxSrc(null)
+        else e.stopPropagation()
+      }}
+    >
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900/90 px-1 py-0.5">
+        <button
+          title="Zoom in (at max, cycles back to fit)"
+          className="rounded px-1.5 text-sm leading-6 text-zinc-300 hover:bg-zinc-700"
+          onClick={() => setZoom((z) => (z + 1) % LIGHTBOX_ZOOMS.length)}
+        >
+          +
+        </button>
+        <span className="min-w-10 text-center font-mono text-[11px] text-zinc-400">
+          {LIGHTBOX_ZOOMS[zoom]}x
+        </span>
+        <button
+          title="Zoom out"
+          className="rounded px-1.5 text-sm leading-6 text-zinc-300 hover:bg-zinc-700"
+          onClick={() => setZoom((z) => (z > 0 ? z - 1 : z))}
+        >
+          −
+        </button>
+        <button
+          title="Reset"
+          className="ml-1 rounded px-1.5 font-mono text-[11px] leading-6 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+          onClick={() => {
+            setZoom(0)
+            setPan({ x: 0, y: 0 })
+          }}
+        >
+          reset
+        </button>
+      </div>
+      {/* The zoom viewport: a definite-size flex box (flex-1 + min-h-0 inside
+          the fixed-height column) that the image overflows when zoomed. Pan
+          clamping measures against THIS box, and the caption below stays put
+          because the oversized image never joins the column layout. */}
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center">
+        <img
+          src={src}
+          alt="full-size image"
+          draggable={false}
+          className={`max-h-full max-w-full select-none rounded ${zoomed ? 'max-w-none cursor-grab' : 'cursor-zoom-in'}`}
+          style={
+            zoomed
+              ? { transform: `translate(${pan.x}px, ${pan.y}px) scale(${LIGHTBOX_ZOOMS[zoom]})` }
+              : undefined
+          }
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            if (!zoomed) {
+              setZoom(1)
+              return
+            }
+            // Pan range: how far the scaled image may translate before its
+            // far edge meets the viewport edge (the flex centers it, so each
+            // direction gets half the total overflow). translate() runs
+            // POST-scale in screen pixels — its argument needs no /factor.
+            const factor = LIGHTBOX_ZOOMS[zoom]
+            const el = e.currentTarget
+            const box = el.parentElement
+            const overflow = (axis: 'clientWidth' | 'clientHeight') =>
+              box ? Math.max(0, el[axis] * factor - box[axis]) / 2 : 0
+            // Pointer capture keeps the drag tracking even when the cursor
+            // outruns the image — no janky mid-pan tracking loss. Guarded:
+            // jsdom and older webviews may not implement it.
+            try {
+              el.setPointerCapture(e.pointerId)
+            } catch {
+              /* per-element drag still works */
+            }
+            drag.current = {
+              sx: e.clientX,
+              sy: e.clientY,
+              ox: pan.x,
+              oy: pan.y,
+              maxX: overflow('clientWidth'),
+              maxY: overflow('clientHeight'),
+            }
+          }}
+          onPointerMove={(e) => {
+            const d = drag.current
+            if (!d) return
+            setPan({
+              x: clampPan(d.ox + (e.clientX - d.sx), d.maxX),
+              y: clampPan(d.oy + (e.clientY - d.sy), d.maxY),
+            })
+          }}
+          onPointerUp={() => (drag.current = null)}
+          onPointerCancel={() => (drag.current = null)}
+        />
+      </div>
+      <p className="mt-2 shrink-0 text-center font-mono text-[10px] text-zinc-500">
+        {zoomed ? 'drag to pan · esc to close' : 'click to zoom · esc to close'}
+      </p>
     </div>
   )
 }

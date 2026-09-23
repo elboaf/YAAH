@@ -200,6 +200,14 @@ interface AgentState {
   previewPath: string | null
   setPreviewPath: (p: string | null) => void
 
+  /** Image currently open in the full-res viewer (#50): a `data:` URL
+   *  (optimistic attachment) or a stored rel path under
+   *  backend/data/images/ (attachment thumbnails, trace tool results).
+   *  Global so any entry point — chat bubbles, trace cards, sub-agent
+   *  output — opens the same top-layer lightbox. */
+  lightboxSrc: string | null
+  setLightboxSrc: (s: string | null) => void
+
   /** Question the agent is currently waiting on, per conversation (keyed by
    *  convKey). Multiple chats can each have one waiting. */
   pendingQuestions: Record<string, PendingQuestion>
@@ -540,6 +548,8 @@ export const useAgent = create<AgentState>((set, get) => ({
   log: [],
   previewPath: null,
   setPreviewPath: (previewPath) => set({ previewPath }),
+  lightboxSrc: null,
+  setLightboxSrc: (lightboxSrc) => set({ lightboxSrc }),
   pendingQuestions: {},
   setPendingQuestion: (q) =>
     set((s) => ({ pendingQuestions: applyPending(s.pendingQuestions, q) })),
