@@ -709,10 +709,19 @@ function toolTarget(tc: ToolCall): string {
 /** One compact chip: glyph + name + target, counting while the call runs. */
 function ToolChip({ tc }: { tc: ToolCall }) {
   const done = tc.result !== undefined
+  // A refused merge-back is an error even though it's "just" a tool result:
+  // the turn's work did NOT reach the main tree. Red keeps meaning failure.
+  const mergeFailed =
+    tc.name === 'git_merge_back' &&
+    (tc.result as { merged?: unknown } | undefined)?.merged === false
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
-        done ? 'bg-zinc-800/70 text-zinc-400' : 'bg-zinc-700/60 text-zinc-200'
+        mergeFailed
+          ? 'bg-red-950/60 text-red-300'
+          : done
+            ? 'bg-zinc-800/70 text-zinc-400'
+            : 'bg-zinc-700/60 text-zinc-200'
       }`}
     >
       <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
@@ -1112,11 +1121,38 @@ function MessageBody({ content }: { content: string }) {
   return <AgentMarkdown content={content} />
 }
 
-function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
+export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   // Persisted failure markers (backend writes role='system' when a turn
-  // dies): a slim machine line, not a fake agent message.
+  // dies): a slim machine line, not a fake agent message. EXCEPTION — the
+  // end-of-turn merge-back handshake (#58 decision 5) persists the same way
+  // and must NOT read as an error: a successful merge renders as the same
+  // neutral git_merge_back pill the live stream showed; red stays reserved
+  // for actual failures (the refusal's reason lives in the expandable
+  // detail, exactly like every other tool result).
   if (msg.role === 'system') {
     if (!msg.content) return null
+    let merge: { worktree_merge?: Record<string, unknown> } | null = null
+    try {
+      const parsed: unknown = JSON.parse(msg.content)
+      if (parsed && typeof parsed === 'object' && 'worktree_merge' in (parsed as object)) {
+        merge = parsed as { worktree_merge: Record<string, unknown> }
+      }
+    } catch {
+      // not JSON — a genuine failure marker
+    }
+    if (merge) {
+      const r = merge.worktree_merge ?? {}
+      const tc: ToolCall = {
+        id: `merge-back-${msg.id}`,
+        name: 'git_merge_back',
+        result: r,
+      }
+      return (
+        <div className="pl-3">
+          <ToolCallRow tc={tc} />
+        </div>
+      )
+    }
     return (
       <div className="font-mono text-[11px] text-red-400/90">
         <span className="mr-1.5 text-zinc-600">⚠</span>
