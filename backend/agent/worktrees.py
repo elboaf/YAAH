@@ -95,8 +95,25 @@ def _component(value: str) -> str:
     return (slug or "x")[:60]
 
 
-def branch_for(chat_id: str, run_id: str) -> str:
-    return f"{BRANCH_PREFIX}{_component(chat_id)}/{_component(run_id)}"
+def branch_for(chat_id: str, run_id: str, label: str | None = None) -> str:
+    """agent/<chat-id>/<label-slug>-<run-id>, or the legacy bare
+    agent/<chat-id>/<run-id> when no label is known. The run uuid always
+    survives intact at the end (anti-collision); the label is the human
+    reading aid (users could not tell agent/221/f983bfef from any other)."""
+    chat = _component(chat_id)
+    run = _component(run_id)
+    if not label:
+        return f"{BRANCH_PREFIX}{chat}/{run}"
+    # Readable lowercase slug: separators for spaces/underscores, everything
+    # outside the git-safe alphabet dropped. Empty (e.g. a symbol-only
+    # title) falls back to the bare form rather than a dangling dash.
+    slug = re.sub(r"[^a-z0-9.-]+", "-", label.lower().replace("_", "-")).strip("-.")
+    if not slug:
+        return f"{BRANCH_PREFIX}{chat}/{run}"
+    # One component, <=60 chars, run uuid never truncated: reserve exactly
+    # len(run) + 1 (dash) of the budget for the suffix.
+    keep = max(1, 60 - len(run) - 1)
+    return f"{BRANCH_PREFIX}{chat}/{slug[:keep]}-{run}"
 
 
 def worktree_base(root: Path) -> Path:
@@ -383,16 +400,16 @@ async def merge_mutex(root: Path):
 # ---------------------------------------------------------------------------
 
 
-async def create_worktree(workspace: str, chat_id: str, run_id: str) -> dict:
+async def create_worktree(workspace: str, chat_id: str, run_id: str, label: str | None = None) -> dict:
     """Create `<main-root>/.yaah/worktrees/<run-id>` on branch
-    `agent/<chat-id>/<run-id>`, based on `workspace`'s current HEAD (a
-    nested sub-agent's parent worktree is a valid base — that is the
-    issue's nested fan-out). Returns {ok: True, workspace, branch, root}
-    or {ok: False, reason}."""
+    `agent/<chat-id>/<label-slug>-<run-id>` (or the bare run-id branch when
+    no label), based on `workspace`'s current HEAD (a nested sub-agent's
+    parent worktree is a valid base — that is the issue's nested fan-out).
+    Returns {ok: True, workspace, branch, root} or {ok: False, reason}."""
     root = await main_repo_root(workspace)
     if root is None:
         return {"ok": False, "reason": "not a git repository"}
-    branch = branch_for(chat_id, run_id)
+    branch = branch_for(chat_id, run_id, label)
     wt = worktree_base(root) / _component(run_id)
     rc, out = await _git(root, "worktree", "add", "-b", branch, str(wt))
     if rc != 0:
@@ -411,6 +428,21 @@ async def create_worktree(workspace: str, chat_id: str, run_id: str) -> dict:
     }
     _active[str(wt)] = info
     return {"ok": True, "workspace": str(wt), "branch": branch, "root": str(root)}
+
+
+async def _chat_title(chat_id: str) -> str | None:
+    """The pinned conversation's title, for human-readable agent branches.
+    Best-effort by contract: ANY failure returns None and the branch falls
+    back to the bare agent/<chat>/<run-id> form — a DB hiccup must never
+    block a write tool call."""
+    try:
+        from backend.db.database import get_conversation
+
+        conv = await get_conversation(int(chat_id))
+        title = (conv or {}).get("title") or ""
+        return title.strip() or None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def ensure_isolated(workspace: str, chat_id: str) -> str:
@@ -443,7 +475,10 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
         holders.add(token)
         return ws
     run_id = uuid.uuid4().hex[:12]
-    created = await create_worktree(ws, chat_id or "chat", run_id)
+    label: str | None = None
+    if chat_id:
+        label = await _chat_title(str(chat_id))
+    created = await create_worktree(ws, chat_id or "chat", run_id, label=label)
     if not created.get("ok"):
         raise IsolationRefused(
             f"git worktree isolation refused: {created.get('reason')}"

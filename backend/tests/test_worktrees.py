@@ -59,6 +59,33 @@ def test_branch_for_is_git_safe():
     assert b.count("/") == 2  # agent/<chat>/<run>
 
 
+def test_branch_for_includes_human_label():
+    """Readable branches: agent/<chat>/<title-slug>-<run-id>. The uuid
+    suffix stays for anti-collision; the label makes the branch readable
+    in a branch list (users were confused by bare agent/221/f983bfef)."""
+    b = worktrees.branch_for("221", "f983bfef6b0f", label="Fix #93: scheduled ask_user")
+    assert b == "agent/221/fix-93-scheduled-ask-user-f983bfef6b0f"
+
+
+def test_branch_for_label_truncation_keeps_run_suffix():
+    """A long title is trimmed — never the run uuid at the end."""
+    b = worktrees.branch_for("7", "abc123def456", label="x" * 200)
+    assert b.endswith("-abc123def456")
+    assert b.count("/") == 2
+    for part in b.split("/"):
+        assert len(part) <= 60
+
+
+def test_branch_for_without_label_unchanged():
+    assert worktrees.branch_for("221", "f983bfef6b0f") == "agent/221/f983bfef6b0f"
+
+
+def test_branch_for_label_that_slugs_to_nothing_falls_back():
+    """A label of only stripped characters must not yield a dangling dash."""
+    b = worktrees.branch_for("5", "abc123def456", label="###")
+    assert b == "agent/5/abc123def456"
+
+
 def test_worktree_of_is_pure_path_shape(tmp_path: Path):
     main = tmp_path / "proj"
     (main / ".yaah" / "worktrees" / "abc").mkdir(parents=True)
@@ -103,6 +130,24 @@ async def test_ensure_isolated_creates_and_binds(repo: Path):
         assert again == wt
     finally:
         await worktrees.self_merge("1")
+
+
+async def test_ensure_isolated_branches_with_conversation_title(repo: Path, monkeypatch):
+    """#branch-names: the top-level seam resolves a human label (the pinned
+    conversation's title) so branches read agent/<chat>/<title-slug>-<run>."""
+    async def fake_title(chat_id: str) -> str | None:
+        return "Fix #93: scheduled ask_user"
+
+    monkeypatch.setattr(worktrees, "_chat_title", fake_title)
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="99")
+    try:
+        info = worktrees.binding_for("99")
+        assert info is not None
+        branch = info["branch"]
+        assert branch.startswith("agent/99/fix-93-scheduled-ask-user-")
+        assert branch.count("/") == 2
+    finally:
+        await worktrees.self_merge("99")
 
 
 async def test_ensure_isolated_nonrepo_first_writer_passes(tmp_path: Path):
