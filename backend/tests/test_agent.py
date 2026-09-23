@@ -167,6 +167,65 @@ async def collect(agent_gen):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("split", range(1, 6))
+async def test_agent_say_opener_split_never_streams_tag(fake_model, tmp_path, split):
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation(f"say-split-{split}")
+    opener = "<say>"
+    fake_model.append([
+        {"type": "content", "text": f"Visible answer. {opener[:split]}"},
+        {"type": "content", "text": f"{opener[split:]}private briefing</say> after"},
+        {"type": "finish"},
+    ])
+
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    visible = "".join(e["text"] for e in events if e["type"] == "text")
+    assert visible == "Visible answer.  after"
+    assert "<say" not in visible
+    messages = await get_messages(cid)
+    assert "<say" not in messages[-1]["content"]
+    assert messages[-1]["content"] == "Visible answer.  after"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split", range(1, 7))
+async def test_agent_say_closer_split_never_streams_tag(fake_model, tmp_path, split):
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation(f"say-close-{split}")
+    closer = "</say>"
+    fake_model.append([
+        {"type": "content", "text": "Visible <say>private briefing" + closer[:split]},
+        {"type": "content", "text": closer[split:] + " tail"},
+        {"type": "finish"},
+    ])
+
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    visible = "".join(e["text"] for e in events if e["type"] == "text")
+    assert visible == "Visible  tail"
+    assert "<say" not in visible
+
+
+@pytest.mark.asyncio
+async def test_agent_unclosed_say_tag_not_streamed_or_persisted(fake_model, tmp_path):
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("say-unclosed")
+    fake_model.append([
+        {"type": "content", "text": "Visible answer. <say>truncated briefing"},
+        {"type": "finish"},
+    ])
+
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    visible = "".join(e["text"] for e in events if e["type"] == "text")
+    messages = await get_messages(cid)
+    assert visible == "Visible answer. "
+    assert messages[-1]["content"] == "Visible answer."
+    assert "<say" not in messages[-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_agent_direct_answer(fake_model, tmp_path):
     from backend.db.database import create_conversation, get_messages
 

@@ -97,6 +97,20 @@ describe('AgentMarkdown', () => {
     expect(screen.getByText((_, el) => el?.textContent === 'def f():')).toBeInTheDocument()
   })
 
+  it('suppresses spoken briefing markup from historical and partial messages', () => {
+    render(
+      <>
+        <AgentMarkdown content={'Visible answer. <say>private briefing</say>'} />
+        <AgentMarkdown content={'Older row. <say>truncated briefing'} />
+        <AgentMarkdown content={'Trailing partial. <sa'} />
+      </>,
+    )
+    expect(screen.getByText(/Visible answer\./)).toBeInTheDocument()
+    expect(screen.getByText(/Older row\./)).toBeInTheDocument()
+    expect(screen.getByText(/Trailing partial\./)).toBeInTheDocument()
+    expect(screen.queryByText(/private briefing|truncated briefing|<say|<sa/)).not.toBeInTheDocument()
+  })
+
   it('renders a full agent-style message end to end', () => {
     const md = [
       '## Plan',

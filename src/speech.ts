@@ -79,6 +79,20 @@ export function liveProse(md: string): string {
 }
 // ---------------------------------------------------------------- briefing
 // Two-channel split (#66): the spoken line is a briefing, not a read-aloud.
+// Keep transcript cleanup here as the frontend counterpart to speak.py; it is
+// also applied at render time to protect historical rows and stream regressions.
+const SAY_TAG_ANY = /<\s*say\s*>([\s\S]*?)<\/\s*say\s*>/gi
+const SAY_TAG_UNCLOSED = /<\s*say\s*>[\s\S]*$/i
+const SAY_TAG_PARTIAL = /<\s*(?:s(?:a(?:y)?)?)?\s*$/i
+
+/** Remove spoken-briefing markup and any truncated trailing briefing. */
+export function stripSay(md: string): string {
+  return md
+    .replace(SAY_TAG_ANY, '')
+    .replace(SAY_TAG_UNCLOSED, '')
+    .replace(/<\/\s*say\s*>/gi, '')
+    .replace(SAY_TAG_PARTIAL, '')
+}
 // Mirrors speak.py's SAY_MAX_CHARS / spoken_line / heuristic_briefing â€” the
 // cap lives in one place per side and both sides stay in sync.
 

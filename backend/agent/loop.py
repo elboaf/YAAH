@@ -16,6 +16,7 @@ import asyncio
 import itertools
 import json
 import os
+import re
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -1063,14 +1064,16 @@ async def run_agent(
                 state["finish"] = None
                 state["usage"] = None
                 acc: list[str] = []
-                # <say> suppression (#66): the briefing tag may stream as
-                # ordinary text deltas. A tail buffer holds back the last
-                # chunk of a possible "<say>...</say>" so the tag never
-                # reaches the UI or the transcript; whatever is not part of
-                # a complete tag is flushed verbatim.
+                # <say> suppression (#66, #95): keep a trailing unfinished
+                # '<...>' candidate until the next chunk disambiguates it.
+                # This catches every split of the opener (including '<', '<s'
+                # and '<sa') rather than only fragments already containing
+                # '<say'. Briefing content stays buffered until its close.
                 tail = ""
                 say_open = False
                 say_buf = ""
+                say_open_tag = re.compile(r"<\s*say\s*>", re.I)
+                say_close_tag = re.compile(r"</\s*say\s*>", re.I)
                 # Per-agent / per-chat model + effort overrides (#41, #51/#76)
                 # only ride along when set, so the default call path (and
                 # anything patching chat with the base signature) is
@@ -1102,34 +1105,42 @@ async def run_agent(
                     elif ev["type"] == "content":
                         acc.append(ev["text"])
                         tail += ev["text"]
-                        if not say_open:
-                            i = tail.find("<say>")
-                            if i >= 0:
-                                # Tag opens: flush what precedes it, hold the rest.
-                                if i > 0:
-                                    yield _ndjson({"type": "text", "text": tail[:i]})
+                        while True:
+                            if say_open:
+                                close = say_close_tag.search(say_buf + tail)
+                                if close is None:
+                                    say_buf += tail
+                                    tail = ""
+                                    break
+                                combined = say_buf + tail
+                                say_open = False
+                                tail = combined[close.end() :]
+                                say_buf = ""
+                                # Continue processing text after the closing
+                                # tag; one delta can contain multiple tags.
+                                continue
+
+                            opening = say_open_tag.search(tail)
+                            if opening is not None:
+                                if opening.start():
+                                    yield _ndjson({"type": "text", "text": tail[: opening.start()]})
                                 say_open = True
-                                say_buf = tail[i + 5 :]
+                                say_buf = tail[opening.end() :]
                                 tail = ""
-                            elif "<say" in tail[-12:]:
-                                # Possible partial "<say" split across chunks:
-                                # hold it back until the next chunk decides.
-                                k = tail.rindex("<say")
-                                yield _ndjson({"type": "text", "text": tail[:k]})
-                                tail = tail[k:]
-                            else:
+                                continue
+
+                            # Hold only a trailing prefix of a possible opener.
+                            # A plain '<' or '<sa' at the delta boundary must
+                            # not escape before the rest of the tag arrives.
+                            candidate = re.search(r"<\s*(?:s(?:a(?:y)?)?)?\s*$", tail, re.I)
+                            if candidate is not None:
+                                if candidate.start():
+                                    yield _ndjson({"type": "text", "text": tail[: candidate.start()]})
+                                tail = tail[candidate.start() :]
+                            elif tail:
                                 yield _ndjson({"type": "text", "text": tail})
                                 tail = ""
-                        else:
-                            j = say_buf.find("</say>")
-                            if j >= 0:
-                                # Tag closed: the briefing stays in acc (it is
-                                # stripped from the transcript below) but is
-                                # never streamed to the UI.
-                                say_open = False
-                                tail = say_buf[j + 6 :]
-                                say_buf = ""
-                            # else: still inside the tag, hold everything.
+                            break
                     elif ev["type"] == "thinking":
                         # Model reasoning stream: UI-only (telemetry tape),
                         # never stored in the transcript.
@@ -1140,10 +1151,14 @@ async def run_agent(
                         state["finish"] = ev.get("reason")
                     elif ev["type"] == "usage":
                         state["usage"] = ev.get("usage")
-                # Flush the tail: whatever is held back at stream end that is
-                # not inside an (unclosed) tag is chat text.
+                # Flush ordinary text at EOF, but never expose a possible
+                # partial opener or an unterminated briefing.
                 if tail and not say_open:
-                    yield _ndjson({"type": "text", "text": tail})
+                    partial = re.search(r"<\s*(?:s(?:a(?:y)?)?)?\s*$", tail, re.I)
+                    if partial is not None:
+                        tail = tail[: partial.start()]
+                    if tail:
+                        yield _ndjson({"type": "text", "text": tail})
                 state["content"] = "".join(acc)
 
             attempt = 0

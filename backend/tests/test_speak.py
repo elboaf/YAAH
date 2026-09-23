@@ -351,6 +351,20 @@ def test_extract_say_keeps_last_tag():
     assert "<say>" not in chat
 
 
+@pytest.mark.parametrize("tag", ["<say>unfinished briefing", "< say>unfinished", "<sa"])
+def test_extract_say_drops_unclosed_or_partial_tag(tag):
+    chat, said = speak.extract_say(f"Answer first. {tag}")
+    assert chat == "Answer first."
+    assert said is None
+    assert "<say" not in speak.strip_say_tags(f"Answer first. {tag}").lower()
+
+
+def test_extract_say_accepts_whitespace_in_closed_tag():
+    chat, said = speak.extract_say("Answer. < say >spoken line</say >")
+    assert chat == "Answer."
+    assert said == "spoken line"
+
+
 def test_heuristic_briefing_first_and_last_sentence():
     md = "The build is fixed and green. " + (
         "Middle detail that nobody needs spoken aloud about modules. " * 10

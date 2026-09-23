@@ -10,6 +10,7 @@ import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
 import { highlightLine } from './codeview'
 import { openExternal } from './openExternal'
+import { stripSay } from './speech'
 
 // ---------------------------------------------------------------- code views
 
@@ -147,7 +148,7 @@ export function AgentMarkdown({ content }: { content: string }) {
   return (
     <div className="space-y-1 break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={components}>
-        {content}
+        {stripSay(content)}
       </ReactMarkdown>
     </div>
   )

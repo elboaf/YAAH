@@ -374,10 +374,15 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
 # prose itself — the fallback is today's truncated verbatim read, never
 # silence.
 
-SAY_TAG = re.compile(r"<say>(.*?)</say>\s*$", re.S)
-# The model may also emit a say tag mid-message (it belongs at the end, but
-# don't let a stray tag leak into the chat transcript or the speech).
-SAY_TAG_ANY = re.compile(r"<say>(.*?)</say>", re.S)
+# Accept harmless whitespace around the tag name/delimiters: the model can
+# emit malformed variants like '< say>' or '</say >'. Only closed tags count
+# as a spoken briefing; transcript stripping is more lenient below.
+SAY_TAG = re.compile(r"<\s*say\s*>(.*?)</\s*say\s*>\s*$", re.S | re.I)
+SAY_TAG_ANY = re.compile(r"<\s*say\s*>(.*?)</\s*say\s*>", re.S | re.I)
+# A truncated trailing briefing is still not chat, even without a closing tag.
+SAY_TAG_UNCLOSED = re.compile(r"<\s*say\s*>[\s\S]*$", re.I)
+SAY_TAG_PARTIAL = re.compile(r"<\s*(?:s(?:a(?:y)?)?)?\s*$", re.I)
+SAY_TAG_CLOSE = re.compile(r"</\s*say\s*>", re.I)
 
 # Hard cap for the spoken line, in ONE place per side (mirrored in speech.ts).
 # ~400 chars ≈ 20–30 s of audio, far under the old 4000-char verbatim cap.
@@ -387,26 +392,29 @@ SAY_MAX_CHARS = 400
 _BRIEFING_MAX = SAY_MAX_CHARS
 
 
+def _strip_say_tags(content: str) -> str:
+    """Remove complete tags anywhere and a trailing truncated briefing."""
+    text = SAY_TAG_CLOSE.sub("", SAY_TAG_ANY.sub("", content))
+    text = SAY_TAG_UNCLOSED.sub("", text)
+    return SAY_TAG_PARTIAL.sub("", text).rstrip()
+
+
 def extract_say(content: str) -> tuple[str, str | None]:
     """Split a final assistant message into (chat text, spoken line).
 
-    Returns the chat transcript with every <say> tag removed (byte-identical
-    to a message that never contained one, modulo the tag itself) and the
-    last emitted briefing — or None when the model omitted the field. The
-    raw tag text is returned un-clipped; the caller runs it through
-    prose_for_speech / the cap.
+    The last nonempty, closed briefing is returned as speech. Complete tags
+    and a trailing unterminated briefing are omitted from the transcript.
     """
     said: str | None = None
     for m in SAY_TAG_ANY.finditer(content):
         if m.group(1).strip():
             said = m.group(1).strip()
-    chat = SAY_TAG_ANY.sub("", content).rstrip()
-    return chat, said
+    return _strip_say_tags(content), said
 
 
 def strip_say_tags(content: str) -> str:
     """Chat-transcript view of a message: <say> tags removed."""
-    return SAY_TAG_ANY.sub("", content).rstrip()
+    return _strip_say_tags(content)
 
 
 def heuristic_briefing(md: str, max_chars: int = _BRIEFING_MAX) -> str:
