@@ -7197,6 +7197,7 @@ function Composer() {
   // thinks it means).
   const [pttHotkey, setPttHotkey] = useState('') // currently registered accelerator
   const pttHeldRef = useRef(false)
+  const pttTargetRef = useRef<{ conversationId: number | null; workspace: string } | null>(null)
   const pttBusyRef = useRef(false) // a release is still transcribing/sending
   const prevTitleRef = useRef('')
   const voiceStateRef = useRef<'idle' | 'recording' | 'transcribing'>('idle')
@@ -7227,7 +7228,13 @@ function Composer() {
     anyPlanRef.current = anyPlan
   }, [anyPlan])
   // Assigned after `send`/`stop` are declared below (TDZ-safe via refs).
-  const sendRef = useRef<(text?: string, opts?: { interrupt?: boolean }) => Promise<void>>(
+  const sendRef = useRef<(
+    text?: string,
+    opts?: {
+      interrupt?: boolean
+      target?: { conversationId: number | null; workspace: string }
+    },
+  ) => Promise<void>>(
     async () => {},
   )
   const stopRef = useRef<() => void>(() => {})
@@ -7248,6 +7255,14 @@ function Composer() {
 
   const pttPress = async () => {
     if (pttBusyRef.current) return // previous release is still in flight
+    const targetState = useAgent.getState()
+    const pttTarget = {
+      conversationId: targetState.conversationId,
+      workspace:
+        targetState.conversationId === null
+          ? (targetState.draftDestination ?? targetState.workspace)
+          : targetState.workspace,
+    }
     if (voiceStateRef.current === 'transcribing') return
     if (status === 'thinking' || status === 'running-tool') {
       // A turn is running: stop it (Stop-button path, server + client) so
@@ -7284,6 +7299,7 @@ function Composer() {
     }
     recorderRef.current = rec
     pttHeldRef.current = true
+    pttTargetRef.current = pttTarget
     setVoiceState('recording')
     setPttTitle(true)
   }
@@ -7300,16 +7316,19 @@ function Composer() {
       void rec.stop().catch(() => {})
       return
     }
-    // The release is the commit point (#88): capture the draft's
-    // destination NOW — before the seconds-long transcription window — so
-    // switching chats or categories while whisper runs can neither re-file
-    // the new chat nor retarget the send. Consumed by send's first-send
-    // branch; cleared below on every outcome that does not send.
-    useAgent.getState().pinDraftDestination(useAgent.getState().workspace)
+    // The release is the commit point: capture the destination AND target
+    // conversation now, before transcription. A subsequent chat switch must
+    // not redirect this recording into whichever chat happens to be visible
+    // when transcription finishes.
+    const releaseTarget = pttTargetRef.current ?? {
+      conversationId: useAgent.getState().conversationId,
+      workspace: useAgent.getState().workspace,
+    }
+    pttTargetRef.current = null
     // Release-time snapshot for the cleanup paths: only a release that was
     // committed on an UNFILED draft owns the pin — clearing must never
     // stomp a pin made later on a different draft (or an adopted chat).
-    const ownedUnfiledDraft = useAgent.getState().conversationId === null
+    const ownedUnfiledDraft = releaseTarget.conversationId === null
     const clearOrphanedDraftPin = () => {
       if (!ownedUnfiledDraft) return
       useAgent.getState().clearOrphanedDraftPin()
@@ -7381,7 +7400,7 @@ function Composer() {
         )
         return
       }
-      void sendRef.current(text)
+      void sendRef.current(text, { target: releaseTarget })
     } catch (e) {
       // Transcription failed: nothing was filed, so the release-time pin
       // must not leak into the next typed draft (#88).
@@ -7930,15 +7949,26 @@ function Composer() {
     }
   }
 
-  const send = async (pttText?: string, opts?: { interrupt?: boolean }) => {
+  const send = async (
+    pttText?: string,
+    opts?: {
+      interrupt?: boolean
+      target?: { conversationId: number | null; workspace: string }
+    },
+  ) => {
     // Push-to-talk passes explicit text: it sends as its own message and
     // must not touch (or clear) whatever draft is sitting in the composer.
+    // Its target is captured at release, not read from this render after
+    // asynchronous transcription.
     const isPtt = pttText !== undefined
+    const target = isPtt ? opts?.target : undefined
+    const targetConversationId = target ? target.conversationId : conversationId
+    const targetWorkspace = target?.workspace ?? workspace
     const interrupting = isPtt && opts?.interrupt === true
     const text = (pttText ?? input).trim()
     if (
       (!text && (isPtt || (attachments.length === 0 && images.length === 0))) ||
-      (sendingKey === (conversationId === null ? 'draft' : String(conversationId)) && !interrupting)
+      (sendingKey === (targetConversationId === null ? 'draft' : String(targetConversationId)) && !interrupting)
     )
       return
     // PTT interrupt: the hotkey press already cancelled the running turn
@@ -7948,7 +7978,7 @@ function Composer() {
     // AbortController before touching any shared state. Bounded at 5s; the
     // abort makes the in-flight fetch throw immediately, so this is fast.
     if (interrupting) {
-      const ivKey = conversationId === null ? 'draft' : String(conversationId)
+      const ivKey = targetConversationId === null ? 'draft' : String(targetConversationId)
       for (let i = 0; i < 100; i++) {
         if (!useAgent.getState().abortByConv[ivKey]) break
         await new Promise<void>((r) => setTimeout(r, 50))
@@ -8027,7 +8057,7 @@ function Composer() {
     // the user switches to another conversation mid-stream (Q11: free).
     // `let` because adopting a newly created conversation re-keys the
     // buffer: events before adoption target 'draft', after it the real id.
-    let bufKey = conversationId === null ? 'draft' : String(conversationId)
+    let bufKey = targetConversationId === null ? 'draft' : String(targetConversationId)
     const entryKey = bufKey
     setError(bufKey, null)
     // A new send supersedes a failed turn: drop the stale mid-stream banner
@@ -8042,13 +8072,11 @@ function Composer() {
     try {
       let cid: number
       // The effective destination for a first send (#94): the pinned draft
-      // destination — which newConversation/pttRelease set as the commit
-      // point (#88) and the card's Change… picker can override (#32) —
-      // else the live active workspace. BOTH the conversation row and the
-      // turn below must use this same value: creating the row under Y
-      // while streaming the turn against X misfiles the run.
-      const dest = useAgent.getState().draftDestination ?? workspace
-      if (conversationId === null) {
+      // destination — which newConversation pins and the card's Change…
+      // picker can override — else the workspace captured by the send. Both
+      // the row and turn use the same destination.
+      const dest = targetWorkspace
+      if (targetConversationId === null) {
         // #51/#76: the draft's header pickers pin the new chat's scope —
         // written into the row at creation so the first turn already
         // resolves through the conversation (the header values ARE what
@@ -8059,17 +8087,18 @@ function Composer() {
           effort: ds?.effort ?? useAgent.getState().globalEffort,
         })
         cid = created.id
-        // Atomic: re-key the draft buffer (optimistic messages included)
-        // to the new id and move the panel onto it. bufKey follows so the
-        // stream keeps writing where the panel is now looking.
-        adoptDraft(cid)
+        // Atomic: re-key the draft buffer (optimistic messages included).
+        // If this PTT belongs to a draft the user has since left, keep that
+        // draft filed but don't steal focus from the currently selected chat.
+        const preserveSelection = target && useAgent.getState().conversationId !== targetConversationId
+        adoptDraft(cid, preserveSelection ? { preserveSelection: true } : undefined)
         bufKey = String(cid)
         // Move the run's abort handle and in-flight marker to the new key.
         setAbortController(bufKey, ac)
         setAbortController(entryKey, null)
         setSendingKey(bufKey)
       } else {
-        cid = conversationId
+        cid = targetConversationId
       }
       setStatus(bufKey, 'thinking')
       await streamAgentTurn(

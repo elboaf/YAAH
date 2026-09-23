@@ -326,8 +326,9 @@ interface AgentState {
   newConversation: () => void
   setConversationId: (id: number) => void
   /** First send of a new chat: re-key the live 'draft' buffer to the real
-   * conversation id and follow it on screen, in one atomic update. */
-  adoptDraft: (id: number) => void
+   * conversation id in one atomic update. Background PTT adoption preserves
+   * whichever conversation the user selected while transcription ran. */
+  adoptDraft: (id: number, opts?: { preserveSelection?: boolean }) => void
   /** After a failed PTT send on an unfiled draft: drop the release-time
    *  destination pin (#88) so the next typed draft follows the live
    *  workspace again. */
@@ -742,13 +743,13 @@ export const useAgent = create<AgentState>((set, get) => ({
     set({ conversationId: id })
   },
 
-  adoptDraft: (id) => {
+  adoptDraft: (id, opts) => {
     set((s) => {
       const draft = s.messagesByConv.draft ?? []
       const rest = { ...s.messagesByConv }
       delete rest.draft
       return {
-        conversationId: id,
+        conversationId: opts?.preserveSelection ? s.conversationId : id,
         messagesByConv: {
           ...rest,
           // Merge rather than stomp: nothing should be under a fresh id,
@@ -762,7 +763,7 @@ export const useAgent = create<AgentState>((set, get) => ({
         draftScope: null,
       }
     })
-    persistConversationId(id)
+    if (!opts?.preserveSelection) persistConversationId(id)
   },
 
   pushLog: (e) =>
