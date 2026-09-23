@@ -5972,11 +5972,8 @@ function ContextChip({ info }: { info: { tokens: number; window: number | null; 
 }
 
 export /**
- * Destination card (issue #32): on a draft chat, state exactly which
- * workspace the first send will file the conversation under, and let the
- * user change it without leaving the screen. Mirrors the live active
- * workspace until the user pins a destination via Change…; the pin survives
- * active-workspace churn until first send (draft-local, per the plan).
+ * Draft destination picker (issue #90): keep the next chat's destination
+ * directly selectable while preserving its draft-local pin until first send.
  * Disappears once the chat is saved — the sidebar grouping takes over.
  */
 function DraftDestinationCard() {
@@ -5984,7 +5981,6 @@ function DraftDestinationCard() {
   const draftDestination = useAgent((s) => s.draftDestination)
   const pinDraftDestination = useAgent((s) => s.pinDraftDestination)
   const scope = useRemote((s) => s.scope)
-  const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<WorkspaceRow[]>([])
   const [remoteAdd, setRemoteAdd] = useState(false)
   const [remotePath, setRemotePath] = useState('')
@@ -5995,7 +5991,6 @@ function DraftDestinationCard() {
   const dest = draftDestination ?? workspace
 
   useEffect(() => {
-    if (!open) return
     let cancelled = false
     const load = scope.connected ? listWorkspaces() : listLocalWorkspaces()
     load
@@ -6008,11 +6003,10 @@ function DraftDestinationCard() {
     return () => {
       cancelled = true
     }
-  }, [open, scope.connected])
+  }, [scope.connected])
 
   const pick = (path: string) => {
     pinDraftDestination(path)
-    setOpen(false)
     setErr(null)
   }
 
@@ -6027,6 +6021,9 @@ function DraftDestinationCard() {
       if (picked) {
         await addWorkspace(picked).catch(() => null)
         pick(picked)
+        setRows((current) => current.some((w) => w.path === picked)
+          ? current
+          : [...current, { id: -1, path: picked, label: wsBasename(picked), last_opened_at: null, exists: true, conversation_count: 0 }])
       }
     } catch {
       setErr('Folder picking needs the desktop app.')
@@ -6039,6 +6036,9 @@ function DraftDestinationCard() {
     try {
       await addWorkspace(path)
       pick(path)
+      setRows((current) => current.some((w) => w.path === path)
+        ? current
+        : [...current, { id: -1, path, label: wsBasename(path), last_opened_at: null, exists: true, conversation_count: 0 }])
       setRemoteAdd(false)
       setRemotePath('')
     } catch (e) {
@@ -6046,85 +6046,70 @@ function DraftDestinationCard() {
     }
   }
 
+  const destinationInRows = rows.some((w) => w.path === dest)
+
   return (
     <div className="mx-auto mt-3 w-full max-w-md rounded border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-      {open ? (
-        <div>
-          <p className="mb-1.5 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
-            Save this chat to
-          </p>
-          <div className="max-h-48 space-y-0.5 overflow-y-auto">
-            <button
-              className="block w-full rounded px-2 py-1 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-              onClick={() => pick('')}
-            >
-              Default (no folder)
-            </button>
-            {rows.map((w) => (
-              <button
-                key={w.path ?? ''}
-                className="block w-full truncate rounded px-2 py-1 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-                title={w.path ?? ''}
-                onClick={() => pick(w.path ?? '')}
-              >
-                {w.label}
-              </button>
-            ))}
-          </div>
-          {remoteAdd ? (
-            <div className="mt-1.5 rounded border border-zinc-700 bg-zinc-800 p-2">
-              <input
-                autoFocus
-                className="mb-1.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs"
-                placeholder="folder path on the host, e.g. C:/repos/proj"
-                value={remotePath}
-                onChange={(e) => setRemotePath(e.target.value)}
-                onKeyDown={(e) => e.key === 'Escape' && setRemoteAdd(false)}
-                aria-label="Folder path on the host"
-              />
-              <div className="flex justify-end gap-1.5">
-                <button
-                  className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-900"
-                  onClick={() => setRemoteAdd(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50"
-                  disabled={!remotePath.trim()}
-                  onClick={() => void addRemote()}
-                >
-                  Add
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              className="mt-1.5 block w-full rounded border border-dashed border-zinc-700 px-2 py-1 text-left text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
-              onClick={() => void addFolder()}
-            >
-              <span aria-hidden="true" className="mr-1 text-sm leading-none text-zinc-500">+</span>
-              {scope.connected ? 'Add folder on host…' : 'Add workspace…'}
-            </button>
+      <div className="flex items-center gap-2">
+        <label htmlFor="draft-destination" className="shrink-0 text-xs text-zinc-400">
+          This chat will be saved to
+        </label>
+        <select
+          id="draft-destination"
+          aria-label="Save this chat to"
+          className="min-w-0 flex-1 truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-blue-500 focus:outline-none"
+          value={dest}
+          onChange={(e) => pick(e.target.value)}
+          title={dest || 'Default (no folder)'}
+        >
+          <option value="">Default (no folder)</option>
+          {dest && !destinationInRows && (
+            <option value={dest}>{wsBasename(dest)}</option>
           )}
-          {err && <p className="mt-1 text-[10px] text-red-400">{err}</p>}
-        </div>
-      ) : (
-        <div className="flex items-center justify-between gap-2">
-          <p className="min-w-0 truncate text-xs text-zinc-400">
-            This chat will be saved to{' '}
-            <span className="font-medium text-zinc-200" title={dest || 'Default (no folder)'}>
-              {dest ? wsBasename(dest) : 'Default (no folder)'}
-            </span>
-          </p>
+          {rows.filter((w) => w.path !== null).map((w) => (
+            <option key={w.path} value={w.path!}>{w.label}</option>
+          ))}
+        </select>
+        {!remoteAdd && (
           <button
-            className="shrink-0 rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-            onClick={() => setOpen(true)}
+            className="shrink-0 rounded border border-dashed border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
+            onClick={() => void addFolder()}
+            aria-label={scope.connected ? 'Add folder on host' : 'Add workspace'}
+            title={scope.connected ? 'Add folder on host' : 'Add workspace'}
           >
-            Change…
+            <span aria-hidden="true" className="text-sm leading-none">+</span>
           </button>
+        )}
+      </div>
+      {remoteAdd && (
+        <div className="mt-1.5 rounded border border-zinc-700 bg-zinc-800 p-2">
+          <input
+            autoFocus
+            className="mb-1.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs"
+            placeholder="folder path on the host, e.g. C:/repos/proj"
+            value={remotePath}
+            onChange={(e) => setRemotePath(e.target.value)}
+            onKeyDown={(e) => e.key === 'Escape' && setRemoteAdd(false)}
+            aria-label="Folder path on the host"
+          />
+          <div className="flex justify-end gap-1.5">
+            <button
+              className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-900"
+              onClick={() => setRemoteAdd(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50"
+              disabled={!remotePath.trim()}
+              onClick={() => void addRemote()}
+            >
+              Add
+            </button>
+          </div>
         </div>
       )}
+      {err && <p className="mt-1 text-[10px] text-red-400">{err}</p>}
     </div>
   )
 }
