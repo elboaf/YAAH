@@ -87,6 +87,7 @@ import { CodeBlock, AgentMarkdown } from './markdown'
 import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
+import { parseModelScope } from './modelScope'
 
 // ---------------------------------------------------------------- code views
 
@@ -6168,8 +6169,9 @@ export function ChatScopePickers() {
     }
     return ''
   }
-  const shownProvider = model.includes('::') ? model.split('::')[0] : activeProviderFor(model)
-  const shownModel = model.includes('::') ? model.split('::')[2] ?? '' : model
+  const parsedModel = parseModelScope(model)
+  const shownProvider = parsedModel.provider || activeProviderFor(model)
+  const shownModel = parsedModel.model
 
   const [savingModel, setSavingModel] = useState(false)
   const [savingEffort, setSavingEffort] = useState(false)
