@@ -7040,6 +7040,17 @@ function Composer() {
     const key = s.conversationId === null ? 'draft' : String(s.conversationId)
     return s.pendingQuestions[key] ?? null
   })
+  // Same gate pattern for the access-mode approval and plan-approval cards:
+  // a pending gate in THIS conversation must block steering/queuing (the
+  // composer input is the gate's answer channel).
+  const pendingApproval = useAgent((s) => {
+    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    return s.pendingApprovals[key] ?? null
+  })
+  const pendingPlanApproval = useAgent((s) => {
+    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    return s.pendingPlanApprovals[key] ?? null
+  })
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   // Issue #7 queue: echoes of messages queued during this run (transcript
