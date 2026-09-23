@@ -956,13 +956,9 @@ async def run_agent(
     # turn actually leaves this path (a nested-parent binding must not).
     original_workspace = str(workspace)
     _isolated = False
-    _merge_result: dict | None = None
-    # Set when the turn actually bound a session worktree (rebound away
-    # from the original workspace) — gates worktree_released, which must
-    # not fire for non-repo turns that never isolated into a worktree.
-    _bound_wt: str | None = None
-    # adr/0003: the worktree is a SESSION binding — the turn-end finally
-    # merges commits but never releases the binding, so the next turn of
+    # adr/0003 revised: the worktree is a SESSION binding — turn end
+    # settles (drains a quiesced session) but otherwise the binding and
+    # its branch persist, so the next turn of
     # this chat works in exactly the tree this turn left behind.
 
     if persist_user:
@@ -1412,7 +1408,6 @@ async def run_agent(
                                     # parent's worktree binding is not a
                                     # new isolation).
                                     if turn_workspace != original_workspace:
-                                        _bound_wt = turn_workspace
                                         _binfo = worktrees.binding_for(
                                             str(conversation_id)
                                         ) or {}
@@ -1474,7 +1469,6 @@ async def run_agent(
                                         _isolated = True
                                         workspace = turn_workspace
                                         if turn_workspace != original_workspace:
-                                            _bound_wt = turn_workspace
                                             _binfo = worktrees.binding_for(
                                                 str(conversation_id)
                                             ) or {}
@@ -1754,51 +1748,45 @@ async def run_agent(
         )
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
-        # Issue #58 decision 5, amended by adr/0003: a top-level chat
-        # agent merges its session branch at end of turn — under the
-        # merge mutex, whatever exit the turn took (done, error,
-        # cancelled). A generator's finally may not resume arbitrarily
-        # deep awaits on abort, so the merge is wrapped in shield+
-        # wait_for. The binding is NEVER released here (session scope):
-        # uncommitted worktree state survives into the next turn, and a
-        # refused merge stays retryable by the next turn. The session is
-        # torn down only by release_session (chat deletion, reaper).
+        # adr/0003 revised (branch-first): turn end never merges into the
+        # main tree, whatever exit the turn took. The session settles
+        # (drain when quiesced) and the binding otherwise survives into
+        # the next turn; teardown runs only in release_session (chat
+        # deletion, drain, reaper).
         if _isolated:
+            # adr/0003 revised (branch-first): turn end NEVER merges into
+            # the main tree. The session worktree settles instead — a
+            # quiesced session (no commits, clean tree) drains; otherwise
+            # the branch + binding persist and the chip keeps telling the
+            # truth between turns. The user merges deliberately.
             try:
-                # 150s > merge_back's own 120s git timeout, so a merge that
-                # reports failure did actually fail — the old 60s cut-off
-                # could report "did not complete" while the merge went on
-                # to succeed.
-                _merge_result = await asyncio.wait_for(
-                    asyncio.shield(worktrees.self_merge(str(conversation_id))),
-                    timeout=150,
+                _settle = await asyncio.wait_for(
+                    asyncio.shield(worktrees.turn_end(str(conversation_id))),
+                    timeout=60,
                 )
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                _merge_result = {
-                    "merged": False,
-                    "reason": "self-merge did not complete; session worktree kept",
+                _settle = {
+                    "drained": False,
+                    "reason": "turn-end settlement did not complete; session kept",
                 }
-            if not _merge_result.get("noop"):
+            if _settle.get("drained"):
+                # Quiesced session released: the chip reverts to the main
+                # tree's branch.
+                yield _ndjson({"type": "worktree_released"})
+            elif _settle.get("commits_ahead"):
+                # Honest status instead of an implicit merge: the work
+                # lives on the branch until the user says otherwise.
+                _note = {
+                    "branch": _settle.get("branch", ""),
+                    "commits": _settle["commits_ahead"],
+                    "dirty": bool(_settle.get("dirty")),
+                }
                 await add_message(
                     conversation_id,
                     "system",
-                    json.dumps({"worktree_merge": _merge_result}, default=str),
+                    json.dumps({"worktree_status": _note}, default=str),
                 )
-                yield _ndjson(
-                    {
-                        "type": "tool_result",
-                        "name": "git_merge_back",
-                        "call_id": f"merge-back-{conversation_id}",
-                        "result": _merge_result,
-                    }
-                )
-            # The chip reverts to the main tree's branch at EVERY turn
-            # that actually bound a session worktree (adr/0003: the
-            # session worktree survives the turn, but the mid-run chip
-            # override must not outlive the turn; non-repo turns that
-            # never bound emit nothing).
-            if _bound_wt is not None:
-                yield _ndjson({"type": "worktree_released"})
+                yield _ndjson({"type": "worktree_status", **_note})
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

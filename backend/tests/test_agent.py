@@ -1150,13 +1150,16 @@ async def test_dirty_turn_ends_and_state_survives_next_turn(fake_model, tmp_path
     )
     texts2 = "".join(e.get("text", "") for e in events2 if e["type"] == "text")
     assert "clean now" in texts2
-    # the session branch was ff'd to main HEAD after turn 1's merge
-    assert Path(seen[1]).exists()
-    # session end (chat deletion path) tears down with salvage-if-dirty
+    # turn 2 ended clean with zero commits: the quiesced session DRAINS
+    # (adr/0003 revised) — the worktree is gone; the next turn would run
+    # on the main tree and re-isolate on demand.
+    assert not Path(seen[1]).exists()
+    # the session already drained at turn 2's end; a later chat deletion
+    # release is a no-op, never an error
     from backend.agent import worktrees as worktrees_mod
 
     rel = await worktrees_mod.release_session(str(cid), why="test")
-    assert rel["released"] is True
+    assert rel.get("noop") is True
 
 
 @pytest.mark.asyncio

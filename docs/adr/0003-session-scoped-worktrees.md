@@ -68,3 +68,34 @@ had any) is deleted at session end — no more per-turn branch litter.
   probe/retry loop disappears), one new terminal path
   (`release_session`), and the accidental "merge timeout → next turn
   reuses the worktree" behavior becomes the designed path.
+
+## Revision (2026-09-23): branch-first — turn end never merges
+
+The per-turn merge-back was removed after a field incident: a chat
+finished its work (merged, chip reverted to `master`, tree clean), the
+user then said "push to github" — but the chat was still bound to its
+session worktree, where HEAD is the `agent/*` branch. `git push` there
+failed ("no upstream"), the model followed git's own suggestion and
+published the AGENT branch to the remote with `--set-upstream` — while
+`master` (the thing the user meant) stayed unpushed. The UI had claimed
+`master` all along; the work actually lived on a branch the user was
+never shown.
+
+Decision revision: the harness NEVER merges into the main tree on its
+own. The session worktree and its `agent/*` branch are the work's home
+until the user merges deliberately — an explicit `git_merge_back` call
+(say "merge it") or plain git. The branch chip shows the agent branch
+honestly, across turns, until the session releases. Turn end only
+settles: a quiesced session (no commits, clean tree — the adr/0002
+trash contract runs first, so a stray capture cannot pin it) is
+DRAINED (worktree + binding + zero-commit branch removed); anything
+with commits or authored dirt stays bound. The session-branch
+fast-forward to main HEAD is kept (fast-forward only — a branch with
+its own commits never moves). Unmerged `agent/*` branches are never
+auto-pruned by the reaper: the branch is the record of the work; the
+user deletes it.
+
+Consequence: master moves only when the user decides. The "user's
+folder must not lag" guarantee of the original decision is consciously
+traded away — lagging is the point: unmerged work should be visible as
+unmerged, not silently landed.

@@ -107,14 +107,42 @@ export interface PendingPlanApproval {
   convKey: string
 }
 
-/** The ephemeral worktree branch a run is working in, per conversation
- *  (issue: mid-run agent-branch visibility). Set by `worktree_bound` when
- *  the turn rebinds to its isolated worktree, cleared by `worktree_released`
- *  after the end-of-turn merge-back — the chip then reverts to the main
- *  tree's branch. Nothing persists it: a restart has no live run. */
+/** The session worktree branch a conversation is bound to (adr/0003
+ *  revised, branch-first). Set by `worktree_bound`; kept across turns —
+ *  the work lives on that branch until the user merges or the session
+ *  drains (`worktree_released`, only on real release). Mirrored to
+ *  localStorage: the binding survives backend restarts (path-shape
+ *  recovery), so a reload must not falsely claim the main branch. */
 export interface AgentBranchInfo {
   branch: string
   boundAt: number
+}
+
+const AGENT_BRANCH_KEY = 'yaah-agent-branch-by-conv'
+
+function loadAgentBranches(): Record<string, AgentBranchInfo> {
+  if (typeof localStorage === 'undefined') return {}
+  try {
+    const raw = JSON.parse(localStorage.getItem(AGENT_BRANCH_KEY) || '{}') as Record<
+      string,
+      AgentBranchInfo
+    >
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+function storeAgentBranches(map: Record<string, AgentBranchInfo | null>): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    // only live bindings are stored; nulls are deletions in disguise
+    const live: Record<string, AgentBranchInfo> = {}
+    for (const [k, v] of Object.entries(map)) if (v) live[k] = v
+    localStorage.setItem(AGENT_BRANCH_KEY, JSON.stringify(live))
+  } catch {
+    // best-effort mirror; in-memory state stays authoritative
+  }
 }
 
 /** One line in the right-panel activity log. */
@@ -566,12 +594,13 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({ queueEchoByConv: { ...s.queueEchoByConv, [key]: items } })),
   steerByConv: {},
   setSteer: (key, on) => set((s) => ({ steerByConv: { ...s.steerByConv, [key]: on } })),
-  agentBranchByConv: {},
+  agentBranchByConv: loadAgentBranches(),
   setAgentBranch: (key, info) =>
     set((s) => {
       const map = { ...s.agentBranchByConv }
       if (info === null) delete map[key]
       else map[key] = info
+      storeAgentBranches(map)
       return { agentBranchByConv: map }
     }),
   setError: (key, error) =>

@@ -22,20 +22,24 @@ the path shape. The path is excluded via
 filtered out of the UI branch list, and search prunes the `.yaah`
 directory (see tools.IGNORED_DIRS).
 
-Merge rules (issue decisions 1-6, amended by docs/adr/0003):
+Merge rules (issue decisions 1-6, amended by docs/adr/0003, REVISED
+branch-first 2026-09-23):
 - Sub-agents never merge: they report the branch on the first line of
   their final message (results are clipped; the parent must always be
   able to act on the branch name).
 - Top-level chat agents are bound to ONE worktree for the chat's whole
   session (adr/0003): the first write-capable tool call creates it, and
-  it is never released mid-session. Every turn still merges the session
-  branch's new commits into the main tree under the mutex (the user's
-  folder must not lag), but uncommitted worktree state is left in place
-  across turns — turn N+1 works in exactly the tree turn N left behind,
-  so there is no within-session variance between runs. The old per-turn
-  trash-drop / salvage / supervised-retry machinery now runs once, at
-  session end (release_session): chat deletion, or the reaper for
-  orphans.
+  it is never released mid-session. The harness NEVER merges into the
+  main tree on its own: commits stay on the session branch until the
+  user merges deliberately (git_merge_back, or plain git). The old
+  per-turn auto-merge hid the work in a phantom branch while the UI
+  claimed master — and made a follow-up "push" publish the wrong ref.
+  Uncommitted worktree state is left in place across turns — turn N+1
+  works in exactly the tree turn N left behind. A session whose branch
+  carries no commits and no uncommitted files is drained at turn end
+  (nothing to preserve); the trash/salvage teardown of adr/0002 runs
+  once, at session end (release_session): chat deletion, drain, or the
+  reaper for orphans.
 - Merge-back refuses zero new commits, uncommitted main-tree files that
   the merge would overwrite (dirty *overlap* — never stash), mid-merge
   state, and merge conflicts (aborting) — surfaced, never papered over.
@@ -189,7 +193,7 @@ def worktree_of(workspace: str) -> str | None:
 
 def release_chat(chat_id: str) -> None:
     """Turn-end bookkeeping: drop a chat's non-repo shared-writer token.
-    Bound worktree sessions are released by self_merge instead."""
+    Bound worktree sessions are released by turn_end/release_session instead."""
     key = f"chat:{chat_id}"
     for holders in _shared_writers.values():
         holders.discard(key)
@@ -955,7 +959,7 @@ async def merge_back(root: Path, branch: str) -> dict:
     Issue #98 (docs/adr/0002): uncommitted files in the *worktree* are
     first classified — provably harness-generated output (provenance or
     machine shape) is dropped; authored-looking files keep the old
-    refuse+salvage path via self_merge.
+    refuse+salvage path via release_session.
     """
     rc_head, _ = await _git(root, "rev-parse", "--verify", "HEAD")
     if rc_head != 0:
@@ -1047,61 +1051,53 @@ async def ff_session_branch(wt_str: str) -> None:
         await _git(Path(wt_str), "merge", "--ff-only", "-q", main_head.strip())
 
 
-async def self_merge(chat_id: str, final: bool = True) -> dict:
-    """End-of-turn merge for a top-level chat agent (issue decision 5,
-    amended by adr/0003). No-op when the turn never got isolated.
+async def turn_end(chat_id: str) -> dict:
+    """End-of-turn settlement for a top-level chat agent (adr/0003 revised:
+    branch-first — the harness never merges into the main tree on its own).
 
-    adr/0003: the binding is a SESSION binding — a turn NEVER releases
-    it. Every turn merges the session branch's new commits into the main
-    tree (the user's folder must not lag) and, on success, fast-forwards
-    the session branch to the merged main HEAD so the next turn starts
-    from exactly what the user now sees. Uncommitted worktree state is
-    deliberately left in place across turns: turn N+1 works in exactly
-    the tree turn N left behind (no within-session variance). The
-    per-turn trash-drop / salvage / supervised-retry machinery of
-    adr/0002 now runs once, at session end (release_session).
+    - Zero commits AND clean worktree: nothing to preserve — the session is
+      drained (release_session: dir + binding + zero-commit branch gone)
+      and the next turn runs on the main tree, re-isolating on demand.
+    - Otherwise the session stays bound: commits stay on the session
+      branch (master untouched — merging is the user's deliberate
+      decision via git_merge_back or plain git) and uncommitted state
+      survives into the next turn.
+    - Best-effort ff keeps a worktree current with the main tree; it is
+      fast-forward only, so a branch carrying its own commits never moves.
 
-    `final` is retained for call compatibility (the loop's old probe
-    passed final=False); under session binding both paths merge, so it
-    no longer changes behavior.
-
-    Refusals (dirty overlap in the MAIN tree, conflict, mid-merge) keep
-    the session bound — the next turn can retry the merge, or the model
-    can call git_merge_back itself. Nothing strands on a branch the next
-    turn cannot see."""
+    Returns {branch, commits_ahead, dirty, drained} for the UI's honest
+    chip/status."""
     info = binding_for(chat_id)
     wt_str = _chat_bindings.get(chat_id, "")
     if info is None:
         release_chat(chat_id)
-        return {"merged": False, "noop": True, "reason": "turn was not isolated"}
+        return {"drained": False, "noop": True, "reason": "turn was not isolated"}
     root = Path(info["root"])
     wt = Path(wt_str)
     branch = info["branch"]
 
-    result = await merge_back(root, branch)
-    if result.get("merged"):
-        # Fast-forward the session branch to the merged main HEAD: the
-        # next turn's worktree then starts from exactly what the user's
-        # folder now shows (no drift between session branch and main).
-        await ff_session_branch(wt_str)
-        # Write provenance deliberately ACCUMULATES for the whole session
-        # (adr/0003): the trash classifier runs at session end, and a
-        # file the model authored in turn 3 must still classify as model
-        # work at session end. Cleared only in release_session.
-    elif result.get("zero_commits"):
-        # Nothing new to merge (a read-only-ish turn, or the model already
-        # merged the branch itself via git_merge_back): still fast-forward
-        # the session branch to main HEAD so the next turn starts from
-        # exactly what the user's folder shows — then report noop (no
-        # pill-worthy failure, no teardown).
-        await ff_session_branch(wt_str)
-        result["noop"] = True
-        result.setdefault("reason", "session branch has no new commits")
-    # else: refused on MAIN-TREE state (dirty overlap / conflict) — that
-    # is the user's tree, not the agent's mess. The session stays bound:
-    # the next turn can retry the merge (or call git_merge_back itself).
-    # The refusal surfaces as the persisted git_merge_back pill.
-    return result
+    commits = await _new_commits(root, branch)
+    if commits <= 0:
+        # No commits on the branch: the session may be drainable. The
+        # adr/0002 trash contract runs here because draining IS a session
+        # end — a stray command capture must not pin a read-only chat's
+        # session forever.
+        await _drop_session_trash(wt, root, branch, "turn-end drain check")
+        if not await _dirty(wt):
+            await release_session(chat_id, why="drained (branch carried no work)")
+            return {
+                "drained": True,
+                "branch": branch,
+                "commits_ahead": 0,
+                "dirty": False,
+            }
+    await ff_session_branch(wt_str)
+    return {
+        "drained": False,
+        "branch": branch,
+        "commits_ahead": max(commits, 0),
+        "dirty": bool(await _dirty(wt)),
+    }
 
 
 async def release_session(chat_id: str, why: str = "session ended") -> dict:
@@ -1390,7 +1386,10 @@ async def reap_stale(now: float | None = None) -> dict:
                 with contextlib.suppress(Exception):
                     await _git(root, "branch", "-D", branch)
             reaped.append(str(child))
-        # branch pruning (decision 4: keep a few days, then remove)
+        # Branch pruning: the 3-day TTL now applies only to branches that
+        # carry NO unmerged commits (merged or zero-commit litter). Under
+        # the branch-first contract an unmerged agent/* branch IS the
+        # record of the work — the user deletes it, never the reaper.
         rc, out = await _git(
             root,
             "for-each-ref",
@@ -1408,7 +1407,8 @@ async def reap_stale(now: float | None = None) -> dict:
                 except ValueError:
                     continue
                 if now - date > BRANCH_TTL_SECONDS and name not in live_branches:
-                    await _git(root, "branch", "-D", name)
+                    if await _new_commits(root, name) <= 0:
+                        await _git(root, "branch", "-D", name)
     return {"reaped": reaped, "salvaged": salvaged}
 
 

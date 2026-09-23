@@ -1200,16 +1200,40 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   // neutral git_merge_back pill the live stream showed; red stays reserved
   // for actual failures (the refusal's reason lives in the expandable
   // detail, exactly like every other tool result).
-  if (msg.role === 'system') {
+    if (msg.role === 'system') {
     if (!msg.content) return null
     let merge: { worktree_merge?: Record<string, unknown> } | null = null
+    let status: {
+      worktree_status?: { branch?: string; commits?: number; dirty?: boolean }
+    } | null = null
     try {
       const parsed: unknown = JSON.parse(msg.content)
       if (parsed && typeof parsed === 'object' && 'worktree_merge' in (parsed as object)) {
         merge = parsed as { worktree_merge: Record<string, unknown> }
+      } else if (
+        parsed &&
+        typeof parsed === 'object' &&
+        'worktree_status' in (parsed as object)
+      ) {
+        status = parsed as {
+          worktree_status: { branch?: string; commits?: number; dirty?: boolean }
+        }
       }
     } catch {
       // not JSON — a genuine failure marker
+    }
+    if (status) {
+      // adr/0003 revised (branch-first): turn end never merges — this
+      // persisted line IS the record of where the work lives.
+      const s = status.worktree_status ?? {}
+      const bits: string[] = [`${s.commits ?? 0} commit(s) on branch ${s.branch ?? '?'}`]
+      if (s.dirty) bits.push('plus uncommitted changes')
+      bits.push('master untouched — say "merge it" to merge, or push the branch as-is')
+      return (
+        <div className="pl-3">
+          <div className="font-mono text-[11px] text-amber-300/90">◆ {bits.join(', ')}</div>
+        </div>
+      )
     }
     if (merge) {
       const r = merge.worktree_merge ?? {}
@@ -2888,6 +2912,9 @@ function ConversationList() {
                   delete abortByConv[key]
                   const errorByConv = { ...s.errorByConv }
                   delete errorByConv[key]
+                  // Chat deletion releases the session server-side; the
+                  // chip must not keep claiming the agent branch.
+                  useAgent.getState().setAgentBranch(key, null)
                   return { statusByConv, abortByConv, errorByConv }
                 })
                 if (deleteTarget.id === conversationId) {
@@ -5646,12 +5673,12 @@ function GitChipCluster({
       .catch(() => {})
   }
 
-  // Mid-run isolation (issue: agent-branch visibility): while this
-  // conversation's run is bound to its ephemeral worktree the chip shows
-  // the agent branch, amber; on worktree_released it reverts to the main
-  // tree's branch. Sub-agents are excluded — the parent turn owns the
-  // binding (worktree_bound fires only at the top-level seam).
-  const showAgentBranch = Boolean(agentBranch && streaming)
+  // Mid-run AND between-turns isolation (adr/0003 revised): while this
+  // conversation's session is bound to its worktree the chip shows the
+  // agent branch, amber — the work lives there until the user merges or
+  // the session drains. Sub-agents are excluded — the parent turn owns
+  // the binding (worktree_bound fires only at the top-level seam).
+  const showAgentBranch = Boolean(agentBranch)
   const branchLabel = showAgentBranch ? agentBranch!.branch : info.branch
   const pairAway = info.ahead > 0 || info.behind > 0
   const pairDiverged = info.ahead > 0 && info.behind > 0
@@ -5676,7 +5703,7 @@ function GitChipCluster({
         }
         title={
           showAgentBranch
-            ? `agent is working in ephemeral worktree branch ${agentBranch!.branch} — merges into ${info.branch} when the turn ends`
+            ? `session worktree branch ${agentBranch!.branch} — the work lives here until you merge it into ${info.branch} (say "merge it") or delete the chat`
             : 'Current git branch — click to switch'
         }
         aria-label={showAgentBranch ? 'Agent worktree branch' : 'Switch git branch'}
@@ -7630,12 +7657,28 @@ function Composer() {
         })
       }
     } else if (ev.type === 'worktree_bound') {
-      // The turn isolated into its ephemeral worktree: the branch chip
-      // shows the agent branch until worktree_released reverts it.
+      // The turn isolated into its session worktree: the branch chip
+      // shows the agent branch — and keeps showing it after the turn
+      // (adr/0003 revised: the binding persists until drain/delete).
       if (ev.branch) {
         setAgentBranch(bufKey, { branch: ev.branch, boundAt: Date.now() })
       }
+    } else if (ev.type === 'worktree_status') {
+      // Turn-end settlement: work stays on the branch, master untouched.
+      appendRawMessage(bufKey, {
+        id: `worktree-status-${Date.now()}`,
+        role: 'system',
+        content: JSON.stringify({
+          worktree_status: {
+            branch: ev.branch ?? '',
+            commits: ev.commits ?? 0,
+            dirty: ev.dirty ?? false,
+          },
+        }),
+      })
     } else if (ev.type === 'worktree_released') {
+      // Only fires when the session actually released (drained, chat
+      // deleted) — not every turn end.
       setAgentBranch(bufKey, null)
     } else if (ev.type === 'tool_progress') {
       if (ev.chunk) {

@@ -571,7 +571,13 @@ TOOLS_SCHEMA += [
         "type": "function",
         "function": {
             "name": "git_push",
-            "description": "Push commits to the remote.",
+            "description": (
+                "Push the current branch to the remote. A branch without an "
+                "upstream is published with --set-upstream automatically. "
+                "Under session worktrees the current branch is the agent/"
+                "branch where the work lives — pushing it is correct; master "
+                "is only touched by an explicit git_merge_back."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -1108,7 +1114,23 @@ async def git_merge_back(workspace: str, branch: str) -> dict:
 
 
 async def git_push(workspace: str) -> dict:
-    return await _git(workspace, "push")
+    """Push the current branch. When the branch has no upstream (the norm
+    for a session worktree's agent/* branch), push with --set-upstream
+    and say so — the branch is the real work under the branch-first
+    contract, not a misfire to paper over."""
+    r = await _git(workspace, "push")
+    if r.get("exit_code") == 0:
+        return r
+    err = str(r.get("error") or "")
+    if "has no upstream branch" not in err and "no upstream configured" not in err:
+        return r
+    rc, branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
+    if rc != 0 or not branch.strip() or branch.strip() == "HEAD":
+        return r
+    pushed = await _git(workspace, "push", "--set-upstream", "origin", branch.strip())
+    if pushed.get("exit_code") == 0:
+        pushed["note"] = f"no upstream was configured; published {branch.strip()} to origin with --set-upstream"
+    return pushed
 
 
 async def git_pull(workspace: str) -> dict:

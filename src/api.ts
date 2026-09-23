@@ -850,6 +850,7 @@ export interface AgentEvent {
     | 'sub_agent_progress'
     | 'sub_agent_done'
     | 'worktree_bound'
+    | 'worktree_status'
     | 'worktree_released'
     | 'compacted'
     | 'compaction_failed'
@@ -871,9 +872,13 @@ export interface AgentEvent {
   queued_autosend_items?: Array<{ id: number; text: string }>
   /** Live output chunk while a shell tool runs (tool_progress). */
   chunk?: string
-  /** Branch name of the ephemeral worktree the turn isolated into
-   *  (worktree_bound); worktree_released carries no payload. */
+  /** Branch name of the session worktree (worktree_bound /
+   *  worktree_status); worktree_released carries no payload. */
   branch?: string
+  /** Turn-end settlement (worktree_status, adr/0003 revised): commits on
+   *  the session branch, master untouched. */
+  commits?: number
+  dirty?: boolean
   /** Sub-agent identity (sub_agent_* events). */
   agent_id?: number
   /** Provider + model a pending chat call is waiting on (model_call, #43). */
