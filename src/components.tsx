@@ -21,6 +21,7 @@ import {
   deleteFile,
   exportConversationMarkdown,
   deleteConversation,
+  moveConversation,
   updateConversation,
   submitAnswer,
   listSkills,
@@ -1987,6 +1988,119 @@ function NoticeDialog({
 
 // ---------------------------------------------------------------- sidebar
 
+/** Move chat to another workspace (issue #8). The backend re-files the
+ *  conversation row — and every future turn derives its working directory
+ *  from that row — so picking a target here genuinely redirects where the
+ *  chat's next messages run. Refusals (run active, messages queued) come
+ *  back as 409s and surface in the failure NoticeDialog. */
+function MoveChatDialog({
+  convId,
+  chatTitle,
+  currentWorkspace,
+  onDone,
+  onError,
+  onCancel,
+}: {
+  convId: number
+  chatTitle: string
+  currentWorkspace: string | null
+  /** Called after a successful move with the destination path (null =
+   *  Default), so the parent can re-adopt the open chat's workspace. */
+  onDone: (target: string | null) => void
+  /** 409s (run active, messages queued) and network failures land here. */
+  onError: (title: string, message: string) => void
+  onCancel: () => void
+}) {
+  const [rows, setRows] = useState<WorkspaceRow[] | null>(null)
+  const [picked, setPicked] = useState<string | null>(currentWorkspace)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    listWorkspaces()
+      .then((ws) => {
+        if (alive) setRows(ws)
+      })
+      .catch(() => {
+        if (alive) setRows([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const move = async () => {
+    if (picked === currentWorkspace) {
+      onCancel()
+      return
+    }
+    setBusy(true)
+    try {
+      await moveConversation(convId, picked)
+      onDone(picked)
+    } catch (e) {
+      onError(
+        'Move failed',
+        String((e as { message?: string }).message ?? e),
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <DialogShell onClose={onCancel}>
+      <div className="p-4">
+        <h2 className="mb-1 text-sm font-semibold text-zinc-100">Move “{chatTitle}”</h2>
+        <p className="mb-3 text-xs leading-relaxed text-zinc-400">
+          The chat keeps its history; its next message will run inside the
+          workspace you pick.
+        </p>
+        <div className="mb-3 max-h-56 space-y-1 overflow-y-auto">
+          {rows === null && <p className="px-1 py-2 text-xs text-zinc-500">Loading…</p>}
+          {rows?.map((w) => (
+            <button
+              key={w.id}
+              disabled={!w.exists}
+              title={w.exists ? w.path ?? 'No root directory' : 'Folder not found on disk'}
+              className={`flex w-full items-center justify-between rounded border px-2 py-1.5 text-left text-xs ${
+                picked === w.path
+                  ? 'border-blue-500 bg-blue-950/40 text-zinc-100'
+                  : 'border-zinc-700 bg-zinc-800/40 text-zinc-300 hover:bg-zinc-800'
+              } ${!w.exists ? 'cursor-not-allowed opacity-40' : ''}`}
+              onClick={() => setPicked(w.path)}
+            >
+              <span className="truncate">{w.label}</span>
+              <span className="ml-2 shrink-0 font-mono text-[9px] text-zinc-500">
+                {w.path === null ? 'no directory' : w.exists ? '' : 'missing'}
+              </span>
+            </button>
+          ))}
+          {rows !== null && rows.length === 0 && (
+            <p className="px-1 py-2 text-xs text-zinc-500">No workspaces registered.</p>
+          )}
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            autoFocus
+            disabled={busy}
+            className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
+            onClick={() => void move()}
+          >
+            {busy ? 'Moving…' : 'Move'}
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  )
+}
+
 /** Relative timestamp for a conversation row ("2h", "3d", "May 2"). */
 function relTime(iso: string | null): string {
   if (!iso) return ''
@@ -2131,6 +2245,9 @@ function ConversationList() {
   const [notice, setNotice] = useState<{ title: string; message: string } | null>(null)
   const [sysTarget, setSysTarget] = useState<{ id: number; title: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; title: string } | null>(null)
+  // Move chat (issue #8): the row being relocated — the picker dialog reads
+  // the workspace registry and POSTs /move, then this list refreshes.
+  const [moveTarget, setMoveTarget] = useState<{ id: number; title: string; workspace: string | null } | null>(null)
   const [removeWsTarget, setRemoveWsTarget] = useState<WorkspaceRow | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
   // Active connection scope decides which registry/chats are shown; local
@@ -2294,6 +2411,11 @@ function ConversationList() {
       }
       onSys={() => setSysTarget({ id: c.id, title: c.title })}
       onDelete={() => setDeleteTarget({ id: c.id, title: c.title })}
+      onMove={
+        isAgent
+          ? undefined
+          : () => setMoveTarget({ id: c.id, title: c.title, workspace: c.workspace ?? null })
+      }
       onToggleRun={isAgent ? () => toggleAgentRun(c) : undefined}
       stopping={stoppingConvs.has(c.id)}
       onAgentSettings={
@@ -2498,6 +2620,29 @@ function ConversationList() {
           }}
         />
       )}
+      {moveTarget && (
+        <MoveChatDialog
+          convId={moveTarget.id}
+          chatTitle={moveTarget.title}
+          currentWorkspace={moveTarget.workspace}
+          onCancel={() => setMoveTarget(null)}
+          onError={(title, message) => {
+            setMoveTarget(null)
+            setNotice({ title, message })
+          }}
+          onDone={(target) => {
+            const movedId = moveTarget?.id
+            setMoveTarget(null)
+            // The core invariant, both ways: the open conversation's
+            // workspace IS the active workspace. If the moved chat is the
+            // one on screen, the panel adopts the destination so the very
+            // next message (and any queued-drain autosend) streams there —
+            // not just the row re-sorting under its new group.
+            if (movedId !== undefined && movedId === conversationId) setWorkspace(target ?? '')
+            refresh()
+          }}
+        />
+      )}
       {deleteTarget && (
         <ConfirmDialog
           title="Delete conversation?"
@@ -2593,6 +2738,7 @@ function ConversationRow({
   onExport,
   onSys,
   onDelete,
+  onMove,
 }: {
   conv: { id: number; title: string; updated_at: string }
   active: boolean
@@ -2626,6 +2772,9 @@ function ConversationRow({
   onExport: () => void
   onSys: () => void
   onDelete: () => void
+  /** Offered for normal chats only: a scheduled agent's pinned chat is
+   *  welded to the agent's workspace row, so it is not movable. */
+  onMove?: () => void
 }) {
   return (
     <div className="group relative flex items-center">
@@ -2725,6 +2874,17 @@ function ConversationRow({
             >
               System prompt override
             </button>
+            {onMove && (
+              <button
+                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => {
+                  setMenuOpen(false)
+                  onMove()
+                }}
+              >
+                Move to workspace…
+              </button>
+            )}
             {onAgentSettings && (
               <button
                 className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"

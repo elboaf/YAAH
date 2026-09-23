@@ -333,6 +333,20 @@ export const updateConversation = (
 export const deleteConversation = (id: number) =>
   api<{ ok: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' })
 
+/** Move a chat to another workspace (issue #8). Backend re-files the row
+ *  (null = the Default pseudo-workspace) AND the turn endpoint derives each
+ *  turn's working directory from that row — so the chat's messages now run
+ *  inside the target workspace, not merely sit under its sidebar group.
+ *  The backend refuses with 409 while a run is active / messages queued. */
+export const moveConversation = (id: number, workspace: string | null) =>
+  api<{ ok: boolean; workspace: string | null; target_id: number | null }>(
+    `/api/conversations/${id}/move`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ workspace }),
+    },
+  )
+
 // ---------------------------------------------------------------- workspaces
 
 export interface WorkspaceRow {

@@ -427,6 +427,49 @@ async def update_conversation(conversation_id: int, **fields):
         await db.close()
 
 
+async def move_conversation(conversation_id: int, target: str | None) -> dict | None:
+    """Re-file a chat under another workspace (issue #8).
+
+    The conversation row's `workspace` column is the single source of truth
+    for where the chat LIVES; the turn endpoint derives each turn's working
+    directory from it, so updating this row IS the move — the sidebar group
+    and the cwd can never drift apart.
+
+    target: the destination workspace path, or None for the Default
+    pseudo-workspace (no root directory). Returns
+    {"workspace": target-or-None, "target_id": registry id or None} —
+    target_id is None when the destination is Default, which has no
+    directory to register. None (chat unknown) means the caller returns 404.
+
+    Renaming-on-move is deliberately out of scope here: if the target path
+    doesn't exist on disk it is still registered (the sidebar already shows
+    a ⚠ for dead workspaces), so the move is never silently lost.
+    """
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        if await cur.fetchone() is None:
+            return None
+        target_id: int | None = None
+        if target is not None:
+            # Resolve/case-fold through the same dedupe the registry uses, so
+            # 'C:/Proj' and 'c:\\proj\\' land on one row and one directory.
+            row = await upsert_workspace(target)
+            target = row["path"]
+            target_id = row["id"]
+        await db.execute(
+            "UPDATE conversations SET workspace = ?,"
+            " updated_at = datetime('now') WHERE id = ?",
+            (target, conversation_id),
+        )
+        await db.commit()
+        return {"workspace": target, "target_id": target_id}
+    finally:
+        await db.close()
+
+
 async def set_conversation_usage(
     conversation_id: int, tokens: int, model: str | None
 ):
