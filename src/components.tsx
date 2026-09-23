@@ -85,6 +85,7 @@ import { diffLines, langOf, type DiffLine } from './codeview'
 import { CodeBlock, AgentMarkdown } from './markdown'
 import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
+import { classifyDrop } from './dropFiles'
 
 // ---------------------------------------------------------------- code views
 
@@ -7642,7 +7643,15 @@ function Composer() {
       onDrop={(e) => {
         e.preventDefault()
         setDragOver(false)
-        if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files)
+        // #48: a drop advertising files with no readable File objects is the
+        // WebView2 silent-failure signature (native OLE handler intercepting
+        // the drag) — surface it, never swallow it.
+        const outcome = classifyDrop(e.dataTransfer)
+        if (outcome.kind === 'files') {
+          addFiles(outcome.files)
+        } else if (outcome.kind === 'files-but-inaccessible') {
+          pushReject('The dropped file(s) could not be read by the app — attach them with the + button instead')
+        }
       }}
     >
       {skillMenuOpen && (
