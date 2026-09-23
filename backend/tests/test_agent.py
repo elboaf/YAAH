@@ -1011,12 +1011,11 @@ async def test_scheduled_exit_plan_never_waits_without_opt_in(fake_model, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_merge_back_nudges_then_completes(fake_model, tmp_path, monkeypatch):
-    """Authored dirt in the worktree at the final answer must NOT end the
-    turn: the model gets a system nudge, cleans up, and the turn completes
-    with a single merge-back pill — never a silent unmerged branch. (Trash
-    dirt instead ends the turn silently: see the self-drop coverage in
-    test_worktrees.)"""
+async def test_dirty_turn_ends_and_state_survives_next_turn(fake_model, tmp_path, monkeypatch):
+    """adr/0003: authored dirt no longer blocks the turn end — the turn
+    ends (zero-commit noop, no pill), the session worktree keeps the
+    dirt, and the NEXT turn of the same chat works in the SAME worktree
+    (it can clean up there). Session end salvages what remains."""
     from backend.db.database import create_conversation
 
     repo = tmp_path / "repo"
@@ -1028,23 +1027,25 @@ async def test_merge_back_nudges_then_completes(fake_model, tmp_path, monkeypatc
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-q", "-m", "init")
 
-    # The bash "tool" dirties the worktree with AUTHORED-class dirt (an
-    # unknown .md is salvage-worthy, not trash) on the first call and
-    # cleans it up on the second — standing in for the model fixing its
-    # own mess after the nudge.
+    seen: list[str] = []
+    marker_seen_by_turn2: list[bool] = []
+
     async def fake_execute(name, arguments, workspace, on_chunk=None):
         marker = Path(workspace) / "draft-notes.md"
+        if seen:
+            # turn 2's call: record what turn 1 left behind BEFORE cleanup
+            marker_seen_by_turn2.append(marker.exists())
         if "clean" in str(arguments.get("command", "")):
             marker.unlink(missing_ok=True)
-        else:
+        elif not marker.exists():
             marker.write_text("# half-authored\n", encoding="utf-8")
+        seen.append(workspace)
         return {"output": "ok", "exit_code": 0}
 
     monkeypatch.setattr(loop, "execute_tool", fake_execute)
 
     cid = await create_conversation("merge-retry")
-    # Round 1: a write tool (isolates the turn), then a final answer while
-    # the worktree is dirty -> the probe must nudge instead of ending.
+    # Turn 1: dirties the worktree, then answers while dirty.
     fake_model.append([
         {
             "type": "tool_calls",
@@ -1056,7 +1057,7 @@ async def test_merge_back_nudges_then_completes(fake_model, tmp_path, monkeypatc
         },
     ])
     fake_model.append([{"type": "content", "text": "all done"}, {"type": "finish"}])
-    # Round 2 (after the nudge): clean up, then finish again.
+    # Turn 2 (same chat): cleans up, then finishes.
     fake_model.append([
         {
             "type": "tool_calls",
@@ -1071,25 +1072,40 @@ async def test_merge_back_nudges_then_completes(fake_model, tmp_path, monkeypatc
 
     events = await collect(loop.run_agent(cid, "go", str(repo)))
     texts = "".join(e.get("text", "") for e in events if e["type"] == "text")
-    assert "all done" in texts and "clean now" in texts, f"events={events}"
+    assert "all done" in texts, f"events={events}"
 
-    # exactly one merge-back pill, and the worktree was fully released
-    # (zero_commits: the scripted turns never committed; the important
-    # part is the turn could not END while authored dirt remained). The
-    # pill emits after done — the finally block owns the real merge.
+    # turn 1 ended with a zero-commit noop: NO pill, NO salvage, and the
+    # session worktree survived with the dirt in place
     pills = [e for e in events if e.get("name") == "git_merge_back"]
-    assert len(pills) == 1
-    assert pills[0]["result"].get("zero_commits") is True, pills[0]["result"]
-    assert "done" in [e["type"] for e in events]
-    assert events[-1] is pills[0]
+    assert not pills, f"turn-end noop must not pill: {events}"
     leftovers = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
-    assert not leftovers, "a cleaned worktree must not be salvaged"
+    assert not leftovers, "turn end must not salvage session state"
+    assert len(seen) == 1 and ".yaah" in seen[0]
+
+    # turn 2: SAME worktree (session binding), dirt still visible
+    events2 = await collect(loop.run_agent(cid, "again", str(repo)))
+    assert len(seen) == 2
+    assert seen[1] == seen[0], "turn 2 must reuse the session worktree"
+    assert marker_seen_by_turn2 == [True], (
+        "turn 2 must see turn 1's uncommitted file"
+    )
+    texts2 = "".join(e.get("text", "") for e in events2 if e["type"] == "text")
+    assert "clean now" in texts2
+    # the session branch was ff'd to main HEAD after turn 1's merge
+    assert Path(seen[1]).exists()
+    # session end (chat deletion path) tears down with salvage-if-dirty
+    from backend.agent import worktrees as worktrees_mod
+
+    rel = await worktrees_mod.release_session(str(cid), why="test")
+    assert rel["released"] is True
 
 
 @pytest.mark.asyncio
-async def test_merge_back_retry_limit_surfaces_refusal(fake_model, tmp_path, monkeypatch):
-    """A model that never cleans its worktree gets nudged MERGE_RETRY_LIMIT
-    times, then the turn ends with the honest refusal pill (salvage path)."""
+async def test_stubborn_dirt_survives_turns_and_salvages_at_session_end(fake_model, tmp_path, monkeypatch):
+    """adr/0003: a model that never cleans its worktree just leaves the
+    dirt in the session worktree — every turn still merges commits, the
+    session keeps the dirt across turns, and session end salvages it
+    (never silently deletes)."""
     from backend.db.database import create_conversation
 
     repo = tmp_path / "repo"
@@ -1126,17 +1142,29 @@ async def test_merge_back_retry_limit_surfaces_refusal(fake_model, tmp_path, mon
 
     events = await collect(loop.run_agent(cid, "go", str(repo)))
     texts = "".join(e.get("text", "") for e in events if e["type"] == "text")
-    # the first answer streamed, retries happened silently, then the turn
-    # still ended (done) with the refusal pill arriving after it (finally)
+    # the turn ends normally (no nudge loop anymore): done, no pill
     assert "answer 0" in texts
     assert "done" in [e["type"] for e in events]
     pills = [e for e in events if e.get("name") == "git_merge_back"]
-    assert len(pills) == 1
-    result = pills[0]["result"]
-    assert result["merged"] is False
-    assert "draft-notes.md" in result["reason"]
-    assert "salvaged" in result["reason"]
-    assert events[-1] is pills[0]
+    assert not pills, f"zero-commit turn must not pill: {events}"
+    # the stubborn draft is still in the session worktree (not salvaged,
+    # not deleted — the next turn sees it)
+    from backend.agent import worktrees as worktrees_mod
+
+    info = worktrees_mod.binding_for(str(cid))
+    assert info is not None, "session must stay bound after the turn"
+    wt_path = Path(info["root"]) / ".yaah" / "worktrees" / str(cid)
+    assert (wt_path / "draft-notes.md").exists(), (
+        "stubborn dirt must survive the turn in the session worktree"
+    )
+    # session end: salvage (never silent deletion), worktree removed
+    rel = await worktrees_mod.release_session(str(cid), why="test")
+    salvages = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
+    assert salvages and "stubborn draft" in salvages[0].read_text(encoding="utf-8")
+    assert not wt_path.exists()
+    assert rel["branch"] not in run_git(
+        repo, "branch", "--list", rel["branch"]
+    ).stdout
 
 
 # --------------------------------------------------- mid-run branch visibility

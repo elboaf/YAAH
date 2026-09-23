@@ -925,12 +925,13 @@ async def run_agent(
     original_workspace = str(workspace)
     _isolated = False
     _merge_result: dict | None = None
-    # Issue #98 / adr/0002: supervised merge-back retries. When the
-    # end-of-turn probe finds the worktree still dirty (and the model can
-    # fix it), the turn does NOT end: the model gets this many extra steps
-    # of ordinary tool machinery, plus a system nudge naming the files.
-    MERGE_RETRY_LIMIT = 2
-    _merge_retries = 0
+    # Set when the turn actually bound a session worktree (rebound away
+    # from the original workspace) — gates worktree_released, which must
+    # not fire for non-repo turns that never isolated into a worktree.
+    _bound_wt: str | None = None
+    # adr/0003: the worktree is a SESSION binding — the turn-end finally
+    # merges commits but never releases the binding, so the next turn of
+    # this chat works in exactly the tree this turn left behind.
 
     if persist_user:
         await add_message(
@@ -1176,37 +1177,11 @@ async def run_agent(
 
             # No tool calls => final answer; turn complete
             if not tool_calls:
-                # Issue #98 / adr/0002: end-of-turn merge-back probe. A
-                # dirty WORKTREE is the agent's own mess — before the turn
-                # is allowed to end, the model gets up to
-                # MERGE_RETRY_LIMIT supervised cleanup rounds: a system
-                # nudge names the files, the next model call happens with
-                # full tool access, and the probe repeats. A main-tree
-                # refusal (the user's dirty overlap / a conflict) is NOT
-                # surfaced to the model — that is the user's tree; the old
-                # path (red pill in the transcript, reaper as backstop)
-                # applies. self_merge(final=False) deliberately leaves the
-                # worktree, branch, and binding alive for the retry.
-                if _isolated:
-                    probe = await worktrees.self_merge(
-                        str(conversation_id), final=False
-                    )
-                    if probe.get("retry_dirty") and _merge_retries < MERGE_RETRY_LIMIT:
-                        _merge_retries += 1
-                        messages.append({
-                            "role": "system",
-                            "content": (
-                                "Your merge-back was refused: uncommitted "
-                                f"files remain in your worktree: "
-                                f"{', '.join(probe.get('dirty', []))}. "
-                                "Generated output (logs, temp captures) must "
-                                "be deleted; real work must be committed with "
-                                "git_add + git_commit. Then finish your answer "
-                                "again — the turn cannot end while your "
-                                "worktree is dirty."
-                            ),
-                        })
-                        continue
+                # adr/0003: no end-of-turn probe or supervised retry — the
+                # session worktree keeps uncommitted state across turns by
+                # design, so a turn may end with WIP in place (the next
+                # turn sees exactly this tree). The finally block below
+                # still merges the session branch's commits every turn.
                 if finish_reason == "length":
                     yield _ndjson(
                         {
@@ -1368,6 +1343,7 @@ async def run_agent(
                                     # parent's worktree binding is not a
                                     # new isolation).
                                     if turn_workspace != original_workspace:
+                                        _bound_wt = turn_workspace
                                         _binfo = worktrees.binding_for(
                                             str(conversation_id)
                                         ) or {}
@@ -1429,6 +1405,7 @@ async def run_agent(
                                         _isolated = True
                                         workspace = turn_workspace
                                         if turn_workspace != original_workspace:
+                                            _bound_wt = turn_workspace
                                             _binfo = worktrees.binding_for(
                                                 str(conversation_id)
                                             ) or {}
@@ -1708,12 +1685,15 @@ async def run_agent(
         )
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
-        # Issue #58 decision 5: a top-level chat agent self-merges at end
-        # of turn — under the merge mutex, whatever exit the turn took
-        # (done, error, cancelled). A generator's finally may not resume
-        # arbitrarily deep awaits on abort, so the merge is wrapped in
-        # shield+wait_for; refusal/cancellation marks the worktree for the
-        # reaper (salvage-before-delete), nothing is ever lost silently.
+        # Issue #58 decision 5, amended by adr/0003: a top-level chat
+        # agent merges its session branch at end of turn — under the
+        # merge mutex, whatever exit the turn took (done, error,
+        # cancelled). A generator's finally may not resume arbitrarily
+        # deep awaits on abort, so the merge is wrapped in shield+
+        # wait_for. The binding is NEVER released here (session scope):
+        # uncommitted worktree state survives into the next turn, and a
+        # refused merge stays retryable by the next turn. The session is
+        # torn down only by release_session (chat deletion, reaper).
         if _isolated:
             try:
                 _merge_result = await asyncio.wait_for(
@@ -1723,14 +1703,9 @@ async def run_agent(
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001
                 _merge_result = {
                     "merged": False,
-                    "reason": "self-merge did not complete; worktree left for the reaper",
+                    "reason": "self-merge did not complete; session worktree kept",
                 }
             if not _merge_result.get("noop"):
-                # The chip reverts to the main tree's branch regardless of
-                # merge outcome: a refusal is surfaced as the git_merge_back
-                # pill; the chip must not keep a stale agent branch shown
-                # after the turn is over.
-                yield _ndjson({"type": "worktree_released"})
                 await add_message(
                     conversation_id,
                     "system",
@@ -1744,6 +1719,13 @@ async def run_agent(
                         "result": _merge_result,
                     }
                 )
+            # The chip reverts to the main tree's branch at EVERY turn
+            # that actually bound a session worktree (adr/0003: the
+            # session worktree survives the turn, but the mid-run chip
+            # override must not outlive the turn; non-repo turns that
+            # never bound emit nothing).
+            if _bound_wt is not None:
+                yield _ndjson({"type": "worktree_released"})
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)
