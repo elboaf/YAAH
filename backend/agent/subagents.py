@@ -392,13 +392,26 @@ async def run_sub_agent(
     # shell, and git tools all follow the rebinding in one place.
     run_workspace = str(workspace)
     _isolation_note: str | None = None
+    # The key this sub-agent would bind under (its own chat id slot).
+    _iso_key = run_label or f"sub-{id(defn):x}"
 
     async def _exec(name: str, args: dict) -> dict:
         nonlocal run_workspace, _isolation_note, _used_worktree
         if _used_worktree is None and name in worktrees.WRITER_TRIGGERS:
+            owned = worktrees.worktree_of(run_workspace)
+            if owned is not None:
+                # Nested parent: the parent's session worktree IS this
+                # sub-agent's tree (adr/0003 — one worktree per chat).
+                # Its commits ride the parent's session branch and merge
+                # at the parent's turn end, so no worktree of our own is
+                # minted and finalize must NOT see this path — finalizing
+                # the parent's worktree here would delete it mid-turn and
+                # unbind the parent's session.
+                run_workspace = owned
+                return await execute_tool(name, args, run_workspace)
             try:
                 run_workspace = await worktrees.ensure_isolated(
-                    run_workspace, chat_id=run_label or f"sub-{id(defn):x}"
+                    run_workspace, chat_id=_iso_key
                 )
             except worktrees.IsolationRefused as e:
                 _isolation_note = str(e)
@@ -733,12 +746,19 @@ async def run_sub_agent(
         **({"note": grace_note} if grace_note else {}),
         "transcript": transcript,
     }
-    if _used_worktree is not None:
+    # finalize only when a worktree was actually BOUND for this sub-agent
+    # (git-repo path). A non-repo workspace returns the original path with
+    # no binding — finalize has nothing to do there, and the non-repo
+    # writer token must be released or every later sub-agent in the same
+    # non-repo workspace is refused until backend restart.
+    if _used_worktree is not None and worktrees.binding_for(_iso_key) == _used_worktree:
         try:
             result = await worktrees.finalize_sub_agent(_used_worktree, result)
         except Exception:  # noqa: BLE001 — reporting must not kill the parent
             result["worktree_note"] = "worktree finalization failed; branch kept"
-    elif _isolation_note:
+    else:
+        worktrees.release_chat(_iso_key)
+    if _isolation_note:
         result["worktree_note"] = _isolation_note
     return result
 

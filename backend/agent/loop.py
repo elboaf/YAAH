@@ -1750,9 +1750,13 @@ async def run_agent(
         # torn down only by release_session (chat deletion, reaper).
         if _isolated:
             try:
+                # 150s > merge_back's own 120s git timeout, so a merge that
+                # reports failure did actually fail — the old 60s cut-off
+                # could report "did not complete" while the merge went on
+                # to succeed.
                 _merge_result = await asyncio.wait_for(
                     asyncio.shield(worktrees.self_merge(str(conversation_id))),
-                    timeout=60,
+                    timeout=150,
                 )
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001
                 _merge_result = {

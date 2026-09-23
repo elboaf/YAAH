@@ -12,6 +12,7 @@ retry protocol (final=False), and the background main-tree fast-forward.
 """
 
 import asyncio
+import json
 import os
 import time
 from pathlib import Path
@@ -47,10 +48,12 @@ def _clean_state():
     worktrees._active.clear()
     worktrees._chat_bindings.clear()
     worktrees._shared_writers.clear()
+    worktrees._reap_failed.clear()
     yield
     worktrees._active.clear()
     worktrees._chat_bindings.clear()
     worktrees._shared_writers.clear()
+    worktrees._reap_failed.clear()
 
 
 # ---------------------------------------------------------------- unit bits
@@ -467,10 +470,13 @@ async def test_self_merge_drops_trash_and_merges(repo: Path):
     wt = await worktrees.ensure_isolated(str(repo), chat_id="11")
     (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
     _commit_all(wt, "feature")
-    # the exact incident shape: a redirect capture left uncommitted
+    # the exact incident shape: a redirect capture left uncommitted (the
+    # harness registers redirect targets as tool provenance — as
+    # note_shell_writes does for every bash call)
     (Path(wt) / "tsc-out2.txt").write_text(
         "error TS2304: node_modules missing\n", encoding="utf-8"
     )
+    worktrees.note_write(wt, "tsc-out2.txt", "tool")
     result = await worktrees.self_merge("11")
     assert result["merged"] is True, result
     # the capture SURVIVES the turn (session state); the committed work
@@ -688,3 +694,109 @@ async def test_release_session_keeps_unmerged_branch(repo: Path):
     rel = await worktrees.release_session("42", why="test")
     assert rel["released"] is True
     assert info["branch"] in _git(repo, "branch", "--list", info["branch"])
+
+
+# ------------------------------------------------- review fixes (2026-09-23)
+
+
+async def test_reaper_salvages_once_when_removal_fails(repo: Path, monkeypatch):
+    """A locked tree the reaper cannot delete must not be re-salvaged every
+    tick — patch litter grew unboundedly before the salvage-once guard."""
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="88")
+    info = worktrees.binding_for("88")
+    (Path(wt) / "capture.txt").write_text("out\n", encoding="utf-8")
+    worktrees._chat_bindings.pop("88")
+    worktrees._active[str(wt)] = {
+        **info,
+        "created": time.time() - worktrees._ttl() - 1,
+    }
+
+    real_remove = worktrees._remove_worktree
+
+    async def stuck_remove(root, path, force=False):
+        worktrees._active.pop(str(path), None)
+        # the tree survives: every file locked (worst-case Windows)
+
+    monkeypatch.setattr(worktrees, "_remove_worktree", stuck_remove)
+    r1 = await worktrees.reap_stale()
+    assert len(r1["salvaged"]) == 1
+    r2 = await worktrees.reap_stale()
+    assert r2["salvaged"] == [], "a removal-failed tree must not re-salvage"
+    # once removal works again, the guard clears and teardown converges.
+    # (Reaper discovery is per-root: re-register the root like any later
+    # session touching the repo would.)
+    monkeypatch.setattr(worktrees, "_remove_worktree", real_remove)
+    worktrees._active[str(wt)] = {
+        **info,
+        "created": time.time() - worktrees._ttl() - 1,
+    }
+    r3 = await worktrees.reap_stale()
+    assert not Path(wt).exists(), "teardown must converge once removal works"
+    assert worktrees._reap_failed == set()
+
+
+async def test_reaper_prune_spares_live_branch(repo: Path, monkeypatch):
+    """The 3-day branch TTL sweep must never delete the branch of a LIVE
+    session (a >3-day session with no commits yet)."""
+    monkeypatch.setattr(worktrees, "BRANCH_TTL_SECONDS", 0.0)
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="77")
+    info = worktrees.binding_for("77")
+    _git(repo, "branch", "agent/stale/orphan")
+    await worktrees.reap_stale()
+    assert info["branch"] in _git(repo, "branch", "--list", info["branch"])
+    assert "agent/stale/orphan" not in _git(repo, "branch", "--list", "agent/stale/orphan")
+    assert Path(wt).exists()  # live worktree untouched too
+
+
+async def test_sync_skips_rebase_in_progress(repo: Path, monkeypatch):
+    """A user mid-rebase in their main tree is never ff-ed underneath."""
+    from backend.db import database as db
+
+    async def fake_list():
+        return [{"path": str(repo)}]
+
+    monkeypatch.setattr(db, "list_workspaces", fake_list)
+    upstream = repo.parent / "upstream"
+    _git(repo, "clone", "-q", str(repo), str(upstream))
+    _git(upstream, "config", "user.email", "t@t")
+    _git(upstream, "config", "user.name", "t")
+    _git(upstream, "commit", "-q", "--allow-empty", "-m", "upstream new")
+    _git(repo, "remote", "add", "origin", str(upstream))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "branch", "--set-upstream-to=origin/master", "master")
+    assert _git(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}").split() == ["0", "1"]
+    (repo / ".git" / "rebase-merge").mkdir()
+    synced = await worktrees.sync_main_trees()
+    assert synced == []
+    assert _git(repo, "rev-parse", "HEAD") != _git(repo, "rev-parse", "@{u}")
+
+
+async def test_trash_drop_insurance_patches_heuristic_only(repo: Path):
+    """Provenance-backed trash (redirect capture) drops without a patch;
+    heuristic-only trash (machine shape, no provenance) is backed up to a
+    dropped-trash patch before deletion."""
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="9")
+    wtp = Path(wt)
+    (wtp / "capture.txt").write_text("command output\n" * 5, encoding="utf-8")
+    worktrees.note_write(wt, "capture.txt", "tool")
+    # untracked, unknown provenance, >256 bytes of nested JSON (depth >= 2)
+    blob = json.dumps({"data": [{"k": i, "v": f"row-{i}"} for i in range(30)]})
+    (wtp / "dump.json").write_text(blob, encoding="utf-8")
+    rel = await worktrees.release_session("9", why="test")
+    assert sorted(rel.get("dropped_trash", [])) == ["capture.txt", "dump.json"]
+    assert "dropped-trash" in rel.get("note", "")
+    patches = list(worktrees.worktree_base(repo).glob("*.dropped-trash.patch"))
+    assert len(patches) == 1
+    text = patches[0].read_text(encoding="utf-8")
+    assert "dump.json" in text
+    assert "capture.txt" not in text
+
+
+async def test_tool_provenance_drop_leaves_no_patch(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="10")
+    (Path(wt) / "out.txt").write_text("log line\n", encoding="utf-8")
+    worktrees.note_write(wt, "out.txt", "tool")
+    rel = await worktrees.release_session("10", why="test")
+    assert rel.get("dropped_trash") == ["out.txt"]
+    assert "dropped-trash" not in rel.get("note", "")
+    assert not list(worktrees.worktree_base(repo).glob("*.dropped-trash.patch"))

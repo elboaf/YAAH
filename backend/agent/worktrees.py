@@ -69,6 +69,7 @@ import contextlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 import uuid
@@ -581,6 +582,23 @@ async def _new_commits(repo: Path, branch: str) -> int:
         return -1
 
 
+def _rmtree_force(path: Path) -> bool:
+    """rmtree that clears the read-only attribute git stamps on its files
+    (Windows) and reports whether the tree is actually gone. A silent
+    partial delete used to strand zombie worktrees the reaper re-salvaged
+    every tick."""
+    def _chmod_retry(func, target, _exc):
+        with contextlib.suppress(OSError):
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+
+    try:
+        shutil.rmtree(path, onexc=_chmod_retry)
+    except TypeError:  # py<3.12: onexc does not exist yet
+        shutil.rmtree(path, onerror=_chmod_retry)
+    return not path.exists()
+
+
 async def _remove_worktree(root: Path, wt: Path, force: bool = False) -> None:
     args = ["worktree", "remove"]
     if force:
@@ -591,7 +609,7 @@ async def _remove_worktree(root: Path, wt: Path, force: bool = False) -> None:
         await _git(root, "worktree", "remove", "--force", str(wt))
     _active.pop(str(wt), None)
     if wt.exists():  # locked-file fallback (Windows): rmtree + prune stub
-        shutil.rmtree(wt, ignore_errors=True)
+        _rmtree_force(wt)
         await _git(root, "worktree", "prune")
 
 
@@ -866,6 +884,64 @@ async def _drop_trash(wt: Path, rels: list[str]) -> list[str]:
     return dropped if rc == 0 else []
 
 
+async def _salvage_paths(
+    root: Path, wt: Path, branch: str, why: str, rels: list[str]
+) -> str:
+    """Partial salvage: capture only `rels` to a patch before they are
+    deleted. The insurance backstop for trash classifications that rest on
+    shape heuristics alone (no tool provenance) — a false TRASH is the one
+    deletion path whose content has no other copy."""
+    if not rels:
+        return ""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    slug = _component(branch.split("/")[-1])
+    patch = worktree_base(root) / f"{slug}.{stamp}.dropped-trash.patch"
+    try:
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(Exception):
+            await _git(wt, "add", "-A", "--", *rels)
+        rc, diff = await _git(wt, "diff", "--cached", "HEAD", "--", *rels)
+        with open(patch, "w", encoding="utf-8", errors="replace") as f:
+            f.write(f"# dropped-trash insurance {branch} ({why}) at {stamp}\n")
+            f.write("# files:\n# " + ", ".join(rels) + "\n\n")
+            f.write(diff or f"# (diff failed rc={rc})\n")
+        # unstage: the drop that follows must leave the tree clean, or the
+        # second contract pass re-processes the already-deleted paths
+        with contextlib.suppress(Exception):
+            await _git(wt, "reset", "-q", "--", *rels)
+        return str(patch)
+    except OSError:
+        return ""
+
+
+async def _drop_session_trash(
+    wt: Path, root: Path, branch: str, why: str
+) -> tuple[list[str], str]:
+    """The adr/0002 session-end trash contract, shared by release_session
+    and finalize_sub_agent: provably harness-generated uncommitted files
+    (tool provenance) are dropped outright; shape-heuristic classifications
+    without provenance get a patch first. Returns (dropped, insurance_patch)
+    — insurance_patch is "" when every drop was provenance-backed."""
+    dropped: list[str] = []
+    insurance = ""
+    for _pass in range(2):  # second pass re-checks after deletions
+        paths = await _dirty_paths(wt)
+        if not paths:
+            break
+        trash_map = _trash_class(paths, wt)
+        trash = sorted(r for r, c in trash_map.items() if c == "trash")
+        if not trash:
+            break
+        prov = _provenance_classify(wt, wt, trash)
+        risky = [r for r in trash if prov.get(r) != "tool"]
+        if risky:
+            insurance = await _salvage_paths(root, wt, branch, why, risky)
+        dropped = await _drop_trash(wt, trash)
+        if not dropped:
+            break  # unlink failed; git still sees them — salvage below
+    return dropped, insurance
+
+
 async def merge_back(root: Path, branch: str) -> dict:
     """Merge `branch` into the main tree under the merge mutex.
 
@@ -1053,20 +1129,9 @@ async def release_session(chat_id: str, why: str = "session ended") -> dict:
         clear_provenance(wt_str)
         release_chat(chat_id)
 
-    dirty = await _dirty(wt)
-    dropped: list[str] = []
-    if dirty:
-        for _pass in range(2):  # second pass re-checks after deletions
-            paths = await _dirty_paths(wt)
-            if not paths:
-                break
-            trash_map = _trash_class(paths, wt)
-            trash = sorted(r for r, c in trash_map.items() if c == "trash")
-            if not trash:
-                break
-            dropped = await _drop_trash(wt, trash)
-            if not dropped:
-                break  # unlink failed; git still sees them — salvage below
+    dropped, insurance = await _drop_session_trash(
+        wt, root, branch, f"session end ({why})"
+    )
 
     salvage_note = ""
     if await _dirty(wt):
@@ -1087,8 +1152,15 @@ async def release_session(chat_id: str, why: str = "session ended") -> dict:
     out: dict = {"released": True, "branch": branch}
     if dropped:
         out["dropped_trash"] = dropped
+    if insurance:
+        out["note"] = (
+            f"heuristic-classified file(s) dropped; contents backed up to "
+            f"{insurance}"
+        )
     if salvage_note:
-        out["note"] = salvage_note
+        out["note"] = (
+            (out.get("note") + "; " if out.get("note") else "") + salvage_note
+        )
     return out
 
 
@@ -1110,35 +1182,26 @@ async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
     _chat_bindings.pop(info.get("chat_id", ""), None)
 
     commits = await _new_commits(root, branch)
-    dirty = await _dirty(wt)
-    dropped: list[str] = []
+    dropped, insurance = await _drop_session_trash(
+        wt, root, branch, "sub-agent completion"
+    )
     note = ""
-    if dirty:
-        # Issue #98 / adr/0002: same trash contract as self_merge —
-        # provably harness-generated files are dropped, authored-looking
-        # files are salvaged (never silently deleted).
-        for _pass in range(2):
-            paths = await _dirty_paths(wt)
-            if not paths:
-                break
-            trash_map = _trash_class(paths, wt)
-            trash = sorted(r for r, c in trash_map.items() if c == "trash")
-            if not trash:
-                break
-            dropped = await _drop_trash(wt, trash)
-            if not dropped:
-                break
-        if await _dirty(wt):
-            patch = await _salvage(
-                root, wt, branch, "uncommitted changes at sub-agent completion"
-            )
-            note = (
-                "worktree had uncommitted changes; they are NOT on the branch. "
-                f"Diff salvaged to {patch or '(salvage failed)'}"
-            )
+    if insurance:
+        note = (
+            "heuristic-classified file(s) were dropped; contents backed up "
+            f"to {insurance}. "
+        )
+    if await _dirty(wt):
+        patch = await _salvage(
+            root, wt, branch, "uncommitted changes at sub-agent completion"
+        )
+        note += (
+            "worktree had uncommitted changes; they are NOT on the branch. "
+            f"Diff salvaged to {patch or '(salvage failed)'}"
+        )
     elif commits == 0:
         note = "no commits were made on the worktree branch"
-    await _remove_worktree(root, wt, force=dirty)
+    await _remove_worktree(root, wt, force=bool(dropped) or bool(await _dirty(wt)))
     if dropped:
         note = (
             f"{len(dropped)} generated file(s) dropped at finalize: "
@@ -1200,8 +1263,13 @@ async def sync_main_trees() -> list[dict]:
         if root is None:
             continue
         async with merge_mutex(root):
-            if (root / ".git" / "MERGE_HEAD").exists():
-                continue
+            gitdir = root / ".git"
+            if (
+                (gitdir / "MERGE_HEAD").exists()
+                or (gitdir / "rebase-merge").exists()
+                or (gitdir / "rebase-apply").exists()
+            ):
+                continue  # mid-merge or mid-rebase — never touch it
             rc, out = await _git(root, "rev-parse", "--abbrev-ref", "@{u}")
             if rc != 0:
                 continue  # no upstream configured — nothing to sync to
@@ -1254,17 +1322,28 @@ def stop_background_sync() -> None:
 # ---------------------------------------------------------------------------
 
 
+# Worktrees whose removal failed (locked files): already salvaged once;
+# re-salvaging every tick would grow patch litter unboundedly. Retry only
+# the removal until something (a reboot, a process exit) unlocks the tree.
+_reap_failed: set[str] = set()
+
+
 async def reap_stale(now: float | None = None) -> dict:
     """Salvage-before-delete for orphaned worktrees (crashed runs, aborted
     batches, restarts): anything under .yaah/worktrees that is not a live
     session and older than the TTL gets the session-end teardown
     (adr/0003: trash dropped, authored leftovers salvaged, directory
     removed, zero-commit branch deleted) instead of a bare salvage.
-    `agent/*` branches past the branch TTL are pruned (decision 4)."""
+    `agent/*` branches past the branch TTL are pruned (decision 4), except
+    branches of live sessions (a >TTL session with no commits yet must not
+    lose its branch)."""
     now = _now() if now is None else now
     ttl = _ttl()
     reaped, salvaged = [], []
     live_paths = set(_chat_bindings.values())
+    live_branches = {
+        info.get("branch") for info in _active.values() if info.get("branch")
+    }
 
     roots: set[Path] = set()
     for wt_str, info in list(_active.items()):
@@ -1295,11 +1374,16 @@ async def reap_stale(now: float | None = None) -> dict:
                     if rc == 0 and out.strip().startswith(BRANCH_PREFIX)
                     else child.name
                 )
-            if await _dirty(child):
+            if await _dirty(child) and str(child) not in _reap_failed:
                 patch = await _salvage(root, child, branch, "TTL reaper")
                 if patch:
                     salvaged.append(patch)
             await _remove_worktree(root, child, force=True)
+            if child.exists():
+                # removal failed (locked tree) — do not re-salvage next tick
+                _reap_failed.add(str(child))
+                continue
+            _reap_failed.discard(str(child))
             # adr/0003 branch hygiene: an orphan whose branch carries no
             # unmerged commits is deleted, not kept for three days.
             if await _new_commits(root, branch) <= 0:
@@ -1323,7 +1407,7 @@ async def reap_stale(now: float | None = None) -> dict:
                     date = float(date_s)
                 except ValueError:
                     continue
-                if now - date > BRANCH_TTL_SECONDS:
+                if now - date > BRANCH_TTL_SECONDS and name not in live_branches:
                     await _git(root, "branch", "-D", name)
     return {"reaped": reaped, "salvaged": salvaged}
 
