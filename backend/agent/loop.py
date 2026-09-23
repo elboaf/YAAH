@@ -34,6 +34,33 @@ from backend.db.database import (
     set_conversation_usage,
 )
 
+
+async def _maybe_compact(
+    conversation_id: int, model_id: str | None = None
+) -> list[dict]:
+    """Compaction pass (adr/0004) before the turn's first model call.
+
+    The provider's measured prompt_tokens for the PREVIOUS call in this
+    conversation (persisted per conversation) is compared against the
+    model's context window; over the trigger fraction, the oldest
+    messages are folded into one persisted summary. Events returned
+    here must be emitted BEFORE the first model call.
+
+    Best-effort by contract: any failure yields a `compaction_failed`
+    event (surfaced in the UI) and never fails the turn. Runs at most
+    once per turn — after a pass, context_tokens is NULL, so a repeat
+    call no-ops at the trigger until the next real measurement lands.
+    """
+    from backend.agent import compaction as compaction_mod
+
+    try:
+        result = await compaction_mod.compact_history_for_context(
+            conversation_id, model_id=model_id
+        )
+    except Exception as e:  # never fail the turn over housekeeping
+        return [{"type": "compaction_failed", "error": str(e)[:300]}]
+    return [result] if result else []
+
 DEFAULT_MAX_STEPS = 200
 MAX_TOOL_RESULT_CHARS = 20_000
 MAX_AGENTS_NOTES_CHARS = 8_000
@@ -974,6 +1001,17 @@ async def run_agent(
     # the transcript still exists in the chat, it just doesn't feed the
     # model, so the current turn's text is appended explicitly (it only
     # reaches the model through the replayed history otherwise).
+    # Compaction (adr/0004): before rebuilding the context, check whether
+    # the last MEASURED call outgrew the model's window; if so the oldest
+    # messages are folded into one persisted summary. Any event surfaces
+    # ahead of everything else this turn yields. Fresh-context agents
+    # (memory off) have no history to compact.
+    if include_history:
+        for _cev in await _maybe_compact(
+            conversation_id, model_id=model_override or None
+        ):
+            yield _ndjson(_cev)
+
     history = await load_history(conversation_id) if include_history else []
     messages = [{"role": "system", "content": system_prompt}] + history
     if not include_history:

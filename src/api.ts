@@ -818,6 +818,8 @@ export interface AgentEvent {
     | 'sub_agent_done'
     | 'worktree_bound'
     | 'worktree_released'
+    | 'compacted'
+    | 'compaction_failed'
     | 'model_call'
     | 'done'
     | 'error'
@@ -855,6 +857,13 @@ export interface AgentEvent {
    *  Unset between the response arriving and the next call of the turn. */
   modelCall?: { provider: string; model: string; startedAt: number }
   model?: string
+  /** History compaction (adr/0004): how many oldest messages the new
+   *  summary row replaced (compacted). */
+  summarized_messages?: number
+  /** The continuity summary text that replaced them (compacted). */
+  summary?: string
+  /** Why the compaction pass was skipped (compaction_failed). */
+  error?: string
 }
 
 export type AgentEventHandler = (ev: AgentEvent) => void

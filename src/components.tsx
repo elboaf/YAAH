@@ -1166,6 +1166,30 @@ function MessageBody({ content }: { content: string }) {
   return <AgentMarkdown content={content} />
 }
 
+/** Collapsible record of a history compaction (adr/0004): marks where the
+ *  summarized prefix used to be; expands to the summary itself. */
+function CompactionDivider({ summarized, summary }: { summarized?: number; summary: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="my-1 border-l-2 border-zinc-700 pl-2">
+      <button
+        onClick={() => setOpen(!open)}
+        className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
+      >
+        <span className="mr-1.5">{open ? '\u25bc' : '\u25b6'}</span>
+        earlier context summarized to stay within the model's window
+        {typeof summarized === 'number' && summarized > 0 ? ` (${summarized} messages)` : ''}
+        {' — details above this line are condensed'}
+      </button>
+      {open && (
+        <div className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap border-l border-zinc-800 pl-2 font-mono text-[11px] text-zinc-400">
+          {summary}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   // Persisted failure markers (backend writes role='system' when a turn
   // dies): a slim machine line, not a fake agent message. EXCEPTION — the
@@ -1197,6 +1221,17 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
           <ToolCallRow tc={tc} />
         </div>
       )
+    }
+    // History compaction marker (adr/0004): a collapsible divider where
+    // the summarized prefix used to be — the summary is the record now.
+    try {
+      const parsed: unknown = JSON.parse(msg.content)
+      if (parsed && typeof parsed === 'object' && 'compaction' in (parsed as object)) {
+        const c = (parsed as { compaction: { summarized_messages?: number; summary: string } }).compaction
+        return <CompactionDivider summarized={c.summarized_messages} summary={c.summary} />
+      }
+    } catch {
+      // not JSON — fall through to the failure-marker render
     }
     return (
       <div className="font-mono text-[11px] text-red-400/90">
@@ -6687,6 +6722,7 @@ function Composer() {
     setPendingPlanApproval,
     setContext,
     pushLog,
+    appendRawMessage,
     setAbortController,
     removeMessage,
   } = useAgent()
@@ -7495,6 +7531,28 @@ function Composer() {
       // The waiting readout is driven by streamAgentTurn's onModelCall hook;
       // this branch only keeps the status dot honest.
       setStatus(bufKey, 'thinking')
+    } else if (ev.type === 'compacted') {
+      // History compaction (adr/0004) ran before the first model call: show
+      // the divider at its transcript position. The backend already
+      // persisted the system row, so a later history refetch sees the same
+      // thing (contentOffset 0 = an empty live bubble, never rendered).
+      appendRawMessage(bufKey, {
+        id: `compaction-${Date.now()}`,
+        role: 'system',
+        content: JSON.stringify({
+          compaction: {
+            summarized_messages: ev.summarized_messages,
+            summary: ev.summary,
+          },
+        }),
+      })
+    } else if (ev.type === 'compaction_failed') {
+      // Soft-fail surfacing: the turn proceeds on the full history.
+      pushLog({
+        kind: 'system',
+        name: 'compaction',
+        result: { skipped: true, error: ev.error ?? 'unknown error' },
+      })
     } else if (ev.type === 'usage') {
       // Exact context size of the turn's final model call, straight from
       // the provider's usage report. Numeric conversation ids only — the

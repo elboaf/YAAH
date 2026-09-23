@@ -487,6 +487,59 @@ async def set_conversation_usage(
         await db.close()
 
 
+async def compact_conversation(
+    conversation_id: int, summary: str, cut_messages: int
+) -> int:
+    """History compaction (adr/0004): atomically delete the oldest
+    cut_messages rows and insert one system summary row in their place.
+
+    The system row is skipped by load_history (model context) but the
+    /messages read feeds it to the UI, which renders the divider. A
+    row count smaller than cut_messages means the caller's rows are
+    stale (something wrote concurrently) — the transaction is rolled
+    back and 0 returned, so the caller reports "not compacted".
+
+    Nulls context_tokens so the next model call re-measures the new,
+    smaller context. Returns the number of rows actually removed.
+    """
+    db = await get_db()
+    try:
+        await db.execute("BEGIN")
+        cur = await db.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? ORDER BY id LIMIT ?",
+            (conversation_id, cut_messages),
+        )
+        doomed = [r["id"] for r in await cur.fetchall()]
+        if len(doomed) != cut_messages:
+            await db.rollback()
+            return 0
+        # The summary row must SORT to where the prefix began: readers
+        # order by id, so a natural insert would land at the transcript's
+        # END. Delete first, then re-insert reusing the prefix's first id.
+        first_id = doomed[0]
+        await db.execute(
+            f"DELETE FROM messages WHERE id IN ({','.join('?' * len(doomed))})",
+            doomed,
+        )
+        await db.execute(
+            "INSERT INTO messages (id, conversation_id, role, content)"
+            " VALUES (?, ?, 'system', ?)",
+            (first_id, conversation_id, summary),
+        )
+        await db.execute(
+            "UPDATE conversations SET context_tokens = NULL, context_model = NULL"
+            " WHERE id = ?",
+            (conversation_id,),
+        )
+        await db.commit()
+        return len(doomed)
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
 async def add_message(
     conversation_id: int,
     role: str,
