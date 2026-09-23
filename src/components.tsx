@@ -711,9 +711,12 @@ function ToolChip({ tc }: { tc: ToolCall }) {
   const done = tc.result !== undefined
   // A refused merge-back is an error even though it's "just" a tool result:
   // the turn's work did NOT reach the main tree. Red keeps meaning failure.
+  // Exception: zero_commits means the work was already merged mid-turn —
+  // a benign no-op, not a failure.
   const mergeFailed =
     tc.name === 'git_merge_back' &&
-    (tc.result as { merged?: unknown } | undefined)?.merged === false
+    (tc.result as { merged?: unknown; zero_commits?: unknown } | undefined)?.merged === false &&
+    (tc.result as { zero_commits?: unknown } | undefined)?.zero_commits !== true
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${

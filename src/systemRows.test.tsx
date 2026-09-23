@@ -79,6 +79,28 @@ describe('persisted merge-back system rows', () => {
     expect(chip!.className).not.toContain('text-red-300')
   })
 
+  it('a zero-commit merge-back (work already merged) is a no-op, not red', () => {
+    // The agent's branch was merged mid-turn; at end-of-turn the merge-back
+    // finds no commits beyond HEAD and returns merged:false + zero_commits.
+    // Nothing failed — the work IS in the main tree — so no red.
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            worktree_merge: {
+              merged: false,
+              reason: 'branch agent/221/x has no commits beyond HEAD',
+              zero_commits: true,
+            },
+          }),
+        )}
+      />,
+    )
+    const chip = screen.getByText('git_merge_back').closest('span.inline-flex') as HTMLElement | null
+    expect(chip).toBeTruthy()
+    expect(chip!.className).not.toContain('text-red-300')
+  })
+
   it('keeps genuine failure markers red (⚠ + turn failed)', () => {
     render(<MessageView msg={sys('turn failed: RuntimeError: provider down')} />)
     expect(screen.getByText(/turn failed/)).toBeTruthy()
