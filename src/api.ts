@@ -816,6 +816,8 @@ export interface AgentEvent {
     | 'sub_agent_spawned'
     | 'sub_agent_progress'
     | 'sub_agent_done'
+    | 'worktree_bound'
+    | 'worktree_released'
     | 'model_call'
     | 'done'
     | 'error'
@@ -834,6 +836,9 @@ export interface AgentEvent {
   queued_autosend_items?: Array<{ id: number; text: string }>
   /** Live output chunk while a shell tool runs (tool_progress). */
   chunk?: string
+  /** Branch name of the ephemeral worktree the turn isolated into
+   *  (worktree_bound); worktree_released carries no payload. */
+  branch?: string
   /** Sub-agent identity (sub_agent_* events). */
   agent_id?: number
   /** Provider + model a pending chat call is waiting on (model_call, #43). */

@@ -107,6 +107,16 @@ export interface PendingPlanApproval {
   convKey: string
 }
 
+/** The ephemeral worktree branch a run is working in, per conversation
+ *  (issue: mid-run agent-branch visibility). Set by `worktree_bound` when
+ *  the turn rebinds to its isolated worktree, cleared by `worktree_released`
+ *  after the end-of-turn merge-back — the chip then reverts to the main
+ *  tree's branch. Nothing persists it: a restart has no live run. */
+export interface AgentBranchInfo {
+  branch: string
+  boundAt: number
+}
+
 /** One line in the right-panel activity log. */
 export interface LogEntry {
   id: number
@@ -166,6 +176,10 @@ interface AgentState {
    *  shows "steering..." until the injection lands. */
   steerByConv: Record<string, boolean>
   setSteer: (key: string, on: boolean) => void
+  /** Ephemeral agent branch per conversation while a run is isolated
+   *  (see AgentBranchInfo). Drives the status strip's branch chip. */
+  agentBranchByConv: Record<string, AgentBranchInfo | null>
+  setAgentBranch: (key: string, info: AgentBranchInfo | null) => void
   workspace: string
   /**
    * Draft destination (issues #32/#88/#94): which workspace the draft chat
@@ -512,6 +526,14 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({ queueEchoByConv: { ...s.queueEchoByConv, [key]: items } })),
   steerByConv: {},
   setSteer: (key, on) => set((s) => ({ steerByConv: { ...s.steerByConv, [key]: on } })),
+  agentBranchByConv: {},
+  setAgentBranch: (key, info) =>
+    set((s) => {
+      const map = { ...s.agentBranchByConv }
+      if (info === null) delete map[key]
+      else map[key] = info
+      return { agentBranchByConv: map }
+    }),
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),
@@ -1032,6 +1054,15 @@ export function useStatus(): AgentStatus {
     (s) => (s.conversationId === null ? 'draft' : String(s.conversationId)),
   )
   return useAgent((s) => s.statusByConv[key] ?? 'idle')
+}
+
+/** The live run's ephemeral agent branch for the on-screen conversation
+ *  (null when idle or never isolated) — the branch chip's mid-run override. */
+export function useAgentBranch(): AgentBranchInfo | null {
+  const key = useAgent(
+    (s) => (s.conversationId === null ? 'draft' : String(s.conversationId)),
+  )
+  return useAgent((s) => s.agentBranchByConv[key] ?? null)
 }
 
 /** The on-screen conversation's last stream/failed-send error, if any. */

@@ -1137,3 +1137,69 @@ async def test_merge_back_retry_limit_surfaces_refusal(fake_model, tmp_path, mon
     assert "draft-notes.md" in result["reason"]
     assert "salvaged" in result["reason"]
     assert events[-1] is pills[0]
+
+
+# --------------------------------------------------- mid-run branch visibility
+
+@pytest.mark.asyncio
+async def test_worktree_bound_released_events(fake_model, tmp_path, monkeypatch):
+    """A turn that isolates emits worktree_bound (carrying the agent branch
+    name) before its first write-tool result and worktree_released after the
+    end-of-turn merge-back machinery — the branch chip's mid-run override and
+    its revert-to-main. A read-only turn emits neither."""
+    from backend.db.database import create_conversation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "master")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "init")
+
+    async def fake_execute(name, arguments, workspace, on_chunk=None):
+        assert ".yaah" in workspace, "write tool must run inside the worktree"
+        return {"output": "ok", "exit_code": 0}
+
+    monkeypatch.setattr(loop, "execute_tool", fake_execute)
+
+    # --- read-only turn: no worktree events at all
+    cid = await create_conversation("wt-events-readonly")
+    fake_model.append([
+        {"type": "content", "text": "just reading"},
+        {"type": "finish"},
+    ])
+    events = await collect(loop.run_agent(cid, "go", str(repo)))
+    assert not [e for e in events if e["type"] == "worktree_bound"]
+    assert not [e for e in events if e["type"] == "worktree_released"]
+
+    # --- write turn: bound before the tool result, released at the end
+    cid2 = await create_conversation("wt-events-write")
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({"command": "echo hi"})},
+            }],
+        },
+        {"type": "content", "text": "wrote it"},
+        {"type": "finish"},
+    ])
+    events2 = await collect(loop.run_agent(cid2, "go", str(repo)))
+
+    bound = [e for e in events2 if e["type"] == "worktree_bound"]
+    assert len(bound) == 1, f"expected exactly one bound event: {events2}"
+    assert bound[0]["branch"].startswith("agent/"), bound[0]
+    # bound arrives before the first write tool's result
+    first_result = next(e for e in events2 if e["type"] == "tool_result")
+    assert events2.index(bound[0]) < events2.index(first_result)
+
+    released = [e for e in events2 if e["type"] == "worktree_released"]
+    assert len(released) == 1, f"expected exactly one released event: {events2}"
+    # released arrives in the finally block, after done
+    assert events2.index(released[0]) > events2.index(
+        next(e for e in events2 if e["type"] == "done")
+    )

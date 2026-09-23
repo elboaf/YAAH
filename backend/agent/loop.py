@@ -920,6 +920,9 @@ async def run_agent(
     # never pay for isolation). `turn_workspace` is the (possibly rebound)
     # workspace every tool call and spawn_batch sees from then on.
     turn_workspace = str(workspace)
+    # Captured before any rebinding: worktree_bound fires only when the
+    # turn actually leaves this path (a nested-parent binding must not).
+    original_workspace = str(workspace)
     _isolated = False
     _merge_result: dict | None = None
     # Issue #98 / adr/0002: supervised merge-back retries. When the
@@ -1357,6 +1360,23 @@ async def run_agent(
                                     )
                                     _isolated = True
                                     workspace = turn_workspace
+                                    # Mid-run branch visibility: the branch
+                                    # chip shows the ephemeral agent branch
+                                    # while the turn runs. Only a FRESH
+                                    # binding that actually rebinds away
+                                    # from the main tree emits (a nested
+                                    # parent's worktree binding is not a
+                                    # new isolation).
+                                    if turn_workspace != original_workspace:
+                                        _binfo = worktrees.binding_for(
+                                            str(conversation_id)
+                                        ) or {}
+                                        yield _ndjson(
+                                            {
+                                                "type": "worktree_bound",
+                                                "branch": _binfo.get("branch", ""),
+                                            }
+                                        )
                                 except worktrees.IsolationRefused as e:
                                     result = {"error": str(e)}
                                     _refused = True
@@ -1408,6 +1428,16 @@ async def run_agent(
                                         )
                                         _isolated = True
                                         workspace = turn_workspace
+                                        if turn_workspace != original_workspace:
+                                            _binfo = worktrees.binding_for(
+                                                str(conversation_id)
+                                            ) or {}
+                                            yield _ndjson(
+                                                {
+                                                    "type": "worktree_bound",
+                                                    "branch": _binfo.get("branch", ""),
+                                                }
+                                            )
                                     except worktrees.IsolationRefused as e:
                                         result = {"error": str(e)}
                                 if result is None:
@@ -1696,6 +1726,11 @@ async def run_agent(
                     "reason": "self-merge did not complete; worktree left for the reaper",
                 }
             if not _merge_result.get("noop"):
+                # The chip reverts to the main tree's branch regardless of
+                # merge outcome: a refusal is surfaced as the git_merge_back
+                # pill; the chip must not keep a stale agent branch shown
+                # after the turn is over.
+                yield _ndjson({"type": "worktree_released"})
                 await add_message(
                     conversation_id,
                     "system",

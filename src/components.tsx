@@ -75,7 +75,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { lastAssistantId, tapeQuestionAction, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentBranchInfo } from './store'
 import { useUpdateCheck } from './update'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
@@ -5278,11 +5278,13 @@ function GitChipCluster({
   streaming,
   conversationId,
   onCommandDone,
+  agentBranch,
 }: {
   info: GitInfo | null
   streaming: boolean
   conversationId: number | null
   onCommandDone: () => void
+  agentBranch: AgentBranchInfo | null
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [branches, setBranches] = useState<string[]>([])
@@ -5370,6 +5372,13 @@ function GitChipCluster({
       .catch(() => {})
   }
 
+  // Mid-run isolation (issue: agent-branch visibility): while this
+  // conversation's run is bound to its ephemeral worktree the chip shows
+  // the agent branch, amber; on worktree_released it reverts to the main
+  // tree's branch. Sub-agents are excluded — the parent turn owns the
+  // binding (worktree_bound fires only at the top-level seam).
+  const showAgentBranch = Boolean(agentBranch && streaming)
+  const branchLabel = showAgentBranch ? agentBranch!.branch : info.branch
   const pairAway = info.ahead > 0 || info.behind > 0
   const pairDiverged = info.ahead > 0 && info.behind > 0
   const pairColor = pairDiverged ? 'text-red-400' : pairAway ? 'text-amber-400' : 'text-zinc-500'
@@ -5385,17 +5394,34 @@ function GitChipCluster({
     <span ref={wrapRef} className="relative flex min-w-0 items-center gap-2">
       {/* branch chip: dirty dot + name + chevron */}
       <button
-        className="flex shrink-0 items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-zinc-500"
-        title="Current git branch — click to switch"
-        aria-label="Switch git branch"
+        className={
+          'flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] ' +
+          (showAgentBranch
+            ? 'border-amber-500/60 bg-amber-500/10 text-amber-300'
+            : 'border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:border-zinc-500')
+        }
+        title={
+          showAgentBranch
+            ? `agent is working in ephemeral worktree branch ${agentBranch!.branch} — merges into ${info.branch} when the turn ends`
+            : 'Current git branch — click to switch'
+        }
+        aria-label={showAgentBranch ? 'Agent worktree branch' : 'Switch git branch'}
         aria-expanded={menuOpen}
         onClick={openMenu}
       >
         <span
-          className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${info.dirty ? 'bg-amber-400' : 'bg-transparent'}`}
-          title={info.dirty ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)` : undefined}
+          className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
+            showAgentBranch ? 'run-pulse bg-amber-400' : info.dirty ? 'bg-amber-400' : 'bg-transparent'
+          }`}
+          title={
+            showAgentBranch
+              ? 'isolated run in progress'
+              : info.dirty
+                ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)`
+                : undefined
+          }
         />
-        <span className="min-w-0 max-w-[10rem] truncate">{info.branch}</span>
+        <span className="min-w-0 max-w-[10rem] truncate">{branchLabel}</span>
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
@@ -5784,6 +5810,7 @@ export function ChatPanel() {
     [messages],
   )
   const streaming = status === 'thinking' || status === 'running-tool'
+  const agentBranch = useAgentBranch()
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
   // show on the newest message while the run is going.
@@ -6044,6 +6071,7 @@ export function ChatPanel() {
           streaming={streaming}
           conversationId={conversationId}
           onCommandDone={refreshGitInfo}
+          agentBranch={agentBranch}
         />
         <ContextChip info={contextInfo} />
         {/* Access mode lives in the composer toolbar now. Plan approval is a
@@ -6460,6 +6488,7 @@ function Composer() {
     settleSubAgents,
     setStatus,
     setModelCall,
+    setAgentBranch,
     setError,
     setConversationId,
     adoptDraft,
@@ -7144,6 +7173,14 @@ function Composer() {
           convKey: bufKey,
         })
       }
+    } else if (ev.type === 'worktree_bound') {
+      // The turn isolated into its ephemeral worktree: the branch chip
+      // shows the agent branch until worktree_released reverts it.
+      if (ev.branch) {
+        setAgentBranch(bufKey, { branch: ev.branch, boundAt: Date.now() })
+      }
+    } else if (ev.type === 'worktree_released') {
+      setAgentBranch(bufKey, null)
     } else if (ev.type === 'tool_progress') {
       if (ev.chunk) {
         appendToolOutput(bufKey, curId, ev.call_id ?? '', ev.chunk)
