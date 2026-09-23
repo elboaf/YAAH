@@ -5,6 +5,10 @@ Covers the harness contract end to end on real temp git repos: rebinding
 dirty overlap with the merge, conflict abort), self_merge lifecycle,
 sub-agent result finalization (branch on the first line), the reaper's
 salvage-before-delete, and the UI hygiene filters.
+
+Issue #98 / adr/0002: trash-aware merge-back — write provenance (model
+vs tool), machine-shape fingerprints, drop-trash-then-merge, the probe/
+retry protocol (final=False), and the background main-tree fast-forward.
 """
 
 import asyncio
@@ -277,11 +281,11 @@ async def test_self_merge_lifecycle(repo: Path):
 
 async def test_self_merge_refuses_and_salvages_dirty_worktree(repo: Path):
     wt = await worktrees.ensure_isolated(str(repo), chat_id="8")
-    (Path(wt) / "uncommitted.txt").write_text("half-done\n", encoding="utf-8")
+    (Path(wt) / "draft.md").write_text("half-done\n", encoding="utf-8")
     result = await worktrees.self_merge("8")
     assert result["merged"] is False
-    assert "uncommitted" in result["reason"]
-    assert not (repo / "uncommitted.txt").exists()
+    assert "draft.md" in result["reason"]
+    assert not (repo / "draft.md").exists()
     # salvage patch exists next to where the worktree was
     salvages = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
     assert salvages, "dirty worktree must be salvaged before deletion"
@@ -379,3 +383,180 @@ async def test_reaper_spares_live_sessions(repo: Path):
     result = await worktrees.reap_stale()
     assert str(wt) not in result["reaped"]
     assert Path(wt).exists()
+
+
+# ------------------------------------------- trash-aware merge (#98, adr/0002)
+
+
+def _commit_all(wt: Path, msg: str) -> None:
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", msg)
+
+
+def test_shell_redirect_parse_captures_targets():
+    worktrees.note_shell_writes(
+        "C:/ws", "node_modules/.bin/tsc --noEmit > tsc-out.txt 2>&1"
+    )
+    worktrees.note_shell_writes("C:/ws", "pytest -q >> out.log")
+    worktrees.note_shell_writes("C:/ws", "gh pr view 96 > notes.md")
+    assert worktrees.provenance_for("C:/ws", "tsc-out.txt") == "tool"
+    assert worktrees.provenance_for("C:/ws", "out.log") == "tool"
+    assert worktrees.provenance_for("C:/ws", "notes.md") == "tool"
+    assert worktrees.provenance_for("C:/ws", "unrelated.txt") is None
+
+
+def test_machine_shape_fingerprints(repo: Path):
+    wt = repo / ".yaah" / "worktrees" / "shape"
+    wt.mkdir(parents=True)
+    (wt / "run.log").write_text(
+        "2026-09-23 03:18:01 INFO boot\n"
+        "2026-09-23 03:18:02 DEBUG load\n"
+        "2026-09-23 03:18:03 INFO ready\n"
+        "2026-09-23 03:18:04 DEBUG done\n",
+        encoding="utf-8",
+    )
+    (wt / "dump.patch").write_text(
+        "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-v\n+v2\n",
+        encoding="utf-8",
+    )
+    assert worktrees._trash_class(["run.log", "dump.patch"], wt) == {
+        "run.log": "trash",
+        "dump.patch": "trash",
+    }
+    # authored-looking text: WORK, never touched
+    (wt / "essay.md").write_text("# Notes\n\nreal words\n", encoding="utf-8")
+    assert worktrees._trash_class(["essay.md"], wt) == {"essay.md": "work"}
+    # uncertainty (extensionless short text): WORK — the safe direction
+    (wt / "Makefile").write_text("all:\n\techo hi\n", encoding="utf-8")
+    assert worktrees._trash_class(["Makefile"], wt) == {"Makefile": "work"}
+
+
+def test_provenance_model_beats_tool(repo: Path):
+    wt = repo / ".yaah" / "worktrees" / "prov"
+    wt.mkdir(parents=True)
+    worktrees.note_write(str(wt), "out.json", "tool")
+    worktrees.note_write(str(wt), str(wt / "out.json"), "model")
+    # the model then edited the captured file: WORK wins
+    assert worktrees._trash_class(["out.json"], wt) == {"out.json": "work"}
+
+
+async def test_self_merge_drops_trash_and_merges(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="11")
+    (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
+    _commit_all(wt, "feature")
+    # the exact incident shape: a redirect capture left uncommitted
+    (Path(wt) / "tsc-out2.txt").write_text(
+        "error TS2304: node_modules missing\n", encoding="utf-8"
+    )
+    result = await worktrees.self_merge("11")
+    assert result["merged"] is True, result
+    assert result.get("dropped_trash") == ["tsc-out2.txt"]
+    assert (repo / "feature.txt").exists()
+    assert not (repo / "tsc-out2.txt").exists()  # dropped, never merged
+    assert not Path(wt).exists()
+    assert worktrees.binding_for("11") is None
+
+
+async def test_self_merge_still_refuses_authored_dirt(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="12")
+    (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
+    _commit_all(wt, "feature")
+    (Path(wt) / "draft.md").write_text("# half-written\n", encoding="utf-8")
+    result = await worktrees.self_merge("12")
+    assert result["merged"] is False
+    assert "draft.md" in result["reason"]
+    assert not (repo / "draft.md").exists()
+    salvages = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
+    assert salvages and "half-written" in salvages[0].read_text(encoding="utf-8")
+
+
+async def test_probe_retries_then_final_merge(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="13")
+    (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
+    _commit_all(wt, "feature")
+    (Path(wt) / "draft.md").write_text("# half-authored\n", encoding="utf-8")
+    # probe 1: authored dirt survives the drop pass -> retry_dirty
+    probe = await worktrees.self_merge("13", final=False)
+    assert probe.get("retry_dirty") is True
+    assert any("draft.md" in p for p in probe.get("dirty", []))
+    assert Path(wt).exists(), "probe must keep the worktree for the retry"
+    assert worktrees.binding_for("13") is not None
+    # the model cleans up: remove the authored leftover, then commit the
+    # real work (the notes file)
+    (Path(wt) / "draft.md").unlink()
+    (Path(wt) / "notes.md").write_text("# kept\n", encoding="utf-8")
+    _commit_all(wt, "notes")
+    # probe 2: clean now -> ready, still no merge, no teardown
+    probe2 = await worktrees.self_merge("13", final=False)
+    assert probe2.get("clean") is True
+    assert Path(wt).exists()
+    # final: the real merge lands
+    final = await worktrees.self_merge("13")
+    assert final["merged"] is True, final
+    assert (repo / "feature.txt").exists()
+    assert (repo / "notes.md").exists()
+    assert not Path(wt).exists()
+
+
+async def test_probe_drops_trash_so_turn_ends_clean(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="14")
+    (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
+    _commit_all(wt, "feature")
+    (Path(wt) / "vitest-out.txt").write_text(
+        "ALL TESTS FAILED\n" * 3, encoding="utf-8"
+    )
+    probe = await worktrees.self_merge("14", final=False)
+    # the capture was droppable: probe reports clean, merges nothing
+    assert probe.get("clean") is True
+    assert probe.get("dropped_trash") == ["vitest-out.txt"]
+    assert not (Path(wt) / "vitest-out.txt").exists()
+    final = await worktrees.self_merge("14")
+    assert final["merged"] is True
+    assert (repo / "feature.txt").exists()
+
+
+async def test_sync_main_trees_fast_forwards(repo: Path, monkeypatch):
+    from backend.db import database as db
+
+    async def fake_list():
+        return [{"path": str(repo), "label": "repo"}]
+
+    monkeypatch.setattr(db, "list_workspaces", fake_list)
+    # upstream: a clone ahead by one commit; the workspace tracks it (as
+    # any real cloned workspace tracks its origin)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "local")
+    upstream = repo.parent / "upstream"
+    _git(repo, "clone", "-q", str(repo), str(upstream))
+    _git(upstream, "config", "user.email", "t@t")
+    _git(upstream, "config", "user.name", "t")
+    _git(upstream, "commit", "-q", "--allow-empty", "-m", "upstream new")
+    _git(repo, "remote", "add", "origin", str(upstream))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "branch", "--set-upstream-to=origin/master", "master")
+    status = _git(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}")
+    assert status.split() == ["0", "1"]  # strictly behind
+    synced = await worktrees.sync_main_trees()
+    assert synced == [{"workspace": str(repo), "fast_forwarded": True}]
+    assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "@{u}")
+
+
+async def test_sync_never_touches_diverged(repo: Path, monkeypatch):
+    from backend.db import database as db
+
+    async def fake_list():
+        return [{"path": str(repo)}]
+
+    monkeypatch.setattr(db, "list_workspaces", fake_list)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "local")
+    upstream = repo.parent / "upstream"
+    _git(repo, "clone", "-q", str(repo), str(upstream))
+    _git(upstream, "config", "user.email", "t@t")
+    _git(upstream, "config", "user.name", "t")
+    _git(upstream, "commit", "-q", "--allow-empty", "-m", "upstream")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "local2")
+    _git(repo, "remote", "add", "origin", str(upstream))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "branch", "--set-upstream-to=origin/master", "master")
+    synced = await worktrees.sync_main_trees()
+    assert synced == []  # diverged: hands off
+

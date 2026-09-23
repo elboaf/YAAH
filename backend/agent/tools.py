@@ -1180,7 +1180,14 @@ async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None
     While a remote session is active, workspace-touching tools are
     forwarded to the host (see backend/agent/remote.py); everything else
     runs locally. on_chunk, when given, is forwarded to the local shell
-    executors for incremental output (remote/MCP tools ignore it)."""
+    executors for incremental output (remote/MCP tools ignore it).
+
+    Issue #98 / adr/0002: write-provenance seeding. Before the call, shell
+    redirection targets in the command are registered (the harness, not the
+    model, writes those capture files); after it, file-tool writes and any
+    output path a tool result reports are registered as model-authored.
+    The registry feeds the merge-back trash classifier only — it is never
+    consulted for access control."""
     from backend.agent import remote as remote_mod
 
     host = remote_mod.get_remote()
@@ -1194,14 +1201,41 @@ async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
+    # --- provenance seeding (pre-call) -------------------------------------
+    try:
+        from backend.agent import worktrees as _wt
+
+        if name in ("bash", "powershell"):
+            _wt.note_shell_writes(workspace, str(arguments.get("command") or ""))
+    except Exception:  # noqa: BLE001 — provenance must never gate a tool
+        pass
     try:
         if on_chunk is not None and name in ("bash", "powershell"):
-            return await fn(workspace=workspace, on_chunk=on_chunk, **arguments)
-        return await fn(workspace=workspace, **arguments)
+            result = await fn(workspace=workspace, on_chunk=on_chunk, **arguments)
+        else:
+            result = await fn(workspace=workspace, **arguments)
     except TypeError as e:
         return {"error": f"Bad arguments for {name}: {e}"}
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
+    # --- provenance recording (post-call) ----------------------------------
+    try:
+        from backend.agent import worktrees as _wt
+
+        if name in ("write_file", "create_file", "edit_file"):
+            path = arguments.get("path")
+            if path:
+                _wt.note_write(workspace, str(path), "model")
+        else:
+            # Only explicit save-target keys — NOT `path` (read_file
+            # returns it, and a read is not a write).
+            for key in ("file", "saved", "written"):
+                value = result.get(key)
+                if isinstance(value, str) and "/" in value:
+                    _wt.note_write(workspace, value, "model")
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 def get_schemas() -> list:

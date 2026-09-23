@@ -6,6 +6,9 @@ import pytest
 
 from backend.agent import loop
 from backend.agent.tools import execute_tool, resolve_path, workspace_root
+from backend.tests.gitutil import run_git
+
+from pathlib import Path
 
 
 # ---------------------------------------------------------------- tools
@@ -1002,3 +1005,135 @@ async def test_scheduled_exit_plan_never_waits_without_opt_in(fake_model, tmp_pa
     assert "error" in result
     assert "unattended" in result["error"]
     assert events[-1]["type"] == "done"
+
+
+# ---------------------------------------------- merge-back retry (#98/adr0002)
+
+
+@pytest.mark.asyncio
+async def test_merge_back_nudges_then_completes(fake_model, tmp_path, monkeypatch):
+    """Authored dirt in the worktree at the final answer must NOT end the
+    turn: the model gets a system nudge, cleans up, and the turn completes
+    with a single merge-back pill — never a silent unmerged branch. (Trash
+    dirt instead ends the turn silently: see the self-drop coverage in
+    test_worktrees.)"""
+    from backend.db.database import create_conversation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "master")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "init")
+
+    # The bash "tool" dirties the worktree with AUTHORED-class dirt (an
+    # unknown .md is salvage-worthy, not trash) on the first call and
+    # cleans it up on the second — standing in for the model fixing its
+    # own mess after the nudge.
+    async def fake_execute(name, arguments, workspace, on_chunk=None):
+        marker = Path(workspace) / "draft-notes.md"
+        if "clean" in str(arguments.get("command", "")):
+            marker.unlink(missing_ok=True)
+        else:
+            marker.write_text("# half-authored\n", encoding="utf-8")
+        return {"output": "ok", "exit_code": 0}
+
+    monkeypatch.setattr(loop, "execute_tool", fake_execute)
+
+    cid = await create_conversation("merge-retry")
+    # Round 1: a write tool (isolates the turn), then a final answer while
+    # the worktree is dirty -> the probe must nudge instead of ending.
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({"command": "make dirt"})},
+            }],
+        },
+    ])
+    fake_model.append([{"type": "content", "text": "all done"}, {"type": "finish"}])
+    # Round 2 (after the nudge): clean up, then finish again.
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c2",
+                "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({"command": "clean up"})},
+            }],
+        },
+    ])
+    fake_model.append([{"type": "content", "text": "clean now"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(repo)))
+    texts = "".join(e.get("text", "") for e in events if e["type"] == "text")
+    assert "all done" in texts and "clean now" in texts, f"events={events}"
+
+    # exactly one merge-back pill, and the worktree was fully released
+    # (zero_commits: the scripted turns never committed; the important
+    # part is the turn could not END while authored dirt remained). The
+    # pill emits after done — the finally block owns the real merge.
+    pills = [e for e in events if e.get("name") == "git_merge_back"]
+    assert len(pills) == 1
+    assert pills[0]["result"].get("zero_commits") is True, pills[0]["result"]
+    assert "done" in [e["type"] for e in events]
+    assert events[-1] is pills[0]
+    leftovers = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
+    assert not leftovers, "a cleaned worktree must not be salvaged"
+
+
+@pytest.mark.asyncio
+async def test_merge_back_retry_limit_surfaces_refusal(fake_model, tmp_path, monkeypatch):
+    """A model that never cleans its worktree gets nudged MERGE_RETRY_LIMIT
+    times, then the turn ends with the honest refusal pill (salvage path)."""
+    from backend.db.database import create_conversation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "master")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "init")
+
+    async def fake_execute(name, arguments, workspace, on_chunk=None):
+        marker = Path(workspace) / "draft-notes.md"
+        if not marker.exists():
+            marker.write_text("# stubborn draft\n", encoding="utf-8")
+        return {"output": "ok", "exit_code": 0}
+
+    monkeypatch.setattr(loop, "execute_tool", fake_execute)
+
+    cid = await create_conversation("merge-retry-limit")
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({"command": "dirt"})},
+            }],
+        },
+    ])
+    # the model just keeps answering without cleaning up
+    for i in range(5):
+        fake_model.append([{"type": "content", "text": f"answer {i}"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(repo)))
+    texts = "".join(e.get("text", "") for e in events if e["type"] == "text")
+    # the first answer streamed, retries happened silently, then the turn
+    # still ended (done) with the refusal pill arriving after it (finally)
+    assert "answer 0" in texts
+    assert "done" in [e["type"] for e in events]
+    pills = [e for e in events if e.get("name") == "git_merge_back"]
+    assert len(pills) == 1
+    result = pills[0]["result"]
+    assert result["merged"] is False
+    assert "draft-notes.md" in result["reason"]
+    assert "salvaged" in result["reason"]
+    assert events[-1] is pills[0]

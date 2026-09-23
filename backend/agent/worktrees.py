@@ -30,8 +30,22 @@ Merge rules (issue decisions 1-6):
   never stash), mid-merge state, and merge conflicts (aborting) —
   surfaced, never papered over. Unrelated WIP does not block a merge:
   git's own overlap-aware pre-flight decides (see docs/adr/0001).
+- Trash-detecting merge-back (issue #98, docs/adr/0002): uncommitted
+  worktree files that are provably harness-generated (write provenance:
+  command-output captures; or machine-shape fingerprints: JSON, diffs,
+  base64 walls, .log/.tmp-style names) are dropped, not salvaged — a
+  stray log must not veto a turn's committed work. Authored-looking
+  files still refuse + salvage exactly as before, and the loop gets
+  MERGE_RETRY_LIMIT supervised cleanup rounds to fix the worktree
+  before the refusal is surfaced (a refusal is a task for the agent,
+  not a chat status the user has to interpret).
 - The worktree directory is deleted after merge-back; the `agent/*`
   branch is kept a few days (the reaper prunes it).
+
+Main-tree sync (issue #98): the user's folder — the only tree they can
+see — is fast-forwarded to upstream on a background cadence (ff-only,
+mutex-serialized, overlap-aware), so a refused or crashed merge-back
+can never leave the visible folder silently behind the released work.
 """
 
 from __future__ import annotations
@@ -543,6 +557,251 @@ async def _salvage(root: Path, wt: Path, branch: str, why: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# write provenance (issue #98 / docs/adr/0002): what did this turn WRITE?
+#
+# The classifier below can only refuse-or-drop a file when it can tell WORK
+# from TRASH. Tools report what they wrote here as they write it; the
+# harness seeds the registry before a write tool call and clears it when
+# the worktree is torn down. Two classes:
+#   model — content the model authored (write_file/create_file/edit_file
+#           payloads): real work, treated as precious.
+#   tool  — harness-generated captures (bash/powershell output redirect
+#           captures written by the harness): trash unless the model then
+#           edited the same path itself.
+# Provenance is a hint, never a veto: an unknown path (say, an `npm install`
+# that wrote package-lock.json) falls through to the shape heuristics, and
+# the user's own files in the main tree are untouched by all of this.
+# ---------------------------------------------------------------------------
+
+_WRITE_PROVENANCE: dict[str, dict[str, set[str]]] = {}
+# workspace -> {"model": {relpath, ...}, "tool": {relpath, ...}}
+
+# Windows/POSIX path normalization for registry keys: forward slashes,
+# lowercased drive, so `C:\x\y` and `c:/x/y` are one entry.
+def _norm_path(p: str | Path) -> str:
+    s = str(p).replace("\\", "/")
+    if len(s) > 1 and s[1] == ":":
+        s = s[0].upper() + s[1:]
+    return s
+
+
+def note_write(workspace: str, path: str, kind: str) -> None:
+    """Record that a tool wrote `path` in `workspace` (kind: model|tool)."""
+    if kind not in ("model", "tool"):
+        return
+    ws = _WRITE_PROVENANCE.setdefault(_norm_path(workspace), {})
+    ws.setdefault(kind, set()).add(_norm_path(path))
+
+
+def provenance_for(workspace: str, path: str) -> str | None:
+    """'model' | 'tool' when this turn wrote the path, else None.
+
+    Accepts the path relative to `workspace` or absolute; both registered
+    forms are checked, and MODEL always wins (a capture the model later
+    edited is authored work, not a capture)."""
+    ws = _WRITE_PROVENANCE.get(_norm_path(workspace))
+    if not ws:
+        return None
+    np = _norm_path(path)
+    cands = {np}
+    try:
+        cands.add(_norm_path(Path(workspace) / path))
+    except OSError:
+        pass
+    if any(c in ws.get("model", ()) for c in cands):
+        return "model"
+    if any(c in ws.get("tool", ()) for c in cands):
+        return "tool"
+    return None
+
+
+def clear_provenance(workspace: str) -> None:
+    _WRITE_PROVENANCE.pop(_norm_path(workspace), None)
+
+
+# Shell output redirections: `cmd > f`, `cmd >> f`, `cmd 2> f`, `cmd &> f`,
+# `cmd 2>&1 > f`, and the PowerShell twins `Out-File f` / `> f`. The harness
+# itself writes these capture files when a command's stdout is redirected
+# into the workspace — content the model never authored — so they register
+# as `tool` provenance and the classifier can drop them at merge time.
+_REDIRECT_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:\d?\s*>+|\d?&>|&>)\s*([^\s|&;<>]+)"
+    r"|(?:^|[\s;&|(])out-file\s+(?:-\w+\s+)*([^\s|&;<>-]+)",
+    re.IGNORECASE,
+)
+
+
+def note_shell_writes(workspace: str, command: str) -> None:
+    """Register redirection targets in `command` as tool-written paths.
+    Best-effort by contract: parsing is heuristic (quotes, subshells and
+    expansions are not interpreted); a miss just means the file falls back
+    to the shape heuristics."""
+    for m in _REDIRECT_RE.finditer(command or ""):
+        target = m.group(1) or m.group(2)
+        if target:
+            note_write(workspace, target, "tool")
+
+
+def _provenance_classify(workspace: str, wt: Path, paths: list[str]) -> dict[str, str]:
+    """provenance class per dirty path: model > tool > unknown."""
+    out: dict[str, str] = {}
+    for rel in paths:
+        cls = provenance_for(wt, rel) or provenance_for(wt, wt / rel)
+        out[rel] = cls or "unknown"
+    return out
+
+
+# Machine-shape fingerprints (adr/0002): content that only a build tool,
+# test runner, or redirect produces. Conservative by design — a miss just
+# means the file takes the precious path (salvage + refusal), exactly the
+# pre-#98 behavior; a false TRASH is the only dangerous direction, so the
+# checks are structural, not name-based wishful thinking.
+_TRASH_EXTS = {
+    ".log", ".tmp", ".temp", ".swp", ".swo", ".pyc", ".pyo",
+    ".patch", ".rej", ".orig", ".bak", ".salvage", ".out",
+    # .txt (adr/0002): in a WORKTREE, uncommitted .txt is overwhelmingly a
+    # command capture or tool dump — authored text goes through
+    # write_file/create_file (provenance `model`, protected regardless).
+    # This is the one knowingly-imperfect extension: an agent-authored
+    # .txt that arrived via a parse-missed redirect would be dropped
+    # (residual risk accepted; the content also lives in the transcript).
+    ".txt",
+}
+
+_TRASH_NAMES = {"npm-debug.log", "yarn-error.log", "yarn.lock.check", ".DS_Store"}
+
+# Extensions a redirect capture plausibly uses (adr/0002): tool-provenance
+# files with these extensions are captures, not authored documents. Authored
+# extensions (.md, code files) keep the precious path even when the model
+# created them via a redirect — `gh pr view 96 > notes.md` is intent.
+_CAPTURE_EXTS = {".txt", ".json", ".csv", ".tsv", ".ndjson", ".xml", ".yaml", ".yml"}
+
+
+def _is_machine_shape(p: Path) -> bool:
+    """Structural fingerprints of generated output. All byte sniffing is
+    capped (32 KB head / 4 KB tail) — this runs per dirty file at merge
+    time and must stay cheap."""
+    try:
+        if not p.is_file():
+            return False
+        with p.open("rb") as f:
+            head = f.read(32768)
+            if p.stat().st_size > 4096:
+                f.seek(-4096, 2)  # tail window, relative to EOF
+            tail = f.read(4096)
+    except OSError:
+        return False
+    if not head:
+        return False
+    # diff/patch walls: git salvage patches, compiler error dumps
+    stripped = head.lstrip()
+    if any(
+        stripped.startswith(sig)
+        for sig in (b"diff ", b"--- ", b"+++ ", b"@@ -", b"Index:")
+    ):
+        return True
+    # unified-diff body (our salvage patches carry a comment header first)
+    if b"\ndiff --git " in head and b"\n+++" in head:
+        return True
+    # base64 wall: saved crash dumps / image captures dropped as text
+    dense = sum(1 for ch in head if 48 <= ch <= 122)
+    if len(head) >= 1024 and dense / len(head) > 0.97:
+        return True
+    # JSON object/array with a parsed balanced-bracket budget: build
+    # manifests, test-output envelopes, tsbuildinfo — but NOT a hand-written
+    # config the model may have authored (those are short; the size gate
+    # plus the depth requirement keeps them out of TRASH).
+    body = head.strip()
+    if body[:1] in (b"{", b"[") and len(body) > 256:
+        depth = curly = 0
+        in_str = False
+        esc = False
+        for ch in body:
+            byte = ch.to_bytes(1, "big")
+            if esc:
+                esc = False
+            elif byte == b"\\":
+                esc = True
+            elif byte == b'"':
+                in_str = not in_str
+            elif not in_str:
+                if byte == b"{":
+                    curly += 1
+                    depth = max(depth, curly)
+                elif byte == b"}":
+                    curly -= 1
+        if depth >= 2 and curly == 0:
+            return True
+    # log-ish tail: line after line of timestamps/levels/severities
+    lines = [ln for ln in tail.splitlines() if ln.strip()]
+    if len(lines) >= 4:
+        logish = sum(
+            1
+            for ln in lines
+            if ln[:1].isdigit()
+            or ln[:1] == b"["
+            or b"ERROR" in ln
+            or b"DEBUG" in ln
+            or b"WARNING" in ln
+        )
+        if logish / len(lines) >= 0.75:
+            return True
+    return False
+
+
+def _trash_class(worktree_dirty: list[str], wt: Path) -> dict[str, str]:
+    """Classify each dirty path: 'work' (precious) or 'trash' (droppable).
+
+    A path is TRASH only when provenance says harness-generated, or when it
+    carries a machine-shape fingerprint (extension, name, or content shape).
+    Everything else — anything authored-looking, anything uncertain — is
+    WORK, which takes the old refuse+salvage path. (adr/0002: only a false
+    'trash' can lose work, so uncertainty always lands on WORK.)
+    """
+    classes = _provenance_classify(wt, wt, worktree_dirty)
+    out: dict[str, str] = {}
+    for rel, cls in classes.items():
+        if cls == "model":
+            out[rel] = "work"
+            continue
+        p = wt / rel
+        ext = p.suffix.lower()
+        if cls == "tool":
+            # The harness captured it — trash when the extension says
+            # capture (a redirected .md / code file stays precious: the
+            # model aimed output at a real artifact).
+            if ext in _CAPTURE_EXTS or ext in _TRASH_EXTS:
+                out[rel] = "trash"
+                continue
+            out[rel] = "work"
+            continue
+        if ext in _TRASH_EXTS or p.name in _TRASH_NAMES:
+            out[rel] = "trash"
+            continue
+        if _is_machine_shape(p):
+            out[rel] = "trash"
+            continue
+        out[rel] = "work"
+    return out
+
+
+async def _drop_trash(wt: Path, rels: list[str]) -> list[str]:
+    """Delete provably-generated uncommitted files so they cannot veto the
+    merge. Deletion is the point (they are not work); failures are
+    non-fatal (the file simply re-dirties the tree and the merge refuses
+    as before)."""
+    dropped: list[str] = []
+    for rel in rels:
+        try:
+            (wt / rel).unlink()
+            dropped.append(rel)
+        except OSError:
+            continue
+    rc, _ = await _git(wt, "status", "--porcelain")
+    return dropped if rc == 0 else []
+
+
 async def merge_back(root: Path, branch: str) -> dict:
     """Merge `branch` into the main tree under the merge mutex.
 
@@ -551,8 +810,12 @@ async def merge_back(root: Path, branch: str) -> dict:
     — never stash — issue decision 1), mid-merge state, and merge
     conflicts (aborted; the shared tree is left clean). Unrelated
     uncommitted work in the main tree does NOT block the merge: git's
-    own overlap-aware pre-flight is the gate (docs/adr/0001), and a
-    successful merge around unrelated dirt is noted in the result.
+    own overlap-aware pre-flight is the gate (docs/adr/0001).
+
+    Issue #98 (docs/adr/0002): uncommitted files in the *worktree* are
+    first classified — provably harness-generated output (provenance or
+    machine shape) is dropped; authored-looking files keep the old
+    refuse+salvage path via self_merge.
     """
     rc_head, _ = await _git(root, "rev-parse", "--verify", "HEAD")
     if rc_head != 0:
@@ -627,38 +890,113 @@ async def merge_back(root: Path, branch: str) -> dict:
     return result
 
 
-async def self_merge(chat_id: str) -> dict:
+async def self_merge(chat_id: str, final: bool = True) -> dict:
     """End-of-turn merge for a top-level chat agent (issue decision 5).
-    No-op when the turn never got isolated. The worktree directory is
-    removed on success; on refusal it stays (with the branch) so nothing
-    is lost and the refusal can be acted on."""
+    No-op when the turn never got isolated.
+
+    `final=False` is the loop's pre-completion probe (issue #98 /
+    adr/0002). It NEVER merges — the turn's finally block owns the real
+    merge, on the real worktree, where the success pill has always been
+    emitted. The probe drops provably-generated trash, and when authored
+    dirt remains it reports `retry_dirty` (worktree, binding, and write
+    provenance all SURVIVE so the model can clean up in place and finish
+    again). `final=True` (default) is terminal: trash is dropped first,
+    then a still-dirty worktree is salvaged (R4), removed, and unbound —
+    nothing is ever lost silently, and the surfaced refusal names the
+    salvage patch. A main-tree refusal (overlap/conflict) keeps the
+    worktree bound for the reaper, exactly as before.
+    """
     info = binding_for(chat_id)
-    wt_str = _chat_bindings.pop(chat_id, "")
+    wt_str = _chat_bindings.get(chat_id, "")
     if info is None:
         release_chat(chat_id)
         return {"merged": False, "noop": True, "reason": "turn was not isolated"}
     root = Path(info["root"])
     wt = Path(wt_str)
     branch = info["branch"]
-    try:
-        if await _dirty(wt):
-            patch = await _salvage(root, wt, branch, "uncommitted changes at self-merge")
-            await _remove_worktree(root, wt, force=True)
+
+    def _release() -> None:
+        _chat_bindings.pop(chat_id, None)
+        _active.pop(wt_str, None)
+        clear_provenance(wt_str)
+        release_chat(chat_id)
+
+    dirty = await _dirty(wt)
+    # Probe contract (final=False): never merges. A clean worktree just
+    # reports ready — the turn's finally block owns the real merge so the
+    # success pill is emitted exactly where it always was.
+    if not dirty and not final:
+        return {"noop": True, "clean": True, "reason": "worktree clean"}
+
+    # Drop pass: provably harness-generated uncommitted files (command-
+    # output captures, log/temp artifacts) are deleted, not salvaged — a
+    # stray log must not veto a turn's committed work. Anything uncertain
+    # or authored-looking classifies as work and takes the refusal path.
+    dropped: list[str] = []
+    if dirty:
+        for _pass in range(2):  # second pass re-checks after deletions
+            paths = await _dirty_paths(wt)
+            if not paths:
+                break
+            trash_map = _trash_class(paths, wt)
+            trash = sorted(r for r, c in trash_map.items() if c == "trash")
+            if not trash:
+                break
+            dropped = await _drop_trash(wt, trash)
+            if not dropped:
+                break  # unlink failed; git still sees them — refuse below
+
+    if await _dirty(wt):
+        paths = await _dirty_paths(wt)
+        if not final:
+            # Retry protocol: leave the scene intact for cleanup.
             return {
                 "merged": False,
+                "retry_dirty": True,
+                "dirty": paths,
+                **({"dropped_trash": dropped} if dropped else {}),
                 "reason": (
-                    f"merge-back refused: this turn left uncommitted changes in "
-                    f"its worktree; they are NOT in the main tree. Branch "
-                    f"{branch} kept; diff salvaged to {patch or '(salvage failed)'}"
+                    "merge-back refused: this turn left uncommitted changes in "
+                    f"its worktree ({', '.join(paths[:5])}); they are NOT in "
+                    "the main tree. Remove generated files, commit real work, "
+                    "then finish your answer again."
                 ),
             }
+        patch = await _salvage(root, wt, branch, "uncommitted changes at self-merge")
+        await _remove_worktree(root, wt, force=True)
+        _release()
+        return {
+            "merged": False,
+            "dirty": paths,
+            **({"dropped_trash": dropped} if dropped else {}),
+            "reason": (
+                f"merge-back refused: this turn left uncommitted changes in "
+                f"its worktree ({', '.join(paths[:5])}); they are NOT in the "
+                f"main tree. Branch {branch} kept; diff salvaged to "
+                f"{patch or '(salvage failed)'}"
+            ),
+        }
+
+    if final:
         result = await merge_back(root, branch)
-        if result.get("merged"):
+        if result.get("merged") or result.get("zero_commits"):
+            _release()
             await _remove_worktree(root, wt)
+        # else: refused on MAIN-TREE state (dirty overlap / conflict) — that
+        # is the user's tree, not the agent's mess. No retry_dirty: nudging
+        # the model cannot fix it. The refusal surfaces as the persisted
+        # git_merge_back pill (reaper as backstop for the bound worktree).
+        if dropped:
+            result["dropped_trash"] = dropped
         return result
-    finally:
-        _active.pop(wt_str, None)
-        release_chat(chat_id)
+    # Probe (final=False) reaching this point: the worktree is clean (any
+    # droppable trash above is already gone). Report ready without
+    # merging — the turn's finally block owns the real merge, so the
+    # success pill is emitted exactly where it always was.
+    out: dict = {"noop": True, "clean": True}
+    if dropped:
+        out["dropped_trash"] = dropped
+    return out
 
 
 async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
@@ -676,18 +1014,41 @@ async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
 
     commits = await _new_commits(root, branch)
     dirty = await _dirty(wt)
+    dropped: list[str] = []
     note = ""
     if dirty:
-        patch = await _salvage(
-            root, wt, branch, "uncommitted changes at sub-agent completion"
-        )
-        note = (
-            "worktree had uncommitted changes; they are NOT on the branch. "
-            f"Diff salvaged to {patch or '(salvage failed)'}"
-        )
+        # Issue #98 / adr/0002: same trash contract as self_merge —
+        # provably harness-generated files are dropped, authored-looking
+        # files are salvaged (never silently deleted).
+        for _pass in range(2):
+            paths = await _dirty_paths(wt)
+            if not paths:
+                break
+            trash_map = _trash_class(paths, wt)
+            trash = sorted(r for r, c in trash_map.items() if c == "trash")
+            if not trash:
+                break
+            dropped = await _drop_trash(wt, trash)
+            if not dropped:
+                break
+        if await _dirty(wt):
+            patch = await _salvage(
+                root, wt, branch, "uncommitted changes at sub-agent completion"
+            )
+            note = (
+                "worktree had uncommitted changes; they are NOT on the branch. "
+                f"Diff salvaged to {patch or '(salvage failed)'}"
+            )
     elif commits == 0:
         note = "no commits were made on the worktree branch"
     await _remove_worktree(root, wt, force=dirty)
+    if dropped:
+        note = (
+            f"{len(dropped)} generated file(s) dropped at finalize: "
+            + ", ".join(dropped[:5])
+            + ("; " if note else "")
+            + note
+        )
 
     output = str(result.get("output") or "")
     if commits > 0:
@@ -702,6 +1063,93 @@ async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
         result["worktree_note"] = note
     result["worktree_branch"] = branch
     return result
+
+
+# ---------------------------------------------------------------------------
+# background main-tree sync (issue #98 / adr/0002): the visible folder never
+# sits silently behind upstream
+# ---------------------------------------------------------------------------
+
+SYNC_INTERVAL_SECONDS = 900.0
+_sync_task: asyncio.Task | None = None
+_sync_busy = asyncio.Lock()
+
+
+async def sync_main_trees() -> list[dict]:
+    """Fast-forward every registered main tree that sits strictly behind
+    its upstream. Safety stack: ff-only (a diverged tree is never touched),
+    git's overlap-aware working-tree guard (the user's uncommitted files —
+    tracked or untracked — are never overwritten; colliding paths fail the
+    ff and are left exactly as they were), and the merge mutex (never race
+    a live turn's merge-back; a busy tree is skipped, the next tick
+    retries). Per-workspace failures are non-fatal by contract."""
+    try:
+        from backend.db.database import list_workspaces
+    except ImportError:
+        return []
+    try:
+        workspaces = await list_workspaces()
+    except Exception:  # noqa: BLE001 — a DB hiccup must not crash the sync
+        return []
+    synced: list[dict] = []
+    for ws in workspaces:
+        path = (ws or {}).get("path") or ""
+        if not path.strip():
+            continue
+        try:
+            root = await main_repo_root(path)
+        except Exception:  # noqa: BLE001
+            continue
+        if root is None:
+            continue
+        async with merge_mutex(root):
+            if (root / ".git" / "MERGE_HEAD").exists():
+                continue
+            rc, out = await _git(root, "rev-parse", "--abbrev-ref", "@{u}")
+            if rc != 0:
+                continue  # no upstream configured — nothing to sync to
+            upstream = out.strip()
+            rc, ahead_behind = await _git(
+                root, "rev-list", "--left-right", "--count", f"HEAD...{upstream}"
+            )
+            if rc != 0:
+                continue
+            parts = ahead_behind.split()
+            if len(parts) != 2 or parts[0] != "0" or parts[1] == "0":
+                # diverged, in sync, or unparsable — ff-only means hands off
+                continue
+            rc, _out = await _git(root, "merge", "--ff-only", upstream, timeout=60)
+            if rc == 0:
+                from backend.agent import gitinfo
+
+                gitinfo.invalidate_git_caches(root)
+                synced.append({"workspace": str(root), "fast_forwarded": True})
+    return synced
+
+
+async def _sync_loop() -> None:
+    # Short first delay: startup (DB init, MCP spawn) is still settling;
+    # the sync must never compete with the boot path.
+    await asyncio.sleep(20.0)
+    while True:
+        if not _sync_busy.locked():
+            async with _sync_busy:
+                with contextlib.suppress(Exception):
+                    await sync_main_trees()
+        await asyncio.sleep(SYNC_INTERVAL_SECONDS)
+
+
+def start_background_sync() -> None:
+    global _sync_task
+    if _sync_task is None or _sync_task.done():
+        _sync_task = asyncio.create_task(_sync_loop())
+
+
+def stop_background_sync() -> None:
+    global _sync_task
+    if _sync_task is not None:
+        _sync_task.cancel()
+        _sync_task = None
 
 
 # ---------------------------------------------------------------------------

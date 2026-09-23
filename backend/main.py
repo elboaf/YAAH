@@ -66,9 +66,15 @@ async def lifespan(app: FastAPI):
     from backend.agent import worktrees as _worktrees
 
     _worktrees.start_reaper()
+    # Issue #98 / adr/0002: keep every visible main tree fast-forwarded to
+    # its upstream on a background cadence (ff-only, overlap-aware) so a
+    # refused or crashed merge-back can never leave the user's folder
+    # silently behind the work that shipped.
+    _worktrees.start_background_sync()
     yield
     await mcp_client.manager.shutdown()
     scheduler.stop_scheduler()
+    _worktrees.stop_background_sync()
     _worktrees.stop_reaper()
     discovery.stop_advertising()
 
