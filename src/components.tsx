@@ -3544,10 +3544,11 @@ function AgentForm({
           checked={allowAsk}
           onChange={(e) => setAllowAsk(e.target.checked)}
         />
-        <span className="text-[10px] text-zinc-400">
-          May ask questions (#93) — the run can pause on ask_user and wait for your answer in
-          this chat. Leave off for unattended agents: questions are then skipped with a note and
-          the run continues.
+        <span
+          className="text-[10px] text-zinc-400"
+          title="Leave off for unattended agents: questions are then skipped with a note and the run continues."
+        >
+          May ask questions — the agent may pause to ask you something and waits for your answer.
         </span>
       </label>
       <div className="flex flex-wrap items-end gap-2">
