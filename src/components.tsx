@@ -88,6 +88,7 @@ import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
 import { parseModelScope } from './modelScope'
+import { sortWorkspaceGroups } from './workspaceGroupOrder'
 
 // ---------------------------------------------------------------- code views
 
@@ -1240,7 +1241,12 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       const bits: string[] = [`${s.commits ?? 0} commit(s) on branch ${s.branch ?? '?'}`]
       if (s.worktree) bits.push(`worktree ${s.worktree}`)
       if (s.dirty) bits.push('plus uncommitted changes')
-      bits.push('master untouched — say "merge it" to merge, or push the branch as-is')
+      bits.push(
+        `committed work is only on the session branch; "merge it" merges those commits into the shared repo's currently checked-out branch, or push the session branch to its remote`,
+      )
+      if (s.dirty) {
+        bits.push('uncommitted changes stay on the session branch and are not included in merge or push')
+      }
       return (
         <div className="pl-3">
           <div className="font-mono text-[11px] text-amber-300/90">◆ {bits.join(', ')}</div>
@@ -2497,6 +2503,7 @@ function ConversationList() {
   const pendingApprovals = useAgent((s) => s.pendingApprovals)
   const pendingPlanApprovals = useAgent((s) => s.pendingPlanApprovals)
   const finishedByConv = useAgent((s) => s.finishedByConv)
+  const agentBranchByConv = useAgent((s) => s.agentBranchByConv)
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; chat_type?: 'chat' | 'agent' }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
@@ -2639,14 +2646,8 @@ function ConversationList() {
       knownPaths.add(p)
     }
   }
-  groups.sort((a, b) => {
-    if ((a.ws.path ?? null) === null) return -1
-    if ((b.ws.path ?? null) === null) return 1
-    const at = a.items[0]?.updated_at ?? a.ws.last_opened_at ?? ''
-    const bt = b.items[0]?.updated_at ?? b.ws.last_opened_at ?? ''
-    return bt.localeCompare(at)
-  })
-  for (const g of groups) {
+  const orderedGroups = sortWorkspaceGroups(groups)
+  for (const g of orderedGroups) {
     g.items.sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   }
 
@@ -2666,6 +2667,8 @@ function ConversationList() {
           pendingPlanApprovals[String(c.id)],
       )}
       finished={finishedByConv[String(c.id)] ?? null}
+      pendingMerge={Boolean(agentBranchByConv[String(c.id)]?.pendingMerge)}
+      pendingMergeBranch={agentBranchByConv[String(c.id)]?.branch}
       isAgent={isAgent}
       menuOpen={menuOpenId === c.id}
       setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
@@ -2699,7 +2702,7 @@ function ConversationList() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      {groups.map(({ ws, items }) => {
+      {orderedGroups.map(({ ws, items }) => {
         const key = expandKey(ws.path ?? '')
         const isExpanded = expanded[key] ?? true
         const isActiveWs = (ws.path ?? '') === (workspace || '')
@@ -2995,6 +2998,8 @@ function ConversationRow({
   running,
   blocked,
   finished,
+  pendingMerge,
+  pendingMergeBranch,
   isAgent,
   onAgentSettings,
   onToggleEnable,
@@ -3020,6 +3025,9 @@ function ConversationRow({
   /** Finished-but-unacknowledged signal: 'ok' (green bar) | 'error' (red
    *  pill). Only set for background chats; cleared when the chat opens. */
   finished: 'ok' | 'error' | null
+  /** Session branch still has pending work; this survives opening/switching chats. */
+  pendingMerge?: boolean
+  pendingMergeBranch?: string
   /** A scheduled agent's pinned chat (issue #41) — silhouette badge. */
   isAgent?: boolean
   /** Open the agent settings dialogue (agent chats only). */
@@ -3053,17 +3061,34 @@ function ConversationRow({
           active ? 'bg-blue-600 text-white' : 'text-zinc-300 hover:bg-zinc-800'
         }`}
         onClick={onOpen}
-        title={liveTitle ?? conv.title}
+        title={
+          pendingMerge
+            ? `${liveTitle ?? conv.title} — unmerged session work on ${pendingMergeBranch ?? 'agent branch'}`
+            : liveTitle ?? conv.title
+        }
+        aria-label={
+          pendingMerge
+            ? `${liveTitle ?? conv.title}, unmerged session work on ${pendingMergeBranch ?? 'agent branch'}`
+            : liveTitle ?? conv.title
+        }
       >
         {/* Issue #25: one status slot left of the title, same footprint for
             every state so the row never shifts. Precedence: needs-you (orange,
-            pulsing) > finished (green bar / red pill) > working dots. */}
+            pulsing) > pending merge > finished (green bar / red pill) > working dots. */}
         {blocked ? (
           <span
             aria-hidden="true"
             className="run-bar run-bar-orange mr-1.5 shrink-0"
             title="Waiting for you — a question or approval is pausing this run"
           />
+        ) : pendingMerge ? (
+          <span
+            aria-hidden="true"
+            className="mr-1.5 inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full border border-amber-500/70 font-mono text-[9px] leading-none text-amber-300"
+            title={`Unmerged session work on ${pendingMergeBranch ?? 'agent branch'} — open chat for details`}
+          >
+            !
+          </span>
         ) : finished === 'error' ? (
           <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
         ) : finished === 'ok' ? (
@@ -5724,7 +5749,7 @@ function GitChipCluster({
           showAgentBranch
             ? agentMerged
               ? `session worktree branch ${agentBranch!.branch} — merged into ${info.branch}; session still bound until the chat is deleted`
-              : `session worktree branch ${agentBranch!.branch} — the work lives here until you merge it into ${info.branch} (say "merge it") or delete the chat`
+              : `session branch ${agentBranch!.branch} has unmerged commits. Saying "merge it" merges those commits into the shared repository's currently checked-out branch (${info.branch}); it does not move or delete the session branch. To publish instead, push the session branch to its remote.`
             : 'Current git branch — click to switch'
         }
         aria-label={showAgentBranch ? 'Agent worktree branch' : 'Switch git branch'}
@@ -7169,6 +7194,7 @@ function Composer() {
   // thinks it means).
   const [pttHotkey, setPttHotkey] = useState('') // currently registered accelerator
   const pttHeldRef = useRef(false)
+  const pttTargetRef = useRef<{ conversationId: number | null; workspace: string } | null>(null)
   const pttBusyRef = useRef(false) // a release is still transcribing/sending
   const prevTitleRef = useRef('')
   const voiceStateRef = useRef<'idle' | 'recording' | 'transcribing'>('idle')
@@ -7197,7 +7223,16 @@ function Composer() {
   // Live exit_plan card (same ref pattern): a plan waiting for approval must
   // shield its turn from the PTT interrupt, and a dictated answer resolves it.
   // Assigned after `send`/`stop` are declared below (TDZ-safe via refs).
-  const sendRef = useRef<(text?: string, opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[] }) => Promise<void>>(
+  const sendRef = useRef<(
+    text?: string,
+    opts?: {
+      interrupt?: boolean
+      queueHandoff?: boolean
+      target?: { conversationId: number | null; workspace: string }
+      images?: string[]
+      skills?: string[]
+    },
+  ) => Promise<void>>(
     async () => {},
   )
 
@@ -7217,6 +7252,14 @@ function Composer() {
 
   const pttPress = async () => {
     if (pttBusyRef.current) return // previous release is still in flight
+    const targetState = useAgent.getState()
+    const pttTarget = {
+      conversationId: targetState.conversationId,
+      workspace:
+        targetState.conversationId === null
+          ? (targetState.draftDestination ?? targetState.workspace)
+          : targetState.workspace,
+    }
     if (voiceStateRef.current === 'transcribing') return
     // Mid-run PTT queues and steers only after a non-empty transcript is
     // available. A gate remains protected and receives dictated answers via
@@ -7247,6 +7290,7 @@ function Composer() {
     }
     recorderRef.current = rec
     pttHeldRef.current = true
+    pttTargetRef.current = pttTarget
     setVoiceState('recording')
     setPttTitle(true)
   }
@@ -7263,16 +7307,19 @@ function Composer() {
       void rec.stop().catch(() => {})
       return
     }
-    // The release is the commit point (#88): capture the draft's
-    // destination NOW — before the seconds-long transcription window — so
-    // switching chats or categories while whisper runs can neither re-file
-    // the new chat nor retarget the send. Consumed by send's first-send
-    // branch; cleared below on every outcome that does not send.
-    useAgent.getState().pinDraftDestination(useAgent.getState().workspace)
+    // The release is the commit point: capture the destination AND target
+    // conversation now, before transcription. A subsequent chat switch must
+    // not redirect this recording into whichever chat happens to be visible
+    // when transcription finishes.
+    const releaseTarget = pttTargetRef.current ?? {
+      conversationId: useAgent.getState().conversationId,
+      workspace: useAgent.getState().workspace,
+    }
+    pttTargetRef.current = null
     // Release-time snapshot for the cleanup paths: only a release that was
     // committed on an UNFILED draft owns the pin — clearing must never
     // stomp a pin made later on a different draft (or an adopted chat).
-    const ownedUnfiledDraft = useAgent.getState().conversationId === null
+    const ownedUnfiledDraft = releaseTarget.conversationId === null
     const clearOrphanedDraftPin = () => {
       if (!ownedUnfiledDraft) return
       useAgent.getState().clearOrphanedDraftPin()
@@ -7344,10 +7391,12 @@ function Composer() {
         )
         return
       }
-      if (streaming && conversationId !== null) {
-        await steerInput(text.trim())
+      const targetKey = releaseTarget.conversationId === null ? 'draft' : String(releaseTarget.conversationId)
+      const targetStatus = useAgent.getState().statusByConv[targetKey]
+      if ((targetStatus === 'thinking' || targetStatus === 'running-tool') && releaseTarget.conversationId !== null) {
+        await steerInput(text.trim(), releaseTarget.conversationId)
       } else {
-        void sendRef.current(text)
+        void sendRef.current(text, { target: releaseTarget })
       }
     } catch (e) {
       // Transcription failed: nothing was filed, so the release-time pin
@@ -7683,10 +7732,16 @@ function Composer() {
       // shows the agent branch — and keeps showing it after the turn
       // (adr/0003 revised: the binding persists until drain/delete).
       if (ev.branch) {
-        setAgentBranch(bufKey, { branch: ev.branch, boundAt: Date.now() })
+        const existing = useAgent.getState().agentBranchByConv[bufKey]
+        setAgentBranch(
+          bufKey,
+          existing?.branch === ev.branch
+            ? { ...existing, boundAt: existing.boundAt }
+            : { branch: ev.branch, boundAt: Date.now() },
+        )
       }
     } else if (ev.type === 'worktree_status') {
-      // Turn-end settlement: work stays on the branch, master untouched.
+      // Turn-end settlement confirmed commits remain on the session branch.
       appendRawMessage(bufKey, {
         id: `worktree-status-${Date.now()}`,
         role: 'system',
@@ -7699,6 +7754,10 @@ function Composer() {
           },
         }),
       })
+      const currentBranch = useAgent.getState().agentBranchByConv[bufKey]
+      if (currentBranch) {
+        setAgentBranch(bufKey, { ...currentBranch, pendingMerge: true, merged: false })
+      }
     } else if (ev.type === 'worktree_released') {
       // Only fires when the session actually released (drained, chat
       // deleted) — not every turn end.
@@ -7733,7 +7792,9 @@ function Composer() {
         // (the session stays bound even though the work is merged).
         const r = ev.result as { merged?: boolean } | undefined
         const cur = useAgent.getState().agentBranchByConv[bufKey]
-        if (r?.merged && cur) setAgentBranch(bufKey, { ...cur, merged: true })
+        if (r?.merged && cur) {
+          setAgentBranch(bufKey, { ...cur, merged: true, pendingMerge: false })
+        }
       }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
@@ -7895,16 +7956,27 @@ function Composer() {
 
   const send = async (
     pttText?: string,
-    opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[] },
+    opts?: {
+      interrupt?: boolean
+      queueHandoff?: boolean
+      target?: { conversationId: number | null; workspace: string }
+      images?: string[]
+      skills?: string[]
+    },
   ) => {
     // Push-to-talk passes explicit text: it sends as its own message and
     // must not touch (or clear) whatever draft is sitting in the composer.
+    // Its target is captured at release, not read from this render after
+    // asynchronous transcription.
     const isPtt = pttText !== undefined
+    const target = isPtt ? opts?.target : undefined
+    const targetConversationId = target ? target.conversationId : conversationId
+    const targetWorkspace = target?.workspace ?? workspace
     const handedOffPayload = opts?.images !== undefined || opts?.skills !== undefined
     const text = (pttText ?? input).trim()
     if (
       (!text && (isPtt || (attachments.length === 0 && images.length === 0))) ||
-      (sendingKey === (conversationId === null ? 'draft' : String(conversationId)) && !opts?.queueHandoff)
+      (sendingKey === (targetConversationId === null ? 'draft' : String(targetConversationId)) && !opts?.queueHandoff)
     )
       return
     // Agent chat (issue #41): typed messages NEVER trigger a run — each one
@@ -7979,7 +8051,7 @@ function Composer() {
     // the user switches to another conversation mid-stream (Q11: free).
     // `let` because adopting a newly created conversation re-keys the
     // buffer: events before adoption target 'draft', after it the real id.
-    let bufKey = conversationId === null ? 'draft' : String(conversationId)
+    let bufKey = targetConversationId === null ? 'draft' : String(targetConversationId)
     const entryKey = bufKey
     setError(bufKey, null)
     // A new send supersedes a failed turn: drop the stale mid-stream banner
@@ -7994,13 +8066,11 @@ function Composer() {
     try {
       let cid: number
       // The effective destination for a first send (#94): the pinned draft
-      // destination — which newConversation/pttRelease set as the commit
-      // point (#88) and the card's Change… picker can override (#32) —
-      // else the live active workspace. BOTH the conversation row and the
-      // turn below must use this same value: creating the row under Y
-      // while streaming the turn against X misfiles the run.
-      const dest = useAgent.getState().draftDestination ?? workspace
-      if (conversationId === null) {
+      // destination — which newConversation pins and the card's Change…
+      // picker can override — else the workspace captured by the send. Both
+      // the row and turn use the same destination.
+      const dest = targetWorkspace
+      if (targetConversationId === null) {
         // #51/#76: the draft's header pickers pin the new chat's scope —
         // written into the row at creation so the first turn already
         // resolves through the conversation (the header values ARE what
@@ -8011,17 +8081,18 @@ function Composer() {
           effort: ds?.effort ?? useAgent.getState().globalEffort,
         })
         cid = created.id
-        // Atomic: re-key the draft buffer (optimistic messages included)
-        // to the new id and move the panel onto it. bufKey follows so the
-        // stream keeps writing where the panel is now looking.
-        adoptDraft(cid)
+        // Atomic: re-key the draft buffer (optimistic messages included).
+        // If this PTT belongs to a draft the user has since left, keep that
+        // draft filed but don't steal focus from the currently selected chat.
+        const preserveSelection = target && useAgent.getState().conversationId !== targetConversationId
+        adoptDraft(cid, preserveSelection ? { preserveSelection: true } : undefined)
         bufKey = String(cid)
         // Move the run's abort handle and in-flight marker to the new key.
         setAbortController(bufKey, ac)
         setAbortController(entryKey, null)
         setSendingKey(bufKey)
       } else {
-        cid = conversationId
+        cid = targetConversationId
       }
       setStatus(bufKey, 'thinking')
       await streamAgentTurn(
@@ -8144,10 +8215,13 @@ function Composer() {
   /** Queue the current composer draft into the running turn (#7): POST it
    *  to the server queue (persisted with the run), echo it optimistically
    *  into the transcript marked queued, and clear the composer. */
-  const queueInput = async (messageOverride?: string): Promise<boolean> => {
+  const queueInput = async (
+    messageOverride?: string,
+    targetConversationId: number | null = conversationId,
+  ): Promise<boolean> => {
     const fromComposer = messageOverride === undefined
     const text = messageOverride ?? input.trim()
-    if ((!text && (fromComposer ? attachments.length === 0 && images.length === 0 : true)) || conversationId === null) return false
+    if ((!text && (fromComposer ? attachments.length === 0 && images.length === 0 : true)) || targetConversationId === null) return false
     const fullText = text + (fromComposer ? attachments.map(attachmentText).join('') : '')
     const skillNames = fromComposer ? [...pickedSkills.map((s) => s.name)] : []
     for (const match of fullText.matchAll(/\$([A-Za-z0-9_-]+)/g)) {
@@ -8165,20 +8239,21 @@ function Composer() {
     }
     const imageDataUrls = fromComposer ? images.map((image) => image.dataUrl) : []
     try {
-      const res = await queueMessage(conversationId, fullText || '[Image attachment]', skillNames, imageDataUrls)
+      const targetKey = String(targetConversationId)
+      const res = await queueMessage(targetConversationId, fullText || '[Image attachment]', skillNames, imageDataUrls)
       const tempId = appendUserMessage(
-        bufKeyForQueue,
+        targetKey,
         fullText || '[Image attachment]',
         imageDataUrls,
         skillNames,
         true,
       )
       const echoes = [
-        ...(useAgent.getState().queueEchoByConv[bufKeyForQueue] ?? []),
+        ...(useAgent.getState().queueEchoByConv[targetKey] ?? []),
         { id: res.item.id, tempId, text: fullText || '[Image attachment]', images: imageDataUrls, skills: skillNames },
       ]
-      setQueueEcho(bufKeyForQueue, echoes)
-      if (fromComposer) {
+      setQueueEcho(targetKey, echoes)
+      if (fromComposer && targetKey === bufKeyForQueue) {
         setInput('')
         setImages([])
         setAttachments([])
@@ -8197,13 +8272,15 @@ function Composer() {
 
   /** Steer (#7): interrupt the in-flight step so queued messages land at
    *  the next boundary now; the run continues with full context. */
-  const steerNow = async () => {
-    if (conversationId === null || pendingQuestion || pendingApproval || pendingPlanApproval) return
-    setSteerFlag(bufKeyForQueue, true)
+  const steerNow = async (targetConversationId: number | null = conversationId) => {
+    if (targetConversationId === null) return
+    const targetKey = String(targetConversationId)
+    if (useAgent.getState().pendingQuestions[targetKey] || useAgent.getState().pendingApprovals[targetKey] || useAgent.getState().pendingPlanApprovals[targetKey]) return
+    setSteerFlag(targetKey, true)
     try {
-      await steerAgent(conversationId)
+      await steerAgent(targetConversationId)
     } catch (e) {
-      setSteerFlag(bufKeyForQueue, false)
+      setSteerFlag(targetKey, false)
       useAgent.getState().pushToast({
         kind: 'error',
         title: 'Could not steer',
@@ -8212,13 +8289,18 @@ function Composer() {
     } finally {
       // The flag clears when the injection lands (user_injected) or when
       // the run ends; this is just a safety reset if the POST failed.
-      setTimeout(() => setSteerFlag(bufKeyForQueue, false), 3000)
+      setTimeout(() => setSteerFlag(targetKey, false), 3000)
     }
   }
 
-  const steerInput = async (messageOverride?: string) => {
-    if (pendingQuestion || pendingApproval || pendingPlanApproval || conversationId === null) return
-    if (await queueInput(messageOverride)) await steerNow()
+  const steerInput = async (
+    messageOverride?: string,
+    targetConversationId: number | null = conversationId,
+  ) => {
+    if (pendingQuestion || pendingApproval || pendingPlanApproval || targetConversationId === null) return
+    if (await queueInput(messageOverride, targetConversationId)) {
+      await steerNow(targetConversationId)
+    }
   }
 
   /** Fire queued messages as fresh turns after the run ended with them
