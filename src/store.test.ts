@@ -436,6 +436,58 @@ describe('draft destination (#32/#88/#94)', () => {
   })
 })
 
+describe('scheduled-agent question cards (#93)', () => {
+  beforeEach(() => {
+    useAgent.setState({ pendingQuestions: {}, conversationId: null })
+  })
+
+  it('opens a card in the asking conversation when the tape sync runs', () => {
+    useAgent.getState().syncTapeQuestion({
+      op: 'set',
+      callId: 'q1',
+      question: 'Deploy now?',
+      options: [{ label: 'Yes' }],
+      convKey: '42',
+    })
+    const q = useAgent.getState().pendingQuestions['42']
+    expect(q).toMatchObject({ callId: 'q1', question: 'Deploy now?', convKey: '42' })
+  })
+
+  it('clears only that conversation\u2019s card — other chats\u2019 questions stay', () => {
+    useAgent.setState({
+      pendingQuestions: {
+        '42': { callId: 'q1', question: '?', options: [], convKey: '42' },
+        '9': { callId: 'q0', question: '?', options: [], convKey: '9' },
+      },
+    })
+    useAgent.getState().syncTapeQuestion({ op: 'clear', convKey: '42' })
+    expect(useAgent.getState().pendingQuestions['42']).toBeUndefined()
+    expect(useAgent.getState().pendingQuestions['9']).toBeDefined()
+  })
+
+  it('a null action is a no-op (no phantom store write)', () => {
+    useAgent.setState({
+      pendingQuestions: { '9': { callId: 'q0', question: '?', options: [], convKey: '9' } },
+    })
+    useAgent.getState().syncTapeQuestion(null)
+    expect(Object.keys(useAgent.getState().pendingQuestions)).toEqual(['9'])
+  })
+
+  it('re-asking in the same conversation replaces the card (callId swap)', () => {
+    useAgent.setState({
+      pendingQuestions: { '42': { callId: 'q1', question: 'one?', options: [], convKey: '42' } },
+    })
+    useAgent.getState().syncTapeQuestion({
+      op: 'set',
+      callId: 'q2',
+      question: 'two?',
+      options: [],
+      convKey: '42',
+    })
+    expect(useAgent.getState().pendingQuestions['42']).toMatchObject({ callId: 'q2' })
+  })
+})
+
 describe('notification chimes (#29) - pure helpers', () => {
   it('chimes on running -> idle and running -> error, not on idle -> idle', () => {
     expect(shouldChimeFinish('thinking', 'idle')).toBe(true)

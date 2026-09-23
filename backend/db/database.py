@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS agents (
     model TEXT NOT NULL DEFAULT '',           -- '' = the active global model
     effort TEXT NOT NULL DEFAULT '',          -- '' = don't send reasoning_effort
     memory_enabled INTEGER NOT NULL DEFAULT 1,
+    allow_ask_user INTEGER NOT NULL DEFAULT 0, -- #93: scheduled run may ask and wait
     retention INTEGER NOT NULL DEFAULT 0,     -- runs kept; 0 = unlimited
     notify_on_success INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -153,6 +154,12 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN chat_type TEXT NOT NULL DEFAULT 'chat'"
         )
+    cur = await db.execute("PRAGMA table_info(agents)")
+    agent_cols = {r[1] for r in await cur.fetchall()}
+    if "allow_ask_user" not in agent_cols:
+        # #93: per-agent opt-in letting a scheduled run block on ask_user.
+        # Default 0 preserves the unattended contract for existing agents.
+        await db.execute("ALTER TABLE agents ADD COLUMN allow_ask_user INTEGER NOT NULL DEFAULT 0")
     await migrate_workspaces(db)
     return db
 
@@ -498,7 +505,8 @@ async def get_messages(conversation_id: int):
 
 AGENT_FIELDS = (
     "workspace", "name", "prompt", "schedule_type", "schedule_spec",
-    "approval_policy", "model", "effort", "memory_enabled", "retention",
+    "approval_policy", "model", "effort", "memory_enabled",
+    "allow_ask_user", "retention",
     "notify_on_success", "enabled", "conversation_id",
     "next_fire_at", "last_fired_at", "last_finished_at", "last_status",
 )

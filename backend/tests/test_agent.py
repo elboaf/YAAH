@@ -1,4 +1,4 @@
-"""Tests for the agent loop and tools (model is faked)."""
+﻿"""Tests for the agent loop and tools (model is faked)."""
 import asyncio
 import json
 
@@ -903,3 +903,102 @@ async def test_chat_provider_model_override(monkeypatch):
     with pytest.raises(mc.ModelError, match="Unknown provider"):
         await mc.chat([{"role": "user", "content": "hi"}],
                       model="nope::m")
+
+
+# ---------------------------------------------------- scheduled ask_user (#93)
+
+@pytest.mark.asyncio
+async def test_scheduled_run_skips_ask_user_without_opt_in(fake_model, tmp_path):
+    """#93: a scheduled run (ANY policy) that has not opted into questions
+    must never block on ask_user. The autonomous wedge: _wait_answer waited
+    on the answer future alone, so an unattended run sat mid-step forever
+    with no card (nothing renders for backend-initiated questions)."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-sched-a")
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "q9", "type": "function",
+            "function": {
+                "name": "ask_user",
+                "arguments": json.dumps({"question": "?", "options": []}),
+            },
+        }]},
+    ])
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(
+        cid, "go", str(tmp_path), policy="autonomous"
+    ))
+    types = [e["type"] for e in events]
+    assert types == ["tool_start", "tool_result", "text", "say", "done"]
+    result = events[1]["result"]
+    assert result["answer"] is None
+    assert "no user is available" in result["note"]
+    assert "decide yourself" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_with_opt_in_waits_for_answer(fake_model, tmp_path):
+    """#93: the agent-level allow_ask_user opt-in lets a scheduled run ask
+    and block exactly like an interactive turn — the answer resolves it."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-sched-b")
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "q3", "type": "function",
+            "function": {
+                "name": "ask_user",
+                "arguments": json.dumps({
+                    "question": "Proceed?",
+                    "options": [{"label": "Yes"}, {"label": "No"}],
+                }),
+            },
+        }]},
+    ])
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+
+    import asyncio
+    agent = loop.run_agent(
+        cid, "go", str(tmp_path), policy="autonomous", allow_ask_user=True
+    )
+
+    async def answer_when_asked():
+        for _ in range(200):
+            if loop.resolve_answer(cid, "q3", "Yes"):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("question never became pending")
+
+    results = await asyncio.gather(collect(agent), answer_when_asked())
+    events = results[0]
+    assert events[1]["result"] == {"answer": "Yes"}
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_exit_plan_never_waits_without_opt_in(fake_model, tmp_path):
+    """#93 (same hole): exit_plan under a scheduled policy blocked on the
+    answer future forever — an unattended run cannot present a plan."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-sched-c")
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "p1", "type": "function",
+            "function": {
+                "name": "exit_plan",
+                "arguments": json.dumps({"plan": "THE PLAN"}),
+            },
+        }]},
+    ])
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(
+        cid, "go", str(tmp_path), policy="autonomous"
+    ))
+    result = next(e for e in events if e["type"] == "tool_result")["result"]
+    assert "error" in result
+    assert "unattended" in result["error"]
+    assert events[-1]["type"] == "done"

@@ -880,6 +880,7 @@ async def run_agent(
     skill_names: list | None = None,
     persist_user: bool = True,
     policy: str | None = None,
+    allow_ask_user: bool = False,
     include_history: bool = True,
     model_override: str = "",
     effort_override: str = "",
@@ -896,6 +897,10 @@ async def run_agent(
     "sandbox-only" (gated tools skip with a note) or "autonomous"
     (everything auto-approved); None = normal chat turn driven by the
     global access mode.
+    allow_ask_user: agent-level opt-in (issue #93) — a scheduled run may
+    block on ask_user when someone is watching its chat. False keeps the
+    unattended contract: ask_user (and exit_plan) never wait; the model is
+    told to decide itself and note the open question.
     include_history: False = fresh context each fire (the agent's memory
     toggle off) — the system prompt is built, but prior transcript rows
     are not replayed into model context.
@@ -1246,27 +1251,45 @@ async def run_agent(
                         }
                     )
                     if name == "ask_user":
-                        if policy == "sandbox-only":
-                            # No user is watching a scheduled run; blocking on
-                            # an answer that may never come would wedge the
-                            # turn until max_steps.
+                        if policy is not None and not allow_ask_user:
+                            # Scheduled run without the ask opt-in (#93): no
+                            # user is guaranteed to be watching, and an
+                            # unattended wait would wedge the turn until
+                            # max_steps — for ANY policy (the autonomous
+                            # path used to block here forever).
                             result = {
                                 "answer": None,
                                 "note": (
                                     "skipped: approval required — no user is "
-                                    "available to answer (scheduled sandbox-only "
+                                    "available to answer (scheduled unattended "
                                     "run); decide yourself or note the open "
                                     "question in your report"
                                 ),
                             }
                         else:
+                            # Interactive turn, or a scheduled run whose
+                            # agent opted into questions (#93): the card
+                            # renders in the pinned chat (tape → store) and
+                            # the answer resolves the wait.
                             result = await _ask_user(
                                 conversation_id, tc.get("id", ""), args, cancel_ev
                             )
                     elif name == "exit_plan":
-                        result = await _exit_plan(
-                            conversation_id, tc.get("id", ""), args, cancel_ev
-                        )
+                        if policy is not None and not allow_ask_user:
+                            # Same unattended-wedge hole as ask_user (#93):
+                            # nobody is watching to approve a plan.
+                            result = {
+                                "error": (
+                                    "skipped: plan approval is unavailable in an "
+                                    "unattended scheduled run — do not present a "
+                                    "plan; act autonomously within your policy "
+                                    "or note the proposed plan in your report"
+                                )
+                            }
+                        else:
+                            result = await _exit_plan(
+                                conversation_id, tc.get("id", ""), args, cancel_ev
+                            )
                     elif name == "load_skill":
                         result = await _load_skill(args, loaded_skills, messages)
                     else:

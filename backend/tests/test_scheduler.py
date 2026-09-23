@@ -169,10 +169,11 @@ async def test_fire_pipeline_prompt_memory_and_overrides(monkeypatch):
     captured = {}
 
     async def fake_run(cid, prompt, workspace, *, policy, include_history,
-                       model_override, effort_override):
+                       model_override, effort_override, allow_ask_user=False):
         captured.update(
             cid=cid, prompt=prompt, policy=policy, include_history=include_history,
             model=model_override, effort=effort_override,
+            allow_ask_user=allow_ask_user,
         )
         return
         yield  # pragma: no cover
@@ -273,6 +274,76 @@ async def test_retention_trim_keeps_last_n_runs():
     rows = await get_messages(conv)
     texts = [r["content"] for r in rows]
     assert texts == ["run 3", "answer 3", "run 4", "answer 4"]
+
+
+# ---------------------------------------------------- scheduled ask_user (#93)
+
+
+@pytest.mark.asyncio
+async def test_fire_threads_allow_ask_user(monkeypatch):
+    """The agent-level ask-user opt-in reaches run_agent so the loop knows
+    whether a scheduled run may block on a question."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        conversation_id=conv,
+        approval_policy="autonomous",
+        allow_ask_user=1,
+    ))
+
+    captured = {}
+
+    async def fake_run(cid, prompt, workspace, *, policy, include_history,
+                       model_override, effort_override, allow_ask_user):
+        captured.update(policy=policy, allow_ask_user=allow_ask_user)
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(loop, "run_agent", fake_run)
+    agent = await get_agent(agent_row["id"])
+    assert await sched.fire_agent(agent) == "started"
+    await drain_pending()
+    assert captured["policy"] == "autonomous"
+    assert captured["allow_ask_user"] is True
+
+
+def test_tape_preserves_question_payload():
+    """#93 delivery channel: the tape must keep ask_user's args + call_id
+    (trimmed like every other field) — without them the open chat can never
+    render the question card or route the answer back."""
+    buf = sched._tape_buffers.setdefault(
+        "tape-q", {"seq": 0, "running": True, "events": []}
+    )
+    try:
+        sched._tape_append("tape-q", {
+            "type": "tool_start",
+            "name": "ask_user",
+            "call_id": "q7",
+            "args": {
+                "question": "Deploy?" * 1000,  # exceeds the value cap
+                "options": [{"label": "Yes"}, {"label": "No"}],
+            },
+        })
+        snap = sched.tape_snapshot("tape-q", 0)
+        ev = snap["events"][0]
+        assert ev["call_id"] == "q7"
+        assert ev["args"]["options"] == [{"label": "Yes"}, {"label": "No"}]
+        assert len(ev["args"]["question"]) <= sched._TAPE_VALUE_CAP
+    finally:
+        sched._tape_buffers.pop("tape-q", None)
+
+
+@pytest.mark.asyncio
+async def test_allow_ask_user_round_trips_through_the_db():
+    """The opt-in persists: create -> read -> update -> read."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    row = await create_agent(make_agent(
+        conversation_id=conv, allow_ask_user=1
+    ))
+    stored = await get_agent(row["id"])
+    assert stored["allow_ask_user"] == 1
+    await update_agent(row["id"], {"allow_ask_user": 0})
+    stored = await get_agent(row["id"])
+    assert stored["allow_ask_user"] == 0
 
 
 @pytest.mark.asyncio

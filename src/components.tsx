@@ -74,7 +74,7 @@ import {
   type SkillInfo,
   type WorkspaceRow,
 } from './api'
-import { lastAssistantId, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
+import { lastAssistantId, tapeQuestionAction, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun } from './store'
 import { useUpdateCheck } from './update'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
@@ -3355,6 +3355,7 @@ function AgentForm({
   const [model, setModel] = useState(agent?.model ?? '')
   const [effort, setEffort] = useState(agent?.effort ?? '')
   const [memory, setMemory] = useState(agent?.memory_enabled ?? true)
+  const [allowAsk, setAllowAsk] = useState(agent?.allow_ask_user ?? false)
   const [retention, setRetention] = useState(String(agent?.retention ?? 0))
   const [notify, setNotify] = useState(agent?.notify_on_success ?? false)
   const [enabled, setEnabled] = useState(agent?.enabled ?? true)
@@ -3406,6 +3407,7 @@ function AgentForm({
         model: model.trim(),
         effort,
         memory_enabled: memory,
+        allow_ask_user: allowAsk,
         retention: Math.max(0, parseInt(retention, 10) || 0),
         notify_on_success: notify,
         enabled,
@@ -3497,6 +3499,18 @@ function AgentForm({
           ? 'Sandbox-only (default): tools that would need approval are skipped ("skipped: approval required") and the run continues — safe unattended.'
           : 'Autonomous (opt-in): everything auto-approves, including shell commands and file edits — only for agents you trust.'}
       </p>
+      <label className="flex items-center gap-1.5">
+        <input
+          type="checkbox"
+          checked={allowAsk}
+          onChange={(e) => setAllowAsk(e.target.checked)}
+        />
+        <span className="text-[10px] text-zinc-400">
+          May ask questions (#93) — the run can pause on ask_user and wait for your answer in
+          this chat. Leave off for unattended agents: questions are then skipped with a note and
+          the run continues.
+        </span>
+      </label>
       <div className="flex flex-wrap items-end gap-2">
         <label>
           <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Model</span>
@@ -3772,6 +3786,7 @@ function agentToBody(a: ScheduledAgent, enabled: boolean): AgentBody {
     model: a.model,
     effort: a.effort,
     memory_enabled: a.memory_enabled,
+    allow_ask_user: a.allow_ask_user,
     retention: a.retention,
     notify_on_success: a.notify_on_success,
     enabled,
@@ -3903,9 +3918,21 @@ export function AgentChatLiveFollow() {
       if (!alive && !final) return
       offset = res.offset
       const appendTape = useAgent.getState().appendTape
+      const syncTapeQuestion = useAgent.getState().syncTapeQuestion
       for (const ev of res.events) {
         const chunk = tapeChunkForEvent(ev as AgentEvent)
         if (chunk) appendTape(String(conversationId), chunk)
+        // #93: a taped ask_user opens the live question card (and its
+        // tool_result / turn-terminal events close it) — same store the
+        // interactive stream writes, so the answer path is identical.
+        syncTapeQuestion(tapeQuestionAction(ev as AgentEvent, String(conversationId)))
+      }
+      // Run over: the final pull must still have cleared any card the run
+      // left behind (the tape's closing events do this; belt-and-braces).
+      if (!res.running) {
+        useAgent.getState().setPendingQuestion((q) =>
+          q && q.convKey === String(conversationId) ? null : q,
+        )
       }
     }
     const pull = () =>

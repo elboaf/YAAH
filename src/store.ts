@@ -190,6 +190,9 @@ interface AgentState {
    *  convKey). Multiple chats can each have one waiting. */
   pendingQuestions: Record<string, PendingQuestion>
   setPendingQuestion: (q: PendingQuestion | null | ((prev: PendingQuestion | null) => PendingQuestion | null)) => void
+  /** #93: apply one tapeQuestionAction from the scheduled-run tape poll.
+   *  Null is a no-op so the poll can feed every event through unchecked. */
+  syncTapeQuestion: (action: TapeQuestionAction | null) => void
 
   /** Tool call awaiting approve/deny under the access-mode gate, per conv. */
   pendingApprovals: Record<string, PendingApproval>
@@ -343,6 +346,53 @@ function applyPending<T extends { convKey: string }>(
   return { ...map, [q.convKey]: q }
 }
 
+// ---- Scheduled-agent question cards (#93) -----------------------------------
+// A scheduled run streams inside the backend; the open chat sees it only as
+// tape events (AgentChatLiveFollow's poll). The ask_user tool_start carries
+// the question payload (scheduler keeps args + call_id on the tape), the
+// tool_result / turn-terminal events close it.
+
+/** The store write a tape event translates to (null = ignore the event). */
+export type TapeQuestionAction =
+  | { op: 'set'; callId: string; question: string; options: Array<{ label: string; description?: string }>; convKey: string }
+  | { op: 'clear'; convKey: string }
+
+export function tapeQuestionAction(
+  ev: {
+    type?: string
+    name?: string
+    call_id?: string
+    args?: unknown
+    text?: string
+    result?: unknown
+    chunk?: string
+    message?: string
+  },
+  convKey: string,
+): TapeQuestionAction | null {
+  // Turn-terminal events close any card for this conversation, even one
+  // whose tool_result was lost to a crash mid-question.
+  if (ev.type === 'done' || ev.type === 'stopped' || ev.type === 'error') {
+    return { op: 'clear', convKey }
+  }
+  if (ev.name !== 'ask_user') return null
+  if (ev.type === 'tool_start') {
+    const a = (ev.args ?? {}) as {
+      question?: string
+      options?: Array<{ label: string; description?: string }>
+    }
+    return {
+      op: 'set',
+      callId: ev.call_id ?? '',
+      question: a.question ?? '',
+      options: a.options ?? [],
+      convKey,
+    }
+  }
+  if (ev.type === 'tool_result') return { op: 'clear', convKey }
+  return null
+}
+
 const now = () =>
   new Date().toLocaleTimeString([], { hour12: false })
 
@@ -471,6 +521,25 @@ export const useAgent = create<AgentState>((set, get) => ({
   pendingQuestions: {},
   setPendingQuestion: (q) =>
     set((s) => ({ pendingQuestions: applyPending(s.pendingQuestions, q) })),
+  syncTapeQuestion: (action) => {
+    if (!action) return
+    if (action.op === 'set') {
+      set((s) => ({
+        pendingQuestions: applyPending(s.pendingQuestions, {
+          callId: action.callId,
+          question: action.question,
+          options: action.options,
+          convKey: action.convKey,
+        }),
+      }))
+    } else {
+      set((s) => ({
+        pendingQuestions: applyPending(s.pendingQuestions, (q) =>
+          q && q.convKey === action.convKey ? null : q,
+        ),
+      }))
+    }
+  },
   pendingApprovals: {},
   setPendingApproval: (a) =>
     set((s) => ({ pendingApprovals: applyPending(s.pendingApprovals, a) })),

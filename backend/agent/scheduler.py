@@ -81,7 +81,12 @@ _fire_tasks: set[asyncio.Task] = set()
 TAPE_EVENT_CAP = 400
 _tape_buffers: dict[int, dict] = {}
 
-_TAPE_FIELDS = ("type", "text", "name", "command", "chunk", "result", "message")
+_TAPE_FIELDS = (
+    "type", "text", "name", "command", "chunk", "result", "message",
+    # #93: ask_user's payload — without args the open chat cannot render the
+    # question card, without call_id the answer cannot be routed back.
+    "args", "call_id",
+)
 _TAPE_VALUE_CAP = 2000
 
 
@@ -106,6 +111,17 @@ def _tape_append(conv_id: int, event: dict):
     for k, v in trimmed.items():
         if isinstance(v, str) and len(v) > _TAPE_VALUE_CAP:
             trimmed[k] = v[:_TAPE_VALUE_CAP]
+        elif isinstance(v, dict):
+            # Structured fields (ask_user's args, #93) feed the question
+            # card: cap their string values in place so the payload stays
+            # usable (bounded, not dropped) instead of let loose in the
+            # buffer.
+            trimmed[k] = {
+                ik: (iv[:_TAPE_VALUE_CAP] if isinstance(iv, str) and len(iv) > _TAPE_VALUE_CAP else iv)
+                for ik, iv in v.items()
+            }
+        elif isinstance(v, list) and len(json.dumps(v, ensure_ascii=False)) > _TAPE_VALUE_CAP:
+            trimmed[k] = {"truncated": True}
     buf["events"].append(trimmed)
     buf["seq"] += 1
     if len(buf["events"]) > TAPE_EVENT_CAP:
@@ -294,6 +310,7 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
             agent.get("model") or "",
             agent.get("effort") or "",
             agent.get("retention") or 0,
+            bool(agent.get("allow_ask_user")),
         )
     )
     _fire_tasks.add(task)
@@ -311,6 +328,7 @@ async def _run_and_settle(
     model: str,
     effort: str,
     retention: int,
+    allow_ask_user: bool = False,
 ):
     """Consume one fire's run to completion, then settle the outcome:
     status recording (the toast source), global retry scheduling, and the
@@ -328,6 +346,7 @@ async def _run_and_settle(
             include_history=memory_enabled,
             model_override=model,
             effort_override=effort,
+            allow_ask_user=allow_ask_user,
         ):
             # The loop persists the transcript itself; here we only relay
             # the events into the per-conversation tape buffer so the open

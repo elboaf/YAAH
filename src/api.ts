@@ -488,6 +488,9 @@ export interface ScheduledAgent {
   model: string
   effort: string
   memory_enabled: boolean
+  /** #93: a scheduled run may ask the user a question and wait (its pinned
+   *  chat renders the card via the tape poll). */
+  allow_ask_user: boolean
   retention: number
   notify_on_success: boolean
   enabled: boolean

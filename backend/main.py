@@ -956,6 +956,7 @@ async def _agent_view(agent: dict) -> dict:
         # SQLite ints -> JSON booleans for the UI.
         "enabled": bool(agent.get("enabled")),
         "memory_enabled": bool(agent.get("memory_enabled")),
+        "allow_ask_user": bool(agent.get("allow_ask_user")),
         "notify_on_success": bool(agent.get("notify_on_success")),
         "retention": int(agent.get("retention") or 0),
         "schedule_spec": scheduler_mod.parse_schedule_spec(agent["schedule_spec"]),
@@ -978,6 +979,9 @@ class AgentBody(BaseModel):
     model: str = ""                          # '' = active global model
     effort: str = ""                         # '' | low | medium | high
     memory_enabled: bool = True
+    # #93: agent-level opt-in — a scheduled run may ask the user a question
+    # (ask_user) and wait for the answer in its pinned chat.
+    allow_ask_user: bool = False
     retention: int = 0                       # runs kept in the transcript; 0 = unlimited
     notify_on_success: bool = False
     enabled: bool = True
@@ -1030,6 +1034,7 @@ async def api_agents_add(body: AgentBody):
         "model": body.model.strip(),
         "effort": body.effort.strip(),
         "memory_enabled": int(body.memory_enabled),
+        "allow_ask_user": int(body.allow_ask_user),
         "retention": max(0, int(body.retention or 0)),
         "notify_on_success": int(body.notify_on_success),
         "enabled": int(body.enabled),
@@ -1062,6 +1067,7 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         "model": body.model.strip(),
         "effort": body.effort.strip(),
         "memory_enabled": int(body.memory_enabled),
+        "allow_ask_user": int(body.allow_ask_user),
         "retention": max(0, int(body.retention or 0)),
         "notify_on_success": int(body.notify_on_success),
         "enabled": int(body.enabled),
