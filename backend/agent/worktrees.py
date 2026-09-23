@@ -14,33 +14,47 @@ Honesty notes (from the issue text, kept honest here):
 - The cross-process merge lock only protects writers who go through the
   harness, same enforcement principle as the rebinding itself.
 
-Layout: worktrees live at `<main-root>/.yaah/worktrees/<run-id>` on
-branches `agent/<chat-id>/<run-id>`. The path is excluded via
+Layout: worktrees live at `<main-root>/.yaah/worktrees/<chat-id>` on
+branches `agent/<chat-id>/<run-id>` — one worktree per chat session
+(adr/0003), named by chat id so a restart can recover the binding from
+the path shape. The path is excluded via
 `.git/info/exclude` (never the user's tracked .gitignore), branches are
 filtered out of the UI branch list, and search prunes the `.yaah`
 directory (see tools.IGNORED_DIRS).
 
-Merge rules (issue decisions 1-6):
+Merge rules (issue decisions 1-6, amended by docs/adr/0003):
 - Sub-agents never merge: they report the branch on the first line of
   their final message (results are clipped; the parent must always be
   able to act on the branch name).
-- Top-level chat agents self-merge at end of turn under the mutex.
-- Merge-back refuses a dirty worktree, zero new commits, uncommitted
-  main-tree files that the merge would overwrite (dirty *overlap* —
-  never stash), mid-merge state, and merge conflicts (aborting) —
-  surfaced, never papered over. Unrelated WIP does not block a merge:
-  git's own overlap-aware pre-flight decides (see docs/adr/0001).
-- Trash-detecting merge-back (issue #98, docs/adr/0002): uncommitted
-  worktree files that are provably harness-generated (write provenance:
-  command-output captures; or machine-shape fingerprints: JSON, diffs,
-  base64 walls, .log/.tmp-style names) are dropped, not salvaged — a
-  stray log must not veto a turn's committed work. Authored-looking
-  files still refuse + salvage exactly as before, and the loop gets
-  MERGE_RETRY_LIMIT supervised cleanup rounds to fix the worktree
-  before the refusal is surfaced (a refusal is a task for the agent,
-  not a chat status the user has to interpret).
-- The worktree directory is deleted after merge-back; the `agent/*`
-  branch is kept a few days (the reaper prunes it).
+- Top-level chat agents are bound to ONE worktree for the chat's whole
+  session (adr/0003): the first write-capable tool call creates it, and
+  it is never released mid-session. Every turn still merges the session
+  branch's new commits into the main tree under the mutex (the user's
+  folder must not lag), but uncommitted worktree state is left in place
+  across turns — turn N+1 works in exactly the tree turn N left behind,
+  so there is no within-session variance between runs. The old per-turn
+  trash-drop / salvage / supervised-retry machinery now runs once, at
+  session end (release_session): chat deletion, or the reaper for
+  orphans.
+- Merge-back refuses zero new commits, uncommitted main-tree files that
+  the merge would overwrite (dirty *overlap* — never stash), mid-merge
+  state, and merge conflicts (aborting) — surfaced, never papered over.
+  Unrelated WIP does not block a merge: git's own overlap-aware
+  pre-flight decides (see docs/adr/0001). A refused merge keeps the
+  session bound: the next turn can retry it (or the model can call
+  git_merge_back itself) instead of the commits stranding on a branch
+  the next turn cannot see.
+- Trash-detecting teardown (issue #98, docs/adr/0002) lives in
+  release_session and finalize_sub_agent: uncommitted files that are
+  provably harness-generated (write provenance: command-output
+  captures; or machine-shape fingerprints: JSON, diffs, base64 walls,
+  .log/.tmp-style names) are dropped, not salvaged — a stray log must
+  not outlive the session as litter. Authored-looking files are
+  salvaged to a patch, never silently deleted.
+- The worktree directory is deleted at session end; the `agent/*`
+  branch is deleted with it when it carries no unmerged commits
+  (already-merged or zero-commit sessions leave no branch litter), and
+  kept for inspection a few days otherwise (the reaper prunes it).
 
 Main-tree sync (issue #98): the user's folder — the only tree they can
 see — is fast-forwarded to upstream on a background cadence (ff-only,
@@ -415,16 +429,20 @@ async def merge_mutex(root: Path):
 
 
 async def create_worktree(workspace: str, chat_id: str, run_id: str, label: str | None = None) -> dict:
-    """Create `<main-root>/.yaah/worktrees/<run-id>` on branch
+    """Create `<main-root>/.yaah/worktrees/<chat-id>` on branch
     `agent/<chat-id>/<label-slug>-<run-id>` (or the bare run-id branch when
     no label), based on `workspace`'s current HEAD (a nested sub-agent's
     parent worktree is a valid base — that is the issue's nested fan-out).
+    The directory is named by CHAT id (adr/0003): one worktree per chat
+    session, so a restart can recover the binding from the path shape
+    alone. `run_id` only names the branch (a re-created session after a
+    root switch gets a fresh branch name, never a collision).
     Returns {ok: True, workspace, branch, root} or {ok: False, reason}."""
     root = await main_repo_root(workspace)
     if root is None:
         return {"ok": False, "reason": "not a git repository"}
     branch = branch_for(chat_id, run_id, label)
-    wt = worktree_base(root) / _component(run_id)
+    wt = worktree_base(root) / _component(chat_id)
     rc, out = await _git(root, "worktree", "add", "-b", branch, str(wt))
     if rc != 0:
         reason = out or f"git worktree add exited {rc}"
@@ -465,13 +483,40 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
 
     Cheap state checks first (this runs before every write tool call):
     already-bound, already-a-worktree. Non-repo shared writers are capped
-    at one concurrent writer (issue §1)."""
+    at one concurrent writer (issue §1).
+
+    adr/0003: the binding is a SESSION binding — once created it stays
+    for the chat's lifetime (never released at turn end), so every turn
+    of a chat works in the same tree. A binding recovered after a
+    backend restart (path-shape discovery below) is re-registered here
+    transparently."""
     ws = str(workspace)
     wt = worktree_of(ws)
     if wt is not None:
         return wt  # already a managed worktree (nested parent) — done
     if chat_id in _chat_bindings:
-        return _chat_bindings[chat_id]
+        bound = _chat_bindings[chat_id]
+        # Root-match guard (adr/0003): the chat may have been refiled to
+        # a different repo mid-session, or the bound directory may have
+        # been removed underneath us (crashed teardown); either way the
+        # binding is released (salvage-first) and a fresh session
+        # worktree is created.
+        try:
+            bound_root = (
+                await main_repo_root(bound)
+                if Path(bound).exists()
+                else None
+            )
+        except Exception:  # noqa: BLE001
+            bound_root = None
+        try:
+            new_root = await main_repo_root(ws)
+        except Exception:  # noqa: BLE001
+            new_root = None
+        if bound_root is not None and new_root is not None \
+                and bound_root == new_root:
+            return bound
+        await release_session(chat_id, why="workspace moved or session worktree gone")
     try:
         root = await main_repo_root(ws)
     except Exception:  # noqa: BLE001
@@ -488,6 +533,25 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
             )
         holders.add(token)
         return ws
+    # Restart recovery (adr/0003): a session worktree from a previous
+    # process lives on disk with the chat-id dir name but no in-memory
+    # binding. Rebind to it instead of minting a second worktree for the
+    # same chat — the session's uncommitted state survives the restart.
+    candidate = worktree_base(root) / _component(chat_id)
+    if candidate.is_dir() and worktree_of(str(candidate)) == str(candidate):
+        rc, out = await _git(candidate, "rev-parse", "--abbrev-ref", "HEAD")
+        if rc == 0 and out.strip().startswith(BRANCH_PREFIX):
+            info = {
+                "root": str(root),
+                "branch": out.strip(),
+                "chat_id": chat_id,
+                "run_id": out.strip().rsplit("/", 1)[-1],
+                "created": _now(),
+                "recovered": True,
+            }
+            _active[str(candidate)] = info
+            _chat_bindings[chat_id] = str(candidate)
+            return str(candidate)
     run_id = uuid.uuid4().hex[:12]
     label: str | None = None
     if chat_id:
@@ -890,22 +954,45 @@ async def merge_back(root: Path, branch: str) -> dict:
     return result
 
 
-async def self_merge(chat_id: str, final: bool = True) -> dict:
-    """End-of-turn merge for a top-level chat agent (issue decision 5).
-    No-op when the turn never got isolated.
+async def ff_session_branch(wt_str: str) -> None:
+    """Fast-forward a session worktree's branch to the main tree's current
+    HEAD (adr/0003): after a successful merge-back the session branch must
+    equal what the user's folder shows, or the next turn starts behind.
+    Best-effort: a dirty worktree file that collides with the ff leaves
+    the branch where it is (the next turn's merge handles it)."""
+    info = _active.get(str(wt_str))
+    if info is None:
+        return
+    root = Path(info["root"])
+    rc, main_head = await _git(root, "rev-parse", "HEAD")
+    if rc != 0 or not main_head.strip():
+        return
+    with contextlib.suppress(Exception):
+        await _git(Path(wt_str), "merge", "--ff-only", "-q", main_head.strip())
 
-    `final=False` is the loop's pre-completion probe (issue #98 /
-    adr/0002). It NEVER merges — the turn's finally block owns the real
-    merge, on the real worktree, where the success pill has always been
-    emitted. The probe drops provably-generated trash, and when authored
-    dirt remains it reports `retry_dirty` (worktree, binding, and write
-    provenance all SURVIVE so the model can clean up in place and finish
-    again). `final=True` (default) is terminal: trash is dropped first,
-    then a still-dirty worktree is salvaged (R4), removed, and unbound —
-    nothing is ever lost silently, and the surfaced refusal names the
-    salvage patch. A main-tree refusal (overlap/conflict) keeps the
-    worktree bound for the reaper, exactly as before.
-    """
+
+async def self_merge(chat_id: str, final: bool = True) -> dict:
+    """End-of-turn merge for a top-level chat agent (issue decision 5,
+    amended by adr/0003). No-op when the turn never got isolated.
+
+    adr/0003: the binding is a SESSION binding — a turn NEVER releases
+    it. Every turn merges the session branch's new commits into the main
+    tree (the user's folder must not lag) and, on success, fast-forwards
+    the session branch to the merged main HEAD so the next turn starts
+    from exactly what the user now sees. Uncommitted worktree state is
+    deliberately left in place across turns: turn N+1 works in exactly
+    the tree turn N left behind (no within-session variance). The
+    per-turn trash-drop / salvage / supervised-retry machinery of
+    adr/0002 now runs once, at session end (release_session).
+
+    `final` is retained for call compatibility (the loop's old probe
+    passed final=False); under session binding both paths merge, so it
+    no longer changes behavior.
+
+    Refusals (dirty overlap in the MAIN tree, conflict, mid-merge) keep
+    the session bound — the next turn can retry the merge, or the model
+    can call git_merge_back itself. Nothing strands on a branch the next
+    turn cannot see."""
     info = binding_for(chat_id)
     wt_str = _chat_bindings.get(chat_id, "")
     if info is None:
@@ -915,23 +1002,58 @@ async def self_merge(chat_id: str, final: bool = True) -> dict:
     wt = Path(wt_str)
     branch = info["branch"]
 
-    def _release() -> None:
+    result = await merge_back(root, branch)
+    if result.get("merged"):
+        # Fast-forward the session branch to the merged main HEAD: the
+        # next turn's worktree then starts from exactly what the user's
+        # folder now shows (no drift between session branch and main).
+        await ff_session_branch(wt_str)
+        # Write provenance deliberately ACCUMULATES for the whole session
+        # (adr/0003): the trash classifier runs at session end, and a
+        # file the model authored in turn 3 must still classify as model
+        # work at session end. Cleared only in release_session.
+    elif result.get("zero_commits"):
+        # Nothing new to merge (a read-only-ish turn, or the model already
+        # merged the branch itself via git_merge_back): still fast-forward
+        # the session branch to main HEAD so the next turn starts from
+        # exactly what the user's folder shows — then report noop (no
+        # pill-worthy failure, no teardown).
+        await ff_session_branch(wt_str)
+        result["noop"] = True
+        result.setdefault("reason", "session branch has no new commits")
+    # else: refused on MAIN-TREE state (dirty overlap / conflict) — that
+    # is the user's tree, not the agent's mess. The session stays bound:
+    # the next turn can retry the merge (or call git_merge_back itself).
+    # The refusal surfaces as the persisted git_merge_back pill.
+    return result
+
+
+async def release_session(chat_id: str, why: str = "session ended") -> dict:
+    """Session end (adr/0003): chat deleted, workspace refiled, or the
+    reaper collecting an orphan. Terminal teardown of the chat's session
+    worktree — the adr/0002 trash contract runs HERE, once: provably
+    harness-generated uncommitted files are dropped, authored-looking
+    leftovers are salvaged to a patch (never silently deleted), the
+    worktree directory is removed, and the branch is deleted when it
+    carries no unmerged commits (merged or zero-commit sessions leave no
+    branch litter). A branch with unmerged commits is kept for
+    inspection (the reaper prunes it after the branch TTL)."""
+    info = binding_for(chat_id)
+    wt_str = _chat_bindings.get(chat_id, "")
+    if info is None:
+        release_chat(chat_id)
+        return {"released": False, "noop": True, "reason": "no session worktree"}
+    root = Path(info["root"])
+    wt = Path(wt_str)
+    branch = info["branch"]
+
+    def _unbind() -> None:
         _chat_bindings.pop(chat_id, None)
         _active.pop(wt_str, None)
         clear_provenance(wt_str)
         release_chat(chat_id)
 
     dirty = await _dirty(wt)
-    # Probe contract (final=False): never merges. A clean worktree just
-    # reports ready — the turn's finally block owns the real merge so the
-    # success pill is emitted exactly where it always was.
-    if not dirty and not final:
-        return {"noop": True, "clean": True, "reason": "worktree clean"}
-
-    # Drop pass: provably harness-generated uncommitted files (command-
-    # output captures, log/temp artifacts) are deleted, not salvaged — a
-    # stray log must not veto a turn's committed work. Anything uncertain
-    # or authored-looking classifies as work and takes the refusal path.
     dropped: list[str] = []
     if dirty:
         for _pass in range(2):  # second pass re-checks after deletions
@@ -944,58 +1066,29 @@ async def self_merge(chat_id: str, final: bool = True) -> dict:
                 break
             dropped = await _drop_trash(wt, trash)
             if not dropped:
-                break  # unlink failed; git still sees them — refuse below
+                break  # unlink failed; git still sees them — salvage below
 
+    salvage_note = ""
     if await _dirty(wt):
-        paths = await _dirty_paths(wt)
-        if not final:
-            # Retry protocol: leave the scene intact for cleanup.
-            return {
-                "merged": False,
-                "retry_dirty": True,
-                "dirty": paths,
-                **({"dropped_trash": dropped} if dropped else {}),
-                "reason": (
-                    "merge-back refused: this turn left uncommitted changes in "
-                    f"its worktree ({', '.join(paths[:5])}); they are NOT in "
-                    "the main tree. Remove generated files, commit real work, "
-                    "then finish your answer again."
-                ),
-            }
-        patch = await _salvage(root, wt, branch, "uncommitted changes at self-merge")
-        await _remove_worktree(root, wt, force=True)
-        _release()
-        return {
-            "merged": False,
-            "dirty": paths,
-            **({"dropped_trash": dropped} if dropped else {}),
-            "reason": (
-                f"merge-back refused: this turn left uncommitted changes in "
-                f"its worktree ({', '.join(paths[:5])}); they are NOT in the "
-                f"main tree. Branch {branch} kept; diff salvaged to "
-                f"{patch or '(salvage failed)'}"
-            ),
-        }
-
-    if final:
-        result = await merge_back(root, branch)
-        if result.get("merged") or result.get("zero_commits"):
-            _release()
-            await _remove_worktree(root, wt)
-        # else: refused on MAIN-TREE state (dirty overlap / conflict) — that
-        # is the user's tree, not the agent's mess. No retry_dirty: nudging
-        # the model cannot fix it. The refusal surfaces as the persisted
-        # git_merge_back pill (reaper as backstop for the bound worktree).
-        if dropped:
-            result["dropped_trash"] = dropped
-        return result
-    # Probe (final=False) reaching this point: the worktree is clean (any
-    # droppable trash above is already gone). Report ready without
-    # merging — the turn's finally block owns the real merge, so the
-    # success pill is emitted exactly where it always was.
-    out: dict = {"noop": True, "clean": True}
+        patch = await _salvage(root, wt, branch, f"session end ({why})")
+        salvage_note = (
+            f"uncommitted changes salvaged to {patch or '(salvage failed)'}"
+        )
+    commits = await _new_commits(root, branch)
+    await _remove_worktree(root, wt, force=True)
+    _unbind()
+    # Branch hygiene (adr/0003): a session branch whose commits are all
+    # merged (or that never had any) is deleted with the worktree — one
+    # read-only chat must not litter agent/* for three days. A branch
+    # with unmerged commits is kept for inspection (reaper prunes later).
+    if commits <= 0:
+        with contextlib.suppress(Exception):
+            await _git(root, "branch", "-D", branch)
+    out: dict = {"released": True, "branch": branch}
     if dropped:
         out["dropped_trash"] = dropped
+    if salvage_note:
+        out["note"] = salvage_note
     return out
 
 
@@ -1011,6 +1104,10 @@ async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
     wt = Path(agent_workspace)
     branch = info["branch"]
     _active.pop(agent_workspace, None)
+    # adr/0003 hygiene: a sub-agent binds under its own chat key (the
+    # spawn call id); finalize is its session end — the binding must go,
+    # or the in-memory map leaks an entry per sub-agent run.
+    _chat_bindings.pop(info.get("chat_id", ""), None)
 
     commits = await _new_commits(root, branch)
     dirty = await _dirty(wt)
@@ -1160,9 +1257,10 @@ def stop_background_sync() -> None:
 async def reap_stale(now: float | None = None) -> dict:
     """Salvage-before-delete for orphaned worktrees (crashed runs, aborted
     batches, restarts): anything under .yaah/worktrees that is not a live
-    session and older than the TTL gets its diff salvaged and the
-    directory removed. `agent/*` branches past the branch TTL are pruned
-    (decision 4)."""
+    session and older than the TTL gets the session-end teardown
+    (adr/0003: trash dropped, authored leftovers salvaged, directory
+    removed, zero-commit branch deleted) instead of a bare salvage.
+    `agent/*` branches past the branch TTL are pruned (decision 4)."""
     now = _now() if now is None else now
     ttl = _ttl()
     reaped, salvaged = [], []
@@ -1202,6 +1300,11 @@ async def reap_stale(now: float | None = None) -> dict:
                 if patch:
                     salvaged.append(patch)
             await _remove_worktree(root, child, force=True)
+            # adr/0003 branch hygiene: an orphan whose branch carries no
+            # unmerged commits is deleted, not kept for three days.
+            if await _new_commits(root, branch) <= 0:
+                with contextlib.suppress(Exception):
+                    await _git(root, "branch", "-D", branch)
             reaped.append(str(child))
         # branch pruning (decision 4: keep a few days, then remove)
         rc, out = await _git(

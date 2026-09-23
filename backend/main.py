@@ -645,6 +645,16 @@ async def api_move_conversation(conversation_id: int, body: ConversationMove):
 
 @app.delete("/api/conversations/{conversation_id}")
 async def api_delete_conversation(conversation_id: int):
+    # adr/0003: deleting the chat ends its worktree session — the
+    # session-end teardown (trash drop, salvage, branch hygiene) runs
+    # here, once, instead of at every turn end. A chat with a live run
+    # keeps its session: the turn's own finally still merges, and the
+    # reaper collects the orphan after the TTL.
+    from backend.agent import worktrees as _wt
+    from backend.agent.loop import agent_is_running
+
+    if not agent_is_running(conversation_id):
+        await _wt.release_session(str(conversation_id), why="chat deleted")
     ok = await delete_conversation(conversation_id)
     if not ok:
         from fastapi import HTTPException
@@ -1164,6 +1174,13 @@ async def api_agents_remove(agent_id: str, delete_chat: bool = True):
     await db_delete_agent(agent_id)
     conv_id = existing.get("conversation_id")
     if delete_chat and conv_id:
+        # adr/0003: the agent's pinned chat ends its worktree session too
+        # (same live-run guard as chat deletion).
+        from backend.agent import worktrees as _wt
+        from backend.agent.loop import agent_is_running
+
+        if not agent_is_running(conv_id):
+            await _wt.release_session(str(conv_id), why="agent deleted")
         await delete_conversation(conv_id)
     return {"ok": True}
 
