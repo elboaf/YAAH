@@ -156,8 +156,9 @@ jobs:
           files: build-*.log
           overwrite_files: true
           # #62: an RC build failure must not publish its log as a stable
-          # release — mirror the channel of the tag being built.
-          prerelease: ${{ inputs.prerelease || false }}
+          # release — mirror the channel of the tag being built. The tag-push
+          # path has no input, so rc-ness falls back to the tag name.
+          prerelease: ${{ inputs.prerelease == true || contains(inputs.tag || github.ref_name, '-rc') }}
 
       # Uploads via gh with per-file retries: softprops/action-gh-release has
       # none, and the 110–240MB assets have repeatedly died mid-upload on
@@ -182,9 +183,17 @@ jobs:
             files="yaah-desktop-setup.deb yaah-server-setup.deb"
           fi
           echo "assets:"; echo "$files"
+          # #62: the RC channel is a property of the version, not of who
+          # pushed the tag. workflow_call runs get it from the input; a
+          # direct tag push must derive it from the tag name, or an -rc.N
+          # release silently publishes to the stable channel.
+          PRERELEASE_FLAG=""
+          if [ "${{ inputs.prerelease }}" = "true" ] || echo "$tag" | grep -Eq -- '-rc\.[0-9]+$'; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --title "$tag" --generate-notes \
-              ${{ inputs.prerelease == true && '--prerelease' || '' }} || true
+              "$PRERELEASE_FLAG" || true
           rc=0
           for f in $files; do
             ok=0
