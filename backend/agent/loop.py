@@ -464,11 +464,12 @@ def enqueue_message(
     conversation_id: int,
     text: str,
     skills: list[str] | None = None,
+    images: list[str] | None = None,
 ) -> dict:
     """Queue a user message for the running conversation; returns the item."""
     global _queue_seq
     _queue_seq += 1
-    item = {"id": _queue_seq, "text": text, "skills": skills or []}
+    item = {"id": _queue_seq, "text": text, "skills": skills or [], "images": images or []}
     _message_queues.setdefault(conversation_id, []).append(item)
     return item
 
@@ -510,8 +511,26 @@ async def _take_injections(conversation_id: int) -> list[dict]:
     in-memory messages entries."""
     items = _drain_queue(conversation_id)
     for it in items:
-        await add_message(conversation_id, "user", it["text"])
+        await add_message(
+            conversation_id, "user", it["text"], images=it.get("images") or None
+        )
     return items
+
+
+def _apply_injected_skills(item: dict, loaded_skills: list[str], messages: list) -> None:
+    """Add explicitly selected queued-message skills to the active run."""
+    names = [
+        name for name in item.get("skills", [])
+        if isinstance(name, str) and name.strip() and name not in loaded_skills
+    ]
+    if not names:
+        return
+    loaded_skills.extend(names)
+    block = skill_registry.bodies_for_prompt(names)
+    if block and messages and messages[0].get("role") == "system":
+        messages[0]["content"] = (
+            f"{messages[0]['content']}\n\n---\n\n# Invoked skills\n\n{block}"
+        )
 
 
 # ---- access-mode gate (PLAN-access-modes.md) -------------------------------
@@ -1098,7 +1117,7 @@ async def run_agent(
     # Skills the model has loaded mid-turn via load_skill (deduped, order
     # preserved). Their bodies are appended to the system prompt so every
     # subsequent model call in this turn sees them.
-    loaded_skills: list[str] = []
+    loaded_skills: list[str] = list(invoked)
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
     # the turn). Configured in Settings → Max steps or config.json `max_steps`.
@@ -1360,9 +1379,10 @@ async def run_agent(
             # + announcement as the tool-result boundary.
             for inj in await _take_injections(conversation_id):
                 yield _ndjson(
-                    {"type": "user_injected", "text": inj["text"], "id": inj["id"]}
+                    {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "skills": inj.get("skills", [])}
                 )
-                messages.append({"role": "user", "content": inj["text"]})
+                _apply_injected_skills(inj, loaded_skills, messages)
+                messages.append({"role": "user", "content": _parts_with_images(inj["text"], inj.get("images", []))})
 
             # Partition this step's tool calls: spawn_agent delegations run
             # in parallel (foreground — the parent blocks until all finish);
@@ -1644,9 +1664,10 @@ async def run_agent(
                 # replayed from history, announced to the UI.
                 for inj in await _take_injections(conversation_id):
                     yield _ndjson(
-                        {"type": "user_injected", "text": inj["text"], "id": inj["id"]}
+                        {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "skills": inj.get("skills", [])}
                     )
-                    messages.append({"role": "user", "content": inj["text"]})
+                    _apply_injected_skills(inj, loaded_skills, messages)
+                    messages.append({"role": "user", "content": _parts_with_images(inj["text"], inj.get("images", []))})
 
             # Run every spawn_agent delegation of this step in parallel.
             # Progress events flow through a queue so the generator can
@@ -1824,7 +1845,7 @@ async def run_agent(
         # holds the queue so explicit silence wins.
         for inj in await _take_injections(conversation_id):
             yield _ndjson(
-                {"type": "user_injected", "text": inj["text"], "id": inj["id"]}
+                {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "skills": inj.get("skills", [])}
             )
         remaining = _drain_queue(conversation_id)
         if remaining and not cancel_ev.is_set():
@@ -1835,11 +1856,19 @@ async def run_agent(
         # failure the transcript would read as if the turn never happened.
         await add_message(conversation_id, "system", f"turn failed: {e}")
         yield _ndjson({"type": "error", "message": str(e)})
+        if not cancel_ev.is_set():
+            remaining = _drain_queue(conversation_id)
+            if remaining:
+                yield _ndjson({"type": "queued_autosend", "items": remaining})
     except Exception as e:  # noqa: BLE001
         await add_message(
             conversation_id, "system", f"turn failed: {type(e).__name__}: {e}"
         )
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        if not cancel_ev.is_set():
+            remaining = _drain_queue(conversation_id)
+            if remaining:
+                yield _ndjson({"type": "queued_autosend", "items": remaining})
     finally:
         # adr/0003 revised (branch-first): turn end never merges into the
         # main tree, whatever exit the turn took. The session settles

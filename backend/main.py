@@ -814,8 +814,15 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn):
     from backend.agent.imagedata import save_data_url
 
     image_paths = []
-    for data_url in body.images[:4]:  # cap at 4 images per message
-        rel = save_data_url(data_url, subdir=str(conversation_id))
+    for image in body.images[:4]:  # cap at 4 images per message
+        if image.startswith("data:"):
+            rel = save_data_url(image, subdir=str(conversation_id))
+        else:
+            # Queue autosend hands off stored relative paths. load_data_url
+            # validates containment and existence before accepting one.
+            from backend.agent.imagedata import load_data_url
+
+            rel = image if load_data_url(image) else None
         if rel:
             image_paths.append(rel)
     return StreamingResponse(
@@ -900,6 +907,7 @@ async def api_agent_cancel(conversation_id: int):
 class QueueBody(BaseModel):
     message: str
     skills: list[str] | None = None
+    images: list[str] | None = None
 
 
 @app.post("/api/agent/{conversation_id}/queue")
@@ -911,9 +919,18 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
     if not agent_is_running(conversation_id):
         raise HTTPException(status_code=409, detail="conversation is not running")
     text = body.message.strip()
-    if not text:
+    if not text and not body.images:
         raise HTTPException(status_code=400, detail="message must not be empty")
-    item = enqueue_message(conversation_id, text, body.skills)
+    from backend.agent.imagedata import save_data_url
+
+    image_paths = []
+    for data_url in (body.images or [])[:4]:
+        rel = save_data_url(data_url, subdir=str(conversation_id))
+        if rel:
+            image_paths.append(rel)
+    if not text and not image_paths:
+        raise HTTPException(status_code=400, detail="message must contain text or a valid image")
+    item = enqueue_message(conversation_id, text, body.skills, image_paths)
     return {"ok": True, "item": item}
 
 

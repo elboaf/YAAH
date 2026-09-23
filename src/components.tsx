@@ -7023,9 +7023,11 @@ function Composer() {
   const queueEchoes = useAgent((s) => s.queueEchoByConv[bufKeyForQueue])
   const setQueueEcho = useAgent((s) => s.setQueueEcho)
   const dropQueuedEcho = useAgent((s) => s.dropQueuedEcho)
+  const markQueuedAsNormal = useAgent((s) => s.markQueuedAsNormal)
   const steering = useAgent((s) => s.steerByConv[bufKeyForQueue] ?? false)
   const setSteerFlag = useAgent((s) => s.setSteer)
   const [queueOpen, setQueueOpen] = useState(false)
+  const pendingQueueAutosendRef = useRef<Record<string, Array<{ id: number; text: string; skills?: string[]; images?: string[] }>>>({})
   // Buffer key of the conversation with a send closure in flight (issue #10:
   // several chats can run at once — gates and the Stop button are scoped to
   // the conversation they belong to, not to the whole app).
@@ -7170,37 +7172,34 @@ function Composer() {
   const pttBusyRef = useRef(false) // a release is still transcribing/sending
   const prevTitleRef = useRef('')
   const voiceStateRef = useRef<'idle' | 'recording' | 'transcribing'>('idle')
-  // Live ask_user card (the stream handler owns the store copy; PTT reads it
-  // from a ref so the hotkey handlers never go stale). `anyQuestion` is the
-  // unfiltered store value: a question in a background conversation must
-  // still shield its turn from the interrupt below.
+  // PTT routes dictated text to the pending gate rather than steering it.
+  // The refs stay live while the global hotkey handler remains mounted.
   const pendingQuestionRef = useRef<PendingQuestion | null>(null)
   const anyQuestionRef = useRef<PendingQuestion | null>(null)
   const anyQuestion = useAgent((s) => Object.values(s.pendingQuestions)[0] ?? null)
   useEffect(() => {
     anyQuestionRef.current = anyQuestion
   }, [anyQuestion])
-  // Live approval card (same ref pattern: the stream handler owns the store
-  // copy; PTT reads a ref so the hotkey handler never goes stale). Unscoped:
-  // an approval in a background conversation must still shield its turn from
-  // the interrupt below.
   const anyApprovalRef = useRef<PendingApproval | null>(null)
   const anyApproval = useAgent((s) => Object.values(s.pendingApprovals)[0] ?? null)
   useEffect(() => {
     anyApprovalRef.current = anyApproval
   }, [anyApproval])
-  // Live exit_plan card (same ref pattern): a plan waiting for approval must
-  // shield its turn from the PTT interrupt, and a dictated answer resolves it.
   const anyPlanRef = useRef<PendingPlanApproval | null>(null)
   const anyPlan = useAgent((s) => Object.values(s.pendingPlanApprovals)[0] ?? null)
   useEffect(() => {
     anyPlanRef.current = anyPlan
   }, [anyPlan])
+  // Live approval card (same ref pattern: the stream handler owns the store
+  // copy; PTT reads a ref so the hotkey handler never goes stale). Unscoped:
+  // an approval in a background conversation must still shield its turn from
+  // the interrupt below.
+  // Live exit_plan card (same ref pattern): a plan waiting for approval must
+  // shield its turn from the PTT interrupt, and a dictated answer resolves it.
   // Assigned after `send`/`stop` are declared below (TDZ-safe via refs).
-  const sendRef = useRef<(text?: string, opts?: { interrupt?: boolean }) => Promise<void>>(
+  const sendRef = useRef<(text?: string, opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[] }) => Promise<void>>(
     async () => {},
   )
-  const stopRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     voiceStateRef.current = voiceState
@@ -7219,15 +7218,9 @@ function Composer() {
   const pttPress = async () => {
     if (pttBusyRef.current) return // previous release is still in flight
     if (voiceStateRef.current === 'transcribing') return
-    if (status === 'thinking' || status === 'running-tool') {
-      // A turn is running: stop it (Stop-button path, server + client) so
-      // the dictation lands now instead of queueing behind the run — unless
-      // the turn is blocked on an ask_user question, an access-mode
-      // approval, or a plan waiting for approval, which the dictated
-      // answer is about to resolve; cancelling would destroy the thing
-      // being answered.
-      if (!anyQuestionRef.current && !anyApprovalRef.current && !anyPlanRef.current) stopRef.current()
-    }
+    // Mid-run PTT queues and steers only after a non-empty transcript is
+    // available. A gate remains protected and receives dictated answers via
+    // the existing release-time routing below.
     if (voiceStateRef.current === 'recording') {
       // Take the mic over from click-dictation; discard its audio.
       try {
@@ -7351,7 +7344,11 @@ function Composer() {
         )
         return
       }
-      void sendRef.current(text)
+      if (streaming && conversationId !== null) {
+        await steerInput(text.trim())
+      } else {
+        void sendRef.current(text)
+      }
     } catch (e) {
       // Transcription failed: nothing was filed, so the release-time pin
       // must not leak into the next typed draft (#88).
@@ -7807,6 +7804,7 @@ function Composer() {
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'stopped') {
       setStatus(bufKey, 'idle')
+      setSteerFlag(bufKey, false)
       appendTextDelta(bufKey, curId, '\n[stopped]')
       settleSubAgents(bufKey, curId)
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
@@ -7817,6 +7815,7 @@ function Composer() {
       // No count state - the pill renders from queueEchoByConv.
     } else if (ev.type === 'done') {
       setStatus(bufKey, 'idle')
+      setSteerFlag(bufKey, false)
       // A completed turn must leave no block pulsing: settle anything the
       // stream ended without a sub_agent_done for (defensive; the backend
       // always emits done events in the normal path).
@@ -7824,6 +7823,9 @@ function Composer() {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
+      // Successful completion drains the backend queue. Any echo left after
+      // injected/autosend events is stale and would expose invalid remove ids.
+      if (!pendingQueueAutosendRef.current[bufKey]) setQueueEcho(bufKey, [])
     } else if (ev.type === 'title') {
       const convId = Number(bufKey)
       if (ev.title && Number.isInteger(convId) && convId > 0) {
@@ -7833,16 +7835,19 @@ function Composer() {
       // Soft injection landed (#7): promote the optimistic echo (matched
       // by the backend's queued-item id) into a real message.
       const echoes = useAgent.getState().queueEchoByConv[bufKey] ?? []
-      const echo = echoes.find((e) => e.id === ev.user_injected_id)
-      if (echo) useAgent.getState().reconcileInjected(bufKey, echo.tempId)
+      const echo = echoes.find((e) => e.id === ev.id)
+      if (echo) {
+        useAgent.getState().reconcileInjected(bufKey, echo.tempId, ev.images ?? echo.images, ev.skills ?? echo.skills)
+      }
+      setSteerFlag(bufKey, false)
       setQueueEcho(
         bufKey,
-        echoes.filter((e) => e.id !== ev.user_injected_id),
+        echoes.filter((e) => e.id !== ev.id),
       )
     } else if (ev.type === 'queued_autosend') {
       // The run ended (naturally or on error) with messages still queued
       // (#7): the backend hands them back - fire them as fresh turns.
-      void drainQueueOnEnd(bufKey, ev.queued_autosend_items ?? [])
+      pendingQueueAutosendRef.current[bufKey] = ev.items ?? []
     } else if (ev.type === 'model_call') {
       // Issue #43: a chat call is dispatched and nothing has come back yet.
       // The waiting readout is driven by streamAgentTurn's onModelCall hook;
@@ -7888,30 +7893,20 @@ function Composer() {
     }
   }
 
-  const send = async (pttText?: string, opts?: { interrupt?: boolean }) => {
+  const send = async (
+    pttText?: string,
+    opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[] },
+  ) => {
     // Push-to-talk passes explicit text: it sends as its own message and
     // must not touch (or clear) whatever draft is sitting in the composer.
     const isPtt = pttText !== undefined
-    const interrupting = isPtt && opts?.interrupt === true
+    const handedOffPayload = opts?.images !== undefined || opts?.skills !== undefined
     const text = (pttText ?? input).trim()
     if (
       (!text && (isPtt || (attachments.length === 0 && images.length === 0))) ||
-      (sendingKey === (conversationId === null ? 'draft' : String(conversationId)) && !interrupting)
+      (sendingKey === (conversationId === null ? 'draft' : String(conversationId)) && !opts?.queueHandoff)
     )
       return
-    // PTT interrupt: the hotkey press already cancelled the running turn
-    // (stopRef → Stop-button path). That turn's stream is still winding down
-    // in its own send closure — the one that owns setSending(false) and
-    // setAbortController(null) — so wait for it to release the store's
-    // AbortController before touching any shared state. Bounded at 5s; the
-    // abort makes the in-flight fetch throw immediately, so this is fast.
-    if (interrupting) {
-      const ivKey = conversationId === null ? 'draft' : String(conversationId)
-      for (let i = 0; i < 100; i++) {
-        if (!useAgent.getState().abortByConv[ivKey]) break
-        await new Promise<void>((r) => setTimeout(r, 50))
-      }
-    }
     // Agent chat (issue #41): typed messages NEVER trigger a run — each one
     // becomes a standing instruction the agent sees at every scheduled fire.
     if (conversationId !== null && !isPtt) {
@@ -7944,7 +7939,7 @@ function Composer() {
     // workspace path pointers the agent can read_file. PTT skips this —
     // the attachments belong to the untouched draft.
     let fullText = text
-    if (!isPtt) {
+    if (!isPtt && !handedOffPayload) {
       for (const a of attachments) {
         fullText += attachmentText(a)
       }
@@ -7952,7 +7947,7 @@ function Composer() {
         fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
       }
     }
-    const imageDataUrls = images.map((i) => i.dataUrl)
+    const imageDataUrls = opts?.images ?? images.map((i) => i.dataUrl)
     // $name anywhere in the prompt loads the skill for this turn (unknown
     // names are literal text; the message is sent exactly as written). Menu
     // picks — / or $ — become chips; this scan is the fallback for hand-typed
@@ -7969,12 +7964,11 @@ function Composer() {
         dollarNames.push(name)
       }
     }
-    const invokedSkills = [...pickedSkills.map((s) => s.name), ...dollarNames]
+    const invokedSkills = opts?.skills ?? [...pickedSkills.map((s) => s.name), ...dollarNames]
     // Captured draft: if the turn fails before the agent answers, the
     // composer gets it back — a failed send must not cost the prompt.
     const draft = { input, attachments, images, pickedSkills }
-
-    if (!isPtt) {
+    if (!isPtt && !handedOffPayload) {
       setInput('')
       setAttachments([])
       setImages([])
@@ -8058,10 +8052,12 @@ function Composer() {
         removeMessage(bufKey, userId)
         // PTT has no input to clear, so its dictated text must come back
         // too — a failed send must not cost the dictation either.
-        setInput(isPtt ? (draft.input ? `${draft.input.trimEnd()} ${text}` : text) : draft.input)
-        setAttachments(draft.attachments)
-        setImages(draft.images)
-        setPickedSkills(draft.pickedSkills)
+        if (!handedOffPayload) {
+          setInput(isPtt ? (draft.input ? `${draft.input.trimEnd()} ${text}` : text) : draft.input)
+          setAttachments(draft.attachments)
+          setImages(draft.images)
+          setPickedSkills(draft.pickedSkills)
+        }
         setStatus(bufKey, 'error')
         setSendError(
           `Message not sent — the agent could not be reached. Your draft was restored.`,
@@ -8076,6 +8072,11 @@ function Composer() {
       setSending(false)
       setAbortController(bufKey, null)
       setSendingKey((k) => (k === entryKey || k === bufKey ? null : k))
+      const autosend = pendingQueueAutosendRef.current[bufKey]
+      if (autosend) {
+        delete pendingQueueAutosendRef.current[bufKey]
+        void drainQueueOnEnd(bufKey, autosend, send)
+      }
     }
   }
   // Keep the PTT handlers pointed at the latest send (stale-closure shield).
@@ -8139,48 +8140,74 @@ function Composer() {
     const key = conversationId === null ? 'draft' : String(conversationId)
     useAgent.getState().abortByConv[key]?.abort()
   }
-  // Keep the PTT handlers pointed at the latest stop (stale-closure shield).
-  stopRef.current = stop
-  // Keep the PTT handlers pointed at the latest stop (stale-closure shield).
-  stopRef.current = stop
 
   /** Queue the current composer draft into the running turn (#7): POST it
    *  to the server queue (persisted with the run), echo it optimistically
    *  into the transcript marked queued, and clear the composer. */
-  const queueInput = async () => {
-    const text = input.trim()
-    if (!text || conversationId === null) return
+  const queueInput = async (messageOverride?: string): Promise<boolean> => {
+    const fromComposer = messageOverride === undefined
+    const text = messageOverride ?? input.trim()
+    if ((!text && (fromComposer ? attachments.length === 0 && images.length === 0 : true)) || conversationId === null) return false
+    const fullText = text + (fromComposer ? attachments.map(attachmentText).join('') : '')
+    const skillNames = fromComposer ? [...pickedSkills.map((s) => s.name)] : []
+    for (const match of fullText.matchAll(/\$([A-Za-z0-9_-]+)/g)) {
+      if (fromComposer && skills.some((skill) => skill.name === match[1]) && !skillNames.includes(match[1])) {
+        skillNames.push(match[1])
+      }
+    }
+    if (fromComposer && images.length > 4) {
+      useAgent.getState().pushToast({
+        kind: 'error',
+        title: 'Too many images',
+        body: 'A message can include up to four images. Remove the extras before queuing.',
+      })
+      return false
+    }
+    const imageDataUrls = fromComposer ? images.map((image) => image.dataUrl) : []
     try {
-      const res = await queueMessage(conversationId, text)
-      const tempId = `q${res.item.id}-${Date.now()}`
-      appendUserMessage(bufKeyForQueue, text)
+      const res = await queueMessage(conversationId, fullText || '[Image attachment]', skillNames, imageDataUrls)
+      const tempId = appendUserMessage(
+        bufKeyForQueue,
+        fullText || '[Image attachment]',
+        imageDataUrls,
+        skillNames,
+        true,
+      )
       const echoes = [
         ...(useAgent.getState().queueEchoByConv[bufKeyForQueue] ?? []),
-        { id: res.item.id, tempId, text },
+        { id: res.item.id, tempId, text: fullText || '[Image attachment]', images: imageDataUrls, skills: skillNames },
       ]
       setQueueEcho(bufKeyForQueue, echoes)
-      setInput('')
+      if (fromComposer) {
+        setInput('')
+        setImages([])
+        setAttachments([])
+        setPickedSkills([])
+      }
+      return true
     } catch (e) {
       useAgent.getState().pushToast({
         kind: 'error',
         title: 'Could not queue message',
-        body: String((e as Error).message ?? e),
+        body: `${String((e as Error).message ?? e)}. Your draft was kept; send it normally if the run has ended.`,
       })
+      return false
     }
   }
 
   /** Steer (#7): interrupt the in-flight step so queued messages land at
    *  the next boundary now; the run continues with full context. */
   const steerNow = async () => {
-    if (conversationId === null) return
+    if (conversationId === null || pendingQuestion || pendingApproval || pendingPlanApproval) return
     setSteerFlag(bufKeyForQueue, true)
     try {
       await steerAgent(conversationId)
     } catch (e) {
+      setSteerFlag(bufKeyForQueue, false)
       useAgent.getState().pushToast({
         kind: 'error',
         title: 'Could not steer',
-        body: String((e as Error).message ?? e),
+        body: `${String((e as Error).message ?? e)}. The message remains queued; use Stop to end the run, or leave it for the next boundary.`,
       })
     } finally {
       // The flag clears when the injection lands (user_injected) or when
@@ -8189,18 +8216,29 @@ function Composer() {
     }
   }
 
+  const steerInput = async (messageOverride?: string) => {
+    if (pendingQuestion || pendingApproval || pendingPlanApproval || conversationId === null) return
+    if (await queueInput(messageOverride)) await steerNow()
+  }
+
   /** Fire queued messages as fresh turns after the run ended with them
    *  still queued (#7: auto-send on natural completion or error). */
   const drainQueueOnEnd = async (
     key: string,
-    items: Array<{ id: number; text: string }>,
+    items: Array<{ id: number; text: string; skills?: string[]; images?: string[] }>,
+    sendQueued: (text?: string, opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[] }) => Promise<void>,
   ) => {
-    const echoes = useAgent.getState().queueEchoByConv[key] ?? []
     for (const it of items) {
+      const echoes = useAgent.getState().queueEchoByConv[key] ?? []
       const echo = echoes.find((e) => e.id === it.id)
-      if (echo) dropQueuedEcho(key, echo.tempId)
-      await sendRef.current?.(it.text)
+      if (echo) {
+        markQueuedAsNormal(key, echo.tempId)
+        dropQueuedEcho(key, echo.tempId)
+      }
+      await sendQueued(it.text, { queueHandoff: true, images: it.images ?? [], skills: it.skills ?? [] })
     }
+    // Any echo without a matching backend item is stale: the backend's
+    // drained list is authoritative after the run-end handoff.
     setQueueEcho(key, [])
   }
 
@@ -8453,7 +8491,11 @@ function Composer() {
                   pickSkill(filteredSkills[skillIndex] ?? filteredSkills[0])
                 } else {
                   setSkillMenuOpen(false)
-                  void send()
+                  if (streaming && conversationId !== null) {
+                    if (!pendingQuestion && !pendingApproval && !pendingPlanApproval) void steerInput()
+                  } else {
+                    void send()
+                  }
                 }
                 return
               }
@@ -8463,15 +8505,15 @@ function Composer() {
                 return
               }
             }
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && streaming && conversationId !== null) {
+              e.preventDefault()
+              if (!pendingQuestion && !pendingApproval && !pendingPlanApproval) void queueInput()
+              return
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
-              // Queuing (#7): while a run streams in this conversation,
-              // plain Enter queues the message instead of sending - it
-              // lands at the next step boundary (or auto-sends at run
-              // end). Agent chats are excluded above; the draft never
-              // streams, so it always takes the normal send path.
               if (streaming && conversationId !== null) {
-                void queueInput()
+                if (!pendingQuestion && !pendingApproval && !pendingPlanApproval) void steerInput()
                 return
               }
               void send()
@@ -8503,7 +8545,7 @@ function Composer() {
                 {queueEchoes.length} queued message{queueEchoes.length === 1 ? '' : 's'}
               </span>
               <span className="ml-auto flex items-center gap-2 tracking-normal normal-case">
-                {streaming && conversationId !== null && (
+                {streaming && conversationId !== null && !pendingQuestion && !pendingApproval && !pendingPlanApproval && (
                   <span
                     role="button"
                     tabIndex={0}
@@ -8614,7 +8656,32 @@ function Composer() {
                 )}
               </button>
             )}
-            {streaming || sendingKey === (conversationId === null ? 'draft' : String(conversationId)) ? (
+            {streaming && conversationId !== null ? (
+              <>
+                <button
+                  className="rounded border border-amber-700 px-2.5 py-1.5 text-sm text-amber-200 hover:bg-amber-950 disabled:opacity-40"
+                  title="Interrupt the current step and inject this message now"
+                  disabled={Boolean(pendingQuestion || pendingApproval || pendingPlanApproval || (!input.trim() && !attachments.length && !images.length))}
+                  onClick={() => void steerInput()}
+                >
+                  Steer
+                </button>
+                <button
+                  className="rounded border border-zinc-600 px-2.5 py-1.5 text-sm text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
+                  title="Queue until the next natural boundary (Ctrl/Cmd+Enter)"
+                  disabled={Boolean(pendingQuestion || pendingApproval || pendingPlanApproval || (!input.trim() && !attachments.length && !images.length))}
+                  onClick={() => void queueInput()}
+                >
+                  Queue
+                </button>
+                <button
+                  className="rounded border border-red-700 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950"
+                  onClick={stop}
+                >
+                  Stop
+                </button>
+              </>
+            ) : streaming || sendingKey === (conversationId === null ? 'draft' : String(conversationId)) ? (
               <button
                 className="rounded border border-red-700 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950"
                 onClick={stop}

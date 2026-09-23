@@ -201,8 +201,8 @@ interface AgentState {
   /** Client-side echo of messages queued during a run (#7): tempId links
    *  the optimistic transcript row to the backend's queued item id, so the
    *  user_injected event can promote the right echo into a real message. */
-  queueEchoByConv: Record<string, Array<{ id: number; tempId: string; text: string }>>
-  setQueueEcho: (key: string, items: Array<{ id: number; tempId: string; text: string }>) => void
+  queueEchoByConv: Record<string, Array<{ id: number; tempId: string; text: string; images?: string[]; skills?: string[] }>>
+  setQueueEcho: (key: string, items: Array<{ id: number; tempId: string; text: string; images?: string[]; skills?: string[] }>) => void
   /** True while a steer interrupt is in flight (#7) - the pill's button
    *  shows "steering..." until the injection lands. */
   steerByConv: Record<string, boolean>
@@ -337,14 +337,15 @@ interface AgentState {
   pushLog: (e: Omit<LogEntry, 'id' | 'time'>) => void
   clearLog: () => void
 
-  appendUserMessage: (key: string, text: string, images?: string[], skills?: string[]) => string
+  appendUserMessage: (key: string, text: string, images?: string[], skills?: string[], queued?: boolean) => string
   appendAssistantPlaceholder: (key: string) => string
   /** Capture a `say` briefing onto its message (#66): speech-only, never
    *  rendered; consumed by the narrator when the emission completes. */
   setSay: (key: string, msgId: string, say: string) => void
   /** Reconcile one injected queued message (#7): the optimistic `queued`
    *  echo becomes a real user message at the injection point. */
-  reconcileInjected: (key: string, tempId: string) => void
+  reconcileInjected: (key: string, tempId: string, images?: string[], skills?: string[]) => void
+  markQueuedAsNormal: (key: string, tempId: string) => void
   /** Remove a queued echo that never landed (hard Stop held the queue,
    *  user removed it from the pill). */
   dropQueuedEcho: (key: string, tempId: string) => void
@@ -784,14 +785,14 @@ export const useAgent = create<AgentState>((set, get) => ({
   // target at send time, so a turn streams into its own conversation's
   // buffer even when the user is looking at another one.
 
-  appendUserMessage: (key, text, images, skills) => {
+  appendUserMessage: (key, text, images, skills, queued = false) => {
     const id = genId()
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
         [key]: [
           ...(s.messagesByConv[key] ?? []),
-          { id, role: 'user', content: text, images, skills },
+          { id, role: 'user', content: text, images, skills, queued },
         ],
       },
     }))
@@ -829,13 +830,24 @@ export const useAgent = create<AgentState>((set, get) => ({
     }))
   },
 
-  reconcileInjected: (key, tempId) => {
+  markQueuedAsNormal: (key, tempId) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) =>
+          m.id === tempId ? { ...m, queued: false } : m,
+        ),
+      },
+    }))
+  },
+
+  reconcileInjected: (key, tempId, images, skills) => {
     set((s) => {
       const msgs = s.messagesByConv[key] ?? []
       const echo = msgs.find((m) => m.id === tempId)
       if (!echo) return {}
       const patched = msgs.map((m) =>
-        m.id === tempId ? { ...m, id: `inj${m.id}`, queued: false } : m,
+        m.id === tempId ? { ...m, id: `inj${m.id}`, queued: false, images, skills } : m,
       )
       return { messagesByConv: { ...s.messagesByConv, [key]: patched } }
     })

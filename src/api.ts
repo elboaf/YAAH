@@ -425,13 +425,19 @@ export interface QueuedItem {
   id: number
   text: string
   skills: string[]
+  images: string[]
 }
 
-export const queueMessage = (id: number, message: string, skills: string[] = []) =>
+export const queueMessage = (
+  id: number,
+  message: string,
+  skills: string[] = [],
+  images: string[] = [],
+) =>
   api<{ ok: boolean; item: QueuedItem }>(`/api/agent/${id}/queue`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, skills }),
+    body: JSON.stringify({ message, skills, images }),
   })
 
 export const fetchQueue = (id: number) =>
@@ -868,9 +874,11 @@ export interface AgentEvent {
   /** Spoken briefing for read-aloud (#66) — speech-only, never rendered. */
   say?: string
   /** Soft injection landed (#7): the queued message is now a real turn. */
-  user_injected_id?: number
+  id?: number
+  images?: string[]
+  skills?: string[]
   /** Run ended with messages still queued (#7): auto-send them. */
-  queued_autosend_items?: Array<{ id: number; text: string }>
+  items?: Array<{ id: number; text: string; skills?: string[]; images?: string[] }>
   /** Live output chunk while a shell tool runs (tool_progress). */
   chunk?: string
   /** Branch name of the session worktree (worktree_bound /
