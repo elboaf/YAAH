@@ -998,10 +998,11 @@ export async function streamAgentTurn(
           model: ev.model ?? '',
           startedAt: Date.now(),
         })
-      } else if (ev.type !== 'thinking') {
-        // Any other stream activity means the call is no longer pending —
-        // thinking deltas still mean "the call hasn't spoken yet", so the
-        // waiting readout stays up while reasoning streams.
+      } else {
+        // Any other stream activity — including `thinking` deltas — means the
+        // model is already responding to us, so the waiting readout must go
+        // away. Reasoning tokens are tokens: only a fully silent call
+        // (request sent, nothing back yet) counts as "waiting".
         onModelCall?.(null)
       }
       onEvent(ev)
