@@ -1356,6 +1356,11 @@ async def test_worktree_bound_released_events(fake_model, tmp_path, monkeypatch)
 
     monkeypatch.setattr(loop, "execute_tool", fake_execute)
 
+    # Worktrees-on-contention: a ghost incumbent forces the isolated path
+    # so the write turn below still exercises bound/released events.
+    from backend.agent import worktrees as _wt
+    _wt._inplace_writers["ghost"] = str(repo)
+
     # --- read-only turn: no worktree events at all
     cid = await create_conversation("wt-events-readonly")
     fake_model.append([

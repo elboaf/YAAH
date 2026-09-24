@@ -237,6 +237,18 @@ _chat_bindings: dict[str, str] = {}
 # writer is refused with a clear error (issue §1 non-repo fallback — never
 # a silent fallthrough for concurrent writers).
 _shared_writers: dict[str, set[str]] = {}  # workspace key -> tokens
+# Contention registry: chat_id -> main-root key for chats whose CURRENT
+# turn is writing in place (no worktree). A lone writer works directly in
+# the user's folder; a newcomer arriving while another chat holds the slot
+# gets a session worktree (newcomer isolates, incumbents are never
+# migrated mid-turn). Entries live only for the duration of a turn —
+# turn_end/release unregisters, so the next lone turn runs in place again.
+_inplace_writers: dict[str, str] = {}
+_writer_locks: dict[str, asyncio.Lock] = {}
+
+
+def _writer_lock(key: str) -> asyncio.Lock:
+    return _writer_locks.setdefault(key, asyncio.Lock())
 
 
 def is_bound(chat_id: str) -> bool:
@@ -262,11 +274,13 @@ def worktree_of(workspace: str) -> str | None:
 
 
 def release_chat(chat_id: str) -> None:
-    """Turn-end bookkeeping: drop a chat's non-repo shared-writer token.
-    Bound worktree sessions are released by turn_end/release_session instead."""
+    """Turn-end bookkeeping: drop a chat's non-repo shared-writer token
+    and any in-place writer registration. Bound worktree sessions are
+    released by turn_end/release_session instead."""
     key = f"chat:{chat_id}"
     for holders in _shared_writers.values():
         holders.discard(key)
+    _inplace_writers.pop(chat_id, None)
 
 
 def session_rows() -> list[dict]:
@@ -557,7 +571,7 @@ async def _chat_title(chat_id: str) -> str | None:
         return None
 
 
-async def ensure_isolated(workspace: str, chat_id: str) -> str:
+async def ensure_isolated(workspace: str, chat_id: str, share_key: str = "") -> str:
     """The rebinding seam: return the worktree path this caller must use,
     or the original workspace when isolation does not apply.
 
@@ -565,11 +579,17 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
     already-bound, already-a-worktree. Non-repo shared writers are capped
     at one concurrent writer (issue §1).
 
-    adr/0003: the binding is a SESSION binding — once created it stays
-    for the chat's lifetime (never released at turn end), so every turn
-    of a chat works in the same tree. A binding recovered after a
-    backend restart (path-shape discovery below) is re-registered here
-    transparently."""
+    Contention gate (worktrees-on-contention): a git workspace's FIRST
+    writer works in place — no worktree, no agent branch; changes land
+    directly in the user's folder. A newcomer arriving while another chat
+    holds the in-place slot gets a session worktree. `share_key` names the
+    parent chat for sub-agents: the parent's registration never counts as
+    contention and covers the sub (registered under the parent's key, so
+    the parent's own later writes see no phantom contender).
+
+    adr/0003: once a WORKTREE binding exists it is a session binding —
+    every turn of that chat works in the same tree. In-place turns
+    re-decide each turn: when the turn ends, the slot is released."""
     ws = str(workspace)
     wt = worktree_of(ws)
     if wt is not None:
@@ -603,9 +623,10 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
         root = None
     if root is None:
         # Non-repo: status quo for the FIRST writer, refused for a second.
+        # A sub-agent shares its parent's token (one slot per chat team).
         key = str(Path(ws).resolve()) if ws.strip() else str(Path.home())
         holders = _shared_writers.setdefault(key, set())
-        token = f"chat:{chat_id}"
+        token = f"chat:{share_key or chat_id}"
         if holders and token not in holders:
             raise IsolationRefused(
                 "another agent is already writing in this non-repo workspace; "
@@ -632,6 +653,22 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
             _active[str(candidate)] = info
             _chat_bindings[chat_id] = str(candidate)
             return str(candidate)
+    # Contention gate: alone → in place. The check-and-register runs under
+    # the per-root lock so two chats' first write calls cannot both see an
+    # empty registry. Registration uses the top-level chat id (share_key
+    # when given): a sub-agent writing first registers its PARENT, so the
+    # parent's own later ensure call finds itself, not a stranger.
+    holder = share_key or chat_id
+    root_key = str(root)
+    async with _writer_lock(root_key):
+        contended = any(
+            r == root_key and c != holder
+            for c, r in _inplace_writers.items()
+        )
+        if not contended:
+            _inplace_writers[holder] = root_key
+            return ws
+    # Contended: this chat becomes the newcomer and isolates as today.
     run_id = uuid.uuid4().hex[:12]
     label: str | None = None
     if chat_id:
@@ -1403,6 +1440,42 @@ def stop_background_sync() -> None:
 # re-salvaging every tick would grow patch litter unboundedly. Retry only
 # the removal until something (a reboot, a process exit) unlocks the tree.
 _reap_failed: set[str] = set()
+
+
+async def release_all_sessions(roots: list[str]) -> list[str]:
+    """Startup sweep (worktrees-on-contention): tear down every session
+    worktree discovered under the given workspace roots before any turn
+    can run. In-place mode makes sessions rare and short-lived, so a
+    previous process's leftover sessions get the full session-end
+    contract immediately (salvage-first, zero-commit branches deleted)
+    instead of waiting out the reaper TTL. Nothing is live in-memory at
+    startup, so nothing bound survives the sweep by design."""
+    released: list[str] = []
+    for root_str in roots:
+        root = Path(root_str)
+        wt_base = worktree_base(root)
+        if not wt_base.is_dir():
+            continue
+        for child in sorted(wt_base.iterdir()):
+            if not child.is_dir() or worktree_of(str(child)) != str(child):
+                continue
+            rc, out = await _git(child, "rev-parse", "--abbrev-ref", "HEAD")
+            branch = (
+                out.strip()
+                if rc == 0 and out.strip().startswith(BRANCH_PREFIX)
+                else child.name
+            )
+            if await _dirty(child):
+                await _salvage(root, child, branch, "startup sweep")
+            await _remove_worktree(root, child, force=True)
+            if child.exists():
+                _reap_failed.add(str(child))
+                continue
+            if await _new_commits(root, branch) <= 0:
+                with contextlib.suppress(Exception):
+                    await _git(root, "branch", "-D", branch)
+            released.append(str(child))
+    return released
 
 
 async def reap_stale(now: float | None = None) -> dict:

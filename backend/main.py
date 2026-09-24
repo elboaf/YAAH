@@ -65,6 +65,23 @@ async def lifespan(app: FastAPI):
     # orphaned by crashed/aborted runs, then TTL pruning).
     from backend.agent import worktrees as _worktrees
 
+    # Worktrees-on-contention: no session worktree survives a restart —
+    # sweep every configured root (salvage-first) before any turn can
+    # rebind, then start the usual reaper for future ones.
+    from backend.db.database import list_workspaces
+    from backend.agent.tools import workspace_root
+
+    try:
+        rows = await list_workspaces()
+        roots = [
+            str(workspace_root(r["path"]))
+            for r in rows
+            if r.get("path") and not str(r["path"]).startswith("remote:")
+        ]
+        roots.append(str(workspace_root("")))
+        await _worktrees.release_all_sessions(sorted(set(roots)))
+    except Exception:  # noqa: BLE001 — a sweep failure must never block boot
+        pass
     _worktrees.start_reaper()
     # Issue #98 / adr/0002: keep every visible main tree fast-forwarded to
     # its upstream on a background cadence (ff-only, overlap-aware) so a
