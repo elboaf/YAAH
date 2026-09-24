@@ -1318,8 +1318,8 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         </div>
       )
     }
-    // History compaction marker (adr/0004): a collapsible divider where
-    // the summarized prefix used to be — the summary is the record now.
+    // Legacy history compaction marker (adr/0004): old versions stored a
+    // summary as a system row after deleting the summarized transcript.
     try {
       const parsed: unknown = JSON.parse(msg.content)
       if (parsed && typeof parsed === 'object' && 'compaction' in (parsed as object)) {
@@ -8207,13 +8207,10 @@ function Composer() {
       // this branch only keeps the status dot honest.
       setStatus(bufKey, 'thinking')
     } else if (ev.type === 'compacted') {
-      // History compaction (adr/0004) ran before the first model call:
+      // Prompt compaction (adr/0004) ran before the first model call:
       // surface it as a chip in the ticker row (store-driven), not a
-      // transcript message — a divider here used to be the only content of
-      // the fresh assistant message, which kept the telemetry strip from
-      // mounting (it lives inside ToolTicker). The backend already
-      // persisted the system row, so a later history refetch still shows
-      // the durable CompactionDivider in its transcript position.
+      // transcript message. The full transcript remains untouched; only
+      // prompt-summary state and its replay watermark are updated.
       setCompaction(bufKey, {
         summarized: ev.summarized_messages,
         summary: ev.summary ?? '',

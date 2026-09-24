@@ -642,6 +642,26 @@ TOOLS_SCHEMA += [
     {
         "type": "function",
         "function": {
+            "name": "search_conversation_history",
+            "description": (
+                "Search all persisted text in this conversation, including "
+                "messages before and after context compaction, tool activity, "
+                "sub-agent transcripts, and the prompt summary. Provide a "
+                "case-insensitive plain-text query; results contain short excerpts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Plain-text query to find in conversation history"},
+                    "max_results": {"type": "integer", "description": "Maximum matches (default 10, max 50)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git_status",
             "description": (
                 "Show git working tree status for the workspace. If this "
@@ -1216,6 +1236,18 @@ async def move_file(workspace: str, src: str, dst: str) -> dict:
         return {"error": str(e)}
 
 
+async def search_conversation_history(
+    workspace: str, conversation_id: int | None = None,
+    query: str = "", max_results: int = 10,
+) -> dict:
+    """Search the active conversation's complete persisted text transcript."""
+    if conversation_id is None:
+        return {"error": "conversation history is unavailable in this context"}
+    from backend.db.database import search_conversation_history as search
+
+    return await search(conversation_id, query, max_results)
+
+
 async def search_files(
     workspace: str,
     pattern: str = None,
@@ -1402,6 +1434,7 @@ EXECUTORS = {
     "delete_file": delete_file,
     "move_file": move_file,
     "search_files": search_files,
+    "search_conversation_history": search_conversation_history,
     "git_status": git_status,
     "git_diff": git_diff,
     "git_add": git_add,
@@ -1460,6 +1493,8 @@ _READ_TOOLS = {
     # delegation is free in all modes: the sub-agent's own tool calls hit
     # the same gate, so spawning cannot launder permissions
     "spawn_agent",
+    # conversation history is a read-only transcript query
+    "search_conversation_history",
     # memory reads live outside the workspace but change nothing
     "memory_read",
 }
@@ -1519,7 +1554,10 @@ def _with_help_nudge(name: str, result: dict) -> dict:
     return result
 
 
-async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None) -> dict:
+async def execute_tool(
+    name: str, arguments: dict, workspace: str, on_chunk=None,
+    conversation_id: int | None = None,
+) -> dict:
     """Execute a tool by name with a dict of arguments. Never raises.
 
     While a remote session is active, workspace-touching tools are
@@ -1554,6 +1592,8 @@ async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
+    if name == "search_conversation_history":
+        arguments = {**arguments, "conversation_id": conversation_id}
     # --- provenance seeding (pre-call) -------------------------------------
     try:
         from backend.agent import worktrees as _wt

@@ -1,25 +1,9 @@
-"""History compaction: keep per-call prompt size bounded on long sessions.
+"""Prompt compaction: bound model context without changing the transcript.
 
-ZCode-style context management (adr/0004): when the conversation's
-measured prompt size (the exact ``usage.prompt_tokens`` the provider
-reported, persisted per conversation) crosses a fraction of the model's
-context window, the oldest messages are folded into ONE summary and
-replaced in the DB. The recent tail stays verbatim.
-
-Design invariants:
-
-- The trigger uses MEASURED tokens (never an estimate) against the
-  resolved window (Settings override -> provider report -> built-in
-  table). Unknown window falls back to a chars/4 estimate over a
-  conservative default budget.
-- The SPLIT POINT uses chars/4 estimates: only relative sizing matters
-  there, and no tokenizer ships with the app.
-- The cut boundary always lands on a user message, so the summarized
-  prefix never breaks an assistant tool_calls -> tool result pair.
-- Compaction is delete-not-tombstone: the folded rows are removed and
-  one system row takes their place. ``load_history`` stays a pure
-  replay with no compacted-row filtering, and the DB stays bounded
-  like the context.
+When measured prompt usage crosses the configured threshold, a cumulative
+summary is stored separately from the conversation's immutable transcript.
+The summary watermark controls model replay; transcript reads, exports, and
+agent search retain access to the original messages.
 """
 
 import json
@@ -231,18 +215,27 @@ def _excerpt(cut_messages: list) -> str:
         elif role == "tool":
             tc_id = m.get("tool_call_id") or ""
             body = f"[tool result {tc_id}] {_content_text(m.get('content'))[:_TOOL_RESULT_CHARS]}"
+        elif role in {"previous summary", "legacy prompt summary"}:
+            body = _content_text(m.get("content"))[:_SUMMARY_MAX_CHARS]
         else:
             body = _content_text(m.get("content"))[:_ITEM_CHARS]
         lines.append(f"{role}: {body}")
     while len("\n".join(lines)) > _TRANSCRIPT_CHAR_BUDGET and len(lines) > 8:
-        lines.pop(0)
+        # If a prior summary is present at the end, preserve it while the
+        # oldest newly folded transcript items are trimmed from the front.
+        if len(lines) > 1 and cut_messages[-1].get("role") == "previous summary":
+            lines.pop(-2)
+        else:
+            lines.pop(0)
     return "\n".join(lines)
 
 
 _SUMMARIZER_PROMPT = (
     "You compress the earlier portion of an AI agent session into a compact "
-    "continuity summary. A new assistant instance will continue the session "
-    "seeing ONLY your summary in place of this excerpt.\n"
+    "continuity summary. The conversation transcript remains preserved for "
+    "review and search; this summary is only a bounded replacement in future "
+    "model prompts. If an earlier summary is included, merge its important "
+    "facts with the newly summarized messages.\n"
     "Preserve: the user's goals and explicit instructions; decisions made and "
     "why; concrete anchors — file paths, branch names, commands, "
     "function/variable names, error messages; what was attempted and what "
@@ -305,7 +298,8 @@ async def compact_history_for_context(
     model_id: str | None = None,
 ) -> dict | None:
     """The whole pass, run once per turn before the first model call:
-    measured tokens vs window -> cut -> summarize -> persist.
+    measured tokens vs window -> cut -> cumulatively summarize -> persist
+    prompt-only state, leaving every transcript message untouched.
 
     Returns a `compacted` event payload when compaction happened, else
     None. Never raises: any failure logs and leaves the conversation
@@ -326,34 +320,47 @@ async def compact_history_for_context(
         return None
 
     rows = await db.get_messages(conversation_id)
-    # The cut is computed over the RAW persisted rows (not the repaired
-    # replay load_history produces): compact_conversation deletes a
-    # prefix of the table, so the boundary must be expressed in the
-    # same units. Repair deltas (dropped orphan rows, synthetic tool
-    # answers) are rare and don't move the boundary meaningfully.
+    state = await db.get_prompt_summary(conversation_id)
+    watermark = int(state.get("through_message_id") or 0)
+    # Only unsummarized transcript rows participate in the next cut. The
+    # transcript itself remains untouched; the watermark affects prompt replay.
+    pending = [r for r in rows if r["id"] > watermark]
     keep_budget = int(window * ccfg["keep_fraction"])
-    cut = find_cut_index(rows, keep_budget, ccfg["keep_recent_messages"])
+    cut = find_cut_index(pending, keep_budget, ccfg["keep_recent_messages"])
     if cut <= 0:
         log.info(
-            "compaction skipped for conv %s: no safe cut (%d msgs, %s/%s tokens)",
-            conversation_id, len(rows), measured, window,
+            "compaction skipped for conv %s: no safe cut (%d pending msgs, %s/%s tokens)",
+            conversation_id, len(pending), measured, window,
         )
         return None
 
-    cut_messages = rows[:cut]
-    summary = await summarize_messages(cut_messages, ccfg.get("model") or "")
-    removed = await db.compact_conversation(
-        conversation_id, summary, cut_messages=len(cut_messages)
+    cut_messages = pending[:cut]
+    through_message_id = int(cut_messages[-1]["id"])
+    summary_input = list(cut_messages)
+    prior_summary = state.get("summary") or ""
+    if watermark and not prior_summary:
+        for row in rows:
+            if row["role"] == "system" and int(row["id"]) == watermark:
+                prior_summary = row["content"]
+                break
+    # Put the prior summary last so _excerpt's oldest-first budget trimming
+    # cannot discard the continuity facts needed for cumulative compaction.
+    if prior_summary:
+        summary_input.append({"role": "previous summary", "content": prior_summary})
+    summary = await summarize_messages(summary_input, ccfg.get("model") or "")
+    summarized = await db.compact_conversation(
+        conversation_id, summary, through_message_id=through_message_id
     )
-    if not removed:
+    if not summarized:
         return None
     log.info(
-        "compacted conv %s: %d messages folded (%s -> est %s of %s tokens)",
-        conversation_id, cut, measured, estimate_tokens(rows[cut:]), window,
+        "compacted conv %s: %d messages summarized through id %d (%s -> est %s of %s tokens)",
+        conversation_id, summarized, through_message_id, measured,
+        estimate_tokens(pending[cut:]), window,
     )
     return {
         "type": "compacted",
-        "summarized_messages": removed,
+        "summarized_messages": summarized,
         "summary": summary,
         "estimated_tokens_before": int(measured or 0),
         "context_window": int(window),

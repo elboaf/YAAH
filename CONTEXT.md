@@ -30,6 +30,20 @@ The error when a second writer tries to use a workspace that cannot be
 isolated (not a git repo). Never a silent fallthrough to the shared
 tree.
 
+### Conversation history
+
+**Conversation transcript**:
+The ordered, user-reviewable record of a conversation, including persisted messages and tool activity. It is preserved independently of model context.
+_Avoid_: unqualified history when the transcript or model context is meant
+
+**Model context**:
+The system instructions and selected/replayed conversation content sent to the model for a particular call. It may be smaller than the transcript.
+_Avoid_: transcript
+
+**Prompt summary**:
+A bounded, cumulative summary of transcript messages used in place of an older prefix in future model context. It does not replace or edit transcript messages.
+_Avoid_: compacted history, replacement transcript
+
 ### Getting work back
 
 **Integration**:

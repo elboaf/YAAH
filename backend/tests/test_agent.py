@@ -931,6 +931,76 @@ async def test_load_history_fills_unanswered_tool_call(fake_model, tmp_path):
     assert "not answered" in tool_msgs[0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_conversation_history_search_includes_compacted_and_auxiliary_text():
+    from backend.db.database import (
+        add_message, compact_conversation, create_conversation, get_messages,
+        search_conversation_history,
+    )
+
+    cid = await create_conversation("history-search")
+    first_id = await add_message(cid, "user", "remember amber-orbit")
+    await add_message(
+        cid, "assistant", "tool call",
+        tool_calls=[{"id": "tc", "type": "function", "function": {"name": "lookup", "arguments": json.dumps({"target": "amber-orbit"})}}],
+    )
+    await add_message(cid, "tool", "tool result mentions AMBER-ORBIT", tool_call_id="tc")
+    await add_message(cid, "assistant", "subagent result", sub_agent_transcript={"content": "amber-orbit detail"})
+    rows = await get_messages(cid)
+    assert await compact_conversation(cid, "summary mentions amber-orbit", rows[1]["id"]) == 2
+
+    result = await search_conversation_history(cid, "AMBER-ORBIT", max_results=10)
+    assert result["count"] >= 4
+    assert any(m["message_id"] == first_id for m in result["matches"])
+    assert any(m["field"] == "tool_calls" for m in result["matches"])
+    assert any(m["field"] == "sub_agent_transcript" for m in result["matches"])
+    assert any(m["role"] == "prompt_summary" for m in result["matches"])
+    assert all("excerpt" in m for m in result["matches"])
+
+
+@pytest.mark.asyncio
+async def test_model_can_search_active_conversation_history(fake_model, tmp_path):
+    from backend.db.database import add_message, create_conversation
+
+    cid = await create_conversation("history-tool-loop")
+    await add_message(cid, "user", "origin value cobalt-signal")
+    fake_model.append([{
+        "type": "tool_calls",
+        "tool_calls": [{
+            "id": "history-search-call",
+            "type": "function",
+            "function": {
+                "name": "search_conversation_history",
+                "arguments": json.dumps({"query": "cobalt-signal"}),
+            },
+        }],
+    }])
+    fake_model.append([{"type": "content", "text": "found it"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "look up the earlier value", str(tmp_path)))
+    result = next(e["result"] for e in events if e["type"] == "tool_result")
+    assert result["count"] >= 1
+    assert any(m["role"] == "user" for m in result["matches"])
+
+
+@pytest.mark.asyncio
+async def test_search_conversation_history_executor_requires_active_conversation(tmp_path):
+    from backend.agent.tools import execute_tool
+    from backend.db.database import add_message, create_conversation
+
+    unavailable = await execute_tool(
+        "search_conversation_history", {"query": "secret"}, str(tmp_path)
+    )
+    assert "error" in unavailable
+    cid = await create_conversation("search-executor")
+    await add_message(cid, "user", "find me")
+    found = await execute_tool(
+        "search_conversation_history", {"query": "find me"}, str(tmp_path),
+        conversation_id=cid,
+    )
+    assert found["count"] == 1
+
+
 # ---------------------------------------------------------------- harness guidance
 # Regression tests for the stalled FlyGD-Wingman verification run: a full
 # pytest that outlives the tool cap, a cmd shell the prompt never named,
