@@ -829,15 +829,20 @@ function LiveTelemetry() {
 }
 
 /** The "waiting for <provider>" readout (issue #43): renders in the in-flight
- *  assistant message while a chat call is pending — no first token, no tool
- *  output yet — so a silent turn is answerable at a glance. Elapsed ticks on
- *  the shared 100ms clock; amber past 30s ("still waiting") distinguishes a
- *  hung/slow provider from a paused run. */
+ *  assistant message while a chat call is pending — no tokens back at all,
+ *  not even reasoning deltas — so a silent turn is answerable at a glance.
+ *  A short grace period (5s) keeps the banner from flashing on for calls the
+ *  provider answers quickly; elapsed ticks on the shared 100ms clock and
+ *  turns amber past 30s ("still waiting") to distinguish a hung/slow
+ *  provider from a paused run. */
+const MODEL_CALL_GRACE_MS = 5_000
+
 function ModelCallWaiting() {
   const mc = useAgent((s) => s.modelCallByConv[s.bufferKey()] ?? null)
   const now = useNow()
   if (!mc) return null
   const ms = Math.max(0, now - mc.startedAt)
+  if (ms < MODEL_CALL_GRACE_MS) return null
   const slow = ms >= 30_000
   return (
     <div className={`my-1 font-mono text-[10px] ${slow ? 'text-amber-400' : 'text-zinc-500'}`}>
@@ -893,8 +898,11 @@ function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | null {
  *  at the left edge and older ones are pushed right, fading out at the right
  *  edge; the row never grows past the chat panel's width. The telemetry tape
  *  runs in a window directly below, whose right edge lines up with the
- *  newest chip's right edge — tape and chip read as one column. */
+ *  newest chip's right edge — tape and chip read as one column. Renders even
+ *  with zero tool calls (compaction chip / tape only): the tape must not
+ *  depend on a tool call existing, or early-turn thinking has no strip. */
 function ToolTicker({ calls }: { calls: ToolCall[] }) {
+  const compaction = useAgent((s) => s.compactionByConv[s.bufferKey()])
   const recent = calls.slice(-12)
   const rowRef = useRef<HTMLDivElement>(null)
   const [tapeWidth, setTapeWidth] = useState<number | null>(null)
@@ -904,6 +912,7 @@ function ToolTicker({ calls }: { calls: ToolCall[] }) {
   }, [calls])
   const fade =
     'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
+  if (!calls.length && !compaction) return null
   return (
     <div className="my-1 w-full min-w-0">
       <div
@@ -914,22 +923,56 @@ function ToolTicker({ calls }: { calls: ToolCall[] }) {
         <span className="shrink-0 font-mono text-[10px] text-zinc-600">
           {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
         </span>
+        {compaction && (
+          <CompactionChip summarized={compaction.summarized} summary={compaction.summary} />
+        )}
         {[...recent].reverse().map((tc, i) => (
           <span
             key={tc.id}
-            data-tape-align={i === 0 ? '' : undefined}
-            className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}
+            data-tape-align={i === 0 && !compaction ? '' : undefined}
+            className={`shrink-0 ${i === 0 && !compaction ? 'chip-in' : ''}`}
           >
             <ToolChip tc={tc} />
           </span>
         ))}
       </div>
-      {tapeWidth !== null && tapeWidth > 0 && (
-        <div className="-mt-px" style={{ width: tapeWidth }}>
-          <LiveTelemetry />
-        </div>
+      {calls.length ? (
+        tapeWidth !== null && tapeWidth > 0 && (
+          <div className="-mt-px" style={{ width: tapeWidth }}>
+            <LiveTelemetry />
+          </div>
+        )
+      ) : (
+        <LiveTelemetry />
       )}
     </div>
+  )
+}
+
+/** Live compaction notice (adr/0004): a chip in the ticker row, expandable
+ *  to the continuity summary. The durable transcript divider (rendered from
+ *  the persisted system row on history reload) still marks the position. */
+function CompactionChip({ summarized, summary }: { summarized?: number; summary: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <span className="relative shrink-0">
+      <button
+        onClick={() => setOpen(!open)}
+        className="inline-flex items-center gap-1.5 rounded bg-zinc-800/70 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400 hover:text-zinc-200"
+        title={summary}
+      >
+        <span className="text-zinc-500">✂</span>
+        <span>
+          context compacted
+          {typeof summarized === 'number' && summarized > 0 ? ` (${summarized} msgs)` : ''}
+        </span>
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-10 mt-1 max-h-72 w-96 overflow-auto whitespace-pre-wrap rounded border border-zinc-800 bg-zinc-900 p-2 font-mono text-[11px] text-zinc-400">
+          {summary}
+        </div>
+      )}
+    </span>
   )
 }
 
@@ -4542,6 +4585,7 @@ export function AgentChatLiveFollow() {
     let alive = true
     // Fresh fire: drop the previous run's tape before the new events land.
     useAgent.getState().resetTape(String(conversationId))
+    useAgent.getState().clearCompaction(String(conversationId))
     let offset = 0
     const drainTape = async (final = false) => {
       const res = await getAgentTape(conversationId, offset)
@@ -7208,8 +7252,10 @@ function Composer() {
     setContext,
     pushLog,
     appendRawMessage,
+    setCompaction,
     setAbortController,
     removeMessage,
+    clearCompaction,
   } = useAgent()
   const status = useStatus()
   // Live ask_user card, for PTT question routing (mirror kept in a ref below
@@ -8115,19 +8161,16 @@ function Composer() {
       // this branch only keeps the status dot honest.
       setStatus(bufKey, 'thinking')
     } else if (ev.type === 'compacted') {
-      // History compaction (adr/0004) ran before the first model call: show
-      // the divider at its transcript position. The backend already
-      // persisted the system row, so a later history refetch sees the same
-      // thing (contentOffset 0 = an empty live bubble, never rendered).
-      appendRawMessage(bufKey, {
-        id: `compaction-${Date.now()}`,
-        role: 'system',
-        content: JSON.stringify({
-          compaction: {
-            summarized_messages: ev.summarized_messages,
-            summary: ev.summary,
-          },
-        }),
+      // History compaction (adr/0004) ran before the first model call:
+      // surface it as a chip in the ticker row (store-driven), not a
+      // transcript message — a divider here used to be the only content of
+      // the fresh assistant message, which kept the telemetry strip from
+      // mounting (it lives inside ToolTicker). The backend already
+      // persisted the system row, so a later history refetch still shows
+      // the durable CompactionDivider in its transcript position.
+      setCompaction(bufKey, {
+        summarized: ev.summarized_messages,
+        summary: ev.summary ?? '',
       })
     } else if (ev.type === 'compaction_failed') {
       // Soft-fail surfacing: the turn proceeds on the full history.
@@ -8259,6 +8302,9 @@ function Composer() {
     // turn. (Resume remains for when the user wants the same turn continued.)
     setTurnError(bufKey, null)
     setSendingKey(bufKey)
+    // Fresh turn: the previous run's compaction chip is stale — clear it
+    // alongside the tape so the ticker row starts clean.
+    clearCompaction(bufKey)
     const userId = appendUserMessage(bufKey, fullText, imageDataUrls, invokedSkills.length ? invokedSkills : undefined)
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()

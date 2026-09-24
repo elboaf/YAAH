@@ -186,7 +186,8 @@ interface AgentState {
   /**
    * Live model-call state per conversation (issue #43): set when the backend
    * emits `model_call` (a chat call dispatched, no response yet), cleared on
-   * the first non-thinking stream activity. The status strip renders
+   * the first stream activity of any kind (thinking deltas count — reasoning
+   * tokens mean the model is already responding). The status strip renders
    * "waiting for <provider> · <elapsed>s" from it so a silent turn is
    * answerable — network vs provider vs quietly working — at a glance.
    */
@@ -311,6 +312,16 @@ interface AgentState {
   tapeByConv: Record<string, string>
   appendTape: (key: string, chunk: string) => void
   resetTape: (key: string) => void
+
+  /**
+   * Per-conversation live compaction notice (adr/0004): set when the turn's
+   * pre-flight compaction pass runs, rendered as a chip in the ticker row
+   * (NOT a transcript message — the divider broke the telemetry strip's
+   * mount condition). Cleared with the tape at the start of a fresh run.
+   */
+  compactionByConv: Record<string, { summarized?: number; summary: string }>
+  setCompaction: (key: string, c: { summarized?: number; summary: string }) => void
+  clearCompaction: (key: string) => void
 
   // ---- scheduled agents (issue #41) ----
   /** All agents, refreshed from /api/agents by the watcher + CRUD callers. */
@@ -692,6 +703,17 @@ export const useAgent = create<AgentState>((set, get) => ({
       const next = { ...s.tapeByConv }
       delete next[key]
       return { tapeByConv: next }
+    }),
+
+  compactionByConv: {},
+  setCompaction: (key, c) =>
+    set((s) => ({ compactionByConv: { ...s.compactionByConv, [key]: c } })),
+  clearCompaction: (key) =>
+    set((s) => {
+      if (!(key in s.compactionByConv)) return s
+      const next = { ...s.compactionByConv }
+      delete next[key]
+      return { compactionByConv: next }
     }),
 
   // ---- scheduled agents (issue #41) ----
