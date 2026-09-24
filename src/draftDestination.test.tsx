@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
-const { listLocalWorkspaces, listWorkspaces, addWorkspace } = vi.hoisted(() => ({
+const { listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches, checkoutWorkspaceBranch } = vi.hoisted(() => ({
   listLocalWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
+  getWorkspaceGitBranches: vi.fn(),
+  checkoutWorkspaceBranch: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
-  return { ...actual, listLocalWorkspaces, listWorkspaces, addWorkspace }
+  return { ...actual, listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches, checkoutWorkspaceBranch }
 })
 
 import { DraftDestinationCard } from './components'
@@ -32,6 +34,8 @@ describe('draft destination card (#90)', () => {
     listLocalWorkspaces.mockResolvedValue(workspaces)
     listWorkspaces.mockResolvedValue(workspaces)
     addWorkspace.mockResolvedValue(workspaces[0])
+    getWorkspaceGitBranches.mockResolvedValue({ branch: 'main', branches: ['feature', 'main'] })
+    checkoutWorkspaceBranch.mockResolvedValue({ ok: true, output: 'Switched to branch feature' })
     useAgent.setState({ conversationId: null, workspace: 'C:/repos/project', draftDestination: null })
     useRemote.getState().setScope({ connected: false })
   })
@@ -51,6 +55,29 @@ describe('draft destination card (#90)', () => {
 
     fireEvent.change(select, { target: { value: 'C:/repos/project' } })
     expect(useAgent.getState().draftDestination).toBe('C:/repos/project')
+  })
+
+  it('shows and checks out a git branch before the draft is saved', async () => {
+    render(<DraftDestinationCard />)
+
+    expect(await screen.findByRole('button', { name: /branch main/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /branch main/i }))
+    expect(await screen.findByRole('menuitem', { name: /feature/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('menuitem', { name: /feature/ }))
+
+    await waitFor(() => expect(checkoutWorkspaceBranch).toHaveBeenCalledWith('C:/repos/project', 'feature'))
+    expect(await screen.findByRole('button', { name: /branch feature/i })).toBeInTheDocument()
+  })
+
+  it('surfaces checkout failures in the draft card', async () => {
+    checkoutWorkspaceBranch.mockResolvedValueOnce({ ok: false, error: 'local changes would be overwritten' })
+    render(<DraftDestinationCard />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /branch main/i }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /feature/ }))
+
+    expect(await screen.findByText('local changes would be overwritten')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /branch main/i })).toBeInTheDocument()
   })
 
   it('keeps the connected-host path fallback reachable from the card', async () => {

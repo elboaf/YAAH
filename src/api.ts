@@ -395,6 +395,21 @@ export const addWorkspace = (path: string) =>
     body: JSON.stringify({ path }),
   })
 
+/** Git state for a draft's chosen workspace, before a conversation exists. */
+export interface WorkspaceGitBranches {
+  branch: string | null
+  branches: string[]
+}
+
+export const getWorkspaceGitBranches = (workspace: string) =>
+  api<WorkspaceGitBranches>(`/api/workspaces/git-branches?workspace=${encodeURIComponent(workspace)}`)
+
+export const checkoutWorkspaceBranch = (workspace: string, branch: string) =>
+  api<GitCommandResult>('/api/workspaces/git-checkout', {
+    method: 'POST',
+    body: JSON.stringify({ workspace, branch }),
+  })
+
 export const deleteWorkspace = (id: number) =>
   api<{ ok: boolean; relocated: number }>(`/api/workspaces/${id}`, {
     method: 'DELETE',
