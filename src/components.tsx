@@ -1248,7 +1248,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       else if (s.worktree) bits.push(`worktree ${s.worktree}`)
       if (s.dirty) bits.push('plus uncommitted changes')
       bits.push(
-        `committed work is only on the agent branch; "merge it" merges those commits into the primary working tree's currently selected branch, or push the agent branch to its remote`,
+        `committed work is only on the agent branch; "merge it" merges those commits into the primary working tree's currently selected branch`,
       )
       if (s.dirty) {
         bits.push('uncommitted changes stay in the agent checkout and are not included in merge or push')
