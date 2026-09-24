@@ -896,6 +896,15 @@ class TestShouldIsolate:
         for name in ("write_file", "edit_file", "create_file", "powershell"):
             assert worktrees.should_isolate(name, {"command": "git status"})
 
+    def test_git_sync_tools_do_not_isolate(self):
+        # rc.23 regression: git_pull/git_push are "shell"-risk tools, so
+        # they still minted a session worktree before the first bash call
+        assert not worktrees.should_isolate("git_pull", {})
+        assert not worktrees.should_isolate("git_push", {})
+        # repo mutation stays isolated
+        for name in ("git_add", "git_commit", "git_merge_back"):
+            assert worktrees.should_isolate(name, {}), name
+
     def test_readonly_git_commands(self):
         for cmd in (
             "git status",

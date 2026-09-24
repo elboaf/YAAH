@@ -142,7 +142,12 @@ def _readonly_shell_command(command: str) -> bool:
 def should_isolate(tool_name: str, args: dict) -> bool:
     """Whether this tool call must run isolated. True for the file writers
     and powershell (no per-command grammar); for bash, decided by the
-    command itself — read-only commands stay on the main tree."""
+    command itself — read-only commands stay on the main tree. The
+    git_pull/git_push tools are the structured form of `git pull/push`,
+    so they follow the same repo-sync rule (a plain "pull from origin"
+    must move the user's branch, not mint a session worktree)."""
+    if tool_name in ("git_pull", "git_push"):
+        return False
     if tool_name != "bash":
         return True
     command = str((args or {}).get("command") or "").strip()
