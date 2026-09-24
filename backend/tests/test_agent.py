@@ -167,6 +167,24 @@ async def collect(agent_gen):
 
 
 @pytest.mark.asyncio
+async def test_usage_event_uses_frontend_context_token_field(fake_model, tmp_path):
+    """The streamed usage count must match the frontend's usage_tokens contract."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("usage-event-contract")
+    fake_model.append([
+        {"type": "content", "text": "A real answer."},
+        {"type": "usage", "usage": {"prompt_tokens": 1234}},
+        {"type": "finish"},
+    ])
+
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    usage = next(event for event in events if event["type"] == "usage")
+
+    assert usage["usage_tokens"] == 1234
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("split", range(1, 6))
 async def test_agent_say_opener_split_never_streams_tag(fake_model, tmp_path, split):
     from backend.db.database import create_conversation, get_messages
