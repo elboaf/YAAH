@@ -18,6 +18,21 @@ inherited by every future sandbox** — it is the persistence mechanism.
     presets `GIT_CONFIG_GLOBAL` to this folder's `gitconfig` so mapped-workspace
     git stops failing on 'dubious ownership'. Drop MinGit into `toolkit\mingit`
     (or point the shim at any git.exe) and `git` works inside the VM.
+  - `windows-mcp-serve.ps1` — starts the VENDORED windows-mcp MCP server
+    (`vendor\windows_mcp`, MIT, from github.com/CursorTouch/Windows-MCP) inside
+    the VM so the HOST can drive the sandbox GUI over HTTP as MCP tools
+    (App/Snapshot/Click/Type/PowerShell/...). Run inside the VM:
+    `powershell -ExecutionPolicy Bypass -File <toolkit>\bin\windows-mcp-serve.ps1`
+    It installs pinned deps from `vendor\windows-mcp-requirements.txt` on first
+    run (marker: `vendor\.windows-mcp-deps-ok`), then prints the host URL
+    (`http://<vm-ip>:<port>/mcp` — NO trailing slash) and bearer key.
+    Wire quirks (schemas are the truth, descriptions lie): App tool takes
+    `mode=launch`/`mode=launch_executable` + `executable` (full path — Edge is
+    NOT in the VM's start menu index), NOT `action`; Shortcut takes `shortcut`,
+    NOT `keys`. Handshake: POST initialize -> grab `mcp-session-id` response
+    header -> POST notifications/initialized -> then tools/list & tools/call,
+    always sending the `mcp-session-id` header (an `/mcp/` trailing-slash POST
+    307-redirects and silently DROPS the body).
 - `gitconfig` — `[safe] directory = *` for the mapped-workspace SID mismatch.
 - `state.json` — machine-readable manifest of what the toolkit contains
   (tools, versions, install/check commands). Check it BEFORE re-downloading

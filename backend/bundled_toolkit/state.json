@@ -11,6 +11,13 @@
       "kind": "script",
       "check": "Test-Path '<toolkit>\\bin\\git.cmd'",
       "installed_at": "bundled"
+    },
+    "windows-mcp": {
+      "version": "0.8.5",
+      "kind": "vendored",
+      "check": "Test-Path '<toolkit>\\vendor\\windows_mcp\\__init__.py'",
+      "installed_at": "bundled",
+      "note": "Vendored MCP server for sandbox GUI control. Start inside the VM: powershell -ExecutionPolicy Bypass -File <toolkit>\\bin\\windows-mcp-serve.ps1. Host connects to http://<vm-ip>:<port>/mcp (no trailing slash) with Authorization: Bearer <key>. Pinned deps in vendor\\windows-mcp-requirements.txt install on first run."
     }
   }
 }

@@ -1,0 +1,20 @@
+﻿# Pinned dependencies for the vendored windows_mcp 0.8.5 server
+# (backend/bundled_toolkit/vendor/windows_mcp). The server code itself is
+# vendored; only these third-party deps come from PyPI.
+click
+comtypes
+dxcam
+fastmcp
+fuzzywuzzy
+markdownify
+pillow
+platformdirs
+posthog
+psutil
+pygments
+python-levenshtein
+pywin32
+requests
+tabulate
+thefuzz
+uuid7
