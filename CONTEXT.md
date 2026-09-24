@@ -33,16 +33,19 @@ tree.
 ### Getting work back
 
 **Branch-first**:
-The contract: the agent's `agent/*` branch is the work's home. Turn
-end never merges. Master moves only by explicit user decision —
-`git_merge_back`, or plain git. Pushing publishes the agent branch,
-which is correct, not a misfire.
-_Avoid_: auto-merge, merge-back at turn end (the superseded contract)
+The agent's `agent/*` branch is the work's home. Turn end never merges.
+A clear user-requested continuation of work just merged (for example,
+a release bump and push) can imply `git_merge_back` into the main tree
+and a push of the verified primary branch; verify the target and stop on
+ambiguity, unexpected changes, or conflicts. `git_push` itself publishes
+the agent branch. Never force-push.
+_Avoid_: auto-merge at turn end, treating `git_push` as a primary-branch push
 
 **git_merge_back**:
-The explicit merge of an `agent/*` branch into the main tree, invoked
-when the user asks for it ("merge it"). Refusals are surfaced, never
-papered over.
+The deliberate merge of an `agent/*` branch into the main tree, invoked
+when the user directly asks or a clear continuation of just-merged work
+implies integration. Ambiguous intent, dirty overlap, and conflicts are
+surfaced, never papered over.
 _Avoid_: sync, check-in, promote, auto-merge
 
 **Dirty overlap**:

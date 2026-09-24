@@ -1453,6 +1453,9 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert notes, "model must be told about its session worktree"
     note_text = notes[0]["content"]
     assert "agent/" in note_text and ".yaah" in note_text
+    assert "continuation" in note_text and "git_merge_back" in note_text
+    assert "Never force-push" in note_text
+    assert "Do not merge merely because a turn ends" in note_text
 
     # turn end: honest status event, nothing merged
     statuses = [e for e in events if e.get("type") == "worktree_status"]

@@ -574,9 +574,11 @@ TOOLS_SCHEMA += [
             "description": (
                 "Push the current branch to the remote. A branch without an "
                 "upstream is published with --set-upstream automatically. "
-                "Under session worktrees the current branch is the agent/"
-                "branch where the work lives — pushing it is correct; master "
-                "is only touched by an explicit git_merge_back."
+                "Under session worktrees this pushes the agent/* branch, not "
+                "the main branch. For a clearly implied continuation of just-"
+                "merged release work, integrate with git_merge_back and push "
+                "the verified main branch from the main workspace instead; "
+                "stop on ambiguity, unexpected changes, or non-fast-forward."
             ),
             "parameters": {"type": "object", "properties": {}},
         },

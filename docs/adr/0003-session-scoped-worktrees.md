@@ -81,10 +81,14 @@ published the AGENT branch to the remote with `--set-upstream` — while
 `master` all along; the work actually lived on a branch the user was
 never shown.
 
-Decision revision: the harness NEVER merges into the main tree on its
-own. The session worktree and its `agent/*` branch are the work's home
-until the user merges deliberately — an explicit `git_merge_back` call
-(say "merge it") or plain git. The branch chip shows the agent branch
+Decision revision: the harness does not merge into the main tree at
+turn end. The session worktree and its `agent/*` branch are the work's
+home until an explicit merge decision. This can be a direct request
+("merge it") or be clearly implied by a user-requested continuation of
+just-merged work, such as a release/version bump and push immediately
+after the related work was merged. Ambiguous continuity is not enough;
+ask before merging. Use `git_merge_back` and stop on dirty overlap or
+conflict rather than improvising. The branch chip shows the agent branch
 honestly, across turns, until the session releases. Turn end only
 settles: a quiesced session (no commits, clean tree — the adr/0002
 trash contract runs first, so a stray capture cannot pin it) is
@@ -95,7 +99,10 @@ its own commits never moves). Unmerged `agent/*` branches are never
 auto-pruned by the reaper: the branch is the record of the work; the
 user deletes it.
 
-Consequence: master moves only when the user decides. The "user's
-folder must not lag" guarantee of the original decision is consciously
-traded away — lagging is the point: unmerged work should be visible as
-unmerged, not silently landed.
+For a clearly implied release push, verify the main workspace branch,
+remote, and tree state, merge the follow-up, then push that primary
+branch (never force-push). `git_push` in a session worktree publishes
+the agent branch only; do not mistake it for pushing the primary branch.
+If the push target is unclear, there are unexpected changes, or the
+push is non-fast-forward, stop and ask. The invariant remains: the main
+tree must not move as a side effect of turn end.
