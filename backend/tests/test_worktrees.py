@@ -883,3 +883,77 @@ def test_git_push_sets_upstream_when_missing(repo: Path, monkeypatch):
     assert result["exit_code"] == 0
     assert ("push", "--set-upstream", "origin", "agent/x/1") in calls
     assert "set-upstream" in (result.get("note") or "")
+
+
+# ---------------------------------------------------------------------------
+# should_isolate: read-only shell commands must not mint session worktrees
+# (a plain "pull from origin" used to create an agent/<chat> branch).
+# ---------------------------------------------------------------------------
+
+
+class TestShouldIsolate:
+    def test_file_writers_always_isolate(self):
+        for name in ("write_file", "edit_file", "create_file", "powershell"):
+            assert worktrees.should_isolate(name, {"command": "git status"})
+
+    def test_readonly_git_commands(self):
+        for cmd in (
+            "git status",
+            "git pull origin master",
+            "git pull",
+            "git fetch --tags --prune",
+            "git push",
+            "git push origin HEAD",
+            "git log --oneline -5",
+            "git diff HEAD~1",
+            "git rev-parse --abbrev-ref HEAD",
+        ):
+            assert not worktrees.should_isolate("bash", {"command": cmd}), cmd
+
+    def test_readonly_plain_commands(self):
+        for cmd in ("ls", "cat README.md", "pwd", "rg TODO src",
+                    "node --version", "wc -l file.txt"):
+            assert not worktrees.should_isolate("bash", {"command": cmd}), cmd
+
+    def test_env_and_var_prefixes_tolerated(self):
+        assert not worktrees.should_isolate(
+            "bash", {"command": "GIT_EDITOR=true git status"}
+        )
+        assert not worktrees.should_isolate(
+            "bash", {"command": "env git pull origin master"}
+        )
+
+    def test_compound_readonly_ok(self):
+        assert not worktrees.should_isolate(
+            "bash", {"command": "git fetch origin && git status; git log -1"}
+        )
+
+    def test_mutating_commands_isolate(self):
+        for cmd in (
+            "rm -rf x",
+            "echo hi > f.txt",
+            "git commit -m x",
+            "git checkout -b thing",
+            "git merge other",
+            "npm install",
+            "git status && npm install",
+            "git add -A",
+        ):
+            assert worktrees.should_isolate("bash", {"command": cmd}), cmd
+
+    def test_redirection_and_substitution_fail_closed(self):
+        for cmd in (
+            "git log > out.txt",
+            "git status >> log",
+            "echo $(rm -rf /) > x",
+            "cat `boom`",
+        ):
+            assert worktrees.should_isolate("bash", {"command": cmd}), cmd
+
+    def test_unknown_commands_fail_closed(self):
+        for cmd in ("do-a-thing", "git", ""):
+            assert worktrees.should_isolate("bash", {"command": cmd}), cmd
+
+    def test_missing_args_isolate(self):
+        assert worktrees.should_isolate("bash", {})
+        assert worktrees.should_isolate("bash", None)  # type: ignore[arg-type]

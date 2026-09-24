@@ -86,6 +86,71 @@ from pathlib import Path
 # already be isolated (write access can only have come from one of these).
 WRITER_TRIGGERS = {"bash", "powershell", "write_file", "edit_file", "create_file"}
 
+# A shell call is only a writer when its command actually mutates: repo
+# inspection and sync (status/diff/fetch/pull/push) run on the main tree —
+# a plain "pull from origin" must move the user's branch, not mint an
+# agent/<chat> worktree for it. The classifier only gates the FIRST
+# binding: once a chat is bound, every later call runs in the session
+# worktree regardless. Fail-closed: anything unrecognized isolates.
+_READONLY_GIT = {
+    "status", "log", "diff", "show", "branch", "remote", "rev-parse",
+    "tag", "fetch", "pull", "push",
+}
+_READONLY_COMMANDS = {
+    "ls", "cat", "head", "tail", "pwd", "rg", "grep", "find", "wc",
+    "which", "where", "dir", "type", "echo",
+}
+
+_SHELL_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
+
+
+def _readonly_segment(seg: str) -> bool:
+    """One shell pipeline stage: recognized read-only, or env/cd prefixes
+    in front of one. Anything else (unknown binary, flags that could hide
+    a write, subshells) fails closed."""
+    tokens = seg.strip().split()
+    while tokens:
+        first = tokens[0]
+        if first in ("env", "time") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first):
+            tokens = tokens[1:]
+            continue
+        if first == "cd":
+            return False
+        break
+    if not tokens:
+        return False
+    if tokens[0] == "git":
+        return len(tokens) > 1 and tokens[1] in _READONLY_GIT
+    if tokens[0] in _READONLY_COMMANDS:
+        # Version probes like `node --version` and bare `ls` are fine;
+        # don't try to whitelist every flag combination of every tool.
+        return True
+    if len(tokens) == 2 and tokens[1] in ("--version", "-v", "--help", "-h"):
+        return True
+    return False
+
+
+def _readonly_shell_command(command: str) -> bool:
+    if ">" in command or "<" in command or "$(" in command or "`" in command:
+        return False
+    return all(
+        _readonly_segment(seg) or not seg.strip()
+        for seg in _SHELL_SPLIT_RE.split(command)
+    )
+
+
+def should_isolate(tool_name: str, args: dict) -> bool:
+    """Whether this tool call must run isolated. True for the file writers
+    and powershell (no per-command grammar); for bash, decided by the
+    command itself — read-only commands stay on the main tree."""
+    if tool_name != "bash":
+        return True
+    command = str((args or {}).get("command") or "").strip()
+    if not command:
+        return True  # no command to vouch for — fail closed
+    return not _readonly_shell_command(command)
+
+
 BRANCH_PREFIX = "agent/"
 WT_DIRNAME = "worktrees"
 WT_PARENT = ".yaah"

@@ -1374,7 +1374,7 @@ async def test_worktree_bound_released_events(fake_model, tmp_path, monkeypatch)
             "tool_calls": [{
                 "id": "c1",
                 "type": "function",
-                "function": {"name": "bash", "arguments": json.dumps({"command": "echo hi"})},
+                "function": {"name": "bash", "arguments": json.dumps({"command": "echo hi > out.txt"})},
             }],
         },
         {"type": "content", "text": "wrote it"},

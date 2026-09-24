@@ -1517,7 +1517,8 @@ async def run_agent(
                             # worktree (refusal surfaces as the tool's error
                             # result — never a dead turn).
                             _refused = False
-                            if tool_risk(name) != "read" and not _isolated:
+                            if (tool_risk(name) != "read" and not _isolated
+                                    and worktrees.should_isolate(name, args)):
                                 try:
                                     turn_workspace = await worktrees.ensure_isolated(
                                         workspace, chat_id=str(conversation_id)
@@ -1597,7 +1598,8 @@ async def run_agent(
                             # denial/plan-block carries its own error result.
                             if result is None:
                                 # Issue #58 rebinding seam (gated path):
-                                if tool_risk(name) != "read" and not _isolated:
+                                if (tool_risk(name) != "read" and not _isolated
+                                    and worktrees.should_isolate(name, args)):
                                     try:
                                         turn_workspace = await worktrees.ensure_isolated(
                                             workspace, chat_id=str(conversation_id)
