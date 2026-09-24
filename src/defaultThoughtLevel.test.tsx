@@ -28,7 +28,7 @@ describe('default thought level picker (#98)', () => {
 
   it('saves the selected thought level as the default for new chats', async () => {
     render(<DefaultThoughtLevelPicker />)
-    const picker = screen.getByRole('combobox', { name: 'Default thought level for new chats' })
+    const picker = screen.getByRole('combobox', { name: 'Thought level' })
     expect(picker).toHaveValue('medium')
 
     fireEvent.change(picker, { target: { value: 'high' } })
@@ -38,13 +38,14 @@ describe('default thought level picker (#98)', () => {
     expect(picker).toHaveValue('high')
   })
 
-  it('offers the provider default and all supported thought levels', () => {
+  it('offers the provider default and all supported thought levels with visible guidance', () => {
     render(<DefaultThoughtLevelPicker />)
-    const picker = screen.getByRole('combobox', { name: 'Default thought level for new chats' })
+    const picker = screen.getByRole('combobox', { name: 'Thought level' })
     expect(picker).toHaveDisplayValue('Medium')
     expect(screen.getByRole('option', { name: 'Default' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Low' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'High' })).toBeInTheDocument()
+    expect(screen.getByText('Only affects reasoning-capable models.')).toBeInTheDocument()
   })
 })

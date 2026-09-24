@@ -3346,24 +3346,26 @@ export function DefaultThoughtLevelPicker() {
   }
 
   return (
-    <div className="mt-2">
-      <label htmlFor="default-thought-level" className="mb-1 block text-[10px] uppercase tracking-wider text-zinc-500">
-        Default thought level for new chats
+    <div className="col-span-2 grid grid-cols-[5.25rem_minmax(0,1fr)] items-center gap-x-2">
+      <label htmlFor="default-thought-level" className="text-xs text-zinc-400">
+        Thought level
       </label>
       <select
         id="default-thought-level"
-        className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+        className="min-w-0 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-60"
         value={effort}
         onChange={(e) => void apply(e.target.value)}
         disabled={saving}
-        aria-label="Default thought level for new chats"
-        aria-describedby={error ? 'default-thought-level-status' : undefined}
-        title={`${EFFORT_HINT} Saved chats use their own pinned thought level.`}
+        aria-describedby={`default-thought-level-help${error ? ' default-thought-level-status' : ''}`}
+        title={EFFORT_HINT}
       >
         <EffortOptions />
       </select>
-      {saving && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving thought level…</p>}
-      {error && <p id="default-thought-level-status" className="mt-1 text-[10px] text-red-400" role="alert">{error}</p>}
+      <p id="default-thought-level-help" className="col-span-2 mt-1 text-[10px] leading-relaxed text-zinc-500">
+        Only affects reasoning-capable models.
+      </p>
+      {saving && <p className="col-span-2 mt-1 text-[10px] text-zinc-500" role="status">Saving thought level…</p>}
+      {error && <p id="default-thought-level-status" className="col-span-2 mt-1 text-[10px] text-red-400" role="alert">{error}</p>}
     </div>
   )
 }
@@ -3375,6 +3377,7 @@ export function Sidebar() {
   // name -> {models, error?} for every configured provider
   const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
   const [savingModel, setSavingModel] = useState(false)
+  const [modelError, setModelError] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [notice, setNotice] = useState<{ title: string; message: string } | null>(null)
 
@@ -3420,12 +3423,18 @@ export function Sidebar() {
     if (idx < 0) return
     const provider = value.slice(0, idx)
     const m = value.slice(idx + 2)
+    const previousProvider = activeProvider
     if (!m || (m === globalModel && provider === activeProvider)) return
     setSavingModel(true)
+    setModelError('')
     setActiveProvider(provider)
     setActiveModel(provider, m)
       .then(refreshGlobals)
       .then(refreshModels)
+      .catch((e) => {
+        setActiveProvider(previousProvider)
+        setModelError(`Could not save model: ${String((e as Error).message ?? e)}`)
+      })
       .finally(() => setSavingModel(false))
   }
 
@@ -3522,27 +3531,26 @@ export function Sidebar() {
             </div>
           </div>
         )}
-        {/* Footer strip: configuration lives at the bottom, pinned — the
-            conversation list owns the column. Model readout in mono (the
-            machine's voice), gear for Settings. #51: this picker sets the
-            DEFAULT for new chats; each chat's header picker overrides it. */}
-        <div className="mt-auto border-t border-zinc-800 pt-2">
-          <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
-            Default model for new chats
+        {/* Compact defaults: existing chats retain their own selections. */}
+        <div className="relative mt-auto border-t border-zinc-800 pt-2">
+          <p className="mb-1 pr-8 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+            New chat defaults
           </p>
-          <div className="flex items-center gap-1">
+          <div className="grid grid-cols-[5.25rem_minmax(0,1fr)] items-center gap-x-2 gap-y-2">
+            <label htmlFor="default-model" className="text-xs text-zinc-400">Model</label>
             <select
-              className="min-w-0 flex-1 truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+              id="default-model"
+              className="min-w-0 w-full truncate rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-60"
               value={`${activeProvider}::${globalModel}`}
               onChange={(e) => pickModel(e.target.value)}
               disabled={savingModel}
-              aria-label="Default model for new chats"
-              title="Default model for new chats — saved chats use their own picker"
+              aria-describedby={`default-settings-help${modelError ? ' default-model-status' : ''}`}
+              title={`${activeProvider} · ${globalModel}`}
             >
               <ModelOptions byProvider={byProvider} value={`${activeProvider}::${globalModel}`} />
           </select>
             <button
-              className="shrink-0 rounded border border-zinc-700 p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              className="absolute right-0 top-2 rounded border border-zinc-700 p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
               aria-label="Settings"
               title="Settings"
               onClick={() => setShowSettings(true)}
@@ -3552,8 +3560,13 @@ export function Sidebar() {
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
             </button>
+            <DefaultThoughtLevelPicker />
           </div>
-          <DefaultThoughtLevelPicker />
+          {savingModel && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving model…</p>}
+          {modelError && <p id="default-model-status" className="mt-1 text-[10px] text-red-400" role="alert">{modelError}</p>}
+          <p id="default-settings-help" className="mt-1 text-[10px] leading-relaxed text-zinc-500">
+            Applies to new chats only; saved chats keep their own settings. Default sends no override.
+          </p>
           {Object.keys(byProvider).length === 0 && (
             <button
               className="mt-1.5 w-full rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 text-left text-[10px] leading-relaxed text-amber-300 hover:border-amber-500"
