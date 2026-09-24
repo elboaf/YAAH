@@ -3064,7 +3064,7 @@ function ConversationRow({
     <div className="group relative flex items-center">
       <button
         className={`flex min-w-0 flex-1 items-center rounded px-2 py-1.5 text-left text-xs ${
-          active ? 'bg-blue-600 text-white' : 'text-zinc-300 hover:bg-zinc-800'
+          active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/60'
         }`}
         onClick={onOpen}
         title={

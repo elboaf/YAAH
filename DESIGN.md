@@ -120,7 +120,7 @@ Density is high but never ambiguous: compact rows (6–8px vertical padding), 10
 A near-monochrome zinc console where one blue accent marks human intent and a small set of state colors report what the machine is doing.
 
 ### Primary
-- **Action Blue** (#2563eb): the only color a human action may use — New chat, Send, Save, the active conversation row, focus rings on the composer. Hover lifts to #3b82f6. If blue appears, the user did it or is about to.
+- **Action Blue** (#2563eb): the only color a human action may use — New chat, Send, Save, and focus rings on the composer. Hover lifts to #3b82f6. If blue appears, the user did it or is about to.
 
 ### Secondary
 - **Working Amber** (#fbbf24): the machine-at-work signal — pulsing status dot, running-tool glyph. Never a button.
@@ -211,7 +211,7 @@ Small, precise radii on a hairline grid: controls and chips use 4px, floating ca
 - **Error:** inline 11px red text below the field; no red border treatment.
 
 ### Navigation
-- **Conversation rows:** 12px text, 4px 8px padding, 4px radius; active = #2563eb fill with white text; hover #27272a. Row actions (md↓, sys, ×) are 10px ghost buttons revealed on hover.
+- **Conversation rows:** 12px text, 4px 8px padding, 4px radius; active = #27272a zinc fill with #f4f4f5 text; inactive hover = a soft #27272a fill. Status colors remain visible in their dedicated indicators. Row actions (md↓, sys, ×) are 10px ghost buttons revealed on hover.
 - **File tree:** 11px rows, 12px-per-level indent, caret/• glyph in #71717a, hover fill #27272a, context menu on right-click.
 
 ### Signature: the Tool Ticker
