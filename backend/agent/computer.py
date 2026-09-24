@@ -30,8 +30,8 @@ WINDOWS = hasattr(ctypes, "windll")
 # survives schema-only context windows.
 _HOST_INPUT_NOTE = (
     " This is the USER'S REAL mouse/keyboard — never use it to drive an "
-    "app running inside the Windows Sandbox; use in-VM AutoHotkey via "
-    "sandbox_run instead."
+    "app running inside the Windows Sandbox; drive the sandbox GUI via "
+    "the windows-mcp MCP server (see the sandbox section) instead."
 )
 
 _OBSERVE = {

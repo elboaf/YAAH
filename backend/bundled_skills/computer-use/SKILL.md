@@ -15,7 +15,8 @@ default (`observe: false` to skip).
 test runs inside the Windows Sandbox, `mouse_*`/`type_text`/`press_key`
 would move the user's real desktop cursor and type into whatever the
 user is doing. The VM has its own input session: drive its GUI with
-in-VM AutoHotkey via `sandbox_run` (see the sandbox-testing skill).
+the windows-mcp MCP server (auto-started in the sandbox; see the
+   sandbox-testing skill).
 Host computer use is only for apps running on the host itself.
 
 ## Structured first, pixels second

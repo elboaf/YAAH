@@ -18,7 +18,8 @@ hard rules define "inside":
 2. **GUI input happens in-VM.** The host `mouse_click`/`type_text`/
    `press_key` tools move the USER'S real mouse and keyboard — never use
    them on the sandbox's windows. The VM has its own input session: use
-   AutoHotkey v2 via `sandbox_run` (see the sandbox section of the
+   the windows-mcp MCP server (auto-started at sandbox boot; see the
+   sandbox section of the
    system prompt for setup and verified ControlClick/ControlSend
    patterns). `screenshot`/`read_ui_tree` on the host are fine — they
    observe without touching input.

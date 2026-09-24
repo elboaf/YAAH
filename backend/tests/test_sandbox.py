@@ -461,27 +461,37 @@ def test_tool_schema_carries_clean_image_knowledge(isolated):
         if t["function"]["name"] == "sandbox_run")
     assert "CLEAN WINDOWS IMAGE" in desc
     assert "toolkit\\bin" in desc
-    assert "AutoHotkey" in desc
+    assert "windows-mcp" in desc
 
 
-def test_prompt_section_carries_ahk_playbook(isolated):
-    """The AHK findings must transfer to clean installs: the prompt is the
-    only knowledge surface a binary install has."""
+def test_prompt_section_carries_windows_mcp_playbook(isolated):
+    """The windows-mcp findings must transfer to clean installs: the prompt
+    is the only knowledge surface a binary install has. It must leave the
+    model zero guessing about how to connect and use the MCP server."""
     text = sb.prompt_section()
-    assert "AutoHotkey" in text
-    assert "/ErrorStdOut" in text
-    assert "ControlSend" in text
-    assert "UIA-v2" in text
+    assert "windows-mcp" in text
+    assert "windows-mcp-serve.ps1" in text
+    assert "mcp-session-id" in text
+    assert "notifications/initialized" in text
+    assert "Bearer" in text
+    assert "trailing slash" in text
+    assert "launch_executable" in text
+    assert "Snapshot" in text
+    # AHK is retired: no playbook left in the prompt.
+    assert "AutoHotkey" not in text
+    assert "ControlSend" not in text
 
 
-def test_ahk_hint_matches_real_failure_text():
+def test_mcp_hint_matches_real_failure_text():
     """The hint keys on output text (exit codes stay 0 for cmdlet errors)."""
-    hint = sb._ahk_hint("ControlSend silently did nothing")
+    hint = sb._mcp_hint("ControlSend silently did nothing")
     assert hint is not None
-    assert "/ErrorStdOut" in hint
-    assert "explicit" in hint.lower() or "Edit1" in hint
-    assert sb._ahk_hint("Get-Date") is None
-    assert sb._ahk_hint("") is None
+    assert "windows-mcp" in hint
+    assert sb._mcp_hint("Get-Date") is None
+    assert sb._mcp_hint("") is None
+    down = sb._mcp_hint("curl: (7) Failed to connect: Connection refused")
+    assert down is not None
+    assert "windows-mcp-serve.ps1" in down
 
 
 def test_dialog_stall_hint_fires_on_timeout_with_no_output():

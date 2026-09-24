@@ -379,6 +379,22 @@ if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}
 # sandbox user is admin without UAC, so this needs no elevation
 # (verified live: all three profiles go OFF, exit 0).
 netsh advfirewall set allprofiles state off | Out-Null
+# Auto-start the vendored windows-mcp GUI server (the PRIMARY GUI control
+# layer: the host drives the VM's GUI over MCP/HTTP). Detached so a slow
+# first-run pip install never delays the ready signal; failure is
+# non-fatal (the session can start it manually via
+# toolkit\\bin\\windows-mcp-serve.ps1).
+Start-Process -FilePath "$PSHOME\\powershell.exe" `
+  -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$tk\\bin\\windows-mcp-serve.ps1" `
+  -WindowStyle Hidden
+# Connection info for the host (readable from the mapped logs dir).
+$mcpIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+  Where-Object {{ $_.IPAddress -notmatch '^127\\.|^169\\.254\\.' }} |
+  Select-Object -First 1).IPAddress
+$mcpKey = if ($env:WMCP_KEY) {{ $env:WMCP_KEY }} else {{ 'sandbox-demo-key' }}
+$mcpPort = if ($env:WMCP_PORT) {{ $env:WMCP_PORT }} else {{ '8000' }}
+('{{' + '"url": "http://' + $mcpIp + ':' + $mcpPort + '/mcp", "auth": "Bearer ' + $mcpKey + '"}}') |
+  Out-File -FilePath "$dir\\mcp.json" -Encoding utf8
 "[$(Get-Date -Format o)] yaah-sandbox-ready" | Out-File -FilePath "$dir\\init.log" -Encoding utf8
 while ($true) {{
   $pending = Get-ChildItem -Path $dir -Filter 'cmd.*.ps1' -ErrorAction SilentlyContinue |
@@ -948,28 +964,37 @@ def _missing_command_hint(output: str) -> str | None:
     )
 
 
-def _ahk_hint(output: str) -> str | None:
-    """Nudge for in-VM GUI automation failures: AutoHotkey v2 is the
-    in-VM input layer (its input never touches the host), and the
-    background-input techniques have sharp edges that fail silently.
-    Fires on the output text, never the exit code."""
+def _mcp_hint(output: str) -> str | None:
+    """Nudge for in-VM GUI automation: windows-mcp is the primary GUI
+    layer. Fires when output shows AHK muscle memory (ControlSend/
+    ControlClick/AutoHotkey) or an MCP connection failure, pointing the
+    session at the vendored windows-mcp server instead. Fires on the
+    output text, never the exit code."""
     low = (output or "").lower()
-    if ("controlsend" not in low and "controlclick" not in low
-            and "autohotkey" not in low):
+    ahk = ("controlsend" in low or "controlclick" in low
+           or "autohotkey" in low)
+    down = ("connection refused" in low or "could not connect" in low
+            or "unable to connect" in low)
+    if not ahk and not down:
         return None
+    if down:
+        return (
+            "the windows-mcp GUI server may not be up yet (it "
+            "auto-starts at boot but the first run pip-installs deps, "
+            "~60s). Retry after a short wait, or start it manually: "
+            "sandbox_run 'powershell -ExecutionPolicy Bypass -File "
+            "C:\\Users\\WDAGUtilityAccount\\Desktop\\toolkit\\bin\\"
+            "windows-mcp-serve.ps1' and read the URL it prints. Connect "
+            "with NO trailing slash on /mcp and Bearer auth."
+        )
     return (
-        "AutoHotkey v2 is the in-VM GUI input layer (its input never "
-        "touches the host). Run scripts via Start-Process -Wait with "
-        "/ErrorStdOut — without it, script errors become modal dialogs "
-        "that hang the session. Background input needs explicit targets: "
-        "ControlClick 'x300 y200', hwnd, , 'Left', 1, 'NA' clicks a "
-        "background window without activating it; ControlSend keys, "
-        "'Edit1', hwnd types into a background window (window-level "
-        "ControlSend without a control target silently does nothing); "
-        "ControlGetText reads state. Never name a variable after an AHK "
-        "function (log, WinGetList). UIA-v2 "
-        "(github.com/Descolada/UIA-v2) adds UI Automation element "
-        "discovery + pattern actions to AHK."
+        "AutoHotkey is retired: the windows-mcp MCP server is the "
+        "primary in-VM GUI layer (it auto-starts at boot; connection "
+        "info in the mapped logs dir as mcp.json). Drive the GUI via "
+        "its MCP tools over HTTP from the host: Snapshot first (UIA "
+        "tree with labeled elements), then Click/Type with the label "
+        "or loc:[x,y] it returns \u2014 no coordinate guessing, no "
+        "background-input tricks."
     )
 
 
@@ -986,8 +1011,9 @@ def _dialog_stall_hint(output: str, timed_out: bool) -> str | None:
         "'/quiet InstallAllUsers=1 PrependPath=1', 'msiexec /qn', "
         "'winget install --silent', or use a zip/portable distribution "
         "with no installer. Never run interactive installers unattended. "
-        "If a dialog is unavoidable, write a small AHK watcher (WinWait "
-        "loop clicking the accept button) instead of babysitting."
+        "If a dialog is unavoidable, drive it via the windows-mcp "
+        "server's Click tool (find the button via Snapshot) instead "
+        "of babysitting."
     )
 
 
@@ -1010,9 +1036,9 @@ async def sandbox_run(workspace: str, command: str,
     hint = _missing_command_hint(str(result.get("output") or ""))
     if hint:
         result["hint"] = hint
-    ahk = _ahk_hint(str(result.get("output") or ""))
-    if ahk:
-        result["hint"] = f"{result.get('hint', '')} {ahk}".strip()
+    mcp = _mcp_hint(str(result.get("output") or ""))
+    if mcp:
+        result["hint"] = f"{result.get('hint', '')} {mcp}".strip()
     stall = _dialog_stall_hint(str(result.get("output") or ""),
                                bool(result.get("timed_out")))
     if stall:
@@ -1053,8 +1079,7 @@ def prompt_section() -> str:
         "And NEVER drive the sandbox's GUI with the host mouse/keyboard "
         "tools (mouse_click, type_text, press_key, ...): they move the "
         "user's REAL desktop input. The VM has its own input session — "
-        "use in-VM AutoHotkey (below) for every GUI interaction inside "
-        "the sandbox.\n"
+        "drive its GUI via the windows-mcp MCP server (below).\n"
         "- The VM is a CLEAN WINDOWS IMAGE: git, python, node and other "
         "dev tools are NOT preinstalled — expect 'is not recognized as "
         "the name of a cmdlet' on first use. BEFORE downloading anything, "
@@ -1067,7 +1092,7 @@ def prompt_section() -> str:
         "with no output)? The VM can screenshot ITSELF: run "
         "toolkit\\bin\\vm-capture.ps1 via sandbox_run and view_image the "
         "PNG it writes (host side: ~/.yaah/toolkit/vm-screen.png). A modal "
-        "dialog left by a failed AHK/installer run is invisible to "
+        "dialog left by a failed installer run is invisible to "
         "sandbox_run output; vm-capture makes it visible in one "
         "round-trip, then kill the offending window/process by title.\n"
         "- NEVER run interactive installers unattended — they stall the "
@@ -1077,8 +1102,8 @@ def prompt_section() -> str:
         "distributions (no installer at all). If a command times out "
         "with no output, assume a dialog stall: kill the process "
         "(taskkill /IM <name> /F) and redo it silently. If a dialog is "
-        "truly unavoidable, write a small AHK watcher on demand (a "
-        "WinWait loop that clicks the accept button) instead of "
+        "truly unavoidable, drive it via the windows-mcp server's "
+        "Click tool (find the button via Snapshot) instead of "
         "babysitting the screen.\n"
         "- Toolkit dirs prepended to PATH inside the VM: toolkit, "
         "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules\\.bin. For "
@@ -1098,24 +1123,41 @@ def prompt_section() -> str:
         "commit --amend). The bootstrap points GIT_EDITOR/EDITOR/"
         "VISUAL at a no-op, so an editor-less commit fails fast with "
         "'empty message' instead of hanging.\n"
-        "- GUI automation inside the VM: AutoHotkey v2 is the in-VM "
-        "input layer — its input never touches the host (the VM has its "
-        "own input session; the host user is unaffected). Install once: "
-        "download the AutoHotkey zip from "
-        "https://www.autohotkey.com/download/2.0/ and expand to "
-        "toolkit\\ahk (persists to the host + future sandboxes). Run "
-        "scripts via Start-Process -Wait with /ErrorStdOut — WITHOUT "
-        "/ErrorStdOut, script errors become modal dialogs that hang the "
-        "session. Techniques (verified): ControlClick 'x300 y200', hwnd, "
-        ", 'Left', 1, 'NA' clicks a BACKGROUND window without activating "
-        "it; ControlSend keys, 'Edit1', hwnd types into a background "
-        "window but REQUIRES an explicit control target (window-level "
-        "ControlSend silently does nothing); ControlGetText reads state. "
-        "UIA-v2 (github.com/Descolada/UIA-v2) adds full UI Automation to "
-        "AHK for element discovery + pattern actions. AHK v2 traps: "
-        "never name a variable after a function (log, WinGetList fail "
-        "with 'This Func cannot be used as an output variable'); "
-        "ControlSend's signature is (Keys, Control, WinTitle).\n"
+        "- GUI automation inside the VM: the windows-mcp MCP server is the "
+        "PRIMARY GUI layer. It AUTO-STARTS at sandbox boot (the bootstrap "
+        "runs toolkit\\bin\\windows-mcp-serve.ps1 detached; first boot "
+        "may take ~60s extra while it pip-installs pinned deps). Its "
+        "connection info is written to the mapped logs dir as mcp.json "
+        "(host side: <session logs dir>\\mcp.json — the logs dir is "
+        "the one sandbox_status / the session files show). It gives "
+        "{\"url\": \"http://<vm-ip>:8000/mcp\", \"auth\": \"Bearer "
+        "sandbox-demo-key\"}. Connect EXACTLY like this (raw HTTP from "
+        "the host — NO trailing slash on /mcp; a trailing slash "
+        "307-redirects and silently DROPS the POST body):\n"
+        "  1) POST <url> with headers {\"Authorization\": \"Bearer "
+        "sandbox-demo-key\", \"Content-Type\": \"application/json\", "
+        "\"Accept\": \"application/json, text/event-stream\"} and body "
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":"
+        "{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},"
+        "\"clientInfo\":{\"name\":\"yaah\",\"version\":\"1.0\"}}} — grab "
+        "the mcp-session-id RESPONSE header.\n"
+        "  2) POST notifications/initialized (same headers + the "
+        "mcp-session-id header).\n"
+        "  3) tools/list, then tools/call — ALWAYS sending the "
+        "mcp-session-id header.\n"
+        "  Key tools (input schemas are the truth; descriptions lie): "
+        "Snapshot returns the UIA tree with labeled elements — call it "
+        "FIRST, then Click/Type with the label or loc:[x,y] it gave you "
+        "(no coordinate guessing). App launches apps: use "
+        "mode=launch_executable + a full executable path (Edge is NOT in "
+        "the VM's start menu index; e.g. C:\\Program Files (x86)\\"
+        "Microsoft\\Edge\\Application\\msedge.exe), NOT 'action'. "
+        "Shortcut takes 'shortcut', NOT 'keys'. The PowerShell tool runs "
+        "commands in the VM. If the server is not up (connection "
+        "refused), start it manually: sandbox_run \"powershell "
+        "-ExecutionPolicy Bypass -File "
+        "C:\\Users\\WDAGUtilityAccount\\Desktop\\toolkit\\bin\\"
+        "windows-mcp-serve.ps1\" and read the URL it prints.\n"
         "- Dispose the sandbox when the work is done: call "
         "`sandbox_stop` after smoke tests, reproductions or testing "
         "wrap up — the VM is an 8 GB window on the user's desktop, not "
@@ -1150,8 +1192,9 @@ SANDBOX_TOOLS_SCHEMA = [
                 "builds (host bash/powershell are for file ops, git and "
                 "non-executing checks). All work for the app under test "
                 "stays inside the VM: its dependencies run in here (never "
-                "host equivalents), and its GUI is driven by in-VM "
-                "AutoHotkey — never the host mouse/keyboard tools. "
+                "host equivalents), and its GUI is driven via the "
+                "windows-mcp MCP server (auto-started at boot; see the "
+                "sandbox prompt section) — never the host mouse/keyboard tools. "
                 "Prompts the user in ask mode. "
                 "Returns once the sandbox is ready (first boot is a slow "
                 "cold start)."
@@ -1190,11 +1233,12 @@ SANDBOX_TOOLS_SCHEMA = [
                 "into the toolkit (PATH inside the VM: toolkit, "
                 "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules"
                 "\\.bin; shim zipped tools' exe from toolkit\\bin\\<name>"
-                ".cmd). For GUI automation in the VM use AutoHotkey v2 "
-                "(in-VM input never touches the host): run via "
-                "Start-Process -Wait with /ErrorStdOut, and target "
-                "background windows with ControlClick 'NA' / ControlSend "
-                "with an explicit control. File-polling transport: each "
+                ".cmd). For GUI automation in the VM use the windows-mcp MCP "
+                "server (auto-started at boot; connection info in the "
+                "mapped logs dir as mcp.json; connect over HTTP with "
+                "Bearer auth, NO trailing slash on /mcp): Snapshot "
+                "first, then Click/Type with the labeled element. "
+                "File-polling transport: each "
                 "command costs ~1-3s — batch work into fewer commands."
             ),
             "parameters": {

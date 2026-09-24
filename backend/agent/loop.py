@@ -222,7 +222,8 @@ Computer use (desktop tools):
   Do not move the user's mouse or type into windows outside the task.
 - These move the USER'S REAL mouse and keyboard. For an app running
   inside the Windows Sandbox they are forbidden — the sandbox has its
-  own input session; use in-VM AutoHotkey via sandbox_run instead
+  own input session; drive the sandbox GUI via the windows-mcp MCP
+  server (see the sandbox section) instead
   (see the sandbox section). Host input here is only for apps running
   on the host itself.
 - Prefer shell/file tools for anything reachable that way; computer use
@@ -341,7 +342,8 @@ Guidelines:
   needs (runtimes, browsers, portable tools) is installed into the VM's
   toolkit — never launch a host equivalent (e.g. the host browser) to
   exercise the app, and never drive the app's GUI with the host
-  mouse/keyboard tools; in-VM AutoHotkey is the input layer for that.
+  mouse/keyboard tools; the windows-mcp MCP server (auto-started in
+  the sandbox) is the GUI layer for that.
 - If a full-suite verification fails, separate YOUR change from the
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists
