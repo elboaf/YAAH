@@ -66,12 +66,11 @@ def _build_payload(cfg: dict, tools: list | None, stream: bool) -> dict:
     # 0/blank = no limit: let the provider use the model's full output cap
     if cfg["max_tokens"] and cfg["max_tokens"] > 0:
         payload["max_tokens"] = cfg["max_tokens"]
-    # Reasoning effort (#6): "" = don't send the param at all, so providers
-    # that hard-reject unknown fields are unaffected until the user opts in
-    # (Settings: Default / low / medium / high). Only reasoning-capable
-    # models react to it; others ignore or 400 — documented in Settings.
+    # Reasoning effort: "" = don't send the param at all. The model-aware UI
+    # limits values to the selected provider's advertised supported_efforts;
+    # don't hard-code a global enum here (providers add values such as "max").
     effort = (cfg.get("reasoning_effort") or "").strip().lower()
-    if effort in ("low", "medium", "high"):
+    if effort and len(effort) <= 64:
         payload["reasoning_effort"] = effort
     if stream:
         # Ask for exact usage (usage.prompt_tokens = what this call actually
@@ -94,7 +93,7 @@ def _resolve_call_cfg(cfg: dict, model: str = "", effort: str | None = "") -> di
     effort: "" = inherit the global reasoning_effort setting; None = THIS
     call explicitly sends no reasoning_effort param (#51/#76 — a chat whose
     stamped effort is '' chose Default deliberately; blank must not drag
-    the global back in); "low"/"medium"/"high" override the global.
+    the global back in); any non-empty provider-advertised value overrides.
     """
     cfg = dict(cfg)
     if model:

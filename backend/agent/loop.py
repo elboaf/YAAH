@@ -1104,7 +1104,7 @@ async def _run_agent_claimed(
     the agent's per-agent values (#41). model: "" = active global model;
     bare id or "provider::model" swaps model (and provider). effort: "" =
     inherit the global reasoning_effort setting; None = send no param at
-    all (the chat's explicit Default); low/medium/high override."""
+    all (the chat's explicit Default); any non-empty value overrides."""
     # Persist the user message first (skipped on resume; the text still
     # reaches the model through the replayed history below).
     # The public run_agent wrapper owns the conversation claim and releases

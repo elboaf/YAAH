@@ -3309,24 +3309,53 @@ export function useModelList() {
   return { byProvider, refresh }
 }
 
-/** #76 — hook: the reasoning-effort options + '' semantics tooltip. */
-export function EffortOptions() {
+/** #76 — render the effort levels advertised for the selected model. */
+export function EffortOptions({ efforts = [] }: { efforts?: string[] }) {
   return (
     <>
       <option value="">Default</option>
-      <option value="low">Low</option>
-      <option value="medium">Medium</option>
-      <option value="high">High</option>
+      {efforts.map((effort) => (
+        <option key={effort} value={effort}>
+          {effort.charAt(0).toUpperCase() + effort.slice(1)}
+        </option>
+      ))}
     </>
   )
 }
 
-export const EFFORT_HINT = 'Default = param not sent. Only affects reasoning-capable models.'
+export function modelReasoningEfforts(
+  byProvider: Record<string, ProviderModels>,
+  model: string,
+): string[] {
+  const parsed = parseModelScope(model)
+  const candidates = parsed.provider ? [parsed.provider] : Object.keys(byProvider)
+  for (const provider of candidates) {
+    const info = byProvider[provider]?.model_info?.find((entry) => entry.id === parsed.model)
+    if (info) return info.reasoning_efforts
+  }
+  return []
+}
+
+export function modelSupportsReasoning(
+  byProvider: Record<string, ProviderModels>,
+  model: string,
+): boolean {
+  const parsed = parseModelScope(model)
+  const candidates = parsed.provider ? [parsed.provider] : Object.keys(byProvider)
+  return candidates.some((provider) =>
+    byProvider[provider]?.model_info?.some((entry) => entry.id === parsed.model && entry.supports_reasoning),
+  )
+}
+
+export const EFFORT_HINT = 'Effort options are shown only when advertised by the model provider.'
 
 /** Default reasoning/thought level for new chats. Existing conversations keep
  *  their pinned effort, matching the default-model selector's scope. */
 export function DefaultThoughtLevelPicker() {
   const effort = useAgent((s) => s.globalEffort)
+  const model = useAgent((s) => s.globalModel)
+  const { byProvider } = useModelList()
+  const supportedEfforts = modelReasoningEfforts(byProvider, model)
   const refreshGlobals = useAgent((s) => s.refreshGlobals)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -3356,7 +3385,7 @@ export function DefaultThoughtLevelPicker() {
         aria-label="Thought level"
         aria-describedby={error ? 'default-thought-level-status' : undefined}
       >
-        <EffortOptions />
+        <EffortOptions efforts={supportedEfforts} />
       </select>
       {saving && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving thought level…</p>}
       {error && <p id="default-thought-level-status" className="mt-1 text-[10px] text-red-400" role="alert">{error}</p>}
@@ -3422,7 +3451,11 @@ export function Sidebar() {
     setSavingModel(true)
     setModelError('')
     setActiveProvider(provider)
+    const keepEffort = modelReasoningEfforts(byProvider, `${provider}::${m}`).includes(
+      useAgent.getState().globalEffort,
+    )
     setActiveModel(provider, m)
+      .then(() => (keepEffort ? undefined : updateConfig({ reasoning_effort: '' })))
       .then(refreshGlobals)
       .then(refreshModels)
       .catch((e) => {
@@ -4654,6 +4687,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
   // Reasoning effort (#6): '' = don't send the param (Default).
   const [reasoningEffort, setReasoningEffort] = useState('')
+  const [availableModels, setAvailableModels] = useState<Record<string, ProviderModels>>({})
+  const activeModel = providers[active]?.model ?? ''
+  const activeSupportsReasoning = modelSupportsReasoning(availableModels, activeModel)
+  const activeEfforts = modelReasoningEfforts(availableModels, activeModel)
   // Per-model context-window overrides (model id -> tokens); blank = auto.
   const [ctxOverrides, setCtxOverrides] = useState<Record<string, number>>({})
   const [ctxModelDraft, setCtxModelDraft] = useState('')
@@ -4734,6 +4771,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           }
           setProviders(next)
           setActive(c.active_provider)
+          listAvailableModels().then((r) => setAvailableModels(r.providers)).catch(() => {})
           setTemperature(c.temperature ?? '')
           setMaxTokens(c.max_tokens ? c.max_tokens : '')
           setMaxSteps(c.max_steps ?? '')
@@ -4884,7 +4922,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         temperature: temperature === '' ? undefined : Number(temperature),
         max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
-        reasoning_effort: reasoningEffort,
+        reasoning_effort: activeEfforts.includes(reasoningEffort) ? reasoningEffort : '',
         context_window_overrides: ctxOverrides,
         ui_scale: uiScale,
         voice: {
@@ -5118,19 +5156,18 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                     Reasoning effort <span className="text-zinc-600">(default for new chats — #76)</span>
                   </label>
                   <select
-                    className={`${settingsInputCls} w-full`}
+                    className={`${settingsInputCls} w-full disabled:opacity-50`}
                     value={reasoningEffort}
                     onChange={(e) => setReasoningEffort(e.target.value)}
                     aria-label="Reasoning effort"
+                    disabled={!activeSupportsReasoning}
                   >
-                    <option value="">Default</option>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
+                    <EffortOptions efforts={activeEfforts} />
                   </select>
                   <p className="mt-1 text-[10px] text-zinc-600">
-                    Default = param not sent. Only affects reasoning-capable models.
-                    Existing chats keep their own header selector.
+                    {activeSupportsReasoning
+                      ? 'Default = provider default. Existing chats keep their own header selector.'
+                      : 'Selected model/provider does not advertise reasoning effort support.'}
                   </p>
                 </div>
               </div>
@@ -6351,14 +6388,16 @@ export function ChatScopePickers() {
     const provider = value.slice(0, idx)
     const m = value.slice(idx + 2)
     if (!m || (m === shownModel && provider === shownProvider)) return
+    const newModel = `${provider}::${m}`
+    const nextEffort = modelReasoningEfforts(byProvider, newModel).includes(effort) ? effort : ''
     if (conversationId === null) {
-      setDraftScope({ model: `${provider}::${m}` })
+      setDraftScope({ model: newModel, effort: nextEffort })
       return
     }
     setSavingModel(true)
     const write = isAgentChat
-      ? updateAgentModelEffort(owner.id, `${provider}::${m}`, effort)
-      : updateConversation(conversationId, { model: `${provider}::${m}` })
+      ? updateAgentModelEffort(owner.id, newModel, nextEffort)
+      : updateConversation(conversationId, { model: newModel, effort: nextEffort })
     write
       .then(() => {
         if (isAgentChat) refreshAgents()
@@ -6414,11 +6453,11 @@ export function ChatScopePickers() {
           className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-50"
           value={effort}
           onChange={(e) => applyEffort(e.target.value)}
-          disabled={locked || saving}
+          disabled={locked || saving || !modelSupportsReasoning(byProvider, model)}
           aria-label="Chat reasoning effort"
           title={`${EFFORT_HINT}${isAgentChat ? ' (writes through to the owning agent)' : ''}`}
         >
-          <EffortOptions />
+          <EffortOptions efforts={modelReasoningEfforts(byProvider, model)} />
         </select>
         {isAgentChat && (
           <span

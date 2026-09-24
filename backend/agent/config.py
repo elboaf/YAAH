@@ -37,7 +37,7 @@ DEFAULTS = {
     "temperature": 0.2,
     "max_tokens": 0,
     # Reasoning effort (#6): "" = don't send reasoning_effort to the model
-    # provider at all; "low" | "medium" | "high" sends it. Settings dropdown.
+    # provider at all; a provider-advertised value sends it. Settings dropdown.
     "reasoning_effort": "",
     # Agent loop tool-call rounds per turn (Settings → Max steps).
     "max_steps": 200,

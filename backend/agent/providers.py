@@ -53,6 +53,41 @@ def detect_preset(api_base: str) -> str | None:
 LIST_TIMEOUT = 4.0  # seconds per provider (Q8 lean)
 
 
+def _model_info(models: object) -> list[dict]:
+    """Normalize model ids and reasoning effort metadata from /models.
+
+    OpenRouter publishes exact supported efforts under ``reasoning``. Other
+    OpenAI-compatible catalogs may publish only ``supported_parameters``;
+    that confirms the parameter exists but does not enumerate valid values,
+    so no effort choices can safely be offered. Catalogs with no capability
+    metadata are unknown, not evidence that the model supports reasoning.
+    """
+    if not isinstance(models, list):
+        return []
+    result = []
+    for model in models:
+        if not isinstance(model, dict) or not isinstance(model.get("id"), str) or not model["id"]:
+            continue
+        reasoning = model.get("reasoning")
+        efforts = reasoning.get("supported_efforts") if isinstance(reasoning, dict) else None
+        if isinstance(efforts, list):
+            efforts = list(dict.fromkeys(v for v in efforts if isinstance(v, str) and v))
+        else:
+            efforts = []
+        parameters = model.get("supported_parameters")
+        supports_reasoning = bool(efforts) or bool(reasoning) or (
+            isinstance(parameters, list) and "reasoning_effort" in parameters
+        )
+        result.append(
+            {
+                "id": model["id"],
+                "reasoning_efforts": efforts,
+                "supports_reasoning": supports_reasoning,
+            }
+        )
+    return result
+
+
 async def list_all_models(providers: dict) -> dict:
     """Query every configured provider in parallel.
 
@@ -70,11 +105,9 @@ async def list_all_models(providers: dict) -> dict:
                 )
             if r.status_code != 200:
                 return {"models": [], "error": f"HTTP {r.status_code}"}
-            data = r.json().get("data", [])
-            models = [
-                m.get("id", "") for m in data if isinstance(m, dict) and m.get("id")
-            ]
-            return {"models": sorted(models)}
+            model_info = _model_info(r.json().get("data", []))
+            models = sorted(item["id"] for item in model_info)
+            return {"models": models, "model_info": sorted(model_info, key=lambda item: item["id"])}
         except (httpx.HTTPError, ValueError) as e:
             return {"models": [], "error": str(e)}
 
@@ -93,11 +126,9 @@ async def list_models(api_base: str, api_key: str = "") -> dict:
             r = await client.get(url, headers=headers)
         if r.status_code != 200:
             return {"error": f"HTTP {r.status_code}", "models": []}
-        data = r.json().get("data", [])
-        models = [
-            m.get("id", "") for m in data if isinstance(m, dict) and m.get("id")
-        ]
-        return {"models": sorted(models)}
+        model_info = _model_info(r.json().get("data", []))
+        models = sorted(item["id"] for item in model_info)
+        return {"models": models, "model_info": sorted(model_info, key=lambda item: item["id"])}
     except (httpx.HTTPError, ValueError) as e:
         return {"error": str(e), "models": []}
 

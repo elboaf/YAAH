@@ -274,8 +274,16 @@ export const getProviders = () =>
   api<Record<string, ProviderPreset>>('/api/providers')
 
 /** Per-provider model listing, with the error when a provider is unreachable. */
+export interface ProviderModelInfo {
+  id: string
+  reasoning_efforts: string[]
+  supports_reasoning: boolean
+}
+
 export interface ProviderModels {
   models: string[]
+  /** Capability metadata may be absent from OpenAI-compatible catalogs. */
+  model_info?: ProviderModelInfo[]
   error?: string
 }
 

@@ -1,10 +1,4 @@
-"""Reasoning effort (#6): the payload knob in model_client._build_payload.
-
-"" (Default) must not send the param at all — providers that hard-reject
-unknown fields stay unaffected until the user opts in. low/medium/high send
-reasoning_effort; anything else (garbage, wrong case, whitespace) is treated
-as unset rather than forwarded.
-"""
+"""Reasoning effort payload behavior for provider-advertised values."""
 from backend.agent.model_client import _build_payload
 
 
@@ -27,17 +21,15 @@ def test_default_sends_no_param():
     assert "reasoning_effort" not in _build_payload(_cfg(""), None, False)
 
 
-def test_levels_send_the_param():
-    for level in ("low", "medium", "high"):
+def test_provider_advertised_levels_send_the_param():
+    for level in ("low", "medium", "high", "max"):
         payload = _build_payload(_cfg(level), None, False)
         assert payload["reasoning_effort"] == level
 
 
-def test_case_and_whitespace_normalized():
-    assert _build_payload(_cfg(" High "), None, False)["reasoning_effort"] == "high"
-    assert _build_payload(_cfg("MEDIUM"), None, False)["reasoning_effort"] == "medium"
+def test_effort_value_normalized_for_provider():
+    assert _build_payload(_cfg(" Max "), None, False)["reasoning_effort"] == "max"
 
 
-def test_unknown_values_treated_as_unset():
-    for bad in ("max", "ultra", "0", "none"):
-        assert "reasoning_effort" not in _build_payload(_cfg(bad), None, False)
+def test_unbounded_values_are_not_forwarded():
+    assert "reasoning_effort" not in _build_payload(_cfg("x" * 65), None, False)

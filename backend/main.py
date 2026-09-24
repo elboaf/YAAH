@@ -864,7 +864,7 @@ class ConfigUpdate(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     max_steps: int | None = None
-    # Reasoning effort (#6): "" = don't send the param; low/medium/high send it.
+    # Reasoning effort (#6): "" = don't send the param; provider-advertised values send it.
     reasoning_effort: str | None = None
     voice: dict | None = None
     remote: dict | None = None
@@ -1233,7 +1233,7 @@ class AgentBody(BaseModel):
     schedule_spec: dict = {}                 # see database.SCHEMA agents comment
     approval_policy: str = "sandbox-only"    # sandbox-only | autonomous
     model: str = ""                          # '' = active global model
-    effort: str = ""                         # '' | low | medium | high
+    effort: str = ""                         # '' | provider-advertised effort
     memory_enabled: bool = True
     # #93: agent-level opt-in — a scheduled run may ask the user a question
     # (ask_user) and wait for the answer in its pinned chat.
