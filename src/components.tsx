@@ -3318,6 +3318,51 @@ export function EffortOptions() {
 
 export const EFFORT_HINT = 'Default = param not sent. Only affects reasoning-capable models.'
 
+/** Default reasoning/thought level for new chats. Existing conversations keep
+ *  their pinned effort, matching the default-model selector's scope. */
+export function DefaultThoughtLevelPicker() {
+  const effort = useAgent((s) => s.globalEffort)
+  const refreshGlobals = useAgent((s) => s.refreshGlobals)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const apply = async (value: string) => {
+    if (value === effort || saving) return
+    setSaving(true)
+    setError('')
+    try {
+      await updateConfig({ reasoning_effort: value })
+      await refreshGlobals()
+    } catch (e) {
+      setError(`Could not save thought level: ${String((e as Error).message ?? e)}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="mt-2">
+      <label htmlFor="default-thought-level" className="mb-1 block text-[10px] uppercase tracking-wider text-zinc-500">
+        Default thought level for new chats
+      </label>
+      <select
+        id="default-thought-level"
+        className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+        value={effort}
+        onChange={(e) => void apply(e.target.value)}
+        disabled={saving}
+        aria-label="Default thought level for new chats"
+        aria-describedby={error ? 'default-thought-level-status' : undefined}
+        title={`${EFFORT_HINT} Saved chats use their own pinned thought level.`}
+      >
+        <EffortOptions />
+      </select>
+      {saving && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving thought level…</p>}
+      {error && <p id="default-thought-level-status" className="mt-1 text-[10px] text-red-400" role="alert">{error}</p>}
+    </div>
+  )
+}
+
 export function Sidebar() {
   const { newConversation, workspace, setWorkspace, clearLog, refreshGlobals } = useAgent()
   const globalModel = useAgent((s) => s.globalModel)
@@ -3503,6 +3548,7 @@ export function Sidebar() {
               </svg>
             </button>
           </div>
+          <DefaultThoughtLevelPicker />
           {Object.keys(byProvider).length === 0 && (
             <button
               className="mt-1.5 w-full rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 text-left text-[10px] leading-relaxed text-amber-300 hover:border-amber-500"
