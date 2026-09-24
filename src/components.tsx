@@ -680,6 +680,7 @@ function toolGlyph(name: string): string {
   if (name === 'web_search') return '⌕'
   if (name === 'web_fetch') return '☰'
   if (name === 'view_image') return '▣'
+  if (name.startsWith('memory_')) return '⌘'
   return '⚙'
 }
 
@@ -694,6 +695,7 @@ function toolGlyphColor(name: string): string {
   if (name === 'web_search' || name === 'web_fetch') return 'text-cyan-400'
   if (name === 'view_image') return 'text-pink-400'
   if (name === 'edit_file' || name === 'write_file') return 'text-amber-400'
+  if (name.startsWith('memory_')) return 'text-lime-400'
   return 'text-zinc-400'
 }
 
@@ -707,7 +709,8 @@ function toolTarget(tc: ToolCall): string {
     }
     return undefined
   }
-  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url', 'question') ?? '')
+  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url', 'question',
+    ...(tc.name ?? '').startsWith('memory_') ? ['name'] : []) ?? '')
     .replace(/\s+/g, ' ')
     .trim()
   return t.length > 48 ? t.slice(0, 48) + '…' : t
