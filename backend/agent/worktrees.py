@@ -447,6 +447,10 @@ async def create_worktree(workspace: str, chat_id: str, run_id: str, label: str 
     if root is None:
         return {"ok": False, "reason": "not a git repository"}
     branch = branch_for(chat_id, run_id, label)
+    # Capture the source branch before creating the isolated worktree. This
+    # lets the UI distinguish the agent branch from the branch it was based on.
+    base_rc, base_branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
+    base_branch = base_branch.strip() if base_rc == 0 else ""
     wt = worktree_base(root) / _component(chat_id)
     rc, out = await _git(root, "worktree", "add", "-b", branch, str(wt))
     if rc != 0:
@@ -459,6 +463,7 @@ async def create_worktree(workspace: str, chat_id: str, run_id: str, label: str 
     info = {
         "root": str(root),
         "branch": branch,
+        "base_branch": base_branch,
         "chat_id": chat_id,
         "run_id": run_id,
         "created": _now(),
@@ -1088,6 +1093,8 @@ async def turn_end(chat_id: str) -> dict:
             return {
                 "drained": True,
                 "branch": branch,
+                "base_branch": info.get("base_branch", ""),
+                "worktree_id": chat_id,
                 "worktree": wt_str,
                 "commits_ahead": 0,
                 "dirty": False,
@@ -1096,6 +1103,8 @@ async def turn_end(chat_id: str) -> dict:
     return {
         "drained": False,
         "branch": branch,
+        "base_branch": info.get("base_branch", ""),
+        "worktree_id": chat_id,
         "worktree": wt_str,
         "commits_ahead": max(commits, 0),
         "dirty": bool(await _dirty(wt)),

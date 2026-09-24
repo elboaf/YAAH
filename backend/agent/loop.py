@@ -1508,6 +1508,8 @@ async def run_agent(
                                             {
                                                 "type": "worktree_bound",
                                                 "branch": _binfo.get("branch", ""),
+                                                "base_branch": _binfo.get("base_branch", ""),
+                                                "worktree_id": str(conversation_id),
                                             }
                                         )
                                         messages.append(
@@ -1579,6 +1581,8 @@ async def run_agent(
                                                 {
                                                     "type": "worktree_bound",
                                                     "branch": _binfo.get("branch", ""),
+                                                    "base_branch": _binfo.get("base_branch", ""),
+                                                    "worktree_id": str(conversation_id),
                                                 }
                                             )
                                             messages.append(
@@ -1900,6 +1904,8 @@ async def run_agent(
                 # lives on the branch until the user says otherwise.
                 _note = {
                     "branch": _settle.get("branch", ""),
+                    "base_branch": _settle.get("base_branch", ""),
+                    "worktree_id": _settle.get("worktree_id", str(conversation_id)),
                     "worktree": _settle.get("worktree", ""),
                     "commits": _settle["commits_ahead"],
                     "dirty": bool(_settle.get("dirty")),

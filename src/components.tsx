@@ -1208,6 +1208,8 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
     let status: {
       worktree_status?: {
         branch?: string
+        base_branch?: string
+        worktree_id?: string
         commits?: number
         dirty?: boolean
         worktree?: string
@@ -1225,6 +1227,8 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         status = parsed as {
           worktree_status: {
             branch?: string
+            base_branch?: string
+            worktree_id?: string
             commits?: number
             dirty?: boolean
             worktree?: string
@@ -1238,14 +1242,16 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       // adr/0003 revised (branch-first): turn end never merges — this
       // persisted line IS the record of where the work lives.
       const s = status.worktree_status ?? {}
-      const bits: string[] = [`${s.commits ?? 0} commit(s) on branch ${s.branch ?? '?'}`]
-      if (s.worktree) bits.push(`worktree ${s.worktree}`)
+      const bits: string[] = [`${s.commits ?? 0} commit(s) on agent branch ${s.branch ?? '?'}`]
+      if (s.base_branch) bits.push(`based on ${s.base_branch}`)
+      if (s.worktree_id) bits.push(`worktree #${s.worktree_id}`)
+      else if (s.worktree) bits.push(`worktree ${s.worktree}`)
       if (s.dirty) bits.push('plus uncommitted changes')
       bits.push(
-        `committed work is only on the session branch; "merge it" merges those commits into the shared repo's currently checked-out branch, or push the session branch to its remote`,
+        `committed work is only on the agent branch; "merge it" merges those commits into the primary working tree's currently selected branch, or push the agent branch to its remote`,
       )
       if (s.dirty) {
-        bits.push('uncommitted changes stay on the session branch and are not included in merge or push')
+        bits.push('uncommitted changes stay in the agent checkout and are not included in merge or push')
       }
       return (
         <div className="pl-3">
@@ -5714,16 +5720,14 @@ function GitChipCluster({
       .catch(() => {})
   }
 
-  // Mid-run AND between-turns isolation (adr/0003 revised): while this
-  // conversation's session is bound to its worktree the chip shows the
-  // agent branch, amber — the work lives there until the user merges or
-  // the session drains. Sub-agents are excluded — the parent turn owns
-  // the binding (worktree_bound fires only at the top-level seam).
+  // Mid-run AND between-turns isolation (adr/0003 revised): the primary
+  // selector continues to represent the primary tree, while this separate
+  // indicator reports the conversation's agent checkout. Sub-agents are
+  // excluded — the parent turn owns the binding.
   const showAgentBranch = Boolean(agentBranch)
-  // An explicit git_merge_back landed the branch in the main tree: same
-  // chip, neutral color — "working here" (amber) vs "merged" (tick).
+  // An explicit git_merge_back landed the agent branch in the primary tree;
+  // the status indicator remains visible and switches to a neutral merged state.
   const agentMerged = Boolean(agentBranch?.merged)
-  const branchLabel = showAgentBranch ? agentBranch!.branch : info.branch
   const pairAway = info.ahead > 0 || info.behind > 0
   const pairDiverged = info.ahead > 0 && info.behind > 0
   const pairColor = pairDiverged ? 'text-red-400' : pairAway ? 'text-amber-400' : 'text-zinc-500'
@@ -5737,45 +5741,52 @@ function GitChipCluster({
 
   return (
     <span ref={wrapRef} className="relative flex min-w-0 items-center gap-2">
-      {/* branch chip: dirty dot + name + chevron */}
+      {/* Primary branch selector: always represents the user's working tree. */}
       <button
-        className={
-          'flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] ' +
-          (showAgentBranch && !agentMerged
-            ? 'border-amber-500/60 bg-amber-500/10 text-amber-300'
-            : 'border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:border-zinc-500')
-        }
+        className="flex shrink-0 items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-zinc-500"
         title={
-          showAgentBranch
-            ? agentMerged
-              ? `session worktree branch ${agentBranch!.branch} — merged into ${info.branch}; session still bound until the chat is deleted`
-              : `session branch ${agentBranch!.branch} has unmerged commits. Saying "merge it" merges those commits into the shared repository's currently checked-out branch (${info.branch}); it does not move or delete the session branch. To publish instead, push the session branch to its remote.`
-            : 'Current git branch — click to switch'
+          info.dirty
+            ? `Primary working-tree branch. ${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked). Click to switch branch.`
+            : 'Primary working-tree branch — click to switch'
         }
-        aria-label={showAgentBranch ? 'Agent worktree branch' : 'Switch git branch'}
+        aria-label="Primary branch; switch branch"
         aria-expanded={menuOpen}
         onClick={openMenu}
       >
         <span
-          className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
-            showAgentBranch ? 'run-pulse bg-amber-400' : info.dirty ? 'bg-amber-400' : 'bg-transparent'
-          }`}
-          title={
-            showAgentBranch
-              ? 'isolated run in progress'
-              : info.dirty
-                ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)`
-                : undefined
-          }
+          className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${info.dirty ? 'bg-amber-400' : 'bg-transparent'}`}
+          title={info.dirty ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)` : undefined}
         />
-        <span className="min-w-0 max-w-[10rem] truncate">
-          {agentMerged ? '✓ ' : ''}
-          {branchLabel}
-        </span>
+        <span className="min-w-0 max-w-[10rem] truncate">{info.branch}</span>
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
       </button>
+
+      {showAgentBranch && (
+        <span
+          className={`flex min-w-0 items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+            agentMerged
+              ? 'border-zinc-700 bg-zinc-800/40 text-zinc-400'
+              : 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+          }`}
+          title={
+            `Agent checkout branch ${agentBranch!.branch}` +
+            (agentBranch!.baseBranch ? `, based on ${agentBranch!.baseBranch}` : '') +
+            `, worktree ${agentBranch!.worktreeId ?? conversationId ?? 'unknown'}` +
+            (agentMerged ? `, merged into ${info.branch}; checkout remains active` : `, not yet merged into ${info.branch}`)
+          }
+          aria-label={`Agent checkout: branch ${agentBranch!.branch}, based on ${agentBranch!.baseBranch ?? 'unknown'}, worktree ${agentBranch!.worktreeId ?? conversationId ?? 'unknown'}${agentMerged ? ', merged' : ', unmerged'}`}
+        >
+          <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${agentMerged ? 'bg-zinc-500' : 'run-pulse bg-amber-400'}`} aria-hidden="true" />
+          <span className="shrink-0 text-zinc-500">AGENT CHECKOUT</span>
+          <span className="min-w-0 max-w-[9rem] truncate font-semibold">{agentBranch!.branch}</span>
+          <span className="shrink-0 text-zinc-500">based on</span>
+          <span className="min-w-0 max-w-[7rem] truncate">{agentBranch!.baseBranch ?? 'unknown'}</span>
+          <span className="shrink-0 text-zinc-500">#{agentBranch!.worktreeId ?? conversationId ?? '?'}</span>
+          {agentMerged && <span className="shrink-0 text-zinc-300">merged</span>}
+        </span>
+      )}
 
       {/* checkout dropdown (opens upward — the strip is the floor) */}
       {menuOpen && (
@@ -7732,18 +7743,30 @@ function Composer() {
         setAgentBranch(
           bufKey,
           existing?.branch === ev.branch
-            ? { ...existing, boundAt: existing.boundAt }
-            : { branch: ev.branch, boundAt: Date.now() },
+            ? {
+                ...existing,
+                baseBranch: ev.base_branch || existing.baseBranch,
+                worktreeId: ev.worktree_id || existing.worktreeId || String(conversationId),
+                boundAt: existing.boundAt,
+              }
+            : {
+                branch: ev.branch,
+                baseBranch: ev.base_branch || undefined,
+                worktreeId: ev.worktree_id || String(conversationId),
+                boundAt: Date.now(),
+              },
         )
       }
     } else if (ev.type === 'worktree_status') {
-      // Turn-end settlement confirmed commits remain on the session branch.
+      // Turn-end settlement confirms commits remain on the agent branch.
       appendRawMessage(bufKey, {
         id: `worktree-status-${Date.now()}`,
         role: 'system',
         content: JSON.stringify({
           worktree_status: {
             branch: ev.branch ?? '',
+            base_branch: ev.base_branch ?? '',
+            worktree_id: ev.worktree_id ?? String(conversationId),
             worktree: ev.worktree ?? '',
             commits: ev.commits ?? 0,
             dirty: ev.dirty ?? false,
@@ -7783,9 +7806,8 @@ function Composer() {
         appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
       }
       if (ev.name === 'git_merge_back') {
-        // An explicit merge landed the session branch in the main tree:
-        // the chip drops from amber to neutral but keeps the branch name
-        // (the session stays bound even though the work is merged).
+        // An explicit merge landed the agent branch in the primary tree:
+        // keep its separate indicator visible, but switch it to neutral.
         const r = ev.result as { merged?: boolean } | undefined
         const cur = useAgent.getState().agentBranchByConv[bufKey]
         if (r?.merged && cur) {

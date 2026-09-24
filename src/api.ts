@@ -884,6 +884,10 @@ export interface AgentEvent {
   /** Branch name of the session worktree (worktree_bound /
    *  worktree_status); worktree_released carries no payload. */
   branch?: string
+  /** Primary-tree branch from which the session worktree was created. */
+  base_branch?: string
+  /** Conversation ID used to identify the managed session worktree. */
+  worktree_id?: string
   /** Turn-end settlement (worktree_status, adr/0003 revised): commits on
    *  the session branch, master untouched. */
   commits?: number

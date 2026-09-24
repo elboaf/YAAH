@@ -115,6 +115,10 @@ export interface PendingPlanApproval {
  *  recovery), so a reload must not falsely claim the main branch. */
 export interface AgentBranchInfo {
   branch: string
+  /** Branch checked out in the primary working tree when this worktree began. */
+  baseBranch?: string
+  /** Conversation ID identifies the session worktree directory. */
+  worktreeId?: string
   boundAt: number
   /** The session has commits not yet merged into the shared repository. */
   pendingMerge?: boolean

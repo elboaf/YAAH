@@ -130,6 +130,8 @@ async def test_ensure_isolated_creates_and_binds(repo: Path):
         info = worktrees.binding_for("1")
         assert info and info["root"] == str(repo)
         assert info["branch"].startswith("agent/1/")
+        assert info["base_branch"] == "master"
+        assert info["chat_id"] == "1"
         # the worktree is real: HEAD works, and the base file is there
         assert (Path(wt) / "hello.txt").read_text(encoding="utf-8") == "v1\n"
         # second call for the same chat rebinds to the SAME worktree
