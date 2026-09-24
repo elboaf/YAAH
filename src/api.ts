@@ -862,6 +862,7 @@ export interface AgentEvent {
     | 'compaction_failed'
     | 'model_call'
     | 'title'
+    | 'usage'
     | 'done'
     | 'error'
     | 'stopped'

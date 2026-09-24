@@ -1343,7 +1343,7 @@ async def run_agent(
                     yield _ndjson(
                         {
                             "type": "usage",
-                            "prompt_tokens": usage["prompt_tokens"],
+                            "usage_tokens": usage["prompt_tokens"],
                             "model": (
                                 model_override
                                 or load_config().get("model")
