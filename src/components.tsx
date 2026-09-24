@@ -6283,11 +6283,6 @@ export function ChatScopePickers() {
         {(savingModel || savingEffort) && (
           <span className="text-[10px] text-zinc-500">saving…</span>
         )}
-        {locked && !saving && (
-          <span className="text-[10px] text-amber-400">
-            {agentRunLive ? 'locked while the agent runs' : 'locked mid-run'}
-          </span>
-        )}
       </div>
       {/* Provider-state affordances (#51): moved here from the sidebar so
           they sit next to the picker that needs them. */}
