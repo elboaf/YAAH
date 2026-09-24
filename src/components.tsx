@@ -64,6 +64,8 @@ import {
   listWorkspaces,
   listLocalWorkspaces,
   addWorkspace,
+  getWorkspaceGitBranches,
+  checkoutWorkspaceBranch,
   deleteWorkspace,
   discoverHosts,
   localInstanceInfo,
@@ -6042,10 +6044,43 @@ function DraftDestinationCard() {
   const [remoteAdd, setRemoteAdd] = useState(false)
   const [remotePath, setRemotePath] = useState('')
   const [err, setErr] = useState<string | null>(null)
+  const [gitBranch, setGitBranch] = useState<string | null>(null)
+  const [gitBranches, setGitBranches] = useState<string[]>([])
+  const [gitMenuOpen, setGitMenuOpen] = useState(false)
+  const [gitLoading, setGitLoading] = useState(false)
+  const [gitBusy, setGitBusy] = useState(false)
+  const [gitError, setGitError] = useState<string | null>(null)
 
   // The live destination: pinned value, else the active workspace ('' =
   // Default, the no-root pseudo-workspace).
   const dest = draftDestination ?? workspace
+  const destRef = useRef(dest)
+  destRef.current = dest
+
+  useEffect(() => {
+    let cancelled = false
+    setGitBranch(null)
+    setGitBranches([])
+    setGitMenuOpen(false)
+    setGitLoading(false)
+    setGitBusy(false)
+    setGitError(null)
+    if (scope.connected || !dest || dest.startsWith('remote:')) return
+    getWorkspaceGitBranches(dest)
+      .then((result) => {
+        if (!cancelled) {
+          setGitBranch(result.branch)
+          setGitBranches(result.branches)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setGitBranch(null)
+          setGitBranches([])
+        }
+      })
+    return () => { cancelled = true }
+  }, [dest, scope.connected])
 
   useEffect(() => {
     let cancelled = false
@@ -6105,6 +6140,48 @@ function DraftDestinationCard() {
 
   const destinationInRows = rows.some((w) => w.path === dest)
 
+  const openGitBranches = async () => {
+    if (!dest) return
+    setGitMenuOpen(true)
+    setGitLoading(true)
+    setGitError(null)
+    try {
+      const result = await getWorkspaceGitBranches(dest)
+      if (destRef.current !== dest) return
+      setGitBranch(result.branch)
+      setGitBranches(result.branches)
+    } catch (e) {
+      if (destRef.current === dest) {
+        setGitError(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
+        setGitBranches([])
+      }
+    } finally {
+      if (destRef.current === dest) setGitLoading(false)
+    }
+  }
+
+  const checkoutDraftBranch = async (branch: string) => {
+    if (!dest || gitBusy) return
+    setGitBusy(true)
+    setGitError(null)
+    try {
+      const result = await checkoutWorkspaceBranch(dest, branch)
+      if (destRef.current !== dest) return
+      if (!result.ok) {
+        setGitError(result.error || 'Branch checkout failed')
+        return
+      }
+      setGitBranch(branch)
+      setGitMenuOpen(false)
+    } catch (e) {
+      if (destRef.current === dest) {
+        setGitError(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
+      }
+    } finally {
+      if (destRef.current === dest) setGitBusy(false)
+    }
+  }
+
   return (
     <div className="mx-auto mt-3 w-full max-w-md rounded border border-zinc-800 bg-zinc-900/60 px-3 py-2">
       <div className="flex items-center gap-2">
@@ -6127,6 +6204,38 @@ function DraftDestinationCard() {
             <option key={w.path} value={w.path!}>{w.label}</option>
           ))}
         </select>
+        {gitBranch && !scope.connected && (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              aria-label={`Branch ${gitBranch}`}
+              title="This switches the branch for every chat sharing this workspace"
+              disabled={gitBusy}
+              onClick={() => gitMenuOpen ? setGitMenuOpen(false) : void openGitBranches()}
+              className="rounded border border-zinc-700 px-2 py-1 font-mono text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            >
+              ⎇ {gitBranch}
+            </button>
+            {gitMenuOpen && (
+              <div role="menu" aria-label="Git branches" className="absolute right-0 top-full z-30 mt-1 max-h-48 min-w-36 overflow-auto rounded border border-zinc-700 bg-zinc-900 p-1 shadow-xl">
+                {gitLoading ? <div className="px-2 py-1 text-[10px] text-zinc-500">Loading branches…</div> :
+                  gitBranches.map((branch) => (
+                    <button
+                      key={branch}
+                      type="button"
+                      role="menuitem"
+                      disabled={gitBusy || branch === gitBranch}
+                      onClick={() => void checkoutDraftBranch(branch)}
+                      className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left font-mono text-[10px] text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      <span>{branch}</span><span>{branch === gitBranch ? '✓' : ''}</span>
+                    </button>
+                  ))}
+                {!gitLoading && gitBranches.length === 0 && <div className="px-2 py-1 text-[10px] text-zinc-500">No local branches</div>}
+              </div>
+            )}
+          </div>
+        )}
         {!remoteAdd && (
           <button
             className="shrink-0 rounded border border-dashed border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
@@ -6167,6 +6276,7 @@ function DraftDestinationCard() {
         </div>
       )}
       {err && <p className="mt-1 text-[10px] text-red-400">{err}</p>}
+      {gitError && <p role="alert" className="mt-1 text-[10px] text-red-400">{gitError}</p>}
     </div>
   )
 }

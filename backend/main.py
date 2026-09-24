@@ -367,6 +367,81 @@ async def api_conversation_context(conversation_id: int):
     }
 
 
+@app.get("/api/workspaces/git-branches")
+async def api_workspace_git_branches(workspace: str = ""):
+    """Current branch and local branch names for an unsaved draft workspace.
+
+    Draft chats have no conversation id yet, so keep this read path keyed by
+    the destination path instead. Default and remote destinations have no
+    local checkout to inspect.
+    """
+    workspace = workspace.strip()
+    if not workspace or workspace.startswith("remote:"):
+        return {"branch": None, "branches": []}
+
+    from backend.agent.gitinfo import current_git_branch, list_local_branches
+    from backend.agent.tools import workspace_root
+    from backend.agent import worktrees
+
+    try:
+        root = workspace_root(workspace)
+    except ValueError:
+        return {"branch": None, "branches": []}
+    branches = await list_local_branches(root)
+    if not branches:
+        return {"branch": None, "branches": []}
+    return {
+        "branch": await current_git_branch(root),
+        "branches": worktrees.filter_agent_branches(branches),
+    }
+
+
+class WorkspaceGitCheckoutBody(BaseModel):
+    workspace: str
+    branch: str
+
+
+@app.post("/api/workspaces/git-checkout")
+async def api_workspace_git_checkout(body: WorkspaceGitCheckoutBody):
+    """Checkout a selected local branch before a draft conversation exists.
+
+    Like the saved-chat checkout, this is user-initiated, shell-free, and
+    serialized with agent merges. Git's own dirty-worktree refusal is returned
+    verbatim to the card rather than hidden.
+    """
+    from fastapi import HTTPException
+    from backend.agent.gitinfo import invalidate_git_caches, list_local_branches
+    from backend.agent.tools import workspace_root
+    from backend.agent import worktrees
+
+    workspace = body.workspace.strip()
+    branch = body.branch.strip()
+    if not workspace or workspace.startswith("remote:"):
+        return {"ok": False, "error": "no local git workspace"}
+    if not branch:
+        return {"ok": False, "error": "checkout target is empty"}
+    if branch.startswith("-"):
+        return {"ok": False, "error": "checkout target must be a local branch name"}
+    try:
+        root = workspace_root(workspace)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        async with worktrees.merge_mutex(root):
+            branches = await list_local_branches(root)
+            if branch not in branches:
+                return {"ok": False, "error": f"not a local branch: {branch}"}
+            result = await _run_ui_git(root, "checkout", branch)
+            invalidate_git_caches(root)
+            return {"ok": "error" not in result, **result}
+    except TimeoutError:
+        return {
+            "ok": False,
+            "error": "another agent merge or git operation is in progress; try again",
+        }
+
+
 @app.get("/api/conversations/{conversation_id}/git-branch")
 async def api_conversation_git_branch(conversation_id: int):
     """Current branch of the conversation's workspace, when it is a git repo.

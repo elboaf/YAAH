@@ -125,6 +125,75 @@ def test_git_branches_lists_local(client, tmp_path):
     assert r.json()["branches"] == ["feature", "master"]
 
 
+def test_workspace_git_branches_and_checkout_before_conversation(client, tmp_path):
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+
+    r = client.get("/api/workspaces/git-branches", params={"workspace": str(repo)})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"branch": "master", "branches": ["feature", "master"]}
+
+    r = client.post(
+        "/api/workspaces/git-checkout",
+        json={"workspace": str(repo), "branch": "feature"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert _git(repo, "branch", "--show-current") == "feature"
+
+    info = client.get(
+        "/api/workspaces/git-branches", params={"workspace": str(repo)}
+    ).json()
+    assert info["branch"] == "feature"
+
+
+def test_workspace_git_endpoints_hide_nonrepo_default_and_remote(client, tmp_path):
+    empty = tmp_path / "empty-workspace"
+    empty.mkdir()
+    assert client.get(
+        "/api/workspaces/git-branches", params={"workspace": str(empty)}
+    ).json() == {"branch": None, "branches": []}
+    assert client.get(
+        "/api/workspaces/git-branches", params={"workspace": ""}
+    ).json() == {"branch": None, "branches": []}
+    assert client.get(
+        "/api/workspaces/git-branches", params={"workspace": "remote:host"}
+    ).json() == {"branch": None, "branches": []}
+
+
+def test_workspace_git_checkout_surfaces_dirty_tree_refusal(client, tmp_path):
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+    _git(repo, "checkout", "feature")
+    (repo / "hello.txt").write_text("feature version\n", encoding="utf-8")
+    _git(repo, "add", "hello.txt")
+    _git(repo, "commit", "-q", "-m", "feature change")
+    _git(repo, "checkout", "master")
+    (repo / "hello.txt").write_text("uncommitted version\n", encoding="utf-8")
+
+    r = client.post(
+        "/api/workspaces/git-checkout",
+        json={"workspace": str(repo), "branch": "feature"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is False
+    assert "local changes" in r.json()["error"].lower()
+    assert _git(repo, "branch", "--show-current") == "master"
+
+
+def test_workspace_git_checkout_rejects_empty_and_option_like_branch(client, tmp_path):
+    repo = _repo_with_commit(tmp_path)
+    for branch in ("", "--detach"):
+        r = client.post(
+            "/api/workspaces/git-checkout",
+            json={"workspace": str(repo), "branch": branch},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is False
+        assert r.json().get("error")
+    assert _git(repo, "branch", "--show-current") == "master"
+
+
 def test_git_command_checkout_switches_branch(client, tmp_path):
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
