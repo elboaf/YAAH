@@ -38,7 +38,7 @@ describe('default thought level picker (#98)', () => {
     expect(picker).toHaveValue('high')
   })
 
-  it('offers the provider default and all supported thought levels with visible guidance', () => {
+  it('offers the provider default and all supported thought levels without extra helper copy', () => {
     render(<DefaultThoughtLevelPicker />)
     const picker = screen.getByRole('combobox', { name: 'Thought level' })
     expect(picker).toHaveDisplayValue('Medium')
@@ -46,6 +46,6 @@ describe('default thought level picker (#98)', () => {
     expect(screen.getByRole('option', { name: 'Low' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Medium' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'High' })).toBeInTheDocument()
-    expect(screen.getByText('Only affects reasoning-capable models.')).toBeInTheDocument()
+    expect(screen.queryByText('Only affects reasoning-capable models.')).not.toBeInTheDocument()
   })
 })
