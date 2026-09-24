@@ -1540,9 +1540,17 @@ async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None
     consulted for access control."""
     from backend.agent import remote as remote_mod
 
-    host = remote_mod.get_remote()
-    if host is not None and name in remote_mod.REMOTE_TOOLS:
+    namespaced = remote_mod.parse_ns(workspace)
+    if namespaced is not None and name in remote_mod.REMOTE_TOOLS:
+        host = remote_mod.get_remote(namespaced[0])
+        if host is None:
+            return {"error": "no connected remote device owns this workspace"}
         return await host.exec_tool(name, arguments, workspace=workspace)
+    if namespaced is None and name in remote_mod.REMOTE_TOOLS:
+        # Legacy connected mode remains supported during the API/UI migration.
+        host = remote_mod.get_remote()
+        if host is not None:
+            return await host.exec_tool(name, arguments, workspace=workspace)
     # MCP server tools route by name prefix, before the static executor map.
     if name.startswith("mcp_"):
         from backend.agent import mcp_client

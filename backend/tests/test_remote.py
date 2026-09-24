@@ -144,7 +144,7 @@ async def test_remote_info_is_open_and_names_the_protocol():
 class _StubSession(remote_mod.RemoteSession):
     """Minimal RemoteSession stand-in: real proxy()/headers, stubbed exec."""
 
-    def __init__(self, windows=False, result=None):
+    def __init__(self, windows=False, result=None, host_id=None):
         super().__init__(
             "http://host:8765",
             "p",
@@ -155,6 +155,7 @@ class _StubSession(remote_mod.RemoteSession):
                 "windows": windows,
                 "workspace_root": "/home/host",
                 "hostname": "stub",
+                "host_id": host_id,
             },
         )
         self.result = result if result is not None else {"ok": True}
@@ -174,6 +175,53 @@ async def test_workspace_tools_route_to_remote(monkeypatch):
     result = await execute_tool("bash", {"command": "echo hi"}, "C:/local/ws")
     assert result == {"exit_code": 0, "output": "remote!"}
     assert stub.calls == [("bash", {"command": "echo hi"}, "C:/local/ws")]
+
+
+@pytest.mark.asyncio
+async def test_remote_workspace_tools_route_to_each_registered_host():
+    host_a = _StubSession(result={"host": "a"}, host_id="host-a")
+    host_b = _StubSession(result={"host": "b"}, host_id="host-b")
+    remote_mod.register_remote(host_a)
+    remote_mod.register_remote(host_b)
+    from backend.agent.tools import execute_tool
+
+    a = await execute_tool("bash", {"command": "pwd"}, "remote:host-a:/srv/a")
+    b = await execute_tool("bash", {"command": "pwd"}, "remote:host-b:/srv/b")
+
+    assert a == {"host": "a"}
+    assert b == {"host": "b"}
+    assert host_a.calls == [("bash", {"command": "pwd"}, "remote:host-a:/srv/a")]
+    assert host_b.calls == [("bash", {"command": "pwd"}, "remote:host-b:/srv/b")]
+
+
+@pytest.mark.asyncio
+async def test_unregistered_remote_workspace_fails_closed():
+    from backend.agent.tools import execute_tool
+
+    result = await execute_tool("bash", {"command": "pwd"}, "remote:missing:/srv/app")
+
+    assert "no connected remote device" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_registered_hosts_do_not_redirect_local_workspace_tools(monkeypatch):
+    host = _StubSession(result={"host": "remote"}, host_id="host-a")
+    remote_mod.register_remote(host)
+    seen = {}
+
+    async def local_bash(workspace, command, timeout_seconds=60):
+        seen["call"] = (workspace, command)
+        return {"output": "local"}
+
+    from backend.agent import tools as tools_mod
+    monkeypatch.setitem(tools_mod.EXECUTORS, "bash", local_bash)
+    from backend.agent.tools import execute_tool
+
+    result = await execute_tool("bash", {"command": "pwd"}, "C:/local/project")
+
+    assert result == {"output": "local"}
+    assert seen["call"] == ("C:/local/project", "pwd")
+    assert host.calls == []
 
 
 @pytest.mark.asyncio

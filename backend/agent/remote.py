@@ -202,20 +202,63 @@ class RemoteSession:
         return res
 
 
-# One active remote session per backend process (the app drives one host
-# at a time). Swapped atomically by the connect/disconnect API.
-_active: RemoteSession | None = None
+# Saved remote sessions keyed by stable host identity. `_active_host_id` is a
+# temporary compatibility bridge for the legacy composer switcher and older
+# callers; workspace-owner-aware code should call get_remote(host_id).
+_sessions: dict[str, RemoteSession] = {}
+_active_host_id: str | None = None
 
 
-def get_remote() -> RemoteSession | None:
-    return _active
+def register_remote(session: RemoteSession, *, make_active: bool = False) -> None:
+    """Make a device available without changing local or other-host routing."""
+    global _active_host_id
+    # Production RemoteSession instances always have a stable ID. The fallback
+    # preserves older lightweight test doubles and pre-registry integrations.
+    host_id = getattr(session, "host_id", "legacy") or "legacy"
+    _sessions[host_id] = session
+    if make_active:
+        _active_host_id = host_id
+
+
+def registered_remotes() -> dict[str, RemoteSession]:
+    """Snapshot of connected devices, keyed by stable host ID."""
+    return dict(_sessions)
+
+
+def unregister_remote(host_id: str) -> RemoteSession | None:
+    """Remove one device; leave every other registered host untouched."""
+    global _active_host_id
+    removed = _sessions.pop(host_id, None)
+    if _active_host_id == host_id:
+        _active_host_id = None
+    return removed
+
+
+def get_remote(host_id: str | None = None) -> RemoteSession | None:
+    """Get a specific device, or the legacy active device when omitted."""
+    if host_id is not None:
+        return _sessions.get(host_id)
+    return _sessions.get(_active_host_id) if _active_host_id else None
+
+
+def remote_for_workspace(workspace: str | None) -> RemoteSession | None:
+    """Resolve the executor for a remote-namespaced workspace, if known."""
+    parsed = parse_ns(workspace)
+    if parsed is None:
+        return None
+    return get_remote(parsed[0])
 
 
 def set_remote(session: RemoteSession) -> None:
-    global _active
-    _active = session
+    """Legacy connection behavior: register and make this device active."""
+    register_remote(session, make_active=True)
 
 
-def clear_remote() -> None:
-    global _active
-    _active = None
+def clear_remote(host_id: str | None = None) -> None:
+    """Clear one registered device, or all devices for legacy teardown/tests."""
+    global _active_host_id
+    if host_id is not None:
+        unregister_remote(host_id)
+        return
+    _sessions.clear()
+    _active_host_id = None
