@@ -518,6 +518,28 @@ async def test_agent_cancel(fake_model, tmp_path, monkeypatch):
 # ---------------------------------------------------------------- concurrency
 
 @pytest.mark.asyncio
+async def test_cancel_during_setup_releases_conversation(fake_model, tmp_path, monkeypatch):
+    """Aborting a stream while setup is suspended must release its run slot."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-cancel-setup")
+    entered = asyncio.Event()
+
+    async def blocked_add_message(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(loop, "add_message", blocked_add_message)
+    task = asyncio.create_task(anext(loop.run_agent(cid, "go", str(tmp_path))))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not loop.agent_is_running(cid), "cancelled setup leaked conversation run slot"
+
+
+@pytest.mark.asyncio
 async def test_second_run_same_conversation_rejected(fake_model, tmp_path):
     """While a turn is in flight, a second run on the SAME conversation must
     be refused (error event, no 'done') — two interleaved streams would

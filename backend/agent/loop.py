@@ -1039,6 +1039,48 @@ async def run_agent(
     model_override: str = "",
     effort_override: str | None = None,
 ) -> AsyncIterator[str]:
+    """Claim a conversation and always release it when its stream ends."""
+    if not try_begin_run(conversation_id):
+        yield _ndjson({
+            "type": "error",
+            "message": "a turn is already running in this conversation",
+        })
+        return
+
+    try:
+        async for event in _run_agent_claimed(
+            conversation_id,
+            user_text,
+            workspace,
+            image_paths=image_paths,
+            skill_names=skill_names,
+            persist_user=persist_user,
+            policy=policy,
+            allow_ask_user=allow_ask_user,
+            include_history=include_history,
+            model_override=model_override,
+            effort_override=effort_override,
+        ):
+            yield event
+    finally:
+        _cancel_events.pop(conversation_id, None)
+        _steer_flags.pop(conversation_id, None)
+        _running_convs.discard(conversation_id)
+
+
+async def _run_agent_claimed(
+    conversation_id: int,
+    user_text: str,
+    workspace: str,
+    image_paths: list | None = None,
+    skill_names: list | None = None,
+    persist_user: bool = True,
+    policy: str | None = None,
+    allow_ask_user: bool = False,
+    include_history: bool = True,
+    model_override: str = "",
+    effort_override: str | None = None,
+) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
     image_paths: rel paths (under backend/data/images/) of images the user
@@ -1065,12 +1107,8 @@ async def run_agent(
     all (the chat's explicit Default); low/medium/high override."""
     # Persist the user message first (skipped on resume; the text still
     # reaches the model through the replayed history below).
-    if not try_begin_run(conversation_id):
-        yield _ndjson({
-            "type": "error",
-            "message": "a turn is already running in this conversation",
-        })
-        return
+    # The public run_agent wrapper owns the conversation claim and releases
+    # it even if cancellation arrives during this setup or finalization.
 
     # Issue #58: nothing is created up front — the shared workspace stays
     # untouched until the first write-capable tool call (read-only turns
