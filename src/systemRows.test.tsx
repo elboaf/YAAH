@@ -101,7 +101,7 @@ describe('persisted merge-back system rows', () => {
     expect(chip!.className).not.toContain('text-red-300')
   })
 
-  it('explains where agent commits live and names the merge target accurately', () => {
+  it('explains that committed work is not yet integrated without asking the user to manage branches', () => {
     render(
       <MessageView
         msg={sys(
@@ -117,15 +117,13 @@ describe('persisted merge-back system rows', () => {
         )}
       />,
     )
-    expect(screen.getByText(/committed work is only on the agent branch/)).toBeTruthy()
-    expect(screen.getByText(/primary working tree's currently selected branch/)).toBeTruthy()
-    expect(screen.getByText(/push the agent branch to its remote/)).toBeTruthy()
-    expect(screen.getByText(/based on master/)).toBeTruthy()
-    expect(screen.getByText(/worktree #221/)).toBeTruthy()
-    expect(screen.queryByText(/master untouched/)).toBeNull()
+    expect(screen.getByText(/2 committed change\(s\) are not yet integrated into the main workspace/)).toBeTruthy()
+    expect(screen.getByText(/target branch master/)).toBeTruthy()
+    expect(screen.queryByText(/push the agent branch/)).toBeNull()
+    expect(screen.queryByText(/worktree #221/)).toBeNull()
   })
 
-  it('warns that uncommitted changes in the agent checkout are not included in merge or push', () => {
+  it('warns that uncommitted changes are not yet integrated', () => {
     render(
       <MessageView
         msg={sys(
@@ -139,7 +137,7 @@ describe('persisted merge-back system rows', () => {
         )}
       />,
     )
-    expect(screen.getByText(/uncommitted changes stay in the agent checkout/)).toBeTruthy()
+    expect(screen.getByText(/additional uncommitted changes are not included/)).toBeTruthy()
   })
 
   it('keeps genuine failure markers red (⚠ + turn failed)', () => {

@@ -695,11 +695,11 @@ TOOLS_SCHEMA += [
         "function": {
             "name": "git_merge_back",
             "description": (
-                "Merge an agent worktree branch (reported as 'changes are on "
-                "branch agent/...' by a spawned sub-agent) into this agent's "
-                "tree. Refuses and reports — never guesses — when the source "
-                "branch has no commits, the target tree is dirty, or the "
-                "merge conflicts (the merge is aborted; nothing is left dirty)."
+                "Merge an agent worktree branch into the main workspace. "
+                "Refuses and reports when the branch has no new commits, "
+                "uncommitted target-workspace changes overlap files the merge "
+                "would update, or a conflict occurs. Conflicts are aborted; "
+                "user work is never stashed or overwritten."
             ),
             "parameters": {
                 "type": "object",
@@ -713,13 +713,9 @@ TOOLS_SCHEMA += [
         "function": {
             "name": "git_push",
             "description": (
-                "Push the current branch to the remote. A branch without an "
-                "upstream is published with --set-upstream automatically. "
-                "Under session worktrees this pushes the agent/* branch, not "
-                "the main branch. For a clearly implied continuation of just-"
-                "merged release work, integrate with git_merge_back and push "
-                "the verified main branch from the main workspace instead; "
-                "stop on ambiguity, unexpected changes, or non-fast-forward."
+                "Pushes the current branch to its remote; sets upstream if "
+                "needed. In a session worktree this is the agent branch, not "
+                "the primary branch."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -1326,10 +1322,10 @@ async def git_commit(workspace: str, message: str) -> dict:
 
 
 async def git_merge_back(workspace: str, branch: str) -> dict:
-    """Issue #58: merge an `agent/*` worktree branch into the tree this
-    tool runs in (the parent's worktree for a nested agent, the main tree
-    for the chat agent). Full refusal rules live in
-    worktrees.merge_back (dirty/zero-commit/conflict all refuse)."""
+    """Integrate an `agent/*` branch into the primary workspace. Full
+    refusal rules live in worktrees.merge_back: no new commits, overlapping
+    uncommitted changes, and conflicts are reported without stashing or
+    overwriting user work."""
     from backend.agent import worktrees as wt
 
     if not branch.strip():
@@ -1342,10 +1338,9 @@ async def git_merge_back(workspace: str, branch: str) -> dict:
 
 
 async def git_push(workspace: str) -> dict:
-    """Push the current branch. When the branch has no upstream (the norm
-    for a session worktree's agent/* branch), push with --set-upstream
-    and say so — the branch is the real work under the branch-first
-    contract, not a misfire to paper over."""
+    """Push the current branch. In a session worktree that is the agent
+    branch, not the primary branch; callers that intend to publish main
+    must target the main workspace explicitly."""
     r = await _git(workspace, "push")
     if r.get("exit_code") == 0:
         return r

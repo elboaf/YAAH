@@ -617,6 +617,8 @@ def test_system_prompt_offers_sandbox_tools_locally(isolated, monkeypatch):
     assert "sandbox_test" in prompt
     assert "# Windows Sandbox (the default place to run things)" in prompt
     assert "persistent dev toolkit" in prompt
+    assert "read-only smoke checks" in prompt
+    assert "focused test, typecheck, lint" in prompt
 
 
 # ------------------------------------------------- mid-session crash (issue #27)

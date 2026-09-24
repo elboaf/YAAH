@@ -1287,20 +1287,18 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       // not JSON — a genuine failure marker
     }
     if (status) {
-      // adr/0003 revised (branch-first): turn end never merges — this
-      // persisted line IS the record of where the work lives.
+      // Turn end itself never integrates work. If commits remain, say plainly
+      // that the main workspace is still unchanged; the existing merge action
+      // is recovery UI, not a request for users to manage branches routinely.
       const s = status.worktree_status ?? {}
-      const bits: string[] = [`${s.commits ?? 0} commit(s) on agent branch ${s.branch ?? '?'}`]
-      if (s.base_branch) bits.push(`based on ${s.base_branch}`)
-      if (s.worktree_id) bits.push(`worktree #${s.worktree_id}`)
-      else if (s.worktree) bits.push(`worktree ${s.worktree}`)
-      if (s.dirty) bits.push('plus uncommitted changes')
-      bits.push(
-        `committed work is only on the agent branch; "merge it" merges those commits into the primary working tree's currently selected branch`,
-      )
-      if (s.dirty) {
-        bits.push('uncommitted changes stay in the agent checkout and are not included in merge or push')
-      }
+      const count = s.commits ?? 0
+      const bits: string[] = [
+        count > 0
+          ? `${count} committed change(s) are not yet integrated into the main workspace`
+          : 'No committed changes are waiting to be integrated',
+      ]
+      if (count > 0 && s.base_branch) bits.push(`target branch ${s.base_branch}`)
+      if (s.dirty) bits.push('additional uncommitted changes are not included')
       return (
         <div className="pl-3">
           <div className="font-mono text-[11px] text-amber-300/90">◆ {bits.join(', ')}</div>

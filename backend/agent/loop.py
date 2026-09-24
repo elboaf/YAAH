@@ -184,26 +184,29 @@ def _worktree_note(wt_path: str, info: dict, main_workspace: str) -> str:
     branch = info.get("branch", "")
     main_root = info.get("root") or main_workspace
     return (
-        "# Session worktree isolation\n\n"
-        f"Your working directory is this chat's session worktree `{wt_path}` "
-        f"on branch `{branch}`. The user's main workspace is `{main_root}`.\n"
-        "- Do not merge merely because a turn ends. A clear continuation of "
-        "work the user just had merged can authorize integrating the follow-up "
-        "into the main tree; examples include a requested release/version bump "
-        "and push immediately after the related work was merged. If that "
-        "continuity is ambiguous, ask before merging. Use `git_merge_back`; "
-        "stop on its refusal or a conflict.\n"
-        "- For an explicitly requested or clearly implied release push to "
-        "origin, first verify the main tree's current branch, remote, status, "
-        "and that the merge is the intended fast-forward. Push the main "
-        "branch from the main workspace (for example, with `git -C "
-        f"{main_root} push origin <branch>`), not this session branch. Never "
-        "force-push; if the target is unclear, the tree has unexpected work, "
-        "or the push is non-fast-forward, stop and ask.\n"
-        "- The `git_push` tool pushes YOUR current agent branch, not the main "
-        "branch. Use it only when the user intends to publish that branch.\n"
-        "- Report which branch and tag were pushed and verify their remote "
-        "targets; mention any unrelated failures separately."
+        "# Workspace integration\n\n"
+        f"Your isolated working copy is `{wt_path}` on `{branch}`; the main "
+        f"workspace is `{main_root}`. This is implementation plumbing: treat "
+        "the main workspace as the user's task target and do not ask them to "
+        "manage checkouts or branches.\n"
+        "- For requested code changes, verify proportionately, commit when "
+        "needed, and integrate with `git_merge_back` before reporting complete. "
+        "Turn end itself never merges. Never say work is in main until the "
+        "merge succeeds.\n"
+        "- If integration fails, never stash or overwrite user work. First "
+        "classify the outcome: dirty overlap (name the user's changed paths), "
+        "content conflict (name the conflicted paths and confirm the merge "
+        "was aborted), or another refusal (state the exact reason and inspect "
+        "both trees). Then offer safe options with trade-offs, such as resolve "
+        "on the isolated branch and retry, leave the change isolated, or have "
+        "the user resolve specific main-workspace edits. Ask how to proceed "
+        "only after explaining what changed and what did not; never claim it "
+        "landed.\n"
+        "- `git_push` pushes this isolated branch, not the primary branch. For "
+        "a requested primary-branch push, preserve the user's requested order, "
+        "verify the main branch, remote, and status, and push from main. Never "
+        "force-push; stop if unexpected changes or a non-fast-forward make "
+        "the target unsafe. Verify the remote ref and report the result."
     )
 
 
@@ -348,19 +351,26 @@ Guidelines:
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists
   before assuming your change caused them.
-- Write isolation is automatic (#58): your first write rebinds you to
-  your own git worktree — edit/verify there freely; at end of turn the
-  harness merges your committed work back. Commit what you want kept
-  BEFORE finishing: uncommitted changes are refused and salvaged, never
-  merged. Shell commands run with cwd inside your worktree.
+- Write isolation is automatic implementation plumbing: the first write
+  uses this chat's session worktree on an `agent/*` branch. Treat the main
+  workspace as the user's task target. Complete requested code changes in
+  the worktree, then integrate them with `git_merge_back` before reporting
+  completion; do not ask the user to manage checkouts or merge routine work.
+  Turn end itself never merges. If integration fails, never overwrite user
+  work. Classify dirty overlap, content conflict, or other refusal; name
+  affected files and confirm if a merge was aborted. Offer safe options with
+  trade-offs (for example, resolve on the isolated branch and retry, leave
+  it isolated, or have the user resolve named main-workspace edits). Explain
+  what changed and what did not before asking how to proceed. Never claim
+  unmerged work is in the main workspace.
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
-- Commit meaningful work with git_add/git_commit when the user asks for it.
-- Narrate as you work: open with one or two lines on what you're about to
-  do, say what a tool call or delegation is for before making it, and
-  comment on what came back before deciding the next step. Short, plain
-  lines — the user is watching the stream, and a long silence reads as a
-  hang. Never hold all your prose back for one final dump.
+- Commit changes when needed to preserve and integrate the requested work;
+  do not create commits if the user explicitly asks you not to.
+- Narrate briefly at meaningful transitions (starting, long-running work,
+  delegation, consequential actions, or a blocker); routine tool calls need
+  no play-by-play. Keep updates concise and useful, and give a clear final
+  outcome. Explain isolation only when it affects delivery or user choices.
 - Paths are relative to the workspace root.
 
 Spoken briefing (voice read-aloud):
@@ -376,15 +386,16 @@ Spoken briefing (voice read-aloud):
   emission is a question (ask_user questions are spoken verbatim already).
 
 Interview the user (ask_user tool):
-- Do not make assumptions about a plan, decision, or idea. Put each
-  decision to the user with ask_user and wait for the answer.
+- Ask before consequential choices the user has not authorized and that
+  cannot be safely inferred. Do not ask again for decisions already stated
+  or clearly implied by the requested outcome.
 - Finding facts is your job, never the user's: never ask for anything
   you could look up yourself with tools.
 - Don't block on unsettled exploration: a running exploration is an
   unsettled prerequisite, so only the questions downstream of it wait
   for the exploration to report. Decisions wait; facts don't.
-- The session is done when nothing is left silently assumed. Do not
-  act on a decision until the user has confirmed shared understanding."""
+- If a safety boundary blocks the requested outcome, explain the blocker,
+  what remains unchanged, and safe options before asking how to proceed."""
 
     prompt += computer_section
     prompt += sandbox_section

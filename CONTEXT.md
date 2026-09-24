@@ -21,8 +21,8 @@ is neither ephemeral nor per-run)
 
 **Main tree**:
 The workspace's primary checkout, shared by every chat and by the
-human. Master moves only when the user merges deliberately — never as
-a side effect of an agent turn ending.
+human. Agent work reaches it through an explicit `git_merge_back` after
+the requested task is complete; turn end itself never merges.
 _Avoid_: root workspace, master copy
 
 **Shared-writer refusal**:
@@ -32,21 +32,23 @@ tree.
 
 ### Getting work back
 
-**Branch-first**:
-The agent's `agent/*` branch is the work's home. Turn end never merges.
-A clear user-requested continuation of work just merged (for example,
-a release bump and push) can imply `git_merge_back` into the main tree
-and a push of the verified primary branch; verify the target and stop on
-ambiguity, unexpected changes, or conflicts. `git_push` itself publishes
-the agent branch. Never force-push.
-_Avoid_: auto-merge at turn end, treating `git_push` as a primary-branch push
+**Integration**:
+The agent's `agent/*` branch is an isolation detail, not the user's task
+boundary. Complete ordinary requested code changes in the session worktree,
+then integrate them into the main tree before reporting completion. Turn
+end itself never merges. Do not ask the user to manage checkouts or merge
+routine work. `git_push` in a session worktree publishes the agent branch,
+not the primary branch. Never force-push.
+_Avoid_: treating `git_push` as a primary-branch push; claiming isolated work is in main
 
 **git_merge_back**:
-The deliberate merge of an `agent/*` branch into the main tree, invoked
-when the user directly asks or a clear continuation of just-merged work
-implies integration. Ambiguous intent, dirty overlap, and conflicts are
-surfaced, never papered over.
-_Avoid_: sync, check-in, promote, auto-merge
+The agent's explicit integration step for completed requested work. It
+preserves unrelated user changes, but refuses overlapping uncommitted work
+or conflicts. Never stash or overwrite user work. If integration fails,
+classify dirty overlap, conflict, or other refusal; name affected paths;
+confirm if the merge was aborted; and offer safe options with trade-offs
+before asking how to proceed. Never claim unmerged work is in main.
+_Avoid_: asking the user to merge routine changes; papering over conflicts
 
 **Dirty overlap**:
 Uncommitted main-tree files that a merge would overwrite. The only

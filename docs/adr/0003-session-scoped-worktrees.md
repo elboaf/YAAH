@@ -106,3 +106,22 @@ the agent branch only; do not mistake it for pushing the primary branch.
 If the push target is unclear, there are unexpected changes, or the
 push is non-fast-forward, stop and ask. The invariant remains: the main
 tree must not move as a side effect of turn end.
+
+## Revision (2026-09-24): agent-owned integration, worktree as plumbing
+
+The branch-first policy made users manage checkout mechanics even for
+ordinary requests to change the project. Keep the harness invariant above:
+turn end itself never merges. Change the agent policy instead: for ordinary
+requested code changes, the agent completes work in its session worktree,
+verifies proportionately, and explicitly calls `git_merge_back` before
+reporting completion. The worktree is isolation plumbing, not the user's
+task boundary. Do not ask the user to manage branches or routine merges.
+
+A failed integration remains a safety boundary, not a reason to improvise.
+Never stash or overwrite user work. Classify dirty overlap, content
+conflict, or other refusal; identify affected paths; confirm whether the
+merge was aborted; and explain what did and did not change. Offer safe
+options with trade-offs before asking the user how to proceed. Never claim
+unmerged work is in the main workspace. User-facing status should focus on
+whether work reached the main workspace; branch/worktree details are for
+recovery and diagnosis.

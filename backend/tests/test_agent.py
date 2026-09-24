@@ -1438,9 +1438,11 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     run_git(repo, "commit", "-q", "-m", "init")
 
     seen_messages: list[list[dict]] = []
+    seen_tools: list[list[dict]] = []
 
     async def fake_chat(messages, tools=None, stream=True):
         seen_messages.append([dict(m) for m in messages])
+        seen_tools.append([dict(t) for t in (tools or [])])
         events = scripts.pop(0) if scripts else [{"type": "finish"}]
         return FakeStream(events)
 
@@ -1470,14 +1472,29 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     # the model saw the isolation note as a system message
     notes = [
         m for call in seen_messages for m in call
-        if m.get("role") == "system" and "Session worktree isolation" in str(m.get("content", ""))
+        if m.get("role") == "system" and "Workspace integration" in str(m.get("content", ""))
     ]
     assert notes, "model must be told about its session worktree"
     note_text = notes[0]["content"]
     assert "agent/" in note_text and ".yaah" in note_text
-    assert "continuation" in note_text and "git_merge_back" in note_text
+    assert "git_merge_back" in note_text
     assert "Never force-push" in note_text
-    assert "Do not merge merely because a turn ends" in note_text
+    assert "do not ask them to manage checkouts or branches" in note_text
+    assert "integrate with `git_merge_back` before reporting complete" in note_text
+    assert "Turn end itself never merges" in note_text
+    assert "safe options with trade-offs" in note_text
+    assert "Never say work is in main until the merge succeeds" in note_text
+    assert "at end of turn the harness merges your committed work back" not in note_text
+
+    # Tool descriptions are also model-facing prompt surface: keep them
+    # accurate and avoid repeating the full release policy in git_push.
+    schemas = {s["function"]["name"]: s["function"] for s in seen_tools[0]}
+    merge_description = schemas["git_merge_back"]["description"]
+    push_description = schemas["git_push"]["description"]
+    assert "uncommitted target-workspace changes overlap" in merge_description
+    assert "target tree is dirty" not in merge_description
+    assert "Pushes the current branch" in push_description
+    assert "clearly implied continuation" not in push_description
 
     # turn end: honest status event, nothing merged
     statuses = [e for e in events if e.get("type") == "worktree_status"]
@@ -1486,6 +1503,15 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert st["commits"] == 1
     assert st["branch"].startswith("agent/")
     assert ".yaah" in st["worktree"]
+    base_prompt = seen_messages[0][0]["content"]
+    assert "Turn end itself never merges" in base_prompt
+    assert "integrate them with `git_merge_back` before reporting" in base_prompt
+    assert "do not ask the user to manage checkouts or merge routine work" in base_prompt
+    assert "Classify dirty overlap, content conflict, or other refusal" in base_prompt
+    assert "Offer safe options with" in base_prompt
+    assert "routine tool calls need" in base_prompt
+    assert "Do not ask again for decisions already stated" in base_prompt
+    assert "at end of turn the harness merges your committed work back" not in base_prompt
     assert not (repo / "f.txt").exists(), "master must be untouched"
     # no fake git_merge_back pill at turn end any more
     assert not [e for e in events if e.get("name") == "git_merge_back" and e.get("type") == "tool_result"]
