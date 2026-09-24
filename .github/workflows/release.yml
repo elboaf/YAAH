@@ -22,6 +22,19 @@ on:
         required: false
         type: boolean
         default: false
+  # Allows retrying a failed release build from the corrected workflow without
+  # changing or recreating its already-pushed version tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to build and publish (e.g. v1.0.9)"
+        required: true
+        type: string
+      prerelease:
+        description: "Publish as a GitHub pre-release"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-tauri:
@@ -39,6 +52,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -187,13 +202,15 @@ jobs:
           # pushed the tag. workflow_call runs get it from the input; a
           # direct tag push must derive it from the tag name, or an -rc.N
           # release silently publishes to the stable channel.
-          PRERELEASE_FLAG=""
+          release_args=("$tag" --title "$tag" --generate-notes)
           if [ "${{ inputs.prerelease }}" = "true" ] || echo "$tag" | grep -Eq -- '-rc\.[0-9]+$'; then
-            PRERELEASE_FLAG="--prerelease"
+            release_args+=(--prerelease)
           fi
-          gh release view "$tag" >/dev/null 2>&1 || \
-            gh release create "$tag" --title "$tag" --generate-notes \
-              "$PRERELEASE_FLAG" || true
+          gh release view "$tag" >/dev/null 2>&1 || {
+            # Both OS jobs can race to create the same release. Ignore a create
+            # failure only if the other job successfully created it meanwhile.
+            gh release create "${release_args[@]}" || gh release view "$tag" >/dev/null 2>&1 || exit 1
+          }
           rc=0
           for f in $files; do
             ok=0
