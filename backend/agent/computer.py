@@ -98,7 +98,12 @@ COMPUTER_TOOLS_SCHEMA = [
                 "Read a window's UI Automation tree: every visible element "
                 "with type, name, value, rect and center coordinates. The "
                 "preferred way to locate controls and verify UI state — "
-                "click an element's center with mouse_click."
+                "far more reliable than screenshotting and guessing pixel "
+                "positions. Click an element's center with mouse_click. "
+                "A result with \"truncated\": true is NOT exhaustive — "
+                "never conclude an element doesn't exist from a "
+                "depth- or node-limited read; raise the limits or "
+                "screenshot instead."
             ),
             "parameters": {
                 "type": "object",
@@ -130,9 +135,13 @@ COMPUTER_TOOLS_SCHEMA = [
                 "coordinate rulers — read the ruler, don't estimate. With "
                 "hwnd, captures the monitor that window lives on; with "
                 "elements=true, draws numbered boxes on its UIA elements "
-                "(set-of-marks) and returns id -> name/type/center. Only "
-                "screenshot when the task requires seeing the screen. "
-                "Screenshots go to the model provider."
+                "(set-of-marks) and returns id -> name/type/center. With "
+                "x/y/w/h the capture is just that region (desktop "
+                "coordinates) - use it for precision targeting and "
+                "close-ups. Results carry the monitor's \"origin\": pixel "
+                "(px,py) in the image is desktop (origin.x + px, "
+                "origin.y + py). Only screenshot when the task requires "
+                "seeing the screen. Screenshots go to the model provider."
             ),
             "parameters": {
                 "type": "object",
@@ -255,7 +264,9 @@ COMPUTER_TOOLS_SCHEMA = [
             "name": "mouse_drag",
             "description": (
                 "Press at a start point, drag to an end point, release. "
-                "x/y are monitor-local."
+                "For sliders, drag-and-drop, and text selection. x/y are "
+                "monitor-local. A slow duration (up to 3s) helps apps "
+                "that need real drag momentum."
                 + _HOST_INPUT_NOTE
             ),
             "parameters": {

@@ -152,7 +152,10 @@ TOOLS_SCHEMA = [
                 "editor: pass -m '<message>' to git commit and use "
                 "GIT_EDITOR=true for git rebase --continue / tag -a / "
                 "commit --amend - an interactive editor blocks the tool "
-                "until it times out."
+                "until it times out. For GitHub operations (PRs, issues, "
+                "releases, CI checks), prefer the gh CLI over web_fetch "
+                "scraping - check availability with 'gh --version' before "
+                "assuming it's missing."
             ),
             "parameters": {
                 "type": "object",
@@ -188,7 +191,10 @@ POWERSHELL_SCHEMA = {
             "git must never open its editor: pass -m '<message>' to git "
             "commit and use GIT_EDITOR=true for git rebase --continue / "
             "commit --amend - an interactive editor blocks the tool "
-            "until it times out."
+            "until it times out. For GitHub operations (PRs, issues, "
+            "releases, CI checks), prefer the gh CLI over web_fetch "
+            "scraping - check availability with 'gh --version' before "
+            "assuming it's missing."
         ),
         "parameters": {
             "type": "object",
@@ -223,7 +229,136 @@ INSTALL_GIT_SCHEMA = {
 
 # Extended, lazy-loaded documentation. The schemas above stay short; what
 # lives here only reaches the model when it calls get_help("tool_name").
-HELP_DOCS: dict = {}
+HELP_DOCS: dict = {
+    "bash": (
+        "Runs through the system shell (cmd.exe on Windows; POSIX tools "
+        "like ls/grep may be absent there - use dir, findstr, or "
+        "PowerShell Select-String / Get-Content -Tail instead). The "
+        "result reports the real exit code and combined stdout/stderr; "
+        "output is truncated at a cap, so tail or filter large output "
+        "in the command itself. On timeout the whole process tree is "
+        "killed - partial output is still returned."
+    ),
+    "powershell": (
+        "Prefer PowerShell for structured Windows data: Get-ChildItem, "
+        "Get-Process, Get-Service, registry via Get-ItemProperty, "
+        "scheduled tasks via Get-ScheduledTask. Objects pipeline, so "
+        "filter with Where-Object / Select-Object instead of parsing "
+        "text. The result reports the real exit code; output is "
+        "truncated at a cap, so filter in the command itself."
+    ),
+    "web_search": (
+        "DuckDuckGo HTML endpoint - no API key, no JS. Snippets are "
+        "short; treat them as pointers, not answers. For a specific "
+        "site, add site:example.com to the query. Rate-limited: on a "
+        "429 or empty result page, wait a few seconds rather than "
+        "hammering retries."
+    ),
+    "web_fetch": (
+        "Renders the page in a real headless browser, so JS-heavy and "
+        "bot-guarded sites usually work, but it is slow (~seconds) - "
+        "do not use it for plain static files (use bash/powershell "
+        "curl or read_file for local paths). Returns readable text "
+        "plus an 'IMAGES ON PAGE' list for view_image. Blocked pages: "
+        "fall back to web_search snippets instead of retrying the "
+        "same URL. max_chars truncates from the top - fetch a "
+        "specific anchor or raise the cap for long pages."
+    ),
+    "view_image": (
+        "Attaches the image to the conversation so a vision-capable "
+        "model can see it on the NEXT turn - the current turn's "
+        "reasoning does not include it. Local paths resolve relative "
+        "to the workspace root. Use it for screenshots, charts, "
+        "renders and UI captures; not for binary formats the model "
+        "cannot render."
+    ),
+    "ask_user": (
+        "Blocks the turn until the user answers - batch open questions "
+        "into one call when they're related, but keep one QUESTION per "
+        "call. Options are clickable; the user may also type free "
+        "text. Never use it to ask for facts you can look up with "
+        "tools (file contents, command output, web pages)."
+    ),
+    "read_file": (
+        "Returns JSON with content, truncated and total_lines. When "
+        "truncated is true, page with start_line/end_line rather than "
+        "assuming the file is short. Binary files come back "
+        "replacement-char mangled - use view_image for images."
+    ),
+    "write_file": (
+        "Overwrites the entire file - read it first if you need to "
+        "preserve content you haven't seen. Creates parent "
+        "directories. Paths resolve inside the workspace; escapes are "
+        "rejected."
+    ),
+    "edit_file": (
+        "Replaces the FIRST exact occurrence of old_text; it must be "
+        "unique in the file or the call errors with a match count. "
+        "Copy old_text verbatim from read_file output - whitespace "
+        "and indentation must match exactly. For multiple edits to "
+        "one file, chain several edit_file calls."
+    ),
+    "create_file": (
+        "Fails if the file already exists (use write_file to "
+        "overwrite). Creates parent directories. Paths resolve inside "
+        "the workspace; escapes are rejected."
+    ),
+    "delete_file": (
+        "Deletes a file or an EMPTY directory; refuses the workspace "
+        "root. There is no undo - prefer move_file to a trash name "
+        "when unsure."
+    ),
+    "move_file": (
+        "Renames or moves within the workspace; fails if the "
+        "destination exists. Creates parent directories of the "
+        "destination."
+    ),
+    "search_files": (
+        "Regex-searches file CONTENTS (Python re syntax, not grep); "
+        "add a glob to filter by filename. Returns matches grouped by "
+        "file, capped by max_results - narrow the pattern or glob "
+        "when the cap is hit rather than assuming nothing else "
+        "matches."
+    ),
+    "git_status": (
+        "Short wrapper over `git status` in the workspace; read-only."
+    ),
+    "git_diff": (
+        "Wraps `git diff`; pass path to limit scope, staged=true for "
+        "the index. Read-only."
+    ),
+    "git_add": (
+        "Stages paths (omit to stage everything). Does not commit."
+    ),
+    "git_commit": (
+        "Commits the staged index with -m; never opens an editor. "
+        "Empty staged set errors - check git_status first."
+    ),
+    "git_push": (
+        "Pushes the current branch; publishes with --set-upstream "
+        "when none exists. Never force-pushes."
+    ),
+    "git_pull": (
+        "Fetches and integrates remote changes for the current branch."
+    ),
+    "get_help": (
+        "With no argument, lists every tool with its full one-line "
+        "description. With a name, returns the tool's parameter "
+        "schema plus extended usage notes (caveats, examples, "
+        "failure modes) that are NOT in the short schema. Cheap and "
+        "read-classified: call it before first use of an unfamiliar "
+        "tool, or immediately after any tool errors."
+    ),
+    "spawn_agent": (
+        "Sub-agents see ONLY the prompt you pass - include file "
+        "paths, error messages, and every decision they need; they "
+        "cannot ask the user questions. Launch several in one turn "
+        "for parallel independent work (max 4). Announce each "
+        "delegation to the user in one line. Do not delegate work "
+        "that needs this conversation's context or a user decision "
+        "mid-task."
+    ),
+}
 
 GET_HELP_SCHEMA = {
     "type": "function",
@@ -254,10 +389,16 @@ async def get_help(workspace: str = "", tool_name: str = "") -> dict:
     schemas = {s["function"]["name"]: s for s in get_schemas()}
     if not name:
         lines = [
-            f"- {n}: {s['function'].get('description', '').split('. ')[0]}"
+            f"- {n}: {s['function'].get('description', '').splitlines()[0]}"
             for n, s in sorted(schemas.items())
         ]
-        return {"tools": "\n".join(lines)}
+        return {
+            "tools": "\n".join(lines),
+            "note": (
+                "Call get_help(tool_name) for a tool's full parameter "
+                "schema and extended usage notes."
+            ),
+        }
     schema = schemas.get(name)
     if schema is None:
         close = [n for n in schemas if name.lower() in n.lower()]
@@ -1375,6 +1516,25 @@ def tool_risk(name: str) -> str:
     return "shell"
 
 
+# Tools whose result already carried an error-nudge this session, so the
+# hint is appended once per tool, not on every failure.
+_NUDGED: set = set()
+
+
+def _with_help_nudge(name: str, result: dict) -> dict:
+    """Append a one-line get_help hint to a tool's error result, once per
+    tool per session. The lazy docs tier is useless if the model never
+    opens it - an error is the moment it's most likely to help."""
+    if name in _NUDGED or name == "get_help":
+        return result
+    _NUDGED.add(name)
+    result["error"] = (
+        str(result.get("error", ""))
+        + " (Hint: call get_help('%s') for usage notes.)" % name
+    )
+    return result
+
+
 async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None) -> dict:
     """Execute a tool by name with a dict of arguments. Never raises.
 
@@ -1416,9 +1576,9 @@ async def execute_tool(name: str, arguments: dict, workspace: str, on_chunk=None
         else:
             result = await fn(workspace=workspace, **arguments)
     except TypeError as e:
-        return {"error": f"Bad arguments for {name}: {e}"}
+        return _with_help_nudge(name, {"error": f"Bad arguments for {name}: {e}"})
     except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}: {e}"}
+        return _with_help_nudge(name, {"error": f"{type(e).__name__}: {e}"})
     # --- provenance recording (post-call) ----------------------------------
     try:
         from backend.agent import worktrees as _wt
