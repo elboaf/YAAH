@@ -39,6 +39,11 @@ COMPACTION_ENABLED = True
 # below 1.0 leaves room for the system prompt, tool plumbing, and a long
 # reply without re-tripping the trigger on the very next call.
 COMPACTION_TRIGGER_FRACTION = 0.70
+# Optional ABSOLUTE trigger (tokens): when > 0, compaction fires at
+# min(trigger_tokens, window * trigger_fraction) — a big-window model
+# waits until the absolute threshold, while a small-window model still
+# compacts before overflowing. 0 = fraction-only (legacy behavior).
+COMPACTION_TRIGGER_TOKENS = 0
 # Compact DOWN to this fraction of the window: the recent tail stays
 # verbatim, the summarized prefix carries the rest.
 COMPACTION_KEEP_FRACTION = 0.40
@@ -60,6 +65,7 @@ _TOOL_ARGS_CHARS = 200
 _DEFAULTS = {
     "enabled": COMPACTION_ENABLED,
     "trigger_fraction": COMPACTION_TRIGGER_FRACTION,
+    "trigger_tokens": COMPACTION_TRIGGER_TOKENS,
     "keep_fraction": COMPACTION_KEEP_FRACTION,
     "keep_recent_messages": COMPACTION_MIN_TAIL_MESSAGES,
     "default_window": COMPACTION_DEFAULT_WINDOW,
@@ -86,6 +92,10 @@ def _compaction_cfg() -> dict:
         cfg["keep_fraction"] = min(max(float(cfg["keep_fraction"]), 0.05), 0.95)
     except (TypeError, ValueError):
         cfg["keep_fraction"] = COMPACTION_KEEP_FRACTION
+    try:
+        cfg["trigger_tokens"] = max(int(cfg["trigger_tokens"] or 0), 0)
+    except (TypeError, ValueError):
+        cfg["trigger_tokens"] = COMPACTION_TRIGGER_TOKENS
     try:
         cfg["keep_recent_messages"] = max(int(cfg["keep_recent_messages"]), 2)
     except (TypeError, ValueError):
@@ -147,11 +157,21 @@ async def resolve_window(model: str | None, cfg: dict | None = None) -> int:
 
 
 def should_compact(context_tokens: int | None, context_window: int) -> bool:
-    """Measured prompt size vs the trigger fraction of the window."""
+    """Measured prompt size vs the trigger threshold.
+
+    With an absolute `trigger_tokens` set (> 0), the trigger is
+    min(trigger_tokens, window * trigger_fraction): big-window models
+    wait for the absolute threshold, small-window models still compact
+    before overflowing. Without it, fraction-of-window only.
+    """
     ccfg = _compaction_cfg()
     if not ccfg["enabled"] or not context_tokens or not context_window:
         return False
-    return context_tokens > context_window * ccfg["trigger_fraction"]
+    trigger = context_window * ccfg["trigger_fraction"]
+    absolute = int(ccfg.get("trigger_tokens") or 0)
+    if absolute > 0:
+        trigger = min(trigger, absolute)
+    return context_tokens > trigger
 
 
 def find_cut_index(messages: list, keep_tokens: int, min_tail: int = 0) -> int:

@@ -4739,6 +4739,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [ctxOverrides, setCtxOverrides] = useState<Record<string, number>>({})
   const [ctxModelDraft, setCtxModelDraft] = useState('')
   const [ctxTokensDraft, setCtxTokensDraft] = useState<number | ''>('')
+  // History compaction: on/off + absolute trigger threshold in k tokens
+  // (the field holds 250 for 250k; 0/blank = fraction-of-window only).
+  const [compactionEnabled, setCompactionEnabled] = useState(true)
+  const [compactionTriggerK, setCompactionTriggerK] = useState<number | ''>('')
   // Interface scale draft (1.0 / 1.1 / 1.25 / 1.5) — applied live on save.
   const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
@@ -4821,6 +4825,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setMaxSteps(c.max_steps ?? '')
           setReasoningEffort(c.reasoning_effort ?? '')
           setCtxOverrides(c.context_window_overrides ?? {})
+          setCompactionEnabled(c.compaction?.enabled !== false)
+          setCompactionTriggerK(c.compaction?.trigger_tokens ? c.compaction.trigger_tokens / 1000 : '')
           setUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
@@ -4968,6 +4974,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
         reasoning_effort: activeEfforts.includes(reasoningEffort) ? reasoningEffort : '',
         context_window_overrides: ctxOverrides,
+        compaction: {
+          enabled: compactionEnabled,
+          trigger_tokens: compactionTriggerK === '' ? 0 : Number(compactionTriggerK) * 1000,
+        },
         ui_scale: uiScale,
         voice: {
           engine: voiceEngine,
@@ -5279,6 +5289,44 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                     ))}
                   </div>
                 )}
+              </div>
+
+              <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
+                <label className="mb-1 block text-[10px] text-zinc-500">History compaction</label>
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={compactionEnabled}
+                    aria-label="Enable history compaction"
+                    className={`relative h-4 w-8 shrink-0 rounded-full transition-colors ${
+                      compactionEnabled ? 'bg-blue-600' : 'bg-zinc-700'
+                    }`}
+                    onClick={() => setCompactionEnabled((v) => !v)}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-3 w-3 rounded-full bg-zinc-100 transition-all ${
+                        compactionEnabled ? 'left-4.5' : 'left-0.5'
+                      }`}
+                    />
+                  </button>
+                  <span className="text-[10px] text-zinc-400">
+                    {compactionEnabled ? 'On' : 'Off'} — fold old history into a summary when the prompt grows past
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    aria-label="Compaction trigger threshold in thousands of tokens"
+                    className={`${settingsInputCls} w-20 shrink-0`}
+                    value={compactionTriggerK}
+                    onChange={(e) => setCompactionTriggerK(e.target.value === '' ? '' : Number(e.target.value))}
+                  />
+                  <span className="text-[10px] text-zinc-600">k tokens (0 = 70% of the model's window)</span>
+                </div>
+                <p className="mt-1 text-[10px] text-zinc-600">
+                  An absolute threshold never fires before the model's window allows: the trigger is the smaller of
+                  the threshold and 70% of the window, so small-window models still compact before overflowing.
+                </p>
               </div>
             </SettingsCard>
 

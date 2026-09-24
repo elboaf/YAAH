@@ -854,6 +854,7 @@ class ConfigUpdate(BaseModel):
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
     access_mode: str | None = None
+    compaction: dict | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -1722,6 +1723,12 @@ async def api_get_config():
         "remote": cfg.get("remote") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
+        # History compaction (Settings edits these; trigger_tokens is an
+        # absolute token threshold, 0 = fraction-of-window only).
+        "compaction": {
+            "enabled": (cfg.get("compaction") or {}).get("enabled", True),
+            "trigger_tokens": (cfg.get("compaction") or {}).get("trigger_tokens", 0),
+        },
         # Access mode: ask | plan | full (header control; see
         # PLAN-access-modes.md).
         "access_mode": cfg.get("access_mode", "ask"),
@@ -1771,6 +1778,18 @@ async def api_set_config(body: ConfigUpdate):
     if "access_mode" in updates:
         mode = str(updates["access_mode"] or "").lower()
         updates["access_mode"] = mode if mode in ("ask", "plan", "full") else "ask"
+    # Compaction merges over the stored block (a Settings save that only
+    # touches enabled must not reset trigger_tokens, and vice versa).
+    comp = updates.get("compaction")
+    if isinstance(comp, dict):
+        existing = load_config().get("compaction") or {}
+        merged_c = {**existing, **comp}
+        merged_c["enabled"] = bool(merged_c.get("enabled", True))
+        try:
+            merged_c["trigger_tokens"] = max(int(merged_c.get("trigger_tokens") or 0), 0)
+        except (TypeError, ValueError):
+            merged_c["trigger_tokens"] = 0
+        updates["compaction"] = merged_c
     save_config(updates)
     # Hosting toggles need the mDNS advertiser to follow.
     if isinstance(remote, dict):

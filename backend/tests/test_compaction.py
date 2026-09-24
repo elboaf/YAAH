@@ -55,6 +55,7 @@ def _patch_cfg(monkeypatch, **over):
         "trigger_fraction": 0.7,
         "keep_fraction": 0.4,
         "keep_recent_messages": 6,
+        "trigger_tokens": 0,
         "default_window": 32_000,
         "model": "",
         **over,
@@ -90,6 +91,22 @@ async def test_should_compact_threshold(monkeypatch):
     assert comp.should_compact(70_001, 0) is False  # unknown window
     _patch_cfg(monkeypatch, enabled=False)
     assert comp.should_compact(999_999, 100_000) is False
+
+
+async def test_should_compact_absolute_threshold(monkeypatch):
+    """trigger_tokens caps the trigger at an absolute size but never
+    RAISES it past the window fraction (small-window protection)."""
+    # 250k absolute on a 1M-window model: fires at 250k, not 700k.
+    _patch_cfg(monkeypatch, trigger_tokens=250_000)
+    assert comp.should_compact(250_000, 1_000_000) is False
+    assert comp.should_compact(250_001, 1_000_000) is True
+    # 250k absolute on a 200k-window model: the fraction (140k) still wins.
+    assert comp.should_compact(140_000, 200_000) is False
+    assert comp.should_compact(140_001, 200_000) is True
+    # 0 = legacy fraction-only behavior.
+    _patch_cfg(monkeypatch, trigger_tokens=0)
+    assert comp.should_compact(250_001, 1_000_000) is False
+    assert comp.should_compact(700_001, 1_000_000) is True
 
 
 def test_find_cut_index_respects_user_boundary():

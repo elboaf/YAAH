@@ -191,6 +191,11 @@ export interface AgentConfig {
   ui_scale?: number
   /** Per-model context-window overrides (model id -> tokens). */
   context_window_overrides?: Record<string, number>
+  /** History compaction; trigger_tokens is an absolute threshold (0 = off). */
+  compaction?: {
+    enabled: boolean
+    trigger_tokens: number
+  }
   /** Voice dictation; cloud_api_key arrives masked ("set" | ""). */
   voice?: {
     engine: 'local' | 'cloud'
@@ -233,6 +238,10 @@ export const updateConfig = (
     ui_scale: number
     access_mode: 'ask' | 'plan' | 'full'
     context_window_overrides: Record<string, number | null>
+    compaction: {
+      enabled?: boolean
+      trigger_tokens?: number
+    }
     voice: {
       engine?: 'local' | 'cloud'
       cloud_endpoint?: string
