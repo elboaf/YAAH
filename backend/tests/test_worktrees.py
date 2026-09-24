@@ -28,18 +28,6 @@ def _git(cwd: Path, *args: str) -> str:
     return run_git(cwd, *args).stdout
 
 
-_ensure_wt_doc = """
-Worktrees-on-contention: ensure_isolated only creates a worktree when
-another chat holds the in-place slot. These helpers register a ghost
-incumbent so tests of the worktree machinery take the isolated path.
-"""
-
-
-async def _ensure_wt(repo, chat_id, **kw):
-    worktrees._inplace_writers[f"ghost-{chat_id}"] = str(repo)
-    return await worktrees.ensure_isolated(str(repo), chat_id=chat_id, **kw)
-
-
 @pytest.fixture()
 def repo(tmp_path: Path) -> Path:
     """A real git repo with one commit (HEAD must exist to branch from)."""
@@ -135,7 +123,7 @@ def test_exclude_uses_info_exclude_not_gitignore(repo: Path):
 
 
 async def test_ensure_isolated_creates_and_binds(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     try:
         assert wt != str(repo)
         assert worktrees.worktree_of(wt) == str(Path(wt))
@@ -147,7 +135,7 @@ async def test_ensure_isolated_creates_and_binds(repo: Path):
         # the worktree is real: HEAD works, and the base file is there
         assert (Path(wt) / "hello.txt").read_text(encoding="utf-8") == "v1\n"
         # second call for the same chat rebinds to the SAME worktree
-        again = await _ensure_wt(repo, chat_id="1")
+        again = await worktrees.ensure_isolated(str(repo), chat_id="1")
         assert again == wt
     finally:
         await worktrees.release_session("1")
@@ -160,7 +148,7 @@ async def test_ensure_isolated_branches_with_conversation_title(repo: Path, monk
         return "Fix #93: scheduled ask_user"
 
     monkeypatch.setattr(worktrees, "_chat_title", fake_title)
-    wt = await _ensure_wt(repo, chat_id="99")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="99")
     try:
         info = worktrees.binding_for("99")
         assert info is not None
@@ -186,7 +174,7 @@ async def test_ensure_isolated_nonrepo_first_writer_passes(tmp_path: Path):
 
 
 async def test_main_repo_root_through_a_worktree(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     try:
         # from INSIDE the worktree, the main root still resolves
         assert await worktrees.main_repo_root(wt) == repo
@@ -198,7 +186,7 @@ async def test_main_repo_root_through_a_worktree(repo: Path):
 
 
 async def test_merge_back_refuses_zero_commits(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     result = await worktrees.merge_back(repo, info["branch"])
     assert result["merged"] is False
@@ -208,7 +196,7 @@ async def test_merge_back_refuses_zero_commits(repo: Path):
 
 
 async def test_merge_back_lands_committed_work(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
@@ -226,7 +214,7 @@ async def test_merge_back_merges_around_unrelated_dirty_main(repo: Path):
     """Revisit of issue #58 decision 1 (docs/adr/0001): dirt that does not
     collide with the merge must not veto it — git's own overlap-aware
     pre-flight is the gate."""
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     (Path(wt) / "f.txt").write_text("x\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
@@ -246,7 +234,7 @@ async def test_merge_back_merges_around_unrelated_dirty_main(repo: Path):
 async def test_merge_back_refuses_dirty_overlap(repo: Path):
     """Uncommitted main-tree files the merge must update still refuse —
     git would clobber them, and YAAH never stashes user work."""
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     (Path(wt) / "hello.txt").write_text("branch edit\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
@@ -265,7 +253,7 @@ async def test_merge_back_refuses_dirty_overlap(repo: Path):
 
 async def test_merge_back_conflict_aborts_clean(repo: Path):
     # a commit on main that will conflict with the worktree branch
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     (repo / "hello.txt").write_text("main edit\n", encoding="utf-8")
     _git(repo, "add", "-A")
@@ -285,7 +273,7 @@ async def test_turn_end_keeps_work_on_branch(repo: Path):
     """adr/0003 revised (branch-first): turn end NEVER merges. Commits
     stay on the session branch, master is untouched, and the session
     stays bound - merging is the user's deliberate decision."""
-    wt = await _ensure_wt(repo, chat_id="7")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="7")
     (Path(wt) / "done.txt").write_text("1\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
     _git(Path(wt), "commit", "-q", "-m", "done")
@@ -317,7 +305,7 @@ async def test_turn_end_keeps_uncommitted_state_across_turns(repo: Path):
     """The adr/0003 core invariant survives the revision: turn end does
     NOT touch uncommitted worktree state — a dirty session is not
     drained; the next turn sees exactly this tree."""
-    wt = await _ensure_wt(repo, chat_id="8")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="8")
     (Path(wt) / "draft.md").write_text("half-done\n", encoding="utf-8")
     settle = await worktrees.turn_end("8")
     assert settle["drained"] is False
@@ -340,7 +328,7 @@ async def test_turn_end_keeps_uncommitted_state_across_turns(repo: Path):
 
 
 async def test_finalize_pins_branch_on_first_line(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     (Path(wt) / "sub.txt").write_text("x\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
@@ -356,7 +344,7 @@ async def test_finalize_pins_branch_on_first_line(repo: Path):
 
 
 async def test_finalize_notes_zero_commit_runs(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     result = await worktrees.finalize_sub_agent(
         wt, {"status": "completed", "output": "read-only work", "turns": 1}
     )
@@ -396,7 +384,7 @@ async def test_merge_mutex_stale_lockfile_taken_over(repo: Path):
 
 
 async def test_reaper_salvages_then_removes_stale_worktrees(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     (Path(wt) / "orphan.txt").write_text("lost\n", encoding="utf-8")
     # orphan the session (simulate a crashed run) and age it past the TTL
@@ -418,7 +406,7 @@ async def test_reaper_salvages_then_removes_stale_worktrees(repo: Path):
 
 
 async def test_reaper_spares_live_sessions(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="1")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
     info = worktrees.binding_for("1")
     worktrees._active[str(wt)] = {
         **info,
@@ -488,7 +476,7 @@ async def test_turn_end_keeps_trash_until_session_end(repo: Path):
     """Branch-first: turn end never merges and never drops trash — the
     committed work stays on the branch and the capture survives the turn
     as session state. The trash contract runs at session end."""
-    wt = await _ensure_wt(repo, chat_id="11")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="11")
     (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
     _commit_all(wt, "feature")
     # the exact incident shape: a redirect capture left uncommitted (the
@@ -515,7 +503,7 @@ async def test_turn_end_keeps_authored_dirt_bound(repo: Path):
     """Authored (work-looking) dirt keeps the session bound at turn end —
     it stays in the session worktree for the next turn. Salvage runs at
     session end."""
-    wt = await _ensure_wt(repo, chat_id="12")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="12")
     (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
     _commit_all(wt, "feature")
     (Path(wt) / "draft.md").write_text("# half-written\n", encoding="utf-8")
@@ -535,7 +523,7 @@ async def test_probe_retries_then_final_merge(repo: Path):
     """adr/0003: the per-turn probe/retry protocol is gone — a dirty
     turn simply ends, keeping the session; the model cleans up in the
     NEXT turn of the same chat (same worktree). Session end salvages."""
-    wt = await _ensure_wt(repo, chat_id="13")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="13")
     (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
     _commit_all(wt, "feature")
     (Path(wt) / "draft.md").write_text("# half-authored\n", encoding="utf-8")
@@ -561,7 +549,7 @@ async def test_probe_retries_then_final_merge(repo: Path):
 async def test_probe_drops_trash_so_turn_ends_clean(repo: Path):
     """adr/0003: turn-end merge no longer drops trash; the capture stays
     in the session worktree and the trash contract runs at session end."""
-    wt = await _ensure_wt(repo, chat_id="14")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="14")
     (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
     _commit_all(wt, "feature")
     (Path(wt) / "vitest-out.txt").write_text(
@@ -632,10 +620,10 @@ async def test_sync_never_touches_diverged(repo: Path, monkeypatch):
 async def test_session_binding_survives_turns(repo: Path):
     """The adr/0003 headline: two turns of one chat work in the SAME
     worktree (the old per-turn model minted a fresh one per turn)."""
-    wt1 = await _ensure_wt(repo, chat_id="21")
+    wt1 = await worktrees.ensure_isolated(str(repo), chat_id="21")
     (Path(wt1) / "notes.md").write_text("turn 1\n", encoding="utf-8")
     await worktrees.turn_end("21")
-    wt2 = await _ensure_wt(repo, chat_id="21")
+    wt2 = await worktrees.ensure_isolated(str(repo), chat_id="21")
     assert wt2 == wt1, "turn 2 must reuse the session worktree"
     assert (Path(wt2) / "notes.md").exists(), (
         "turn 2 must see turn 1's uncommitted file"
@@ -647,12 +635,12 @@ async def test_restart_recovery_rebinds_from_path_shape(repo: Path):
     """A backend restart loses _chat_bindings; the next isolated call for
     the chat must rebind to the EXISTING worktree (chat-id dir name +
     agent/* HEAD), keeping the session's uncommitted state."""
-    wt = await _ensure_wt(repo, chat_id="31")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="31")
     (Path(wt) / "wip.md").write_text("survives restart\n", encoding="utf-8")
     # simulate the restart: all in-memory state gone
     worktrees._chat_bindings.clear()
     worktrees._active.clear()
-    wt2 = await _ensure_wt(repo, chat_id="31")
+    wt2 = await worktrees.ensure_isolated(str(repo), chat_id="31")
     assert wt2 == wt, "restart must recover the session worktree"
     assert worktrees.binding_for("31") is not None
     assert (Path(wt2) / "wip.md").exists(), "session state survives restart"
@@ -670,13 +658,11 @@ async def test_root_switch_releases_and_recreates(repo: Path, tmp_path: Path):
     (other / "base.txt").write_text("x\n", encoding="utf-8")
     _git(other, "add", "-A")
     _git(other, "commit", "-q", "-m", "init")
-    wt1 = await _ensure_wt(repo, chat_id="41")
+    wt1 = await worktrees.ensure_isolated(str(repo), chat_id="41")
     (Path(wt1) / "old.md").write_text("old session\n", encoding="utf-8")
     wt2 = await worktrees.ensure_isolated(str(other), chat_id="41")
-    # refile releases the old session; the new root has no contention,
-    # so the chat continues IN PLACE there (worktrees-on-contention)
-    assert wt2 != wt1 and Path(wt2) == other
-    assert worktrees.binding_for("41") is None
+    assert wt2 != wt1 and worktrees.worktree_of(wt2) == str(Path(wt2))
+    assert Path(wt2).parent == worktrees.worktree_base(other)
     # the old session was salvaged, not silently deleted
     salvages = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
     assert salvages and "old session" in salvages[0].read_text(encoding="utf-8")
@@ -686,7 +672,7 @@ async def test_root_switch_releases_and_recreates(repo: Path, tmp_path: Path):
 async def test_release_session_deletes_merged_branch(repo: Path):
     """Branch hygiene: a session whose commits all merged leaves NO
     agent/* branch behind at session end."""
-    wt = await _ensure_wt(repo, chat_id="41")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="41")
     info = worktrees.binding_for("41")
     (Path(wt) / "f.txt").write_text("work\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
@@ -704,7 +690,7 @@ async def test_release_session_deletes_merged_branch(repo: Path):
 async def test_release_session_keeps_unmerged_branch(repo: Path):
     """A session branch with UNMERGED commits is kept for inspection at
     session end (the reaper prunes it after the branch TTL)."""
-    wt = await _ensure_wt(repo, chat_id="42")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="42")
     info = worktrees.binding_for("42")
     (Path(wt) / "f.txt").write_text("work\n", encoding="utf-8")
     _git(Path(wt), "add", "-A")
@@ -725,7 +711,7 @@ async def test_release_session_keeps_unmerged_branch(repo: Path):
 async def test_reaper_salvages_once_when_removal_fails(repo: Path, monkeypatch):
     """A locked tree the reaper cannot delete must not be re-salvaged every
     tick — patch litter grew unboundedly before the salvage-once guard."""
-    wt = await _ensure_wt(repo, chat_id="88")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="88")
     info = worktrees.binding_for("88")
     (Path(wt) / "capture.txt").write_text("out\n", encoding="utf-8")
     worktrees._chat_bindings.pop("88")
@@ -762,7 +748,7 @@ async def test_reaper_prune_spares_live_branch(repo: Path, monkeypatch):
     """The 3-day branch TTL sweep must never delete the branch of a LIVE
     session (a >3-day session with no commits yet)."""
     monkeypatch.setattr(worktrees, "BRANCH_TTL_SECONDS", 0.0)
-    wt = await _ensure_wt(repo, chat_id="77")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="77")
     info = worktrees.binding_for("77")
     _git(repo, "branch", "agent/stale/orphan")
     await worktrees.reap_stale()
@@ -798,7 +784,7 @@ async def test_trash_drop_insurance_patches_heuristic_only(repo: Path):
     """Provenance-backed trash (redirect capture) drops without a patch;
     heuristic-only trash (machine shape, no provenance) is backed up to a
     dropped-trash patch before deletion."""
-    wt = await _ensure_wt(repo, chat_id="9")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="9")
     wtp = Path(wt)
     (wtp / "capture.txt").write_text("command output\n" * 5, encoding="utf-8")
     worktrees.note_write(wt, "capture.txt", "tool")
@@ -816,7 +802,7 @@ async def test_trash_drop_insurance_patches_heuristic_only(repo: Path):
 
 
 async def test_tool_provenance_drop_leaves_no_patch(repo: Path):
-    wt = await _ensure_wt(repo, chat_id="10")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="10")
     (Path(wt) / "out.txt").write_text("log line\n", encoding="utf-8")
     worktrees.note_write(wt, "out.txt", "tool")
     rel = await worktrees.release_session("10", why="test")
@@ -829,7 +815,7 @@ async def test_turn_end_drains_quiesced_session(repo: Path):
     """A session whose branch carries no commits and no uncommitted files
     is drained at turn end: the worktree is removed and the next turn
     runs on the main tree, re-isolating on demand."""
-    wt = await _ensure_wt(repo, chat_id="71")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="71")
     settle = await worktrees.turn_end("71")
     assert settle["drained"] is True
     assert not Path(wt).exists()
@@ -839,14 +825,14 @@ async def test_turn_end_drains_quiesced_session(repo: Path):
 async def test_turn_end_drain_drops_capture_but_not_work(repo: Path):
     """Draining runs the trash contract: a stray capture does not pin the
     session; authored dirt does."""
-    wt = await _ensure_wt(repo, chat_id="72")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="72")
     (Path(wt) / "out.txt").write_text("log line\n", encoding="utf-8")
     worktrees.note_write(wt, "out.txt", "tool")
     settle = await worktrees.turn_end("72")
     assert settle["drained"] is True, "provenance-backed trash must not pin the session"
     assert not Path(wt).exists()
 
-    wt2 = await _ensure_wt(repo, chat_id="73")
+    wt2 = await worktrees.ensure_isolated(str(repo), chat_id="73")
     (Path(wt2) / "draft.md").write_text("# authored\n", encoding="utf-8")
     settle2 = await worktrees.turn_end("73")
     assert settle2["drained"] is False, "authored dirt must keep the session bound"
@@ -859,7 +845,7 @@ async def test_reaper_never_prunes_unmerged_branches(repo: Path, monkeypatch):
     carry no unmerged commits. An unmerged branch is the record of the
     work — only the user deletes it."""
     monkeypatch.setattr(worktrees, "BRANCH_TTL_SECONDS", 0.0)
-    wt = await _ensure_wt(repo, chat_id="81")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="81")
     info = worktrees.binding_for("81")
     (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
     _commit_all(wt, "feature")
@@ -980,126 +966,3 @@ class TestShouldIsolate:
     def test_missing_args_isolate(self):
         assert worktrees.should_isolate("bash", {})
         assert worktrees.should_isolate("bash", None)  # type: ignore[arg-type]
-
-
-# ---------------------------------------------------------------------------
-# Worktrees on contention: a lone writer works in place; only a newcomer
-# arriving while another chat holds the in-place slot gets a worktree.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_lone_chat_writes_in_place(repo: Path):
-    cid = "800"
-    got = await worktrees.ensure_isolated(str(repo), chat_id=cid)
-    assert Path(got) == repo  # main tree, no worktree
-    assert worktrees.worktree_of(got) is None
-    assert worktrees.binding_for(cid) is None
-    assert worktrees._inplace_writers[cid] == str(repo)
-    # no worktree dir, no agent branch
-    assert not worktrees.worktree_base(repo).exists()
-    await worktrees.turn_end(cid)  # unregister
-    assert cid not in worktrees._inplace_writers
-
-
-@pytest.mark.asyncio
-async def test_newcomer_isolates_while_incumbent_in_place(repo: Path):
-    incumbent, newcomer = "801", "802"
-    got = await worktrees.ensure_isolated(str(repo), chat_id=incumbent)
-    assert Path(got) == repo
-    newcomer_ws = await _ensure_wt(repo, chat_id=newcomer)
-    assert worktrees.worktree_of(newcomer_ws) is not None  # isolated
-    assert Path(newcomer_ws) != repo
-    # incumbent was never migrated
-    assert worktrees._inplace_writers.get(incumbent) == str(repo)
-    await worktrees.turn_end(incumbent)
-    await worktrees.release_session(newcomer, why="test")
-
-
-@pytest.mark.asyncio
-async def test_sequential_turns_both_in_place(repo: Path):
-    a, b = "803", "804"
-    assert Path(await worktrees.ensure_isolated(str(repo), chat_id=a)) == repo
-    await worktrees.turn_end(a)
-    assert Path(await worktrees.ensure_isolated(str(repo), chat_id=b)) == repo
-    await worktrees.turn_end(b)
-
-
-@pytest.mark.asyncio
-async def test_race_on_first_write_one_in_place_one_isolated(repo: Path):
-    x, y = "805", "806"
-    r1, r2 = await asyncio.gather(
-        worktrees.ensure_isolated(str(repo), chat_id=x),
-        worktrees.ensure_isolated(str(repo), chat_id=y),
-    )
-    in_place = [p for p in (r1, r2) if worktrees.worktree_of(p) is None]
-    isolated = [p for p in (r1, r2) if worktrees.worktree_of(p) is not None]
-    assert len(in_place) == 1 and len(isolated) == 1
-    for cid, p in ((x, r1), (y, r2)):
-        if worktrees.worktree_of(p) is None:
-            await worktrees.turn_end(cid)
-        else:
-            await worktrees.release_session(cid, why="test")
-
-
-@pytest.mark.asyncio
-async def test_sub_agent_shares_parent_in_place_slot(repo: Path):
-    parent, sub = "807", "sub-abc"
-    got = await worktrees.ensure_isolated(
-        str(repo), chat_id=sub, share_key=parent
-    )
-    assert Path(got) == repo
-    # registered under the PARENT's key; the parent's own write finds itself
-    assert worktrees._inplace_writers.get(parent) == str(repo)
-    assert sub not in worktrees._inplace_writers
-    got2 = await worktrees.ensure_isolated(str(repo), chat_id=parent)
-    assert Path(got2) == repo
-    # sub teardown must not unregister the parent's slot
-    worktrees.release_chat(sub)
-    assert worktrees._inplace_writers.get(parent) == str(repo)
-    await worktrees.turn_end(parent)
-    assert parent not in worktrees._inplace_writers
-
-
-@pytest.mark.asyncio
-async def test_sub_agent_isolates_when_parent_of_other_chat_in_place(repo: Path):
-    other, parent, sub = "808", "809", "sub-xyz"
-    await _ensure_wt(repo, chat_id=other)
-    got = await worktrees.ensure_isolated(
-        str(repo), chat_id=sub, share_key=parent
-    )
-    assert worktrees.worktree_of(got) is not None  # contended: isolate
-    await worktrees.turn_end(other)
-    await worktrees.release_session(sub, why="test")
-
-
-@pytest.mark.asyncio
-async def test_release_all_sessions_sweeps_legacy_worktrees(repo: Path):
-    cid = "810"
-    created = await worktrees.create_worktree(str(repo), cid, "abc123", label="legacy")
-    assert created["ok"]
-    wt = Path(created["workspace"])
-    (wt / "leftover.txt").write_text("uncommitted work\n", encoding="utf-8")
-    released = await worktrees.release_all_sessions([str(repo)])
-    assert str(wt) in released
-    assert not wt.exists()  # removed...
-    # ...but the uncommitted work was salvaged to a patch, never deleted
-    patches = list(worktrees.worktree_base(repo).glob("*.salvage.patch"))
-    assert patches, "dirty session must be salvaged before removal"
-    # zero-commit branch deleted with the worktree
-    branches = _git(repo, "branch", "--list", "agent/*").split()
-    assert not branches
-
-
-@pytest.mark.asyncio
-async def test_non_repo_second_writer_still_refused(tmp_path: Path):
-    ws = tmp_path / "a"  # non-repo writer keys are per-directory
-    ws.mkdir()
-    got = await worktrees.ensure_isolated(str(ws), chat_id="811")
-    assert Path(got) == ws
-    with pytest.raises(worktrees.IsolationRefused):
-        await worktrees.ensure_isolated(str(ws), chat_id="812")
-    # a sub-agent shares the parent's token instead of being refused
-    got2 = await worktrees.ensure_isolated(str(ws), chat_id="sub-s", share_key="811")
-    assert Path(got2) == ws
-    worktrees.release_chat("811")

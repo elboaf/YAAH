@@ -373,7 +373,6 @@ async def run_sub_agent(
     on_event=None,
     gate=None,
     run_label: str = "",
-    parent_chat_id: str = "",
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
@@ -398,11 +397,7 @@ async def run_sub_agent(
 
     async def _exec(name: str, args: dict) -> dict:
         nonlocal run_workspace, _isolation_note, _used_worktree
-        if (
-            _used_worktree is None
-            and name in worktrees.WRITER_TRIGGERS
-            and worktrees.should_isolate(name, args)
-        ):
+        if _used_worktree is None and name in worktrees.WRITER_TRIGGERS:
             owned = worktrees.worktree_of(run_workspace)
             if owned is not None:
                 # Nested parent: the parent's session worktree IS this
@@ -416,21 +411,13 @@ async def run_sub_agent(
                 return await execute_tool(name, args, run_workspace)
             try:
                 run_workspace = await worktrees.ensure_isolated(
-                    run_workspace,
-                    chat_id=_iso_key,
-                    share_key=parent_chat_id,
+                    run_workspace, chat_id=_iso_key
                 )
             except worktrees.IsolationRefused as e:
                 _isolation_note = str(e)
                 return {"error": str(e)}
             else:
-                # In place (shared with the parent's slot): nothing to
-                # finalize and no binding of our own to release.
-                _used_worktree = (
-                    run_workspace
-                    if worktrees.worktree_of(run_workspace) is not None
-                    else None
-                )
+                _used_worktree = run_workspace
         return await execute_tool(name, args, run_workspace)
 
     _used_worktree: str | None = None
@@ -785,7 +772,6 @@ async def spawn_batch(
     cancel_ev: asyncio.Event,
     on_event=None,
     gate=None,
-    parent_chat_id: str = "",
 ) -> dict[str, dict]:
     """Run every spawn_agent call in one parent turn in parallel (capped
     by MAX_CONCURRENT via a semaphore). Returns {call_id: result}.
@@ -793,9 +779,7 @@ async def spawn_batch(
     Each call: {call_id, agent_type, prompt}. Never raises per call — a
     bad agent_type or prompt returns a structured error result so the
     parent's turn survives. `gate` threads the access-mode gate (see
-    run_sub_agent) into every sub-agent of the batch. `parent_chat_id`
-    lets sub-agents of an in-place parent share the parent's writer slot
-    instead of spuriously isolating.
+    run_sub_agent) into every sub-agent of the batch.
     """
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
@@ -857,7 +841,6 @@ async def spawn_batch(
                 on_event=_forward if on_event else None,
                 gate=agent_gate,
                 run_label=call_id,
-                parent_chat_id=parent_chat_id,
             )
             if on_event:
                 on_event(

@@ -1209,8 +1209,6 @@ async def test_dirty_turn_ends_and_state_survives_next_turn(fake_model, tmp_path
     (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-q", "-m", "init")
-    from backend.agent import worktrees as _wt
-    _wt._inplace_writers["ghost"] = str(repo)
 
     seen: list[str] = []
     marker_seen_by_turn2: list[bool] = []
@@ -1304,8 +1302,6 @@ async def test_stubborn_dirt_survives_turns_and_salvages_at_session_end(fake_mod
     (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-q", "-m", "init")
-    from backend.agent import worktrees as _wt
-    _wt._inplace_writers["ghost"] = str(repo)
 
     async def fake_execute(name, arguments, workspace, on_chunk=None):
         marker = Path(workspace) / "draft-notes.md"
@@ -1382,11 +1378,6 @@ async def test_worktree_bound_released_events(fake_model, tmp_path, monkeypatch)
 
     monkeypatch.setattr(loop, "execute_tool", fake_execute)
 
-    # Worktrees-on-contention: a ghost incumbent forces the isolated path
-    # so the write turn below still exercises bound/released events.
-    from backend.agent import worktrees as _wt
-    _wt._inplace_writers["ghost"] = str(repo)
-
     # --- read-only turn: no worktree events at all
     cid = await create_conversation("wt-events-readonly")
     fake_model.append([
@@ -1445,8 +1436,6 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-q", "-m", "init")
-    from backend.agent import worktrees as _wt
-    _wt._inplace_writers["ghost"] = str(repo)
 
     seen_messages: list[list[dict]] = []
 

@@ -797,8 +797,6 @@ async def test_sub_agent_in_parent_worktree_shares_it(fake_model, tmp_path):
     (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-q", "-m", "init")
-    # ghost contender: force the parent onto the isolated path
-    worktrees._inplace_writers["ghost-55"] = str(repo)
     parent_wt = await worktrees.ensure_isolated(str(repo), chat_id="55")
 
     fake_model.append([

@@ -1334,18 +1334,7 @@ async def git_merge_back(workspace: str, branch: str) -> dict:
 
     if not branch.strip():
         return {"error": "merge branch is empty"}
-    if wt.worktree_of(workspace) is None:
-        # Worktrees-on-contention: a chat working in place has no session
-        # branch to merge — resolve instead of merging a tree into itself.
-        return {
-            "output": (
-                "This chat is working directly in the main tree (no session "
-                "worktree) — there is nothing to merge back. Changes are "
-                "already in the user's workspace."
-            ),
-            "exit_code": 0,
-        }
-    root = workspace
+    root = wt.worktree_of(workspace) or workspace
     real = await wt.main_repo_root(root)
     if real is None:
         real = workspace_root(workspace)

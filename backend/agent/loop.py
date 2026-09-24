@@ -207,20 +207,6 @@ def _worktree_note(wt_path: str, info: dict, main_workspace: str) -> str:
     )
 
 
-def _inplace_note(workspace: str) -> str:
-    """The in-place twin of _worktree_note: the chat is the workspace's
-    only writer right now, so it edits the user's live folder directly —
-    no session branch, no merge-back. Say so once per turn so the model
-    doesn't assume the branch/ref world of the isolated path."""
-    return (
-        "# Working in the user's workspace\n\n"
-        f"You are this workspace's only active writer, so you are working "
-        f"directly in `{workspace}` — the user's real folder. Changes are "
-        "live and uncommitted. Do not commit unless the user asks; there "
-        "is no session branch and `git_merge_back` does not apply here.\n"
-    )
-
-
 def _computer_use_prompt() -> str:
     """Computer-use section for the system prompt (Windows local only).
     General principles only — tool mechanics live in the tool schemas,
@@ -1613,20 +1599,6 @@ async def _run_agent_claimed(
                                 except worktrees.IsolationRefused as e:
                                     result = {"error": str(e)}
                                     _refused = True
-                                else:
-                                    if turn_workspace == original_workspace:
-                                        # In place: the chat is the
-                                        # workspace's only writer. One
-                                        # note so the model doesn't
-                                        # assume the isolated world.
-                                        messages.append(
-                                            {
-                                                "role": "system",
-                                                "content": _inplace_note(
-                                                    original_workspace
-                                                ),
-                                            }
-                                        )
                             if not _refused:
                                 box: dict = {}
                                 async for pev in _execute_with_progress(
@@ -1700,16 +1672,6 @@ async def _run_agent_claimed(
                                             )
                                     except worktrees.IsolationRefused as e:
                                         result = {"error": str(e)}
-                                    else:
-                                        if turn_workspace == original_workspace:
-                                            messages.append(
-                                                {
-                                                    "role": "system",
-                                                    "content": _inplace_note(
-                                                        original_workspace
-                                                    ),
-                                                }
-                                            )
                                 if result is None:
                                     box = {}
                                     async for pev in _execute_with_progress(
@@ -1850,8 +1812,7 @@ async def _run_agent_claimed(
 
                 batch = asyncio.create_task(
                     subagents_mod.spawn_batch(
-                        calls, turn_workspace, cancel_ev, on_event=_emit,
-                        gate=_sub_gate, parent_chat_id=str(conversation_id),
+                        calls, turn_workspace, cancel_ev, on_event=_emit, gate=_sub_gate
                     )
                 )
 
