@@ -5660,8 +5660,8 @@ function AccessModeControl() {
 }
 
 /** Git cluster for the status strip: branch chip (click = checkout dropdown),
- *  +N −N uncommitted line counts, local·upstream hash pair with ↑N ↓N, and
- *  the status/commit/push/pull commands. Hidden entirely for non-repos.
+ *  a compact Git control that opens detailed sync state and Git commands.
+ *  Hidden entirely for non-repos.
  *
  *  Commands run directly against git (no agent turn, no tokens) and land in
  *  the conversation as synthetic tool rows; mutating actions are disabled
@@ -5681,6 +5681,7 @@ function GitChipCluster({
   agentBranch: AgentBranchInfo | null
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const [branches, setBranches] = useState<string[]>([])
   const [branchesLoaded, setBranchesLoaded] = useState(false)
   const [confirmAction, setConfirmAction] = useState<'push' | 'pull' | null>(null)
@@ -5696,21 +5697,23 @@ function GitChipCluster({
     setBranches([])
     setBranchesLoaded(false)
     setMenuOpen(false)
+    setDetailsOpen(false)
   }, [conversationId])
 
   // Click-outside closes any open popover/menu.
   useEffect(() => {
-    if (!menuOpen && !commitOpen && !confirmAction) return
+    if (!menuOpen && !detailsOpen && !commitOpen && !confirmAction) return
     const onDown = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
         setMenuOpen(false)
+        setDetailsOpen(false)
         setCommitOpen(false)
         setConfirmAction(null)
       }
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
-  }, [menuOpen, commitOpen, confirmAction])
+  }, [menuOpen, detailsOpen, commitOpen, confirmAction])
 
   if (!info) return null
 
@@ -5718,6 +5721,7 @@ function GitChipCluster({
   const lockMutations = streaming || busy
 
   const openMenu = () => {
+    setDetailsOpen(false)
     setCommitOpen(false)
     setConfirmAction(null)
     setMenuOpen((o) => !o)
@@ -5825,11 +5829,8 @@ function GitChipCluster({
           aria-label={`Agent checkout: branch ${agentBranch!.branch}, based on ${agentBranch!.baseBranch ?? 'unknown'}, worktree ${agentBranch!.worktreeId ?? conversationId ?? 'unknown'}${agentMerged ? ', merged' : ', unmerged'}`}
         >
           <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${agentMerged ? 'bg-zinc-500' : 'run-pulse bg-amber-400'}`} aria-hidden="true" />
-          <span className="shrink-0 text-zinc-500">AGENT CHECKOUT</span>
+          <span className="shrink-0 text-zinc-500">AGENT</span>
           <span className="min-w-0 max-w-[9rem] truncate font-semibold">{agentBranch!.branch}</span>
-          <span className="shrink-0 text-zinc-500">based on</span>
-          <span className="min-w-0 max-w-[7rem] truncate">{agentBranch!.baseBranch ?? 'unknown'}</span>
-          <span className="shrink-0 text-zinc-500">#{agentBranch!.worktreeId ?? conversationId ?? '?'}</span>
           {agentMerged && <span className="shrink-0 text-zinc-300">merged</span>}
         </span>
       )}
@@ -5871,97 +5872,79 @@ function GitChipCluster({
         </div>
       )}
 
-      {/* uncommitted line counts (tracked changes) */}
-      {info.added + info.deleted > 0 && (
-        <span
-          className="shrink-0 font-mono text-[10px]"
-          title={`${info.added} added / ${info.deleted} deleted lines (uncommitted, tracked files)`}
-        >
-          <span className="text-emerald-500/90">+{info.added}</span>{' '}
-          <span className="text-red-400/90">−{info.deleted}</span>
-        </span>
+      <button
+        className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500 hover:border-zinc-500 hover:text-zinc-200"
+        title="Git details and actions"
+        aria-label="Git details and actions"
+        aria-expanded={detailsOpen}
+        onClick={() => {
+          setMenuOpen(false)
+          setDetailsOpen((open) => !open)
+        }}
+      >
+        git{info.ahead > 0 && <span className="ml-1 text-amber-400">↑{info.ahead}</span>}{info.behind > 0 && <span className="ml-0.5 text-amber-400">↓{info.behind}</span>}
+      </button>
+
+      {detailsOpen && (
+        <div className="absolute bottom-full right-0 z-30 mb-1 w-80 max-w-[calc(100vw-2rem)] rounded border border-zinc-700 bg-zinc-900 p-2 shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_8px_10px_-6px_rgba(0,0,0,0.1)]">
+          <div className="mb-2 flex items-center justify-between border-b border-zinc-800 pb-1.5">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400">Git details</span>
+            <span className="font-mono text-[10px] text-zinc-500">{info.branch}</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px]">
+            {info.added + info.deleted > 0 && (
+              <span title={`${info.added} added / ${info.deleted} deleted lines (uncommitted, tracked files)`}>
+                <span className="text-emerald-500/90">+{info.added}</span>{' '}
+                <span className="text-red-400/90">−{info.deleted}</span>
+              </span>
+            )}
+            {info.local_hash && (
+              <span className={pairColor} title={pairTitle}>
+                <button className="hover:text-zinc-200" title={copied === 'local' ? 'copied' : `copy ${info.local_hash}`} onClick={() => copyHash(info.local_hash!, 'local')}>
+                  {copied === 'local' ? '✓' : info.local_hash}
+                </button>
+                <span className="text-zinc-700">·</span>
+                <button className="hover:text-zinc-200" title={copied === 'remote' ? 'copied' : info.remote_hash ? `copy ${info.remote_hash}` : 'no upstream'} onClick={() => info.remote_hash && copyHash(info.remote_hash, 'remote')}>
+                  {copied === 'remote' ? '✓' : info.remote_hash ?? '—'}
+                </button>
+                {info.ahead > 0 && <span> ↑{info.ahead}</span>}
+                {info.behind > 0 && <span> ↓{info.behind}</span>}
+              </span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-zinc-800 pt-1.5">
+            <button className={cmdBtn} disabled={busyAction !== null} title="git status" onClick={() => run('status')}>
+              status{busyAction === 'status' && <span className="run-pulse text-amber-300"> ●</span>}
+            </button>
+            <button className={cmdBtn} disabled={lockMutations} title={streaming ? 'agent is working — wait for the turn to end' : 'stage all + commit'} onClick={() => { setConfirmAction(null); setCommitOpen(true) }}>
+              commit{busyAction === 'commit' && <span className="run-pulse text-amber-300"> ●</span>}
+            </button>
+            {confirmAction === 'push' ? (
+              <span className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                push to {info.upstream ?? `origin/${info.branch}`}?{' '}
+                <button className="text-blue-400 hover:text-blue-300" title="confirm push" onClick={() => run('push')}>✓</button>
+                <button className="text-zinc-500 hover:text-zinc-300" title="cancel" onClick={() => setConfirmAction(null)}>✕</button>
+              </span>
+            ) : (
+              <button className={cmdBtn} disabled={lockMutations} title={streaming ? 'agent is working — wait for the turn to end' : info.upstream ? `push to ${info.upstream}` : 'push (sets upstream on first push)'} onClick={() => setConfirmAction('push')}>
+                push{busyAction === 'push' && <span className="run-pulse text-amber-300"> ●</span>}
+              </button>
+            )}
+            {confirmAction === 'pull' ? (
+              <span className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                pull {info.upstream ? `from ${info.upstream}` : '(no upstream)'}?{' '}
+                <button className="text-blue-400 hover:text-blue-300" title="confirm pull" onClick={() => run('pull')}>✓</button>
+                <button className="text-zinc-500 hover:text-zinc-300" title="cancel" onClick={() => setConfirmAction(null)}>✕</button>
+              </span>
+            ) : (
+              <button className={cmdBtn} disabled={lockMutations} title={streaming ? 'agent is working — wait for the turn to end' : info.upstream ? `pull from ${info.upstream}` : 'pull (no upstream set)'} onClick={() => setConfirmAction('pull')}>
+                pull{busyAction === 'pull' && <span className="run-pulse text-amber-300"> ●</span>}
+              </button>
+            )}
+          </div>
+        </div>
       )}
 
-      {/* local·upstream hash pair (click a hash to copy) */}
-      {info.local_hash && (
-        <span className={`shrink-0 font-mono text-[10px] ${pairColor}`} title={pairTitle}>
-          <button
-            className="hover:text-zinc-200"
-            title={copied === 'local' ? 'copied' : `copy ${info.local_hash}`}
-            onClick={() => copyHash(info.local_hash!, 'local')}
-          >
-            {copied === 'local' ? '✓' : info.local_hash}
-          </button>
-          <span className="text-zinc-700">·</span>
-          <button
-            className="hover:text-zinc-200"
-            title={copied === 'remote' ? 'copied' : info.remote_hash ? `copy ${info.remote_hash}` : 'no upstream'}
-            onClick={() => info.remote_hash && copyHash(info.remote_hash, 'remote')}
-          >
-            {copied === 'remote' ? '✓' : info.remote_hash ?? '—'}
-          </button>
-          {info.ahead > 0 && <span> ↑{info.ahead}</span>}
-          {info.behind > 0 && <span> ↓{info.behind}</span>}
-        </span>
-      )}
-
-      {/* commands: status · commit · push · pull */}
-      <span className="flex shrink-0 items-center gap-0.5">
-        <button className={cmdBtn} disabled={busyAction !== null} title="git status" onClick={() => run('status')}>
-          status{busyAction === 'status' && <span className="run-pulse text-amber-300"> ●</span>}
-        </button>
-        <button
-          className={cmdBtn}
-          disabled={lockMutations}
-          title={streaming ? 'agent is working — wait for the turn to end' : 'stage all + commit'}
-          onClick={() => {
-            setConfirmAction(null)
-            setCommitOpen(true)
-          }}
-        >
-          commit{busyAction === 'commit' && <span className="run-pulse text-amber-300"> ●</span>}
-        </button>
-        {confirmAction === 'push' ? (
-          <span className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
-            push to {info.upstream ?? `origin/${info.branch}`}?{' '}
-            <button className="text-blue-400 hover:text-blue-300" title="confirm push" onClick={() => run('push')}>
-              ✓
-            </button>
-            <button className="text-zinc-500 hover:text-zinc-300" title="cancel" onClick={() => setConfirmAction(null)}>
-              ✕
-            </button>
-          </span>
-        ) : (
-          <button
-            className={cmdBtn}
-            disabled={lockMutations}
-            title={streaming ? 'agent is working — wait for the turn to end' : info.upstream ? `push to ${info.upstream}` : 'push (sets upstream on first push)'}
-            onClick={() => setConfirmAction('push')}
-          >
-            push{busyAction === 'push' && <span className="run-pulse text-amber-300"> ●</span>}
-          </button>
-        )}
-        {confirmAction === 'pull' ? (
-          <span className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
-            pull {info.upstream ? `from ${info.upstream}` : '(no upstream)'}?{' '}
-            <button className="text-blue-400 hover:text-blue-300" title="confirm pull" onClick={() => run('pull')}>
-              ✓
-            </button>
-            <button className="text-zinc-500 hover:text-zinc-300" title="cancel" onClick={() => setConfirmAction(null)}>
-              ✕
-            </button>
-          </span>
-        ) : (
-          <button
-            className={cmdBtn}
-            disabled={lockMutations}
-            title={streaming ? 'agent is working — wait for the turn to end' : info.upstream ? `pull from ${info.upstream}` : 'pull (no upstream set)'}
-            onClick={() => setConfirmAction('pull')}
-          >
-            pull{busyAction === 'pull' && <span className="run-pulse text-amber-300"> ●</span>}
-          </button>
-        )}
-      </span>
 
       {/* commit popover: message + visible stage-all sweep */}
       {commitOpen && (
