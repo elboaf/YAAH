@@ -161,6 +161,21 @@ def _agents_notes(workspace: str) -> str:
     )
 
 
+def _memory_notes(workspace: str) -> str:
+    """Persistent-memory block: the project's MEMORY.md index plus the
+    save/read/delete guidance. Empty for a fresh project (no memories
+    yet) and swallowed on any error — optional context must never break
+    a turn. Remote sessions keep their memories client-local: the tools
+    resolve slugs against the CLIENT's memory root, so injection is the
+    same block either way."""
+    from backend.agent import memory
+
+    try:
+        return memory.index_for_prompt(workspace)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _worktree_note(wt_path: str, info: dict, main_workspace: str) -> str:
     """Branch-first transparency for the model: isolation is invisible
     plumbing to the file tools, but branch/ref semantics leak into every
@@ -1070,6 +1085,12 @@ async def run_agent(
     notes = _agents_notes(workspace)
     if notes:
         system_prompt = f"{system_prompt}\n\n---\n\n{notes}"
+
+    # Persistent per-project memory: the saved-memory index travels with
+    # the workspace across conversations, so read it fresh each turn too.
+    memory_notes = _memory_notes(workspace)
+    if memory_notes:
+        system_prompt = f"{system_prompt}\n\n---\n\n{memory_notes}"
 
     # Plan mode tells the model what it cannot do, so it plans instead of
     # hitting blocked-tool errors all turn.

@@ -657,6 +657,91 @@ TOOLS_SCHEMA += [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_save",
+            "description": (
+                "Save a durable fact to your persistent per-project memory "
+                "(user preferences, feedback on how to work, project "
+                "constraints not derivable from the code, resource "
+                "pointers). The index of saved memories is in your system "
+                "prompt every turn. Update an existing memory by saving "
+                "with its name; do not create near-duplicates."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Kebab-case slug, e.g. 'prefers-dark-ui' or "
+                            "'release-pipeline-gotchas'. Reuse the existing "
+                            "slug when updating."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short human title, e.g. 'Prefers dark UI'.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "One-line summary shown in the index — what a "
+                            "future you needs to decide relevance."
+                        ),
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": (
+                            "One of: user | feedback | project | reference "
+                            "(default project)."
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The memory itself, in markdown.",
+                    },
+                },
+                "required": ["name", "title", "description", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_read",
+            "description": (
+                "Read one saved memory file in full (the system prompt "
+                "only carries the one-line index entries). Read before "
+                "updating an existing memory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The memory's slug."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_delete",
+            "description": (
+                "Delete a saved memory that is wrong or obsolete and "
+                "remove its index line."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The memory's slug."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 
@@ -1148,6 +1233,24 @@ async def _install_git_executor(workspace: str) -> dict:
     return await gitenv.run_install_git(workspace)
 
 
+def _memory_executor(op: str):
+    async def _run(workspace: str, **arguments) -> dict:
+        from backend.agent import memory
+
+        args = dict(arguments)
+        if op == "save":
+            # the schema's key is "type"; the module kwarg is mtype
+            args["mtype"] = args.pop("type", None)
+        fn = {
+            "save": memory.save_memory,
+            "read": memory.read_memory,
+            "delete": memory.delete_memory,
+        }[op]
+        return fn(workspace, **args)
+
+    return _run
+
+
 EXECUTORS = {
     "bash": run_bash,
     "powershell": run_powershell,
@@ -1170,6 +1273,9 @@ EXECUTORS = {
     "git_pull": git_pull,
     "install_git": _install_git_executor,
     "get_help": get_help,
+    "memory_save": _memory_executor("save"),
+    "memory_read": _memory_executor("read"),
+    "memory_delete": _memory_executor("delete"),
 }
 
 # Computer use (Q2: Windows-only hard line, same pattern as powershell but
@@ -1216,6 +1322,8 @@ _READ_TOOLS = {
     # delegation is free in all modes: the sub-agent's own tool calls hit
     # the same gate, so spawning cannot launder permissions
     "spawn_agent",
+    # memory reads live outside the workspace but change nothing
+    "memory_read",
 }
 _MUTATING_TOOLS = {
     "write_file", "edit_file", "create_file", "delete_file", "move_file",
@@ -1229,6 +1337,9 @@ _MUTATING_TOOLS = {
     # creates a disposable VM and maps the workspace R/W into it (prompts
     # in ask mode, blocked in plan mode)
     "sandbox_test",
+    # persistent memory lives outside the workspace (~/.yaah/memory) but
+    # is model-authored content, so it gates like a file write
+    "memory_save", "memory_delete",
 }
 _SHELL_TOOLS = {
     "bash", "powershell", "git_push", "git_pull",
