@@ -40,6 +40,12 @@ One line per memory file below; the files hold the detail.
 """
 
 
+def _case_insensitive_fs() -> bool:
+    # Module-level so tests can flip it — patching os.name globally breaks
+    # pathlib on the CI runner (Path() would try to build a WindowsPath).
+    return os.name == "nt"
+
+
 def project_key(workspace: str | None) -> str:
     """Stable 16-hex key for a workspace. Remote-namespaced workspaces
     (`remote:<host_id>:<path>`) hash the raw namespaced string — those
@@ -55,7 +61,7 @@ def project_key(workspace: str | None) -> str:
     else:
         p = workspace_root(ws)
         key_input = p.as_posix()
-        if os.name == "nt":
+        if _case_insensitive_fs():
             key_input = key_input.lower()
     return hashlib.sha1(key_input.encode("utf-8")).hexdigest()[:16]
 

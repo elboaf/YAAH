@@ -27,7 +27,7 @@ def test_project_key_is_stable_and_path_derived():
 
 
 def test_project_key_case_insensitive_on_windows(monkeypatch):
-    monkeypatch.setattr(memory.os, "name", "nt")
+    monkeypatch.setattr(memory, "_case_insensitive_fs", lambda: True)
     upper = memory.project_key("C:\\Proj")
     lower = memory.project_key("c:\\proj")
     assert upper == lower
