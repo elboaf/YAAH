@@ -927,6 +927,43 @@ export const getRemoteDeviceMessages = (hostId: string, conversationId: string) 
     `/api/remote/devices/${encodeURIComponent(hostId)}/conversations/${encodeURIComponent(conversationId)}/messages`,
   )
 
+export interface RemoteSnapshot {
+  conversation: { id: number; title: string; workspace: string | null }
+  messages: StoredMessage[]
+  revision: string
+}
+
+const remoteChatPath = (hostId: string, conversationId: string) =>
+  `/api/remote/devices/${encodeURIComponent(hostId)}/conversations/${encodeURIComponent(conversationId)}`
+
+export const getRemoteDeviceSnapshot = (hostId: string, conversationId: string) =>
+  api<RemoteSnapshot>(`${remoteChatPath(hostId, conversationId)}/snapshot`)
+
+export const acquireRemoteDeviceLease = (hostId: string, conversationId: string, revision: string, holderId: string) =>
+  api<{ ok: boolean; lease_token: string; expires_at: number; revision: string; lease_seconds: number }>(`${remoteChatPath(hostId, conversationId)}/lease`, {
+    method: 'POST', body: JSON.stringify({ revision, holder_id: holderId }),
+  })
+
+export const renewRemoteDeviceLease = (hostId: string, conversationId: string, leaseToken: string) =>
+  api<{ ok: boolean; lease_token: string; expires_at: number; lease_seconds: number }>(`${remoteChatPath(hostId, conversationId)}/lease`, {
+    method: 'POST', body: JSON.stringify({ lease_token: leaseToken }),
+  })
+
+export const releaseRemoteDeviceLease = (hostId: string, conversationId: string, leaseToken: string) =>
+  api<{ ok: boolean; released: boolean }>(`${remoteChatPath(hostId, conversationId)}/lease`, {
+    method: 'DELETE', body: JSON.stringify({ lease_token: leaseToken }),
+  })
+
+export const commitRemoteDeviceSnapshot = (hostId: string, conversationId: string, body: {
+  lease_token: string; revision: string; commit_id: string
+  conversation: RemoteSnapshot['conversation']; messages: StoredMessage[]
+}) => api<{ ok: boolean; commit_id: string; revision: string; message_count: number; replayed: boolean }>(
+  `${remoteChatPath(hostId, conversationId)}/commit`, { method: 'POST', body: JSON.stringify(body) },
+)
+
+export const syncPendingRemoteDeviceCommits = (hostId: string, conversationId: string) =>
+  api<{ synced: number; pending: number; conflict?: unknown }>(`${remoteChatPath(hostId, conversationId)}/sync-pending`, { method: 'POST' })
+
 export const remoteStatus = () => api<RemoteStatus>('/api/remote/status')
 
 export const connectRemote = (url: string, passphrase: string) =>

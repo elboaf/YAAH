@@ -81,7 +81,8 @@ describe('read-only remote transcript viewer', () => {
     expect(useRemoteConversations.getState().getTranscript('host-a', '7')?.[0].content).toBe('transcript from host-a')
     expect(useRemoteConversations.getState().getTranscript('host-b', '7')?.[0].content).toBe('transcript from host-b')
     expect(useRemoteConversations.getState().transcripts[remoteConversationKey('host-a', '7')]).toBeDefined()
-    expect(screen.getAllByText(/Remote editing and turns are not enabled yet/)).toHaveLength(2)
+    expect(screen.getAllByText(/Remote turns and workspace execution remain Phase 6/)).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Edit transcript' })).toHaveLength(2)
   })
 
   it('routes remote transcript images through that host owner proxy', async () => {

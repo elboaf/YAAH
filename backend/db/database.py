@@ -101,6 +101,18 @@ CREATE TABLE IF NOT EXISTS remote_messages (
     FOREIGN KEY (host_id, conversation_id)
         REFERENCES remote_conversations(host_id, conversation_id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS remote_pending_commits (
+    host_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    commit_id TEXT NOT NULL,
+    base_revision TEXT NOT NULL,
+    conversation_json TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (host_id, conversation_id, commit_id),
+    FOREIGN KEY (host_id, conversation_id)
+        REFERENCES remote_conversations(host_id, conversation_id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS idx_remote_messages_order
     ON remote_messages(host_id, conversation_id, position);
 
@@ -743,6 +755,15 @@ async def upsert_remote_conversation(host_id: str, conversation: dict, messages:
     db = await get_db()
     try:
         await db.execute("BEGIN")
+        cur = await db.execute(
+            "SELECT sync_status FROM remote_conversations WHERE host_id=? AND conversation_id=?",
+            (host_id, cid),
+        )
+        existing = await cur.fetchone()
+        # Never replace a durable local commit intent with a background refresh.
+        if existing is not None and existing["sync_status"] == "pending":
+            await db.commit()
+            return
         await db.execute(
             """INSERT INTO remote_conversations
                (host_id, conversation_id, title, workspace, updated_at, revision, sync_status)
@@ -769,6 +790,86 @@ async def upsert_remote_conversation(host_id: str, conversation: dict, messages:
     except Exception:
         await db.rollback()
         raise
+    finally:
+        await db.close()
+
+
+async def queue_remote_commit(
+    host_id: str, conversation_id: str, base_revision: str,
+    conversation: dict, messages: list[dict], commit_id: str | None = None,
+) -> str:
+    """Persist a full snapshot before network I/O so ambiguous failures are retryable."""
+    import secrets
+
+    cid = str(conversation_id)
+    commit_id = commit_id or secrets.token_urlsafe(24)
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            "INSERT INTO remote_pending_commits(host_id, conversation_id, commit_id, base_revision, conversation_json, messages_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (host_id, cid, commit_id, base_revision, json.dumps(conversation), json.dumps(messages)),
+        )
+        await db.execute(
+            "UPDATE remote_conversations SET title=?, workspace=?, sync_status='pending' WHERE host_id=? AND conversation_id=?",
+            (conversation.get("title", "New Task"), conversation.get("workspace"), host_id, cid),
+        )
+        await db.execute("DELETE FROM remote_messages WHERE host_id=? AND conversation_id=?", (host_id, cid))
+        for position, message in enumerate(messages):
+            await db.execute(
+                "INSERT INTO remote_messages(host_id, conversation_id, message_id, position, payload) VALUES (?, ?, ?, ?, ?)",
+                (host_id, cid, str(message.get("id", position)), position, json.dumps(message)),
+            )
+        await db.commit()
+        return commit_id
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def pending_remote_commits(host_id: str, conversation_id: str | None = None) -> list[dict]:
+    db = await get_db()
+    try:
+        sql = "SELECT * FROM remote_pending_commits WHERE host_id=?"
+        params: tuple = (host_id,)
+        if conversation_id is not None:
+            sql += " AND conversation_id=?"
+            params += (str(conversation_id),)
+        sql += " ORDER BY created_at, commit_id"
+        cur = await db.execute(sql, params)
+        rows = [dict(row) for row in await cur.fetchall()]
+        for row in rows:
+            row["conversation"] = json.loads(row.pop("conversation_json"))
+            row["messages"] = json.loads(row.pop("messages_json"))
+        return rows
+    finally:
+        await db.close()
+
+
+async def acknowledge_remote_commit(host_id: str, conversation_id: str, commit_id: str, revision: str) -> bool:
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "DELETE FROM remote_pending_commits WHERE host_id=? AND conversation_id=? AND commit_id=?",
+            (host_id, str(conversation_id), commit_id),
+        )
+        if cur.rowcount:
+            if revision:
+                await db.execute(
+                    "UPDATE remote_conversations SET revision=?, sync_status='synced' WHERE host_id=? AND conversation_id=?",
+                    (revision, host_id, str(conversation_id)),
+                )
+            else:
+                await db.execute(
+                    "UPDATE remote_conversations SET sync_status='synced' WHERE host_id=? AND conversation_id=?",
+                    (host_id, str(conversation_id)),
+                )
+        await db.commit()
+        return cur.rowcount > 0
     finally:
         await db.close()
 
@@ -817,6 +918,10 @@ async def acquire_remote_edit_lease(
         if conversation is None:
             await db.rollback()
             raise RemoteProtocolError("conversation_not_found")
+        from backend.agent.loop import agent_is_running
+        if agent_is_running(conversation_id):
+            await db.rollback()
+            raise RemoteProtocolError("lease_held", holder_id="host-local-agent")
         current_revision = _revision_token(conversation["remote_revision_counter"])
         if revision != current_revision:
             await db.rollback()

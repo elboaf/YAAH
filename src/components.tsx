@@ -84,6 +84,13 @@ import {
   type SkillInfo,
   type WorkspaceRow,
   type RemoteConversation,
+  type RemoteSnapshot,
+  getRemoteDeviceSnapshot,
+  acquireRemoteDeviceLease,
+  renewRemoteDeviceLease,
+  releaseRemoteDeviceLease,
+  commitRemoteDeviceSnapshot,
+  syncPendingRemoteDeviceCommits,
 } from './api'
 import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentBranchInfo } from './store'
 import { useUpdateCheck } from './update'
@@ -2765,6 +2772,12 @@ export function RemoteTranscriptDialog({
   const [loading, setLoading] = useState(!messages)
   const [error, setError] = useState<string | null>(null)
   const [retry, setRetry] = useState(0)
+  const [editing, setEditing] = useState(false)
+  const [leaseToken, setLeaseToken] = useState<string | null>(null)
+  const [revision, setRevision] = useState<string | null>(null)
+  const [draftMessages, setDraftMessages] = useState<ChatMessage[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -2781,22 +2794,97 @@ export function RemoteTranscriptDialog({
     return () => { cancelled = true }
   }, [hostId, conversationId, retry, setTranscript])
 
+  useEffect(() => {
+    if (!leaseToken) return
+    const timer = window.setInterval(() => {
+      void renewRemoteDeviceLease(hostId, conversationId, leaseToken).catch((error) => {
+        setLeaseToken(null)
+        setEditing(false)
+        setDraftMessages(null)
+        setSyncMessage(`Edit lease lost: ${String((error as Error).message ?? error)}`)
+      })
+    }, 45_000)
+    return () => window.clearInterval(timer)
+  }, [hostId, conversationId, leaseToken])
+
+  const startEditing = async () => {
+    setBusy(true)
+    setSyncMessage(null)
+    try {
+      const snapshot: RemoteSnapshot = await getRemoteDeviceSnapshot(hostId, conversationId)
+      const lease = await acquireRemoteDeviceLease(hostId, conversationId, snapshot.revision, `yaah-${Date.now()}`)
+      setRevision(snapshot.revision)
+      setLeaseToken(lease.lease_token)
+      setDraftMessages(buildMessages(snapshot.messages).map((message) => scopeRemoteMedia(message, hostId)))
+      setEditing(true)
+    } catch (error) {
+      setSyncMessage(`Could not acquire edit lease: ${String((error as Error).message ?? error)}`)
+    } finally { setBusy(false) }
+  }
+
+  const cancelEditing = async () => {
+    const token = leaseToken
+    setLeaseToken(null)
+    setEditing(false)
+    setDraftMessages(null)
+    setRevision(null)
+    if (token) await releaseRemoteDeviceLease(hostId, conversationId, token).catch(() => {})
+  }
+
+  const saveEditing = async () => {
+    if (!leaseToken || !revision || !draftMessages) return
+    setBusy(true)
+    setSyncMessage(null)
+    try {
+      const commitId = crypto.randomUUID()
+      const snapshot = await getRemoteDeviceSnapshot(hostId, conversationId)
+      if (snapshot.revision !== revision) throw new Error('stale revision; refresh before editing')
+      const stored = draftMessages.map((message) => ({
+        id: Number(message.id), role: message.role, content: message.content,
+        tool_calls: message.toolCalls?.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) } })) ?? null,
+        tool_call_id: null, images: message.images ?? [], sub_agent_transcript: message.subAgent ?? null,
+      }))
+      const result = await commitRemoteDeviceSnapshot(hostId, conversationId, {
+        lease_token: leaseToken, revision, commit_id: commitId,
+        conversation: { ...snapshot.conversation, title }, messages: stored,
+      })
+      setTranscript(hostId, conversationId, draftMessages)
+      setRevision(result.revision)
+      setSyncMessage('Changes saved to device.')
+      await releaseRemoteDeviceLease(hostId, conversationId, leaseToken).catch(() => {})
+      setLeaseToken(null)
+      setEditing(false)
+      setDraftMessages(null)
+    } catch (error) {
+      setSyncMessage(`Changes remain pending locally. Retry sync when the device reconnects: ${String((error as Error).message ?? error)}`)
+      void syncPendingRemoteDeviceCommits(hostId, conversationId).catch(() => {})
+    } finally { setBusy(false) }
+  }
+
+  const renderedMessages = draftMessages ?? messages
+
   return (
-    <DialogShell onClose={onClose} panelClassName="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
+    <DialogShell onClose={editing ? () => void cancelEditing() : onClose} panelClassName="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
       <header className="flex items-start justify-between gap-4 border-b border-zinc-800 px-4 py-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-zinc-100">{title}</h2>
             <p className="mt-1 font-mono text-[10px] text-zinc-500">{deviceName} <span className="px-1 text-zinc-700">·</span> {online ? 'remote transcript · read-only' : 'cached transcript · read-only offline'}</p>
           </div>
-          <button className="shrink-0 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={onClose} aria-label="Close remote transcript">Close</button>
+          <div className="flex shrink-0 gap-2">
+            {!editing && <button disabled={!online || busy} className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40" onClick={() => void startEditing()}>Edit transcript</button>}
+            {editing && <><button disabled={busy} className="rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800" onClick={() => void cancelEditing()}>Cancel edit</button><button disabled={busy} className="rounded bg-blue-600 px-2 py-1 text-xs text-white hover:bg-blue-500 disabled:opacity-40" onClick={() => void saveEditing()}>{busy ? 'Saving…' : 'Save changes'}</button></>}
+            <button className="rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={() => editing ? void cancelEditing() : onClose()} aria-label="Close remote transcript">Close</button>
+          </div>
         </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           {error && <div role="alert" className="flex items-center gap-2 py-4 text-xs text-red-400"><span>Could not load this transcript. {online ? 'Check the device connection and retry.' : 'Reconnect to this device to refresh its cached copy.'}</span><button className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={() => setRetry((value) => value + 1)}>Retry</button></div>}
           {(loading && messages === null) && !error && <div aria-label="Loading remote transcript" className="space-y-3 py-2"><div className="h-3 w-1/3 animate-pulse rounded bg-zinc-800"/><div className="h-12 w-2/3 animate-pulse rounded bg-zinc-800/70"/><div className="h-8 w-1/2 animate-pulse rounded bg-zinc-800/50"/></div>}
-          {messages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
-          {messages && messages.length > 0 && <div className="space-y-4">{messages.map((message) => <MessageView key={message.id} msg={message}/>)}</div>}
+          {syncMessage && <p role="status" className="mb-2 text-xs text-amber-300">{syncMessage}</p>}
+          {editing && draftMessages && <p className="mb-2 font-mono text-[10px] text-emerald-400">EDIT LEASE HELD · transcript-only changes; turns remain unavailable until Phase 6</p>}
+          {renderedMessages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
+          {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded border border-zinc-700 bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
         </div>
-      <footer className="border-t border-zinc-800 px-4 py-2 font-mono text-[10px] text-zinc-600">READ ONLY <span className="px-1 text-zinc-700">·</span> Remote editing and turns are not enabled yet</footer>
+      <footer className="border-t border-zinc-800 px-4 py-2 font-mono text-[10px] text-zinc-600">{editing ? 'LEASED TRANSCRIPT EDIT' : 'READ ONLY'} <span className="px-1 text-zinc-700">·</span> Remote turns and workspace execution remain Phase 6</footer>
     </DialogShell>
   )
 }
