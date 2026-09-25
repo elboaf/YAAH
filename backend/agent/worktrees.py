@@ -1308,7 +1308,8 @@ async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
             "heuristic-classified file(s) were dropped; contents backed up "
             f"to {insurance}. "
         )
-    if await _dirty(wt):
+    dirty = await _dirty(wt)
+    if dirty:
         patch = await _salvage(
             root, wt, branch, "uncommitted changes at sub-agent completion"
         )
@@ -1340,6 +1341,7 @@ async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
         result["worktree_note"] = note
     result["worktree_branch"] = branch
     result["commits_ahead"] = max(commits, 0)
+    result["dirty"] = dirty
     result["worktree_removed"] = True
     return result
 

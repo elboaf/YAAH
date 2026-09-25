@@ -1341,7 +1341,18 @@ function escapeMermaid(value: string): string {
 
 export function gitMermaid(summary: GitActivitySummary): string {
   const lines = ['flowchart LR', '  primary["Primary workspace"]']
-  summary.lanes.forEach((lane, laneIndex) => {
+  const visibleLanes = summary.lanes.filter((lane) => {
+    // An explorer that only reused a parent worktree has no isolated changes
+    // of its own to show. Likewise, omit a drained, clean isolated worktree
+    // whose only recorded operation was the harness creating it.
+    if (lane.worktree === 'shared' && lane.operations.length === 0) return false
+    const hasNoUnmergedWork = lane.commits_ahead === 0 && lane.dirty === false
+    const onlyWorktreeSetup = lane.operations.every(
+      (op) => op.operation === 'checkout' && op.source === 'harness',
+    )
+    return !(hasNoUnmergedWork && onlyWorktreeSetup)
+  })
+  visibleLanes.forEach((lane, laneIndex) => {
     const id = `lane${laneIndex}`
     const branch = escapeMermaid(lane.branch || 'current branch')
     const base = escapeMermaid(lane.base_branch || 'primary branch')

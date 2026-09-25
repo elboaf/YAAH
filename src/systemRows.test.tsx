@@ -36,6 +36,37 @@ describe('persisted merge-back system rows', () => {
     expect(graph).toContain('Not merged')
     expect(graph).not.toContain('merged into primary')
   })
+  it('omits exploration lanes and clean worktree setup without hiding Git activity', () => {
+    const graph = gitMermaid({
+      run_id: 'run-exploration',
+      outcome: 'completed',
+      lanes: [
+        {
+          id: 'explore', label: 'Explore', branch: 'agent/42/task',
+          branch_action: 'reused', commits_ahead: null, dirty: null,
+          worktree: 'shared', integrated: null, operations: [],
+        },
+        {
+          id: 'empty', label: 'Empty agent', branch: 'agent/42/empty',
+          branch_action: 'created', commits_ahead: 0, dirty: false,
+          worktree: 'removed', integrated: false,
+          operations: [{ sequence: 1, operation: 'checkout', outcome: 'succeeded', source: 'harness', detail: 'created isolated worktree' }],
+        },
+        {
+          id: 'work', label: 'Changed agent', branch: 'agent/42/work',
+          branch_action: 'created', commits_ahead: 1, dirty: false,
+          worktree: 'removed', integrated: false,
+          operations: [{ sequence: 2, operation: 'commit', outcome: 'succeeded', source: 'agent-tool', commit: 'abc123' }],
+        },
+      ],
+    })
+
+    expect(graph).not.toContain('Explore')
+    expect(graph).not.toContain('Empty agent')
+    expect(graph).toContain('Changed agent')
+    expect(graph).toContain('Commit: completed')
+  })
+
   it('omits a redundant no-work terminal when a clean isolated lane is drained', () => {
     const graph = gitMermaid({
       run_id: 'run-drained',

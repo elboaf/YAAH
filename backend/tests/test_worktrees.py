@@ -349,6 +349,8 @@ async def test_finalize_notes_zero_commit_runs(repo: Path):
         wt, {"status": "completed", "output": "read-only work", "turns": 1}
     )
     assert "carries no commits" in result["output"].splitlines()[0]
+    assert result["commits_ahead"] == 0
+    assert result["dirty"] is False
     assert not Path(wt).exists()
 
 
