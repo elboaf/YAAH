@@ -1671,6 +1671,10 @@ async def _run_agent_claimed(
                     yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                     return
                 name = tc["function"]["name"]
+                # Malformed arguments still need a tool result recorded and
+                # returned to the model. Keep a safe empty payload for the
+                # parent-tool recorder when JSON decoding fails.
+                args = {}
                 try:
                     args = json.loads(tc["function"]["arguments"] or "{}")
                 except json.JSONDecodeError as e:

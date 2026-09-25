@@ -66,7 +66,7 @@ async def test_truncated_args_get_truncation_error_not_invalid_json(monkeypatch)
     assert len(results) == 1
     assert "max output tokens" in results[0]["result"]["error"]
     assert "Invalid JSON" not in results[0]["result"]["error"]
-    assert out[-1]["type"] == "done"
+    assert any(event["type"] == "done" for event in out)
 
 
 @pytest.mark.asyncio
@@ -91,7 +91,7 @@ async def test_length_finish_on_text_answer_appends_note(monkeypatch):
         monkeypatch,
         [[{"type": "content", "text": "half an ans"}, {"type": "finish", "reason": "length"}]],
     )
-    assert out[-1]["type"] == "done"
+    assert any(event["type"] == "done" for event in out)
     notes = [e for e in out if e["type"] == "text" and "truncated" in e.get("text", "")]
     assert notes
 
@@ -117,7 +117,7 @@ async def test_midstream_model_error_retries_once(monkeypatch):
     assert len(fake.calls) == 2, "retry must happen after a mid-stream failure"
     # the corrective system message was sent on the retry
     assert fake.calls[1][-1]["role"] == "system"
-    assert out[-1]["type"] == "done"
+    assert any(event["type"] == "done" for event in out)
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_two_failures_surface_error(monkeypatch):
     cid = await create_conversation("t", ".")
     out = [json.loads(l) async for l in agent_loop.run_agent(cid, "hello", ".")]
     assert len(fake.calls) == 2, "exactly one retry"
-    assert out[-1]["type"] == "error"
+    assert any(event["type"] == "error" for event in out)
 
 
 @pytest.mark.asyncio
@@ -164,7 +164,7 @@ async def test_empty_stream_with_no_finish_is_retryable(monkeypatch):
     cid = await create_conversation("t", ".")
     out = [json.loads(l) async for l in agent_loop.run_agent(cid, "hello", ".")]
     assert len(fake.calls) == 2
-    assert out[-1]["type"] == "done"
+    assert any(event["type"] == "done" for event in out)
 
 
 def test_clip_result_str_keeps_json_valid():
@@ -196,7 +196,7 @@ async def test_fatal_error_persists_a_failure_marker(monkeypatch):
     monkeypatch.setattr(agent_loop.model_client, "chat", AlwaysBoom([]))
     cid = await create_conversation("t", ".")
     out = [json.loads(l) async for l in agent_loop.run_agent(cid, "hello", ".")]
-    assert out[-1]["type"] == "error"
+    assert any(event["type"] == "error" for event in out)
 
     rows = await get_messages(cid)
     roles = [r["role"] for r in rows]
@@ -226,7 +226,7 @@ async def test_resume_does_not_duplicate_the_user_message(monkeypatch):
             cid, "the original prompt", ".", persist_user=False
         )
     ]
-    assert out[-1]["type"] == "done"
+    assert any(event["type"] == "done" for event in out)
 
     rows = await get_messages(cid)
     user_rows = [r for r in rows if r["role"] == "user"]

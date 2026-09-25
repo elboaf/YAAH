@@ -1029,8 +1029,11 @@ async def test_workspaces_mirror_host_registry_namespaced(monkeypatch):
     assert remote_rows[1]["path"] == "remote:abc123:/home/host/proj"
     # Raw host paths must never leak to the client UI as-is. Local Default
     # remains an ordinary null path in the aggregate.
+    # The shared test database may already contain unrelated local paths;
+    # only rows owned by this host are expected to use its namespace.
     assert all(
-        r["path"] is None or r["path"].startswith("remote:abc123:") for r in rows
+        r["path"] is None or r["path"].startswith("remote:abc123:")
+        for r in remote_rows
     )
 
 
