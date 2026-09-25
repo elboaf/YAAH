@@ -929,18 +929,18 @@ function ToolTicker({ calls }: { calls: ToolCall[] }) {
         <span className="shrink-0 font-mono text-[10px] text-zinc-600">
           {calls.length > recent.length ? `${calls.length} calls` : 'working…'}
         </span>
-        {compaction && (
-          <CompactionChip summarized={compaction.summarized} summary={compaction.summary} />
-        )}
         {[...recent].reverse().map((tc, i) => (
           <span
             key={tc.id}
-            data-tape-align={i === 0 && !compaction ? '' : undefined}
-            className={`shrink-0 ${i === 0 && !compaction ? 'chip-in' : ''}`}
+            data-tape-align={i === 0 ? '' : undefined}
+            className={`shrink-0 ${i === 0 ? 'chip-in' : ''}`}
           >
             <ToolChip tc={tc} />
           </span>
         ))}
+        {compaction && (
+          <CompactionChip summarized={compaction.summarized} summary={compaction.summary} />
+        )}
       </div>
       {calls.length ? (
         tapeWidth !== null && tapeWidth > 0 && (
@@ -1478,12 +1478,10 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
           <MessageBody content={msg.content} />
         </div>
       ) : null}
-      {msg.toolCalls?.length ? (
-        live ? (
-          <ToolTicker calls={msg.toolCalls} />
-        ) : (
-          <TraceLine calls={msg.toolCalls} />
-        )
+      {live ? (
+        <ToolTicker calls={msg.toolCalls ?? []} />
+      ) : msg.toolCalls?.length ? (
+        <TraceLine calls={msg.toolCalls} />
       ) : null}
       {!msg.content && !msg.toolCalls?.length && (
         <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
