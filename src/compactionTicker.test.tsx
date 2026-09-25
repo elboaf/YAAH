@@ -51,14 +51,29 @@ describe('live compaction ticker', () => {
     expect(screen.getByText(tape)).toBeTruthy()
   })
 
-  it('renders a live sub-agent block with its own telemetry strip', () => {
+  it('renders nested sub-agent tool calls in a single clipped ticker row', () => {
     const run = {
       agentId: 1,
       agentType: 'explore',
       prompt: 'inspect this module',
       status: 'running' as const,
       text: 'Looking through the code',
-      tools: [],
+      tools: [
+        {
+          id: 'nested-1',
+          name: 'read_file',
+          args: { path: 'src/store.ts' },
+          startedAt: 1,
+        },
+        {
+          id: 'nested-2',
+          name: 'bash',
+          args: { command: 'npm test' },
+          result: { output: 'ok' },
+          startedAt: 1,
+          finishedAt: 2,
+        },
+      ],
       telemetry: 'nested per-agent tape',
     }
     render(
@@ -70,6 +85,40 @@ describe('live compaction ticker', () => {
     expect(screen.getByText('inspect this module')).toBeTruthy()
     expect(screen.getByText('nested per-agent tape')).toBeTruthy()
     expect(screen.getByText('Looking through the code')).toBeTruthy()
+    const ticker = document.querySelector('[data-subagent-tool-ticker]')
+    expect(ticker).toBeTruthy()
+    expect(ticker!.classList.contains('overflow-hidden')).toBe(true)
+    expect(ticker!.classList.contains('flex')).toBe(true)
+    expect(ticker!.querySelectorAll('[data-tape-align]').length).toBe(1)
+    expect(screen.getByText('read_file')).toBeTruthy()
+    expect(screen.getByText('bash')).toBeTruthy()
+  })
+
+  it('collapses completed sub-agent tool calls to the normal expandable trace', () => {
+    const run = {
+      agentId: 1,
+      agentType: 'explore',
+      prompt: 'inspect this module',
+      status: 'completed' as const,
+      text: 'Finished reading',
+      tools: [
+        {
+          id: 'nested-1',
+          name: 'read_file',
+          args: { path: 'src/store.ts' },
+          result: { output: 'done' },
+        },
+      ],
+      telemetry: 'completed per-agent tape',
+    }
+    render(
+      <MessageView
+        msg={liveMessage([{ id: 'spawn-1', name: 'spawn_agent', subAgent: run }])}
+        live
+      />,
+    )
+    expect(screen.getByRole('button', { name: /1 call/ })).toBeTruthy()
+    expect(document.querySelector('[data-subagent-tool-ticker]')).toBeNull()
   })
 
   it('places later traces ahead of compaction and keeps them aligned with telemetry', async () => {

@@ -731,7 +731,9 @@ function toolTarget(tc: ToolCall): string {
 }
 
 /** One compact chip: glyph + name + target, counting while the call runs. */
-function ToolChip({ tc }: { tc: ToolCall }) {
+type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'startedAt' | 'finishedAt'>
+
+function ToolChip({ tc }: { tc: TickerToolCall }) {
   const done = tc.result !== undefined
   // A refused merge-back is an error even though it's "just" a tool result:
   // the turn's work did NOT reach the main tree. Red keeps meaning failure.
@@ -915,9 +917,20 @@ function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | null {
  *  newest chip's right edge — tape and chip read as one column. Renders even
  *  with zero tool calls (compaction chip / tape only): the tape must not
  *  depend on a tool call existing, or early-turn thinking has no strip. */
-function ToolTicker({ calls }: { calls: ToolCall[] }) {
-  const compaction = useAgent((s) => s.compactionByConv[s.bufferKey()])
-  const tape = useAgent((s) => s.tapeByConv[s.bufferKey()] ?? '')
+function ToolTicker({
+  calls,
+  telemetry,
+  showCompaction = true,
+}: {
+  calls: ToolCall[]
+  /** Optional per-run tape for nested agents; otherwise use the chat tape. */
+  telemetry?: string
+  showCompaction?: boolean
+}) {
+  const compaction = useAgent((s) =>
+    showCompaction ? s.compactionByConv[s.bufferKey()] : undefined,
+  )
+  const tape = useAgent((s) => telemetry ?? s.tapeByConv[s.bufferKey()] ?? '')
   const recent = calls.slice(-12)
   const rowRef = useRef<HTMLDivElement>(null)
   const [tapeWidth, setTapeWidth] = useState<number | null>(null)
@@ -927,11 +940,12 @@ function ToolTicker({ calls }: { calls: ToolCall[] }) {
   }, [calls])
   const fade =
     'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
-  if (!calls.length && !compaction) return null
+  if (!calls.length && !compaction && !tape) return null
   return (
     <div className="my-1 w-full min-w-0">
       <div
         ref={rowRef}
+        data-subagent-tool-ticker={telemetry !== undefined ? '' : undefined}
         className="relative flex items-center gap-1.5 overflow-hidden"
         style={{ maskImage: fade, WebkitMaskImage: fade }}
       >
@@ -1129,10 +1143,6 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
 function SubAgentBlock({ run }: { run: SubAgentRun }) {
   const [open, setOpen] = useState(true)
   const running = run.status === 'running'
-  // #52: follow the sub-agent transcript only while the reader is already at
-  // (near) its bottom — a block scrolled up to re-read must not be yanked
-  // back on every streamed chunk. Same 50px tolerance as the main transcript.
-  const { containerRef: textRef, onScroll } = useStickToBottom(false, [run.text, running])
   const statusLabel =
     run.status === 'running'
       ? 'running'
@@ -1165,84 +1175,38 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
       </button>
       {open && (
         <div className="border-t border-zinc-800/80 px-3 py-1.5">
-          {run.tools.length > 0 && (
-            <div className="mb-1 space-y-0.5 border-l border-zinc-800 pl-2">
-              {run.tools.map((t) => (
-                <SubAgentToolRow key={t.id} t={t} />
-              ))}
-            </div>
-          )}
-          {run.telemetry && <AgentTelemetry tape={run.telemetry} compact />}
           {run.text && (
-            <div
-              ref={textRef}
-              onScroll={onScroll}
-              className={`whitespace-pre-wrap break-words font-mono text-[11px] leading-4 text-zinc-400 ${
-                running ? 'max-h-40 overflow-auto' : ''
-              }`}
-            >
-              {run.text}
+            <div className="text-sm leading-relaxed text-zinc-200">
+              <MessageBody content={run.text} />
               {running && <span className="stream-caret" />}
             </div>
           )}
+          {running ? (
+            <SubAgentToolTicker tools={run.tools} telemetry={run.telemetry} />
+          ) : run.tools.length > 0 ? (
+            <SubAgentTraceLine tools={run.tools} />
+          ) : run.telemetry ? (
+            <AgentTelemetry tape={run.telemetry} compact />
+          ) : null}
         </div>
       )}
     </div>
   )
 }
 
-/** #50: one sub-agent tool row — the old chip, plus inline rendering of any
- *  stored images the result carries ({image}/{images}, same contract as the
- *  main trace's ToolCallRow). The result's text still shows via the JSON
- *  dump so nothing is lost when a picture is attached. */
-function SubAgentToolRow({ t }: { t: SubAgentToolCall }) {
-  const [open, setOpen] = useState(false)
-  const running = t.result === undefined
-  const resultObj = t.result && typeof t.result === 'object' ? (t.result as Record<string, unknown>) : null
-  const rel = resultObj?.image
-  const rels = Array.isArray(resultObj?.images) ? (resultObj!.images as unknown[]).filter((v): v is string => typeof v === 'string' && !!v) : []
-  const images = typeof rel === 'string' && rel ? [rel, ...rels] : rels
-  const elapsed = t.startedAt && t.finishedAt ? formatElapsed(t.finishedAt - t.startedAt) : undefined
-  const fallback = typeof resultObj?.output === 'string' ? resultObj.output : t.result
-  const output = (t.output ?? (typeof fallback === 'string' ? fallback : undefined))?.toString().trim()
+/** Live nested calls use the normal horizontal ticker; finished calls use the
+ *  same expandable trace rows as the parent conversation. */
+function SubAgentToolTicker({ tools, telemetry }: { tools: SubAgentToolCall[]; telemetry: string }) {
   return (
-    <div className="font-mono text-[10px]">
-      <button
-        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-zinc-800/50"
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
-        <span className={running ? 'text-zinc-200' : 'text-zinc-400'}>{t.name}</span>
-        {!running && elapsed && <span className="text-zinc-600">{elapsed}</span>}
-        {running ? (
-          <ElapsedBadge startedAt={t.startedAt} className="ml-auto text-zinc-500" />
-        ) : (
-          <span className="ml-auto text-emerald-500">{'\u2713'}</span>
-        )}
-      </button>
-      {open && (
-        <div className="ml-3 border-l border-zinc-800 px-2 py-1 text-zinc-400">
-          <div className="whitespace-pre-wrap break-all text-zinc-500">args: {JSON.stringify(t.args ?? {}, null, 2)}</div>
-          {output && <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words text-zinc-300">{output.slice(-TOOL_OUTPUT_CAP)}</pre>}
-          {t.result !== undefined && !output && <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words text-zinc-300">{JSON.stringify(t.result, null, 2)}</pre>}
-          {images.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-2">
-              {images.map((imgRel, i) => (
-                <img
-                  key={i}
-                  src={imageSrc(imgRel)}
-                  alt={`${t.name} result`}
-                  title="click to open full size"
-                  className="max-h-64 cursor-zoom-in rounded border border-zinc-700"
-                  onClick={() => useAgent.getState().setLightboxSrc(imgRel)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+    <div className="min-w-0 border-l border-zinc-800 pl-2">
+      <ToolTicker calls={tools} telemetry={telemetry} showCompaction={false} />
     </div>
   )
+}
+
+/** Finished nested tools stay behind the same expandable summary as a normal chat. */
+function SubAgentTraceLine({ tools }: { tools: SubAgentToolCall[] }) {
+  return <TraceLine calls={tools} />
 }
 
 /** Agent message body: full markdown rendering (see src/markdown.tsx). */
