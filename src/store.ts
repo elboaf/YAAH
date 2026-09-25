@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { getConfig, listAgents, type ScheduledAgent } from './api'
+import { getConfig, listAgents, type ScheduledAgent, type StoredMessage } from './api'
 
 let toastSeq = 0
 
@@ -393,28 +393,8 @@ interface AgentState {
    *  (done, stopped, error, or abort) so no block pulses forever. */
   settleSubAgents: (key: string, msgId: string) => void
 
-  /** Load a conversation's persisted history into its buffer. */
-  loadHistory: (
-    convId: number,
-    rows: Array<{
-      id: number
-      role: string
-      content: string
-      images?: string[] | null
-      sub_agent_transcript?: {
-        agent_type?: string
-        status?: string
-        turns?: number
-        output?: string
-        transcript?: Array<{ role: string; content: string; name?: string }>
-      } | null
-      tool_call_id?: string | null
-      tool_calls: Array<{
-        id?: string
-        function?: { name?: string; arguments?: string }
-      }> | null
-    }>,
-  ) => void
+  /** Load a conversation's persisted history into its local-owner buffer. */
+  loadHistory: (convId: number, rows: StoredMessage[]) => void
 }
 
 let nextId = 1

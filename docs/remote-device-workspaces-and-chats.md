@@ -2,7 +2,7 @@
 
 ## Status
 
-Design accepted; implementation is phased. The first backend slice adds a registry of multiple remote sessions and routes namespaced workspace-tool calls to the owning host. Sidebar aggregation, remote-owned conversation caching/sync, and per-chat edit leases are subsequent phases.
+Design accepted; implementation is phased. The multi-host routing foundation and per-device sidebar are in place. Remote-owned conversations now have a cached, read-only transcript path in the sidebar; composite identity in the editable main chat, leases, bidirectional sync, and remote-workspace turns remain subsequent phases.
 
 ## Product behavior
 
@@ -90,13 +90,15 @@ Design accepted; implementation is phased. The first backend slice adds a regist
 
 ### Phase 4 — Remote-owned conversation cache and read path (in progress)
 
-- [ ] Add composite owner identity throughout frontend state and read APIs.
+- [ ] Add composite owner identity throughout the main frontend conversation state and editable APIs.
 - [x] Cache remote metadata/messages locally; load from cache offline and display read-only status.
-- [ ] Scope image/attachment retrieval and conversation actions by owner. Test ID collisions between local and multiple remote databases.
+- [x] Expose each device's host-owned chats in its sidebar group and open transcripts in an isolated read-only viewer.
+- [x] Scope transcript image/attachment retrieval through the owning device's image proxy.
+- [ ] Test collision-safe device hierarchy and complete owner-scoped conversation actions across local and multiple remote databases.
 
-**Backend read/cache slice:** Added authenticated host metadata/history endpoints, host-keyed cache tables, and per-device read routes that refresh while connected and serve cached transcripts on loss of connectivity. Backend DB/cache and remote API tests pass. Frontend composite identity/read-only rendering and owner-scoped media remain outstanding.
+**Backend read/cache slice:** Added authenticated host metadata/history endpoints, host-keyed cache tables, and per-device read routes that refresh while connected and serve cached transcripts on loss of connectivity. Backend DB/cache and remote API tests pass. **Frontend read-only slice:** Added device-chat listing, an isolated transcript viewer, offline/read-only labeling, and owner-scoped media URLs. Remote transcripts do not enter the local numeric-ID selection, message buffers, or editable chat APIs. Focused frontend tests cover device grouping, local/remote ID collisions, host-specific transcript reads, and remote images.
 
-**Implementation notes:** Phase 4 is deliberately read-only. Host-owned chats must remain distinct from local-owned chats that happen to use remote workspaces. Use composite identity `(owner device ID, conversation ID)`; do not reuse local integer-keyed conversation tables. Defer leases and bidirectional edits/sync to Phase 5, and remote-workspace turn execution to Phase 6.
+**Implementation notes:** Phase 4 remains deliberately read-only. Host-owned chats must remain distinct from local-owned chats that happen to use remote workspaces. The viewer keys reads by `(owner device ID, conversation ID)`; do not reuse local integer-keyed conversation tables. Main-chat composite identity and editable actions remain outstanding. Defer leases and bidirectional edits/sync to Phase 5, and remote-workspace turn execution to Phase 6.
 
 ### Phase 5 — Per-chat leases and bidirectional sync
 

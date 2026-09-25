@@ -146,23 +146,38 @@ export const createConversation = (
     }),
   })
 
+export interface StoredMessage {
+  id: number
+  role: string
+  content: string
+  images?: string[] | null
+  tool_call_id?: string | null
+  tool_calls: Array<{
+    id?: string
+    type?: string
+    function?: { name?: string; arguments?: string }
+  }> | null
+  sub_agent_transcript?: {
+    agent_type?: string
+    status?: string
+    turns?: number
+    output?: string
+    transcript?: Array<{ role: string; content: string; name?: string }>
+  } | null
+}
+
 export const getMessages = (id: number) =>
-  api<
-    Array<{
-      id: number
-      role: string
-      content: string
-      images?: string[] | null
-      tool_calls: Array<{
-        id?: string
-        type?: string
-        function?: { name?: string; arguments?: string }
-      }> | null
-    }>
-  >(`/api/conversations/${id}/messages`)
+  api<StoredMessage[]>(`/api/conversations/${id}/messages`)
 
 /** URL for a stored image (rel path under backend/data/images/). */
 export const imageUrl = (rel: string) => `${BASE}/api/images/${rel}`
+
+/** Owner-scoped media URL for a cached transcript owned by a remote device. */
+export const remoteDeviceImageUrl = (hostId: string, rel: string) =>
+  `${BASE}/api/remote/devices/${encodeURIComponent(hostId)}/images/${rel.split('/').map(encodeURIComponent).join('/')}`
+
+/** Internal transcript-viewer reference that keeps media tied to its owner. */
+export const remoteMediaRef = (hostId: string, rel: string) => `remote-image:${hostId}:${rel}`
 
 // ---------------------------------------------------------------- config
 
@@ -891,6 +906,26 @@ export const disconnectRemoteDevice = (hostId: string) =>
 
 export const removeRemoteDevice = (hostId: string) =>
   api<{ ok: boolean }>(`/api/remote/devices/${encodeURIComponent(hostId)}`, { method: 'DELETE' })
+
+export interface RemoteConversation {
+  host_id: string
+  conversation_id: string
+  title: string
+  workspace: string | null
+  updated_at: string
+  revision: string
+  sync_status: 'synced' | 'pending'
+}
+
+export const listRemoteDeviceConversations = (hostId: string) =>
+  api<{ conversations: RemoteConversation[]; status: 'online' | 'cached' }>(
+    `/api/remote/devices/${encodeURIComponent(hostId)}/conversations`,
+  )
+
+export const getRemoteDeviceMessages = (hostId: string, conversationId: string) =>
+  api<StoredMessage[]>(
+    `/api/remote/devices/${encodeURIComponent(hostId)}/conversations/${encodeURIComponent(conversationId)}/messages`,
+  )
 
 export const remoteStatus = () => api<RemoteStatus>('/api/remote/status')
 

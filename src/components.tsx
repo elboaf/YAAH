@@ -69,6 +69,10 @@ import {
   deleteWorkspace,
   discoverHosts,
   localInstanceInfo,
+  listRemoteDeviceConversations,
+  getRemoteDeviceMessages,
+  remoteDeviceImageUrl,
+  remoteMediaRef,
   addRemoteDevice,
   connectRemoteDevice,
   disconnectRemoteDevice,
@@ -79,8 +83,9 @@ import {
   type ProviderPreset,
   type SkillInfo,
   type WorkspaceRow,
+  type RemoteConversation,
 } from './api'
-import { lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentBranchInfo } from './store'
+import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentBranchInfo } from './store'
 import { useUpdateCheck } from './update'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
@@ -2220,7 +2225,7 @@ export function ImageLightbox() {
 
 /** Shared modal chrome: scrim, Esc, backdrop click. All in-app dialogs
  *  build on this so Esc/backdrop behavior matches PreviewModal. */
-function DialogShell({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+function DialogShell({ children, onClose, panelClassName, panelRole, panelLabel }: { children: React.ReactNode; onClose: () => void; panelClassName?: string; panelRole?: 'dialog' | 'alertdialog'; panelLabel?: string }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -2234,7 +2239,10 @@ function DialogShell({ children, onClose }: { children: React.ReactNode; onClose
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
+        className={panelClassName ?? "w-full max-w-sm rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"}
+        role={panelRole}
+        aria-label={panelLabel}
+        aria-modal={panelRole ? true : undefined}
         onClick={(e) => e.stopPropagation()}
       >
         {children}
@@ -2508,7 +2516,74 @@ const wsBasename = (path: string) => {
 const expandKey = (path: string | null) =>
   `yaah.group.expanded.${path ?? 'default'}`
 
-function DeviceGroups({
+export function RemoteTranscriptDialog({
+  hostId,
+  conversationId,
+  title,
+  online,
+  deviceName,
+  onClose,
+}: {
+  hostId: string
+  conversationId: string
+  title: string
+  online: boolean
+  deviceName: string
+  onClose: () => void
+}) {
+  const [messages, setMessages] = useState<ChatMessage[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [retry, setRetry] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setMessages(null)
+    setError(null)
+    getRemoteDeviceMessages(hostId, conversationId)
+      .then((rows) => {
+        if (!cancelled) setMessages(buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String((e as Error).message ?? e))
+      })
+    return () => { cancelled = true }
+  }, [hostId, conversationId, retry])
+
+  return (
+    <DialogShell onClose={onClose} panelClassName="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
+      <header className="flex items-start justify-between gap-4 border-b border-zinc-800 px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-zinc-100">{title}</h2>
+            <p className="mt-1 font-mono text-[10px] text-zinc-500">{deviceName} <span className="px-1 text-zinc-700">·</span> {online ? 'remote transcript · read-only' : 'cached transcript · read-only offline'}</p>
+          </div>
+          <button className="shrink-0 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={onClose} aria-label="Close remote transcript">Close</button>
+        </header>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {error && <div role="alert" className="flex items-center gap-2 py-4 text-xs text-red-400"><span>Could not load this transcript. {online ? 'Check the device connection and retry.' : 'Reconnect to this device to refresh its cached copy.'}</span><button className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={() => setRetry((value) => value + 1)}>Retry</button></div>}
+          {messages === null && !error && <div aria-label="Loading remote transcript" className="space-y-3 py-2"><div className="h-3 w-1/3 animate-pulse rounded bg-zinc-800"/><div className="h-12 w-2/3 animate-pulse rounded bg-zinc-800/70"/><div className="h-8 w-1/2 animate-pulse rounded bg-zinc-800/50"/></div>}
+          {messages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
+          {messages && messages.length > 0 && <div className="space-y-4">{messages.map((message) => <MessageView key={message.id} msg={message}/>)}</div>}
+        </div>
+      <footer className="border-t border-zinc-800 px-4 py-2 font-mono text-[10px] text-zinc-600">READ ONLY <span className="px-1 text-zinc-700">·</span> Remote editing and turns are not enabled yet</footer>
+    </DialogShell>
+  )
+}
+
+/** Bind image paths in cached transcript records to their conversation owner. */
+function scopeRemoteMedia<T>(value: T, hostId: string): T {
+  if (Array.isArray(value)) return value.map((item) => scopeRemoteMedia(item, hostId)) as T
+  if (!value || typeof value !== 'object') return value
+  const entries = Object.entries(value as Record<string, unknown>).map(([key, item]) => {
+    if (key === 'image' && typeof item === 'string') return [key, remoteMediaRef(hostId, item)]
+    if (key === 'images' && Array.isArray(item)) {
+      return [key, item.map((image) => typeof image === 'string' ? remoteMediaRef(hostId, image) : scopeRemoteMedia(image, hostId))]
+    }
+    return [key, scopeRemoteMedia(item, hostId)]
+  })
+  return Object.fromEntries(entries) as T
+}
+
+export function DeviceGroups({
   devices,
   workspaces,
   conversations,
@@ -2533,7 +2608,44 @@ function DeviceGroups({
   const [disconnectConfirmId, setDisconnectConfirmId] = useState<string | null>(null)
   const [refreshingDevices, setRefreshingDevices] = useState(false)
   const [expandedDevices, setExpandedDevices] = useState<Record<string, boolean>>({})
+  const [deviceChats, setDeviceChats] = useState<Record<string, RemoteConversation[]>>({})
+  const [deviceChatStatus, setDeviceChatStatus] = useState<Record<string, 'online' | 'cached'>>({})
+  const [loadingDeviceChats, setLoadingDeviceChats] = useState<Record<string, boolean>>({})
+  const [deviceChatErrors, setDeviceChatErrors] = useState<Record<string, string | null>>({})
+  const deviceChatRequestRef = useRef<Record<string, number>>({})
+  const [remoteConversation, setRemoteConversation] = useState<{
+    hostId: string
+    conversationId: string
+    title: string
+    online: boolean
+  } | null>(null)
   const [addingFolderFor, setAddingFolderFor] = useState<string | null>(null)
+
+  const refreshDeviceChats = useCallback(async (hostId: string) => {
+    const requestId = (deviceChatRequestRef.current[hostId] ?? 0) + 1
+    deviceChatRequestRef.current[hostId] = requestId
+    const isCurrent = () => deviceChatRequestRef.current[hostId] === requestId
+    setLoadingDeviceChats((current) => ({ ...current, [hostId]: true }))
+    setDeviceChatErrors((current) => ({ ...current, [hostId]: null }))
+    try {
+      const result = await listRemoteDeviceConversations(hostId)
+      if (!isCurrent()) return
+      setDeviceChats((current) => ({ ...current, [hostId]: result.conversations }))
+      setDeviceChatStatus((current) => ({ ...current, [hostId]: result.status }))
+    } catch (e) {
+      if (isCurrent()) setDeviceChatErrors((current) => ({ ...current, [hostId]: String((e as Error).message ?? e) }))
+    } finally {
+      if (isCurrent()) setLoadingDeviceChats((current) => ({ ...current, [hostId]: false }))
+    }
+  }, [])
+
+  useEffect(() => {
+    const hostIds = new Set(devices.map((device) => device.host_id))
+    for (const device of devices) void refreshDeviceChats(device.host_id)
+    for (const hostId of Object.keys(deviceChatRequestRef.current)) {
+      if (!hostIds.has(hostId)) deviceChatRequestRef.current[hostId] = (deviceChatRequestRef.current[hostId] ?? 0) + 1
+    }
+  }, [devices, refreshDeviceChats])
   const [folderPath, setFolderPath] = useState('')
   const askToConnect = async (device: RemoteDevice) => {
     const secret = passByDevice[device.host_id] ?? ''
@@ -2630,7 +2742,8 @@ function DeviceGroups({
       )}
       {devices.map((device) => {
         const deviceWorkspaces = workspaces.filter((row) => row.owner_id === device.host_id)
-        const deviceConversations = conversations.filter((conversation) => parseNsWorkspace(conversation.workspace)?.hostId === device.host_id).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        const localDeviceConversations = conversations.filter((conversation) => parseNsWorkspace(conversation.workspace)?.hostId === device.host_id).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        const ownedConversations = deviceChats[device.host_id] ?? []
         const connected = device.status === 'online'
         const statusLabel = device.status === 'online' ? 'online' : device.status === 'error' ? 'connection error' : 'offline · cached'
         const expanded = expandedDevices[device.host_id] ?? true
@@ -2666,12 +2779,25 @@ function DeviceGroups({
               {deviceWorkspaces.map((row) => (
                 <div key={row.path ?? `${device.host_id}:default`}>
                   <button className="flex w-full items-center gap-1.5 truncate rounded py-1 pl-6 pr-1 text-left font-mono text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:opacity-50" disabled={!connected} title={connected ? row.path ?? 'Device home folder' : 'Offline — cached workspace name; reconnect to use'} onClick={() => selectDeviceWorkspace(row.path ?? '')}><span className="truncate">{row.label}</span><span className="ml-auto shrink-0 text-[9px] text-zinc-600" aria-hidden="true">›</span></button>
-                  {deviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => (
-                    <button key={conversation.id} className="block w-full truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · chat history stored on this device`} onClick={() => onOpenConversation(conversation)}>{conversation.title}<span className="ml-1 font-mono text-[9px] text-zinc-600">local chat</span></button>
+                  {localDeviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => (
+                    <button key={`local:${conversation.id}`} className="block w-full truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · locally owned chat using this device's workspace`} onClick={() => onOpenConversation(conversation)}>{conversation.title}<span className="ml-1 font-mono text-[9px] text-zinc-600">local chat</span></button>
                   ))}
                 </div>
               ))}
               {!connected && deviceWorkspaces.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">No cached workspaces</p>}
+              <div className="mt-1 border-t border-zinc-800/70 pt-1">
+                <div className="flex items-center justify-between px-6 py-0.5">
+                  <span className="font-mono text-[9px] uppercase tracking-wider text-zinc-600">Device chats</span>
+                  <button className="rounded px-1 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-50" aria-label={`Refresh chats from ${device.name}`} title="Refresh cached transcripts from this device" disabled={loadingDeviceChats[device.host_id]} onClick={() => void refreshDeviceChats(device.host_id)}>{loadingDeviceChats[device.host_id] ? '…' : '↻'}</button>
+                </div>
+                {loadingDeviceChats[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">Loading device chats…</p>}
+                {deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <div role="alert" className="flex items-center justify-between gap-2 px-6 py-1 text-[10px] text-red-400"><span>Could not load device chats</span><button className="rounded px-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onClick={() => void refreshDeviceChats(device.host_id)}>Retry</button></div>}
+                {ownedConversations.map((conversation) => {
+                  const transcriptOnline = connected && deviceChatStatus[device.host_id] === 'online'
+                  return <button key={`remote:${device.host_id}:${conversation.conversation_id}`} className="block w-full truncate rounded py-1 pl-6 pr-2 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · ${transcriptOnline ? 'read-only remote transcript' : 'cached transcript · read-only offline'}`} onClick={() => setRemoteConversation({ hostId: device.host_id, conversationId: conversation.conversation_id, title: conversation.title, online: transcriptOnline })}>{conversation.title}<span className={`ml-1 font-mono text-[9px] ${transcriptOnline ? 'text-zinc-600' : 'text-amber-500/80'}`}>{transcriptOnline ? 'remote' : 'cached · read-only'}</span></button>
+                })}
+                {!loadingDeviceChats[device.host_id] && !deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">No cached device chats</p>}
+              </div>
               {connected && <button className="ml-6 mt-0.5 rounded px-1 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" onClick={() => { setAddingFolderFor(addingFolderFor === device.host_id ? null : device.host_id); setFolderPath('') }}>+ Add folder</button>}
               {addingFolderFor === device.host_id && connected && <div className="ml-6 mt-1 border-l border-zinc-800 pl-2"><input autoFocus className="w-full rounded border border-zinc-700 bg-zinc-800 px-1.5 py-1 font-mono text-[10px] text-zinc-200 focus:border-blue-500 focus:outline-none" aria-label={`Folder path on ${device.name}`} placeholder="path on device" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void addFolder(); if (event.key === 'Escape') setAddingFolderFor(null) }} /><button className="mt-1 rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50" disabled={!folderPath.trim() || working !== null} onClick={() => void addFolder()}>{working === device.host_id ? 'Adding…' : 'Add folder'}</button></div>}
             </>}
@@ -2694,6 +2820,7 @@ function DeviceGroups({
           if (device) void remove(device);
         }} />
       )}
+      {remoteConversation && <RemoteTranscriptDialog key={`${remoteConversation.hostId}:${remoteConversation.conversationId}`} {...remoteConversation} deviceName={devices.find((device) => device.host_id === remoteConversation.hostId)?.name ?? remoteConversation.hostId} onClose={() => setRemoteConversation(null)} />}
     </section>
   )
 }
@@ -5802,7 +5929,14 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
 /** Message images are data URLs while live (just sent) and backend rel
  *  paths once loaded from history — render either. */
-const imageSrc = (img: string) => (img.startsWith('data:') ? img : imageUrl(img))
+const imageSrc = (img: string) => {
+  if (img.startsWith('data:')) return img
+  if (img.startsWith('remote-image:')) {
+    const [, hostId, ...parts] = img.split(':')
+    return remoteDeviceImageUrl(hostId, parts.join(':'))
+  }
+  return imageUrl(img)
+}
 
 /** Compact token readout: 43,251 -> "43.3k" (sub-k values stay exact). */
 function fmtTok(n: number): string {
