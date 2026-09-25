@@ -163,6 +163,70 @@ async def test_remote_marker_without_passphrase_is_refused():
 
 
 @pytest.mark.asyncio
+async def test_authenticated_remote_peer_cannot_touch_local_agent_run_controls(monkeypatch):
+    """Remote IDs must never enter the local numeric-ID run/queue namespace."""
+    _set_host("hunter2")
+    headers = {"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "hunter2"}
+    calls = []
+
+    from backend.agent import loop
+
+    monkeypatch.setattr(loop, "cancel_agent", lambda cid: calls.append(("cancel", cid)))
+    monkeypatch.setattr(loop, "enqueue_message", lambda cid, *a, **kw: calls.append(("enqueue", cid)))
+    monkeypatch.setattr(loop, "queue_items", lambda cid: calls.append(("queue", cid)) or [])
+    monkeypatch.setattr(loop, "remove_queued", lambda cid, item: calls.append(("remove", cid)) or True)
+    monkeypatch.setattr(loop, "steer_agent", lambda cid: calls.append(("steer", cid)) or True)
+    monkeypatch.setattr(loop, "agent_is_running", lambda cid: calls.append(("running", cid)) or True)
+
+    requests = [
+        ("POST", "/api/agent/731", {"message": "remote turn", "workspace": ""}),
+        ("POST", "/api/agent/731/cancel", None),
+        ("POST", "/api/agent/731/queue", {"message": "queued"}),
+        ("GET", "/api/agent/731/queue", None),
+        ("DELETE", "/api/agent/731/queue/4", None),
+        ("POST", "/api/agent/731/steer", None),
+        ("GET", "/api/conversations", None),
+        ("GET", "/api/conversations/731", None),
+        ("GET", "/api/conversations/731/messages", None),
+        ("POST", "/api/conversations/731/messages", {"role": "user", "content": "remote"}),
+        ("PATCH", "/api/conversations/731", {"title": "remote"}),
+        ("DELETE", "/api/conversations/731", None),
+        ("POST", "/api/conversations/731/answer", {"call_id": "x", "answer": "yes"}),
+        ("POST", "/api/conversations", {"workspace": "", "title": "remote"}),
+    ]
+    async with await _client() as c:
+        for method, path, body in requests:
+            response = await c.request(method, path, json=body, headers=headers)
+            assert response.status_code == 409, (method, path, response.text)
+            expected_code = (
+                "remote_write_requires_lease"
+                if method in {"POST", "PATCH", "PUT", "DELETE"}
+                and path.startswith("/api/conversations/")
+                else "remote_turns_not_enabled"
+            )
+            assert response.json()["detail"]["code"] == expected_code
+
+        denied = await c.post("/api/agent/731/cancel", headers={
+            "X-Yaah-Remote": "1", "X-Yaah-Passphrase": "wrong"
+        })
+        assert denied.status_code == 401
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_local_agent_routes_still_work_without_remote_marker(monkeypatch):
+    calls = []
+    from backend.agent import loop
+
+    monkeypatch.setattr(loop, "cancel_agent", lambda cid: calls.append(cid))
+    async with await _client() as c:
+        response = await c.post("/api/agent/731/cancel")
+    assert response.status_code == 200
+    assert calls == [731]
+
+
+@pytest.mark.asyncio
 async def test_remote_wrong_passphrase_is_refused():
     _set_host("hunter2")
     async with await _client() as c:

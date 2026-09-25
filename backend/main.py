@@ -154,14 +154,41 @@ async def remote_auth_guard(request, call_next):
     # peers must not use them to bypass host-enforced exclusion.
     remote_peer = marked or not is_local
     parts = request.url.path.strip("/").split("/")
+    # Local conversation IDs, transcripts, and agent state are not an
+    # owner-qualified remote conversation API. Never let a remote peer's
+    # numeric ID reach local DB/run/cancel/queue/ask-user state; only the
+    # dedicated /api/remote/... routes carry remote ownership and
+    # lease/revision semantics. Keep this after the passphrase guard so it
+    # does not widen remote access. Reads are blocked as well as writes to
+    # prevent ID collisions from leaking local data.
+    if remote_peer and parts[:2] == ["api", "conversations"]:
+        # Preserve the established machine-readable denial for generic
+        # transcript mutation attempts. Reads and operations without a
+        # lease-aware owner route use the broader Phase 6 fail-closed code.
+        if request.method in {"POST", "PATCH", "PUT", "DELETE"} and len(parts) >= 3:
+            return JSONResponse(
+                {"detail": {"code": "remote_write_requires_lease",
+                             "message": "use the revision-aware remote conversation commit endpoint"}},
+                status_code=409,
+            )
+        return JSONResponse(
+            {"detail": {"code": "remote_turns_not_enabled",
+                         "message": "owner-qualified remote conversation routes are required"}},
+            status_code=409,
+        )
+    # The integer-ID agent routes own only this process's local run state.
+    # Remote turns need a distinct owner-qualified endpoint and runner; until
+    # that exists fail closed for every method/path beneath this namespace.
+    if remote_peer and parts[:2] == ["api", "agent"]:
+        return JSONResponse(
+            {"detail": {"code": "remote_turns_not_enabled",
+                         "message": "remote-owned turns are not enabled"}},
+            status_code=409,
+        )
     writes_conversation = (
         len(parts) >= 3
         and parts[:2] == ["api", "conversations"]
         and request.method in {"POST", "PATCH", "PUT", "DELETE"}
-    ) or (
-        len(parts) == 3
-        and parts[:2] == ["api", "agent"]
-        and request.method == "POST"
     )
     if remote_peer and writes_conversation:
         return JSONResponse(
