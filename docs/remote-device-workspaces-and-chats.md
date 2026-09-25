@@ -66,7 +66,7 @@ Design accepted; implementation is phased. The first backend slice adds a regist
 
 ## Delivery phases
 
-### Phase 1 — Multi-host session/routing foundation (in progress)
+### Phase 1 — Multi-host session/routing foundation (complete)
 
 - Add a registry of multiple backend remote sessions while retaining the old singleton accessor for compatibility.
 - Route namespaced workspace-tool calls by host ID and fail closed for a missing owner.
