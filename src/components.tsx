@@ -805,14 +805,66 @@ function ElapsedBadge({ startedAt, className = 'text-zinc-500' }: { startedAt?: 
   return <span className={`tabular-nums ${className}`}>{formatElapsed(ms)}</span>
 }
 
+/** After a quiet stretch, animate an explicitly synthetic signal in the
+ *  primary ticker. This is visual keepalive only: it never enters the stored
+ *  telemetry tape or pretends to report a real tool/test. */
+const IDLE_TELEMETRY_DELAY_MS = 8_000
+const IDLE_PATTERN_STEP_MS = 1_200
+const IDLE_TELEMETRY_PATTERNS = [
+  '[synthetic idle] ATTENTION HUMAN! 市民请注意! ⣿⣿⣿⣿⣿⠟⠋',
+  '[synthetic idle] ⣿⣿⣿⣿⣿⠃⠄⠄⠄⠄⠄⠄⠄⠄⠄⠈',
+  '[synthetic idle] signal persists · awaiting real output · ⣿⣿⣿',
+  '[synthetic idle] 市民请注意! ⠄⠄⠄⠄⠄⠄⠄⠄⣿⣿⣿',
+]
+
 /** The telemetry tape: one borderless terminal line per conversation where
  *  every tool event of the session flows by — call, arguments, streamed
  *  output, response, timing — newest at the right edge, old text pushing
  *  out through a left fade. Lives in the store, so it survives tool calls,
- *  thinking gaps, and turn boundaries. Rendered in a narrow window under
- *  the ticker chips, right edge aligned with the newest chip's right edge.
- *  Not meant to be read; it is proof that output is occurring. */
-function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boolean }) {
+ *  thinking gaps, and turn boundaries. The primary ticker may show a clearly
+ *  marked idle animation when the real tape has been quiet; nested agents
+ *  remain strictly event-driven. */
+function AgentTelemetry({
+  tape,
+  compact = false,
+  syntheticWhenIdle = false,
+}: {
+  tape: string
+  compact?: boolean
+  syntheticWhenIdle?: boolean
+}) {
+  if (syntheticWhenIdle) {
+    return <IdleAgentTelemetry tape={tape} compact={compact} />
+  }
+  return <AgentTelemetryLine tape={tape} compact={compact} />
+}
+
+function IdleAgentTelemetry({ tape, compact }: { tape: string; compact: boolean }) {
+  const now = useNow()
+  const lastTapeRef = useRef(tape)
+  const lastActivityAtRef = useRef(Date.now())
+  if (lastTapeRef.current !== tape) {
+    lastTapeRef.current = tape
+    lastActivityAtRef.current = Date.now()
+  }
+
+  const idle = now - lastActivityAtRef.current >= IDLE_TELEMETRY_DELAY_MS
+  const pattern = IDLE_TELEMETRY_PATTERNS[
+    Math.floor(now / IDLE_PATTERN_STEP_MS) % IDLE_TELEMETRY_PATTERNS.length
+  ]
+  const visibleTape = idle ? `${tape}${tape ? '    ' : ''}${pattern}` : tape
+  return <AgentTelemetryLine tape={visibleTape} compact={compact} synthetic={idle} />
+}
+
+function AgentTelemetryLine({
+  tape,
+  compact,
+  synthetic = false,
+}: {
+  tape: string
+  compact: boolean
+  synthetic?: boolean
+}) {
   const visibleTape = (compact ? tape.slice(-160) : tape).replace(/[\r\n]+/g, '    ')
   const wrapRef = useRef<HTMLDivElement>(null)
   const tapeRef = useRef<HTMLSpanElement>(null)
@@ -826,6 +878,9 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
     <div
       ref={wrapRef}
       data-agent-telemetry=""
+      data-synthetic-telemetry={synthetic ? '' : undefined}
+      aria-label={synthetic ? 'Synthetic idle animation; no new agent output' : undefined}
+      title={synthetic ? 'Synthetic idle animation — no new agent output' : undefined}
       className={`overflow-hidden ${compact ? 'mt-1 rounded bg-zinc-950/50 px-1.5 py-0.5' : ''}`}
       style={{
         maskImage:
@@ -941,7 +996,8 @@ function ToolTicker({
   }, [calls])
   const fade =
     'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
-  if (!calls.length && !compaction && !tape) return null
+  const syntheticWhenIdle = telemetry === undefined
+  if (!calls.length && !compaction && !tape && !syntheticWhenIdle) return null
   return (
     <div className="my-1 w-full min-w-0">
       <div
@@ -969,11 +1025,11 @@ function ToolTicker({
       {calls.length ? (
         tapeWidth !== null && tapeWidth > 0 && (
           <div className="-mt-px" style={{ width: tapeWidth }}>
-            <AgentTelemetry tape={tape} />
+            <AgentTelemetry tape={tape} syntheticWhenIdle={telemetry === undefined} />
           </div>
         )
       ) : (
-        <AgentTelemetry tape={tape} />
+        <AgentTelemetry tape={tape} syntheticWhenIdle={telemetry === undefined} />
       )}
     </div>
   )

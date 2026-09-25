@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MessageView } from './components'
 import { useAgent, type ChatMessage } from './store'
 
@@ -36,6 +36,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   cleanup()
   useAgent.setState({ compactionByConv: {}, tapeByConv: {} })
   Reflect.deleteProperty(HTMLElement.prototype, 'clientWidth')
@@ -49,6 +50,58 @@ describe('live compaction ticker', () => {
 
     expect(screen.getByRole('button', { name: /context compacted/ })).toBeTruthy()
     expect(screen.getByText(tape)).toBeTruthy()
+  })
+
+  it('shows a labeled synthetic keepalive only on the primary ticker after an idle delay', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2025-01-01T00:00:00Z'))
+    useAgent.setState({ tapeByConv: { '42': '' }, compactionByConv: {} })
+    const run = {
+      agentId: 1,
+      agentType: 'explore',
+      prompt: 'inspect this module',
+      status: 'running' as const,
+      text: '',
+      tools: [],
+      telemetry: '',
+    }
+    render(
+      <MessageView
+        msg={liveMessage([{ id: 'spawn-1', name: 'spawn_agent', subAgent: run }])}
+        live
+      />,
+    )
+
+    expect(document.querySelector('[data-synthetic-telemetry]')).toBeNull()
+    act(() => { vi.advanceTimersByTime(8_100) })
+    expect(document.querySelector('[data-synthetic-telemetry]')).toBeTruthy()
+    expect(screen.getByLabelText('Synthetic idle animation; no new agent output')).toBeTruthy()
+    expect(screen.getByText(/\[synthetic idle\]/)).toBeTruthy()
+    expect(document.querySelectorAll('[data-synthetic-telemetry]')).toHaveLength(1)
+    expect(document.querySelector('[data-subagent-tool-ticker] [data-synthetic-telemetry]')).toBeNull()
+
+    act(() => { vi.advanceTimersByTime(1_300) })
+    expect(screen.getByText(/\[synthetic idle\]/).textContent).not.toBe(
+      '[synthetic idle] ATTENTION HUMAN! 市民请注意! ⣿⣿⣿⣿⣿⠟⠋',
+    )
+  })
+
+  it('returns the primary ticker to real telemetry as soon as the tape changes', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2025-01-01T00:00:00Z'))
+    useAgent.setState({ tapeByConv: { '42': '' }, compactionByConv: {} })
+    const { rerender } = render(<MessageView msg={liveMessage()} live />)
+
+    act(() => { vi.advanceTimersByTime(8_100) })
+    expect(document.querySelector('[data-synthetic-telemetry]')).toBeTruthy()
+
+    act(() => {
+      useAgent.setState({ tapeByConv: { '42': 'real tool progress' } })
+    })
+    rerender(<MessageView msg={liveMessage()} live />)
+    expect(screen.getByText(/real tool progress/)).toBeTruthy()
+    expect(document.querySelector('[data-synthetic-telemetry]')).toBeNull()
+    vi.useRealTimers()
   })
 
   it('keeps parent and sub-agent telemetry segments on one line', () => {
