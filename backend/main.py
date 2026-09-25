@@ -800,7 +800,10 @@ async def api_update_conversation(conversation_id: int, body: ConversationUpdate
         val = getattr(body, name)
         if val is not None:
             fields[name] = val
-    ok = await update_conversation(conversation_id, **fields)
+    try:
+        ok = await update_conversation(conversation_id, **fields)
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
     return {"ok": ok}
 
 
@@ -833,7 +836,10 @@ async def api_move_conversation(conversation_id: int, body: ConversationMove):
             status_code=409,
             detail="this chat has queued messages — send or discard them before moving",
         )
-    result = await move_conversation(conversation_id, body.workspace)
+    try:
+        result = await move_conversation(conversation_id, body.workspace)
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
     if result is None:
         raise HTTPException(status_code=404, detail="conversation not found")
     # Touch the destination so it re-sorts to the top of the sidebar picker.
@@ -855,13 +861,16 @@ async def api_delete_conversation(conversation_id: int):
     from backend.agent import worktrees as _wt
     from backend.agent.loop import agent_is_running
 
-    if not agent_is_running(conversation_id):
-        await _wt.release_session(str(conversation_id), why="chat deleted")
-    ok = await delete_conversation(conversation_id)
+    try:
+        ok = await delete_conversation(conversation_id)
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
     if not ok:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
+    if not agent_is_running(conversation_id):
+        await _wt.release_session(str(conversation_id), why="chat deleted")
     return {"ok": True}
 
 
@@ -872,9 +881,12 @@ async def api_get_messages(conversation_id: int):
 
 @app.post("/api/conversations/{conversation_id}/messages")
 async def api_add_message(conversation_id: int, body: NewMessage):
-    mid = await add_message(
-        conversation_id, body.role, body.content, body.tool_calls, body.tool_call_id
-    )
+    try:
+        mid = await add_message(
+            conversation_id, body.role, body.content, body.tool_calls, body.tool_call_id
+        )
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
     return {"id": mid}
 
 

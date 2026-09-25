@@ -34,8 +34,11 @@ from backend.agent import worktrees
 from backend.agent.tools import execute_tool, get_schemas, tool_risk, workspace_root
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.db.database import (
+    RemoteProtocolError,
     add_message,
+    assert_no_active_remote_edit_lease,
     get_conversation,
+    get_db,
     get_messages,
     get_prompt_summary,
     set_conversation_usage,
@@ -494,6 +497,30 @@ def try_begin_run(conversation_id: int) -> bool:
         return False
     _running_convs.add(conversation_id)
     return True
+
+
+async def _try_begin_run_excluding_remote_lease(conversation_id: int) -> bool:
+    """Claim the run while holding SQLite's writer lock against lease acquisition."""
+    db = await get_db()
+    claimed = False
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await assert_no_active_remote_edit_lease(db, conversation_id)
+        if conversation_id in _running_convs:
+            await db.rollback()
+            return False
+        _running_convs.add(conversation_id)
+        claimed = True
+        await db.commit()
+        return True
+    except Exception:
+        if claimed:
+            _running_convs.discard(conversation_id)
+        if db.in_transaction:
+            await db.rollback()
+        raise
+    finally:
+        await db.close()
 
 
 # Pending ask_user calls: "conversation_id:call_id" -> Future carrying the
@@ -1134,11 +1161,23 @@ async def run_agent(
     effort_override: str | None = None,
 ) -> AsyncIterator[str]:
     """Claim a conversation and always release it when its stream ends."""
-    if not try_begin_run(conversation_id):
+    try:
+        claimed = await _try_begin_run_excluding_remote_lease(conversation_id)
+    except RemoteProtocolError as error:
+        if error.code != "lease_held":
+            raise
         yield _ndjson(
             {
-            "type": "error",
-            "message": "a turn is already running in this conversation",
+                "type": "error",
+                "message": "a remote edit lease is active in this conversation",
+            }
+        )
+        return
+    if not claimed:
+        yield _ndjson(
+            {
+                "type": "error",
+                "message": "a turn is already running in this conversation",
             }
         )
         return
