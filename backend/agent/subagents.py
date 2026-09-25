@@ -405,8 +405,17 @@ async def run_sub_agent(
     # The key this sub-agent would bind under (its own chat id slot).
     _iso_key = run_label or f"sub-{id(defn):x}"
 
-    async def _exec(name: str, args: dict) -> dict:
+    async def _exec(name: str, args: dict, tool_call_id: str = "") -> dict:
         nonlocal run_workspace, _isolation_note, _used_worktree
+
+        def on_chunk(chunk: str) -> None:
+            if on_event and chunk:
+                on_event({"type": "tool_progress", "tool_call_id": tool_call_id, "chunk": chunk})
+
+        async def execute(name: str, args: dict, path: str) -> dict:
+            return await execute_tool(
+                name, args, path, on_chunk=on_chunk if on_event else None
+            )
         needs_child_worktree = (
             name in worktrees.WRITER_TRIGGERS
             or name == "powershell"
@@ -429,7 +438,7 @@ async def run_sub_agent(
                     branch=await git_activity_mod._branch(run_workspace),
                     branch_action="reused", worktree="shared",
                 )
-                result = await execute_tool(name, args, run_workspace)
+                result = await execute(name, args, run_workspace)
                 try:
                     await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
                     if name in {"bash", "powershell"}:
@@ -453,7 +462,7 @@ async def run_sub_agent(
                 return {"error": str(e)}
             else:
                 _used_worktree = run_workspace
-        result = await execute_tool(name, args, run_workspace)
+        result = await execute(name, args, run_workspace)
         if not (initial_child_wt and needs_child_worktree):
             try:
                 await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
@@ -536,6 +545,10 @@ async def run_sub_agent(
                         acc.append(ev["text"])
                         if on_event:
                             on_event({"type": "text", "text": ev["text"]})
+                    elif ev["type"] == "thinking":
+                        # UI-only telemetry; never record reasoning in the transcript.
+                        if on_event:
+                            on_event({"type": "thinking", "text": ev.get("text", "")})
                     elif ev["type"] == "tool_calls":
                         state["tool_calls"] = ev["tool_calls"]
                     elif ev["type"] == "finish":
@@ -609,13 +622,21 @@ async def run_sub_agent(
                     final_text = "".join(acc)
                     break
                 name = tc["function"]["name"]
+                args = {}
                 try:
                     args = json.loads(tc["function"]["arguments"] or "{}")
                 except json.JSONDecodeError as e:
                     result = {"error": f"Invalid JSON arguments: {e}"}
                 else:
                     if on_event:
-                        on_event({"type": "tool_start", "name": name, "args": args})
+                        on_event(
+                            {
+                                "type": "tool_start",
+                                "tool_call_id": tc.get("id", ""),
+                                "name": name,
+                                "args": args,
+                            }
+                        )
                     if name == "load_skill":
                         result = skill_registry.load_skill_into_messages(
                             args, loaded_skills, messages
@@ -630,14 +651,21 @@ async def run_sub_agent(
                         else:
                             result = None
                         if result is None:
-                            result = await _exec(name, args)
+                            result = await _exec(name, args, tc.get("id", ""))
                         else:
                             try:
                                 await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
                             except Exception:
                                 pass
                     if on_event:
-                        on_event({"type": "tool_result", "name": name, "result": result})
+                        on_event(
+                            {
+                                "type": "tool_result",
+                                "tool_call_id": tc.get("id", ""),
+                                "name": name,
+                                "result": result,
+                            }
+                        )
 
                 result_str = json.dumps(result)
                 if len(result_str) > MAX_RESULT_CHARS:
@@ -647,6 +675,7 @@ async def run_sub_agent(
                     result_str,
                     tool_call_id=tc.get("id", ""),
                     name=name,
+                    args=args,
                 )
                 messages.append(
                     {
@@ -688,6 +717,10 @@ async def run_sub_agent(
                             acc.append(ev["text"])
                             if on_event:
                                 on_event({"type": "text", "text": ev["text"]})
+                        elif ev["type"] == "thinking":
+                            # UI-only telemetry; never record reasoning in the transcript.
+                            if on_event:
+                                on_event({"type": "thinking", "text": ev.get("text", "")})
                         elif ev["type"] == "tool_calls":
                             state["tool_calls"] = ev["tool_calls"]
                         elif ev["type"] == "finish":
@@ -713,13 +746,21 @@ async def run_sub_agent(
                     )
                     for tc in tool_calls:
                         name = tc["function"]["name"]
+                        args = {}
                         try:
                             args = json.loads(tc["function"]["arguments"] or "{}")
                         except json.JSONDecodeError as e:
                             result = {"error": f"Invalid JSON arguments: {e}"}
                         else:
                             if on_event:
-                                on_event({"type": "tool_start", "name": name, "args": args})
+                                on_event(
+                                    {
+                                        "type": "tool_start",
+                                        "tool_call_id": tc.get("id", ""),
+                                        "name": name,
+                                        "args": args,
+                                    }
+                                )
                             if name == "load_skill":
                                 result = skill_registry.load_skill_into_messages(
                                     args, loaded_skills, messages
@@ -730,9 +771,16 @@ async def run_sub_agent(
                                 else:
                                     result = None
                                 if result is None:
-                                    result = await _exec(name, args)
+                                    result = await _exec(name, args, tc.get("id", ""))
                             if on_event:
-                                on_event({"type": "tool_result", "name": name, "result": result})
+                                on_event(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_call_id": tc.get("id", ""),
+                                        "name": name,
+                                        "result": result,
+                                    }
+                                )
                         result_str = json.dumps(result)
                         if len(result_str) > MAX_RESULT_CHARS:
                             result_str = result_str[:MAX_RESULT_CHARS] + "…[truncated]"
@@ -741,6 +789,7 @@ async def run_sub_agent(
                             result_str,
                             tool_call_id=tc.get("id", ""),
                             name=name,
+                            args=args,
                         )
                         messages.append(
                             {
@@ -881,17 +930,26 @@ async def spawn_batch(
                 )
 
             def _forward(ev: dict):
-                # Wrap the inner event (text | tool_start | tool_result) as
-                # sub_agent_progress. The inner "type" cannot ride through
-                # the spread (the wrapper's type wins), so it is preserved
-                # as "kind" — the frontend routes on it.
+                # Wrap inner events as sub_agent_progress. call_id always
+                # identifies the parent spawn; tool_call_id stays distinct so
+                # nested output and results route within this run.
                 inner = dict(ev)
                 kind = inner.pop("type", None)
+                inner_call_id = inner.pop("call_id", None)
+                tool_call_id = inner.pop("tool_call_id", None)
+                if kind in {"tool_start", "tool_progress", "tool_result"}:
+                    tool_call_id = tool_call_id or inner_call_id
                 on_event(
                     {
                         "agent_id": agent_id,
-                        "call_id": call_id,
                         **inner,
+                        "call_id": call_id,
+                        **({"tool_call_id": tool_call_id} if tool_call_id else {}),
+                        **(
+                            {"approval_call_id": inner_call_id}
+                            if kind in {"approval_request", "approval_decision"} and inner_call_id
+                            else {}
+                        ),
                         "kind": kind,
                         "type": "sub_agent_progress",
                     }
@@ -915,6 +973,7 @@ async def spawn_batch(
                         "agent_type": defn.name,
                         "status": result["status"],
                         "turns": result["turns"],
+                        **({"note": result["note"]} if result.get("note") else {}),
                     }
                 )
             return call_id, result

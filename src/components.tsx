@@ -92,7 +92,7 @@ import {
   commitRemoteDeviceSnapshot,
   syncPendingRemoteDeviceCommits,
 } from './api'
-import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentBranchInfo } from './store'
+import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentBranchInfo } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
@@ -810,20 +810,20 @@ function ElapsedBadge({ startedAt, className = 'text-zinc-500' }: { startedAt?: 
  *  thinking gaps, and turn boundaries. Rendered in a narrow window under
  *  the ticker chips, right edge aligned with the newest chip's right edge.
  *  Not meant to be read; it is proof that output is occurring. */
-function LiveTelemetry() {
-  const tape = useAgent((s) => s.tapeByConv[s.bufferKey()] ?? '')
+function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boolean }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const tapeRef = useRef<HTMLSpanElement>(null)
   const [offset, setOffset] = useState(0)
+  const visibleTape = compact ? tape.slice(-160) : tape
   useEffect(() => {
     const w = wrapRef.current?.clientWidth ?? 0
     const t = tapeRef.current?.scrollWidth ?? 0
     setOffset(Math.min(0, w - t))
-  }, [tape])
+  }, [visibleTape])
   return (
     <div
       ref={wrapRef}
-      className="overflow-hidden"
+      className={`overflow-hidden ${compact ? 'mt-1 rounded bg-zinc-950/50 px-1.5 py-0.5' : ''}`}
       style={{
         maskImage:
           'linear-gradient(to right, transparent 0%, black 14%, black 100%)',
@@ -836,7 +836,7 @@ function LiveTelemetry() {
         className="block whitespace-pre font-mono text-[10px] leading-4 text-zinc-400"
         style={{ transform: `translateX(${offset}px)` }}
       >
-        {tape}
+        {visibleTape}
       </span>
     </div>
   )
@@ -917,6 +917,7 @@ function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | null {
  *  depend on a tool call existing, or early-turn thinking has no strip. */
 function ToolTicker({ calls }: { calls: ToolCall[] }) {
   const compaction = useAgent((s) => s.compactionByConv[s.bufferKey()])
+  const tape = useAgent((s) => s.tapeByConv[s.bufferKey()] ?? '')
   const recent = calls.slice(-12)
   const rowRef = useRef<HTMLDivElement>(null)
   const [tapeWidth, setTapeWidth] = useState<number | null>(null)
@@ -953,11 +954,11 @@ function ToolTicker({ calls }: { calls: ToolCall[] }) {
       {calls.length ? (
         tapeWidth !== null && tapeWidth > 0 && (
           <div className="-mt-px" style={{ width: tapeWidth }}>
-            <LiveTelemetry />
+            <AgentTelemetry tape={tape} />
           </div>
         )
       ) : (
-        <LiveTelemetry />
+        <AgentTelemetry tape={tape} />
       )}
     </div>
   )
@@ -1165,12 +1166,13 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
       {open && (
         <div className="border-t border-zinc-800/80 px-3 py-1.5">
           {run.tools.length > 0 && (
-            <div className="mb-1 flex flex-wrap gap-1">
+            <div className="mb-1 space-y-0.5 border-l border-zinc-800 pl-2">
               {run.tools.map((t) => (
                 <SubAgentToolRow key={t.id} t={t} />
               ))}
             </div>
           )}
+          {run.telemetry && <AgentTelemetry tape={run.telemetry} compact />}
           {run.text && (
             <div
               ref={textRef}
@@ -1193,34 +1195,50 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
  *  stored images the result carries ({image}/{images}, same contract as the
  *  main trace's ToolCallRow). The result's text still shows via the JSON
  *  dump so nothing is lost when a picture is attached. */
-function SubAgentToolRow({ t }: { t: { id: string; name: string; args?: unknown; result?: unknown } }) {
+function SubAgentToolRow({ t }: { t: SubAgentToolCall }) {
+  const [open, setOpen] = useState(false)
+  const running = t.result === undefined
   const resultObj = t.result && typeof t.result === 'object' ? (t.result as Record<string, unknown>) : null
   const rel = resultObj?.image
   const rels = Array.isArray(resultObj?.images) ? (resultObj!.images as unknown[]).filter((v): v is string => typeof v === 'string' && !!v) : []
   const images = typeof rel === 'string' && rel ? [rel, ...rels] : rels
+  const elapsed = t.startedAt && t.finishedAt ? formatElapsed(t.finishedAt - t.startedAt) : undefined
+  const fallback = typeof resultObj?.output === 'string' ? resultObj.output : t.result
+  const output = (t.output ?? (typeof fallback === 'string' ? fallback : undefined))?.toString().trim()
   return (
-    <div>
-      <span
-        className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] ${
-          t.result !== undefined ? 'bg-zinc-800/70 text-zinc-400' : 'bg-zinc-700/60 text-zinc-200'
-        }`}
+    <div className="font-mono text-[10px]">
+      <button
+        className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-zinc-800/50"
+        onClick={() => setOpen((value) => !value)}
       >
         <span className={toolGlyphColor(t.name)}>{toolGlyph(t.name)}</span>
-        <span>{t.name}</span>
-        {t.result === undefined && <span className="run-pulse text-amber-300">{'\u25cf'}</span>}
-      </span>
-      {images.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-2">
-          {images.map((imgRel, i) => (
-            <img
-              key={i}
-              src={imageSrc(imgRel)}
-              alt={`${t.name} result`}
-              title="click to open full size"
-              className="max-h-64 cursor-zoom-in rounded border border-zinc-700"
-              onClick={() => useAgent.getState().setLightboxSrc(imgRel)}
-            />
-          ))}
+        <span className={running ? 'text-zinc-200' : 'text-zinc-400'}>{t.name}</span>
+        {!running && elapsed && <span className="text-zinc-600">{elapsed}</span>}
+        {running ? (
+          <ElapsedBadge startedAt={t.startedAt} className="ml-auto text-zinc-500" />
+        ) : (
+          <span className="ml-auto text-emerald-500">{'\u2713'}</span>
+        )}
+      </button>
+      {open && (
+        <div className="ml-3 border-l border-zinc-800 px-2 py-1 text-zinc-400">
+          <div className="whitespace-pre-wrap break-all text-zinc-500">args: {JSON.stringify(t.args ?? {}, null, 2)}</div>
+          {output && <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words text-zinc-300">{output.slice(-TOOL_OUTPUT_CAP)}</pre>}
+          {t.result !== undefined && !output && <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words text-zinc-300">{JSON.stringify(t.result, null, 2)}</pre>}
+          {images.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-2">
+              {images.map((imgRel, i) => (
+                <img
+                  key={i}
+                  src={imageSrc(imgRel)}
+                  alt={`${t.name} result`}
+                  title="click to open full size"
+                  className="max-h-64 cursor-zoom-in rounded border border-zinc-700"
+                  onClick={() => useAgent.getState().setLightboxSrc(imgRel)}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1719,6 +1737,9 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   const planApproved = exitCalls.some(
     (c) => (c.result as { decision?: string } | undefined)?.decision === 'approved',
   )
+  const liveSubAgents = live
+    ? (msg.toolCalls ?? []).filter((call) => call.name === 'spawn_agent' && call.subAgent)
+    : []
 
   const body = (
     <>
@@ -1728,7 +1749,12 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         </div>
       ) : null}
       {live ? (
-        <ToolTicker calls={msg.toolCalls ?? []} />
+        <>
+          <ToolTicker calls={msg.toolCalls ?? []} />
+          {liveSubAgents.map((call) => (
+            <SubAgentBlock key={call.id} run={call.subAgent!} />
+          ))}
+        </>
       ) : msg.toolCalls?.length ? (
         <TraceLine calls={msg.toolCalls} />
       ) : null}
@@ -7582,7 +7608,9 @@ function Composer() {
     startSubAgent,
     subAgentTextDelta,
     subAgentToolStart,
+    subAgentToolProgress,
     subAgentToolResult,
+    appendSubAgentTelemetry,
     finishSubAgent,
     settleSubAgents,
     setStatus,
@@ -8449,28 +8477,43 @@ function Composer() {
         ev.agent_type ?? 'sub-agent',
         ev.prompt ?? '',
       )
+      appendTape(bufKey, `\n▸ spawned ${ev.agent_type ?? 'sub-agent'}    `)
       pushLog({ kind: 'tool', name: 'spawn_agent', args: { agent_type: ev.agent_type, prompt: ev.prompt } })
     } else if (ev.type === 'sub_agent_progress') {
-      if (ev.text) subAgentTextDelta(bufKey, curId, ev.call_id ?? '', ev.text)
+      const spawnCallId = ev.call_id ?? ''
+      const tapeEvent: AgentEvent = { ...ev, type: ev.kind as AgentEvent['type'] }
+      if (ev.kind !== 'tool_result') {
+        const tapeChunk = tapeChunkForEvent(tapeEvent)
+        if (tapeChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, tapeChunk)
+      }
+      if (ev.text && ev.kind === 'text') subAgentTextDelta(bufKey, curId, spawnCallId, ev.text)
       if (ev.kind === 'tool_start') {
-        subAgentToolStart(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
+        subAgentToolStart(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.name ?? 'tool', ev.args)
+        appendTape(bufKey, `\n▸ spawn ${spawnCallId}: ${ev.name ?? 'tool'}    `)
+      } else if (ev.kind === 'tool_progress') {
+        if (ev.chunk) subAgentToolProgress(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.chunk)
       } else if (ev.kind === 'tool_result') {
-        subAgentToolResult(bufKey, curId, ev.call_id ?? '', ev.result)
+        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
+        const childTool = msg?.toolCalls?.find((call) => call.id === spawnCallId)?.subAgent?.tools.find((tool) => tool.id === ev.tool_call_id)
+        const elapsed = childTool?.startedAt ? formatElapsed(Date.now() - childTool.startedAt) : undefined
+        const resultChunk = tapeChunkForEvent(tapeEvent, elapsed)
+        if (resultChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, resultChunk)
+        subAgentToolResult(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.result)
       } else if (ev.kind === 'approval_request') {
         setStatus(bufKey, 'running-tool')
         setPendingApproval({
-          // The forwarded event's call_id is the namespaced gate key
-          // (spawnCallId:toolCallId) the /answer endpoint must echo.
-          callId: ev.call_id ?? '',
+          // Approval requests carry their separate namespaced gate ID.
+          callId: ev.approval_call_id ?? '',
           tool: ev.name ?? 'tool',
           args: (ev.args ?? {}) as Record<string, unknown>,
           convKey: bufKey,
         })
       } else if (ev.kind === 'approval_decision') {
-        setPendingApproval((a) => (a && a.callId === ev.call_id ? null : a))
+        setPendingApproval((a) => (a && a.callId === ev.approval_call_id ? null : a))
       }
     } else if (ev.type === 'sub_agent_done') {
-      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0)
+      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note)
+      appendTape(bufKey, `\n${ev.status === 'completed' ? '✓' : ev.status === 'cancelled' ? '■' : '!'} spawn ${ev.call_id ?? ''} ${ev.status ?? 'completed'} · ${ev.turns ?? 0} turns    `)
       pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
     } else if (ev.type === 'error') {
       setStatus(bufKey, 'error')

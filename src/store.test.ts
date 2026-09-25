@@ -29,6 +29,42 @@ const callRow = (id: number, callId: string, name: string, result: unknown) =>
     tool_calls: [{ id: callId, function: { name } }],
   })
 
+describe('buildMessages sub-agent snapshot', () => {
+  it('rehydrates nested tool args/results and aggregates assistant text', () => {
+    const msgs = buildMessages([
+      row(1, 'assistant', 'spawned', {
+        tool_calls: [{
+          id: 'spawn-1',
+          function: { name: 'spawn_agent', arguments: JSON.stringify({ agent_type: 'explore', prompt: 'inspect' }) },
+        }],
+      }),
+      row(2, 'tool', JSON.stringify({ status: 'completed' }), {
+        tool_call_id: 'spawn-1',
+        tool_calls: [{ id: 'spawn-1', function: { name: 'spawn_agent' } }],
+        sub_agent_transcript: {
+          agent_type: 'explore',
+          status: 'completed',
+          transcript: [
+            { role: 'user', content: 'inspect' },
+            { role: 'assistant', content: 'checking' },
+            { role: 'tool', tool_call_id: 'inner-1', name: 'read_file', args: { path: 'a.txt' }, content: JSON.stringify({ content: 'hello' }) },
+            { role: 'assistant', content: 'found it' },
+          ],
+        },
+      }),
+    ])
+    const run = msgs[0].toolCalls?.[0].subAgent
+    expect(run?.text).toBe('checking\nfound it')
+    expect(run?.telemetry).toBe('')
+    expect(run?.tools[0]).toMatchObject({
+      id: 'inner-1',
+      name: 'read_file',
+      args: { path: 'a.txt' },
+      result: { content: 'hello' },
+    })
+  })
+})
+
 describe('buildMessages plan split', () => {
   it('flags the message after an approved exit_plan with the plan text', () => {
     const msgs = buildMessages([
@@ -178,6 +214,49 @@ describe('buildMessages emission coalescing (#17)', () => {
     expect(msgs[1].content).toBe('planning...')
     expect(msgs[2].implementsPlan).toBe('THE PLAN')
     expect(msgs[2].content).toBe('implementing')
+  })
+})
+
+describe('sub-agent live state', () => {
+  beforeEach(() => {
+    useAgent.setState({ messagesByConv: {} })
+  })
+
+  const seed = () => {
+    useAgent.setState({
+      messagesByConv: {
+        t: [{
+          id: 'a',
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'spawn-1', name: 'spawn_agent', args: {} }],
+        }],
+      },
+    })
+    useAgent.getState().startSubAgent('t', 'a', 'spawn-1', 1, 'explore', 'inspect')
+  }
+
+  it('keeps a bounded per-spawn tape and routes nested chunks/results by child tool id', () => {
+    seed()
+    const store = useAgent.getState()
+    store.subAgentToolStart('t', 'a', 'spawn-1', 'inner-1', 'bash', { command: 'build' })
+    store.subAgentToolProgress('t', 'a', 'spawn-1', 'inner-1', 'output chunk')
+    store.subAgentToolResult('t', 'a', 'spawn-1', 'inner-1', { output: 'done' })
+    store.appendSubAgentTelemetry('t', 'a', 'spawn-1', 'thinking trace')
+    store.appendSubAgentTelemetry('t', 'a', 'other-spawn', 'must not route')
+    const run = useAgent.getState().messagesByConv.t[0].toolCalls?.[0].subAgent
+    expect(run?.telemetry).toContain('spawned explore')
+    expect(run?.telemetry).toContain('thinking trace')
+    expect(run?.telemetry).not.toContain('must not route')
+    expect(run?.tools).toHaveLength(1)
+    expect(run?.tools[0].id).toBe('inner-1')
+    expect(run?.tools[0].args).toEqual({ command: 'build' })
+    expect(run?.tools[0].output).toBe('output chunk')
+    expect(run?.tools[0].result).toEqual({ output: 'done' })
+    expect(run?.tools[0].finishedAt).toBeGreaterThanOrEqual(run?.tools[0].startedAt ?? 0)
+
+    store.appendSubAgentTelemetry('t', 'a', 'spawn-1', 'x'.repeat(20_000))
+    expect(useAgent.getState().messagesByConv.t[0].toolCalls?.[0].subAgent?.telemetry).toHaveLength(16_000)
   })
 })
 
