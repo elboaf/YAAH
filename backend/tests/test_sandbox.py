@@ -320,6 +320,11 @@ class _FakeProc:
     def poll(self):
         return self._rc
 
+    def terminate(self):
+        # On POSIX, stop_sync terminates the owned process directly rather
+        # than using Windows' taskkill command.
+        self._rc = 0
+
 
 def test_run_round_trip_and_sequence(isolated, monkeypatch):
     monkeypatch.setattr(sb.config_mod, "load_config",
