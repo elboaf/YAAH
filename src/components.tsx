@@ -1384,6 +1384,7 @@ export function gitMermaid(summary: GitActivitySummary): string {
 function GitActivityDiagram({ summary }: { summary: GitActivitySummary }) {
   const [svg, setSvg] = useState('')
   const [failed, setFailed] = useState(false)
+  const [enlarged, setEnlarged] = useState(false)
   const id = `git-activity-${summary.run_id.replace(/[^A-Za-z0-9_-]/g, '') || 'run'}`
   const graph = gitMermaid(summary)
   useEffect(() => {
@@ -1402,9 +1403,19 @@ function GitActivityDiagram({ summary }: { summary: GitActivitySummary }) {
     return <p className="text-[10px] text-zinc-500">Branch-flow diagram unavailable; the text timeline below contains the full summary.</p>
   }
   return (
-    <div className="overflow-x-auto rounded border border-zinc-800 bg-zinc-950 p-2" aria-hidden="true">
-      <div className="min-w-[520px] [&_svg]:h-auto [&_svg]:max-w-full" dangerouslySetInnerHTML={{ __html: svg }} />
-    </div>
+    <button
+      type="button"
+      aria-label={enlarged ? 'Restore Git branch activity diagram size' : 'Enlarge Git branch activity diagram'}
+      aria-pressed={enlarged}
+      title={enlarged ? 'Restore diagram size' : 'Enlarge diagram'}
+      onClick={() => setEnlarged((current) => !current)}
+      className={enlarged
+        ? 'fixed inset-[1%] z-40 cursor-zoom-out overflow-auto rounded border border-zinc-700 bg-zinc-950 p-[1.5%] text-left shadow-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
+        : 'block w-full cursor-zoom-in overflow-x-auto rounded border border-zinc-800 bg-zinc-950 p-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'}
+    >
+      <span className="sr-only">{enlarged ? 'Click to restore the diagram to its default size.' : 'Click to enlarge the diagram.'}</span>
+      <span className={enlarged ? 'block min-w-[720px] [&_svg]:h-auto [&_svg]:max-w-full' : 'block min-w-[520px] [&_svg]:h-auto [&_svg]:max-w-full'} aria-hidden="true" dangerouslySetInnerHTML={{ __html: svg }} />
+    </button>
   )
 }
 

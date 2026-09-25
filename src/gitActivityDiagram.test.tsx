@@ -54,4 +54,25 @@ describe('Git activity diagram rendering', () => {
     expect(mermaid.render).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('rendered-diagram')).toBeTruthy()
   })
+
+  it('toggles the diagram between its default and enlarged size', async () => {
+    render(<MessageView msg={summaryMessage()} />)
+    fireEvent.click(screen.getByRole('button', { name: /Git branch activity/ }))
+    await waitFor(() => expect(mermaid.render).toHaveBeenCalledTimes(1))
+
+    const enlargeButton = screen.getByRole('button', { name: 'Enlarge Git branch activity diagram' })
+    expect(enlargeButton.getAttribute('aria-pressed')).toBe('false')
+    expect(enlargeButton.className).toContain('w-full')
+
+    fireEvent.click(enlargeButton)
+    const restoreButton = screen.getByRole('button', { name: 'Restore Git branch activity diagram size' })
+    expect(restoreButton.getAttribute('aria-pressed')).toBe('true')
+    expect(restoreButton.className).toContain('fixed')
+    expect(restoreButton.className).toContain('inset-[1%]')
+
+    fireEvent.click(restoreButton)
+    const restoredButton = screen.getByRole('button', { name: 'Enlarge Git branch activity diagram' })
+    expect(restoredButton.getAttribute('aria-pressed')).toBe('false')
+    expect(restoredButton.className).toContain('w-full')
+  })
 })
