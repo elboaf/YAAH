@@ -47,6 +47,16 @@ def test_start_preview_is_idempotent_and_stop_releases_manager(monkeypatch):
     assert events == ["start", "stop"]
 
 
+def test_main_window_selection_prefers_largest_candidate():
+    # EnumWindows may report an auxiliary/title-bar HWND before the full client.
+    candidates = [(320 * 36, 0x101), (1280 * 720, 0x202), (900 * 600, 0x303)]
+    assert preview._select_main_window(candidates) == 0x202
+
+
+def test_main_window_selection_handles_no_candidates():
+    assert preview._select_main_window([]) == 0
+
+
 def test_manager_stop_signals_and_joins_preview_thread():
     entered = threading.Event()
     release = threading.Event()

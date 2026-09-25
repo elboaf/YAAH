@@ -268,9 +268,7 @@ class _PreviewManager:
             props.rcDestination = RECT(left, top, left + width, top + height)
             props.opacity = 255
             props.fVisible = True
-            result = dwmapi.DwmUpdateThumbnailProperties(
-                thumbnail, ctypes.byref(props)
-            )
+            result = dwmapi.DwmUpdateThumbnailProperties(thumbnail, ctypes.byref(props))
             if result != 0:
                 log.warning(
                     "DwmUpdateThumbnailProperties failed with HRESULT 0x%08x",
@@ -382,8 +380,21 @@ class _PreviewManager:
                     )
 
 
+def _select_main_window(candidates: list[tuple[int, int]]) -> int:
+    """Select the largest HWND by bounding-box area; ties prefer first found."""
+    if not candidates:
+        return 0
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
 def _find_sandbox_window(user32=None) -> int:
-    """Return the first visible WindowsSandboxClient.exe top-level HWND."""
+    """Return the largest visible WindowsSandboxClient.exe top-level HWND.
+
+    Windows Sandbox may expose multiple top-level windows from its client
+    process. EnumWindows order is not a reliable way to distinguish the main
+    desktop surface from a narrow title-bar/auxiliary window, so choose the
+    candidate with the largest window area.
+    """
     if os.name != "nt" or not hasattr(ctypes, "windll"):
         return 0
     user32 = user32 or ctypes.windll.user32
@@ -391,7 +402,7 @@ def _find_sandbox_window(user32=None) -> int:
     wintypes = ctypes.wintypes
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    found: list[int] = []
+    found: list[tuple[int, int]] = []
 
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
@@ -406,6 +417,8 @@ def _find_sandbox_window(user32=None) -> int:
     user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
     user32.EnumWindows.restype = wintypes.BOOL
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetWindowRect.restype = wintypes.BOOL
     user32.GetWindowThreadProcessId.argtypes = [
         wintypes.HWND,
         ctypes.POINTER(wintypes.DWORD),
@@ -429,11 +442,14 @@ def _find_sandbox_window(user32=None) -> int:
                 and buf.value.replace("\\", "/").rsplit("/", 1)[-1].lower()
                 == "windowssandboxclient.exe"
             ):
-                found.append(int(hwnd))
-                return False
+                rect = wintypes.RECT()
+                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    width = max(0, rect.right - rect.left)
+                    height = max(0, rect.bottom - rect.top)
+                    found.append((width * height, int(hwnd)))
         finally:
             kernel32.CloseHandle(process)
         return True
 
     user32.EnumWindows(callback_type(_callback), 0)
-    return found[0] if found else 0
+    return _select_main_window(found)
