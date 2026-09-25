@@ -51,6 +51,27 @@ describe('live compaction ticker', () => {
     expect(screen.getByText(tape)).toBeTruthy()
   })
 
+  it('renders a live sub-agent block with its own telemetry strip', () => {
+    const run = {
+      agentId: 1,
+      agentType: 'explore',
+      prompt: 'inspect this module',
+      status: 'running' as const,
+      text: 'Looking through the code',
+      tools: [],
+      telemetry: 'nested per-agent tape',
+    }
+    render(
+      <MessageView
+        msg={liveMessage([{ id: 'spawn-1', name: 'spawn_agent', subAgent: run }])}
+        live
+      />,
+    )
+    expect(screen.getByText('inspect this module')).toBeTruthy()
+    expect(screen.getByText('nested per-agent tape')).toBeTruthy()
+    expect(screen.getByText('Looking through the code')).toBeTruthy()
+  })
+
   it('places later traces ahead of compaction and keeps them aligned with telemetry', async () => {
     render(
       <MessageView

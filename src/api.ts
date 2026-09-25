@@ -162,7 +162,14 @@ export interface StoredMessage {
     status?: string
     turns?: number
     output?: string
-    transcript?: Array<{ role: string; content: string; name?: string }>
+    note?: string
+    transcript?: Array<{
+      role: string
+      content: string
+      name?: string
+      tool_call_id?: string
+      args?: unknown
+    }>
   } | null
 }
 
@@ -1010,7 +1017,12 @@ export interface AgentEvent {
   args?: unknown
   result?: unknown
   message?: string
+  /** Parent tool call ID; in sub-agent progress this identifies the spawn. */
   call_id?: string
+  /** Inner child tool ID, distinct from the parent spawn ID. */
+  tool_call_id?: string
+  /** Namespaced approval gate ID used only to answer access requests. */
+  approval_call_id?: string
   /** Spoken briefing for read-aloud (#66) — speech-only, never rendered. */
   say?: string
   /** Soft injection landed (#7): the queued message is now a real turn. */
@@ -1044,7 +1056,8 @@ export interface AgentEvent {
   prompt?: string
   status?: string
   turns?: number
-  /** Inner event type wrapped by sub_agent_progress (text | tool_start | tool_result). */
+  note?: string
+  /** Inner event type wrapped by sub_agent_progress. */
   kind?: string
   /** Exact context size (usage.prompt_tokens) of the turn's final model call. */
   usage_tokens?: number

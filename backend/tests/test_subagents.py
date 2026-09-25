@@ -310,6 +310,76 @@ async def test_spawn_batch_parallel_and_capped(fake_model, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sub_agent_forwards_thinking_and_child_tool_progress(fake_model, tmp_path, monkeypatch):
+    """Thinking and shell chunks are live events, not transcript content."""
+    async def fake_execute(name, args, workspace, on_chunk=None):
+        assert name == "bash"
+        if on_chunk:
+            on_chunk("first chunk\n")
+            on_chunk("second chunk")
+        return {"output": "first chunk\nsecond chunk", "exit_code": 0}
+
+    monkeypatch.setattr(subagents, "execute_tool", fake_execute)
+    fake_model.append([
+        {"type": "thinking", "text": "checking the shell"},
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "inner-1", "type": "function",
+            "function": {"name": "bash", "arguments": json.dumps({"command": "echo hi"})},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "content", "text": "finished"},
+        {"type": "finish"},
+    ])
+    events = []
+    result = await subagents.run_sub_agent(
+        AgentDef(name="test", description="", body="", tools=["bash"], max_turns=2),
+        "run shell", str(tmp_path), on_event=events.append,
+    )
+
+    assert result["status"] == "completed"
+    assert any(e["type"] == "thinking" and e["text"] == "checking the shell" for e in events)
+    progress = [e for e in events if e["type"] == "tool_progress"]
+    assert [e["chunk"] for e in progress] == ["first chunk\n", "second chunk"]
+    assert all(e["tool_call_id"] == "inner-1" for e in progress)
+    assert all(e["type"] == "tool_progress" for e in progress)
+    assert all("checking the shell" not in str(e) for e in result["transcript"])
+    assert result["transcript"][2]["args"] == {"command": "echo hi"}
+    starts = [e for e in events if e["type"] == "tool_start"]
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert starts[0]["tool_call_id"] == results[0]["tool_call_id"] == "inner-1"
+
+
+@pytest.mark.asyncio
+async def test_spawn_batch_keeps_spawn_and_child_tool_ids_separate(fake_model, tmp_path, monkeypatch):
+    async def fake_execute(name, args, workspace, on_chunk=None):
+        if on_chunk:
+            on_chunk("chunk")
+        return {"content": "read"}
+
+    monkeypatch.setattr(subagents, "execute_tool", fake_execute)
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "inner-1", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+    events = []
+    await subagents.spawn_batch(
+        [{"call_id": "spawn-1", "agent_id": 8, "agent_type": "explore", "prompt": "read"}],
+        str(tmp_path), asyncio.Event(), on_event=events.append,
+    )
+    progress = [e for e in events if e["type"] == "sub_agent_progress"]
+    tool_events = [e for e in progress if e.get("kind") in {"tool_start", "tool_progress", "tool_result"}]
+    assert {e["call_id"] for e in tool_events} == {"spawn-1"}
+    assert {e["tool_call_id"] for e in tool_events} == {"inner-1"}
+    assert {e["kind"] for e in tool_events} == {"tool_start", "tool_progress", "tool_result"}
+
+
+@pytest.mark.asyncio
 async def test_spawn_batch_unknown_agent_type(fake_model, tmp_path):
     calls = [{"call_id": "c0", "agent_id": 0, "agent_type": "nope", "prompt": "x"}]
     results = await subagents.spawn_batch(calls, str(tmp_path), asyncio.Event())

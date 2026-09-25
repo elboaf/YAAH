@@ -30,6 +30,17 @@ export const TOOL_OUTPUT_CAP = 8_000
 /** Cap on the telemetry tape per conversation (a tail is kept). */
 export const TAPE_CAP = 16_000
 
+/** A nested tool call inside one sub-agent run. */
+export interface SubAgentToolCall {
+  id: string
+  name: string
+  args?: unknown
+  result?: unknown
+  output?: string
+  startedAt?: number
+  finishedAt?: number
+}
+
 /** A live sub-agent run (spawn_agent tool call in flight). */
 export interface SubAgentRun {
   agentId: number
@@ -38,8 +49,12 @@ export interface SubAgentRun {
   status: 'running' | 'completed' | 'error' | 'cancelled' | 'max_turns'
   /** Streamed text deltas from the sub-agent's own turns. */
   text: string
-  /** Tool chips inside the sub-agent's block. */
-  tools: Array<{ id: string; name: string; args?: unknown; result?: unknown }>
+  /** Tool calls inside the sub-agent's block. */
+  tools: SubAgentToolCall[]
+  /** Bounded, UI-only telemetry tail scoped to this spawn call. */
+  telemetry: string
+  turns?: number
+  note?: string
 }
 
 export interface ChatMessage {
@@ -385,9 +400,11 @@ interface AgentState {
   /** Sub-agent live state (spawn_agent calls). */
   startSubAgent: (key: string, msgId: string, callId: string, agentId: number, agentType: string, prompt: string) => void
   subAgentTextDelta: (key: string, msgId: string, callId: string, text: string) => void
-  subAgentToolStart: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
-  subAgentToolResult: (key: string, msgId: string, callId: string, result: unknown) => void
-  finishSubAgent: (key: string, msgId: string, callId: string, status: string, turns: number) => void
+  subAgentToolStart: (key: string, msgId: string, callId: string, toolCallId: string, name: string, args: unknown) => void
+  subAgentToolProgress: (key: string, msgId: string, callId: string, toolCallId: string, chunk: string) => void
+  subAgentToolResult: (key: string, msgId: string, callId: string, toolCallId: string, result: unknown) => void
+  appendSubAgentTelemetry: (key: string, msgId: string, callId: string, chunk: string) => void
+  finishSubAgent: (key: string, msgId: string, callId: string, status: string, turns: number, note?: string) => void
   /** Mark every still-running sub-agent on a message as interrupted and
    *  settle its unfinished tool chips — called when the stream ends
    *  (done, stopped, error, or abort) so no block pulses forever. */
@@ -1009,6 +1026,7 @@ export const useAgent = create<AgentState>((set, get) => ({
                   status: 'running',
                   text: '',
                   tools: [],
+                  telemetry: `\n▸ spawned ${agentType}    `,
                 },
               }
               break
@@ -1040,7 +1058,114 @@ export const useAgent = create<AgentState>((set, get) => ({
     }))
   },
 
-  subAgentToolStart: (key, msgId, callId, name, args) => {
+  subAgentToolStart: (key, msgId, callId, toolCallId, name, args) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              const id = toolCallId || `sat${sa.tools.length + 1}`
+              if (sa.tools.some((tool) => tool.id === id)) break
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: {
+                  ...sa,
+                  tools: [...sa.tools, { id, name, args, startedAt: Date.now() }],
+                },
+              }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentToolProgress: (key, msgId, callId, toolCallId, chunk) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id !== callId || !tcs[i].subAgent) continue
+            const sa = tcs[i].subAgent!
+            const tools = [...sa.tools]
+            const j = tools.findIndex(
+              (tool) => tool.id === toolCallId && tool.result === undefined,
+            )
+            if (j !== -1) {
+              const merged = (tools[j].output ?? '') + chunk
+              tools[j] = {
+                ...tools[j],
+                output: merged.length > TOOL_OUTPUT_CAP ? merged.slice(-TOOL_OUTPUT_CAP) : merged,
+              }
+              tcs[i] = { ...tcs[i], subAgent: { ...sa, tools } }
+            }
+            break
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  subAgentToolResult: (key, msgId, callId, toolCallId, result) => {
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id === callId && tcs[i].subAgent) {
+              const sa = tcs[i].subAgent!
+              const tools = [...sa.tools]
+              const j = tools.findIndex(
+                (tool) => tool.id === toolCallId && tool.result === undefined,
+              )
+              if (j !== -1) {
+                tools[j] = { ...tools[j], result, finishedAt: Date.now() }
+              }
+              tcs[i] = { ...tcs[i], subAgent: { ...sa, tools } }
+              break
+            }
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  appendSubAgentTelemetry: (key, msgId, callId, chunk) => {
+    if (!chunk) return
+    set((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId || !m.toolCalls?.length) return m
+          const tcs = [...m.toolCalls]
+          for (let i = tcs.length - 1; i >= 0; i--) {
+            if (tcs[i].id !== callId || !tcs[i].subAgent) continue
+            const sa = tcs[i].subAgent!
+            const merged = sa.telemetry + chunk
+            const telemetry = merged.length > TAPE_CAP ? merged.slice(-TAPE_CAP) : merged
+            tcs[i] = { ...tcs[i], subAgent: { ...sa, telemetry } }
+            break
+          }
+          return { ...m, toolCalls: tcs }
+        }),
+      },
+    }))
+  },
+
+  finishSubAgent: (key, msgId, callId, status, turns, note) => {
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
@@ -1054,58 +1179,12 @@ export const useAgent = create<AgentState>((set, get) => ({
                 ...tcs[i],
                 subAgent: {
                   ...sa,
-                  tools: [...sa.tools, { id: `sat${sa.tools.length + 1}`, name, args }],
+                  status: status as SubAgentRun['status'],
+                  turns,
+                  note,
+                  telemetry:
+                    (sa.telemetry + `\n${status === 'completed' ? '✓' : status === 'cancelled' ? '■' : '!'} ${status} · ${turns} turns    `).slice(-TAPE_CAP),
                 },
-              }
-              break
-            }
-          }
-          return { ...m, toolCalls: tcs }
-        }),
-      },
-    }))
-  },
-
-  subAgentToolResult: (key, msgId, callId, result) => {
-    set((s) => ({
-      messagesByConv: {
-        ...s.messagesByConv,
-        [key]: (s.messagesByConv[key] ?? []).map((m) => {
-          if (m.id !== msgId || !m.toolCalls?.length) return m
-          const tcs = [...m.toolCalls]
-          for (let i = tcs.length - 1; i >= 0; i--) {
-            if (tcs[i].id === callId && tcs[i].subAgent) {
-              const sa = tcs[i].subAgent!
-              const tools = [...sa.tools]
-              for (let j = tools.length - 1; j >= 0; j--) {
-                if (tools[j].result === undefined) {
-                  tools[j] = { ...tools[j], result }
-                  break
-                  }
-              }
-              tcs[i] = { ...tcs[i], subAgent: { ...sa, tools } }
-              break
-            }
-          }
-          return { ...m, toolCalls: tcs }
-        }),
-      },
-    }))
-  },
-
-  finishSubAgent: (key, msgId, callId, status, turns) => {
-    set((s) => ({
-      messagesByConv: {
-        ...s.messagesByConv,
-        [key]: (s.messagesByConv[key] ?? []).map((m) => {
-          if (m.id !== msgId || !m.toolCalls?.length) return m
-          const tcs = [...m.toolCalls]
-          for (let i = tcs.length - 1; i >= 0; i--) {
-            if (tcs[i].id === callId && tcs[i].subAgent) {
-              const sa = tcs[i].subAgent!
-              tcs[i] = {
-                ...tcs[i],
-                subAgent: { ...sa, status: status as SubAgentRun['status'] },
               }
               break
             }
@@ -1246,9 +1325,14 @@ export function buildMessages(
       const tools: SubAgentRun['tools'] = []
       for (const e of entries) {
         if (e.role === 'assistant' && typeof e.content === 'string') {
-          text = e.content // last assistant text wins (the final message)
+          text += (text ? '\n' : '') + e.content
         } else if (e.role === 'tool' && e.name) {
-          tools.push({ id: `sat${tools.length + 1}`, name: e.name, result: e.content })
+          tools.push({
+            id: e.tool_call_id ?? `sat${tools.length + 1}`,
+            name: e.name,
+            args: e.args,
+            result: safeParse(e.content),
+          })
         }
       }
       subAgentById.set(id, {
@@ -1258,6 +1342,9 @@ export function buildMessages(
         status: (snap.status as SubAgentRun['status']) ?? 'completed',
         text,
         tools,
+        telemetry: '',
+        turns: snap.turns,
+        note: snap.note,
       })
     }
   }
