@@ -105,7 +105,8 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 - [x] Implement host-enforced, expiring edit leases keyed by conversation and revision-aware idempotent snapshot commits.
 - [x] Add owner-scoped client proxies and durable pending transcript commits; preserve uncertain network outcomes and retry idempotently on refresh/reconnect.
 - [x] Add a separate lease-protected transcript edit mode; surface lock/revision/network errors and renew/release leases. Remote turns and workspace execution remain Phase 6.
-- [ ] Expand host local-write/run exclusion to every direct database mutation path and verify real multi-device online/offline behavior.
+- [x] Guard host-local transcript/conversation mutations, including workspace relocation and agent-retention deletion, against active remote edit leases.
+- [ ] Verify real multi-device online/offline behavior for lease, edit, reconnect, and pending-commit recovery.
 
 **Implementation notes:** Protocol v4 requires matching client/host builds. Remote transcript edits are limited to editing existing message text in the isolated viewer; no composer sends, turns, workspace dispatch, message additions/deletions, or broad main-chat owner identity are enabled. Pending full-snapshot commits are retained durably, and background refresh does not overwrite them. A stale-revision conflict stays pending for explicit human resolution; it is never silently rebased or discarded.
 

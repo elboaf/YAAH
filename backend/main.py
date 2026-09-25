@@ -408,6 +408,8 @@ async def api_delete_workspace(workspace_id: int, owner_id: str | None = None):
 
     try:
         result = await delete_workspace(workspace_id)
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except KeyError:

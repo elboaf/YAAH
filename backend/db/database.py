@@ -464,13 +464,21 @@ async def delete_workspace(workspace_id: int) -> dict:
     """
     db = await get_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,))
         row = await cur.fetchone()
         if row is None:
+            await db.rollback()
             raise KeyError(workspace_id)
         ws = dict(row)
         if ws["path"] is None:
+            await db.rollback()
             raise ValueError("the Default workspace cannot be removed")
+        cur = await db.execute(
+            "SELECT id FROM conversations WHERE workspace = ?", (ws["path"],)
+        )
+        for conversation in await cur.fetchall():
+            await assert_no_active_remote_edit_lease(db, conversation["id"])
         cur = await db.execute(
             "UPDATE conversations SET workspace = NULL WHERE workspace = ?",
             (ws["path"],),
@@ -492,6 +500,10 @@ async def delete_workspace(workspace_id: int) -> dict:
         except OSError:
             pass
         return {"relocated": relocated}
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
     finally:
         await db.close()
 
@@ -1577,6 +1589,8 @@ async def trim_agent_transcript(conversation_id: int, keep_runs: int):
     tool/assistant rows attached to their run."""
     db = await get_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
             "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user' "
             "ORDER BY id",
@@ -1584,6 +1598,7 @@ async def trim_agent_transcript(conversation_id: int, keep_runs: int):
         )
         user_rows = [r[0] for r in await cur.fetchall()]
         if len(user_rows) <= keep_runs:
+            await db.commit()
             return
         cutoff = user_rows[len(user_rows) - keep_runs]
         await db.execute(
@@ -1591,5 +1606,9 @@ async def trim_agent_transcript(conversation_id: int, keep_runs: int):
             (conversation_id, cutoff),
         )
         await db.commit()
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
     finally:
         await db.close()
