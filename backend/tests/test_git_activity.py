@@ -45,6 +45,37 @@ def test_activity_keeps_operations_separate_from_cumulative_branch_context():
     assert summary["run_id"] == "run-1"
 
 
+@pytest.mark.asyncio
+async def test_successful_merge_remains_integrated_after_final_worktree_settlement(monkeypatch, tmp_path):
+    activity = GitActivity("run-merged")
+    activity.set_context(
+        "parent", "Agent", branch="agent/fix", base_branch="master",
+        branch_action="created", worktree="kept",
+    )
+    monkeypatch.setattr(
+        "backend.agent.git_activity._branch",
+        lambda _ws: asyncio.sleep(0, result="master"),
+    )
+    await activity.record_tool(
+        "parent", "Agent", "git_merge_back", {"branch": "agent/fix"},
+        {"merged": True, "exit_code": 0, "branch": "agent/fix", "target_branch": "master"},
+        str(tmp_path),
+    )
+
+    # turn_end observes that the just-merged session branch is now clean and
+    # has no commits ahead; this is cleanup, not evidence that integration failed.
+    activity.set_context("parent", "Agent", worktree="removed")
+    activity.set_settlement(
+        "parent", "Agent", commits_ahead=0, dirty=False,
+        worktree="removed", integrated=False,
+    )
+
+    lane = activity.summary("completed")["lanes"][0]
+    assert lane["integrated"] is True
+    assert lane["commits_ahead"] == 0
+    assert lane["worktree"] == "removed"
+
+
 def test_no_activity_has_no_row():
     assert GitActivity("run-empty").summary("completed") is None
 

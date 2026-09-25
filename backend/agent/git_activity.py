@@ -173,7 +173,7 @@ class GitActivity:
         lane["commits_ahead"] = commits_ahead
         lane["dirty"] = dirty
         lane["worktree"] = worktree
-        if integrated is not None:
+        if integrated is True or lane.get("integrated") is not True:
             lane["integrated"] = integrated
 
     def record(

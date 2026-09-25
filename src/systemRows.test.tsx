@@ -36,6 +36,39 @@ describe('persisted merge-back system rows', () => {
     expect(graph).toContain('Not merged')
     expect(graph).not.toContain('merged into primary')
   })
+  it('omits a redundant no-work terminal when a clean isolated lane is drained', () => {
+    const graph = gitMermaid({
+      run_id: 'run-drained',
+      outcome: 'completed',
+      lanes: [{
+        id: 'parent', label: 'Agent', branch: 'agent/42/empty', base_branch: 'master',
+        branch_action: 'created', commits_ahead: 0, dirty: false, worktree: 'removed',
+        integrated: false, operations: [],
+      }],
+    })
+    expect(graph).not.toContain('Not merged')
+    expect(graph).not.toContain('no unmerged work')
+
+    render(
+      <MessageView
+        msg={sys(JSON.stringify({
+          git_activity: {
+            run_id: 'run-drained',
+            outcome: 'completed',
+            lanes: [{
+              id: 'parent', label: 'Agent', branch: 'agent/42/empty', base_branch: 'master',
+              branch_action: 'created', commits_ahead: 0, dirty: false, worktree: 'removed',
+              integrated: false, operations: [],
+            }],
+          },
+        }))}
+      />,
+    )
+    const chip = screen.getByRole('button', { name: /no unmerged work/ })
+    fireEvent.click(chip)
+    expect(screen.queryByText(/Not merged/)).toBeNull()
+  })
+
   it('renders a collapsed run summary that expands to per-file line changes', () => {
     render(
       <MessageView

@@ -1358,13 +1358,13 @@ export function gitMermaid(summary: GitActivitySummary): string {
       previous = node
     })
     const confirmedMerge = lane.operations.find((op) => op.operation === 'merge' && op.outcome === 'succeeded')
-    if (lane.integrated === true && confirmedMerge?.target_branch) {
-      lines.push(`  ${id}Merged["Merged into ${escapeMermaid(confirmedMerge.target_branch)}"]`)
-      lines.push(`  ${previous} --> ${id}Merged --> primary`)
+    if (lane.integrated === true && confirmedMerge) {
+      lines.push(`  ${previous} --> primary`)
     }
-    if (lane.branch_action !== 'none' && lane.integrated !== true) {
+    const hasNoUnmergedWork = lane.commits_ahead === 0 && lane.dirty === false
+    if (lane.branch_action !== 'none' && lane.integrated !== true && !hasNoUnmergedWork) {
       const end = `${id}End`
-      const lifecycle = lane.commits_ahead === 0 && !lane.dirty ? 'no unmerged work' : lane.worktree === 'removed' ? 'worktree removed' : lane.worktree === 'kept' ? 'worktree retained' : 'worktree status unknown'
+      const lifecycle = lane.worktree === 'removed' ? 'worktree removed' : lane.worktree === 'kept' ? 'worktree retained' : 'worktree status unknown'
       const count = typeof lane.commits_ahead === 'number' && lane.commits_ahead > 0 ? ` · ${lane.commits_ahead} cumulative commits ahead` : ''
       lines.push(`  ${end}["Not merged · ${escapeMermaid(lifecycle + count)}"]`)
       lines.push(`  ${previous} -.-> ${end}`)
@@ -1376,11 +1376,11 @@ export function gitMermaid(summary: GitActivitySummary): string {
 function GitActivityDiagram({ summary }: { summary: GitActivitySummary }) {
   const [svg, setSvg] = useState('')
   const [failed, setFailed] = useState(false)
+  const id = `git-activity-${summary.run_id.replace(/[^A-Za-z0-9_-]/g, '') || 'run'}`
+  const graph = gitMermaid(summary)
   useEffect(() => {
     let active = true
-    const id = `git-activity-${summary.run_id.replace(/[^A-Za-z0-9_-]/g, '') || 'run'}`
-    setSvg('')
-    void loadMermaid().then((module) => module.default.render(id, gitMermaid(summary))).then(({ svg: rendered }) => {
+    void loadMermaid().then((module) => module.default.render(id, graph)).then(({ svg: rendered }) => {
       if (active) {
         setSvg(rendered)
         setFailed(false)
@@ -1389,7 +1389,7 @@ function GitActivityDiagram({ summary }: { summary: GitActivitySummary }) {
       if (active) setFailed(true)
     })
     return () => { active = false }
-  }, [summary])
+  }, [id, graph])
   if (failed || !svg) {
     return <p className="text-[10px] text-zinc-500">Branch-flow diagram unavailable; the text timeline below contains the full summary.</p>
   }
@@ -1409,7 +1409,11 @@ function GitActivitySummary({ summary }: { summary: GitActivitySummary }) {
     ? `${operations.length} Git ${operations.length === 1 ? 'operation' : 'operations'}`
     : 'Git branch activity'
   const scopeNote = summary.lanes.some((lane) => lane.branch_action !== 'none')
-    ? summary.lanes.map((lane) => lane.integrated === true ? 'merged into primary workspace' : `${lane.branch || 'branch'} remains separate`).join(' · ')
+    ? summary.lanes.map((lane) => lane.integrated === true
+      ? 'merged into primary workspace'
+      : lane.commits_ahead === 0 && lane.dirty === false
+        ? 'no unmerged work'
+        : `${lane.branch || 'branch'} remains separate`).join(' · ')
     : 'Git operations recorded'
   return (
     <div className="w-fit max-w-full overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 font-mono text-[11px]">
@@ -1452,9 +1456,9 @@ function GitActivitySummary({ summary }: { summary: GitActivitySummary }) {
                     </li>
                   ))}
                 </ol>
-                {lane.branch_action !== 'none' && (
+                {lane.branch_action !== 'none' && !(lane.integrated !== true && lane.commits_ahead === 0 && lane.dirty === false) && (
                   <div className="pl-3 text-zinc-500">
-                    {lane.integrated === true ? `Merged into ${lane.operations.find((op) => op.operation === 'merge' && op.outcome === 'succeeded')?.target_branch || 'the primary workspace'}` : `Not merged${lane.commits_ahead === 0 && !lane.dirty ? ' · no unmerged work' : ` · ${lane.worktree === 'removed' ? 'worktree removed' : lane.worktree === 'kept' ? 'worktree retained' : 'worktree state unknown'}${typeof lane.commits_ahead === 'number' ? ` · ${lane.commits_ahead} commits ahead (cumulative)` : ''}${lane.dirty ? ' · uncommitted changes remain' : ''}`}`}
+                    {lane.integrated === true ? `Merged into ${lane.operations.find((op) => op.operation === 'merge' && op.outcome === 'succeeded')?.target_branch || 'the primary workspace'}` : `Not merged${lane.worktree === 'removed' ? ' · worktree removed' : lane.worktree === 'kept' ? ' · worktree retained' : ' · worktree state unknown'}${typeof lane.commits_ahead === 'number' ? ` · ${lane.commits_ahead} commits ahead (cumulative)` : ''}${lane.dirty ? ' · uncommitted changes remain' : ''}`}
                   </div>
                 )}
               </li>

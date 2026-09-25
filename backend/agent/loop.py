@@ -2280,7 +2280,7 @@ async def _run_agent_claimed(
                 )
                 git_activity.set_settlement(
                     "parent", "Agent", commits_ahead=0, dirty=False,
-                    worktree="removed", integrated=False,
+                    worktree="removed",
                 )
                 # Quiesced session released: the chip reverts to the main
                 # tree's branch.
