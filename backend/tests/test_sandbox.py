@@ -477,6 +477,18 @@ def test_prompt_section_mentions_toolkit_and_gates(isolated):
     assert "sandbox_test" in text and "sandbox_run" in text
     assert "toolkit" in text
     assert "ask mode" in text
+    assert "host by default" in text
+    assert "full suites, builds, Python scripts" in text
+    assert "network port" in text
+    assert "visual inspection" in text
+
+    description = next(
+        tool["function"]["description"]
+        for tool in sb.SANDBOX_TOOLS_SCHEMA
+        if tool["function"]["name"] == "sandbox_test")
+    assert "network ports" in description
+    assert "GUI visual checks" in description
+    assert "automated tests and validation on the host" in description
 
 
 def test_prompt_section_carries_clean_image_knowledge(isolated):
@@ -654,10 +666,11 @@ def test_system_prompt_offers_sandbox_tools_locally(isolated, monkeypatch):
                         lambda: {"access_mode": "full"})
     prompt = loop_mod._default_system_prompt("C:\\proj")
     assert "sandbox_test" in prompt
-    assert "# Windows Sandbox (the default place to run things)" in prompt
+    assert "# Windows Sandbox (for tests that need isolation)" in prompt
     assert "persistent dev toolkit" in prompt
-    assert "read-only smoke checks" in prompt
-    assert "focused test, typecheck, lint" in prompt
+    assert "host by default" in prompt
+    assert "network port" in prompt
+    assert "visual inspection" in prompt
 
 
 # ------------------------------------------------- mid-session crash (issue #27)

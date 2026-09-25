@@ -367,7 +367,7 @@ def _default_system_prompt(workspace: str = "") -> str:
 
             tools += [
                 "sandbox_test (boot/reuse a disposable Windows Sandbox VM "
-                "— the default place to run the workspace's app/tests)",
+                "for tests that need isolation, such as servers/ports or GUI checks)",
                 "sandbox_run (run a command inside that VM)",
                 "sandbox_status", "sandbox_stop",
             ]
@@ -395,16 +395,15 @@ Guidelines:
   instead of scraping the web UI.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
-- Verify your work INSIDE the sandbox when the work is disruptive:
-  full test suites, builds, installs, servers, anything that writes
-  outside the workspace. Quick smoke checks — a single test
-  file, a typecheck, a lint pass, an import — may run host-side
-  when they are read-only and stay inside the workspace (smoke-test
-  rule). Boot the VM with sandbox_test and run commands via
-  sandbox_run. Size the timeout to the command; a full test suite
-  that takes minutes needs a large timeout_seconds or chunked runs
-  (per directory/file), not retries. The VM is a clean image:
-  install missing tools into the toolkit (installs persist across
+- Choose the test environment by side effects. Run automated tests and
+  validation on the host by default—including full suites, builds, Python
+  scripts, smoke tests, typechecks and lint—when they won't open a new
+  window or reasonably interfere with or interrupt the host user. Use the
+  sandbox when project execution opens/listens on a network port, when a GUI
+  window must be opened for visual inspection, or when a test could otherwise
+  disrupt the host. Boot with sandbox_test and run commands via sandbox_run.
+  Size timeouts to the work; chunk long suites when needed. The VM is a clean
+  image: install missing tools into the toolkit (installs persist across
   sandboxes).
 - Sandbox work stays IN the sandbox: every dependency the app under test
   needs (runtimes, browsers, portable tools) is installed into the VM's

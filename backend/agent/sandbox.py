@@ -1,10 +1,11 @@
 """Windows Sandbox integration: disposable test VMs + a persistent toolkit.
 
-The model calls `sandbox_test` to run the workspace's app, tests and
-builds inside a disposable VM (the default place to run things):
-run the workspace's app, reproduce a bug, exercise real behavior. That
-starts (or reuses) a Windows Sandbox VM built from a generated `.wsb`
-config that maps three host folders in:
+The model calls `sandbox_test` for tests that benefit from isolation, such
+as running servers that open network ports, visual GUI checks, or execution
+that could otherwise disrupt the host user. Ordinary automated tests and
+validation generally run directly on the host. Starting a sandbox launches
+(or reuses) a Windows Sandbox VM built from a generated `.wsb` config that
+maps three host folders in:
 
   workspace  -> C:\\Users\\WDAGUtilityAccount\\Desktop\\ws      (R/W)
   toolkit    -> C:\\Users\\WDAGUtilityAccount\\Desktop\\toolkit (R/W)
@@ -1087,24 +1088,26 @@ async def sandbox_stop(workspace: str) -> dict:
 
 def prompt_section() -> str:
     return (
-        "# Windows Sandbox (the default place to run things)\n\n"
-        "- Run builds, full test suites, installs, servers, and GUI tests "
-        "INSIDE the sandbox: boot it with `sandbox_test`, then `sandbox_run` "
-        "to execute PowerShell commands inside it. Host bash/powershell are "
-        "for file ops, git, non-executing checks, and read-only smoke checks "
-        "that stay within the workspace (a focused test, typecheck, lint, or "
-        "import). `sandbox_status` reports state; "
-        "`sandbox_stop` disposes it.\n"
+        "# Windows Sandbox (for tests that need isolation)\n\n"
+        "- Choose the test environment by side effects. Run automated tests "
+        "and validation on the host by default—including full suites, builds, "
+        "Python scripts, smoke tests, typechecks and lint—when they won't "
+        "open a new window or reasonably interfere with or interrupt the "
+        "host user. Use the sandbox when project execution opens/listens on "
+        "a network port (especially a server), when a GUI window must be "
+        "opened for visual inspection, or when a test could otherwise "
+        "disrupt the host. Boot with `sandbox_test`, then use `sandbox_run` "
+        "to execute PowerShell commands inside it. `sandbox_status` reports "
+        "state; `sandbox_stop` disposes it.\n"
         "- The sandbox maps the workspace at C:\\Users\\WDAGUtilityAccount"
         "\\Desktop\\ws (your sandbox cwd) and the persistent dev toolkit "
-        "at ...\\Desktop\\toolkit (on PATH). Host execution is allowed "
-        "for read-only smoke checks that stay within the workspace (a focused "
-        "test, typecheck, lint, or import); builds, full suites, installs, "
-        "servers, and GUI tests belong in the sandbox. The toolkit is mounted "
-        "read/write and persists on the host: tools installed inside any "
-        "sandbox (into the toolkit) are inherited by every future "
-        "sandbox, so add missing dev tools there instead of skipping a "
-        "verification step.\n"
+        "at ...\\Desktop\\toolkit (on PATH). Sandbox this execution when "
+        "it could disrupt the host or needs a GUI/port; harmless automated "
+        "checks can run host-side, even if they write normal test/build "
+        "artifacts within the workspace. The toolkit is mounted read/write "
+        "and persists on the host: tools installed inside any sandbox "
+        "(into the toolkit) are inherited by every future sandbox, so add "
+        "missing dev tools there instead of skipping a verification step.\n"
         "- Keep the work INSIDE the VM: if the app under test needs a "
         "browser, runtime or portable tool, install/download it into "
         "the sandbox (toolkit) and run it there — never launch a host "
@@ -1220,11 +1223,12 @@ SANDBOX_TOOLS_SCHEMA = [
         "function": {
             "name": "sandbox_test",
             "description": (
-                "Start (or reuse) a disposable Windows Sandbox VM — the "
-                "default place to run the workspace's app, tests and "
-                "builds (host bash/powershell are for file ops, git and "
-                "non-executing checks). All work for the app under test "
-                "stays inside the VM: its dependencies run in here (never "
+                "Start (or reuse) a disposable Windows Sandbox VM for work "
+                "that needs isolation, such as servers opening network "
+                "ports, GUI visual checks, or disruptive execution. Run "
+                "harmless automated tests and validation on the host. Work "
+                "that does need isolation stays inside the VM: dependencies "
+                "run in here (never "
                 "host equivalents), and its GUI is driven via the "
                 "windows-mcp MCP server (auto-started at boot; see the "
                 "sandbox prompt section) — never the host mouse/keyboard tools. "
