@@ -17,7 +17,6 @@ once-per-process seed flag before each test.
 """
 
 import pytest
-from fastapi.responses import StreamingResponse
 from httpx import ASGITransport, AsyncClient
 
 import backend.main as main
@@ -122,11 +121,12 @@ async def test_moved_chat_runs_next_turn_in_target_workspace(client, tmp_path):
     real = main.run_agent
     main.run_agent = fake_run_agent
     try:
-        body = main.AgentTurn(message="hi", workspace=src)  # stale on purpose
-        resp = await main.api_agent_turn(cid, body)
-        assert isinstance(resp, StreamingResponse)
-        async for _ in resp.body_iterator:
-            pass
+        # Go through ASGI so FastAPI supplies the required Request object;
+        # the stale workspace in the body is intentional.
+        resp = await client.post(
+            f"/api/agent/{cid}", json={"message": "hi", "workspace": src}
+        )
+        assert resp.status_code == 200, resp.text
     finally:
         main.run_agent = real
     assert seen["workspace"] == dest
