@@ -1204,6 +1204,7 @@ async def turn_end(chat_id: str) -> dict:
                 "branch": branch,
                 "base_branch": info.get("base_branch", ""),
                 "worktree_id": chat_id,
+                "worktree": wt_str,
                 "commits_ahead": 0,
                 "dirty": False,
                 "worktree_removed": True,

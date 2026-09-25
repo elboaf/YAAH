@@ -1660,6 +1660,13 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert st["commits"] == 1
     assert st["branch"].startswith("agent/")
     assert ".yaah" in st["worktree"]
+    from backend.db.database import get_messages
+    persisted_status = next(
+        json.loads(message["content"])["worktree_status"]
+        for message in await get_messages(cid)
+        if message["role"] == "system" and "worktree_status" in message["content"]
+    )
+    assert ".yaah" in persisted_status["worktree"]
     base_prompt = seen_messages[0][0]["content"]
     assert "Turn end itself never merges" in base_prompt
     assert "integrate them with `git_merge_back` before reporting" in base_prompt

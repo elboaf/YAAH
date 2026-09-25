@@ -2306,6 +2306,7 @@ async def _run_agent_claimed(
                     "branch": _settle.get("branch", ""),
                     "base_branch": _settle.get("base_branch", ""),
                     "worktree_id": _settle.get("worktree_id", str(conversation_id)),
+                    "worktree": _settle.get("worktree", ""),
                     "commits": _settle["commits_ahead"],
                     "dirty": bool(_settle.get("dirty")),
                     "worktree_removed": bool(_settle.get("worktree_removed")),
