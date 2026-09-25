@@ -2237,6 +2237,56 @@ async def api_remote_device_messages(host_id: str, conversation_id: str):
     return messages
 
 
+def _validate_remote_image_rel(rel: str) -> str:
+    """Accept only POSIX-style relative image paths; reject traversal before proxying."""
+    from pathlib import PurePosixPath
+
+    if (not rel or rel.startswith(("/", "\\")) or "\\" in rel or "\x00" in rel):
+        raise HTTPException(status_code=400, detail="invalid image path")
+    parts = rel.split("/")
+    if any(part in ("", ".", "..") or ":" in part for part in parts):
+        raise HTTPException(status_code=400, detail="invalid image path")
+    path = PurePosixPath(rel)
+    if path.is_absolute() or path.as_posix() != rel:
+        raise HTTPException(status_code=400, detail="invalid image path")
+    return rel
+
+
+@app.get("/api/remote/devices/{host_id}/images/{rel:path}")
+async def api_remote_device_image(host_id: str, rel: str):
+    """Retrieve media through the saved owner device without exposing its credentials."""
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    rel = _validate_remote_image_rel(rel)
+    if not any(profile.get("host_id") == host_id for profile in _remote_device_profiles()):
+        raise HTTPException(status_code=404, detail="remote device not found")
+    session = remote_mod.get_remote(host_id)
+    if session is None or getattr(session, "host_id", None) != host_id:
+        raise HTTPException(status_code=503, detail="remote device is offline")
+    try:
+        # Quote each untrusted path character while preserving already-validated
+        # separators; never accept a caller-supplied URL or forward client headers.
+        remote_path = "/api/images/" + quote(rel, safe="/")
+        res = await session.proxy("GET", remote_path)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="remote image unavailable") from exc
+    if res.status_code == 404:
+        raise HTTPException(status_code=404, detail="image not found")
+    if res.status_code != 200:
+        # Do not relay remote response text/headers, which may contain secrets.
+        raise HTTPException(status_code=502, detail="remote image retrieval failed")
+    content_type = res.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"}:
+        raise HTTPException(status_code=502, detail="remote endpoint returned unsupported media")
+    return Response(
+        content=res.content,
+        media_type=content_type,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
 @app.get("/api/remote/devices")
 async def api_remote_devices():
     profiles = _remote_device_profiles()

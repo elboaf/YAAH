@@ -65,6 +65,82 @@ async def test_remote_device_conversation_cache_refreshes_and_serves_offline(mon
         assert await get_remote_messages(host_id, "3") is not None
 
 
+@pytest.mark.asyncio
+async def test_remote_image_proxy_uses_only_saved_owner_session(monkeypatch):
+    import httpx
+
+    host_a = remote_mod.RemoteSession("http://host-a", "secret-a", {"host_id": "host-a"})
+    host_b = remote_mod.RemoteSession("http://host-b", "secret-b", {"host_id": "host-b"})
+    remote_mod.register_remote(host_a)
+    remote_mod.register_remote(host_b)
+    save_config({"remote_devices": [
+        {"host_id": "host-a", "url": "http://host-a"},
+        {"host_id": "host-b", "url": "http://host-b"},
+    ]})
+    calls = []
+
+    async def proxy_a(method, path, **kwargs):
+        calls.append(("a", method, path, kwargs))
+        return httpx.Response(200, content=b"image from a", headers={"content-type": "image/png"})
+
+    async def proxy_b(method, path, **kwargs):
+        calls.append(("b", method, path, kwargs))
+        return httpx.Response(200, content=b"image from b", headers={"content-type": "image/png"})
+
+    monkeypatch.setattr(host_a, "proxy", proxy_a)
+    monkeypatch.setattr(host_b, "proxy", proxy_b)
+
+    async with await _client() as c:
+        response_a = await c.get("/api/remote/devices/host-a/images/3/capture.png")
+        response_b = await c.get("/api/remote/devices/host-b/images/3/capture.png")
+
+    assert response_a.status_code == response_b.status_code == 200
+    assert response_a.content == b"image from a"
+    assert response_b.content == b"image from b"
+    assert response_a.headers["content-type"] == "image/png"
+    assert response_a.headers["x-content-type-options"] == "nosniff"
+    assert b"secret-a" not in response_a.content
+    assert "secret-a" not in str(response_a.headers)
+    assert [(owner, method, path) for owner, method, path, _ in calls] == [
+        ("a", "GET", "/api/images/3/capture.png"),
+        ("b", "GET", "/api/images/3/capture.png"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remote_image_proxy_rejects_path_traversal_before_proxy(monkeypatch):
+    host = remote_mod.RemoteSession("http://host", "secret", {"host_id": "host-a"})
+    remote_mod.register_remote(host)
+    save_config({"remote_devices": [{"host_id": "host-a", "url": "http://host"}]})
+
+    async def should_not_proxy(*args, **kwargs):
+        raise AssertionError("invalid path must not be proxied")
+
+    monkeypatch.setattr(host, "proxy", should_not_proxy)
+    async with await _client() as c:
+        response = await c.get("/api/remote/devices/host-a/images/%2e%2e%2fsecret.png")
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_remote_image_proxy_rejects_unsaved_and_foreign_owner_ids(monkeypatch):
+    host = remote_mod.RemoteSession("http://host", "secret", {"host_id": "host-a"})
+    remote_mod.register_remote(host)
+    save_config({"remote_devices": [{"host_id": "host-a", "url": "http://host"}]})
+    calls = []
+
+    async def proxy(*args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(host, "proxy", proxy)
+    async with await _client() as c:
+        unknown = await c.get("/api/remote/devices/host-b/images/3/image.png")
+        assert unknown.status_code == 404
+
+    assert calls == []
+
+
 # ---------------------------------------------------------------- auth gate
 
 
