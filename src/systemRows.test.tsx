@@ -6,7 +6,7 @@
 // the same git_merge_back tool pill the live stream showed.
 
 import { describe, expect, it, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { MessageView } from './components'
 import type { ChatMessage } from './store'
 
@@ -15,6 +15,32 @@ const sys = (content: string): ChatMessage => ({ id: 's1', role: 'system', conte
 afterEach(() => cleanup())
 
 describe('persisted merge-back system rows', () => {
+  it('renders a collapsed run summary that expands to per-file line changes', () => {
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            file_changes: {
+              files: [
+                { path: 'src/App.tsx', added: 3, deleted: 1 },
+                { path: 'package.json', added: 1, deleted: 1 },
+              ],
+              added: 4,
+              deleted: 2,
+            },
+          }),
+        )}
+      />,
+    )
+    const chip = screen.getByRole('button', { name: /2 files changed\+4-2/ })
+    expect(chip.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText('package.json')).toBeNull()
+    fireEvent.click(chip)
+    expect(chip.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByText('package.json')).toBeTruthy()
+    expect(screen.getByText('src/App.tsx')).toBeTruthy()
+  })
+
   it('renders a successful merge-back as a git_merge_back pill, not red text', () => {
     render(
       <MessageView

@@ -167,6 +167,54 @@ async def collect(agent_gen):
 
 
 @pytest.mark.asyncio
+async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path, monkeypatch):
+    from backend.db.database import create_conversation, get_messages
+
+    # Use a non-Git workspace to exercise the filesystem-snapshot fallback;
+    # it already contains earlier-run dirt that must not be reported again.
+    wt = tmp_path / "workspace"
+    wt.mkdir()
+    (wt / "existing.txt").write_text("before\n", encoding="utf-8")
+    (wt / "previous-run.txt").write_text("older work\n", encoding="utf-8")
+    (wt / "earlier.txt").write_text("from prior turn\n", encoding="utf-8")
+    baseline = await loop.file_changes.snapshot_workspace(str(wt))
+    original_snapshot = loop.file_changes.snapshot_workspace
+    snapshots = 0
+
+    async def fake_snapshot(path):
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 1:
+            return baseline
+        # Simulate the run changing one existing file, adding one, and
+        # deleting one. The earlier file remains untouched.
+        (wt / "existing.txt").write_text("after\nnew line\n", encoding="utf-8")
+        (wt / "added.txt").write_text("added line\n", encoding="utf-8")
+        (wt / "previous-run.txt").unlink()
+        return await original_snapshot(path)
+
+    async def no_title(*_args):
+        return None
+
+    monkeypatch.setattr(loop, "_generate_conversation_title", no_title)
+    monkeypatch.setattr(loop.file_changes, "snapshot_workspace", fake_snapshot)
+    cid = await create_conversation("file change summary")
+    fake_model.append([{"type": "content", "text": "Done."}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(wt)))
+    event = next(e for e in events if e["type"] == "file_changes")
+    assert event["added"] == 3
+    assert event["deleted"] == 2
+    assert {f["path"] for f in event["files"]} == {"existing.txt", "added.txt", "previous-run.txt"}
+    assert "earlier.txt" not in {f["path"] for f in event["files"]}
+    assert events[-1]["type"] == "done"
+
+    persisted = await get_messages(cid)
+    saved = next(json.loads(m["content"]) for m in persisted if m["role"] == "system" and "file_changes" in m["content"])
+    assert saved["file_changes"] == {"files": event["files"], "added": 3, "deleted": 2}
+
+
+@pytest.mark.asyncio
 async def test_usage_event_uses_frontend_context_token_field(fake_model, tmp_path):
     """The streamed usage count must match the frontend's usage_tokens contract."""
     from backend.db.database import create_conversation

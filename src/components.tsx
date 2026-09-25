@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   listConversations,
   createConversation,
@@ -1243,6 +1243,49 @@ function CompactionDivider({ summarized, summary }: { summarized?: number; summa
   )
 }
 
+type FileChange = { path: string; added: number; deleted: number; binary?: boolean }
+type FileChangeSummary = { files: FileChange[]; added: number; deleted: number }
+
+function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
+  const [open, setOpen] = useState(false)
+  const panelId = useId()
+  const count = summary.files.length
+  return (
+    <div className="w-fit max-w-full overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 font-mono text-[11px]">
+      <button
+        type="button"
+        className="flex min-h-7 max-w-full items-center gap-2 px-2 py-1 text-left text-zinc-300 hover:bg-zinc-800/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="w-2 text-zinc-500" aria-hidden="true">{open ? '\u2304' : '\u203a'}</span>
+        <span className="whitespace-nowrap">{count} {count === 1 ? 'file changed' : 'files changed'}</span>
+        <span className="whitespace-nowrap text-emerald-400">+{summary.added}</span>
+        <span className="whitespace-nowrap text-red-400">-{summary.deleted}</span>
+      </button>
+      {open && (
+        <div id={panelId} className="border-t border-zinc-800" role="list" aria-label="Changed files">
+          {summary.files.map((file) => (
+            <div key={file.path} role="listitem" className="flex min-h-7 max-w-full items-center gap-2 border-b border-zinc-800/70 px-2 py-1 last:border-b-0">
+              <span className="w-2 shrink-0 text-amber-400" aria-hidden="true">{'{}'}</span>
+              <span className="min-w-0 flex-1 truncate text-zinc-300" title={file.path}>{file.path}</span>
+              {file.binary ? (
+                <span className="shrink-0 text-zinc-500">binary</span>
+              ) : (
+                <>
+                  <span className="shrink-0 text-emerald-400">+{file.added}</span>
+                  <span className="shrink-0 text-red-400">-{file.deleted}</span>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   // Persisted failure markers (backend writes role='system' when a turn
   // dies): a slim machine line, not a fake agent message. EXCEPTION — the
@@ -1254,6 +1297,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
     if (msg.role === 'system') {
     if (!msg.content) return null
     let merge: { worktree_merge?: Record<string, unknown> } | null = null
+    let fileChanges: FileChangeSummary | undefined
     let status: {
       worktree_status?: {
         branch?: string
@@ -1268,6 +1312,14 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       const parsed: unknown = JSON.parse(msg.content)
       if (parsed && typeof parsed === 'object' && 'worktree_merge' in (parsed as object)) {
         merge = parsed as { worktree_merge: Record<string, unknown> }
+      } else if (
+        parsed &&
+        typeof parsed === 'object' &&
+        'file_changes' in parsed &&
+        parsed.file_changes &&
+        typeof parsed.file_changes === 'object'
+      ) {
+        fileChanges = parsed.file_changes as FileChangeSummary
       } else if (
         parsed &&
         typeof parsed === 'object' &&
@@ -1286,6 +1338,13 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       }
     } catch {
       // not JSON — a genuine failure marker
+    }
+    if (fileChanges) {
+      return (
+        <div className="pl-3">
+          <FileChangesSummary summary={fileChanges} />
+        </div>
+      )
     }
     if (status) {
       // Turn end itself never integrates work. If commits remain, say plainly
@@ -7806,6 +7865,18 @@ function Composer() {
               },
         )
       }
+    } else if (ev.type === 'file_changes') {
+      appendRawMessage(bufKey, {
+        id: `file-changes-${Date.now()}`,
+        role: 'system',
+        content: JSON.stringify({
+          file_changes: {
+            files: ev.files ?? [],
+            added: ev.added ?? 0,
+            deleted: ev.deleted ?? 0,
+          },
+        }),
+      })
     } else if (ev.type === 'worktree_status') {
       // Turn-end settlement confirms commits remain on the agent branch.
       appendRawMessage(bufKey, {

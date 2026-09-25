@@ -923,6 +923,7 @@ export interface AgentEvent {
     | 'worktree_bound'
     | 'worktree_status'
     | 'worktree_released'
+    | 'file_changes'
     | 'compacted'
     | 'compaction_failed'
     | 'model_call'
@@ -974,6 +975,10 @@ export interface AgentEvent {
   kind?: string
   /** Exact context size (usage.prompt_tokens) of the turn's final model call. */
   usage_tokens?: number
+  /** Net workspace changes made during this run. */
+  files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
+  added?: number
+  deleted?: number
   /** The provider+model this turn's chat call is waiting on (model_call).
    *  Unset between the response arriving and the next call of the turn. */
   modelCall?: { provider: string; model: string; startedAt: number }
