@@ -18,11 +18,14 @@ import itertools
 import json
 import os
 import re
+import sys
+import uuid
 from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
 from backend.agent import file_changes
+from backend.agent import git_activity as git_activity_mod
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
@@ -67,6 +70,24 @@ async def _persist_file_change_summary(conversation_id: int, summary: dict) -> N
     except Exception:
         # Persistence must not mask the run's terminal status.
         pass
+
+
+async def _persist_git_activity_summary(conversation_id: int, summary: dict) -> None:
+    try:
+        await add_message(
+            conversation_id, "system", json.dumps({"git_activity": summary})
+        )
+    except Exception:
+        # Git accounting is best-effort and must not mask run status.
+        pass
+
+
+def _record_worktree_lifecycle(activity, actor: str, label: str, info: dict) -> None:
+    git_activity_mod.record_worktree_lifecycle(activity, actor, label, info)
+
+
+def _emit_git_activity_payload(activity, outcome: str) -> dict | None:
+    return activity.summary(outcome)
 
 
 async def _generate_conversation_title(
@@ -1196,7 +1217,25 @@ async def _run_agent_claimed(
     # Captured before any rebinding: worktree_bound fires only when the
     # turn actually leaves this path (a nested-parent binding must not).
     original_workspace = str(workspace)
-    _isolated = False
+    run_id = uuid.uuid4().hex
+    git_activity = git_activity_mod.GitActivity(run_id=run_id)
+    git_activity_emitted = False
+    actor_id = "parent"
+    actor_label = "Agent"
+    initial_binding = worktrees.binding_for(str(conversation_id))
+    _isolated = worktrees.worktree_of(turn_workspace) is not None
+    if initial_binding:
+        _record_worktree_lifecycle(git_activity, actor_id, actor_label, {
+            "event": "reused",
+            "branch": str(initial_binding.get("branch") or ""),
+            "base_branch": str(initial_binding.get("base_branch") or ""),
+        })
+    elif _isolated:
+        _record_worktree_lifecycle(git_activity, actor_id, actor_label, {
+            "event": "inherited",
+            "branch": await git_activity_mod._branch(turn_workspace),
+        })
+    run_outcome = "completed"
     # adr/0003 revised: the worktree is a SESSION binding — turn end
     # settles (drains a quiesced session) but otherwise the binding and
     # its branch persist, so the next turn of
@@ -1296,6 +1335,20 @@ async def _run_agent_claimed(
         tools = tools + [EXIT_PLAN_SCHEMA]
     cancel_ev = asyncio.Event()
     _cancel_events[conversation_id] = cancel_ev
+
+    async def _record_parent_tool(name: str, args: dict, result: object, tool_workspace: str) -> None:
+        try:
+            await git_activity.record_tool(
+                "parent", "Agent", name, args, result, tool_workspace
+            )
+            if name in {"bash", "powershell"} and isinstance(result, dict):
+                await git_activity.record_shell(
+                    "parent", "Agent", str((args or {}).get("command") or ""),
+                    result, tool_workspace,
+                )
+        except Exception:
+            # Summary collection cannot disrupt the actual tool/run.
+            pass
     steer_ev = asyncio.Event()
     _steer_flags[conversation_id] = steer_ev
 
@@ -1713,7 +1766,11 @@ async def _run_agent_claimed(
                                     and worktrees.should_isolate(name, args)):
                                 try:
                                     turn_workspace = await worktrees.ensure_isolated(
-                                        workspace, chat_id=str(conversation_id)
+                                        workspace,
+                                        chat_id=str(conversation_id),
+                                        on_lifecycle=lambda info: _record_worktree_lifecycle(
+                                            git_activity, "parent", "Agent", info
+                                        ),
                                     )
                                     _isolated = True
                                     workspace = turn_workspace
@@ -1811,8 +1868,12 @@ async def _run_agent_claimed(
                                     try:
                                         turn_workspace = (
                                             await worktrees.ensure_isolated(
-                                            workspace, chat_id=str(conversation_id)
-                                        )
+                                                workspace,
+                                                chat_id=str(conversation_id),
+                                                on_lifecycle=lambda info: _record_worktree_lifecycle(
+                                                    git_activity, "parent", "Agent", info
+                                                ),
+                                            )
                                         )
                                         _isolated = True
                                         workspace = turn_workspace
@@ -1881,6 +1942,7 @@ async def _run_agent_claimed(
                         )
                     }
 
+                await _record_parent_tool(name, args, result, turn_workspace)
                 result_str = _clip_result_str(result)
                 # A tool that attached an image (view_image) becomes a
                 # multimodal parts list for the live LLM call.
@@ -2089,6 +2151,7 @@ async def _run_agent_claimed(
                     result = batch_results.get(
                         tc.get("id", ""), {"error": "sub-agent produced no result"}
                     )
+                    git_activity.add_child(result.get("git_activity"), str(tc.get("id", "")))
                     summary, result_str = await _persist_spawn_result(tc, result)
                     yield _ndjson(
                         {
@@ -2110,6 +2173,7 @@ async def _run_agent_claimed(
             f"Step budget ({max_steps}) exhausted — raise it in "
             "Settings → Max steps (or config.json `max_steps`; 0 = unlimited)"
         )
+        run_outcome = "failed"
         await add_message(conversation_id, "system", f"turn failed: {budget_msg}")
         file_summary = await _emit_file_changes(
             conversation_id, turn_workspace, change_baseline
@@ -2142,6 +2206,7 @@ async def _run_agent_claimed(
             yield _ndjson({"type": "queued_autosend", "items": remaining})
 
     except model_client.ModelError as e:
+        run_outcome = "failed"
         # The user message is already stored; without a record of the
         # failure the transcript would read as if the turn never happened.
         await add_message(conversation_id, "system", f"turn failed: {e}")
@@ -2152,6 +2217,7 @@ async def _run_agent_claimed(
         if file_summary:
             await _persist_file_change_summary(conversation_id, file_summary)
             yield _ndjson({"type": "file_changes", **file_summary})
+        run_outcome = "failed"
         yield _ndjson({"type": "error", "message": str(e)})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
@@ -2168,6 +2234,7 @@ async def _run_agent_claimed(
         if file_summary:
             await _persist_file_change_summary(conversation_id, file_summary)
             yield _ndjson({"type": "file_changes", **file_summary})
+        run_outcome = "failed"
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
@@ -2206,19 +2273,43 @@ async def _run_agent_claimed(
                     "reason": "turn-end settlement did not complete; session kept",
                 }
             if _settle.get("drained"):
+                git_activity.set_context(
+                    "parent", "Agent",
+                    branch=str(_settle.get("branch") or ""),
+                    base_branch=str(_settle.get("base_branch") or ""),
+                    worktree="removed",
+                )
+                git_activity.set_settlement(
+                    "parent", "Agent", commits_ahead=0, dirty=False,
+                    worktree="removed", integrated=False,
+                )
                 # Quiesced session released: the chip reverts to the main
                 # tree's branch.
                 yield _ndjson({"type": "worktree_released"})
-            elif _settle.get("commits_ahead"):
+            elif _settle.get("branch"):
+                git_activity.set_context(
+                    "parent", "Agent",
+                    branch=str(_settle.get("branch") or ""),
+                    base_branch=str(_settle.get("base_branch") or ""),
+                    worktree="kept",
+                )
+                git_activity.set_settlement(
+                    "parent", "Agent",
+                    commits_ahead=int(_settle.get("commits_ahead") or 0),
+                    dirty=bool(_settle.get("dirty")), worktree="kept",
+                    integrated=False,
+                )
+            if _settle.get("commits_ahead"):
                 # Honest status instead of an implicit merge: the work
                 # lives on the branch until the user says otherwise.
                 _note = {
                     "branch": _settle.get("branch", ""),
                     "base_branch": _settle.get("base_branch", ""),
                     "worktree_id": _settle.get("worktree_id", str(conversation_id)),
-                    "worktree": _settle.get("worktree", ""),
                     "commits": _settle["commits_ahead"],
                     "dirty": bool(_settle.get("dirty")),
+                    "worktree_removed": bool(_settle.get("worktree_removed")),
+                    "integrated": bool(git_activity.lanes.get("parent", {}).get("integrated")),
                 }
                 await add_message(
                     conversation_id,
@@ -2226,6 +2317,14 @@ async def _run_agent_claimed(
                     json.dumps({"worktree_status": _note}, default=str),
                 )
                 yield _ndjson({"type": "worktree_status", **_note})
+        summary = git_activity.summary(
+            "cancelled" if cancel_ev.is_set() else run_outcome
+        )
+        if summary and not git_activity_emitted:
+            await _persist_git_activity_summary(conversation_id, summary)
+            git_activity_emitted = True
+            if sys.exc_info()[0] is None:
+                yield _ndjson({"type": "git_activity", **summary})
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

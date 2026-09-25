@@ -959,6 +959,7 @@ export interface AgentEvent {
     | 'worktree_status'
     | 'worktree_released'
     | 'file_changes'
+    | 'git_activity'
     | 'compacted'
     | 'compaction_failed'
     | 'model_call'
@@ -1014,6 +1015,11 @@ export interface AgentEvent {
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number
   deleted?: number
+  /** Structured, run-scoped Git activity summary. */
+  run_id?: string
+  outcome?: string
+  lanes?: Array<Record<string, unknown>>
+  coverage?: string
   /** The provider+model this turn's chat call is waiting on (model_call).
    *  Unset between the response arriving and the next call of the turn. */
   modelCall?: { provider: string; model: string; startedAt: number }

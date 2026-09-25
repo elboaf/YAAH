@@ -37,6 +37,7 @@ from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
 from backend.agent import worktrees
 from backend.agent.tools import execute_tool, get_schemas, workspace_root
+from backend.agent import git_activity as git_activity_mod
 
 # ------------------------------------------------------------------ registry
 
@@ -391,13 +392,28 @@ async def run_sub_agent(
     # agent's own worktree; every tool call goes through _exec so file,
     # shell, and git tools all follow the rebinding in one place.
     run_workspace = str(workspace)
+    activity = git_activity_mod.GitActivity(run_id=run_label or f"sub-{id(defn):x}")
+    actor_id = "subagent"
+    actor_label = defn.name
+    initial_child_wt = worktrees.worktree_of(run_workspace)
+    if initial_child_wt:
+        activity.set_context(
+            actor_id, actor_label, branch=await git_activity_mod._branch(initial_child_wt),
+            branch_action="reused", worktree="shared",
+        )
     _isolation_note: str | None = None
     # The key this sub-agent would bind under (its own chat id slot).
     _iso_key = run_label or f"sub-{id(defn):x}"
 
     async def _exec(name: str, args: dict) -> dict:
         nonlocal run_workspace, _isolation_note, _used_worktree
-        if _used_worktree is None and name in worktrees.WRITER_TRIGGERS:
+        needs_child_worktree = (
+            name in worktrees.WRITER_TRIGGERS
+            or name == "powershell"
+            or (name == "bash" and worktrees.should_isolate(name, args))
+            or name in {"git_add", "git_commit"}
+        )
+        if _used_worktree is None and needs_child_worktree:
             owned = worktrees.worktree_of(run_workspace)
             if owned is not None:
                 # Nested parent: the parent's session worktree IS this
@@ -408,17 +424,47 @@ async def run_sub_agent(
                 # the parent's worktree here would delete it mid-turn and
                 # unbind the parent's session.
                 run_workspace = owned
-                return await execute_tool(name, args, run_workspace)
+                activity.set_context(
+                    actor_id, actor_label,
+                    branch=await git_activity_mod._branch(run_workspace),
+                    branch_action="reused", worktree="shared",
+                )
+                result = await execute_tool(name, args, run_workspace)
+                try:
+                    await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
+                    if name in {"bash", "powershell"}:
+                        await activity.record_shell(
+                            actor_id, actor_label, str((args or {}).get("command") or ""),
+                            result, run_workspace,
+                        )
+                except Exception:
+                    pass
+                return result
             try:
                 run_workspace = await worktrees.ensure_isolated(
-                    run_workspace, chat_id=_iso_key
+                    run_workspace,
+                    chat_id=_iso_key,
+                    on_lifecycle=lambda info: git_activity_mod.record_worktree_lifecycle(
+                        activity, actor_id, actor_label, info
+                    ),
                 )
             except worktrees.IsolationRefused as e:
                 _isolation_note = str(e)
                 return {"error": str(e)}
             else:
                 _used_worktree = run_workspace
-        return await execute_tool(name, args, run_workspace)
+        result = await execute_tool(name, args, run_workspace)
+        if not (initial_child_wt and needs_child_worktree):
+            try:
+                await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
+                if name in {"bash", "powershell"}:
+                    await activity.record_shell(
+                        actor_id, actor_label, str((args or {}).get("command") or ""),
+                        result, run_workspace,
+                    )
+            except Exception:
+                pass
+        return result
 
     _used_worktree: str | None = None
 
@@ -585,6 +631,11 @@ async def run_sub_agent(
                             result = None
                         if result is None:
                             result = await _exec(name, args)
+                        else:
+                            try:
+                                await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
+                            except Exception:
+                                pass
                     if on_event:
                         on_event({"type": "tool_result", "name": name, "result": result})
 
@@ -754,12 +805,25 @@ async def run_sub_agent(
     if _used_worktree is not None and worktrees.binding_for(_iso_key) == _used_worktree:
         try:
             result = await worktrees.finalize_sub_agent(_used_worktree, result)
+            lane = activity._lane(actor_id, actor_label)
+            lane["commits_ahead"] = result.get("commits_ahead")
+            lane["worktree"] = "removed"
+            lane["dirty"] = bool(result.get("worktree_note"))
+            lane["integrated"] = False
         except Exception:  # noqa: BLE001 — reporting must not kill the parent
+            lane = activity._lane(actor_id, actor_label)
+            lane["worktree"] = "kept"
+            lane["integrated"] = False
             result["worktree_note"] = "worktree finalization failed; branch kept"
     else:
         worktrees.release_chat(_iso_key)
+        if not initial_child_wt:
+            lane = activity.lanes.get(actor_id)
+            if lane:
+                lane["worktree"] = "not-isolated"
     if _isolation_note:
         result["worktree_note"] = _isolation_note
+    result["git_activity"] = activity.summary(str(result.get("status") or "completed"))
     return result
 
 

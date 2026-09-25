@@ -215,6 +215,45 @@ async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_git_tool_run_emits_and_persists_separate_git_summary(fake_model, tmp_path, monkeypatch):
+    from backend.db.database import create_conversation, get_messages
+    from backend.agent import worktrees
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "main")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "file.txt").write_text("before\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "baseline")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="git-summary-test")
+    (Path(wt) / "file.txt").write_text("after\n", encoding="utf-8")
+    run_git(Path(wt), "add", "-A")
+    cid = await create_conversation("git activity summary")
+    monkeypatch.setattr(loop, "_generate_conversation_title", lambda *_: asyncio.sleep(0, result=None))
+    fake_model.append([{
+        "type": "tool_calls",
+        "tool_calls": [{
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "git_commit", "arguments": json.dumps({"message": "Run summary commit"})},
+        }],
+    }])
+    fake_model.append([{"type": "content", "text": "Committed."}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "commit this", str(wt)))
+    summary_event = next(event for event in events if event["type"] == "git_activity")
+    lane = next(lane for lane in summary_event["lanes"] if lane["id"] == "parent")
+    assert lane["branch_action"] == "reused"
+    assert lane["operations"][-1]["operation"] == "commit"
+    assert lane["operations"][-1]["subject"] == "Run summary commit"
+    saved = await get_messages(cid)
+    row = next(json.loads(message["content"]) for message in saved if message["role"] == "system" and "git_activity" in message["content"])
+    assert row["git_activity"]["run_id"] == summary_event["run_id"]
+
+
+@pytest.mark.asyncio
 async def test_usage_event_uses_frontend_context_token_field(fake_model, tmp_path):
     """The streamed usage count must match the frontend's usage_tokens contract."""
     from backend.db.database import create_conversation

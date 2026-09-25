@@ -1250,6 +1250,222 @@ function CompactionDivider({ summarized, summary }: { summarized?: number; summa
 
 type FileChange = { path: string; added: number; deleted: number; binary?: boolean }
 type FileChangeSummary = { files: FileChange[]; added: number; deleted: number }
+type GitActivityOperation = {
+  sequence: number
+  operation: string
+  outcome: string
+  source: string
+  certainty?: string
+  detail?: string
+  branch?: string
+  remote?: string
+  target_branch?: string
+  commit?: string
+  subject?: string
+}
+type GitActivityLane = {
+  id: string
+  label: string
+  branch?: string
+  base_branch?: string
+  branch_action?: string
+  commits_ahead?: number | null
+  dirty?: boolean | null
+  worktree?: string
+  integrated?: boolean | null
+  operations: GitActivityOperation[]
+}
+type GitActivitySummary = {
+  run_id: string
+  outcome: string
+  coverage?: string
+  lanes: GitActivityLane[]
+}
+
+const GIT_STEP_LABELS: Record<string, string> = {
+  checkout: 'Checkout / worktree',
+  stage: 'Stage changes',
+  commit: 'Commit',
+  push: 'Push',
+  pull: 'Pull',
+  merge: 'Merge back',
+  rebase: 'Rebase',
+  reset: 'Reset',
+  stash: 'Stash',
+  clean: 'Clean',
+  restore: 'Restore',
+  remove: 'Remove',
+  move: 'Move',
+  'cherry-pick': 'Cherry-pick',
+  revert: 'Revert',
+  worktree: 'Worktree',
+  branch: 'Branch',
+  tag: 'Tag',
+}
+
+function gitOutcomeLabel(outcome: string) {
+  switch (outcome) {
+    case 'succeeded': return 'completed'
+    case 'failed': return 'failed'
+    case 'blocked': return 'blocked'
+    case 'cancelled': return 'cancelled'
+    case 'no-op': return 'no changes'
+    case 'skipped': return 'skipped'
+    default: return 'outcome unknown'
+  }
+}
+
+let mermaidLoading: Promise<typeof import('mermaid')> | null = null
+
+function loadMermaid() {
+  if (!mermaidLoading) {
+    mermaidLoading = import('mermaid').then((module) => {
+      module.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', flowchart: { htmlLabels: false } })
+      return module
+    })
+  }
+  return mermaidLoading
+}
+
+function escapeMermaid(value: string): string {
+  return value.replace(/["\\[\]{}<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
+export function gitMermaid(summary: GitActivitySummary): string {
+  const lines = ['flowchart LR', '  primary["Primary workspace"]']
+  summary.lanes.forEach((lane, laneIndex) => {
+    const id = `lane${laneIndex}`
+    const branch = escapeMermaid(lane.branch || 'current branch')
+    const base = escapeMermaid(lane.base_branch || 'primary branch')
+    const start = `${id}Start`
+    const startLabel = lane.branch_action === 'created'
+      ? `${lane.label}: created ${branch}`
+      : lane.branch_action === 'reused'
+        ? `${lane.label}: reused ${branch}`
+        : `${lane.label}: ${branch}`
+    lines.push(`  ${start}["${escapeMermaid(startLabel)}"]`)
+    if (lane.branch_action !== 'none') lines.push(`  primary -. "from ${base}" .-> ${start}`)
+    let previous = start
+    lane.operations.forEach((op, opIndex) => {
+      const node = `${id}Op${opIndex}`
+      const operation = GIT_STEP_LABELS[op.operation] || op.operation
+      const detail = op.subject ? `${op.commit || ''} ${op.subject}` : op.detail || ''
+      const target = op.operation === 'push'
+        ? [op.remote, op.target_branch].filter(Boolean).join('/')
+        : op.target_branch ? `to ${op.target_branch}` : detail
+      lines.push(`  ${node}["${escapeMermaid(`${operation}: ${gitOutcomeLabel(op.outcome)}${target ? ` · ${target}` : ''}`)}"]`)
+      lines.push(`  ${previous} --> ${node}`)
+      previous = node
+    })
+    const confirmedMerge = lane.operations.find((op) => op.operation === 'merge' && op.outcome === 'succeeded')
+    if (lane.integrated === true && confirmedMerge?.target_branch) {
+      lines.push(`  ${id}Merged["Merged into ${escapeMermaid(confirmedMerge.target_branch)}"]`)
+      lines.push(`  ${previous} --> ${id}Merged --> primary`)
+    }
+    if (lane.branch_action !== 'none' && lane.integrated !== true) {
+      const end = `${id}End`
+      const lifecycle = lane.commits_ahead === 0 && !lane.dirty ? 'no unmerged work' : lane.worktree === 'removed' ? 'worktree removed' : lane.worktree === 'kept' ? 'worktree retained' : 'worktree status unknown'
+      const count = typeof lane.commits_ahead === 'number' && lane.commits_ahead > 0 ? ` · ${lane.commits_ahead} cumulative commits ahead` : ''
+      lines.push(`  ${end}["Not merged · ${escapeMermaid(lifecycle + count)}"]`)
+      lines.push(`  ${previous} -.-> ${end}`)
+    }
+  })
+  return lines.join('\n')
+}
+
+function GitActivityDiagram({ summary }: { summary: GitActivitySummary }) {
+  const [svg, setSvg] = useState('')
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let active = true
+    const id = `git-activity-${summary.run_id.replace(/[^A-Za-z0-9_-]/g, '') || 'run'}`
+    setSvg('')
+    void loadMermaid().then((module) => module.default.render(id, gitMermaid(summary))).then(({ svg: rendered }) => {
+      if (active) {
+        setSvg(rendered)
+        setFailed(false)
+      }
+    }).catch(() => {
+      if (active) setFailed(true)
+    })
+    return () => { active = false }
+  }, [summary])
+  if (failed || !svg) {
+    return <p className="text-[10px] text-zinc-500">Branch-flow diagram unavailable; the text timeline below contains the full summary.</p>
+  }
+  return (
+    <div className="overflow-x-auto rounded border border-zinc-800 bg-zinc-950 p-2" aria-hidden="true">
+      <div className="min-w-[520px] [&_svg]:h-auto [&_svg]:max-w-full" dangerouslySetInnerHTML={{ __html: svg }} />
+    </div>
+  )
+}
+
+function GitActivitySummary({ summary }: { summary: GitActivitySummary }) {
+  const [open, setOpen] = useState(false)
+  const panelId = useId()
+  const operations = summary.lanes.flatMap((lane) => lane.operations)
+  const failures = operations.filter((op) => ['failed', 'blocked', 'cancelled'].includes(op.outcome)).length
+  const label = operations.length
+    ? `${operations.length} Git ${operations.length === 1 ? 'operation' : 'operations'}`
+    : 'Git branch activity'
+  const scopeNote = summary.lanes.some((lane) => lane.branch_action !== 'none')
+    ? summary.lanes.map((lane) => lane.integrated === true ? 'merged into primary workspace' : `${lane.branch || 'branch'} remains separate`).join(' · ')
+    : 'Git operations recorded'
+  return (
+    <div className="w-fit max-w-full overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 font-mono text-[11px]">
+      <button
+        type="button"
+        className="flex min-h-7 max-w-full items-center gap-2 px-2 py-1 text-left text-zinc-300 hover:bg-zinc-800/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="w-2 text-zinc-500" aria-hidden="true">{open ? '\u2304' : '\u203a'}</span>
+        <span>{label}</span>
+        <span className={failures ? 'text-red-400' : 'text-zinc-500'}>
+          {failures ? `${failures} unsuccessful` : scopeNote}
+        </span>
+      </button>
+      {open && (
+        <div id={panelId} className="max-w-[min(80vw,760px)] space-y-3 border-t border-zinc-800 p-2">
+          <GitActivityDiagram summary={summary} />
+          <ol className="space-y-2" aria-label="Git operation timeline">
+            {summary.lanes.map((lane) => (
+              <li key={lane.id} className="space-y-1">
+                <div className="text-zinc-300">{lane.label} <span className="text-zinc-500">{lane.branch && `· ${lane.branch}`}</span></div>
+                {lane.branch_action !== 'none' && (
+                  <div className="pl-3 text-zinc-400">
+                    {lane.branch_action === 'created' ? `Created branch from ${lane.base_branch || 'the primary workspace'}` : lane.branch_action === 'reused' ? 'Reused existing branch/worktree' : 'Used the parent worktree'}
+                  </div>
+                )}
+                <ol className="space-y-1 pl-3">
+                  {lane.operations.map((op) => (
+                    <li key={`${lane.id}-${op.sequence}`} className="flex flex-wrap gap-x-2 text-zinc-400">
+                      <span className={op.outcome === 'succeeded' ? 'text-emerald-400' : ['failed', 'blocked'].includes(op.outcome) ? 'text-red-400' : 'text-amber-300'}>
+                        {GIT_STEP_LABELS[op.operation] || op.operation}: {gitOutcomeLabel(op.outcome)}
+                      </span>
+                      {op.commit && <span className="text-zinc-300">{op.commit} {op.subject}</span>}
+                      {op.operation === 'push' && <span>{[op.remote, op.target_branch].filter(Boolean).join('/') || op.detail}</span>}
+                      {op.operation === 'merge' && op.target_branch && <span>into {op.target_branch}</span>}
+                      {op.detail && op.operation !== 'push' && <span className="break-all">{op.detail}</span>}
+                      {op.certainty === 'uncertain' && <span className="text-amber-300">result may be incomplete</span>}
+                    </li>
+                  ))}
+                </ol>
+                {lane.branch_action !== 'none' && (
+                  <div className="pl-3 text-zinc-500">
+                    {lane.integrated === true ? `Merged into ${lane.operations.find((op) => op.operation === 'merge' && op.outcome === 'succeeded')?.target_branch || 'the primary workspace'}` : `Not merged${lane.commits_ahead === 0 && !lane.dirty ? ' · no unmerged work' : ` · ${lane.worktree === 'removed' ? 'worktree removed' : lane.worktree === 'kept' ? 'worktree retained' : 'worktree state unknown'}${typeof lane.commits_ahead === 'number' ? ` · ${lane.commits_ahead} commits ahead (cumulative)` : ''}${lane.dirty ? ' · uncommitted changes remain' : ''}`}`}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ol>
+          {summary.coverage && <p className="text-[10px] leading-4 text-zinc-500">Coverage: {summary.coverage}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
   const [open, setOpen] = useState(false)
@@ -1303,6 +1519,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
     if (!msg.content) return null
     let merge: { worktree_merge?: Record<string, unknown> } | null = null
     let fileChanges: FileChangeSummary | undefined
+    let gitActivity: GitActivitySummary | undefined
     let status: {
       worktree_status?: {
         branch?: string
@@ -1328,6 +1545,14 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       } else if (
         parsed &&
         typeof parsed === 'object' &&
+        'git_activity' in parsed &&
+        parsed.git_activity &&
+        typeof parsed.git_activity === 'object'
+      ) {
+        gitActivity = parsed.git_activity as GitActivitySummary
+      } else if (
+        parsed &&
+        typeof parsed === 'object' &&
         'worktree_status' in (parsed as object)
       ) {
         status = parsed as {
@@ -1344,10 +1569,11 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
     } catch {
       // not JSON — a genuine failure marker
     }
-    if (fileChanges) {
+    if (fileChanges || gitActivity) {
       return (
-        <div className="pl-3">
-          <FileChangesSummary summary={fileChanges} />
+        <div className="space-y-1 pl-3">
+          {fileChanges && <FileChangesSummary summary={fileChanges} />}
+          {gitActivity && <GitActivitySummary summary={gitActivity} />}
         </div>
       )
     }
@@ -7999,6 +8225,20 @@ function Composer() {
               },
         )
       }
+    } else if (ev.type === 'git_activity') {
+      appendRawMessage(bufKey, {
+        id: `git-activity-${ev.run_id ?? Date.now()}`,
+        role: 'system',
+        content: JSON.stringify({
+          git_activity: {
+            version: 1,
+            run_id: ev.run_id ?? '',
+            outcome: ev.outcome ?? 'unknown',
+            coverage: ev.coverage ?? '',
+            lanes: ev.lanes ?? [],
+          },
+        }),
+      })
     } else if (ev.type === 'file_changes') {
       appendRawMessage(bufKey, {
         id: `file-changes-${Date.now()}`,
