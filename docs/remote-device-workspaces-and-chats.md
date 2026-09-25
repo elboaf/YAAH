@@ -100,11 +100,14 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 
 **Implementation notes:** Phase 4 remains deliberately read-only. Host-owned chats must remain distinct from local-owned chats that happen to use remote workspaces. Remote viewer state is keyed by `(owner device ID, conversation ID)` and is kept separate from local integer-keyed conversation tables; remote IDs never enter local editable-chat selection or APIs. Main-chat composite identity and editable actions remain intentionally out of scope until remote editing is designed. Defer leases and bidirectional edits/sync to Phase 5, and remote-workspace turn execution to Phase 6.
 
-### Phase 5 — Per-chat leases and bidirectional sync
+### Phase 5 — Per-chat leases and bidirectional sync (in progress)
 
-- Implement host-enforced, expiring edit leases keyed by conversation; only edits/turns acquire them.
-- Sync remote history and metadata idempotently; refresh before edit; surface lock held elsewhere and stale revision errors.
-- Preserve partial turn output as pending sync after network loss. Retry sync on reconnection; do not silently discard or run an unsynchronized second editor.
+- [x] Implement host-enforced, expiring edit leases keyed by conversation and revision-aware idempotent snapshot commits.
+- [x] Add owner-scoped client proxies and durable pending transcript commits; preserve uncertain network outcomes and retry idempotently on refresh/reconnect.
+- [x] Add a separate lease-protected transcript edit mode; surface lock/revision/network errors and renew/release leases. Remote turns and workspace execution remain Phase 6.
+- [ ] Expand host local-write/run exclusion to every direct database mutation path and verify real multi-device online/offline behavior.
+
+**Implementation notes:** Protocol v4 requires matching client/host builds. Remote transcript edits are limited to editing existing message text in the isolated viewer; no composer sends, turns, workspace dispatch, message additions/deletions, or broad main-chat owner identity are enabled. Pending full-snapshot commits are retained durably, and background refresh does not overwrite them. A stale-revision conflict stays pending for explicit human resolution; it is never silently rebased or discarded.
 
 ### Phase 6 — Local agent turns with per-workspace remote tool dispatch
 

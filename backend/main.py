@@ -2409,8 +2409,8 @@ async def api_remote_device_commit(host_id: str, conversation_id: str, body: Rem
         # The durable request stays queued. A lost acknowledgement can be retried
         # with the exact same commit ID and host idempotency makes that safe.
         if isinstance(exc, HTTPException):
-            if exc.status_code in (409, 423, 422, 404):
-                await acknowledge_remote_commit(host_id, conversation_id, body.commit_id, "")
+            # Keep rejected/conflicted intents durable too. A human must refresh
+            # or resolve the conflict; never label their local edit as synced.
             raise
         raise HTTPException(status_code=503, detail="commit outcome unknown; pending commit retained") from exc
 
