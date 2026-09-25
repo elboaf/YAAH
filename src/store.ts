@@ -519,6 +519,11 @@ function loadStoredWorkspace(): string {
 
 /** Persist the workspace: localStorage immediately, backend config.json async. */
 export function persistWorkspace(ws: string): void {
+  if (ws.startsWith('remote:')) {
+    // Remote destinations are meaningful for the running client but the
+    // local backend's last-workspace restore is intentionally local-only.
+    return
+  }
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(WORKSPACE_KEY, ws)

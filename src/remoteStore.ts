@@ -1,8 +1,8 @@
-// Active connection scope, shared by the host switcher, sidebar conversation
-// list, and workspace picker. The backend owns the session; this mirrors its
-// /api/remote/status shape so the UI can scope (and grey out) what it shows.
+// Connected and saved remote devices. Device membership is metadata owned by
+// the backend; credentials are supplied only for the current connection and
+// never persisted by the browser.
 import { create } from 'zustand'
-import { remoteStatus } from './api'
+import { listRemoteDevices, remoteStatus, type RemoteDevice, type RemoteStatus } from './api'
 
 export interface RemoteScope {
   connected: boolean
@@ -14,24 +14,38 @@ export interface RemoteScope {
 
 interface RemoteState {
   scope: RemoteScope
+  devices: RemoteDevice[]
   setScope: (s: RemoteScope) => void
-  /** Re-read the backend's session (e.g. after a launch auto-reconnect). */
+  setDevices: (devices: RemoteDevice[]) => void
   refreshScope: () => Promise<void>
+  refreshDevices: () => Promise<boolean>
 }
+
+const asScope = (s: RemoteStatus): RemoteScope =>
+  s.connected
+    ? { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os }
+    : { connected: false }
 
 export const useRemote = create<RemoteState>((set) => ({
   scope: { connected: false },
+  devices: [],
   setScope: (scope) => set({ scope }),
+  setDevices: (devices) => set({ devices }),
   refreshScope: async () => {
     try {
-      const s = await remoteStatus()
-      set({
-        scope: s.connected
-          ? { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os }
-          : { connected: false },
-      })
+      set({ scope: asScope(await remoteStatus()) })
     } catch {
-      /* backend still starting; stays local until told otherwise */
+      /* backend still starting */
+    }
+  },
+  refreshDevices: async () => {
+    try {
+      const { devices } = await listRemoteDevices()
+      set({ devices })
+      return true
+    } catch {
+      /* transient backend error; preserve cached UI state */
+      return false
     }
   },
 }))

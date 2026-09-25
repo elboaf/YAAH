@@ -11,7 +11,14 @@ const { listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranch
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
-  return { ...actual, listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches, checkoutWorkspaceBranch }
+  return {
+    ...actual,
+    listLocalWorkspaces,
+    listWorkspaces,
+    addWorkspace,
+    getWorkspaceGitBranches,
+    checkoutWorkspaceBranch,
+  }
 })
 
 import { DraftDestinationCard } from './components'
@@ -34,10 +41,23 @@ describe('draft destination card (#90)', () => {
     listLocalWorkspaces.mockResolvedValue(workspaces)
     listWorkspaces.mockResolvedValue(workspaces)
     addWorkspace.mockResolvedValue(workspaces[0])
-    getWorkspaceGitBranches.mockResolvedValue({ branch: 'main', branches: ['feature', 'main'] })
-    checkoutWorkspaceBranch.mockResolvedValue({ ok: true, output: 'Switched to branch feature' })
-    useAgent.setState({ conversationId: null, workspace: 'C:/repos/project', draftDestination: null })
-    useRemote.getState().setScope({ connected: false })
+    getWorkspaceGitBranches.mockResolvedValue({
+      branch: 'main',
+      branches: ['feature', 'main'],
+    })
+    checkoutWorkspaceBranch.mockResolvedValue({
+      ok: true,
+      output: 'Switched to branch feature',
+    })
+    useAgent.setState({
+      conversationId: null,
+      workspace: 'C:/repos/project',
+      draftDestination: null,
+    })
+    useRemote.setState({
+      scope: { connected: false },
+      devices: [],
+    })
   })
 
   afterEach(() => {
@@ -70,7 +90,10 @@ describe('draft destination card (#90)', () => {
   })
 
   it('surfaces checkout failures in the draft card', async () => {
-    checkoutWorkspaceBranch.mockResolvedValueOnce({ ok: false, error: 'local changes would be overwritten' })
+    checkoutWorkspaceBranch.mockResolvedValueOnce({
+      ok: false,
+      error: 'local changes would be overwritten',
+    })
     render(<DraftDestinationCard />)
 
     fireEvent.click(await screen.findByRole('button', { name: /branch main/i }))
@@ -80,18 +103,59 @@ describe('draft destination card (#90)', () => {
     expect(screen.getByRole('button', { name: /branch main/i })).toBeInTheDocument()
   })
 
-  it('keeps the connected-host path fallback reachable from the card', async () => {
-    useRemote.getState().setScope({ connected: true })
+  it('does not offer cached workspaces as destinations while their device is offline', async () => {
+    useRemote.setState({
+      scope: { connected: false },
+      devices: [{ host_id: 'saved-host', url: 'http://host', name: 'Host', status: 'offline', workspaces: [] }],
+    })
+    listLocalWorkspaces.mockResolvedValue([
+      ...workspaces,
+      { ...workspaces[0], id: 2, path: 'remote:saved-host:C:/repo', label: 'project', owner_id: 'saved-host', device_status: 'cached' },
+    ])
+    render(<DraftDestinationCard />)
+
+    await waitFor(() => expect(listLocalWorkspaces).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('option', { name: /Host · project/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps adding a folder available for the selected online device', async () => {
+    useAgent.setState({
+      conversationId: null,
+      workspace: 'remote:saved-host:',
+      draftDestination: null,
+    })
+    useRemote.setState({
+      scope: { connected: false },
+      devices: [
+        {
+          host_id: 'saved-host',
+          url: 'http://host',
+          name: 'Host',
+          status: 'online',
+          workspaces: [],
+        },
+      ],
+    })
+    listWorkspaces.mockResolvedValue([
+      {
+        ...workspaces[0],
+        path: 'remote:saved-host:C:/repo',
+        owner_id: 'saved-host',
+        device_status: 'online',
+      },
+    ])
     render(<DraftDestinationCard />)
 
     await waitFor(() => expect(listWorkspaces).toHaveBeenCalledOnce())
     fireEvent.click(screen.getByRole('button', { name: /add folder on host/i }))
-    const pathInput = screen.getByRole('textbox', { name: 'Folder path on the host' })
+    const pathInput = screen.getByRole('textbox', {
+      name: 'Folder path on the host',
+    })
     expect(pathInput).toBeInTheDocument()
     fireEvent.change(pathInput, { target: { value: 'D:/work/new-project' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
 
-    await waitFor(() => expect(addWorkspace).toHaveBeenCalledWith('D:/work/new-project'))
-    expect(useAgent.getState().draftDestination).toBe('D:/work/new-project')
+    await waitFor(() => expect(addWorkspace).toHaveBeenCalledWith('remote:saved-host:D:/work/new-project', 'saved-host'))
+    expect(useAgent.getState().draftDestination).toBe('remote:saved-host:D:/work/new-project')
   })
 })

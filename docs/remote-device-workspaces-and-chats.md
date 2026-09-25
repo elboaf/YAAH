@@ -74,15 +74,15 @@ Design accepted; implementation is phased. The first backend slice adds a regist
 
 ### Phase 2 — Per-device connection API and workspace aggregation
 
-- Add APIs to save/connect/remove/query multiple devices without replacing a global active connection.
-- Aggregate local and reachable remote workspace rows; route remote file/attachment/workspace CRUD operations by explicit owner.
-- Cover online/offline/error responses and prevent one host's failure from hiding other workspaces.
+- [x] Add APIs to save/connect/remove/query multiple devices without replacing a global active connection.
+- [x] Aggregate local and reachable remote workspace rows; route remote file/attachment/workspace CRUD operations by explicit owner.
+- [x] Cover online/offline/error responses and prevent one host's failure from hiding other workspaces.
 
 ### Phase 3 — Sidebar device hierarchy and persistent profiles
 
-- Add device-parent groups with connection status and device-specific workspace/chat grouping.
-- Keep local workspace rows and chats fully usable at all times; preserve existing local-owned chats.
-- Add device management (add/discover, reconnect, refresh, remove) outside the composer; selecting a device must not toggle global execution scope.
+- [x] Add device-parent groups with connection status and device-specific workspace/local-chat grouping.
+- [x] Keep local workspace rows and chats fully usable at all times; preserve existing local-owned chats.
+- [x] Add device management (add/discover, reconnect, refresh, remove) outside the composer; selecting a device must not toggle global execution scope.
 
 ### Phase 4 — Remote-owned conversation cache and read path
 

@@ -9,6 +9,7 @@ Legacy flat configs (single api_base/api_key/model) are migrated on load.
 Environment variables (AGENT_API_BASE/KEY/MODEL) override the active
 provider's fields.
 """
+
 import json
 import os
 import sys
@@ -29,8 +30,7 @@ def _default_config_dir() -> Path:
 # YAAH_CONFIG_PATH lets the test suite redirect this (default path is the
 # user's real config).
 CONFIG_PATH = Path(
-    os.environ.get("YAAH_CONFIG_PATH")
-    or _default_config_dir() / "config.json"
+    os.environ.get("YAAH_CONFIG_PATH") or _default_config_dir() / "config.json"
 )
 
 DEFAULTS = {
@@ -58,6 +58,9 @@ DEFAULTS = {
         # "" disables. Tauri accelerator syntax, e.g. "Ctrl+Space".
         "ptt_hotkey": "Ctrl+Space",
     },
+    # Saved remote device metadata. Passphrases are intentionally never
+    # persisted here; users re-enter them after a backend restart.
+    "remote_devices": [],
     # LAN hosting (see backend/agent/remote.py + discovery.py). Hosting is
     # on by default; a host with no passphrase refuses remote exec.
     "remote": {
@@ -158,7 +161,9 @@ def load_config() -> dict:
         except (json.JSONDecodeError, OSError):
             raw = {}
     raw = _migrate(raw or {})
-    cfg.update({k: v for k, v in raw.items() if k not in ("api_base", "api_key", "model")})
+    cfg.update(
+        {k: v for k, v in raw.items() if k not in ("api_base", "api_key", "model")}
+    )
     cfg.setdefault("providers", {})
     cfg.setdefault("active_provider", "")
 
@@ -196,10 +201,15 @@ def set_active_model(provider: str, model: str):
     cfg = load_config()
     if provider not in cfg["providers"]:
         return
-    save_config({"active_provider": provider, "providers": {
+    save_config(
+        {
+            "active_provider": provider,
+            "providers": {
         **{n: p for n, p in cfg["providers"].items() if n != provider},
         provider: {**cfg["providers"][provider], "model": model},
-    }})
+            },
+        }
+    )
 
 
 def set_last_workspace(workspace: str):
@@ -230,7 +240,10 @@ def save_config(updates: dict):
         merged = {}
         for name, p in incoming_providers.items():
             base = saved.get(name, {})
-            new = {**base, **{k: v for k, v in (p or {}).items() if v not in (None, "")}}
+            new = {
+                **base,
+                **{k: v for k, v in (p or {}).items() if v not in (None, "")},
+            }
             # explicit removal of a key is not supported via merge; blank keeps old
             merged[name] = new
         current["providers"] = merged

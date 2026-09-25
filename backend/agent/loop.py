@@ -12,6 +12,7 @@ Emits JSON-line events for the frontend:
   {'type': 'done'}                          - final answer complete
   {'type': 'error', 'message'}              - fatal error
 """
+
 import asyncio
 import itertools
 import json
@@ -40,7 +41,9 @@ from backend.db.database import (
 AUTO_TITLE_MAX_CHARS = 60
 
 
-async def _generate_conversation_title(conversation_id: int, user_text: str) -> str | None:
+async def _generate_conversation_title(
+    conversation_id: int, user_text: str
+) -> str | None:
     """Replace the generated first-message slice with a concise model title.
 
     Runs after the first successful turn. Manual titles and pinned agent chat
@@ -52,7 +55,11 @@ async def _generate_conversation_title(conversation_id: int, user_text: str) -> 
     current = (conv or {}).get("title") or ""
     history = await get_messages(conversation_id)
     first_user_text = next(
-        (str(message.get("content") or "") for message in history if message.get("role") == "user"),
+        (
+            str(message.get("content") or "")
+            for message in history
+            if message.get("role") == "user"
+        ),
         user_text,
     )
     if current != "New chat" and current != first_user_text[:40]:
@@ -143,6 +150,8 @@ def _agents_notes(workspace: str) -> str:
     remote workspaces (the file lives on the host, unreadable here) and
     swallowed on read errors — optional context must never break a turn."""
     try:
+        if workspace and workspace.startswith("remote:"):
+            return ""
         root = workspace_root(workspace)
         if not root.is_dir():
             return ""
@@ -273,7 +282,14 @@ def _default_system_prompt(workspace: str = "") -> str:
     on the host instead of always claiming the host's home."""
     from backend.agent import remote as remote_mod
 
-    host = remote_mod.get_remote()
+    # Namespaced workspaces choose their own device, independent of any
+    # legacy active connection. Unnamespaced paths retain compatibility for
+    # older clients that still use the singleton host switcher.
+    host = (
+        remote_mod.remote_for_workspace(workspace)
+        if remote_mod.parse_ns(workspace) is not None
+        else remote_mod.get_remote()
+    )
     if host is not None:
         env = host.env_line(workspace)
         windows = host.windows
@@ -410,6 +426,7 @@ Interview the user (ask_user tool):
     prompt += "\n\n" + subagents_mod.index_for_prompt()
     return prompt
 
+
 # Per-conversation cancellation flags checked between model/tool steps.
 _cancel_events: dict[int, asyncio.Event] = {}
 
@@ -429,6 +446,7 @@ def try_begin_run(conversation_id: int) -> bool:
         return False
     _running_convs.add(conversation_id)
     return True
+
 
 # Pending ask_user calls: "conversation_id:call_id" -> Future carrying the
 # user's answer text. Resolved by the /answer API endpoint.
@@ -511,7 +529,12 @@ def enqueue_message(
     """Queue a user message for the running conversation; returns the item."""
     global _queue_seq
     _queue_seq += 1
-    item = {"id": _queue_seq, "text": text, "skills": skills or [], "images": images or []}
+    item = {
+        "id": _queue_seq,
+        "text": text,
+        "skills": skills or [],
+        "images": images or [],
+    }
     _message_queues.setdefault(conversation_id, []).append(item)
     return item
 
@@ -559,10 +582,13 @@ async def _take_injections(conversation_id: int) -> list[dict]:
     return items
 
 
-def _apply_injected_skills(item: dict, loaded_skills: list[str], messages: list) -> None:
+def _apply_injected_skills(
+    item: dict, loaded_skills: list[str], messages: list
+) -> None:
     """Add explicitly selected queued-message skills to the active run."""
     names = [
-        name for name in item.get("skills", [])
+        name
+        for name in item.get("skills", [])
         if isinstance(name, str) and name.strip() and name not in loaded_skills
     ]
     if not names:
@@ -795,7 +821,11 @@ def _ndjson(event: dict) -> str:
 
 
 async def _execute_with_progress(
-    name: str, args: dict, workspace: str, call_id: str, box: dict,
+    name: str,
+    args: dict,
+    workspace: str,
+    call_id: str,
+    box: dict,
     cancel_ev: asyncio.Event | None = None,
     steer_ev: asyncio.Event | None = None,
 ):
@@ -949,11 +979,14 @@ async def load_history(conversation_id: int) -> list:
             m = {"role": "assistant", "content": r["content"]}
             tcs = r.get("tool_calls")
             # Only replay well-formed OpenAI tool calls (id + function.name)
-            if tcs and isinstance(tcs[0], dict) and tcs[0].get("id") and tcs[0].get("function"):
+            if (
+                tcs
+                and isinstance(tcs[0], dict)
+                and tcs[0].get("id")
+                and tcs[0].get("function")
+            ):
                 m["tool_calls"] = tcs
-                valid_call_ids.update(
-                    tc.get("id", "") for tc in tcs if tc.get("id")
-                )
+                valid_call_ids.update(tc.get("id", "") for tc in tcs if tc.get("id"))
             out.append(m)
         elif role == "tool":
             # Prefer the dedicated tool_call_id column; fall back to the
@@ -1044,10 +1077,12 @@ async def run_agent(
 ) -> AsyncIterator[str]:
     """Claim a conversation and always release it when its stream ends."""
     if not try_begin_run(conversation_id):
-        yield _ndjson({
+        yield _ndjson(
+            {
             "type": "error",
             "message": "a turn is already running in this conversation",
-        })
+            }
+        )
         return
 
     try:
@@ -1143,7 +1178,9 @@ async def _run_agent_claimed(
     if invoked:
         skill_block = skill_registry.bodies_for_prompt(invoked)
         if skill_block:
-            system_prompt = f"{system_prompt}\n\n---\n\n# Invoked skills\n\n{skill_block}"
+            system_prompt = (
+                f"{system_prompt}\n\n---\n\n# Invoked skills\n\n{skill_block}"
+            )
 
     # The project's own agent instructions (baseline failures, shell quirks,
     # prerequisites) travel with the workspace, so read them fresh each turn.
@@ -1291,7 +1328,12 @@ async def _run_agent_claimed(
                             opening = say_open_tag.search(tail)
                             if opening is not None:
                                 if opening.start():
-                                    yield _ndjson({"type": "text", "text": tail[: opening.start()]})
+                                    yield _ndjson(
+                                        {
+                                            "type": "text",
+                                            "text": tail[: opening.start()],
+                                        }
+                                    )
                                 say_open = True
                                 say_buf = tail[opening.end() :]
                                 tail = ""
@@ -1300,10 +1342,17 @@ async def _run_agent_claimed(
                             # Hold only a trailing prefix of a possible opener.
                             # A plain '<' or '<sa' at the delta boundary must
                             # not escape before the rest of the tag arrives.
-                            candidate = re.search(r"<\s*(?:s(?:a(?:y)?)?)?\s*$", tail, re.I)
+                            candidate = re.search(
+                                r"<\s*(?:s(?:a(?:y)?)?)?\s*$", tail, re.I
+                            )
                             if candidate is not None:
                                 if candidate.start():
-                                    yield _ndjson({"type": "text", "text": tail[: candidate.start()]})
+                                    yield _ndjson(
+                                        {
+                                            "type": "text",
+                                            "text": tail[: candidate.start()],
+                                        }
+                                    )
                                 tail = tail[candidate.start() :]
                             elif tail:
                                 yield _ndjson({"type": "text", "text": tail})
@@ -1431,9 +1480,7 @@ async def _run_agent_claimed(
                             "type": "usage",
                             "usage_tokens": usage["prompt_tokens"],
                             "model": (
-                                model_override
-                                or load_config().get("model")
-                                or None
+                                model_override or load_config().get("model") or None
                             ),
                         }
                     )
@@ -1588,14 +1635,17 @@ async def _run_agent_claimed(
                                     # parent's worktree binding is not a
                                     # new isolation).
                                     if turn_workspace != original_workspace:
-                                        _binfo = worktrees.binding_for(
-                                            str(conversation_id)
-                                        ) or {}
+                                        _binfo = (
+                                            worktrees.binding_for(str(conversation_id))
+                                            or {}
+                                        )
                                         yield _ndjson(
                                             {
                                                 "type": "worktree_bound",
                                                 "branch": _binfo.get("branch", ""),
-                                                "base_branch": _binfo.get("base_branch", ""),
+                                                "base_branch": _binfo.get(
+                                                    "base_branch", ""
+                                                ),
                                                 "worktree_id": str(conversation_id),
                                             }
                                         )
@@ -1615,8 +1665,13 @@ async def _run_agent_claimed(
                             if not _refused:
                                 box: dict = {}
                                 async for pev in _execute_with_progress(
-                                    name, args, turn_workspace, tc.get("id", ""), box,
-                                    cancel_ev=cancel_ev, steer_ev=steer_ev,
+                                    name,
+                                    args,
+                                    turn_workspace,
+                                    tc.get("id", ""),
+                                    box,
+                                    cancel_ev=cancel_ev,
+                                    steer_ev=steer_ev,
                                 ):
                                     yield _ndjson(pev)
                                 result = box.get("result")
@@ -1653,23 +1708,33 @@ async def _run_agent_claimed(
                             # denial/plan-block carries its own error result.
                             if result is None:
                                 # Issue #58 rebinding seam (gated path):
-                                if (tool_risk(name) != "read" and not _isolated
-                                    and worktrees.should_isolate(name, args)):
+                                if (
+                                    tool_risk(name) != "read"
+                                    and not _isolated
+                                    and worktrees.should_isolate(name, args)
+                                ):
                                     try:
-                                        turn_workspace = await worktrees.ensure_isolated(
+                                        turn_workspace = (
+                                            await worktrees.ensure_isolated(
                                             workspace, chat_id=str(conversation_id)
+                                        )
                                         )
                                         _isolated = True
                                         workspace = turn_workspace
                                         if turn_workspace != original_workspace:
-                                            _binfo = worktrees.binding_for(
+                                            _binfo = (
+                                                worktrees.binding_for(
                                                 str(conversation_id)
-                                            ) or {}
+                                                )
+                                                or {}
+                                            )
                                             yield _ndjson(
                                                 {
                                                     "type": "worktree_bound",
                                                     "branch": _binfo.get("branch", ""),
-                                                    "base_branch": _binfo.get("base_branch", ""),
+                                                    "base_branch": _binfo.get(
+                                                        "base_branch", ""
+                                                    ),
                                                     "worktree_id": str(conversation_id),
                                                 }
                                             )
@@ -1688,8 +1753,13 @@ async def _run_agent_claimed(
                                 if result is None:
                                     box = {}
                                     async for pev in _execute_with_progress(
-                                        name, args, turn_workspace, tc.get("id", ""), box,
-                                        cancel_ev=cancel_ev, steer_ev=steer_ev,
+                                        name,
+                                        args,
+                                        turn_workspace,
+                                        tc.get("id", ""),
+                                        box,
+                                        cancel_ev=cancel_ev,
+                                        steer_ev=steer_ev,
                                     ):
                                         yield _ndjson(pev)
                                     result = box.get("result")
@@ -1756,10 +1826,23 @@ async def _run_agent_claimed(
                 # replayed from history, announced to the UI.
                 for inj in await _take_injections(conversation_id):
                     yield _ndjson(
-                        {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "skills": inj.get("skills", [])}
+                        {
+                            "type": "user_injected",
+                            "text": inj["text"],
+                            "id": inj["id"],
+                            "images": inj.get("images", []),
+                            "skills": inj.get("skills", []),
+                        }
                     )
                     _apply_injected_skills(inj, loaded_skills, messages)
-                    messages.append({"role": "user", "content": _parts_with_images(inj["text"], inj.get("images", []))})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": _parts_with_images(
+                                inj["text"], inj.get("images", [])
+                            ),
+                        }
+                    )
 
             # Run every spawn_agent delegation of this step in parallel.
             # Progress events flow through a queue so the generator can
@@ -1784,7 +1867,10 @@ async def _run_agent_claimed(
                         {
                             "type": "tool_start",
                             "name": "spawn_agent",
-                            "args": {"agent_type": calls[-1]["agent_type"], "prompt": calls[-1]["prompt"]},
+                            "args": {
+                                "agent_type": calls[-1]["agent_type"],
+                                "prompt": calls[-1]["prompt"],
+                            },
                             "call_id": tc.get("id", ""),
                         }
                     )
@@ -1937,7 +2023,13 @@ async def _run_agent_claimed(
         # holds the queue so explicit silence wins.
         for inj in await _take_injections(conversation_id):
             yield _ndjson(
-                {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "skills": inj.get("skills", [])}
+                {
+                    "type": "user_injected",
+                    "text": inj["text"],
+                    "id": inj["id"],
+                    "images": inj.get("images", []),
+                    "skills": inj.get("skills", []),
+                }
             )
         remaining = _drain_queue(conversation_id)
         if remaining and not cancel_ev.is_set():

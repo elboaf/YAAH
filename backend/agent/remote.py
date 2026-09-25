@@ -12,6 +12,7 @@ Handshake/protocol: bump PROTOCOL_VERSION whenever the remote exec
 contract changes; a client refuses to connect to a host advertising a
 different protocol (clear "update both sides" error, per design).
 """
+
 import json
 import platform
 import secrets
@@ -59,6 +60,7 @@ def parse_ns(ws: str | None) -> tuple[str, str] | None:
         hid, _, path = ws[len("remote:"):].partition(":")
         return hid, path
     return None
+
 
 # Workspace-touching tools: the only ones that execute remotely. Everything
 # else (web tools, ask_user, load_skill, view_image) stays client-local.
@@ -184,7 +186,9 @@ class RemoteSession:
             if res.status_code == 401:
                 return {"error": "remote host rejected the passphrase"}
             if res.status_code != 200:
-                return {"error": f"remote exec failed ({res.status_code}): {res.text[:200]}"}
+                return {
+                    "error": f"remote exec failed ({res.status_code}): {res.text[:200]}"
+                }
             return res.json()
         except (httpx.HTTPError, OSError, json.JSONDecodeError) as e:
             return {"error": f"remote host unreachable: {type(e).__name__}: {e}"}
@@ -230,7 +234,10 @@ def unregister_remote(host_id: str) -> RemoteSession | None:
     global _active_host_id
     removed = _sessions.pop(host_id, None)
     if _active_host_id == host_id:
-        _active_host_id = None
+        # A new UI connects devices without assigning a global active host;
+        # when a legacy host goes away, fall back to another live session if
+        # present instead of making local execution appear disconnected.
+        _active_host_id = next(iter(_sessions), None)
     return removed
 
 

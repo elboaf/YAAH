@@ -69,11 +69,12 @@ import {
   deleteWorkspace,
   discoverHosts,
   localInstanceInfo,
-  remoteStatus,
-  connectRemote,
-  disconnectRemote,
+  addRemoteDevice,
+  connectRemoteDevice,
+  disconnectRemoteDevice,
+  removeRemoteDevice,
+  type RemoteDevice,
   type RemoteHostFound,
-  type RemoteStatus,
   type FileEntry,
   type ProviderPreset,
   type SkillInfo,
@@ -1736,7 +1737,7 @@ export function FilesPanel() {
   const [loading, setLoading] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('filesPanelCollapsed') === '1')
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null)
-  const cacheKey = `${scope.connected ? scope.url : 'local'}|${workspace}`
+  const cacheKey = `${parseNsWorkspace(workspace)?.hostId ?? 'local'}|${workspace}`
 
   const toggleCollapsed = () =>
     setCollapsed((c) => {
@@ -2448,33 +2449,195 @@ const wsBasename = (path: string) => {
 const expandKey = (path: string | null) =>
   `yaah.group.expanded.${path ?? 'default'}`
 
-/** Groups for the greyed "This device" section shown while connected. */
-function buildLocalGroups(
-  localWorkspaces: WorkspaceRow[],
-  localConvs: Array<{ id: number; title: string; workspace: string | null }>,
-) {
-  const groups: Array<{ ws: WorkspaceRow; items: typeof localConvs }> = localWorkspaces.map(
-    (ws) => ({ ws, items: localConvs.filter((c) => (c.workspace ?? null) === ws.path) }),
-  )
-  const known = new Set(localWorkspaces.map((w) => w.path))
-  for (const c of localConvs) {
-    if (!known.has(c.workspace ?? null)) {
-      groups.push({
-        ws: {
-          id: -1,
-          path: c.workspace ?? null,
-          label: c.workspace === null ? 'Default (Home)' : wsBasename(c.workspace),
-          last_opened_at: null,
-          exists: true,
-          conversation_count: 0,
-        },
-        items: [],
-      })
+function DeviceGroups({
+  devices,
+  workspaces,
+  conversations,
+  onChange,
+  onOpenConversation,
+}: {
+  devices: RemoteDevice[]
+  workspaces: WorkspaceRow[]
+  conversations: Array<{ id: number; title: string; workspace: string | null; updated_at: string }>
+  onChange: () => void
+  onOpenConversation: (conversation: { id: number; workspace: string | null }) => void
+}) {
+  const [adding, setAdding] = useState(false)
+  const [url, setUrl] = useState('')
+  const [passphrase, setPassphrase] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [hosts, setHosts] = useState<RemoteHostFound[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [working, setWorking] = useState<string | null>(null)
+  const [passByDevice, setPassByDevice] = useState<Record<string, string>>({})
+  const [removeConfirmId, setRemoveConfirmId] = useState<string | null>(null)
+  const [disconnectConfirmId, setDisconnectConfirmId] = useState<string | null>(null)
+  const [refreshingDevices, setRefreshingDevices] = useState(false)
+  const [expandedDevices, setExpandedDevices] = useState<Record<string, boolean>>({})
+  const [addingFolderFor, setAddingFolderFor] = useState<string | null>(null)
+  const [folderPath, setFolderPath] = useState('')
+  const askToConnect = async (device: RemoteDevice) => {
+    const secret = passByDevice[device.host_id] ?? ''
+    setWorking(device.host_id)
+    setError(null)
+    try {
+      await connectRemoteDevice(device.host_id, secret)
+      setPassByDevice((current) => ({ ...current, [device.host_id]: '' }))
+      await useRemote.getState().refreshDevices()
+      onChange()
+    } catch (e) {
+      setError(String((e as Error).message ?? e).replace(/^\\d+:\\s*/, ''))
+    } finally {
+      setWorking(null)
     }
   }
-  return groups.filter((g) => g.items.length > 0 || g.ws.path === null)
+  const scan = async () => {
+    setScanning(true)
+    setError(null)
+    try {
+      const [found, me] = await Promise.all([discoverHosts(), localInstanceInfo()])
+      setHosts(found.hosts.filter((host) => host.iid && host.iid !== me.instance_id))
+    } catch (e) {
+      setError(String((e as Error).message ?? e))
+    } finally {
+      setScanning(false)
+    }
+  }
+  const add = async (deviceUrl = url, secret = passphrase) => {
+    if (!deviceUrl.trim()) return
+    setWorking('add')
+    setError(null)
+    try {
+      await addRemoteDevice(deviceUrl.trim(), secret)
+      setPassphrase('')
+      setUrl('')
+      setAdding(false)
+      await useRemote.getState().refreshDevices()
+      onChange()
+    } catch (e) {
+      setError(String((e as Error).message ?? e).replace(/^\\d+:\\s*/, ''))
+    } finally {
+      setWorking(null)
+    }
+  }
+  const remove = async (device: RemoteDevice) => {
+    setWorking(device.host_id)
+    try {
+      await removeRemoteDevice(device.host_id)
+      await useRemote.getState().refreshDevices()
+      onChange()
+    } catch (e) {
+      setError(String((e as Error).message ?? e))
+    } finally {
+      setWorking(null)
+    }
+  }
+  const refreshDeviceList = async () => {
+    if (refreshingDevices) return
+    setRefreshingDevices(true)
+    setError(null)
+    const ok = await useRemote.getState().refreshDevices()
+    if (ok) onChange()
+    else setError('Could not refresh devices. Check the backend connection and try again.')
+    setRefreshingDevices(false)
+  }
+  const selectDeviceWorkspace = (workspacePath: string) => {
+    useAgent.getState().setWorkspace(workspacePath)
+    useAgent.getState().newConversation()
+    void getWorkspaceGitBranches(workspacePath).catch(() => {})
+  }
+  return (
+    <section className="mb-2 border-b border-zinc-800 pb-2" aria-label="Remote devices">
+      <div className="flex items-center justify-between px-1 py-1">
+        <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Remote devices</h2>
+        <div className="flex items-center gap-1">
+          <button className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 disabled:opacity-50" onClick={() => void refreshDeviceList()} disabled={refreshingDevices || working !== null} aria-label="Refresh devices" title="Refresh device status and workspace lists">
+            {refreshingDevices ? 'Refreshing…' : '↻ Refresh'}
+          </button>
+          <button className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={() => { setAdding((value) => !value); setError(null) }} aria-expanded={adding}>+ Add</button>
+        </div>
+      </div>
+      {adding && (
+        <div className="space-y-1.5 px-1 pb-2">
+          <input aria-label="Device URL" className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-[11px] text-zinc-200 placeholder:text-zinc-500 focus:border-blue-500 focus:outline-none" placeholder="http://192.168.1.10:8765" value={url} onChange={(event) => setUrl(event.target.value)} />
+          <input aria-label="Device passphrase" type="password" autoComplete="new-password" className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-[11px] text-zinc-200 placeholder:text-zinc-500 focus:border-blue-500 focus:outline-none" placeholder="Passphrase (not saved)" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} />
+          <div className="flex items-center justify-between">
+            <button className="rounded px-1 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-200 disabled:opacity-50" disabled={scanning || working !== null} onClick={() => void scan()}>{scanning ? 'Scanning…' : 'Scan network'}</button>
+            <div className="flex gap-1.5"><button className="rounded px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-800" onClick={() => setAdding(false)}>Cancel</button><button className="rounded bg-blue-600 px-2 py-1 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50" disabled={working !== null || !url.trim()} onClick={() => void add()}>{working === 'add' ? 'Verifying…' : 'Save device'}</button></div>
+          </div>
+          {hosts.length > 0 && <div className="max-h-24 overflow-auto border-t border-zinc-800 pt-1">{hosts.map((host) => <button key={`${host.host}:${host.port}`} className="block w-full truncate px-1 py-1 text-left text-[10px] text-zinc-300 hover:bg-zinc-800" onClick={() => { const discovered = `http://${host.host}:${host.port}`; setUrl(discovered); if (!host.auth) void add(discovered, '') }}>{host.name} · {host.host}:{host.port}</button>)}</div>}
+          {error && <p role="alert" className="text-[10px] text-red-400">{error}</p>}
+        </div>
+      )}
+      {devices.map((device) => {
+        const deviceWorkspaces = workspaces.filter((row) => row.owner_id === device.host_id)
+        const deviceConversations = conversations.filter((conversation) => parseNsWorkspace(conversation.workspace)?.hostId === device.host_id).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        const connected = device.status === 'online'
+        const statusLabel = device.status === 'online' ? 'online' : device.status === 'error' ? 'connection error' : 'offline · cached'
+        const expanded = expandedDevices[device.host_id] ?? true
+        const addFolder = async () => {
+          const raw = folderPath.trim()
+          if (!raw || !connected) return
+          setWorking(device.host_id)
+          setError(null)
+          try {
+            const namespaced = nsWorkspace(device.host_id, raw)
+            await addWorkspace(namespaced, device.host_id)
+            setFolderPath('')
+            setAddingFolderFor(null)
+            await useRemote.getState().refreshDevices()
+            onChange()
+          } catch (e) {
+            setError(String((e as Error).message ?? e))
+          } finally {
+            setWorking(null)
+          }
+        }
+        return (
+          <div key={device.host_id} className="group/device">
+            <div className="flex items-center gap-1 rounded px-1 py-1 hover:bg-zinc-800/50">
+              <button className="rounded px-1 text-[10px] text-zinc-600 hover:text-zinc-200" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${device.name}`} aria-expanded={expanded} onClick={() => setExpandedDevices((current) => ({ ...current, [device.host_id]: !expanded }))}>{expanded ? '⌄' : '›'}</button>
+              <button className="min-w-0 flex-1 truncate text-left text-xs text-zinc-300" title={`${device.url} · ${statusLabel}`} onClick={() => setExpandedDevices((current) => ({ ...current, [device.host_id]: true }))}>{device.name}</button>
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${connected ? 'bg-emerald-500' : device.status === 'error' ? 'bg-red-500' : 'bg-zinc-600'}`} title={statusLabel} aria-label={statusLabel} />
+              <button className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-700 hover:text-zinc-200 disabled:opacity-50" aria-label={connected ? `Disconnect ${device.name}` : `Reconnect ${device.name}`} title={connected ? 'Disconnect device' : 'Reconnect device'} disabled={working !== null || (!connected && !(passByDevice[device.host_id] ?? ''))} onClick={() => connected ? setDisconnectConfirmId(device.host_id) : void askToConnect(device)}>{working === device.host_id ? '…' : connected ? '−' : '↻'}</button>
+              {!connected && <input className="w-20 rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 font-mono text-[9px] text-zinc-300 placeholder:text-zinc-600 focus:border-blue-500 focus:outline-none" type="password" autoComplete="new-password" aria-label={`Passphrase for ${device.name}`} placeholder="passphrase" value={passByDevice[device.host_id] ?? ''} onChange={(event) => setPassByDevice((current) => ({ ...current, [device.host_id]: event.target.value }))} />}
+              <button className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover/device:opacity-100 focus:opacity-100" aria-label={`Remove ${device.name}`} title="Remove device profile" disabled={working !== null} onClick={() => setRemoveConfirmId(device.host_id)}>×</button>
+            </div>
+            {expanded && <>
+              {deviceWorkspaces.map((row) => (
+                <div key={row.path ?? `${device.host_id}:default`}>
+                  <button className="flex w-full items-center gap-1.5 truncate rounded py-1 pl-6 pr-1 text-left font-mono text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:opacity-50" disabled={!connected} title={connected ? row.path ?? 'Device home folder' : 'Offline — cached workspace name; reconnect to use'} onClick={() => selectDeviceWorkspace(row.path ?? '')}><span className="truncate">{row.label}</span><span className="ml-auto shrink-0 text-[9px] text-zinc-600" aria-hidden="true">›</span></button>
+                  {deviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => (
+                    <button key={conversation.id} className="block w-full truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · chat history stored on this device`} onClick={() => onOpenConversation(conversation)}>{conversation.title}<span className="ml-1 font-mono text-[9px] text-zinc-600">local chat</span></button>
+                  ))}
+                </div>
+              ))}
+              {!connected && deviceWorkspaces.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">No cached workspaces</p>}
+              {connected && <button className="ml-6 mt-0.5 rounded px-1 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" onClick={() => { setAddingFolderFor(addingFolderFor === device.host_id ? null : device.host_id); setFolderPath('') }}>+ Add folder</button>}
+              {addingFolderFor === device.host_id && connected && <div className="ml-6 mt-1 border-l border-zinc-800 pl-2"><input autoFocus className="w-full rounded border border-zinc-700 bg-zinc-800 px-1.5 py-1 font-mono text-[10px] text-zinc-200 focus:border-blue-500 focus:outline-none" aria-label={`Folder path on ${device.name}`} placeholder="path on device" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void addFolder(); if (event.key === 'Escape') setAddingFolderFor(null) }} /><button className="mt-1 rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50" disabled={!folderPath.trim() || working !== null} onClick={() => void addFolder()}>{working === device.host_id ? 'Adding…' : 'Add folder'}</button></div>}
+            </>}
+          </div>
+        )
+      })}
+      {devices.length === 0 && !adding && <p className="px-2 py-1 text-[10px] text-zinc-600">No saved devices. Add one to browse its workspaces here.</p>}
+      {!adding && error && <p role="alert" className="px-2 py-1 text-[10px] text-red-400">{error}</p>}
+      {disconnectConfirmId && (
+        <ConfirmDialog title={`Disconnect ${devices.find((device) => device.host_id === disconnectConfirmId)?.name ?? 'device'}?`} body="Chats and device metadata stay here. Any open remote conversation will stop working until you reconnect with the device passphrase. Local workspaces and chats are unaffected." confirmLabel="Disconnect" onCancel={() => setDisconnectConfirmId(null)} onConfirm={() => {
+          const hostId = disconnectConfirmId;
+          setDisconnectConfirmId(null);
+          void disconnectRemoteDevice(hostId).then(() => { void useRemote.getState().refreshDevices(); onChange() }).catch((e) => setError(String(e)));
+        }} />
+      )}
+      {removeConfirmId && (
+        <ConfirmDialog title={`Remove ${devices.find((device) => device.host_id === removeConfirmId)?.name ?? 'device'}?`} body="This removes the saved device and its cached workspace list from this sidebar. It does not delete data on the remote machine." confirmLabel="Remove device" onCancel={() => setRemoveConfirmId(null)} onConfirm={() => {
+          const device = devices.find((item) => item.host_id === removeConfirmId);
+          setRemoveConfirmId(null);
+          if (device) void remove(device);
+        }} />
+      )}
+    </section>
+  )
 }
-
 function ConversationList() {
   const { conversationId, setConversationId, loadHistory, setWorkspace, newConversation, workspace } = useAgent()
   // Per-conversation run status: rows with an in-flight turn show a spinner
@@ -2572,27 +2735,17 @@ function ConversationList() {
   const [moveTarget, setMoveTarget] = useState<{ id: number; title: string; workspace: string | null } | null>(null)
   const [removeWsTarget, setRemoveWsTarget] = useState<WorkspaceRow | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null)
-  // Active connection scope decides which registry/chats are shown; local
-  // rows render greyed while a host is connected.
-  const scope = useRemote((s) => s.scope)
-  const [localWorkspaces, setLocalWorkspaces] = useState<WorkspaceRow[]>([])
+  const devices = useRemote((s) => s.devices)
+  const refreshDevices = useRemote((s) => s.refreshDevices)
 
   const refresh = useCallback(() => {
     listConversations().then((rows) => {
       setConvs(rows)
       useAgent.setState({ titleByConv: {} })
     }).catch(() => setConvs([]))
-    // Scope-aware: the backend returns the HOST's registry (namespaced)
-    // while connected, this machine's otherwise.
-    listWorkspaces()
-      .then(setWorkspaces)
-      .catch(() => setWorkspaces([]))
-    if (scope.connected) {
-      listLocalWorkspaces().then(setLocalWorkspaces).catch(() => setLocalWorkspaces([]))
-    } else {
-      setLocalWorkspaces([])
-    }
-  }, [scope.connected, scope.hostId])
+    listWorkspaces().then(setWorkspaces).catch(() => setWorkspaces([]))
+    void refreshDevices()
+  }, [refreshDevices])
   useEffect(() => {
     refresh()
     // workspace too: adding a workspace (Sidebar) flips the active workspace,
@@ -2645,26 +2798,19 @@ function ConversationList() {
     return () => window.removeEventListener('keydown', onKey)
   }, [menuOpenId])
 
-  // Chats visible in the active scope: while connected, only conversations
-  // namespaced to THIS host; otherwise only non-remote ones. A chat from a
-  // different host stays hidden entirely (it would be unopenable anyway).
-  const inScope = (ws: string | null) => {
-    const ns = parseNsWorkspace(ws)
-    return scope.connected ? ns?.hostId === scope.hostId : ns === null
-  }
-  const visibleConvs = convs.filter((c) => inScope(c.workspace))
-  const localConvs = convs.filter((c) => parseNsWorkspace(c.workspace) === null)
+  // Conversations are local-owned even when their selected workspace belongs
+  // to a remote. Keep the transcript under that device while preserving the
+  // local conversation ID and local read/write APIs.
+  const visibleConvs = convs.filter((conversation) => parseNsWorkspace(conversation.workspace) === null)
+  const remoteConvs = convs.filter((conversation) => parseNsWorkspace(conversation.workspace) !== null)
   // Scheduled agents (issue #41): each agent chat is pinned under its own
   // workspace, above the workspace's normal chats. The composer gating map
   // comes from the AgentRunWatcher's store slice.
   const agentChatByConv = useAgent((s) => s.agentChatByConv)
   const [agentsDialog, setAgentsDialog] = useState<{ ws: string | null; agentId: string | null } | null>(null)
 
-  /** Open a conversation and adopt its workspace (the core invariant: the
-   *  open conversation's workspace IS the active workspace, both ways).
-   *  Scope guard: a local chat must never open while connected. */
+  /** Open a locally-owned conversation and adopt its workspace. */
   const openConversation = (c: { id: number; workspace: string | null }) => {
-    if (!inScope(c.workspace)) return
     setConversationId(c.id)
     setWorkspace(c.workspace ?? '')
     getMessages(c.id)
@@ -2674,11 +2820,12 @@ function ConversationList() {
 
   // Group rows by workspace; Default (null path) first, then by the most
   // recent conversation activity in each group.
+  const localWorkspaces = workspaces.filter((workspace) => !workspace.owner_id)
   const groups: Array<{ ws: WorkspaceRow; items: typeof convs }> = []
-  for (const w of workspaces) {
+  for (const w of localWorkspaces) {
     groups.push({ ws: w, items: visibleConvs.filter((c) => (c.workspace ?? null) === w.path) })
   }
-  const knownPaths = new Set(workspaces.map((w) => w.path))
+  const knownPaths = new Set(localWorkspaces.map((w) => w.path))
   for (const c of visibleConvs) {
     const p = c.workspace ?? null
     if (!knownPaths.has(p)) {
@@ -2754,6 +2901,8 @@ function ConversationList() {
 
   return (
     <div className="flex-1 overflow-y-auto">
+      <DeviceGroups devices={devices} workspaces={workspaces} conversations={remoteConvs} onChange={refresh} onOpenConversation={openConversation} />
+      {orderedGroups.length > 0 && <h2 className="mb-1 px-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-zinc-500">This device</h2>}
       {orderedGroups.map(({ ws, items }) => {
         const key = expandKey(ws.path ?? '')
         const isExpanded = expanded[key] ?? true
@@ -2866,45 +3015,6 @@ function ConversationList() {
       {convs.length === 0 && groups.length === 0 && (
         <p className="px-2 py-3 text-center text-[11px] text-zinc-600">No conversations yet.</p>
       )}
-      {scope.connected && (
-        <div
-          className="mb-3 border-t border-zinc-800 pt-2 opacity-40 select-none"
-          title="Local chats — switch back to “This device” to open them"
-          aria-disabled="true"
-        >
-          <p className="px-2 pb-1 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-            💻 This device — view only
-          </p>
-          {buildLocalGroups(localWorkspaces, localConvs).map(({ ws, items }) => {
-            // Same 5-cap + show-more as live groups (session-only stepping,
-            // keyed under local: to stay apart from workspace keys); no
-            // toggle — the section is view-only.
-            const lkey = `local:${ws.path ?? 'default'}`
-            const lbase = Math.min(5 + (extra[lkey] ?? 0), items.length)
-            const lvisible = items.slice(0, lbase)
-            return (
-              <div key={ws.path ?? 'default'} className="mb-1 px-1">
-                <p className="truncate py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-                  {ws.label}
-                </p>
-                {lvisible.map((c) => (
-                  <p key={c.id} className="truncate rounded px-2 py-1 text-xs text-zinc-600">
-                    {c.title}
-                  </p>
-                ))}
-                {items.length > lvisible.length && (
-                  <button
-                    className="block w-full px-2 py-1 text-left text-[11px] text-zinc-600 hover:text-zinc-400"
-                    onClick={() => setExtra((e) => ({ ...e, [lkey]: (e[lkey] ?? 0) + 5 }))}
-                  >
-                    Show more ({items.length - lvisible.length} more)
-                  </button>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
 
       {/* in-app dialogs (replace native confirm/prompt/alert) */}
       {agentsDialog && (
@@ -3011,7 +3121,7 @@ function ConversationList() {
           confirmLabel="Remove"
           onCancel={() => setRemoveWsTarget(null)}
           onConfirm={() => {
-            deleteWorkspace(removeWsTarget.id)
+            deleteWorkspace(removeWsTarget.id, removeWsTarget.owner_id ?? undefined)
               .then((r) => {
                 // If the open conversation was relocated, follow it to Default.
                 const moved =
@@ -3459,9 +3569,8 @@ export function Sidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Registry refresh is owned by ConversationList; the Sidebar only needs
-  // model/config state for the footer plus the add-workspace flows.
-  const scope = useRemote((s) => s.scope)
+  // Registry and device flows are owned by ConversationList/DeviceGroups;
+  // the sidebar footer only manages local model defaults.
 
   // Merged model list: every configured provider, queried in parallel by the
   // backend (keys never reach the browser). Grouped per provider in the dropdown.
@@ -3506,29 +3615,6 @@ export function Sidebar() {
       .finally(() => setSavingModel(false))
   }
 
-  // While connected there is no client-side folder picker for host paths:
-  // the folder dialog can only open on the machine running the UI. Adding a
-  // host workspace is a free-text path, validated by the host on register.
-  const [showRemoteAdd, setShowRemoteAdd] = useState(false)
-  const [remoteAddPath, setRemoteAddPath] = useState('')
-
-  const addRemoteWorkspace = async () => {
-    const path = remoteAddPath.trim()
-    if (!path) return
-    try {
-      await addWorkspace(path)
-      setWorkspace(path)
-      newConversation()
-      setShowRemoteAdd(false)
-      setRemoteAddPath('')
-    } catch (e) {
-      setNotice({
-        title: 'Could not add folder on host',
-        message: String((e as Error).message ?? e).replace(/^\d+:\s*/, ''),
-      })
-    }
-  }
-
   /** Open a workspace from the list: its most recent conversation, or a
    *  fresh chat when it has none (Q2: the list is the conversation switcher). */
   const browseWorkspace = async () => {
@@ -3563,42 +3649,13 @@ export function Sidebar() {
         </button>
         <ConversationList />
         <UpdateChip />
-        {/* Add workspace: a persistent, labeled action row — the affordance
-            the old dropdown buried as a pseudo-option. */}
         <button
           className="mb-2 flex w-full items-center gap-1.5 rounded border border-dashed border-zinc-700 px-2 py-1.5 text-left text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
-          onClick={scope.connected ? () => setShowRemoteAdd(true) : () => void browseWorkspace()}
+          onClick={() => void browseWorkspace()}
         >
           <span aria-hidden="true" className="text-sm leading-none text-zinc-500">+</span>
-          {scope.connected ? 'Add folder on host…' : 'Add workspace…'}
+          Add local workspace…
         </button>
-        {scope.connected && showRemoteAdd && (
-          <div className="mb-3 rounded border border-zinc-700 bg-zinc-800 p-2">
-            <input
-              autoFocus
-              className="mb-1.5 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs"
-              placeholder="folder path on the host, e.g. C:/repos/proj"
-              value={remoteAddPath}
-              onChange={(e) => setRemoteAddPath(e.target.value)}
-              onKeyDown={(e) => e.key === 'Escape' && setShowRemoteAdd(false)}
-              aria-label="Folder path on the host"
-            />
-            <div className="flex justify-end gap-1.5">
-              <button
-                className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-900"
-                onClick={() => setShowRemoteAdd(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500"
-                onClick={() => void addRemoteWorkspace()}
-              >
-                Add on host
-              </button>
-            </div>
-          </div>
-        )}
         {/* Compact defaults: existing chats retain their own selections. */}
         <div className="relative mt-auto border-t border-zinc-800 pt-2">
           <div className="mb-1 flex items-center justify-between">
@@ -6158,6 +6215,7 @@ function DraftDestinationCard() {
   const workspace = useAgent((s) => s.workspace)
   const draftDestination = useAgent((s) => s.draftDestination)
   const pinDraftDestination = useAgent((s) => s.pinDraftDestination)
+  const devices = useRemote((s) => s.devices)
   const scope = useRemote((s) => s.scope)
   const [rows, setRows] = useState<WorkspaceRow[]>([])
   const [remoteAdd, setRemoteAdd] = useState(false)
@@ -6184,7 +6242,7 @@ function DraftDestinationCard() {
     setGitLoading(false)
     setGitBusy(false)
     setGitError(null)
-    if (scope.connected || !dest || dest.startsWith('remote:')) return
+    if (!dest || dest.startsWith('remote:')) return
     getWorkspaceGitBranches(dest)
       .then((result) => {
         if (!cancelled) {
@@ -6199,11 +6257,11 @@ function DraftDestinationCard() {
         }
       })
     return () => { cancelled = true }
-  }, [dest, scope.connected])
+  }, [dest])
 
   useEffect(() => {
     let cancelled = false
-    const load = scope.connected ? listWorkspaces() : listLocalWorkspaces()
+    const load = parseNsWorkspace(dest) ? listWorkspaces() : listLocalWorkspaces()
     load
       .then((r) => {
         if (!cancelled) setRows(r)
@@ -6214,15 +6272,27 @@ function DraftDestinationCard() {
     return () => {
       cancelled = true
     }
-  }, [scope.connected])
+  }, [dest, devices])
 
   const pick = (path: string) => {
+    if (path.startsWith('remote:')) {
+      const hostId = parseNsWorkspace(path)?.hostId
+      const device = devices.find((item) => item.host_id === hostId)
+      if (!device || device.status !== 'online') {
+        setErr('Reconnect this device in the sidebar before using its workspace.')
+        return
+      }
+    }
+    if (path === dest) {
+      pinDraftDestination(path)
+      return
+    }
     pinDraftDestination(path)
     setErr(null)
   }
 
   const addFolder = async () => {
-    if (scope.connected) {
+    if (parseNsWorkspace(dest)) {
       setRemoteAdd(true)
       return
     }
@@ -6243,13 +6313,19 @@ function DraftDestinationCard() {
 
   const addRemote = async () => {
     const path = remotePath.trim()
-    if (!path) return
+    const ownerId = parseNsWorkspace(dest)?.hostId
+    const device = devices.find((item) => item.host_id === ownerId)
+    if (!path || !ownerId || device?.status !== 'online') {
+      setErr('Reconnect this device before adding a workspace to it.')
+      return
+    }
+    const namespacedPath = nsWorkspace(ownerId, path)
     try {
-      await addWorkspace(path)
-      pick(path)
-      setRows((current) => current.some((w) => w.path === path)
+      await addWorkspace(namespacedPath, ownerId)
+      pick(namespacedPath)
+      setRows((current) => current.some((w) => w.path === namespacedPath)
         ? current
-        : [...current, { id: -1, path, label: wsBasename(path), last_opened_at: null, exists: true, conversation_count: 0 }])
+        : [...current, { id: -1, path: namespacedPath, label: wsBasename(path), last_opened_at: null, exists: true, conversation_count: 0, owner_id: ownerId, device_status: 'online' }])
       setRemoteAdd(false)
       setRemotePath('')
     } catch (e) {
@@ -6317,13 +6393,13 @@ function DraftDestinationCard() {
         >
           <option value="">Default (no folder)</option>
           {dest && !destinationInRows && (
-            <option value={dest}>{wsBasename(dest)}</option>
+            <option value={dest}>{wsBasename(parseNsWorkspace(dest)?.path ?? dest)}</option>
           )}
-          {rows.filter((w) => w.path !== null).map((w) => (
-            <option key={w.path} value={w.path!}>{w.label}</option>
+          {rows.filter((w) => w.path !== null && (!w.owner_id || w.device_status === 'online')).map((w) => (
+            <option key={w.path} value={w.path!}>{w.owner_id ? `${devices.find((d) => d.host_id === w.owner_id)?.name ?? 'Device'} · ${w.label}` : w.label}</option>
           ))}
         </select>
-        {gitBranch && !scope.connected && (
+        {gitBranch && !parseNsWorkspace(dest) && (
           <div className="relative shrink-0">
             <button
               type="button"
@@ -6359,8 +6435,8 @@ function DraftDestinationCard() {
           <button
             className="shrink-0 rounded border border-dashed border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
             onClick={() => void addFolder()}
-            aria-label={scope.connected ? 'Add folder on host' : 'Add workspace'}
-            title={scope.connected ? 'Add folder on host' : 'Add workspace'}
+            aria-label={parseNsWorkspace(dest) ? `Add folder on ${devices.find((d) => d.host_id === parseNsWorkspace(dest)?.hostId)?.name ?? 'remote device'}` : 'Add workspace'}
+            title={parseNsWorkspace(dest) ? 'Add folder on selected remote device' : 'Add workspace'}
           >
             <span aria-hidden="true" className="text-sm leading-none">+</span>
           </button>
@@ -6948,321 +7024,20 @@ const attachmentText = (a: Attachment): string => {
   return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
 }
 
-/** Remembered passphrases per host URL, and the last-connected URL for
- *  auto-reconnect on launch. localStorage only — the backend keeps the
- *  session in memory alone, so a restart reconnects from here. */
-const REMOTE_PASS_KEY = 'yaah.remote.pass'
-const REMOTE_LAST_KEY = 'yaah.remote.last'
-
-function loadPassMap(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(REMOTE_PASS_KEY) ?? '{}')
-  } catch {
-    return {}
-  }
-}
-
-function savePassMap(map: Record<string, string>) {
-  try {
-    localStorage.setItem(REMOTE_PASS_KEY, JSON.stringify(map))
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-/**
- * Host switcher: sits left of the chatbox. "This device" is the local
- * backend; any discovered YAAH host on the LAN can be selected instead —
- * the agent's workspace tools then execute over there (conversations and
- * provider keys stay here). Switching is locked while a turn is running.
- */
+/** Execution is selected by each chat workspace, not by a global host toggle. */
 function HostSwitcher({ disabled }: { disabled: boolean }) {
-  const [status, setStatus] = useState<RemoteStatus | null>(null)
-  const [open, setOpen] = useState(false)
-  const [hosts, setHosts] = useState<RemoteHostFound[] | null>(null)
-  const [scanning, setScanning] = useState(false)
-  const [askingPass, setAskingPass] = useState<RemoteHostFound | null>(null)
-  const [pass, setPass] = useState('')
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const remember = (url: string, passphrase: string) => {
-    const map = loadPassMap()
-    if (passphrase) map[url] = passphrase
-    else delete map[url]
-    savePassMap(map)
-    try {
-      if (url) localStorage.setItem(REMOTE_LAST_KEY, url)
-      else localStorage.removeItem(REMOTE_LAST_KEY)
-    } catch {
-      /* storage unavailable */
-    }
-  }
-
-  const connect = async (url: string, passphrase: string) => {
-    setBusy(true)
-    setErr(null)
-    try {
-      const s = await connectRemote(url, passphrase)
-      setStatus(s)
-      remember(url, passphrase)
-      setAskingPass(null)
-      setOpen(false)
-      // Scope switch: stash the local workspace so disconnect restores it,
-      // and land on the host's Default workspace.
-      if (s.host_id) {
-        const st = useAgent.getState()
-        if (!parseNsWorkspace(st.workspace)) {
-          try {
-            localStorage.setItem('yaah.ws.stash', st.workspace)
-          } catch {
-            /* storage unavailable */
-          }
-        }
-        st.setWorkspace(nsWorkspace(s.host_id, null))
-        useRemote.setState({
-          scope: { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os },
-        })
-      }
-    } catch (e) {
-      const msg = String((e as Error).message).replace(/^\d+:\s*/, '')
-      // A rejected passphrase must never be a permanent dead end: forget
-      // the remembered value for this host so the next pick prompts fresh.
-      if (/wrong passphrase|no passphrase set/i.test(msg)) {
-        remember(url, '')
-        // Re-prompt with the real host/port parsed from the URL, so the
-        // form's submit rebuilds the same address.
-        try {
-          const u = new URL(url)
-          setAskingPass({
-            name: u.hostname,
-            host: u.hostname,
-            port: Number(u.port) || 80,
-            protocol: 0,
-            iid: '',
-            os: '',
-            auth: true,
-          })
-        } catch {
-          setAskingPass(null)
-        }
-        setErr('The host rejected the remembered passphrase — enter the current one.')
-      } else {
-        setErr(msg)
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const goLocal = async () => {
-    setBusy(true)
-    try {
-      await disconnectRemote()
-      remember('', '')
-      setStatus({ connected: false })
-      setOpen(false)
-      // Restore the stashed local workspace (stashed at connect time).
-      let stash = ''
-      try {
-        stash = localStorage.getItem('yaah.ws.stash') ?? ''
-        localStorage.removeItem('yaah.ws.stash')
-      } catch {
-        /* storage unavailable */
-      }
-      useAgent.getState().setWorkspace(stash)
-      useRemote.setState({ scope: { connected: false } })
-    } catch (e) {
-      setErr(String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const scan = () => {
-    setScanning(true)
-    setErr(null)
-    // Hide this machine itself from the list (its beacon arrives like any
-    // other host's, seen via its LAN IP) and match by instance id.
-    Promise.all([discoverHosts(), localInstanceInfo()])
-      .then(([r, me]) =>
-        setHosts(r.hosts.filter((h) => h.iid && h.iid !== me.instance_id)),
-      )
-      .catch((e) => setErr(String(e)))
-      .finally(() => setScanning(false))
-  }
-
-  // Restore the last host on launch; silent failure just means local mode.
-  useEffect(() => {
-    remoteStatus()
-      .then((s) => {
-        if (s.connected) {
-          setStatus(s)
-          useRemote.setState({
-            scope: { connected: true, url: s.url, name: s.name, hostId: s.host_id, os: s.os },
-          })
-          return
-        }
-        let last = ''
-        try {
-          last = localStorage.getItem(REMOTE_LAST_KEY) ?? ''
-        } catch {
-          /* storage unavailable */
-        }
-        const passMap = loadPassMap()
-        if (last && passMap[last] !== undefined) void connect(last, passMap[last])
-      })
-      .catch(() => {})
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const pickHost = (h: RemoteHostFound) => {
-    const url = `http://${h.host}:${h.port}`
-    const known = loadPassMap()[url]
-    if (h.auth && known === undefined) {
-      setAskingPass(h)
-      setPass('')
-      return
-    }
-    void connect(url, known ?? '')
-  }
-
-  const connected = status?.connected === true
-
   return (
-    <div className="relative">
-      <button
-        title={
-          connected
-            ? `Connected to ${status?.name} — tools run there (click to switch)`
-            : 'Running on this device (click to pick a remote host)'
-        }
-        aria-label="Host switcher"
-        aria-expanded={open}
-        disabled={disabled}
-        className={`flex items-center gap-1.5 whitespace-nowrap rounded px-2 py-1.5 text-xs hover:bg-zinc-700/50 ${
-          connected ? 'text-emerald-300' : 'text-zinc-300'
-        } disabled:opacity-50`}
-        onClick={() => {
-          setOpen(!open)
-          if (!open && hosts === null) scan()
-        }}
-      >
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 14 14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          aria-hidden="true"
-        >
-          <rect x="2" y="2.5" width="10" height="4" rx="1" />
-          <rect x="2" y="8.5" width="10" height="4" rx="1" />
-        </svg>
-        {connected ? status?.name : 'This device'}
-        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-          <path d="M1.5 3l2.5 2.5L6.5 3" />
-        </svg>
-      </button>
-      {open && (
-        <div className="absolute bottom-9 left-0 z-20 w-64 rounded border border-zinc-700 bg-zinc-900 py-1 shadow-lg">
-          {askingPass ? (
-            <form
-              className="p-3"
-              onSubmit={(e) => {
-                e.preventDefault()
-                if (askingPass && askingPass.port > 0) {
-                  void connect(`http://${askingPass.host}:${askingPass.port}`, pass)
-                }
-              }}
-            >
-              <p className="mb-2 text-xs text-zinc-300">
-                Passphrase for <span className="font-mono text-zinc-100">{askingPass.name}</span>
-              </p>
-              <input
-                type="password"
-                autoFocus
-                className="mb-2 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={pass}
-                onChange={(e) => setPass(e.target.value)}
-                aria-label="Host passphrase"
-              />
-              <div className="flex justify-end gap-1.5">
-                <button
-                  type="button"
-                  className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-800"
-                  onClick={() => setAskingPass(null)}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="rounded bg-blue-600 px-2 py-1 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50"
-                >
-                  Connect
-                </button>
-              </div>
-            </form>
-          ) : (
-            <>
-              <button
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs ${
-                  connected ? 'hover:bg-zinc-800/60' : 'bg-zinc-800/80 text-zinc-400'
-                }`}
-                disabled={busy}
-                onClick={() => void goLocal()}
-              >
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-                  <rect x="2" y="2.5" width="10" height="4" rx="1" />
-                  <rect x="2" y="8.5" width="10" height="4" rx="1" />
-                </svg>
-                <span className="text-zinc-200">This device</span>
-                {!connected && <span className="ml-auto text-[10px] text-zinc-500">current</span>}
-              </button>
-              <div className="border-t border-zinc-800" />
-              {(hosts ?? []).map((h) => (
-                <button
-                  key={`${h.host}:${h.port}`}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-zinc-800/60"
-                  disabled={busy}
-                  title={`${h.host}:${h.port} · ${h.os}`}
-                  onClick={() => pickHost(h)}
-                >
-                  {h.auth ? (
-                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <rect x="3" y="6" width="8" height="6" rx="1" />
-                      <path d="M5 6V4.5a2 2 0 0 1 4 0V6" />
-                    </svg>
-                  ) : (
-                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-                      <circle cx="7" cy="7" r="5" />
-                      <path d="M2 7h10M7 2c1.8 1.5 1.8 8.5 0 10M7 2c-1.8 1.5-1.8 8.5 0 10" />
-                    </svg>
-                  )}
-                  <span className="min-w-0 flex-1 truncate text-zinc-200">{h.name}</span>
-                </button>
-              ))}
-              {hosts !== null && hosts.length === 0 && (
-                <p className="px-3 py-2 text-[11px] leading-snug text-zinc-500">
-                  No hosts found on this network. Install YAAH on the other machine (hosting is on
-                  by default) — first launches may need the Windows firewall prompt accepted.
-                </p>
-              )}
-              <button
-                className="block w-full border-t border-zinc-800 px-3 py-1.5 text-left text-[10px] text-zinc-500 hover:text-zinc-300"
-                disabled={scanning || busy}
-                onClick={scan}
-              >
-                {scanning ? 'Scanning…' : '↻ Scan network'}
-              </button>
-            </>
-          )}
-          {err && <p className="border-t border-red-900 px-3 py-1.5 text-[10px] text-red-300">{err}</p>}
-        </div>
-      )}
+    <div
+      className="flex items-center gap-1.5 rounded px-2 py-1.5 text-xs text-zinc-400"
+      title="Workspace selection determines where workspace tools run. Local paths always stay on this device."
+      aria-label="Workspace-bound execution target"
+    >
+      <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+        <rect x="2" y="2.5" width="10" height="4" rx="1" />
+        <rect x="2" y="8.5" width="10" height="4" rx="1" />
+      </svg>
+      Workspace target
+      {disabled && <span className="sr-only">A conversation is running.</span>}
     </div>
   )
 }

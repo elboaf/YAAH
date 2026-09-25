@@ -1,23 +1,29 @@
 """Remote hosting: auth gate, host exec endpoint, client dispatch split,
 handshake protocol check, discovery beacon properties."""
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from backend.agent import remote as remote_mod
-from backend.agent.config import load_config, save_config
+from backend.agent.config import CONFIG_PATH, load_config, save_config
 from backend.main import app
 
 
 @pytest.fixture(autouse=True)
 def _no_remote_session():
     remote_mod.clear_remote()
+    saved_devices = load_config().get("remote_devices", [])
+    save_config({"remote_devices": []})
     yield
     remote_mod.clear_remote()
+    save_config({"remote_devices": saved_devices})
 
 
 def _set_host(passphrase: str):
     """Point the redirected test config's remote block at a host state."""
-    save_config({"remote": {**load_config().get("remote", {}), "passphrase": passphrase}})
+    save_config(
+        {"remote": {**load_config().get("remote", {}), "passphrase": passphrase}}
+    )
 
 
 async def _client():
@@ -25,6 +31,7 @@ async def _client():
 
 
 # ---------------------------------------------------------------- auth gate
+
 
 @pytest.mark.asyncio
 async def test_local_requests_need_no_auth():
@@ -92,6 +99,7 @@ async def test_env_passphrase_overrides_config(monkeypatch):
 
 # ---------------------------------------------------------------- exec endpoint
 
+
 @pytest.mark.asyncio
 async def test_exec_runs_workspace_tool_in_host_default_workspace(monkeypatch):
     _set_host("hunter2")
@@ -140,6 +148,7 @@ async def test_remote_info_is_open_and_names_the_protocol():
 
 
 # ---------------------------------------------------------------- client dispatch
+
 
 class _StubSession(remote_mod.RemoteSession):
     """Minimal RemoteSession stand-in: real proxy()/headers, stubbed exec."""
@@ -214,6 +223,7 @@ async def test_registered_hosts_do_not_redirect_local_workspace_tools(monkeypatc
         return {"output": "local"}
 
     from backend.agent import tools as tools_mod
+
     monkeypatch.setitem(tools_mod.EXECUTORS, "bash", local_bash)
     from backend.agent.tools import execute_tool
 
@@ -262,13 +272,22 @@ async def test_add_workspace_proxies_host_path_raw(monkeypatch):
     host = _StubSession()
     host.info["host_id"] = host.host_id = "abc123"
     _FakeProxyClient.response_body = {
-        "id": 9, "path": "/home/derp/proj", "label": "proj", "exists": True,
-        "last_opened_at": None, "conversation_count": 0,
+        "id": 9,
+        "path": "/home/derp/proj",
+        "label": "proj",
+        "exists": True,
+        "last_opened_at": None,
+        "conversation_count": 0,
     }
     monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
-    remote_mod.set_remote(host)
+    remote_mod.register_remote(host)
     async with await _client() as c:
-        row = (await c.post("/api/workspaces", json={"path": "proj"})).json()
+        row = (
+            await c.post(
+                "/api/workspaces",
+                json={"path": "remote:abc123:proj", "owner_id": "abc123"},
+            )
+        ).json()
     sent = _FakeProxyClient.last_request
     assert sent["json"]["path"] == "proj"  # raw, untouched by client rules
     assert row["path"] == "remote:abc123:/home/derp/proj"  # namespaced reply
@@ -280,8 +299,15 @@ async def test_exec_tool_strips_own_namespace_and_refuses_foreign():
     host = remote_mod.RemoteSession(
         "http://host:8765",
         "p",
-        {"os": "Linux", "os_version": "6", "machine": "x86_64", "windows": False,
-         "workspace_root": "/home/host", "hostname": "stub", "host_id": "abc123"},
+        {
+            "os": "Linux",
+            "os_version": "6",
+            "machine": "x86_64",
+            "windows": False,
+            "workspace_root": "/home/host",
+            "hostname": "stub",
+            "host_id": "abc123",
+        },
     )
     host.host_id = "abc123"
 
@@ -306,11 +332,15 @@ async def test_exec_tool_strips_own_namespace_and_refuses_foreign():
     orig = rm.httpx.AsyncClient
     rm.httpx.AsyncClient = _C
     try:
-        ok = await host.exec_tool("bash", {"command": "pwd"}, workspace="remote:abc123:/srv/x")
+        ok = await host.exec_tool(
+            "bash", {"command": "pwd"}, workspace="remote:abc123:/srv/x"
+        )
         assert ok == {"ok": True}
         assert captured["json"]["workspace"] == "/srv/x"  # namespace stripped
 
-        bad = await host.exec_tool("bash", {"command": "pwd"}, workspace="remote:other:/x")
+        bad = await host.exec_tool(
+            "bash", {"command": "pwd"}, workspace="remote:other:/x"
+        )
         assert "different remote host" in bad["error"]
     finally:
         rm.httpx.AsyncClient = orig
@@ -375,6 +405,7 @@ def test_schemas_follow_host_platform():
 
 # ---------------------------------------------------------------- connect handshake
 
+
 class _FakeResponse:
     def __init__(self, body, status=200):
         self._body = body
@@ -420,7 +451,8 @@ async def test_connect_accepts_matching_protocol(monkeypatch):
     _FakeAsyncClient.body = body
     async with await _client() as c:
         res = await c.post(
-            "/api/remote/connect", json={"url": "http://10.0.0.5:8765", "passphrase": "p"}
+            "/api/remote/connect",
+            json={"url": "http://10.0.0.5:8765", "passphrase": "p"},
         )
     assert res.status_code == 200
     assert res.json()["connected"] is True
@@ -437,7 +469,8 @@ async def test_connect_refuses_protocol_mismatch(monkeypatch):
     _FakeAsyncClient.body = body
     async with await _client() as c:
         res = await c.post(
-            "/api/remote/connect", json={"url": "http://10.0.0.5:8765", "passphrase": "p"}
+            "/api/remote/connect",
+            json={"url": "http://10.0.0.5:8765", "passphrase": "p"},
         )
     assert res.status_code == 409
     assert "Incompatible" in res.json()["detail"]
@@ -455,12 +488,14 @@ async def test_connect_unreachable_host(monkeypatch):
     monkeypatch.setattr(main_mod.httpx, "AsyncClient", _Down)
     async with await _client() as c:
         res = await c.post(
-            "/api/remote/connect", json={"url": "http://10.0.0.5:8765", "passphrase": "p"}
+            "/api/remote/connect",
+            json={"url": "http://10.0.0.5:8765", "passphrase": "p"},
         )
     assert res.status_code == 502
 
 
 # ---------------------------------------------------------------- discovery beacon
+
 
 def test_beacon_props_reflect_config():
     from backend.agent import discovery
@@ -474,6 +509,7 @@ def test_beacon_props_reflect_config():
 
 
 # ---------------------------------------------------------------- files proxy
+
 
 class _FakeProxyClient:
     """Stands in for the httpx client inside RemoteSession.proxy."""
@@ -499,7 +535,9 @@ class _FakeProxyClient:
             "json": json,
             "headers": headers,
         }
-        return _FakeResponse(_FakeProxyClient.response_body, _FakeProxyClient.response_status)
+        return _FakeResponse(
+            _FakeProxyClient.response_body, _FakeProxyClient.response_status
+        )
 
 
 @pytest.mark.asyncio
@@ -508,9 +546,12 @@ async def test_files_tree_proxies_to_host_when_connected(monkeypatch):
 
     _FakeProxyClient.response_body = {"root": "/home/host", "tree": []}
     monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
-    remote_mod.set_remote(_StubSession())
+    host = _StubSession(host_id="legacy-host")
+    remote_mod.set_remote(host)
     async with await _client() as c:
-        res = await c.get("/api/files", params={"workspace": "C:/local"})
+        res = await c.get(
+            "/api/files", params={"workspace": "remote:legacy-host:/repo"}
+        )
     assert res.status_code == 200
     assert res.json() == {"root": "/home/host", "tree": []}
     sent = _FakeProxyClient.last_request
@@ -527,14 +568,20 @@ async def test_attachments_proxied_to_host(monkeypatch):
 
     _FakeProxyClient.response_body = {"path": ".yaah-attachments/a.txt"}
     monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
-    remote_mod.set_remote(_StubSession())
+    host = _StubSession(host_id="attachment-host")
+    remote_mod.register_remote(host)
     async with await _client() as c:
         res = await c.post(
             "/api/attachments",
-            json={"workspace": "C:/local", "name": "a.txt", "content": "hi"},
+            json={
+                "workspace": "remote:attachment-host:/repo",
+                "name": "a.txt",
+                "content": "hi",
+            },
         )
     assert res.json() == {"path": ".yaah-attachments/a.txt"}
     assert _FakeProxyClient.last_request["json"]["content"] == "hi"
+    assert _FakeProxyClient.last_request["json"]["workspace"] == "/repo"
 
 
 @pytest.mark.asyncio
@@ -557,6 +604,7 @@ async def test_connect_refuses_this_same_instance(monkeypatch):
 
 # ---------------------------------------------------------------- loopback gate
 
+
 def test_loopback_classification():
     from backend.main import _is_loopback_client
 
@@ -569,6 +617,7 @@ def test_loopback_classification():
 
 
 # ---------------------------------------------------------------- host id + namespacing
+
 
 def test_host_id_is_stable_and_namespacing_roundtrips():
     from backend.agent import remote as rm
@@ -584,7 +633,63 @@ def test_host_id_is_stable_and_namespacing_roundtrips():
     assert rm.parse_ns(rm.ns_path(hid, "")) == (hid, "")
     assert rm.parse_ns("C:/repo") is None
     assert rm.parse_ns(None) is None
-    assert "hid" in __import__("backend.agent.discovery", fromlist=["beacon_props"]).beacon_props()
+    assert (
+        "hid"
+        in __import__(
+            "backend.agent.discovery", fromlist=["beacon_props"]
+        ).beacon_props()
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_url_rejects_embedded_credentials():
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/devices",
+            json={"url": "http://user:secret@10.0.0.5:8765", "passphrase": "p"},
+        )
+    assert res.status_code == 400
+    assert "embedded credentials" in res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_device_connect_saves_profile_without_changing_active_scope(monkeypatch):
+
+    import json
+    import backend.main as main_mod
+
+    body = {
+        **remote_mod.host_info(),
+        "host_id": "saved-host",
+        "protocol": remote_mod.PROTOCOL_VERSION,
+        "instance_id": "remote-one",
+        "app_version": "1",
+    }
+    _FakeAsyncClient.body = body
+    _FakeAsyncClient.verify_status = 200
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeAsyncClient)
+    active = _StubSession(host_id="legacy-active")
+    remote_mod.register_remote(active, make_active=True)
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/devices",
+            json={"url": "http://10.0.0.5:8765", "passphrase": "secret"},
+        )
+        legacy_status = await c.get("/api/remote/status")
+    assert legacy_status.json()["host_id"] == "legacy-active"
+    assert res.status_code == 200
+    assert res.json()["status"] == "online"
+    assert remote_mod.get_remote() is active
+    assert remote_mod.get_remote("saved-host").passphrase == "secret"
+    async with await _client() as c:
+        await c.post("/api/remote/devices/saved-host/disconnect")
+        after_disconnect = await c.get("/api/remote/status")
+    assert after_disconnect.json()["host_id"] == "legacy-active"
+    assert remote_mod.get_remote("saved-host") is None
+    assert remote_mod.get_remote() is active
+    profiles = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))["remote_devices"]
+    assert profiles[0]["host_id"] == "saved-host"
+    assert "passphrase" not in profiles[0]
 
 
 @pytest.mark.asyncio
@@ -594,23 +699,85 @@ async def test_workspaces_mirror_host_registry_namespaced(monkeypatch):
     host = _StubSession()
     host.info["host_id"] = host.host_id = "abc123"
     _FakeProxyClient.response_body = [
-        {"id": 1, "path": None, "label": "Default (Home)", "exists": True,
-         "last_opened_at": None, "conversation_count": 0},
-        {"id": 2, "path": "/home/host/proj", "label": "proj", "exists": True,
-         "last_opened_at": None, "conversation_count": 0},
+        {
+            "id": 1,
+            "path": None,
+            "label": "Default (Home)",
+            "exists": True,
+            "last_opened_at": None,
+            "conversation_count": 0,
+        },
+        {
+            "id": 2,
+            "path": "/home/host/proj",
+            "label": "proj",
+            "exists": True,
+            "last_opened_at": None,
+            "conversation_count": 0,
+        },
     ]
     monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
     remote_mod.set_remote(host)
     async with await _client() as c:
         rows = (await c.get("/api/workspaces")).json()
-    assert rows[0]["path"] == "remote:abc123:"
-    assert rows[1]["path"] == "remote:abc123:/home/host/proj"
-    # Raw host paths must never leak to the client UI as-is
-    assert all(r["path"].startswith("remote:abc123:") for r in rows)
+    remote_rows = [row for row in rows if row.get("owner_id") == "abc123"]
+    assert remote_rows[0]["path"] == "remote:abc123:"
+    assert remote_rows[1]["path"] == "remote:abc123:/home/host/proj"
+    # Raw host paths must never leak to the client UI as-is. Local Default
+    # remains an ordinary null path in the aggregate.
+    assert all(
+        r["path"] is None or r["path"].startswith("remote:abc123:") for r in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_workspace_aggregate_keeps_local_rows_and_cached_rows_when_host_offline(
+    monkeypatch,
+):
+    import json
+    import backend.main as main_mod
+    from backend.agent.config import save_config
+    from backend.db.database import upsert_workspace
+
+    local = await upsert_workspace("C:/local-project")
+    save_config(
+        {
+            "remote_devices": [
+                {
+                    "host_id": "offline-host",
+                    "url": "http://offline:8765",
+                    "name": "Offline host",
+                    "status": "offline",
+                    "cached_workspaces": [
+                        {
+                            "id": 1,
+                            "path": "remote:offline-host:/repo",
+                            "label": "repo",
+                            "last_opened_at": None,
+                            "exists": True,
+                            "conversation_count": 0,
+                            "owner_id": "offline-host",
+                            "device_status": "cached",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    async with await _client() as c:
+        rows = (await c.get("/api/workspaces")).json()
+        devices = (await c.get("/api/remote/devices")).json()["devices"]
+    assert any(row["path"] == local["path"] and row["owner_id"] is None for row in rows)
+    assert any(
+        row["path"] == "remote:offline-host:/repo" and row["device_status"] == "cached"
+        for row in rows
+    )
+    assert devices[0]["status"] == "offline"
 
 
 @pytest.mark.asyncio
 async def test_local_workspaces_view_hides_remote_rows():
+
     from backend.db.database import upsert_workspace
 
     await upsert_workspace("remote:deadbeef:/fake")
@@ -621,12 +788,31 @@ async def test_local_workspaces_view_hides_remote_rows():
 
 
 @pytest.mark.asyncio
+async def test_files_proxy_routes_by_workspace_owner_not_active_host(monkeypatch):
+    from backend.agent import remote as rm
+
+    host_a = _StubSession(host_id="active-host")
+    host_b = _StubSession(host_id="selected-host")
+    remote_mod.register_remote(host_a, make_active=True)
+    remote_mod.register_remote(host_b)
+    _FakeProxyClient.response_body = {"root": "/host-b", "tree": []}
+    monkeypatch.setattr(rm.httpx, "AsyncClient", _FakeProxyClient)
+    async with await _client() as c:
+        result = await c.get(
+            "/api/files", params={"workspace": "remote:selected-host:/repo"}
+        )
+    assert result.status_code == 200
+    assert _FakeProxyClient.last_request["url"].startswith(host_b.url)
+    assert _FakeProxyClient.last_request["params"]["workspace"] == "/repo"
+
+
+@pytest.mark.asyncio
 async def test_files_proxy_rejects_foreign_host_namespace(monkeypatch):
     from backend.agent import remote as rm
 
     host = _StubSession()
     host.info["host_id"] = host.host_id = "abc123"
-    remote_mod.set_remote(host)
+    remote_mod.register_remote(host, make_active=True)
     async with await _client() as c:
         res = await c.get("/api/files", params={"workspace": "remote:deadbeef:/x"})
     assert res.status_code == 400
@@ -634,6 +820,7 @@ async def test_files_proxy_rejects_foreign_host_namespace(monkeypatch):
 
 
 # ---------------------------------------------------------------- lazy file tree
+
 
 @pytest.mark.asyncio
 async def test_file_tree_is_depth_limited_and_lazy(tmp_path):
@@ -694,6 +881,7 @@ async def test_children_proxied_with_namespace(monkeypatch):
     sent = _FakeProxyClient.last_request
     assert sent["params"]["workspace"] == "sub"  # namespace stripped
     assert sent["params"]["path"] == "sub/dir"
+
 
 @pytest.mark.asyncio
 async def test_connect_refuses_wrong_passphrase(monkeypatch):

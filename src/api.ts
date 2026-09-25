@@ -398,18 +398,20 @@ export interface WorkspaceRow {
   last_opened_at: string | null
   exists: boolean
   conversation_count: number
+  owner_id?: string | null
+  device_status?: 'local' | 'online' | 'offline' | 'cached' | 'error'
 }
 
 export const listWorkspaces = () => api<WorkspaceRow[]>('/api/workspaces')
 
-/** This machine's registry only (the sidebar greys it while connected). */
+/** This machine's registry only. */
 export const listLocalWorkspaces = () =>
   api<WorkspaceRow[]>('/api/workspaces/local')
 
-export const addWorkspace = (path: string) =>
+export const addWorkspace = (path: string, ownerId?: string) =>
   api<WorkspaceRow>('/api/workspaces', {
     method: 'POST',
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, owner_id: ownerId }),
   })
 
 /** Git state for a draft's chosen workspace, before a conversation exists. */
@@ -427,10 +429,11 @@ export const checkoutWorkspaceBranch = (workspace: string, branch: string) =>
     body: JSON.stringify({ workspace, branch }),
   })
 
-export const deleteWorkspace = (id: number) =>
-  api<{ ok: boolean; relocated: number }>(`/api/workspaces/${id}`, {
-    method: 'DELETE',
-  })
+export const deleteWorkspace = (id: number, ownerId?: string) =>
+  api<{ ok: boolean; relocated: number }>(
+    `/api/workspaces/${id}${ownerId ? `?owner_id=${encodeURIComponent(ownerId)}` : ''}`,
+    { method: 'DELETE' },
+  )
 
 // The export endpoint sets Content-Disposition: attachment, but the `download`
 // attribute on an anchor is ignored cross-origin (tauri.localhost -> 127.0.0.1),
@@ -851,6 +854,15 @@ export interface RemoteStatus {
   workspace_root?: string
 }
 
+export interface RemoteDevice {
+  host_id: string
+  url: string
+  name: string
+  os?: string
+  status: 'online' | 'offline' | 'cached' | 'error'
+  workspaces: WorkspaceRow[]
+}
+
 /** mDNS sweep (~2.5s) for YAAH hosts on this LAN. */
 export const discoverHosts = () =>
   api<{ hosts: RemoteHostFound[] }>('/api/remote/discover')
@@ -858,6 +870,27 @@ export const discoverHosts = () =>
 /** This instance's own handshake info (instance id, hostname, …). */
 export const localInstanceInfo = () =>
   api<{ instance_id: string; hostname: string }>('/api/remote/info')
+
+export const listRemoteDevices = () =>
+  api<{ devices: RemoteDevice[] }>('/api/remote/devices')
+
+export const addRemoteDevice = (url: string, passphrase: string) =>
+  api<RemoteDevice>('/api/remote/devices', {
+    method: 'POST',
+    body: JSON.stringify({ url, passphrase }),
+  })
+
+export const connectRemoteDevice = (hostId: string, passphrase: string) =>
+  api<RemoteDevice>(`/api/remote/devices/${encodeURIComponent(hostId)}/connect`, {
+    method: 'POST',
+    body: JSON.stringify({ passphrase }),
+  })
+
+export const disconnectRemoteDevice = (hostId: string) =>
+  api<{ ok: boolean }>(`/api/remote/devices/${encodeURIComponent(hostId)}/disconnect`, { method: 'POST' })
+
+export const removeRemoteDevice = (hostId: string) =>
+  api<{ ok: boolean }>(`/api/remote/devices/${encodeURIComponent(hostId)}`, { method: 'DELETE' })
 
 export const remoteStatus = () => api<RemoteStatus>('/api/remote/status')
 

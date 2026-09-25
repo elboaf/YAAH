@@ -224,28 +224,63 @@ async def api_create_conversation(body: NewConversation):
 
 class NewWorkspace(BaseModel):
     path: str
+    owner_id: str | None = None
 
 
 @app.get("/api/workspaces")
 async def api_list_workspaces():
-    """Registry rows for the sidebar dropdown and grouped list.
-
-    While a remote session is active this mirrors the HOST's registry;
-    every path comes back namespaced ('remote:<hid>:<path>') so remote
-    groups can never collide with same-named local paths on this machine.
-    """
-    host = remote_mod.get_remote()
-    if host is not None:
-        res = await host.proxy("GET", "/api/workspaces")
-        rows = _proxy_result(res)
-        for r in rows:
-            r["path"] = remote_mod.ns_path(host.host_id, r.get("path"))
-        return rows
-    return [
-        r for r in await list_workspaces()
-        if remote_mod.parse_ns(r["path"]) is None
+    """Aggregate local workspaces and each saved device's reachable or cached workspaces."""
+    local_rows = [
+        {**row, "owner_id": None, "device_status": "local"}
+        for row in await list_workspaces()
+        if remote_mod.parse_ns(row["path"]) is None
     ]
+    profiles = _remote_device_profiles()
+    if not profiles and remote_mod.get_remote() is not None:
+        host = remote_mod.get_remote()
+        try:
+            rows = _proxy_result(await host.proxy("GET", "/api/workspaces/local"))
+            remote_rows = [
+                {**row, "path": remote_mod.ns_path(host.host_id, row.get("path")),
+                 "owner_id": host.host_id, "device_status": "online"}
+                for row in rows
+            ]
+            return local_rows + remote_rows
+        except (httpx.HTTPError, HTTPException):
+            return local_rows
 
+    result = list(local_rows)
+    for profile in profiles:
+        host_id = profile["host_id"]
+        host = remote_mod.get_remote(host_id)
+        rows = profile.get("cached_workspaces") or []
+        state = "offline"
+        if host is not None:
+            try:
+                rows = _proxy_result(await host.proxy("GET", "/api/workspaces/local"))
+                rows = [
+                    {**row, "path": remote_mod.ns_path(host_id, row.get("path")),
+                     "owner_id": host_id, "device_status": "online"}
+                    for row in rows
+                ]
+                profile["cached_workspaces"] = rows
+                profile.update({"name": host.name, "os": host.info.get("os")})
+                state = "online"
+            except (httpx.HTTPError, HTTPException):
+                rows = [
+                    {**row, "owner_id": host_id, "device_status": "error"}
+                    for row in rows
+                ]
+                state = "error"
+        else:
+            rows = [
+                {**row, "owner_id": host_id, "device_status": "cached"}
+                for row in rows
+            ]
+        result.extend(rows)
+        profile["status"] = state
+    _save_remote_device_profiles(profiles)
+    return result
 
 @app.get("/api/workspaces/local")
 async def api_list_local_workspaces():
@@ -259,13 +294,10 @@ async def api_list_local_workspaces():
 
 @app.post("/api/workspaces")
 async def api_add_workspace(body: NewWorkspace):
-    """Register a folder (resolved + deduped) and select it implicitly.
-    While connected, the folder is registered on the HOST: a namespaced
-    path is stripped, a raw path is taken as-is (the host validates that
-    it exists)."""
+    """Register a folder on its explicit owner, or locally for local paths."""
     import os
 
-    host = remote_mod.get_remote()
+    host = _workspace_host(body.path, body.owner_id)
     if host is None:
         # Typed paths need normalizing before anything resolves them: `~` does
         # not expand itself, and a bare name must anchor to the home directory
@@ -280,11 +312,14 @@ async def api_add_workspace(body: NewWorkspace):
 
     if host is not None:
         raw = remote_mod.parse_ns(body.path)
+        remote_path = raw[1] if raw else body.path.strip()
         res = await host.proxy(
-            "POST", "/api/workspaces", json_body={"path": raw[1] if raw else body.path.strip()}
+            "POST", "/api/workspaces", json_body={"path": remote_path}
         )
         row = _proxy_result(res)
         row["path"] = remote_mod.ns_path(host.host_id, row.get("path"))
+        row["owner_id"] = host.host_id
+        row["device_status"] = "online"
         return row
     ws = await upsert_workspace(body.path)
     ws["exists"] = True if ws["path"] is None else os.path.isdir(ws["path"])
@@ -301,12 +336,12 @@ async def api_add_workspace(body: NewWorkspace):
 
 
 @app.delete("/api/workspaces/{workspace_id}")
-async def api_delete_workspace(workspace_id: int):
+async def api_delete_workspace(workspace_id: int, owner_id: str | None = None):
     """Remove a workspace; its conversations relocate to Default (host-side
     registry and host-side relocation while connected)."""
     from fastapi import HTTPException
 
-    host = remote_mod.get_remote()
+    host = _workspace_host("", owner_id)
     if host is not None:
         res = await host.proxy("DELETE", f"/api/workspaces/{workspace_id}")
         return _proxy_result(res)
@@ -938,7 +973,7 @@ async def api_save_attachment(body: NewAttachment):
     host's workspace, where its read_file will look)."""
     import os
 
-    host = remote_mod.get_remote()
+    host = _workspace_host(body.workspace)
     if host is not None:
         res = await host.proxy(
             "POST",
@@ -1539,7 +1574,7 @@ async def api_file_tree(workspace: str):
 
     While a remote session is active the call is proxied to the host, so
     the FilesPanel transparently shows the host's workspace."""
-    host = remote_mod.get_remote()
+    host = _workspace_host(workspace)
     if host is not None:
         res = await host.proxy(
             "GET", "/api/files", params={"workspace": _host_ws(host, workspace)}
@@ -1557,7 +1592,7 @@ async def api_file_tree(workspace: str):
 async def api_file_children(workspace: str, path: str):
     """Children of a single directory (lazy tree expansion). One level;
     nested dirs come back lazy. Proxied like the rest while connected."""
-    host = remote_mod.get_remote()
+    host = _workspace_host(workspace)
     if host is not None:
         res = await host.proxy(
             "GET",
@@ -1577,13 +1612,14 @@ async def api_file_children(workspace: str, path: str):
 class PreviewRequest(BaseModel):
     workspace: str
     path: str
+    owner_id: str | None = None
     start_line: int | None = None
     end_line: int | None = None
 
 
 @app.post("/api/files/preview")
 async def api_file_preview(body: PreviewRequest):
-    host = remote_mod.get_remote()
+    host = _workspace_host(body.workspace)
     if host is not None:
         res = await host.proxy(
             "POST",
@@ -1602,7 +1638,7 @@ async def api_file_preview(body: PreviewRequest):
 @app.delete("/api/files")
 async def api_delete_file(workspace: str, path: str):
     """Delete a file from the workspace (file-tree context menu)."""
-    host = remote_mod.get_remote()
+    host = _workspace_host(workspace)
     if host is not None:
         res = await host.proxy(
             "DELETE",
@@ -1619,22 +1655,31 @@ async def api_delete_file(workspace: str, path: str):
     return result
 
 
+def _workspace_host(workspace: str, owner_id: str | None = None):
+    """Resolve an explicit remote owner; ordinary paths remain local."""
+    ns = remote_mod.parse_ns(workspace)
+    if ns is None and owner_id is None:
+        return None
+    host_id = ns[0] if ns is not None else owner_id
+    if ns is not None and remote_mod.get_remote(host_id) is None:
+        raise HTTPException(status_code=400, detail="that workspace belongs to a different remote host")
+    host = remote_mod.get_remote(host_id)
+    if host is None:
+        raise HTTPException(status_code=503, detail=f"remote device {host_id} is offline or not connected")
+    if owner_id and owner_id != host_id:
+        raise HTTPException(status_code=400, detail="workspace owner does not match its namespace")
+    return host
+
+
 def _host_ws(host, workspace: str) -> str:
-    """Translate a client-side workspace string into a raw host path for
-    proxying: a namespaced workspace must belong to the CONNECTED host
-    (defends against chatting into one host while a stale path points at
-    another); anything else passes through (empty = host default)."""
+    """Strip only this host namespace; reject foreign owners."""
     ns = remote_mod.parse_ns(workspace)
     if ns is None:
         return workspace
     hid, path = ns
     if hid != host.host_id:
-        raise HTTPException(
-            status_code=400,
-            detail="that workspace belongs to a different remote host",
-        )
+        raise HTTPException(status_code=400, detail="that workspace belongs to a different remote host")
     return path
-
 
 def _proxy_result(res):
     """Unwrap a proxied host response; surface host errors as HTTP errors."""
@@ -2086,8 +2131,162 @@ async def api_remote_exec(body: RemoteExec):
 
 
 class RemoteConnect(BaseModel):
-    url: str  # e.g. http://192.168.1.10:8765 (or a tailscale https URL)
+    url: str
     passphrase: str = ""
+
+
+class RemoteDeviceConnect(BaseModel):
+    url: str
+    passphrase: str = ""
+
+
+class RemoteDeviceReconnect(BaseModel):
+    passphrase: str = ""
+
+
+def _remote_device_profiles() -> list[dict]:
+    from backend.agent.config import load_config
+    profiles = load_config().get("remote_devices") or []
+    return [dict(profile) for profile in profiles if isinstance(profile, dict)]
+
+
+def _save_remote_device_profiles(profiles: list[dict]) -> None:
+    from backend.agent.config import save_config
+    safe = [{key: value for key, value in profile.items() if key != "passphrase"} for profile in profiles]
+    save_config({"remote_devices": safe})
+
+
+def _public_remote_device(profile: dict) -> dict:
+    host_id = profile["host_id"]
+    session = remote_mod.get_remote(host_id)
+    status = profile.get("status", "offline")
+    if session is not None and status != "error":
+        status = "online"
+    return {"host_id": host_id, "url": profile.get("url", ""),
+            "name": (session.name if session else profile.get("name")) or profile.get("url", host_id),
+            "os": session.info.get("os") if session else profile.get("os"), "status": status,
+            "workspaces": profile.get("cached_workspaces") or []}
+
+
+@app.get("/api/remote/devices")
+async def api_remote_devices():
+    profiles = _remote_device_profiles()
+    for profile in profiles:
+        session = remote_mod.get_remote(profile.get("host_id", ""))
+        if session is not None:
+            try:
+                rows = _proxy_result(await session.proxy("GET", "/api/workspaces/local"))
+                profile["cached_workspaces"] = [{**row, "path": remote_mod.ns_path(session.host_id, row.get("path")),
+                    "owner_id": session.host_id, "device_status": "online"} for row in rows]
+                profile.update({"name": session.name, "os": session.info.get("os"), "status": "online"})
+            except (httpx.HTTPError, HTTPException):
+                profile["status"] = "error"
+                profile["cached_workspaces"] = [{**row, "owner_id": session.host_id, "device_status": "error"}
+                    for row in profile.get("cached_workspaces", [])]
+        else:
+            profile["status"] = "offline"
+    _save_remote_device_profiles(profiles)
+    return {"devices": [_public_remote_device(profile) for profile in profiles]}
+
+
+@app.post("/api/remote/devices")
+async def api_add_remote_device(body: RemoteDeviceConnect):
+    host = await _connect_remote_session(body.url, body.passphrase, make_active=False)
+    profiles = _remote_device_profiles()
+    profile = next((item for item in profiles if item.get("host_id") == host.host_id), None)
+    if profile is None:
+        profile = {"host_id": host.host_id, "cached_workspaces": []}
+        profiles.append(profile)
+    profile.update({"url": host.url, "name": host.name, "os": host.info.get("os"), "status": "online"})
+    _save_remote_device_profiles(profiles)
+    return _public_remote_device(profile)
+
+
+@app.post("/api/remote/devices/{host_id}/connect")
+async def api_connect_remote_device(host_id: str, body: RemoteDeviceReconnect):
+    profiles = _remote_device_profiles()
+    profile = next((item for item in profiles if item.get("host_id") == host_id), None)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="remote device not found")
+    host = await _connect_remote_session(profile.get("url", ""), body.passphrase, make_active=False)
+    if host.host_id != host_id:
+        raise HTTPException(status_code=409, detail="the URL now identifies a different remote device")
+    profile.update({"name": host.name, "os": host.info.get("os"), "status": "online"})
+    _save_remote_device_profiles(profiles)
+    return _public_remote_device(profile)
+
+
+@app.post("/api/remote/devices/{host_id}/disconnect")
+async def api_disconnect_remote_device(host_id: str):
+    remote_mod.unregister_remote(host_id)
+    profiles = _remote_device_profiles()
+    for profile in profiles:
+        if profile.get("host_id") == host_id:
+            profile["status"] = "offline"
+    _save_remote_device_profiles(profiles)
+    return {"ok": True}
+
+
+@app.delete("/api/remote/devices/{host_id}")
+async def api_remove_remote_device(host_id: str):
+    remote_mod.unregister_remote(host_id)
+    _save_remote_device_profiles([profile for profile in _remote_device_profiles() if profile.get("host_id") != host_id])
+    return {"ok": True}
+
+
+async def _connect_remote_session(url: str, passphrase: str, *, make_active: bool):
+    from urllib.parse import urlsplit
+    import re
+    url = url.strip()
+    if url and not url.startswith(("http://", "https://")):
+        url = f"http://{url}"
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="device URL must be an HTTP or HTTPS address")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="device URLs must not contain embedded credentials")
+    url = url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            response = await client.get(f"{url}/api/remote/info")
+        response.raise_for_status()
+        info = response.json()
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(status_code=502, detail=f"host unreachable: {error}")
+    if info.get("protocol") != PROTOCOL_VERSION:
+        raise HTTPException(status_code=409, detail="Incompatible YAAH versions: update both instances.")
+    if info.get("instance_id") == remote_mod.INSTANCE_ID:
+        raise HTTPException(status_code=400, detail="refusing to connect to this same instance")
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            verified = await client.get(f"{url}/api/remote/verify", headers={"X-Yaah-Remote": "1", "X-Yaah-Passphrase": passphrase})
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=502, detail=f"host unreachable: {error}")
+    if verified.status_code == 401:
+        raise HTTPException(status_code=401, detail="wrong passphrase")
+    if verified.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"host verify failed ({verified.status_code})")
+    host_id = str(info.get("host_id") or "")
+    if not host_id:
+        host_id = "h-" + (info.get("hostname") or url).lower().replace(" ", "-")[:120]
+        info["host_id"] = host_id
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", host_id):
+        raise HTTPException(status_code=502, detail="remote host returned an invalid device identity")
+    existing = remote_mod.get_remote(host_id)
+    if existing is not None and existing.url != url:
+        raise HTTPException(status_code=409, detail="device identity is already connected at a different URL")
+    host = remote_mod.RemoteSession(url, passphrase, info, app_version=info.get("app_version", ""))
+    remote_mod.register_remote(host, make_active=make_active)
+    return host
+
+
+@app.post("/api/remote/connect")
+async def api_remote_connect(body: RemoteConnect):
+    host = await _connect_remote_session(body.url, body.passphrase, make_active=True)
+    return remote_status_dict(host)
+
+
+
 
 
 @app.get("/api/remote/discover")
@@ -2107,54 +2306,6 @@ async def api_remote_verify():
     without this a wrong passphrase would "connect" green and only 401
     later on every proxied call)."""
     return {"ok": True}
-
-
-@app.post("/api/remote/connect")
-async def api_remote_connect(body: RemoteConnect):
-    """Handshake with a host, refuse protocol mismatches and wrong
-    passphrases, then make it the active session (workspace tools + files
-    proxy route there)."""
-    url = body.url.strip()
-    if url and not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            res = await client.get(f"{url}/api/remote/info")
-        res.raise_for_status()
-        info = res.json()
-    except (httpx.HTTPError, ValueError) as e:
-        raise HTTPException(status_code=502, detail=f"host unreachable: {e}")
-    if info.get("protocol") != PROTOCOL_VERSION:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Incompatible YAAH versions: this app speaks protocol "
-                f"{PROTOCOL_VERSION}, the host reports {info.get('protocol')}. "
-                "Update both instances to matching versions."
-            ),
-        )
-    # Connecting this instance to itself would send every workspace tool
-    # and files call in an endless loop back through its own endpoints.
-    if info.get("instance_id") == remote_mod.INSTANCE_ID:
-        raise HTTPException(status_code=400, detail="refusing to connect to this same instance")
-    # Auth check before accepting the session (see /api/remote/verify):
-    # the info handshake is open, so without this probe a wrong passphrase
-    # would "connect" green and only 401 later on every proxied call.
-    try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            vres = await client.get(
-                f"{url}/api/remote/verify",
-                headers={"X-Yaah-Remote": "1", "X-Yaah-Passphrase": body.passphrase},
-            )
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"host unreachable: {e}")
-    if vres.status_code == 401:
-        raise HTTPException(status_code=401, detail="wrong passphrase")
-    if vres.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"host verify failed ({vres.status_code})")
-    host = remote_mod.RemoteSession(url, body.passphrase, info, app_version=info.get("app_version", ""))
-    remote_mod.set_remote(host)
-    return remote_status_dict(host)
 
 
 @app.post("/api/remote/disconnect")
@@ -2180,4 +2331,6 @@ def remote_status_dict(host: remote_mod.RemoteSession | None = None):
 
 @app.get("/api/remote/status")
 async def api_remote_status():
-    return remote_status_dict()
+    # Legacy status reflects only the old explicit host switcher. Device
+    # profiles and their sessions do not set a global execution mode.
+    return remote_status_dict() if remote_mod._active_host_id else {"connected": False}
