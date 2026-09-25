@@ -557,7 +557,12 @@ async def _chat_title(chat_id: str) -> str | None:
         return None
 
 
-async def ensure_isolated(workspace: str, chat_id: str) -> str:
+async def _branch_name(workspace: str) -> str:
+    rc, branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
+    return branch.strip() if rc == 0 else ""
+
+
+async def ensure_isolated(workspace: str, chat_id: str, on_lifecycle=None) -> str:
     """The rebinding seam: return the worktree path this caller must use,
     or the original workspace when isolation does not apply.
 
@@ -573,6 +578,13 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
     ws = str(workspace)
     wt = worktree_of(ws)
     if wt is not None:
+        if on_lifecycle:
+            info = _active.get(wt, {})
+            on_lifecycle({
+                "event": "inherited", "workspace": wt,
+                "branch": await _branch_name(wt),
+                "base_branch": info.get("base_branch", ""),
+            })
         return wt  # already a managed worktree (nested parent) — done
     if chat_id in _chat_bindings:
         bound = _chat_bindings[chat_id]
@@ -595,6 +607,13 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
             new_root = None
         if bound_root is not None and new_root is not None \
                 and bound_root == new_root:
+            if on_lifecycle:
+                info = binding_for(chat_id) or {}
+                on_lifecycle({
+                    "event": "reused", "workspace": bound,
+                    "branch": info.get("branch") or await _branch_name(bound),
+                    "base_branch": info.get("base_branch", ""),
+                })
             return bound
         await release_session(chat_id, why="workspace moved or session worktree gone")
     try:
@@ -631,6 +650,11 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
             }
             _active[str(candidate)] = info
             _chat_bindings[chat_id] = str(candidate)
+            if on_lifecycle:
+                on_lifecycle({
+                    "event": "reused", "workspace": str(candidate),
+                    "branch": info["branch"], "base_branch": info.get("base_branch", ""),
+                })
             return str(candidate)
     run_id = uuid.uuid4().hex[:12]
     label: str | None = None
@@ -638,11 +662,20 @@ async def ensure_isolated(workspace: str, chat_id: str) -> str:
         label = await _chat_title(str(chat_id))
     created = await create_worktree(ws, chat_id or "chat", run_id, label=label)
     if not created.get("ok"):
+        if on_lifecycle:
+            on_lifecycle({"event": "create_failed", "reason": created.get("reason", "")})
         raise IsolationRefused(
             f"git worktree isolation refused: {created.get('reason')}"
         )
     wt = created["workspace"]
     _chat_bindings[chat_id] = wt
+    if on_lifecycle:
+        info = binding_for(chat_id) or {}
+        on_lifecycle({
+            "event": "created", "workspace": wt,
+            "branch": created.get("branch", ""),
+            "base_branch": info.get("base_branch", ""),
+        })
     return wt
 
 
@@ -1103,7 +1136,13 @@ async def merge_back(root: Path, branch: str) -> dict:
     from backend.agent import gitinfo
 
     gitinfo.invalidate_git_caches(root)
-    result: dict = {"merged": True, "commits": count, "branch": branch}
+    target_rc, target_branch = await _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    result: dict = {
+        "merged": True,
+        "commits": count,
+        "branch": branch,
+        "target_branch": target_branch.strip() if target_rc == 0 else "",
+    }
     if dirty_note:
         result["note"] = dirty_note
     return result
@@ -1165,9 +1204,9 @@ async def turn_end(chat_id: str) -> dict:
                 "branch": branch,
                 "base_branch": info.get("base_branch", ""),
                 "worktree_id": chat_id,
-                "worktree": wt_str,
                 "commits_ahead": 0,
                 "dirty": False,
+                "worktree_removed": True,
             }
     await ff_session_branch(wt_str)
     return {
@@ -1299,6 +1338,8 @@ async def finalize_sub_agent(agent_workspace: str, result: dict) -> dict:
     if note:
         result["worktree_note"] = note
     result["worktree_branch"] = branch
+    result["commits_ahead"] = max(commits, 0)
+    result["worktree_removed"] = True
     return result
 
 

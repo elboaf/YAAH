@@ -6,8 +6,8 @@
 // the same git_merge_back tool pill the live stream showed.
 
 import { describe, expect, it, afterEach } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
-import { MessageView } from './components'
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import { MessageView, gitMermaid } from './components'
 import type { ChatMessage } from './store'
 
 const sys = (content: string): ChatMessage => ({ id: 's1', role: 'system', content })
@@ -15,6 +15,27 @@ const sys = (content: string): ChatMessage => ({ id: 's1', role: 'system', conte
 afterEach(() => cleanup())
 
 describe('persisted merge-back system rows', () => {
+  it('builds a branch-flow Mermaid graph with separate workspace lanes and explicit outcomes', () => {
+    const graph = gitMermaid({
+      run_id: 'run-42',
+      outcome: 'completed',
+      lanes: [{
+        id: 'parent', label: 'Agent', branch: 'agent/42/fix', base_branch: 'main',
+        branch_action: 'created', commits_ahead: 1, worktree: 'kept', integrated: false,
+        operations: [
+          { sequence: 1, operation: 'commit', outcome: 'succeeded', source: 'agent-tool', commit: 'abc123', subject: 'Fix parser' },
+          { sequence: 2, operation: 'push', outcome: 'failed', source: 'agent-tool', remote: 'origin', target_branch: 'agent/42/fix' },
+        ],
+      }],
+    })
+    expect(graph).toContain('flowchart LR')
+    expect(graph).toContain('Primary workspace')
+    expect(graph).toContain('created agent/42/fix')
+    expect(graph).toContain('Commit: completed')
+    expect(graph).toContain('Push: failed')
+    expect(graph).toContain('Not merged')
+    expect(graph).not.toContain('merged into primary')
+  })
   it('renders a collapsed run summary that expands to per-file line changes', () => {
     render(
       <MessageView
@@ -39,6 +60,50 @@ describe('persisted merge-back system rows', () => {
     expect(chip.getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByText('package.json')).toBeTruthy()
     expect(screen.getByText('src/App.tsx')).toBeTruthy()
+  })
+
+  it('renders an independent expandable Git activity summary with branch and commit details', async () => {
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            git_activity: {
+              version: 1,
+              run_id: 'run-42',
+              outcome: 'completed',
+              coverage: 'structured Git tools',
+              lanes: [
+                {
+                  id: 'parent',
+                  label: 'Agent',
+                  branch: 'agent/42/fix',
+                  base_branch: 'main',
+                  branch_action: 'created',
+                  commits_ahead: 1,
+                  dirty: false,
+                  worktree: 'kept',
+                  integrated: false,
+                  operations: [
+                    { sequence: 1, operation: 'commit', outcome: 'succeeded', source: 'agent-tool', commit: 'abc123', subject: 'Fix parser' },
+                    { sequence: 2, operation: 'push', outcome: 'failed', source: 'agent-tool', remote: 'origin', target_branch: 'agent/42/fix', detail: 'network unavailable' },
+                  ],
+                },
+              ],
+            },
+          }),
+        )}
+      />,
+    )
+    const chip = screen.getByRole('button', { name: /2 Git operations.*1 unsuccessful/ })
+    expect(chip.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText('Fix parser')).toBeNull()
+    fireEvent.click(chip)
+    expect(screen.getByText(/Created branch from main/)).toBeTruthy()
+    expect(screen.getByText(/abc123 Fix parser/)).toBeTruthy()
+    expect(screen.getByText(/origin\/agent\/42\/fix/)).toBeTruthy()
+    expect(screen.getByText(/Not merged/)).toBeTruthy()
+    expect(screen.getByText(/Coverage: structured Git tools/)).toBeTruthy()
+    await waitFor(() => expect(screen.getByText(/Branch-flow diagram unavailable/)).toBeTruthy())
   })
 
   it('renders a successful merge-back as a git_merge_back pill, not red text', () => {
