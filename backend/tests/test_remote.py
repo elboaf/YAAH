@@ -433,18 +433,104 @@ async def test_remote_edit_lease_conflict_stale_revision_and_independent_convers
         )
         assert independent.status_code == 200
 
-        # An ordinary host-side edit bumps the revision, invalidating the old
-        # token without allowing the stale snapshot to overwrite it.
+        # Once the remote editor releases its lease, a host-side edit bumps the
+        # revision and invalidates that token before a stale snapshot can apply.
+        released = await c.request(
+            "DELETE", f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"lease_token": acquired.json()["lease_token"]},
+        )
+        assert released.status_code == 200
         from backend.db.database import update_conversation
         await update_conversation(cid, title="Host changed")
+        changed_snapshot = (await c.get(
+            f"/api/remote/conversations/{cid}/snapshot", headers=_REMOTE_HEADERS
+        )).json()
+        reacquired = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": changed_snapshot["revision"], "holder_id": "first"},
+        )
+        assert reacquired.status_code == 200
         commit = await c.post(
             f"/api/remote/conversations/{cid}/commit", headers=_REMOTE_HEADERS,
-            json={"lease_token": acquired.json()["lease_token"],
+            json={"lease_token": reacquired.json()["lease_token"],
                   "revision": snapshot["revision"], "commit_id": "stale-commit",
                   "conversation": {"title": "Lost host edit"}, "messages": snapshot["messages"]},
         )
         assert commit.status_code == 409
         assert commit.json()["detail"]["code"] == "stale_revision"
+
+
+@pytest.mark.asyncio
+async def test_local_conversation_routes_are_excluded_by_active_remote_lease(
+    remote_conversation, monkeypatch
+):
+    from backend.agent import worktrees
+    from backend.db.database import (
+        RemoteProtocolError,
+        acquire_remote_edit_lease,
+        get_conversation,
+        get_messages,
+        get_remote_conversation_snapshot,
+    )
+
+    cid = remote_conversation
+    snapshot = await get_remote_conversation_snapshot(cid)
+    lease = await acquire_remote_edit_lease(cid, snapshot["revision"], "remote-client")
+    release_calls = []
+
+    async def release_session(*args, **kwargs):
+        release_calls.append((args, kwargs))
+        return {"released": True}
+
+    monkeypatch.setattr(worktrees, "release_session", release_session)
+    async with await _client() as c:
+        cases = [
+            await c.post(
+                f"/api/conversations/{cid}/messages",
+                json={"role": "user", "content": "blocked"},
+            ),
+            await c.patch(
+                f"/api/conversations/{cid}", json={"title": "blocked title"}
+            ),
+            await c.post(
+                f"/api/conversations/{cid}/move", json={"workspace": "C:/blocked"}
+            ),
+            await c.delete(f"/api/conversations/{cid}"),
+        ]
+
+    assert [response.status_code for response in cases] == [423, 423, 423, 423]
+    assert all(response.json()["detail"]["code"] == "lease_held" for response in cases)
+    assert release_calls == []
+    conversation = await get_conversation(cid)
+    assert conversation["title"] == "Before edit"
+    assert [message["content"] for message in await get_messages(cid)] == ["original"]
+    # The lease still belongs to the remote client after every rejected request.
+    try:
+        await acquire_remote_edit_lease(cid, snapshot["revision"], "second-client")
+    except RemoteProtocolError as error:
+        assert error.code == "lease_held"
+    else:
+        pytest.fail("rejected local writes must not release the active lease")
+
+
+@pytest.mark.asyncio
+async def test_run_agent_does_not_start_during_remote_edit_lease(remote_conversation):
+    import json
+
+    from backend.agent.loop import run_agent
+    from backend.db.database import (
+        acquire_remote_edit_lease,
+        get_messages,
+        get_remote_conversation_snapshot,
+    )
+
+    cid = remote_conversation
+    snapshot = await get_remote_conversation_snapshot(cid)
+    await acquire_remote_edit_lease(cid, snapshot["revision"], "remote-client")
+    events = [json.loads(line) async for line in run_agent(cid, "blocked", "")]
+    assert events[0]["type"] == "error"
+    assert "remote edit lease" in events[0]["message"]
+    assert [message["content"] for message in await get_messages(cid)] == ["original"]
 
 
 @pytest.mark.asyncio

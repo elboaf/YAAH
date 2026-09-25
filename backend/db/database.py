@@ -570,13 +570,44 @@ async def delete_conversation(conversation_id: int) -> bool:
     """Delete a conversation and all its messages (FK cascade)."""
     db = await get_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
             "DELETE FROM conversations WHERE id = ?", (conversation_id,)
         )
         await db.commit()
         return cur.rowcount > 0
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
     finally:
         await db.close()
+
+
+class RemoteProtocolError(Exception):
+    """A lease/revision conflict with a machine-readable protocol code."""
+
+    def __init__(self, code: str, **details):
+        self.code = code
+        self.details = details
+        super().__init__(code)
+
+
+async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
+    """Refuse host-local writes while a remote editor holds this conversation."""
+    import time
+
+    cur = await db.execute(
+        "SELECT holder_id, expires_at FROM remote_edit_leases"
+        " WHERE conversation_id = ? AND expires_at > ?",
+        (conversation_id, int(time.time())),
+    )
+    lease = await cur.fetchone()
+    if lease is not None:
+        raise RemoteProtocolError(
+            "lease_held", holder_id=lease["holder_id"], expires_at=lease["expires_at"]
+        )
 
 
 async def update_conversation(conversation_id: int, **fields):
@@ -589,6 +620,8 @@ async def update_conversation(conversation_id: int, **fields):
     sets = ", ".join(f"{k} = ?" for k in updates)
     db = await get_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        await assert_no_active_remote_edit_lease(db, conversation_id)
         await db.execute(
             f"UPDATE conversations SET {sets},"
             " updated_at = datetime('now') WHERE id = ?",
@@ -596,6 +629,10 @@ async def update_conversation(conversation_id: int, **fields):
         )
         await db.commit()
         return True
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
     finally:
         await db.close()
 
@@ -620,18 +657,40 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
     """
     db = await get_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
             "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
         )
         if await cur.fetchone() is None:
+            await db.rollback()
             return None
         target_id: int | None = None
         if target is not None:
             # Resolve/case-fold through the same dedupe the registry uses, so
             # 'C:/Proj' and 'c:\\proj\\' land on one row and one directory.
-            row = await upsert_workspace(target)
-            target = row["path"]
-            target_id = row["id"]
+            resolved = str(Path(target).resolve())
+            cur = await db.execute("SELECT * FROM workspaces")
+            existing = None
+            for row in await cur.fetchall():
+                if row["path"] is not None and str(Path(row["path"]).resolve()).lower() == resolved.lower():
+                    existing = row
+                    break
+            if existing is None:
+                cur = await db.execute(
+                    "INSERT INTO workspaces (path, label, last_opened_at)"
+                    " VALUES (?, ?, datetime('now'))",
+                    (resolved, basename(resolved)),
+                )
+                target_id = cur.lastrowid
+            else:
+                target = existing["path"]
+                target_id = existing["id"]
+                await db.execute(
+                    "UPDATE workspaces SET last_opened_at = datetime('now') WHERE id = ?",
+                    (target_id,),
+                )
+            target = resolved if target_id is not None and existing is None else target
         await db.execute(
             "UPDATE conversations SET workspace = ?,"
             " updated_at = datetime('now') WHERE id = ?",
@@ -639,6 +698,10 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
         )
         await db.commit()
         return {"workspace": target, "target_id": target_id}
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
     finally:
         await db.close()
 
@@ -726,6 +789,8 @@ async def add_message(
 ):
     db = await get_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, tool_calls,"
             " tool_call_id, images, sub_agent_transcript) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -745,6 +810,10 @@ async def add_message(
         )
         await db.commit()
         return cur.lastrowid
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
     finally:
         await db.close()
 
@@ -884,15 +953,6 @@ async def list_remote_conversations(host_id: str) -> list[dict]:
         return [dict(row) for row in await cur.fetchall()]
     finally:
         await db.close()
-
-
-class RemoteProtocolError(Exception):
-    """A lease/revision conflict with a machine-readable protocol code."""
-
-    def __init__(self, code: str, **details):
-        self.code = code
-        self.details = details
-        super().__init__(code)
 
 
 def _revision_token(counter: int) -> str:
