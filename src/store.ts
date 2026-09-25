@@ -47,8 +47,12 @@ export interface SubAgentRun {
   agentType: string
   prompt: string
   status: 'running' | 'completed' | 'error' | 'cancelled' | 'max_turns'
-  /** Streamed text deltas from the sub-agent's own turns. */
+  /** Streamed assistant emissions from the sub-agent, newline-separated. */
   text: string
+  /** Latest assistant emission, kept separately for the collapsed one-line preview. */
+  preview?: string
+  /** A tool boundary has passed and the next text chunk starts a new emission. */
+  awaitingEmission?: boolean
   /** Tool calls inside the sub-agent's block. */
   tools: SubAgentToolCall[]
   /** Bounded, UI-only telemetry tail scoped to this spawn call. */
@@ -1019,12 +1023,14 @@ export const useAgent = create<AgentState>((set, get) => ({
             if (tcs[i].id === callId && !tcs[i].subAgent) {
               tcs[i] = {
                 ...tcs[i],
+                contentOffset: m.content.length,
                 subAgent: {
                   agentId,
                   agentType,
                   prompt,
                   status: 'running',
                   text: '',
+                  preview: '',
                   tools: [],
                   telemetry: `\n▸ spawned ${agentType}    `,
                 },
@@ -1048,7 +1054,17 @@ export const useAgent = create<AgentState>((set, get) => ({
           for (let i = tcs.length - 1; i >= 0; i--) {
             if (tcs[i].id === callId && tcs[i].subAgent) {
               const sa = tcs[i].subAgent!
-              tcs[i] = { ...tcs[i], subAgent: { ...sa, text: sa.text + text } }
+              const separator = sa.awaitingEmission && sa.text && !sa.text.endsWith('\n') ? '\n' : ''
+              const preview = (sa.awaitingEmission ? '' : sa.preview ?? '') + text
+              tcs[i] = {
+                ...tcs[i],
+                subAgent: {
+                  ...sa,
+                  text: sa.text + separator + text,
+                  preview: preview.length > TAPE_CAP ? preview.slice(-TAPE_CAP) : preview,
+                  awaitingEmission: false,
+                },
+              }
               break
             }
           }
@@ -1074,6 +1090,7 @@ export const useAgent = create<AgentState>((set, get) => ({
                 ...tcs[i],
                 subAgent: {
                   ...sa,
+                  awaitingEmission: true,
                   tools: [...sa.tools, { id, name, args, startedAt: Date.now() }],
                 },
               }
@@ -1322,10 +1339,12 @@ export function buildMessages(
     if (name === 'spawn_agent' && snap && typeof snap === 'object') {
       const entries = Array.isArray(snap.transcript) ? snap.transcript : []
       let text = ''
+      let preview = ''
       const tools: SubAgentRun['tools'] = []
       for (const e of entries) {
         if (e.role === 'assistant' && typeof e.content === 'string') {
           text += (text ? '\n' : '') + e.content
+          preview = e.content
         } else if (e.role === 'tool' && e.name) {
           tools.push({
             id: e.tool_call_id ?? `sat${tools.length + 1}`,
@@ -1341,6 +1360,7 @@ export function buildMessages(
         prompt: '',
         status: (snap.status as SubAgentRun['status']) ?? 'completed',
         text,
+        preview,
         tools,
         telemetry: '',
         turns: snap.turns,
@@ -1424,7 +1444,10 @@ export function buildMessages(
         name: c.function?.name ?? nameById.get(c.id ?? '') ?? 'tool',
         args: safeParse(c.function?.arguments),
         result: c.id ? resultById.get(c.id) : undefined,
-        subAgent: c.id ? subAgentById.get(c.id) : undefined,
+        ...(c.id && subAgentById.has(c.id)
+          ? { subAgent: subAgentById.get(c.id) }
+          : {}),
+        contentOffset: open?.content.length ?? (r.content ?? '').length,
       }))
       // A plan boundary always opens a fresh block; close the old one.
       if (pendingPlanText !== null) closeOpen()

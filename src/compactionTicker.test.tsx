@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MessageView } from './components'
 import { useAgent, type ChatMessage } from './store'
 
@@ -63,6 +63,7 @@ describe('live compaction ticker', () => {
       text: '',
       tools: [],
       telemetry: '\nspawned explore\nread_file\nsearch_files',
+      preview: 'latest answer fragment',
     }
     render(
       <MessageView
@@ -76,6 +77,68 @@ describe('live compaction ticker', () => {
     for (const strip of telemetry) {
       expect(strip.textContent).not.toMatch(/[\r\n]/)
     }
+  })
+
+  it('keeps collapsed sub-agent chat to a one-line latest-emission preview while showing live tools and telemetry', () => {
+    const run = {
+      agentId: 1,
+      agentType: 'explore',
+      prompt: 'inspect this module',
+      status: 'running' as const,
+      text: 'earlier emission\nlatest answer fragment',
+      preview: 'latest answer fragment',
+      tools: [{ id: 'nested-1', name: 'read_file', args: { path: 'src/store.ts' }, startedAt: 1 }],
+      telemetry: 'nested thinking telemetry',
+    }
+    render(
+      <MessageView
+        msg={liveMessage([{ id: 'spawn-1', name: 'spawn_agent', subAgent: run, contentOffset: 0 }])}
+        live
+      />,
+    )
+
+    expect(document.querySelector('[data-subagent-preview-line]')?.textContent).toContain('latest answer fragment')
+    expect(screen.queryByText('earlier emission')).toBeNull()
+    expect(screen.getByText('read_file')).toBeTruthy()
+    expect(screen.getByText('nested thinking telemetry')).toBeTruthy()
+    const preview = document.querySelector('[data-subagent-preview]')
+    expect(preview?.classList.contains('overflow-hidden')).toBe(true)
+    expect(document.querySelector('[data-subagent-tool-ticker]')).toBeTruthy()
+
+    fireEvent.click(document.querySelector('[data-subagent-toggle]')!)
+    expect(screen.getByText(/earlier emission/)).toBeTruthy()
+    expect(screen.getByText(/latest answer fragment/)).toBeTruthy()
+  })
+
+  it('places the sub-agent card between parent-agent emissions and preserves all sub-agent summaries when settled', () => {
+    const run = {
+      agentId: 1,
+      agentType: 'explore',
+      prompt: 'inspect this module',
+      status: 'completed' as const,
+      text: 'sub-agent full answer',
+      preview: 'sub-agent full answer',
+      tools: [{ id: 'nested-1', name: 'read_file', args: { path: 'src/store.ts' }, result: { ok: true } }],
+      telemetry: 'sub-agent telemetry',
+    }
+    const message: ChatMessage = {
+      ...liveMessage([{ id: 'spawn-1', name: 'spawn_agent', subAgent: run, contentOffset: 'parent before'.length + 1 }]),
+      content: 'parent before\nparent after',
+    }
+    render(<MessageView msg={message} />)
+
+    const emissions = [...document.querySelectorAll('[data-agent-emission]')]
+    const card = document.querySelector('[data-subagent-card]')!
+    expect(emissions).toHaveLength(2)
+    expect(emissions[0].textContent).toContain('parent before')
+    expect(emissions[0].compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(card.compareDocumentPosition(emissions[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('sub-agent telemetry')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /1 call/ })).toBeTruthy()
+    expect(document.querySelector('[data-subagent-full-text]')).toBeNull()
+
+    fireEvent.click(document.querySelector('[data-subagent-toggle]')!)
+    expect(document.querySelector('[data-subagent-full-text]')?.textContent).toContain('sub-agent full answer')
   })
 
   it('renders nested sub-agent tool calls in a single clipped ticker row', () => {
@@ -111,6 +174,7 @@ describe('live compaction ticker', () => {
     )
     expect(screen.getByText('inspect this module')).toBeTruthy()
     expect(screen.getByText('nested per-agent tape')).toBeTruthy()
+    fireEvent.click(document.querySelector('[data-subagent-toggle]')!)
     expect(screen.getByText('Looking through the code')).toBeTruthy()
     const ticker = document.querySelector('[data-subagent-tool-ticker]')
     expect(ticker).toBeTruthy()

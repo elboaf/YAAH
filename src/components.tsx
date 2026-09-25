@@ -1142,7 +1142,21 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
  *  to a status line when the run finishes; expands on click. The running
  *  transcript carries the streaming caret. */
 function SubAgentBlock({ run }: { run: SubAgentRun }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
+  const previewTape = run.preview ?? ''
+  const previewRef = useRef<HTMLSpanElement>(null)
+  const [previewOffset, setPreviewOffset] = useState(0)
+  useEffect(() => {
+    const tape = previewRef.current
+    const viewport = tape?.parentElement
+    if (!tape || !viewport) return
+    const updateOffset = () => setPreviewOffset(Math.min(0, viewport.clientWidth - tape.scrollWidth))
+    updateOffset()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(updateOffset)
+    observer.observe(viewport)
+    return () => observer.disconnect()
+  }, [previewTape])
   const running = run.status === 'running'
   const statusLabel =
     run.status === 'running'
@@ -1160,8 +1174,10 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
       ? 'text-red-400'
       : 'text-emerald-400'
   return (
-    <div className="my-1 rounded border border-zinc-800 bg-zinc-900/40">
+    <div data-subagent-card="" className="my-1 rounded border border-zinc-800 bg-zinc-900/40">
       <button
+        data-subagent-toggle=""
+        aria-expanded={open}
         className="flex w-full items-center gap-2 px-2 py-1 text-left font-mono text-[10px]"
         onClick={() => setOpen((o) => !o)}
       >
@@ -1174,23 +1190,40 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
         </span>
         <span className="shrink-0 text-zinc-600">{open ? '\u25be' : '\u25b8'}</span>
       </button>
-      {open && (
-        <div className="border-t border-zinc-800/80 px-3 py-1.5">
-          {run.text && (
-            <div className="text-sm leading-relaxed text-zinc-200">
+      <div className="border-t border-zinc-800/80 px-3 py-1.5">
+        {open ? (
+          run.text ? (
+            <div className="text-sm leading-relaxed text-zinc-200" data-subagent-full-text="">
               <MessageBody content={run.text} />
               {running && <span className="stream-caret" />}
             </div>
-          )}
-          {running ? (
-            <SubAgentToolTicker tools={run.tools} telemetry={run.telemetry} />
-          ) : run.tools.length > 0 ? (
-            <SubAgentTraceLine tools={run.tools} />
-          ) : run.telemetry ? (
-            <AgentTelemetry tape={run.telemetry} compact />
-          ) : null}
-        </div>
-      )}
+          ) : null
+        ) : run.preview ? (
+          <div className="overflow-hidden text-sm leading-relaxed text-zinc-200" data-subagent-preview>
+            <span className="relative block overflow-hidden whitespace-pre">
+              <span
+                className="block whitespace-pre"
+                style={{ transform: `translateX(${previewOffset}px)` }}
+                data-subagent-preview-line=""
+              >
+                {run.preview.replace(/[\r\n]+/g, ' ')}
+                {running && <span className="stream-caret" />}
+              </span>
+              <span ref={previewRef} className="invisible absolute left-0 top-0 whitespace-pre" aria-hidden="true">
+                {run.preview.replace(/[\r\n]+/g, ' ')}
+              </span>
+            </span>
+          </div>
+        ) : null}
+        {running ? (
+          <SubAgentToolTicker tools={run.tools} telemetry={run.telemetry} />
+        ) : (
+          <>
+            {run.tools.length > 0 && <SubAgentTraceLine tools={run.tools} />}
+            {run.telemetry && <AgentTelemetry tape={run.telemetry} compact />}
+          </>
+        )}
+      </div>
     </div>
   )
 }
@@ -1713,9 +1746,9 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   const planApproved = exitCalls.some(
     (c) => (c.result as { decision?: string } | undefined)?.decision === 'approved',
   )
-  const liveSubAgents = live
-    ? (msg.toolCalls ?? []).filter((call) => call.name === 'spawn_agent' && call.subAgent)
-    : []
+  const inlineSubAgents = (msg.toolCalls ?? []).filter(
+    (call) => call.name === 'spawn_agent' && call.subAgent,
+  )
 
   const body = (
     <>
@@ -1724,14 +1757,9 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
           <MessageBody content={msg.content} />
         </div>
       ) : null}
-      {live ? (
-        <>
-          <ToolTicker calls={msg.toolCalls ?? []} />
-          {liveSubAgents.map((call) => (
-            <SubAgentBlock key={call.id} run={call.subAgent!} />
-          ))}
-        </>
-      ) : msg.toolCalls?.length ? (
+      {!inlineSubAgents.length && live ? (
+        <ToolTicker calls={msg.toolCalls ?? []} />
+      ) : !inlineSubAgents.length && msg.toolCalls?.length ? (
         <TraceLine calls={msg.toolCalls} />
       ) : null}
       {!msg.content && !msg.toolCalls?.length && (
@@ -1763,6 +1791,48 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   const anchorFor = (t: ToolCall) => (
     <QuestionAnchor key={t.id} tc={t} after={allCalls.slice(allCalls.indexOf(t) + 1)} />
   )
+  const hasSpawnAnchors = inlineSubAgents.length > 0 && inlineSubAgents.every(
+    (call) => typeof call.contentOffset === 'number',
+  )
+  const textAnchors: Array<{ offset: number; order: number; node: ReactNode }> = [
+    ...ordered.map((call, order) => ({
+      offset: call.contentOffset ?? 0,
+      order,
+      node: <QuestionAnchor key={`question-${call.id}`} tc={call} after={allCalls.slice(allCalls.indexOf(call) + 1)} />,
+    })),
+    ...inlineSubAgents.map((call, order) => ({
+      offset: hasSpawnAnchors ? call.contentOffset! : msg.content.length,
+      order: ordered.length + order,
+      node: <SubAgentBlock key={`subagent-${call.id}`} run={call.subAgent!} />,
+    })),
+  ].sort((a, b) => a.offset - b.offset || a.order - b.order)
+  const interleaved: ReactNode[] = []
+  if (
+    textAnchors.length > 0 &&
+    ordered.every((call) => typeof call.contentOffset === 'number') &&
+    (hasSpawnAnchors || ordered.length === 0)
+  ) {
+    let cursor = 0
+    for (const anchor of textAnchors) {
+      const cut = Math.min(Math.max(anchor.offset, cursor), msg.content.length)
+      if (cut > cursor) {
+        interleaved.push(
+          <div key={`agent-seg-${cursor}`} data-agent-emission="" className="text-sm leading-relaxed text-zinc-200">
+            <MessageBody content={msg.content.slice(cursor, cut)} />
+          </div>,
+        )
+        cursor = cut
+      }
+      interleaved.push(anchor.node)
+    }
+    if (cursor < msg.content.length) {
+      interleaved.push(
+        <div key={`agent-seg-${cursor}`} data-agent-emission="" className="text-sm leading-relaxed text-zinc-200">
+          <MessageBody content={msg.content.slice(cursor)} />
+        </div>,
+      )
+    }
+  }
   const segments: ReactNode[] = []
   if (chronological) {
     let cursor = 0
@@ -1795,21 +1865,33 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         <MessageStopButton msgId={msg.id} />
       </div>
       {msg.implementsPlan && <PlanBanner plan={msg.implementsPlan} />}
-      {chronological ? (
+      {textAnchors.length > 0 &&
+      (hasSpawnAnchors || ordered.every((call) => typeof call.contentOffset === 'number')) ? (
+        <>
+          {interleaved}
+          {live && (
+            <ToolTicker calls={(msg.toolCalls ?? []).filter((call) => call.name !== 'spawn_agent')} />
+          )}
+          {!live && allCalls.some((call) => call.name !== 'spawn_agent') && (
+            <TraceLine calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
+          )}
+          {live && <ModelCallWaiting />}
+        </>
+      ) : chronological ? (
         <>
           {segments}
-          {allCalls.length ? (
-            live ? (
-              <ToolTicker calls={allCalls} />
-            ) : (
-              <TraceLine calls={allCalls} />
-            )
+          {allCalls.some((call) => call.name !== 'spawn_agent') ? (
+            live
+              ? <ToolTicker calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
+              : <TraceLine calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
           ) : null}
           {live && <ModelCallWaiting />}
         </>
       ) : (
         <>
-          {ordered.map(anchorFor)}
+          {ordered.map((call) => (
+            <QuestionAnchor key={call.id} tc={call} after={allCalls.slice(allCalls.indexOf(call) + 1)} />
+          ))}
           {body}
         </>
       )}
@@ -8462,7 +8544,9 @@ function Composer() {
         const tapeChunk = tapeChunkForEvent(tapeEvent)
         if (tapeChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, tapeChunk)
       }
-      if (ev.text && ev.kind === 'text') subAgentTextDelta(bufKey, curId, spawnCallId, ev.text)
+      if (ev.kind === 'text' && ev.text) {
+        subAgentTextDelta(bufKey, curId, spawnCallId, ev.text)
+      }
       if (ev.kind === 'tool_start') {
         subAgentToolStart(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.name ?? 'tool', ev.args)
         appendSubAgentTelemetry(bufKey, curId, spawnCallId, `\n▸ ${ev.name ?? 'tool'}    `)

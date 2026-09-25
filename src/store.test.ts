@@ -53,7 +53,9 @@ describe('buildMessages sub-agent snapshot', () => {
         },
       }),
     ])
+    expect(msgs[0].toolCalls?.[0].contentOffset).toBe('spawned'.length)
     const run = msgs[0].toolCalls?.[0].subAgent
+    expect(run?.preview).toBe('found it')
     expect(run?.text).toBe('checking\nfound it')
     expect(run?.telemetry).toBe('')
     expect(run?.tools[0]).toMatchObject({
@@ -239,12 +241,17 @@ describe('sub-agent live state', () => {
   it('keeps a bounded per-spawn tape and routes nested chunks/results by child tool id', () => {
     seed()
     const store = useAgent.getState()
+    store.subAgentTextDelta('t', 'a', 'spawn-1', 'first emission')
     store.subAgentToolStart('t', 'a', 'spawn-1', 'inner-1', 'bash', { command: 'build' })
+    store.subAgentTextDelta('t', 'a', 'spawn-1', 'second emission')
     store.subAgentToolProgress('t', 'a', 'spawn-1', 'inner-1', 'output chunk')
     store.subAgentToolResult('t', 'a', 'spawn-1', 'inner-1', { output: 'done' })
     store.appendSubAgentTelemetry('t', 'a', 'spawn-1', 'thinking trace')
     store.appendSubAgentTelemetry('t', 'a', 'other-spawn', 'must not route')
     const run = useAgent.getState().messagesByConv.t[0].toolCalls?.[0].subAgent
+    expect(run?.text).toBe('first emission\nsecond emission')
+    expect(run?.preview).toBe('second emission')
+    expect(run?.tools).toHaveLength(1)
     expect(run?.telemetry).toContain('spawned explore')
     expect(run?.telemetry).toContain('thinking trace')
     expect(run?.telemetry).not.toContain('must not route')
