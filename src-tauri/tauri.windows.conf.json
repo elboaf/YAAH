@@ -6,7 +6,8 @@
       "../backend/whisper/**/*",
       "../backend/bundled_skills/**/*",
       "../backend/installers/**/*",
-      "../backend/bundled_toolkit/**/*"
+      "../backend/bundled_toolkit/**/*",
+      "../backend/gh/**/*"
     ]
   }
 }

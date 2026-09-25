@@ -68,6 +68,20 @@ npx tauri build                 # desktop installers
 bash scripts/build_server.sh    # headless server -> dist/yaah-server
 ```
 
+## Bundled tools and licenses
+
+Desktop and headless-server builds include the official [GitHub CLI](https://cli.github.com/)
+(`gh`) so agent shell commands can use it without a separate installation. The
+CLI is MIT-licensed; its copyright and permission notice is shipped alongside
+the binary. GitHub CLI also embeds platform-specific third-party license
+information, available with `gh licenses`. Bundling the CLI does not configure
+a GitHub account: authenticate with `gh auth login` or the usual `GH_TOKEN`
+environment variable.
+
+GitHub CLI is an independent project; YAAH is not affiliated with or endorsed
+by GitHub. See the [GitHub CLI license](https://github.com/cli/cli/blob/trunk/LICENSE)
+and [license-compliance notes](https://github.com/cli/cli/blob/trunk/docs/license-compliance.md).
+
 ## Tests
 
 ```

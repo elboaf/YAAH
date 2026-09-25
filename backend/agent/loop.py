@@ -390,9 +390,9 @@ You have tools: {", ".join(tools)}.
 Guidelines:
 - Explore before acting: use search_files and read files before editing.
 - For GitHub operations (PRs, issues, releases, CI status), prefer the
-  gh CLI via bash/powershell over web_fetch scraping - check
-  availability with 'gh --version' first; if it's missing, say so
-  instead of scraping the web UI.
+  gh CLI via bash/powershell over web_fetch scraping. The desktop and server
+  builds bundle gh, and its commands still require the user's normal GitHub
+  authentication; if gh is unavailable, say so instead of scraping the web UI.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
 - Choose the test environment by side effects. Run automated tests and

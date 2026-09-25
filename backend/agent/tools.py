@@ -15,8 +15,17 @@ import signal
 import subprocess
 from pathlib import Path
 
+from backend.agent.ghenv import command_env
+
 
 # ---------------------------------------------------------------- path safety
+
+
+def _tool_env() -> dict:
+    """Environment inherited by agent shell tools, including bundled gh."""
+    from backend.agent.ghenv import command_env
+
+    return command_env()
 
 # Windows: suppress the console window a console child of the windowed app
 # would pop up. POSIX subprocess has no creationflags parameter.
@@ -1034,6 +1043,7 @@ async def run_bash(
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=workspace_root(workspace),
+            env=_tool_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_NO_WINDOW, **_NEW_SESSION,
@@ -1074,6 +1084,7 @@ async def run_powershell(
             "powershell.exe", "-NoProfile", "-NonInteractive",
             "-ExecutionPolicy", "Bypass", "-Command", command,
             cwd=workspace_root(workspace),
+            env=_tool_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_NO_WINDOW, **_NEW_SESSION,

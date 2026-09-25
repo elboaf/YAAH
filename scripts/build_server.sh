@@ -23,6 +23,10 @@ python scripts/sync_version.py
 
 pip install -r requirements.txt -r requirements-build.txt
 
+# A server build can be run independently of build_sidecar.sh; stage the
+# matching platform's official GitHub CLI for this standalone executable.
+bash scripts/bundle_gh.sh
+
 EXE=""
 case "$(uname -s)" in
   MINGW*|MSYS*|Windows_NT*|CYGWIN*) EXE=".exe" ;;
@@ -34,6 +38,8 @@ if [ -n "$EXE" ]; then
   pip install pywin32
   pyinstaller --noconfirm --clean --onefile --console \
     --name yaah-server-setup \
+    --add-binary "backend/gh/bin/gh.exe;gh/bin" \
+    --add-data "backend/gh/LICENSE;gh" \
     --paths . --paths scripts \
     --collect-all uvicorn --collect-all fastapi \
     --collect-all pydantic --collect-all pydantic_core \
@@ -55,6 +61,8 @@ if [ -n "$EXE" ]; then
 else
   pyinstaller --noconfirm --clean --onefile --console \
     --name yaah-server \
+    --add-binary "backend/gh/bin/gh:gh/bin" \
+    --add-data "backend/gh/LICENSE:gh" \
     --paths . --paths scripts \
     --collect-all uvicorn --collect-all fastapi \
     --collect-all pydantic --collect-all pydantic_core \

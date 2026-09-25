@@ -149,3 +149,7 @@ if [ ! -f "backend/installers/$GIT_INSTALLER" ]; then
 fi
 ls -la backend/installers/
 echo "git installer: backend/installers/$GIT_INSTALLER"
+
+# Official GitHub CLI release (issue #24), MIT-licensed; verify its upstream
+# SHA-256 manifest before staging the executable and license notice.
+bash scripts/bundle_gh.sh

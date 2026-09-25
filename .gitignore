@@ -27,6 +27,8 @@ src-tauri/binaries/
 backend/whisper/
 # Git-for-Windows installer staged by scripts/build_sidecar.sh (#12)
 backend/installers/
+# GitHub CLI release staged by scripts/bundle_gh.sh (#24)
+backend/gh/
 backend/bin/
 backend/data/models/
 

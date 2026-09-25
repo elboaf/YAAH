@@ -38,7 +38,8 @@
       "../backend/**/*.py",
       "../backend/whisper/**/*",
       "../backend/bundled_skills/**/*",
-      "../backend/bundled_toolkit/**/*"
+      "../backend/bundled_toolkit/**/*",
+      "../backend/gh/**/*"
     ],
     "externalBin": [
       "binaries/backend",
