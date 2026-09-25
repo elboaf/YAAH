@@ -19,7 +19,6 @@ from backend.db.database import (
     create_conversation,
     get_agent,
     get_messages,
-    list_agents,
     list_instructions,
     trim_agent_transcript,
     update_agent,
@@ -556,8 +555,8 @@ async def test_paused_agent_never_fires_and_run_now_refuses(fake_model, tmp_path
     past = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
     await update_agent(agent_row["id"], {"next_fire_at": past})
 
-    due = [a for a in await list_agents() if sched._is_due(a, datetime.now())]
-    assert due == [], "tick fired a disabled agent"
+    agent = await get_agent(agent_row["id"])
+    assert not sched._is_due(agent, datetime.now()), "tick fired a disabled agent"
 
     assert await sched.fire_agent(agent_row) == "disabled"
 

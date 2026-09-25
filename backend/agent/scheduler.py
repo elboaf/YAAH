@@ -369,9 +369,6 @@ async def _run_and_settle(
         if conv_id in _tape_buffers:
             _tape_buffers[conv_id]["running"] = False
 
-    now_iso = datetime.now().isoformat(timespec="seconds")
-    await _patch(aid, last_finished_at=now_iso, last_status="ok" if ok else "error")
-
     if not ok:
         log.warning("scheduled agent %s fire failed: %s", aid, error_text)
         state = _retry_state.get(aid)
@@ -384,11 +381,18 @@ async def _run_and_settle(
             retry_at = (datetime.now() + timedelta(minutes=backoff)).isoformat(
                 timespec="seconds"
             )
-            await _patch(aid, next_fire_at=retry_at)
+            await _patch(
+                aid,
+                next_fire_at=retry_at,
+                last_finished_at=datetime.now().isoformat(timespec="seconds"),
+                last_status="error",
+            )
             return
     # Success, or retries exhausted: the parked slot becomes the schedule.
     _retry_state.pop(aid, None)
     await _ensure_future_slot(aid)
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    await _patch(aid, last_finished_at=now_iso, last_status="ok" if ok else "error")
     if retention > 0:
         with contextlib.suppress(Exception):
             await trim_agent_transcript(conv_id, retention)

@@ -298,18 +298,23 @@ def test_list_windows_shape(monkeypatch):
     assert res["windows"][0]["monitor"] == 2
 
 
-def test_monitor_for_rect_containment_and_nearest():
-    if not computer_mod.WINDOWS:
-        pytest.skip("windows-only")
-    mons = computer_mod._monitors()
-    if len(mons) < 2:
-        pytest.skip("needs multiple monitors")
-    r0, r1 = mons[0]["rect"], mons[1]["rect"]
-    # Center of monitor 1's rect maps to monitor 1, etc.
-    assert computer_mod._monitor_for_rect(r0) == 1
-    assert computer_mod._monitor_for_rect(r1) == 2
-    # A minimized window sits at -32000: must fall back to nearest, not crash.
-    assert computer_mod._monitor_for_rect([-32000, -32000, -31800, -31900]) in (1, 2)
+def test_monitor_for_rect_containment_and_nearest(monkeypatch):
+    # Keep monitor topology deterministic: CI/self-hosted hosts may have any
+    # number and arrangement of displays, but the mapping logic should not
+    # depend on the machine running the test.
+    mons = [
+        {"monitor": 1, "rect": [-1920, 0, 0, 1080]},
+        {"monitor": 2, "rect": [0, 0, 1920, 1080]},
+        {"monitor": 3, "rect": [1920, 0, 3840, 1080]},
+    ]
+    monkeypatch.setattr(computer_mod, "_monitors", lambda: mons)
+
+    # Each monitor is selected when the rect center is inside it.
+    assert computer_mod._monitor_for_rect(mons[0]["rect"]) == 1
+    assert computer_mod._monitor_for_rect(mons[1]["rect"]) == 2
+    assert computer_mod._monitor_for_rect(mons[2]["rect"]) == 3
+    # A minimized window sits at -32000: fall back to the closest monitor.
+    assert computer_mod._monitor_for_rect([-32000, -32000, -31800, -31900]) == 1
 
 
 def test_screenshot_hwnd_captures_window_monitor(fake_capture, monkeypatch):
