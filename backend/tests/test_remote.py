@@ -30,6 +30,41 @@ async def _client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
+@pytest.mark.asyncio
+async def test_remote_device_conversation_cache_refreshes_and_serves_offline(monkeypatch):
+    import httpx
+    from backend.db.database import get_remote_messages
+
+    host_id = "chat-host"
+    session = remote_mod.RemoteSession("http://host", "secret", {
+        "host_id": host_id, "hostname": "Host", "protocol": remote_mod.PROTOCOL_VERSION,
+    })
+    remote_mod.register_remote(session)
+    save_config({"remote_devices": [{"host_id": host_id, "url": "http://host", "cached_workspaces": []}]})
+
+    async def proxy(method, path, **kwargs):
+        if path == "/api/remote/conversations":
+            return httpx.Response(200, json=[{"id": 3, "title": "Remote chat", "updated_at": "2025-01-01"}])
+        if path.endswith("/messages"):
+            return httpx.Response(200, json=[{"id": 9, "role": "user", "content": "cached"}])
+        raise AssertionError(path)
+
+    monkeypatch.setattr(session, "proxy", proxy)
+    async with await _client() as c:
+        r = await c.get(f"/api/remote/devices/{host_id}/conversations")
+        assert r.status_code == 200
+        assert r.json()["conversations"][0]["conversation_id"] == "3"
+        assert (await c.get(f"/api/remote/devices/{host_id}/conversations/3/messages")).json()[0]["content"] == "cached"
+        monkeypatch.setattr(session, "proxy", lambda *a, **k: None)
+        async def offline(*a, **k):
+            raise httpx.ConnectError("offline")
+        monkeypatch.setattr(session, "proxy", offline)
+        r = await c.get(f"/api/remote/devices/{host_id}/conversations/3/messages")
+        assert r.status_code == 200
+        assert r.json()[0]["content"] == "cached"
+        assert await get_remote_messages(host_id, "3") is not None
+
+
 # ---------------------------------------------------------------- auth gate
 
 

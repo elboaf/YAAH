@@ -174,6 +174,9 @@ from backend.db.database import (
     update_conversation,
     delete_conversation,
     upsert_workspace,
+    upsert_remote_conversation,
+    list_remote_conversations,
+    get_remote_messages,
 )
 
 
@@ -2105,6 +2108,25 @@ async def api_remote_info():
     return info
 
 
+@app.get("/api/remote/conversations")
+async def api_remote_conversations():
+    """Read host-owned conversation metadata for an authenticated client."""
+    rows = await list_conversations()
+    for row in rows:
+        row.pop("system_prompt_override", None)
+        row.pop("context_tokens", None)
+        row.pop("context_model", None)
+    return rows
+
+
+@app.get("/api/remote/conversations/{conversation_id}/messages")
+async def api_remote_conversation_messages(conversation_id: int):
+    """Read host-owned transcript for an authenticated client."""
+    if await get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return await get_messages(conversation_id)
+
+
 @app.post("/api/remote/exec")
 async def api_remote_exec(body: RemoteExec):
     """Execute one workspace tool on THIS host, in the workspace the client
@@ -2166,6 +2188,53 @@ def _public_remote_device(profile: dict) -> dict:
             "name": (session.name if session else profile.get("name")) or profile.get("url", host_id),
             "os": session.info.get("os") if session else profile.get("os"), "status": status,
             "workspaces": profile.get("cached_workspaces") or []}
+
+
+@app.get("/api/remote/devices/{host_id}/conversations")
+async def api_remote_device_conversations(host_id: str):
+    """Refresh and return cached conversation metadata for one saved device."""
+    if not any(profile.get("host_id") == host_id for profile in _remote_device_profiles()):
+        raise HTTPException(status_code=404, detail="remote device not found")
+    session = remote_mod.get_remote(host_id)
+    if session is not None:
+        try:
+            remote_rows = _proxy_result(await session.proxy("GET", "/api/remote/conversations"))
+            for row in remote_rows:
+                conv_id = str(row["id"])
+                messages = _proxy_result(await session.proxy(
+                    "GET", f"/api/remote/conversations/{conv_id}/messages"
+                ))
+                await upsert_remote_conversation(host_id, row, messages)
+        except (httpx.HTTPError, HTTPException) as exc:
+            cached = await list_remote_conversations(host_id)
+            if not cached:
+                raise HTTPException(status_code=503, detail="remote device unavailable and no cached conversations") from exc
+    cached = await list_remote_conversations(host_id)
+    return {"conversations": cached, "status": "online" if session else "cached"}
+
+
+@app.get("/api/remote/devices/{host_id}/conversations/{conversation_id}/messages")
+async def api_remote_device_messages(host_id: str, conversation_id: str):
+    """Refresh online, otherwise serve the owner-scoped cached transcript."""
+    if not any(profile.get("host_id") == host_id for profile in _remote_device_profiles()):
+        raise HTTPException(status_code=404, detail="remote device not found")
+    session = remote_mod.get_remote(host_id)
+    if session is not None:
+        try:
+            rows = _proxy_result(await session.proxy("GET", "/api/remote/conversations"))
+            conversation = next((row for row in rows if str(row.get("id")) == str(conversation_id)), None)
+            if conversation is None:
+                raise HTTPException(status_code=404, detail="conversation not found")
+            messages = _proxy_result(await session.proxy(
+                "GET", f"/api/remote/conversations/{conversation_id}/messages"
+            ))
+            await upsert_remote_conversation(host_id, conversation, messages)
+        except (httpx.HTTPError, HTTPException):
+            pass
+    messages = await get_remote_messages(host_id, conversation_id)
+    if messages is None:
+        raise HTTPException(status_code=404, detail="remote conversation is not cached")
+    return messages
 
 
 @app.get("/api/remote/devices")

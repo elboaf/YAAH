@@ -22,10 +22,11 @@ from pathlib import Path
 import httpx
 
 # Bump on any change to the remote endpoints' request/response shape.
+# v3: adds authenticated read-only remote conversation metadata/history endpoints.
 # v2: /api/remote/exec carries the client's selected workspace, and
 # host-bound workspace paths are proxied raw (the client no longer
 # normalizes them with its own OS's path rules).
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 # Random per-process identity: a host that is also a client can recognize
 # itself at handshake time and refuse the self-connection (which would

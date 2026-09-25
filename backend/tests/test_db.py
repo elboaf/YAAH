@@ -3,7 +3,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from backend.main import app
-from backend.db.database import add_message, create_conversation, get_messages
+from backend.db.database import (
+    add_message, create_conversation, get_messages,
+    upsert_remote_conversation, list_remote_conversations, get_remote_messages,
+) 
 
 
 @pytest.mark.asyncio
@@ -23,7 +26,25 @@ async def test_conversation_and_message_roundtrip():
 
 
 @pytest.mark.asyncio
-async def test_health_endpoint():
+async def test_remote_cache_scopes_colliding_ids_by_host_and_preserves_order():
+    conversation = {"id": 7, "title": "Remote task", "workspace": "C:/repo", "updated_at": "2025-01-02"}
+    await upsert_remote_conversation("host-a", conversation, [
+        {"id": 10, "role": "user", "content": "first"},
+        {"id": 11, "role": "assistant", "content": "second"},
+    ])
+    await upsert_remote_conversation("host-b", {**conversation, "title": "Other"}, [
+        {"id": 10, "role": "user", "content": "other host"},
+    ])
+    await create_conversation("Local task")
+
+    assert (await list_remote_conversations("host-a"))[0]["title"] == "Remote task"
+    assert [m["content"] for m in await get_remote_messages("host-a", "7")] == ["first", "second"]
+    assert [m["content"] for m in await get_remote_messages("host-b", "7")] == ["other host"]
+    assert await get_remote_messages("unknown-host", "7") is None
+
+
+@pytest.mark.asyncio
+async def test_health_endpoint(): 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         r = await client.get("/api/health")
         assert r.status_code == 200

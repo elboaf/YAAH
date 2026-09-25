@@ -77,6 +77,32 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages(conversation_id, id);
 
+-- Read-only cache of conversations owned by connected remote devices.
+-- Remote integer IDs are only unique within their host, never locally.
+CREATE TABLE IF NOT EXISTS remote_conversations (
+    host_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT 'New Task',
+    workspace TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    revision TEXT NOT NULL DEFAULT '',
+    sync_status TEXT NOT NULL DEFAULT 'synced',
+    PRIMARY KEY (host_id, conversation_id)
+);
+
+CREATE TABLE IF NOT EXISTS remote_messages (
+    host_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (host_id, conversation_id, message_id),
+    FOREIGN KEY (host_id, conversation_id)
+        REFERENCES remote_conversations(host_id, conversation_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_remote_messages_order
+    ON remote_messages(host_id, conversation_id, position);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     -- NULL = the Default pseudo-workspace (no root directory). SQLite UNIQUE
@@ -656,6 +682,73 @@ async def add_message(
         )
         await db.commit()
         return cur.lastrowid
+    finally:
+        await db.close()
+
+
+async def upsert_remote_conversation(host_id: str, conversation: dict, messages: list[dict]) -> None:
+    """Replace one cached remote transcript atomically; IDs are host-scoped."""
+    cid = str(conversation["id"])
+    db = await get_db()
+    try:
+        await db.execute("BEGIN")
+        await db.execute(
+            """INSERT INTO remote_conversations
+               (host_id, conversation_id, title, workspace, updated_at, revision, sync_status)
+               VALUES (?, ?, ?, ?, ?, ?, 'synced')
+               ON CONFLICT(host_id, conversation_id) DO UPDATE SET
+                 title=excluded.title, workspace=excluded.workspace,
+                 updated_at=excluded.updated_at, revision=excluded.revision,
+                 sync_status='synced'""",
+            (host_id, cid, conversation.get("title", "New Task"),
+             conversation.get("workspace"), conversation.get("updated_at", ""),
+             str(conversation.get("revision", ""))),
+        )
+        await db.execute(
+            "DELETE FROM remote_messages WHERE host_id=? AND conversation_id=?",
+            (host_id, cid),
+        )
+        for position, message in enumerate(messages):
+            await db.execute(
+                "INSERT INTO remote_messages(host_id, conversation_id, message_id, position, payload) VALUES (?, ?, ?, ?, ?)",
+                (host_id, cid, str(message.get("id", position)), position,
+                 json.dumps(message)),
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def list_remote_conversations(host_id: str) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT host_id, conversation_id, title, workspace, updated_at, revision, sync_status FROM remote_conversations WHERE host_id=? ORDER BY updated_at DESC",
+            (host_id,),
+        )
+        return [dict(row) for row in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+async def get_remote_messages(host_id: str, conversation_id: str) -> list[dict] | None:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT payload FROM remote_messages WHERE host_id=? AND conversation_id=? ORDER BY position",
+            (host_id, str(conversation_id)),
+        )
+        rows = await cur.fetchall()
+        if not rows:
+            cur = await db.execute(
+                "SELECT 1 FROM remote_conversations WHERE host_id=? AND conversation_id=?",
+                (host_id, str(conversation_id)),
+            )
+            return [] if await cur.fetchone() else None
+        return [json.loads(row["payload"]) for row in rows]
     finally:
         await db.close()
 

@@ -33,6 +33,8 @@ Design accepted; implementation is phased. The first backend slice adds a regist
 
 - Sidebar hierarchy: This device → local workspace groups → local-owned chats; each saved remote device → its remote workspace groups → remote-owned chats.
 - Selecting a device/workspace is navigation, not a global execution-target toggle. Selecting a chat determines conversation ownership; its workspace determines where workspace tools execute.
+
+**Verification notes:** Device groups and management flows exist and selection does not switch global execution scope. Follow-up gaps found in audit: remote workspace groups show only the three newest chats with no expansion path; chats associated with a removed device profile lose their sidebar group; no focused frontend tests cover device hierarchy/status/management/local-chat visibility. Clarify whether a distinct “connecting” status is required and whether refresh should be per-device.
 - Add-device flow: discover or enter URL, verify protocol and passphrase, save device profile, fetch workspace list and remote conversation metadata/history, then expose the device group. Add/remove/refresh actions are on the device group.
 - A device status indicator reports online, offline/cached, connecting, or authentication/error state. Cached remote chat rows remain available offline and communicate read-only/pending-sync status.
 - A selected remote chat uses the same composer and local provider controls. Starting a turn first refreshes its revision and acquires the per-chat edit lease. Losing the lease or host aborts remote-dependent execution and marks any local-only turn output pending sync.
@@ -78,17 +80,23 @@ Design accepted; implementation is phased. The first backend slice adds a regist
 - [x] Aggregate local and reachable remote workspace rows; route remote file/attachment/workspace CRUD operations by explicit owner.
 - [x] Cover online/offline/error responses and prevent one host's failure from hiding other workspaces.
 
+**Verification notes (2025-06-16):** Core device APIs, aggregation, and owner-based routing are present. Follow-up gaps found in audit: add a test proving one connected host's failure does not hide another host's workspaces; directly test remote workspace deletion and file preview/delete routing; confirm whether workspace update semantics are required for CRUD. Per-host malformed-response isolation also needs consideration.
+
 ### Phase 3 — Sidebar device hierarchy and persistent profiles
 
 - [x] Add device-parent groups with connection status and device-specific workspace/local-chat grouping.
 - [x] Keep local workspace rows and chats fully usable at all times; preserve existing local-owned chats.
 - [x] Add device management (add/discover, reconnect, refresh, remove) outside the composer; selecting a device must not toggle global execution scope.
 
-### Phase 4 — Remote-owned conversation cache and read path
+### Phase 4 — Remote-owned conversation cache and read path (in progress)
 
-- Add composite owner identity throughout frontend state and read APIs.
-- Cache remote metadata/messages locally; load from cache offline and display read-only status.
-- Scope image/attachment retrieval and conversation actions by owner. Test ID collisions between local and multiple remote databases.
+- [ ] Add composite owner identity throughout frontend state and read APIs.
+- [x] Cache remote metadata/messages locally; load from cache offline and display read-only status.
+- [ ] Scope image/attachment retrieval and conversation actions by owner. Test ID collisions between local and multiple remote databases.
+
+**Backend read/cache slice:** Added authenticated host metadata/history endpoints, host-keyed cache tables, and per-device read routes that refresh while connected and serve cached transcripts on loss of connectivity. Backend DB/cache and remote API tests pass. Frontend composite identity/read-only rendering and owner-scoped media remain outstanding.
+
+**Implementation notes:** Phase 4 is deliberately read-only. Host-owned chats must remain distinct from local-owned chats that happen to use remote workspaces. Use composite identity `(owner device ID, conversation ID)`; do not reuse local integer-keyed conversation tables. Defer leases and bidirectional edits/sync to Phase 5, and remote-workspace turn execution to Phase 6.
 
 ### Phase 5 — Per-chat leases and bidirectional sync
 
