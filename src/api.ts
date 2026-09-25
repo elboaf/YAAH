@@ -200,8 +200,6 @@ export interface AgentConfig {
   api_base: string // derived from active provider
   api_key: string // masked, derived
   model: string // derived
-  temperature?: number
-  max_tokens?: number
   max_steps?: number
   /** Reasoning effort (#6): "" = don't send the param; low | medium | high. */
   reasoning_effort?: string
@@ -253,8 +251,6 @@ export const updateConfig = (
   patch: Partial<{
     providers: Record<string, Partial<ProviderConfig>>
     active_provider: string
-    temperature: number
-    max_tokens: number
     max_steps: number
     reasoning_effort: string
     ui_scale: number

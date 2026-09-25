@@ -57,18 +57,15 @@ def _classify_timeout(e: Exception, provider: str, started: float) -> ModelTimeo
 def _build_payload(cfg: dict, tools: list | None, stream: bool) -> dict:
     """The chat-completions request body. Pure so the param-gating rules are
     unit-testable without HTTP."""
+    # Let the selected model/provider apply its own generation defaults and
+    # output cap. Temperature and max_tokens are intentionally not sent.
     payload = {
         "model": cfg["model"],
         "messages": [],
-        "temperature": cfg["temperature"],
         "stream": stream,
     }
-    # 0/blank = no limit: let the provider use the model's full output cap
-    if cfg["max_tokens"] and cfg["max_tokens"] > 0:
-        payload["max_tokens"] = cfg["max_tokens"]
-    # Reasoning effort: "" = don't send the param at all. The model-aware UI
-    # limits values to the selected provider's advertised supported_efforts;
-    # don't hard-code a global enum here (providers add values such as "max").
+    # Reasoning effort is set per chat (or inherited from the new-chat
+    # default in the sidebar); blank means use the provider default.
     effort = (cfg.get("reasoning_effort") or "").strip().lower()
     if effort and len(effort) <= 64:
         payload["reasoning_effort"] = effort

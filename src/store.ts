@@ -761,9 +761,9 @@ export const useAgent = create<AgentState>((set, get) => ({
       // New chat button after setWorkspace) sets s.workspace first, and the
       // first send both files the chat and streams its turn here (#88/#94).
       draftDestination: s.workspace,
-      // #51/#76: the fresh draft inherits the CURRENT defaults (sidebar
-      // model / Settings effort) — the picker values it shows are what the
-      // first send will pin into the new conversation row.
+      // #51/#76: the fresh draft inherits the CURRENT sidebar defaults —
+      // the picker values it shows are what the first send will pin into the
+      // new conversation row.
       draftScope: { model: get().globalModel, effort: get().globalEffort },
     }))
     persistConversationId(null)

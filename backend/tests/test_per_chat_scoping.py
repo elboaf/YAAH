@@ -26,8 +26,6 @@ from backend.db.database import (
 def _cfg(effort=None):
     cfg = {
         "model": "global-m",
-        "temperature": 0.2,
-        "max_tokens": 0,
         "api_base": "http://p1",
         "api_key": "",
         "providers": {"p1": {"api_base": "http://p1"}, "p2": {"api_base": "http://p2"}},

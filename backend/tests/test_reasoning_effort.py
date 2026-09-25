@@ -5,8 +5,6 @@ from backend.agent.model_client import _build_payload
 def _cfg(effort=None):
     cfg = {
         "model": "m",
-        "temperature": 0.2,
-        "max_tokens": 0,
         "api_base": "http://x",
         "api_key": "",
         "providers": {"p": {}},
@@ -14,6 +12,18 @@ def _cfg(effort=None):
     if effort is not None:
         cfg["reasoning_effort"] = effort
     return cfg
+
+
+def test_model_generation_controls_are_left_to_provider_defaults():
+    payload = _build_payload(_cfg(), None, False)
+    assert "temperature" not in payload
+    assert "max_tokens" not in payload
+
+    # Legacy values can remain in an existing config file, but are ignored.
+    legacy_cfg = {**_cfg(), "temperature": 0.9, "max_tokens": 100}
+    payload = _build_payload(legacy_cfg, None, False)
+    assert "temperature" not in payload
+    assert "max_tokens" not in payload
 
 
 def test_default_sends_no_param():

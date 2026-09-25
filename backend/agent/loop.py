@@ -1396,7 +1396,7 @@ async def _run_agent_claimed(
     loaded_skills: list[str] = list(invoked)
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
-    # the turn). Configured in Settings → Max steps or config.json `max_steps`.
+    # the turn). Configured in Settings → General → Max steps or config.json `max_steps`.
     try:
         max_steps = int(load_config().get("max_steps") or 0)
     except (TypeError, ValueError):
@@ -1635,8 +1635,8 @@ async def _run_agent_claimed(
                     yield _ndjson(
                         {
                             "type": "text",
-                            "text": "\n\n[output truncated: the model hit its "
-                            "max output tokens — raise max_tokens in Settings]",
+                            "text": "\n\n[output truncated: the model reached its output limit. "
+                            "Try shortening the request or splitting it into smaller steps.]",
                         }
                     )
                 # Final usage readout for the UI's context strip (the last
@@ -1726,8 +1726,7 @@ async def _run_agent_claimed(
                                 "Tool arguments were cut off because the model "
                                 "reached its max output tokens (finish_reason="
                                 "length). Retry with a much shorter call — e.g. "
-                                "smaller arguments or a narrower file range — "
-                                "or ask the user to raise max_tokens in Settings."
+                                "smaller arguments or a narrower file range."
                             )
                         }
                     else:
@@ -2213,7 +2212,7 @@ async def _run_agent_claimed(
 
         budget_msg = (
             f"Step budget ({max_steps}) exhausted — raise it in "
-            "Settings → Max steps (or config.json `max_steps`; 0 = unlimited)"
+            "Settings → General → Max steps (or config.json `max_steps`; 0 = unlimited)"
         )
         run_outcome = "failed"
         await add_message(conversation_id, "system", f"turn failed: {budget_msg}")

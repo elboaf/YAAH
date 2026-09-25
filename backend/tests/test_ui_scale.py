@@ -6,7 +6,7 @@ from backend.agent.config import load_config, save_config
 
 
 def test_ui_scale_persists(tmp_path, monkeypatch):
-    """ui_scale rides the generic config merge like temperature/max_steps."""
+    """ui_scale rides the generic config merge without disturbing other settings."""
     from backend.agent import config as cfgmod
 
     monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
@@ -14,7 +14,7 @@ def test_ui_scale_persists(tmp_path, monkeypatch):
 
     save_config({"ui_scale": 1.25})
     assert load_config()["ui_scale"] == 1.25
-    save_config({"temperature": 0.5})
+    save_config({"max_steps": 50})
     # A later save that doesn't mention ui_scale must not reset it.
     assert load_config()["ui_scale"] == 1.25
 

@@ -5382,15 +5382,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
   const [active, setActive] = useState('')
   const [newName, setNewName] = useState('')
-  const [temperature, setTemperature] = useState<number | ''>('')
-  const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
-  // Reasoning effort (#6): '' = don't send the param (Default).
-  const [reasoningEffort, setReasoningEffort] = useState('')
-  const [availableModels, setAvailableModels] = useState<Record<string, ProviderModels>>({})
-  const activeModel = providers[active]?.model ?? ''
-  const activeSupportsReasoning = modelSupportsReasoning(availableModels, activeModel)
-  const activeEfforts = modelReasoningEfforts(availableModels, activeModel)
+  const [activeTab, setActiveTab] = useState<'general' | 'providers' | 'voice' | 'mcp'>('general')
   // Per-model context-window overrides (model id -> tokens); blank = auto.
   const [ctxOverrides, setCtxOverrides] = useState<Record<string, number>>({})
   const [ctxModelDraft, setCtxModelDraft] = useState('')
@@ -5475,11 +5468,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           }
           setProviders(next)
           setActive(c.active_provider)
-          listAvailableModels().then((r) => setAvailableModels(r.providers)).catch(() => {})
-          setTemperature(c.temperature ?? '')
-          setMaxTokens(c.max_tokens ? c.max_tokens : '')
           setMaxSteps(c.max_steps ?? '')
-          setReasoningEffort(c.reasoning_effort ?? '')
           setCtxOverrides(c.context_window_overrides ?? {})
           setCompactionEnabled(c.compaction?.enabled !== false)
           setCompactionTriggerK(c.compaction?.trigger_tokens ? c.compaction.trigger_tokens / 1000 : '')
@@ -5625,10 +5614,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       await updateConfig({
         providers: out,
         active_provider: active || undefined,
-        temperature: temperature === '' ? undefined : Number(temperature),
-        max_tokens: maxTokens === '' ? 0 : Number(maxTokens),
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
-        reasoning_effort: activeEfforts.includes(reasoningEffort) ? reasoningEffort : '',
         context_window_overrides: ctxOverrides,
         compaction: {
           enabled: compactionEnabled,
@@ -5658,8 +5644,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
       // Live-apply the interface scale (App's UiScale listens and re-zooms).
       window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: uiScale } }))
-      // #76: Settings' effort (and any provider/model change) is the DEFAULT
-      // for new chats — resync the store globals the header pickers inherit.
+      // Provider/model changes can affect the defaults inherited by new chats;
+      // refresh the sidebar's model and thought-level controls.
       useAgent.getState().refreshGlobals()
       setSaved(true)
       setTimeout(onClose, 600)
@@ -5695,10 +5681,67 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div
+          className="flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-800 px-4"
+          role="tablist"
+          aria-label="Settings sections"
+        >
+          {([
+            ['general', 'General'],
+            ['providers', 'Providers'],
+            ['voice', 'Voice'],
+            ['mcp', 'MCP'],
+          ] as const).map(([tab, label]) => (
+            <button
+              key={tab}
+              type="button"
+              role="tab"
+              id={`settings-tab-${tab}`}
+              aria-selected={activeTab === tab}
+              aria-controls="settings-panel"
+              tabIndex={activeTab === tab ? 0 : -1}
+              onClick={() => setActiveTab(tab)}
+              onKeyDown={(e) => {
+                const tabs = ['general', 'providers', 'voice', 'mcp'] as const
+                const index = tabs.indexOf(tab)
+                const next = e.key === 'ArrowRight'
+                  ? (index + 1) % tabs.length
+                  : e.key === 'ArrowLeft'
+                    ? (index - 1 + tabs.length) % tabs.length
+                    : e.key === 'Home'
+                      ? 0
+                      : e.key === 'End'
+                        ? tabs.length - 1
+                        : -1
+                if (next >= 0) {
+                  e.preventDefault()
+                  const nextTab = tabs[next]
+                  setActiveTab(nextTab)
+                  document.getElementById(`settings-tab-${nextTab}`)?.focus()
+                }
+              }}
+              className={`shrink-0 border-b-2 px-3 py-2.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 ${
+                activeTab === tab
+                  ? 'border-blue-500 text-zinc-100'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div
+          className="min-h-0 flex-1 overflow-y-auto p-4"
+          role="tabpanel"
+          id="settings-panel"
+          aria-labelledby={`settings-tab-${activeTab}`}
+          tabIndex={0}
+        >
           <div className="grid grid-cols-4 gap-3">
             {/* providers: collapsed rows, active first; fields behind one open row */}
-            <SettingsCard title="Providers" className="col-span-4">
+            {activeTab === 'providers' && (
+              <SettingsCard title="Providers" className="col-span-4">
               {providerOrder.length === 0 && (
                 <p className="text-[11px] text-zinc-600">
                   No providers yet — add one below to start using the agent.
@@ -5824,62 +5867,20 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
             </SettingsCard>
+            )}
 
-            <SettingsCard title="Generation" className="col-span-2">
-              <div className="grid grid-cols-2 gap-2.5">
-                <div>
-                  <label className="mb-1 block text-[10px] text-zinc-500">Temperature</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    max="2"
-                    className={`${settingsInputCls} w-full`}
-                    value={temperature}
-                    onChange={(e) => setTemperature(e.target.value === '' ? '' : Number(e.target.value))}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] text-zinc-500">Max tokens</label>
-                  <input
-                    type="number"
-                    min="0"
-                    className={`${settingsInputCls} w-full`}
-                    value={maxTokens}
-                    onChange={(e) => setMaxTokens(e.target.value === '' ? '' : Number(e.target.value))}
-                  />
-                  <p className="mt-1 text-[10px] text-zinc-600">0 = provider default</p>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] text-zinc-500">Max steps</label>
-                  <input
-                    type="number"
-                    min="0"
-                    className={`${settingsInputCls} w-full`}
-                    value={maxSteps}
-                    onChange={(e) => setMaxSteps(e.target.value === '' ? '' : Number(e.target.value))}
-                  />
-                  <p className="mt-1 text-[10px] text-zinc-600">0 = unlimited (Stop still works)</p>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] text-zinc-500">
-                    Reasoning effort <span className="text-zinc-600">(default for new chats — #76)</span>
-                  </label>
-                  <select
-                    className={`${settingsInputCls} w-full disabled:opacity-50`}
-                    value={reasoningEffort}
-                    onChange={(e) => setReasoningEffort(e.target.value)}
-                    aria-label="Reasoning effort"
-                    disabled={!activeSupportsReasoning}
-                  >
-                    <EffortOptions efforts={activeEfforts} />
-                  </select>
-                  <p className="mt-1 text-[10px] text-zinc-600">
-                    {activeSupportsReasoning
-                      ? 'Default = provider default. Existing chats keep their own header selector.'
-                      : 'Selected model/provider does not advertise reasoning effort support.'}
-                  </p>
-                </div>
+            {activeTab === 'general' && (
+              <SettingsCard title="Agent & context" className="col-span-4">
+              <div className="max-w-sm">
+                <label className="mb-1 block text-[10px] text-zinc-500">Max steps</label>
+                <input
+                  type="number"
+                  min="0"
+                  className={`${settingsInputCls} w-full`}
+                  value={maxSteps}
+                  onChange={(e) => setMaxSteps(e.target.value === '' ? '' : Number(e.target.value))}
+                />
+                <p className="mt-1 text-[10px] text-zinc-600">0 = unlimited (Stop still works)</p>
               </div>
 
               <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
@@ -5985,8 +5986,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 </p>
               </div>
             </SettingsCard>
+            )}
 
-            <SettingsCard title="Voice dictation" className="col-span-2">
+            {activeTab === 'voice' && (
+              <>
+                <SettingsCard title="Voice dictation" className="col-span-2">
               <div className="mb-2.5 flex gap-1.5" role="radiogroup" aria-label="Transcription engine">
                 {(['local', 'cloud'] as const).map((engine) => (
                   <button
@@ -6226,8 +6230,12 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 <p className="mt-2 text-[10px] text-red-400">Read-aloud error: {ttsUiError}</p>
               )}
             </SettingsCard>
+            </>
+            )}
 
-            <SettingsCard title="Remote hosting" className="col-span-2">
+            {activeTab === 'general' && (
+              <>
+                <SettingsCard title="Remote hosting" className="col-span-2">
               <div className="space-y-1.5">
                 <label className="flex items-center gap-2 text-xs text-zinc-300">
                   <input
@@ -6289,12 +6297,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               </div>
             </SettingsCard>
 
-            <SettingsCard title="MCP tool servers" className="col-span-4">
-              <McpSection />
-            </SettingsCard>
             <SettingsCard title="Scheduled agents" className="col-span-4">
               <AgentsSettingsSection />
             </SettingsCard>
+            </>
+            )}
+
+            {activeTab === 'mcp' && (
+              <SettingsCard title="MCP tool servers" className="col-span-4">
+              <McpSection />
+            </SettingsCard>
+            )}
           </div>
         </div>
 

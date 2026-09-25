@@ -914,11 +914,11 @@ def _resolve_turn_scope(
     """Per-chat model + effort resolution (#51/#76): what a turn in this
     conversation runs on, before any streaming starts.
 
-    - Normal chat: the conversation row pins both — the sidebar default and
-      the Settings effort were stamped in at first send and only change when
-      the chat's own pickers change them. effort '' (the chat's explicit
-      Default) becomes the None sentinel so the reasoning_effort param is
-      NOT sent even if the global setting would send it.
+    - Normal chat: the conversation row pins both — the sidebar defaults
+      were stamped in at first send and only change when the chat's own
+      pickers change them. effort '' (the chat's explicit Default) becomes
+      the None sentinel so reasoning_effort is not sent even if a global
+      default is configured.
     - Agent-pinned chat: resolve through the owning agent — the header
       selectors write through to the agent, so its values ARE the chat's.
       Agent effort '' means inherit-global here, matching the semantics the
@@ -951,10 +951,8 @@ class ProviderEntry(BaseModel):
 class ConfigUpdate(BaseModel):
     providers: dict[str, ProviderEntry] | None = None
     active_provider: str | None = None
-    temperature: float | None = None
-    max_tokens: int | None = None
     max_steps: int | None = None
-    # Reasoning effort (#6): "" = don't send the param; provider-advertised values send it.
+    # Default reasoning effort for new chats (set in the sidebar picker).
     reasoning_effort: str | None = None
     voice: dict | None = None
     remote: dict | None = None
@@ -1824,8 +1822,6 @@ async def api_get_config():
         "api_base": cfg["api_base"],
         "api_key": "set" if cfg.get("api_key") else "",
         "model": cfg["model"],
-        "temperature": cfg.get("temperature"),
-        "max_tokens": cfg.get("max_tokens"),
         "max_steps": cfg.get("max_steps"),
         # Reasoning effort (#6): "" = don't send the param to the provider.
         "reasoning_effort": cfg.get("reasoning_effort") or "",

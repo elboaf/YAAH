@@ -34,12 +34,9 @@ CONFIG_PATH = Path(
 )
 
 DEFAULTS = {
-    "temperature": 0.2,
-    "max_tokens": 0,
-    # Reasoning effort (#6): "" = don't send reasoning_effort to the model
-    # provider at all; a provider-advertised value sends it. Settings dropdown.
+    # New-chat reasoning effort is selected from the sidebar, not Settings.
     "reasoning_effort": "",
-    # Agent loop tool-call rounds per turn (Settings → Max steps).
+    # Agent loop tool-call rounds per turn (Settings → General → Max steps).
     "max_steps": 200,
     # Last workspace chosen in the sidebar, so it survives app restarts.
     "last_workspace": "",

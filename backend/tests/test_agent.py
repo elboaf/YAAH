@@ -1205,8 +1205,6 @@ async def test_chat_provider_model_override(monkeypatch):
         "api_key": "k-or",
         "model": "z-ai/glm-5.3-flash",
         "reasoning_effort": "",
-        "max_tokens": 0,
-        "temperature": 0.7,
     })
 
     captured = {}
