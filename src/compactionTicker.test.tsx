@@ -51,6 +51,33 @@ describe('live compaction ticker', () => {
     expect(screen.getByText(tape)).toBeTruthy()
   })
 
+  it('keeps parent and sub-agent telemetry segments on one line', () => {
+    useAgent.setState({
+      tapeByConv: { '42': '\nspawned explore\nspawn explore: read_file\nspawn explore: bash' },
+    })
+    const run = {
+      agentId: 1,
+      agentType: 'explore',
+      prompt: 'inspect this module',
+      status: 'running' as const,
+      text: '',
+      tools: [],
+      telemetry: '\nspawned explore\nread_file\nsearch_files',
+    }
+    render(
+      <MessageView
+        msg={liveMessage([{ id: 'spawn-1', name: 'spawn_agent', subAgent: run }])}
+        live
+      />,
+    )
+
+    const telemetry = document.querySelectorAll('[data-agent-telemetry]')
+    expect(telemetry.length).toBe(2)
+    for (const strip of telemetry) {
+      expect(strip.textContent).not.toMatch(/[\r\n]/)
+    }
+  })
+
   it('renders nested sub-agent tool calls in a single clipped ticker row', () => {
     const run = {
       agentId: 1,

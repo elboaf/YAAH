@@ -813,10 +813,10 @@ function ElapsedBadge({ startedAt, className = 'text-zinc-500' }: { startedAt?: 
  *  the ticker chips, right edge aligned with the newest chip's right edge.
  *  Not meant to be read; it is proof that output is occurring. */
 function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boolean }) {
+  const visibleTape = (compact ? tape.slice(-160) : tape).replace(/[\r\n]+/g, '    ')
   const wrapRef = useRef<HTMLDivElement>(null)
   const tapeRef = useRef<HTMLSpanElement>(null)
   const [offset, setOffset] = useState(0)
-  const visibleTape = compact ? tape.slice(-160) : tape
   useEffect(() => {
     const w = wrapRef.current?.clientWidth ?? 0
     const t = tapeRef.current?.scrollWidth ?? 0
@@ -825,6 +825,7 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
   return (
     <div
       ref={wrapRef}
+      data-agent-telemetry=""
       className={`overflow-hidden ${compact ? 'mt-1 rounded bg-zinc-950/50 px-1.5 py-0.5' : ''}`}
       style={{
         maskImage:
@@ -8464,7 +8465,7 @@ function Composer() {
       if (ev.text && ev.kind === 'text') subAgentTextDelta(bufKey, curId, spawnCallId, ev.text)
       if (ev.kind === 'tool_start') {
         subAgentToolStart(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.name ?? 'tool', ev.args)
-        appendTape(bufKey, `\n▸ spawn ${spawnCallId}: ${ev.name ?? 'tool'}    `)
+        appendSubAgentTelemetry(bufKey, curId, spawnCallId, `\n▸ ${ev.name ?? 'tool'}    `)
       } else if (ev.kind === 'tool_progress') {
         if (ev.chunk) subAgentToolProgress(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.chunk)
       } else if (ev.kind === 'tool_result') {
@@ -8488,7 +8489,12 @@ function Composer() {
       }
     } else if (ev.type === 'sub_agent_done') {
       finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note)
-      appendTape(bufKey, `\n${ev.status === 'completed' ? '✓' : ev.status === 'cancelled' ? '■' : '!'} spawn ${ev.call_id ?? ''} ${ev.status ?? 'completed'} · ${ev.turns ?? 0} turns    `)
+      appendSubAgentTelemetry(
+        bufKey,
+        curId,
+        ev.call_id ?? '',
+        `\n${ev.status === 'completed' ? '✓' : ev.status === 'cancelled' ? '■' : '!'} ${ev.status ?? 'completed'} · ${ev.turns ?? 0} turns    `,
+      )
       pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
     } else if (ev.type === 'error') {
       setStatus(bufKey, 'error')
