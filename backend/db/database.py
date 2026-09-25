@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     system_prompt_override TEXT,
     model TEXT NOT NULL DEFAULT '',
     effort TEXT NOT NULL DEFAULT '',
+    remote_revision_counter INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -102,6 +103,23 @@ CREATE TABLE IF NOT EXISTS remote_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_remote_messages_order
     ON remote_messages(host_id, conversation_id, position);
+
+-- Host-enforced edit leases and idempotent remote conversation commits.
+-- Expirations use Unix seconds so they can be atomically compared in SQLite.
+CREATE TABLE IF NOT EXISTS remote_edit_leases (
+    conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    lease_token TEXT NOT NULL,
+    holder_id TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS remote_conversation_commits (
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    commit_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, commit_id)
+);
 
 CREATE TABLE IF NOT EXISTS workspaces (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -201,12 +219,45 @@ async def get_db() -> aiosqlite.Connection:
                 "ALTER TABLE conversations ADD COLUMN effort TEXT NOT NULL DEFAULT ''"
             )
         await _stamp_conversation_scopes(db)
+    if "remote_revision_counter" not in conv_cols:
+        # Revision 1 is a stable baseline token for conversations created
+        # before the remote-edit protocol existed.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN remote_revision_counter INTEGER NOT NULL DEFAULT 1"
+        )
     cur = await db.execute("PRAGMA table_info(agents)")
     agent_cols = {r[1] for r in await cur.fetchall()}
     if "allow_ask_user" not in agent_cols:
         # #93: per-agent opt-in letting a scheduled run block on ask_user.
         # Default 0 preserves the unattended contract for existing agents.
         await db.execute("ALTER TABLE agents ADD COLUMN allow_ask_user INTEGER NOT NULL DEFAULT 0")
+    # Revision tokens change for every host-side metadata/transcript edit,
+    # including legacy local routes, not just commits through the new API.
+    await db.executescript("""
+    CREATE TRIGGER IF NOT EXISTS conversations_remote_revision_update
+    AFTER UPDATE OF title, workspace, system_prompt_override, model, effort
+    ON conversations
+    BEGIN
+        UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
+        WHERE id = NEW.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_remote_revision_insert
+    AFTER INSERT ON messages BEGIN
+        UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
+        WHERE id = NEW.conversation_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_remote_revision_update
+    AFTER UPDATE OF role, content, tool_calls, tool_call_id, images, sub_agent_transcript
+    ON messages BEGIN
+        UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
+        WHERE id = NEW.conversation_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_remote_revision_delete
+    AFTER DELETE ON messages BEGIN
+        UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
+        WHERE id = OLD.conversation_id;
+    END;
+    """)
     await migrate_workspaces(db)
     return db
 
@@ -730,6 +781,313 @@ async def list_remote_conversations(host_id: str) -> list[dict]:
             (host_id,),
         )
         return [dict(row) for row in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+class RemoteProtocolError(Exception):
+    """A lease/revision conflict with a machine-readable protocol code."""
+
+    def __init__(self, code: str, **details):
+        self.code = code
+        self.details = details
+        super().__init__(code)
+
+
+def _revision_token(counter: int) -> str:
+    return f"r:{counter}"
+
+
+async def acquire_remote_edit_lease(
+    conversation_id: int, revision: str, holder_id: str = ""
+) -> dict:
+    """Atomically check the revision and acquire a bounded host-side lease."""
+    import secrets
+    import time
+
+    lease_seconds = 120
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT remote_revision_counter FROM conversations WHERE id = ?",
+            (conversation_id,),
+        )
+        conversation = await cur.fetchone()
+        if conversation is None:
+            await db.rollback()
+            raise RemoteProtocolError("conversation_not_found")
+        current_revision = _revision_token(conversation["remote_revision_counter"])
+        if revision != current_revision:
+            await db.rollback()
+            raise RemoteProtocolError(
+                "stale_revision", current_revision=current_revision,
+                provided_revision=revision,
+            )
+        now = int(time.time())
+        cur = await db.execute(
+            "SELECT holder_id, expires_at FROM remote_edit_leases"
+            " WHERE conversation_id = ? AND expires_at > ?",
+            (conversation_id, now),
+        )
+        active = await cur.fetchone()
+        if active is not None:
+            await db.rollback()
+            raise RemoteProtocolError(
+                "lease_held", holder_id=active["holder_id"],
+                expires_at=active["expires_at"],
+            )
+        token = secrets.token_urlsafe(32)
+        expires_at = now + lease_seconds
+        await db.execute(
+            "INSERT INTO remote_edit_leases(conversation_id, lease_token, holder_id, expires_at)"
+            " VALUES (?, ?, ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET"
+            " lease_token=excluded.lease_token, holder_id=excluded.holder_id,"
+            " expires_at=excluded.expires_at",
+            (conversation_id, token, holder_id, expires_at),
+        )
+        await db.commit()
+        return {"lease_token": token, "expires_at": expires_at,
+                "revision": current_revision, "lease_seconds": lease_seconds}
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def renew_remote_edit_lease(conversation_id: int, lease_token: str) -> dict:
+    import time
+
+    lease_seconds = 120
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        now = int(time.time())
+        cur = await db.execute(
+            "SELECT expires_at FROM remote_edit_leases"
+            " WHERE conversation_id = ? AND lease_token = ? AND expires_at > ?",
+            (conversation_id, lease_token, now),
+        )
+        if await cur.fetchone() is None:
+            await db.rollback()
+            raise RemoteProtocolError("lease_invalid_or_expired")
+        expires_at = now + lease_seconds
+        await db.execute(
+            "UPDATE remote_edit_leases SET expires_at = ? WHERE conversation_id = ?",
+            (expires_at, conversation_id),
+        )
+        await db.commit()
+        return {"lease_token": lease_token, "expires_at": expires_at,
+                "lease_seconds": lease_seconds}
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def release_remote_edit_lease(conversation_id: int, lease_token: str) -> bool:
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT lease_token, expires_at FROM remote_edit_leases WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        lease = await cur.fetchone()
+        if lease is None:
+            await db.commit()
+            return False
+        import time
+        if lease["lease_token"] != lease_token or lease["expires_at"] <= int(time.time()):
+            await db.rollback()
+            raise RemoteProtocolError("lease_invalid_or_expired")
+        await db.execute(
+            "DELETE FROM remote_edit_leases WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        await db.commit()
+        return True
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def get_remote_conversation_snapshot(conversation_id: int) -> dict | None:
+    db = await get_db()
+    try:
+        await db.execute("BEGIN")
+        cur = await db.execute(
+            "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        conversation = dict(row)
+        conversation["revision"] = _revision_token(
+            conversation.pop("remote_revision_counter")
+        )
+        conversation.pop("prompt_summary", None)
+        conversation.pop("prompt_summary_through_message_id", None)
+        cur = await db.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id",
+            (conversation_id,),
+        )
+        messages = [dict(item) for item in await cur.fetchall()]
+        for message in messages:
+            for field in ("tool_calls", "images", "sub_agent_transcript"):
+                raw = message.get(field)
+                message[field] = json.loads(raw) if raw else ([] if field == "images" else None)
+        return {"conversation": conversation, "messages": messages,
+                "revision": conversation["revision"]}
+    finally:
+        await db.close()
+
+
+async def commit_remote_conversation(
+    conversation_id: int,
+    *,
+    lease_token: str,
+    revision: str,
+    commit_id: str,
+    conversation: dict,
+    messages: list[dict],
+) -> dict:
+    """Validate lease+revision and atomically replace a snapshot exactly once."""
+    import hashlib
+    import time
+
+    request = {"revision": revision, "conversation": conversation, "messages": messages}
+    request_hash = hashlib.sha256(
+        json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    db = await get_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT request_hash, response_json FROM remote_conversation_commits"
+            " WHERE conversation_id = ? AND commit_id = ?",
+            (conversation_id, commit_id),
+        )
+        previous = await cur.fetchone()
+        if previous is not None:
+            if previous["request_hash"] != request_hash:
+                await db.rollback()
+                raise RemoteProtocolError("commit_id_reused")
+            result = json.loads(previous["response_json"])
+            result["replayed"] = True
+            await db.commit()
+            return result
+
+        cur = await db.execute(
+            "SELECT remote_revision_counter FROM conversations WHERE id = ?",
+            (conversation_id,),
+        )
+        conv = await cur.fetchone()
+        if conv is None:
+            await db.rollback()
+            raise RemoteProtocolError("conversation_not_found")
+        now = int(time.time())
+        cur = await db.execute(
+            "SELECT lease_token, expires_at FROM remote_edit_leases"
+            " WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        active = await cur.fetchone()
+        if active is None or active["lease_token"] != lease_token or active["expires_at"] <= now:
+            await db.rollback()
+            raise RemoteProtocolError("lease_invalid_or_expired")
+        current_revision = _revision_token(conv["remote_revision_counter"])
+        if revision != current_revision:
+            await db.rollback()
+            raise RemoteProtocolError(
+                "stale_revision", current_revision=current_revision,
+                provided_revision=revision,
+            )
+
+        fields = {field: conversation[field] for field in ("title", "workspace") if field in conversation}
+        if fields:
+            sets = ", ".join(f"{field} = ?" for field in fields)
+            await db.execute(
+                f"UPDATE conversations SET {sets}, updated_at = datetime('now') WHERE id = ?",
+                (*fields.values(), conversation_id),
+            )
+        await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        normalized_ids = []
+        for message in messages:
+            try:
+                candidate = int(message.get("id"))
+                if candidate <= 0 or str(candidate) != str(message.get("id")):
+                    raise ValueError
+                normalized_ids.append(candidate)
+            except (TypeError, ValueError):
+                normalized_ids.append(None)
+        keep_ids = (
+            all(mid is not None for mid in normalized_ids)
+            and normalized_ids == sorted(set(normalized_ids))
+        )
+        if keep_ids and normalized_ids:
+            placeholders = ",".join("?" for _ in normalized_ids)
+            cur = await db.execute(
+                f"SELECT 1 FROM messages WHERE id IN ({placeholders}) LIMIT 1",
+                normalized_ids,
+            )
+            # IDs colliding with another conversation cannot be preserved;
+            # let SQLite allocate host-local IDs instead of failing the commit.
+            keep_ids = await cur.fetchone() is None
+        for index, message in enumerate(messages):
+            role = message.get("role")
+            if role not in ("user", "assistant", "tool", "system"):
+                await db.rollback()
+                raise RemoteProtocolError("invalid_message_role", index=index)
+            columns = "conversation_id, role, content, tool_calls, tool_call_id, images, sub_agent_transcript"
+            values = [
+                conversation_id, role, message.get("content", ""),
+                json.dumps(message["tool_calls"]) if message.get("tool_calls") is not None else None,
+                message.get("tool_call_id"),
+                json.dumps(message["images"]) if message.get("images") else None,
+                json.dumps(message["sub_agent_transcript"]) if message.get("sub_agent_transcript") else None,
+            ]
+            if keep_ids:
+                columns = "id, " + columns
+                values.insert(0, normalized_ids[index])
+            if message.get("created_at"):
+                columns += ", created_at"
+                values.append(message["created_at"])
+            placeholders = ", ".join("?" for _ in values)
+            await db.execute(
+                f"INSERT INTO messages ({columns}) VALUES ({placeholders})", values
+            )
+        await db.execute(
+            "UPDATE conversations SET updated_at = datetime('now'),"
+            " remote_revision_counter = remote_revision_counter + 1 WHERE id = ?",
+            (conversation_id,),
+        )
+        cur = await db.execute(
+            "SELECT remote_revision_counter FROM conversations WHERE id = ?",
+            (conversation_id,),
+        )
+        new_revision = _revision_token((await cur.fetchone())["remote_revision_counter"])
+        result = {"ok": True, "commit_id": commit_id, "revision": new_revision,
+                  "message_count": len(messages), "replayed": False}
+        await db.execute(
+            "INSERT INTO remote_conversation_commits"
+            "(conversation_id, commit_id, request_hash, response_json) VALUES (?, ?, ?, ?)",
+            (conversation_id, commit_id, request_hash,
+             json.dumps(result, sort_keys=True, separators=(",", ":"))),
+        )
+        await db.commit()
+        return result
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
     finally:
         await db.close()
 

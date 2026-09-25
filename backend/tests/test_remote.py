@@ -258,6 +258,199 @@ async def test_remote_info_is_open_and_names_the_protocol():
     assert isinstance(body["windows"], bool)
 
 
+# ------------------------------------------------------- remote edit protocol
+
+
+@pytest.fixture
+async def remote_conversation():
+    from backend.db.database import add_message, create_conversation
+
+    conversation_id = await create_conversation("Before edit")
+    await add_message(conversation_id, "user", "original")
+    return conversation_id
+
+
+_REMOTE_HEADERS = {"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "hunter2"}
+
+
+@pytest.mark.asyncio
+async def test_remote_snapshot_lease_commit_is_idempotent_and_preserves_ids(remote_conversation):
+    from backend.db.database import get_messages
+
+    _set_host("hunter2")
+    cid = remote_conversation
+    async with await _client() as c:
+        snapshot_response = await c.get(
+            f"/api/remote/conversations/{cid}/snapshot", headers=_REMOTE_HEADERS
+        )
+        assert snapshot_response.status_code == 200
+        snapshot = snapshot_response.json()
+        assert snapshot["revision"].startswith("r:")
+        assert snapshot["conversation"]["revision"] == snapshot["revision"]
+        message_id = snapshot["messages"][0]["id"]
+        lease_response = await c.post(
+            f"/api/remote/conversations/{cid}/lease",
+            headers=_REMOTE_HEADERS,
+            json={"revision": snapshot["revision"], "holder_id": "client-a"},
+        )
+        assert lease_response.status_code == 200
+        lease = lease_response.json()
+        assert lease["lease_seconds"] == 120
+        assert lease["expires_at"] > 0
+        body = {
+            "lease_token": lease["lease_token"],
+            "revision": snapshot["revision"],
+            "commit_id": "commit-once",
+            "conversation": {"title": "After edit", "workspace": "C:/repo"},
+            "messages": [
+                {**snapshot["messages"][0], "content": "edited original"},
+                {"id": 99, "role": "assistant", "content": "reply"},
+            ],
+        }
+        first = await c.post(
+            f"/api/remote/conversations/{cid}/commit", headers=_REMOTE_HEADERS, json=body
+        )
+        replay = await c.post(
+            f"/api/remote/conversations/{cid}/commit", headers=_REMOTE_HEADERS, json=body
+        )
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert first.json()["replayed"] is False
+        assert replay.json()["replayed"] is True
+        assert first.json()["revision"] == replay.json()["revision"]
+        assert (await get_messages(cid))[0]["id"] == message_id
+        assert [m["content"] for m in await get_messages(cid)] == ["edited original", "reply"]
+        refreshed = await c.get(
+            f"/api/remote/conversations/{cid}/snapshot", headers=_REMOTE_HEADERS
+        )
+        assert refreshed.json()["revision"] == first.json()["revision"]
+
+
+@pytest.mark.asyncio
+async def test_remote_edit_lease_conflict_stale_revision_and_independent_conversations(remote_conversation):
+    from backend.db.database import create_conversation
+
+    _set_host("hunter2")
+    cid = remote_conversation
+    other_id = await create_conversation("Independent")
+    async with await _client() as c:
+        snapshot = (await c.get(
+            f"/api/remote/conversations/{cid}/snapshot", headers=_REMOTE_HEADERS
+        )).json()
+        stale = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": "r:999"},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["detail"]["code"] == "stale_revision"
+        acquired = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": snapshot["revision"], "holder_id": "first"},
+        )
+        assert acquired.status_code == 200
+        held = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": snapshot["revision"], "holder_id": "second"},
+        )
+        assert held.status_code == 423
+        assert held.json()["detail"]["code"] == "lease_held"
+        bypass = await c.post(
+            f"/api/conversations/{cid}/messages", headers=_REMOTE_HEADERS,
+            json={"role": "user", "content": "must not bypass lease"},
+        )
+        assert bypass.status_code == 409
+        assert bypass.json()["detail"]["code"] == "remote_write_requires_lease"
+        other_snapshot = (await c.get(
+            f"/api/remote/conversations/{other_id}/snapshot", headers=_REMOTE_HEADERS
+        )).json()
+        independent = await c.post(
+            f"/api/remote/conversations/{other_id}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": other_snapshot["revision"]},
+        )
+        assert independent.status_code == 200
+
+        # An ordinary host-side edit bumps the revision, invalidating the old
+        # token without allowing the stale snapshot to overwrite it.
+        from backend.db.database import update_conversation
+        await update_conversation(cid, title="Host changed")
+        commit = await c.post(
+            f"/api/remote/conversations/{cid}/commit", headers=_REMOTE_HEADERS,
+            json={"lease_token": acquired.json()["lease_token"],
+                  "revision": snapshot["revision"], "commit_id": "stale-commit",
+                  "conversation": {"title": "Lost host edit"}, "messages": snapshot["messages"]},
+        )
+        assert commit.status_code == 409
+        assert commit.json()["detail"]["code"] == "stale_revision"
+
+
+@pytest.mark.asyncio
+async def test_remote_lease_renew_release_expiry_and_auth(remote_conversation):
+    import time
+    from backend.db.database import get_db
+
+    _set_host("hunter2")
+    cid = remote_conversation
+    async with await _client() as c:
+        denied = await c.get(
+            f"/api/remote/conversations/{cid}/snapshot",
+            headers={"X-Yaah-Remote": "1"},
+        )
+        assert denied.status_code == 401
+        snapshot = (await c.get(
+            f"/api/remote/conversations/{cid}/snapshot", headers=_REMOTE_HEADERS
+        )).json()
+        acquired = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": snapshot["revision"]},
+        )
+        token = acquired.json()["lease_token"]
+        renewed = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"lease_token": token},
+        )
+        assert renewed.status_code == 200
+        assert renewed.json()["expires_at"] >= acquired.json()["expires_at"]
+        released = await c.request(
+            "DELETE", f"/api/remote/conversations/{cid}/lease",
+            headers=_REMOTE_HEADERS, json={"lease_token": token},
+        )
+        assert released.status_code == 200
+        assert released.json() == {"ok": True, "released": True}
+        expired_lease = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": snapshot["revision"]},
+        )
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE remote_edit_leases SET expires_at = ? WHERE conversation_id = ?",
+                (int(time.time()) - 1, cid),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        next_lease = await c.post(
+            f"/api/remote/conversations/{cid}/lease", headers=_REMOTE_HEADERS,
+            json={"revision": snapshot["revision"]},
+        )
+        assert next_lease.status_code == 200
+        # Expiry is enforced during release as well as on renew/commit.
+        expired_release = await c.request(
+            "DELETE", f"/api/remote/conversations/{cid}/lease",
+            headers=_REMOTE_HEADERS,
+            json={"lease_token": expired_lease.json()["lease_token"]},
+        )
+        assert expired_release.status_code == 409
+        rejected = await c.post(
+            f"/api/remote/conversations/{cid}/commit", headers=_REMOTE_HEADERS,
+            json={"lease_token": expired_lease.json()["lease_token"],
+                  "revision": snapshot["revision"], "commit_id": "expired",
+                  "conversation": {}, "messages": snapshot["messages"]},
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"]["code"] == "lease_invalid_or_expired"
+
+
 # ---------------------------------------------------------------- client dispatch
 
 

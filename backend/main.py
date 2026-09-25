@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import httpx
 import os
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend._version import __version__
@@ -148,6 +148,27 @@ async def remote_auth_guard(request, call_next):
                 else "remote access refused: wrong passphrase"
             )
             return JSONResponse({"detail": detail}, status_code=401)
+    # Protocol v4 intentionally reserves host-owned transcript writes for the
+    # lease-checked /api/remote/.../commit endpoint. Older generic local-chat
+    # write routes cannot carry a revision + lease, so authenticated remote
+    # peers must not use them to bypass host-enforced exclusion.
+    remote_peer = marked or not is_local
+    parts = request.url.path.strip("/").split("/")
+    writes_conversation = (
+        len(parts) >= 3
+        and parts[:2] == ["api", "conversations"]
+        and request.method in {"POST", "PATCH", "PUT", "DELETE"}
+    ) or (
+        len(parts) == 3
+        and parts[:2] == ["api", "agent"]
+        and request.method == "POST"
+    )
+    if remote_peer and writes_conversation:
+        return JSONResponse(
+            {"detail": {"code": "remote_write_requires_lease",
+                         "message": "use the revision-aware remote conversation commit endpoint"}},
+            status_code=409,
+        )
     return await call_next(request)
 
 
@@ -177,6 +198,12 @@ from backend.db.database import (
     upsert_remote_conversation,
     list_remote_conversations,
     get_remote_messages,
+    acquire_remote_edit_lease,
+    renew_remote_edit_lease,
+    release_remote_edit_lease,
+    get_remote_conversation_snapshot,
+    commit_remote_conversation,
+    RemoteProtocolError,
 )
 
 
@@ -2113,6 +2140,9 @@ async def api_remote_conversations():
     """Read host-owned conversation metadata for an authenticated client."""
     rows = await list_conversations()
     for row in rows:
+        snapshot = await get_remote_conversation_snapshot(row["id"])
+        row["revision"] = snapshot["revision"]
+        row.pop("remote_revision_counter", None)
         row.pop("system_prompt_override", None)
         row.pop("context_tokens", None)
         row.pop("context_model", None)
@@ -2122,9 +2152,85 @@ async def api_remote_conversations():
 @app.get("/api/remote/conversations/{conversation_id}/messages")
 async def api_remote_conversation_messages(conversation_id: int):
     """Read host-owned transcript for an authenticated client."""
-    if await get_conversation(conversation_id) is None:
+    snapshot = await get_remote_conversation_snapshot(conversation_id)
+    if snapshot is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-    return await get_messages(conversation_id)
+    return snapshot["messages"]
+
+
+class RemoteLeaseRequest(BaseModel):
+    revision: str | None = None
+    holder_id: str = ""
+    lease_token: str | None = None
+
+
+class RemoteCommitRequest(BaseModel):
+    lease_token: str
+    revision: str
+    commit_id: str
+    conversation: dict = {}
+    messages: list[dict] = []
+
+
+def _remote_protocol_error(error: RemoteProtocolError):
+    statuses = {
+        "conversation_not_found": 404,
+        "lease_held": 423,
+        "stale_revision": 409,
+        "lease_invalid_or_expired": 409,
+        "commit_id_reused": 409,
+        "invalid_message_role": 422,
+    }
+    return HTTPException(
+        status_code=statuses.get(error.code, 400),
+        detail={"code": error.code, **error.details},
+    )
+
+
+@app.post("/api/remote/conversations/{conversation_id}/lease")
+async def api_remote_conversation_lease(conversation_id: int, body: RemoteLeaseRequest):
+    """Acquire, renew, or release the expiring lease for one host conversation."""
+    try:
+        if body.lease_token:
+            result = await renew_remote_edit_lease(conversation_id, body.lease_token)
+            return {"ok": True, **result}
+        result = await acquire_remote_edit_lease(
+            conversation_id, body.revision, body.holder_id
+        )
+        return {"ok": True, **result}
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
+
+
+@app.delete("/api/remote/conversations/{conversation_id}/lease")
+async def api_remote_conversation_release_lease(conversation_id: int, body: RemoteLeaseRequest):
+    try:
+        released = await release_remote_edit_lease(conversation_id, body.lease_token or "")
+        return {"ok": True, "released": released}
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
+
+
+@app.post("/api/remote/conversations/{conversation_id}/commit")
+async def api_remote_conversation_commit(conversation_id: int, body: RemoteCommitRequest):
+    if not body.commit_id.strip() or len(body.commit_id) > 200:
+        raise HTTPException(status_code=422, detail={"code": "invalid_commit_id"})
+    try:
+        return await commit_remote_conversation(
+            conversation_id, lease_token=body.lease_token,
+            revision=body.revision, commit_id=body.commit_id,
+            conversation=body.conversation, messages=body.messages,
+        )
+    except RemoteProtocolError as error:
+        raise _remote_protocol_error(error)
+
+
+@app.get("/api/remote/conversations/{conversation_id}/snapshot")
+async def api_remote_conversation_snapshot(conversation_id: int):
+    snapshot = await get_remote_conversation_snapshot(conversation_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return snapshot
 
 
 @app.post("/api/remote/exec")
