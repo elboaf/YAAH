@@ -230,28 +230,41 @@ async def test_summarize_errors_propagate():
 
 
 @pytest.mark.asyncio
-async def test_compact_persists_and_remeasures(monkeypatch):
-    """The whole pass: rows folded into one system row, context_tokens
-    nulled, conversation still loadable."""
+async def test_compact_persists_prompt_state_without_changing_transcript(monkeypatch):
+    """Compaction updates hidden prompt state and leaves transcript rows intact."""
     cid = await db.create_conversation("compact-me")
     for m in _make_history():
         await db.add_message(cid, m["role"], m["content"])
-    # Real load_history also feeds from get_messages; the pass reads raw rows.
-    rows = await db.get_messages(cid)
-    assert len(rows) == 24
+    rows_before = await db.get_messages(cid)
+    assert len(rows_before) == 24
+    through_id = rows_before[15]["id"]
 
-    await db.compact_conversation(cid, "the summary", cut_messages=16)
+    summarized = await db.compact_conversation(cid, "the summary", through_id)
     rows_after = await db.get_messages(cid)
-    roles = [r["role"] for r in rows_after]
-    assert roles == (["system"] + ["user", "assistant"] * 4)
-    assert rows_after[0]["content"] == "the summary"
+    assert summarized == 16
+    assert rows_after == rows_before
+    state = await db.get_prompt_summary(cid)
+    assert state == {"summary": "the summary", "through_message_id": through_id}
     conv = await db.get_conversation(cid)
     assert conv["context_tokens"] is None
 
-    # Stale caller (rows deleted concurrently): rollback, 0 removed.
-    removed = await db.compact_conversation(cid, "x", cut_messages=999)
-    assert removed == 0
-    assert len(await db.get_messages(cid)) == 9
+    # Stale watermark cannot overwrite newer prompt state.
+    rejected = await db.compact_conversation(cid, "stale", through_id)
+    assert rejected == 0
+    assert (await db.get_prompt_summary(cid))["summary"] == "the summary"
+
+
+@pytest.mark.asyncio
+async def test_legacy_compaction_summary_is_replayed_without_system_row():
+    from backend.agent import loop
+
+    cid = await db.create_conversation("legacy-compact")
+    summary_id = await db.add_message(cid, "system", "legacy continuity summary")
+    await db.add_message(cid, "user", "recent question")
+    state = await db.get_prompt_summary(cid)
+    assert state == {"summary": "legacy continuity summary", "through_message_id": summary_id}
+    history = await loop.load_history(cid, state["through_message_id"])
+    assert history == [{"role": "user", "content": "recent question"}]
 
 
 @pytest.mark.asyncio
@@ -279,12 +292,51 @@ async def test_compact_history_for_context_end_to_end(monkeypatch):
     assert result["context_window"] == 8_000
 
     rows = await db.get_messages(cid)
-    assert rows[0]["role"] == "system"
-    assert len(rows) == 1 + (24 - result["summarized_messages"])
+    assert len(rows) == 24
+    state = await db.get_prompt_summary(cid)
+    assert state["summary"] == result["summary"]
+    assert state["through_message_id"] == rows[result["summarized_messages"] - 1]["id"]
 
     # Second pass: no measurement since the compaction -> no-op.
     again = await comp.compact_history_for_context(cid, model_id="test-model")
     assert again is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_compaction_carries_previous_summary(monkeypatch):
+    _patch_cfg(monkeypatch, default_window=8_000, keep_recent_messages=4)
+
+    async def fake_resolve_window(model, cfg=None):
+        return 8_000
+
+    monkeypatch.setattr(comp, "resolve_window", fake_resolve_window)
+    summarized_inputs = []
+
+    async def record_summary(messages, model_override=""):
+        summarized_inputs.append(messages)
+        return f"cumulative-{len(summarized_inputs)}"
+
+    monkeypatch.setattr(comp, "summarize_messages", record_summary)
+    cid = await db.create_conversation("repeat-compact")
+    for m in _make_history("first"):
+        await db.add_message(cid, m["role"], m["content"])
+    await db.set_conversation_usage(cid, 6_000, "test-model")
+    first = await comp.compact_history_for_context(cid, model_id="test-model")
+    assert first
+
+    for i in range(12):
+        await db.add_message(cid, "user", _big(900, f"new-user-{i}"))
+        await db.add_message(cid, "assistant", _big(900, f"new-assistant-{i}"))
+    await db.set_conversation_usage(cid, 6_000, "test-model")
+    second = await comp.compact_history_for_context(cid, model_id="test-model")
+    assert second
+    assert summarized_inputs[1][-1] == {
+        "role": "previous summary", "content": "cumulative-1"
+    }
+    state = await db.get_prompt_summary(cid)
+    assert state["summary"] == "cumulative-2"
+    rows = await db.get_messages(cid)
+    assert len(rows) == 48
 
 
 @pytest.mark.asyncio
@@ -306,7 +358,8 @@ async def test_loop_runs_compaction_before_history(monkeypatch, tmp_path):
         await db.add_message(cid, m["role"], m["content"])
     await db.set_conversation_usage(cid, 6_000, "test-model")
 
-    seen_sizes = []
+    seen_messages = []
+    seen_tool_names = []
 
     class FakeStream:
         def __init__(self, events):
@@ -321,7 +374,8 @@ async def test_loop_runs_compaction_before_history(monkeypatch, tmp_path):
             return self._events.pop(0)
 
     async def fake_chat(messages, tools=None, stream=True, model=""):
-        seen_sizes.append(len(messages))
+        seen_messages.append(messages)
+        seen_tool_names.append({t["function"]["name"] for t in tools or []})
         return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
 
     monkeypatch.setattr(loop.model_client, "chat", fake_chat)
@@ -339,11 +393,16 @@ async def test_loop_runs_compaction_before_history(monkeypatch, tmp_path):
     # Every other event trails the compaction notice.
     assert all(t != "compacted" for t in types[1:])
     assert "done" in types
-    # First model call saw: system + summary-less compacted tail + live
-    # user message — i.e. the compacted history, not all 24 old rows.
-    assert seen_sizes[0] < 24
+    # First model call saw: system + hidden summary + un-compacted tail + live
+    # user message — never the full transcript replay.
+    assert len(seen_messages[0]) < 24
+    assert "search_conversation_history" in seen_tool_names[0]
+    assert any("SYNTHETIC SUMMARY" in str(m.get("content")) for m in seen_messages[0])
+    assert all(_make_history()[0]["content"] != m.get("content") for m in seen_messages[0])
     rows = await db.get_messages(cid)
-    assert rows[0]["role"] == "system"
+    assert len(rows) == 26  # original rows, new user message, and assistant reply
+    assert not any(r["role"] == "system" for r in rows)
+    assert rows[0]["content"] == _make_history()[0]["content"]
 
 
 @pytest.mark.asyncio

@@ -463,12 +463,14 @@ async def test_memory_toggle_off_builds_fresh_context(fake_model, tmp_path, monk
     async def spy_chat(messages, tools=None, stream=True, model="", effort=""):
         seen["roles"] = [m["role"] for m in messages]
         seen["user_texts"] = [m.get("content") for m in messages if m["role"] == "user"]
+        seen["tools"] = {t["function"]["name"] for t in tools or []}
         return FakeStream([{"type": "finish"}])
 
     monkeypatch.setattr(loop.model_client, "chat", spy_chat)
     await _collect(loop.run_agent(cid, "fresh fire", str(tmp_path), include_history=False))
     assert seen["roles"] == ["system", "user"]
     assert "earlier conversation" not in seen["user_texts"]
+    assert "search_conversation_history" not in seen["tools"]
 
 
 @pytest.mark.asyncio

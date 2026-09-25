@@ -33,6 +33,7 @@ from backend.db.database import (
     add_message,
     get_conversation,
     get_messages,
+    get_prompt_summary,
     set_conversation_usage,
     update_conversation,
 )
@@ -92,13 +93,13 @@ async def _generate_conversation_title(
 async def _maybe_compact(
     conversation_id: int, model_id: str | None = None
 ) -> list[dict]:
-    """Compaction pass (adr/0004) before the turn's first model call.
+    """Prompt-compaction pass (adr/0004) before the turn's first model call.
 
     The provider's measured prompt_tokens for the PREVIOUS call in this
     conversation (persisted per conversation) is compared against the
-    model's context window; over the trigger fraction, the oldest
-    messages are folded into one persisted summary. Events returned
-    here must be emitted BEFORE the first model call.
+    model's context window; over the trigger fraction, an old transcript
+    prefix is summarized in separate prompt state. Events returned here
+    must be emitted BEFORE the first model call.
 
     Best-effort by contract: any failure yields a `compaction_failed`
     event (surfaced in the UI) and never fails the turn. Runs at most
@@ -828,6 +829,7 @@ async def _execute_with_progress(
     box: dict,
     cancel_ev: asyncio.Event | None = None,
     steer_ev: asyncio.Event | None = None,
+    conversation_id: int | None = None,
 ):
     """Run a tool, yielding tool_progress events with live output while it
     runs (only the shell executors actually stream; everything else emits
@@ -843,7 +845,12 @@ async def _execute_with_progress(
     def on_chunk(text: str) -> None:
         queue.put_nowait(text)
 
-    task = asyncio.create_task(execute_tool(name, args, workspace, on_chunk=on_chunk))
+    tool_kwargs = {"on_chunk": on_chunk}
+    if name == "search_conversation_history":
+        tool_kwargs["conversation_id"] = conversation_id
+    task = asyncio.create_task(
+        execute_tool(name, args, workspace, **tool_kwargs)
+    )
 
     async def _finisher():
         try:
@@ -958,9 +965,13 @@ def _parts_with_images(text: str, image_rels: list) -> list | str:
     return parts or text
 
 
-async def load_history(conversation_id: int) -> list:
-    """Load persisted messages back into OpenAI chat format."""
+async def load_history(
+    conversation_id: int, through_message_id: int = 0
+) -> list:
+    """Load transcript rows after the prompt-compaction watermark."""
     rows = await get_messages(conversation_id)
+    if through_message_id:
+        rows = [r for r in rows if int(r["id"]) > through_message_id]
     out = []
     # Track which assistant tool_call ids actually made it into the replayed
     # history, so we can drop orphaned 'tool' rows (e.g. when a malformed
@@ -1222,12 +1233,34 @@ async def _run_agent_claimed(
         ):
             yield _ndjson(_cev)
 
-    history = await load_history(conversation_id) if include_history else []
-    messages = [{"role": "system", "content": system_prompt}] + history
+    prompt_state = (
+        await get_prompt_summary(conversation_id)
+        if include_history else {"summary": "", "through_message_id": 0}
+    )
+    history = (
+        await load_history(
+            conversation_id,
+            through_message_id=int(prompt_state.get("through_message_id") or 0),
+        )
+        if include_history else []
+    )
+    messages = [{"role": "system", "content": system_prompt}]
+    if include_history and prompt_state.get("summary"):
+        messages.append({
+            "role": "system",
+            "content": "Earlier conversation summary (for context only):\n"
+            + prompt_state["summary"],
+        })
+    messages.extend(history)
     if not include_history:
         messages.append({"role": "user", "content": user_text})
 
     tools = get_schemas()
+    if not include_history:
+        tools = [
+            schema for schema in tools
+            if schema["function"]["name"] != "search_conversation_history"
+        ]
     # exit_plan exists only while plan mode is on (the schema is how the
     # model learns it can ask for approval at all).
     if current_access_mode() == "plan":
@@ -1672,6 +1705,7 @@ async def _run_agent_claimed(
                                     box,
                                     cancel_ev=cancel_ev,
                                     steer_ev=steer_ev,
+                                    conversation_id=conversation_id,
                                 ):
                                     yield _ndjson(pev)
                                 result = box.get("result")

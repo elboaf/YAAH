@@ -150,6 +150,12 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_tokens INTEGER")
     if "context_model" not in conv_cols:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_model TEXT")
+    if "prompt_summary" not in conv_cols:
+        await db.execute("ALTER TABLE conversations ADD COLUMN prompt_summary TEXT")
+    if "prompt_summary_through_message_id" not in conv_cols:
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN prompt_summary_through_message_id INTEGER"
+        )
     if "chat_type" not in conv_cols:
         # 'chat' = a normal conversation; 'agent' = a scheduled agent's pinned
         # chat (issue #41). Existing rows are normal chats by default.
@@ -446,7 +452,11 @@ async def list_conversations():
         cur = await db.execute(
             "SELECT * FROM conversations ORDER BY updated_at DESC"
         )
-        return [dict(r) for r in await cur.fetchall()]
+        rows = [dict(r) for r in await cur.fetchall()]
+        for row in rows:
+            row.pop("prompt_summary", None)
+            row.pop("prompt_summary_through_message_id", None)
+        return rows
     finally:
         await db.close()
 
@@ -458,7 +468,11 @@ async def get_conversation(conversation_id: int) -> dict | None:
             "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
         )
         row = await cur.fetchone()
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        if result:
+            result.pop("prompt_summary", None)
+            result.pop("prompt_summary_through_message_id", None)
+        return result
     finally:
         await db.close()
 
@@ -558,51 +572,53 @@ async def set_conversation_usage(
 
 
 async def compact_conversation(
-    conversation_id: int, summary: str, cut_messages: int
+    conversation_id: int, summary: str, through_message_id: int
 ) -> int:
-    """History compaction (adr/0004): atomically delete the oldest
-    cut_messages rows and insert one system summary row in their place.
+    """Persist prompt-only compaction without changing transcript rows.
 
-    The system row is skipped by load_history (model context) but the
-    /messages read feeds it to the UI, which renders the divider. A
-    row count smaller than cut_messages means the caller's rows are
-    stale (something wrote concurrently) — the transaction is rolled
-    back and 0 returned, so the caller reports "not compacted".
-
-    Nulls context_tokens so the next model call re-measures the new,
-    smaller context. Returns the number of rows actually removed.
+    The prompt summary is a bounded cumulative summary through a message
+    watermark. User-facing reads and exports continue to see every original
+    row. A concurrent append does not affect the boundary; a missing or
+    stale watermark is rejected. Returns the count of transcript messages
+    covered by the summary, or zero when the update could not be applied.
     """
     db = await get_db()
     try:
         await db.execute("BEGIN")
         cur = await db.execute(
-            "SELECT id FROM messages WHERE conversation_id = ? ORDER BY id LIMIT ?",
-            (conversation_id, cut_messages),
-        )
-        doomed = [r["id"] for r in await cur.fetchall()]
-        if len(doomed) != cut_messages:
-            await db.rollback()
-            return 0
-        # The summary row must SORT to where the prefix began: readers
-        # order by id, so a natural insert would land at the transcript's
-        # END. Delete first, then re-insert reusing the prefix's first id.
-        first_id = doomed[0]
-        await db.execute(
-            f"DELETE FROM messages WHERE id IN ({','.join('?' * len(doomed))})",
-            doomed,
-        )
-        await db.execute(
-            "INSERT INTO messages (id, conversation_id, role, content)"
-            " VALUES (?, ?, 'system', ?)",
-            (first_id, conversation_id, summary),
-        )
-        await db.execute(
-            "UPDATE conversations SET context_tokens = NULL, context_model = NULL"
-            " WHERE id = ?",
+            "SELECT prompt_summary_through_message_id FROM conversations WHERE id = ?",
             (conversation_id,),
         )
+        conv = await cur.fetchone()
+        if conv is None:
+            await db.rollback()
+            return 0
+        previous_id = conv["prompt_summary_through_message_id"] or 0
+        if through_message_id <= previous_id:
+            await db.rollback()
+            return 0
+        cur = await db.execute(
+            "SELECT COUNT(*) AS count, MAX(id) AS max_id FROM messages"
+            " WHERE conversation_id = ? AND id > ? AND id <= ?",
+            (conversation_id, previous_id, through_message_id),
+        )
+        boundary = await cur.fetchone()
+        count = boundary["count"]
+        if not count or boundary["max_id"] != through_message_id:
+            await db.rollback()
+            return 0
+        cur = await db.execute(
+            "UPDATE conversations SET prompt_summary = ?,"
+            " prompt_summary_through_message_id = ?,"
+            " context_tokens = NULL, context_model = NULL"
+            " WHERE id = ? AND COALESCE(prompt_summary_through_message_id, 0) = ?",
+            (summary, through_message_id, conversation_id, previous_id),
+        )
+        if cur.rowcount != 1:
+            await db.rollback()
+            return 0
         await db.commit()
-        return len(doomed)
+        return count
     except Exception:
         await db.rollback()
         raise
@@ -666,6 +682,118 @@ async def get_messages(conversation_id: int):
         return rows
     finally:
         await db.close()
+
+
+async def get_prompt_summary(conversation_id: int) -> dict:
+    """Return prompt-only compaction state, recognizing legacy summary rows.
+
+    Old versions stored a summary as the first system row after deleting the
+    transcript prefix. Those rows remain visible and searchable, but are
+    treated as the initial prompt summary when no new-style summary exists.
+    Failure markers are normally appended after user messages and are never
+    mistaken for summaries.
+    """
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT prompt_summary, prompt_summary_through_message_id"
+            " FROM conversations WHERE id = ?",
+            (conversation_id,),
+        )
+        conv = await cur.fetchone()
+        if conv is None:
+            return {"summary": "", "through_message_id": 0}
+        if conv["prompt_summary"]:
+            return {
+                "summary": conv["prompt_summary"],
+                "through_message_id": conv["prompt_summary_through_message_id"] or 0,
+            }
+        cur = await db.execute(
+            "SELECT id, role, content FROM messages WHERE conversation_id = ?"
+            " ORDER BY id LIMIT 1",
+            (conversation_id,),
+        )
+        legacy = await cur.fetchone()
+        # Destructive legacy compaction placed its replacement system row at
+        # the transcript's first id. Failure notices were appended after prior
+        # user/assistant rows and must never become prompt summaries.
+        if (
+            legacy and legacy["role"] == "system"
+            and not str(legacy["content"]).startswith("turn failed:")
+        ):
+            cur = await db.execute(
+                "SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'user'"
+                " AND id > ? LIMIT 1",
+                (conversation_id, legacy["id"]),
+            )
+            if await cur.fetchone():
+                return {"summary": legacy["content"], "through_message_id": legacy["id"]}
+        return {"summary": "", "through_message_id": 0}
+    finally:
+        await db.close()
+
+
+async def search_conversation_history(
+    conversation_id: int, query: str, max_results: int = 10
+) -> dict:
+    """Case-insensitive plain-text search over all textual transcript fields."""
+    query = str(query or "").strip()
+    if not query:
+        return {"error": "query must not be empty"}
+    try:
+        max_results = max(1, min(int(max_results or 10), 50))
+    except (TypeError, ValueError):
+        max_results = 10
+    needle = query.casefold()
+    rows = await get_messages(conversation_id)
+    state = await get_prompt_summary(conversation_id)
+    candidates = []
+    stopped = False
+    for row in rows:
+        fields = (
+            ("content", row.get("content") or ""),
+            ("tool_calls", json.dumps(row.get("tool_calls"), ensure_ascii=False) if row.get("tool_calls") else ""),
+            ("tool_call_id", row.get("tool_call_id") or ""),
+            ("sub_agent_transcript", json.dumps(row.get("sub_agent_transcript"), ensure_ascii=False) if row.get("sub_agent_transcript") else ""),
+        )
+        for field, value in fields:
+            text = str(value)
+            pos = text.casefold().find(needle)
+            if pos >= 0:
+                start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
+                excerpt = text[start:end]
+                if start:
+                    excerpt = "…" + excerpt
+                if end < len(text):
+                    excerpt += "…"
+                candidates.append({
+                    "message_id": row["id"],
+                    "role": row["role"],
+                    "field": field,
+                    "excerpt": excerpt,
+                })
+                if len(candidates) > max_results:
+                    stopped = True
+                    break
+        if stopped:
+            break
+    summary = state["summary"]
+    summary_pos = summary.casefold().find(needle)
+    if summary_pos >= 0:
+        start, end = max(0, summary_pos - 160), min(len(summary), summary_pos + len(query) + 160)
+        excerpt = summary[start:end]
+        if start:
+            excerpt = "…" + excerpt
+        if end < len(summary):
+            excerpt += "…"
+        candidates.append({"message_id": None, "role": "prompt_summary", "field": "prompt_summary", "excerpt": excerpt})
+        if len(candidates) > max_results:
+            stopped = True
+    return {
+        "matches": candidates[:max_results],
+        "count": len(candidates[:max_results]),
+        "truncated": stopped,
+    }
 
 # ---- Scheduled agents (issue #41) ----
 

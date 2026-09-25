@@ -26,6 +26,9 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(sb, "_base_dir", lambda: tmp_path / "sb")
     monkeypatch.setattr(sb, "toolkit_dir", lambda: tmp_path / "toolkit")
     monkeypatch.setattr(sb, "_SESSION", None)
+    # Sandbox lifecycle tests must not start real host UI discovery threads.
+    monkeypatch.setattr(sb, "_start_preview", lambda: None)
+    monkeypatch.setattr(sb, "_stop_preview", lambda: None)
     # A real WindowsSandbox.exe may be live on the dev host (issue #27's
     # crash tests ran one); the adoption branch would hijack these tests,
     # so default to "no VMs running". Tests exercising adoption override.
@@ -256,6 +259,33 @@ def test_stop_without_session_is_idempotent(isolated):
     assert second["stopped"] is False
 
 
+def test_successful_start_starts_preview_and_stop_cleans_it(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config",
+                        lambda: {"sandbox": {}})
+    preview = []
+    monkeypatch.setattr(sb, "_start_preview", lambda: preview.append("start"))
+    monkeypatch.setattr(sb, "_stop_preview", lambda: preview.append("stop"))
+
+    def fake_spawn(exe, wsb, logs_path):
+        (logs_path / "init.log").write_text("yaah-sandbox-ready",
+                                            encoding="utf-8")
+        return _FakeProc()
+
+    monkeypatch.setattr(sb, "_spawn", fake_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    result = sb.start_sync("C:\\proj")
+    assert result["status"] == "running"
+    # Reuse exercises the same preview start seam without spawning again.
+    assert sb.start_sync("C:\\proj")["status"] == "running"
+    assert preview == ["start", "start"]
+
+    monkeypatch.setattr(sb.subprocess, "run", lambda *a, **k: None)
+    stopped = sb.stop_sync()
+    assert stopped["stopped"] is True
+    assert preview == ["start", "start", "stop"]
+
+
 def test_start_reuses_live_session_without_respawning(isolated, monkeypatch):
     monkeypatch.setattr(sb.config_mod, "load_config",
                         lambda: {"sandbox": {}})
@@ -388,6 +418,9 @@ def test_start_adopts_running_sandbox_after_app_restart(isolated, monkeypatch):
                         lambda ws: isolated / "sb" / "ws-abc")
     monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
     monkeypatch.setattr(sb, "_sandbox_pids", lambda: [999])
+    preview_calls = []
+    monkeypatch.setattr(sb, "_start_preview",
+                        lambda: preview_calls.append("start"))
     # ack any command file dropped into the logs dir (the nonce handshake)
     monkeypatch.setattr(sb.Path, "write_text",
                         _ack_on_cmd_write(logs, ack_nonce))
@@ -396,6 +429,7 @@ def test_start_adopts_running_sandbox_after_app_restart(isolated, monkeypatch):
     assert result["status"] == "running"
     assert result["note"].startswith("re-attached")
     assert spawned == []  # no second VM
+    assert preview_calls == ["start"]
 
 
 def test_start_refuses_second_vm_when_handshake_fails(isolated, monkeypatch):

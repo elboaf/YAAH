@@ -77,7 +77,7 @@ class AgentDef:
 # Tool sets for the built-ins. Sub-agents never get ask_user (they cannot
 # block on the user), spawn_agent (no nesting), or computer-use tools (two
 # agents cannot share one mouse/keyboard).
-_ALWAYS_EXCLUDED = {"ask_user", "spawn_agent"}
+_ALWAYS_EXCLUDED = {"ask_user", "spawn_agent", "search_conversation_history"}
 _COMPUTER_TOOLS = {
     "screenshot", "list_windows", "focus_window", "read_ui_tree",
     "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",

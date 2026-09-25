@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -666,7 +667,31 @@ def _try_adopt(logs: Path) -> bool:
     return False
 
 
+def _start_preview() -> None:
+    """Show the optional interactive Windows preview without blocking startup."""
+    if os.name != "nt" or os.environ.get("YAAH_HEADLESS") == "1":
+        return
+    try:
+        from backend.agent import sandbox_preview
+
+        sandbox_preview.start_preview()
+    except Exception:  # preview is never required for sandbox
+        logging.getLogger(__name__).exception("could not start sandbox preview")
+
+
+def _stop_preview() -> None:
+    """Best-effort release of the optional sandbox preview."""
+    try:
+        from backend.agent import sandbox_preview
+
+        sandbox_preview.stop_preview()
+    except Exception:  # preview cleanup must not block stop
+        logging.getLogger(__name__).exception("could not stop sandbox preview")
+
+
 def _session_info(note: str | None = None) -> dict:
+    # Centralized successful-session path covers new boots, reuse, and adopt.
+    _start_preview()
     s = _SESSION or {}
     first_marker = s.get("dir", Path()) / "launched_once"
     note_text = note
@@ -888,6 +913,7 @@ def status_sync() -> dict:
 def stop_sync() -> dict:
     global _SESSION
     if not _alive():
+        _stop_preview()
         _SESSION = None
         return {"stopped": False, "note": "no live sandbox session"}
     # Stopping mid-command would strand another chat's waiter on a session
@@ -900,6 +926,7 @@ def stop_sync() -> dict:
                         "conversation; try sandbox_stop again in a moment"}
     try:
         if not _alive():
+            _stop_preview()
             _SESSION = None
             return {"stopped": False, "note": "no live sandbox session"}
         proc = _SESSION.get("proc")
@@ -921,8 +948,10 @@ def stop_sync() -> dict:
                     timeout=15,
                 )
         except Exception as e:  # noqa: BLE001 — PID may already be gone
+            _stop_preview()
             _SESSION = None
             return {"stopped": False, "note": f"stop attempt failed: {e}"}
+        _stop_preview()
         _SESSION = None
         return {"stopped": True, "note": "sandbox disposed; toolkit and "
                                          "workspace writes persist on the host"}
