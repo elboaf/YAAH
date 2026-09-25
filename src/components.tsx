@@ -87,6 +87,7 @@ import {
 } from './api'
 import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentBranchInfo } from './store'
 import { useUpdateCheck } from './update'
+import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
@@ -2759,23 +2760,26 @@ export function RemoteTranscriptDialog({
   deviceName: string
   onClose: () => void
 }) {
-  const [messages, setMessages] = useState<ChatMessage[] | null>(null)
+  const messages = useRemoteConversations((state) => state.transcripts[remoteConversationKey(hostId, conversationId)] ?? null)
+  const setTranscript = useRemoteConversations((state) => state.setTranscript)
+  const [loading, setLoading] = useState(!messages)
   const [error, setError] = useState<string | null>(null)
   const [retry, setRetry] = useState(0)
 
   useEffect(() => {
     let cancelled = false
-    setMessages(null)
+    setLoading(true)
     setError(null)
     getRemoteDeviceMessages(hostId, conversationId)
       .then((rows) => {
-        if (!cancelled) setMessages(buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
+        if (!cancelled) setTranscript(hostId, conversationId, buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
       })
       .catch((e) => {
         if (!cancelled) setError(String((e as Error).message ?? e))
       })
+      .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [hostId, conversationId, retry])
+  }, [hostId, conversationId, retry, setTranscript])
 
   return (
     <DialogShell onClose={onClose} panelClassName="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
@@ -2788,7 +2792,7 @@ export function RemoteTranscriptDialog({
         </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           {error && <div role="alert" className="flex items-center gap-2 py-4 text-xs text-red-400"><span>Could not load this transcript. {online ? 'Check the device connection and retry.' : 'Reconnect to this device to refresh its cached copy.'}</span><button className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={() => setRetry((value) => value + 1)}>Retry</button></div>}
-          {messages === null && !error && <div aria-label="Loading remote transcript" className="space-y-3 py-2"><div className="h-3 w-1/3 animate-pulse rounded bg-zinc-800"/><div className="h-12 w-2/3 animate-pulse rounded bg-zinc-800/70"/><div className="h-8 w-1/2 animate-pulse rounded bg-zinc-800/50"/></div>}
+          {(loading && messages === null) && !error && <div aria-label="Loading remote transcript" className="space-y-3 py-2"><div className="h-3 w-1/3 animate-pulse rounded bg-zinc-800"/><div className="h-12 w-2/3 animate-pulse rounded bg-zinc-800/70"/><div className="h-8 w-1/2 animate-pulse rounded bg-zinc-800/50"/></div>}
           {messages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
           {messages && messages.length > 0 && <div className="space-y-4">{messages.map((message) => <MessageView key={message.id} msg={message}/>)}</div>}
         </div>

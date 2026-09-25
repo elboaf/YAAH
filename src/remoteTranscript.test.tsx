@@ -3,6 +3,7 @@ import type { RemoteDevice, WorkspaceRow } from './api'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DeviceGroups, RemoteTranscriptDialog } from './components'
 import { useAgent } from './store'
+import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 
 const { getRemoteDeviceMessages, listRemoteDeviceConversations } = vi.hoisted(() => ({
   getRemoteDeviceMessages: vi.fn(),
@@ -20,6 +21,7 @@ afterEach(() => {
   getRemoteDeviceMessages.mockReset()
   listRemoteDeviceConversations.mockReset()
   useAgent.setState({ conversationId: 7, messagesByConv: { '7': [{ id: 'local', role: 'user', content: 'local transcript' }] } })
+  useRemoteConversations.setState({ transcripts: {} })
 })
 
 const row = (content: string, image?: string) => ({
@@ -76,6 +78,9 @@ describe('read-only remote transcript viewer', () => {
     expect(getRemoteDeviceMessages).toHaveBeenCalledWith('host-b', '7')
     expect(useAgent.getState().conversationId).toBe(7)
     expect(useAgent.getState().messagesByConv['7'][0].content).toBe('local transcript')
+    expect(useRemoteConversations.getState().getTranscript('host-a', '7')?.[0].content).toBe('transcript from host-a')
+    expect(useRemoteConversations.getState().getTranscript('host-b', '7')?.[0].content).toBe('transcript from host-b')
+    expect(useRemoteConversations.getState().transcripts[remoteConversationKey('host-a', '7')]).toBeDefined()
     expect(screen.getAllByText(/Remote editing and turns are not enabled yet/)).toHaveLength(2)
   })
 

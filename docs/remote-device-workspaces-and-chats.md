@@ -90,7 +90,7 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 
 ### Phase 4 — Remote-owned conversation cache and read path (in progress)
 
-- [ ] Add composite owner identity throughout the main frontend conversation state and editable APIs.
+- [x] Keep remote transcript cache keys owner-qualified and distinct from local numeric conversation buffers; main editable-chat selection remains local-only.
 - [x] Cache remote metadata/messages locally; load from cache offline and display read-only status.
 - [x] Expose each device's host-owned chats in its sidebar group and open transcripts in an isolated read-only viewer.
 - [x] Scope transcript image/attachment retrieval through the owning device's image proxy.
@@ -98,7 +98,7 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 
 **Backend read/cache slice:** Added authenticated host metadata/history endpoints, host-keyed cache tables, and per-device read routes that refresh while connected and serve cached transcripts on loss of connectivity. Backend DB/cache and remote API tests pass. **Frontend read-only slice:** Added device-chat listing, an isolated transcript viewer, offline/read-only labeling, and owner-scoped media URLs. Remote transcripts do not enter the local numeric-ID selection, message buffers, or editable chat APIs. Focused frontend tests cover device grouping, local/remote ID collisions, host-specific transcript reads, and remote images.
 
-**Implementation notes:** Phase 4 remains deliberately read-only. Host-owned chats must remain distinct from local-owned chats that happen to use remote workspaces. The viewer keys reads by `(owner device ID, conversation ID)`; do not reuse local integer-keyed conversation tables. Main-chat composite identity and editable actions remain outstanding. Defer leases and bidirectional edits/sync to Phase 5, and remote-workspace turn execution to Phase 6.
+**Implementation notes:** Phase 4 remains deliberately read-only. Host-owned chats must remain distinct from local-owned chats that happen to use remote workspaces. Remote viewer state is keyed by `(owner device ID, conversation ID)` and is kept separate from local integer-keyed conversation tables; remote IDs never enter local editable-chat selection or APIs. Main-chat composite identity and editable actions remain intentionally out of scope until remote editing is designed. Defer leases and bidirectional edits/sync to Phase 5, and remote-workspace turn execution to Phase 6.
 
 ### Phase 5 — Per-chat leases and bidirectional sync
 
