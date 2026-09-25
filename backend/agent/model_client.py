@@ -171,21 +171,37 @@ async def chat(
     # The payload already carries the per-call model/effort overrides; the
     # resolved api_base rides along explicitly so a provider::model override
     # targets the right host (the old re-read would have hit the active one).
-    return _stream_response(payload, headers, cfg["api_base"])
+    return _stream_response(
+        payload, headers, cfg["api_base"],
+        provider=cfg.get("active_provider"), model=cfg["model"],
+    )
 
 
 async def _stream_response(
-    payload: dict, headers: dict, api_base: str | None = None
+    payload: dict,
+    headers: dict,
+    api_base: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> AsyncIterator[dict]:
     """Yield parsed SSE chunks: content deltas, tool_call deltas, and a final
     assembled message. api_base None = resolve from the live config (legacy
     direct callers). Opens with a model_call event (issue #43) so the UI can
-    show "waiting for <provider>" between send and first token."""
+    show "waiting for <provider>" between send and first token.
+
+    provider/model: the RESOLVED call scope (per-chat override applied, #51/#76).
+    The event must report what this call actually targets — re-reading the
+    global config here made the waiting readout follow the sidebar default
+    instead of the chat's pinned model."""
     if api_base is None:
         api_base = load_config()["api_base"]
-    cfg = load_config()
-    provider = cfg.get("active_provider") or _provider_from_base(api_base)
-    yield {"type": "model_call", "provider": provider, "model": cfg["model"]}
+    if provider is None or model is None:
+        cfg = load_config()
+        provider = provider if provider is not None else (
+            cfg.get("active_provider") or _provider_from_base(api_base)
+        )
+        model = model if model is not None else cfg["model"]
+    yield {"type": "model_call", "provider": provider, "model": model}
     started = time.monotonic()
     tool_calls: dict[int, dict] = {}
     finish_reason = None
