@@ -49,7 +49,7 @@ describe('read-only remote transcript viewer', () => {
     const conversations = [{ id: 7, title: 'Local chat on A workspace', workspace: 'remote:host-a:/workspace', updated_at: '2025-01-01' }]
     const workspaces: WorkspaceRow[] = [{ id: 1, path: 'remote:host-a:/workspace', label: 'workspace', last_opened_at: null, exists: true, conversation_count: 1, owner_id: 'host-a', device_status: 'online' }]
 
-    render(<DeviceGroups devices={devices} workspaces={workspaces} conversations={conversations} onChange={() => {}} onOpenConversation={onOpenConversation} />)
+    render(<DeviceGroups devices={devices} workspaces={workspaces} conversations={conversations} onChange={() => {}} onOpenConversation={onOpenConversation} adding={false} setAdding={() => {}} />)
 
     expect(await screen.findByText('same ID from A')).toBeTruthy()
     expect(await screen.findByText('same ID from B')).toBeTruthy()
