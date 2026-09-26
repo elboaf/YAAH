@@ -6968,24 +6968,49 @@ function useCompactionConfig(): { enabled: boolean; trigger_tokens: number } {
   return cfg ?? { enabled: true, trigger_tokens: 0 }
 }
 
-/** Where the bar's fill flips to warning colors, as a fraction of the bar:
- *  compaction first, then the dumb zone (the more severe of the two marks
- *  the color for the moment the count passes it). */
-function contextFillClass(
+/** Where the dial's fill flips to warning colors: compaction first, then
+ *  the dumb zone (the more severe of the two marks the color for the moment
+ *  the count passes it). */
+function contextDialColor(
   tokens: number,
   trigger: number | null,
-  dumbFrac: number | null,
+  dumbVisible: boolean,
 ): string {
-  if (dumbFrac !== null && tokens >= DUMB_ZONE_TOKENS) return 'bg-red-500'
-  if (trigger !== null && tokens >= trigger) return 'bg-amber-500'
-  return 'bg-emerald-500'
+  if (dumbVisible && tokens >= DUMB_ZONE_TOKENS) return '#ef4444' // red-500
+  if (trigger !== null && tokens >= trigger) return '#f59e0b' // amber-500
+  return '#10b981' // emerald-500
 }
 
-/** Context-size readout: exact tokens + a window-relative bar carrying two
- *  threshold ticks — the compaction trigger (dashed, history gets rewritten
- *  past it) and the 120k "dumb zone" (model quality degrades). Nothing
- *  renders until the first turn completes (the count comes from the API's
- *  usage report); during a run the bar climbs with every model call. */
+/** One tick on the dial rim: a short radial line just outside the ring,
+ *  pointing at the angle its threshold sits at. */
+function DialTick({ frac, color }: { frac: number; color: string }) {
+  const a = frac * 2 * Math.PI - Math.PI / 2
+  const r1 = 9.2
+  const r2 = 11.2
+  return (
+    <line
+      x1={12 + r1 * Math.cos(a)}
+      y1={12 + r1 * Math.sin(a)}
+      x2={12 + r2 * Math.cos(a)}
+      y2={12 + r2 * Math.sin(a)}
+      stroke={color}
+      strokeWidth="1"
+      strokeLinecap="round"
+    />
+  )
+}
+
+/** Context gauge (status strip): a circular dial whose fill arc is the
+ *  exact context size against the model's window, climbing with every
+ *  model call during a run. Two rim ticks mark the thresholds:
+ *  - compaction trigger (light tick, adr/0004): min(Settings trigger_tokens,
+ *    70% of window) — past it the NEXT turn rewrites history, so the
+ *    visible count is no longer the full transcript.
+ *  - the "dumb zone" (red tick, 120k): past it model quality measurably
+ *    degrades on most families, independent of the hard window.
+ *  Nothing renders until the first turn completes (the count comes from
+ *  the API's usage report). Config arrives from /api/config, cached per
+ *  page load. */
 function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
   const compaction = useCompactionConfig()
   if (!info) return null
@@ -7002,17 +7027,29 @@ function ContextChip({ info }: { info: { tokens: number; window: number | null; 
       : null
   const triggerFrac = trigger !== null && windowTokens ? Math.min(1, trigger / windowTokens) : null
   const dumbFrac = windowTokens ? DUMB_ZONE_TOKENS / windowTokens : null
-  // The dumb-zone mark only exists inside the visible bar when the window
-  // is larger than 120k; a smaller window overflows it before the zone.
+  // The dumb-zone tick only exists when the window is larger than 120k; a
+  // smaller window passes through the zone on its way to full.
   const dumbVisible = dumbFrac !== null && dumbFrac < 1
-  const fill = contextFillClass(info.tokens, trigger, dumbVisible ? dumbFrac : null)
+  const fill = contextDialColor(info.tokens, trigger, dumbVisible)
   const pct = frac !== null ? ` (${Math.round((frac as number) * 100)}%)` : ''
   const dumbLine =
     dumbFrac !== null && windowTokens
       ? windowTokens > DUMB_ZONE_TOKENS
         ? `dumb zone from ${fmtTok(DUMB_ZONE_TOKENS)} (${Math.round(dumbFrac * 100)}%)`
-        : `whole bar is dumb zone (window < ${fmtTok(DUMB_ZONE_TOKENS)})`
+        : `whole dial is dumb zone (window < ${fmtTok(DUMB_ZONE_TOKENS)})`
       : 'dumb zone unmarked (window unknown)'
+  // Arc geometry: a 24x24 viewBox dial, ring from 12 o'clock clockwise.
+  const r = 8.5
+  const c = 2 * Math.PI * r
+  const arcFrac = frac ?? 0
+  const largeArc = arcFrac > 0.5 ? 1 : 0
+  const endAngle = arcFrac * 2 * Math.PI - Math.PI / 2
+  const endX = 12 + r * Math.cos(endAngle)
+  const endY = 12 + r * Math.sin(endAngle)
+  const arcPath =
+    arcFrac > 0
+      ? `M 12 ${12 - r} A ${r} ${r} 0 ${largeArc} 1 ${endX.toFixed(3)} ${endY.toFixed(3)}`
+      : ''
   return (
     <span
       className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"
@@ -7029,23 +7066,29 @@ function ContextChip({ info }: { info: { tokens: number; window: number | null; 
       }
     >
       {frac !== null && (
-        <span className="relative inline-block h-1.5 w-24 overflow-hidden rounded bg-zinc-700">
-          <span className={`absolute inset-y-0 left-0 rounded ${fill}`} style={{ width: `${Math.max(2, frac * 100)}%` }} />
-          {/* Compaction trigger tick: past it, the next turn compacts. */}
-          {triggerFrac !== null && (
-            <span
-              className="absolute inset-y-0 w-px bg-zinc-300/80"
-              style={{ left: `calc(${triggerFrac * 100}% - 0.5px)` }}
-            />
+        <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" className="shrink-0">
+          {/* Track: full ring, dim. */}
+          <circle cx="12" cy="12" r={r} fill="none" stroke="#3f3f46" strokeWidth="2.6" />
+          {/* Fill arc: context vs window, from 12 o'clock clockwise. */}
+          {arcPath && (
+            <path d={arcPath} fill="none" stroke={fill} strokeWidth="2.6" strokeLinecap="round" />
           )}
-          {/* Dumb-zone tick: past it, model quality degrades. */}
-          {dumbVisible && (
-            <span
-              className="absolute inset-y-0 w-px bg-red-400/70"
-              style={{ left: `calc(${dumbFrac! * 100}% - 0.5px)` }}
-            />
-          )}
-        </span>
+          {/* Threshold ticks on the rim. */}
+          {triggerFrac !== null && <DialTick frac={triggerFrac} color="#d4d4d8" />}
+          {dumbVisible && <DialTick frac={dumbFrac!} color="#f87171" />}
+          {/* Hub readout: percent (or "—" when the window is unknown). */}
+          <text
+            x="12"
+            y="12.8"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="7"
+            fontFamily="ui-monospace, monospace"
+            fill={frac !== null && frac > 0.92 ? fill : '#a1a1aa'}
+          >
+            {Math.round(arcFrac * 100)}%
+          </text>
+        </svg>
       )}
       <span>
         {fmtTok(info.tokens)}
