@@ -53,6 +53,8 @@ async def _emit_file_changes(
     _conversation_id: int, workspace: str, baseline: file_changes.WorkspaceSnapshot
 ) -> dict | None:
     """Persist the run's net file changes and return its stream payload."""
+    if baseline is None:
+        return None
     try:
         current = await file_changes.snapshot_workspace(workspace)
         summary = file_changes.summarize_file_changes(
@@ -1250,7 +1252,12 @@ async def _run_agent_claimed(
     # never pay for isolation). `turn_workspace` is the (possibly rebound)
     # workspace every tool call and spawn_batch sees from then on.
     turn_workspace = str(workspace)
-    change_baseline = await file_changes.snapshot_workspace(turn_workspace)
+    from backend.agent import remote as remote_mod
+
+    remote_workspace = remote_mod.parse_ns(turn_workspace) is not None
+    change_baseline = (
+        None if remote_workspace else await file_changes.snapshot_workspace(turn_workspace)
+    )
     file_summary_emitted = False
     # Captured before any rebinding: worktree_bound fires only when the
     # turn actually leaves this path (a nested-parent binding must not).
@@ -1260,8 +1267,8 @@ async def _run_agent_claimed(
     git_activity_emitted = False
     actor_id = "parent"
     actor_label = "Agent"
-    initial_binding = worktrees.binding_for(str(conversation_id))
-    _isolated = worktrees.worktree_of(turn_workspace) is not None
+    initial_binding = None if remote_workspace else worktrees.binding_for(str(conversation_id))
+    _isolated = False if remote_workspace else worktrees.worktree_of(turn_workspace) is not None
     if initial_binding:
         _record_worktree_lifecycle(git_activity, actor_id, actor_label, {
             "event": "reused",
@@ -1361,7 +1368,7 @@ async def _run_agent_claimed(
     if not include_history:
         messages.append({"role": "user", "content": user_text})
 
-    tools = get_schemas()
+    tools = get_schemas(workspace=workspace)
     if not include_history:
         tools = [
             schema for schema in tools
@@ -1803,7 +1810,7 @@ async def _run_agent_claimed(
                             # worktree (refusal surfaces as the tool's error
                             # result — never a dead turn).
                             _refused = False
-                            if (tool_risk(name) != "read" and not _isolated
+                            if (not remote_workspace and tool_risk(name) != "read" and not _isolated
                                     and worktrees.should_isolate(name, args)):
                                 try:
                                     turn_workspace = await worktrees.ensure_isolated(
@@ -1902,7 +1909,8 @@ async def _run_agent_claimed(
                             if result is None:
                                 # Issue #58 rebinding seam (gated path):
                                 if (
-                                    tool_risk(name) != "read"
+                                    not remote_workspace
+                                    and tool_risk(name) != "read"
                                     and not _isolated
                                     and worktrees.should_isolate(name, args)
                                 ):
