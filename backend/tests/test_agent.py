@@ -1507,12 +1507,13 @@ async def test_stubborn_dirt_survives_turns_and_salvages_at_session_end(fake_mod
     assert (wt_path / "draft-notes.md").exists(), (
         "stubborn dirt must survive the turn in the session worktree"
     )
-    # session end: salvage (never silent deletion), worktree removed
+    # session end: salvage (never silent deletion); the physical tree is
+    # kept for the reaper's TTL (recovery over tidiness), branch retained
     rel = await worktrees_mod.release_session(str(cid), why="test")
     salvages = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
     assert salvages and "stubborn draft" in salvages[0].read_text(encoding="utf-8")
-    assert not wt_path.exists()
-    assert rel["branch"] not in run_git(
+    assert wt_path.exists()
+    assert rel["branch"] in run_git(
         repo, "branch", "--list", rel["branch"]
     ).stdout
 
@@ -1698,7 +1699,7 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert "not the reaper" in note_text
     assert "Turn end does NOT tear it down" in note_text
     assert "uncommitted files persist across turns" in note_text
-    assert "ORPHANED" in note_text and ">6h" in note_text
+    assert "ORPHANED" in note_text and ">48h" in note_text
     assert "YAAH_WORKTREE_TTL_SECONDS" in note_text
     assert "10-min sweep" in note_text
     assert "never 'clean up'" in note_text.lower()

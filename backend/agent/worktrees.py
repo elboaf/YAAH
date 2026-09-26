@@ -55,10 +55,13 @@ branch-first 2026-09-23):
   .log/.tmp-style names) are dropped, not salvaged — a stray log must
   not outlive the session as litter. Authored-looking files are
   salvaged to a patch, never silently deleted.
-- The worktree directory is deleted at session end; the `agent/*`
-  branch is deleted with it when it carries no unmerged commits
-  (already-merged or zero-commit sessions leave no branch litter), and
-  kept for inspection a few days otherwise (the reaper prunes it).
+- Recovery over tidiness: release_session runs the adr/0002 trash
+  contract once (drops and salvage patches) but leaves the worktree
+  directory and the branch in place — the reaper performs the physical
+  teardown after the worktree TTL (48h default). The branch is deleted
+  at release only when git confirms it is fully merged into the main
+  HEAD; unmerged branches always survive the reaper (the branch is the
+  record of the work — the user deletes it, never the reaper).
 
 Main-tree sync (issue #98): the user's folder — the only tree they can
 see — is fast-forwarded to upstream on a background cadence (ff-only,
@@ -189,10 +192,11 @@ MUTEX_TIMEOUT_SECONDS = 120.0
 STALE_LOCK_SECONDS = 300.0
 
 # Reaper TTLs. Worktree dirs: crashed runs must not pin the workspace
-# forever, but a slow verification run must survive (default 6h,
-# YAAH_WORKTREE_TTL_SECONDS overrides). Branches: kept for inspection a
-# few days (issue decision 4), then pruned.
-DEFAULT_WORKTREE_TTL_SECONDS = 6 * 3600.0
+# forever, but recovery outranks tidiness — an agent's worktree is the
+# only place uncommitted work lives, so teardown is deliberately slow
+# (default 48h, YAAH_WORKTREE_TTL_SECONDS overrides). Branches: kept for
+# inspection a few days (issue decision 4), then pruned.
+DEFAULT_WORKTREE_TTL_SECONDS = 48 * 3600.0
 BRANCH_TTL_SECONDS = 3 * 24 * 3600.0
 REAP_INTERVAL_SECONDS = 600.0
 
@@ -1421,7 +1425,7 @@ def _worktree_note_text(wt_path: str, info: dict, main_workspace: str) -> str:
         "dirt; uncommitted files persist across turns intact. Only a fully "
         "quiesced session (no commits, clean tree) is drained at turn end.\n"
         "- The reaper only sweeps ORPHANED worktrees (no live session) idle "
-        ">6h (`YAAH_WORKTREE_TTL_SECONDS`; zero-commit `agent/*` branches 3d) "
+        ">48h (`YAAH_WORKTREE_TTL_SECONDS`; zero-commit `agent/*` branches 3d) "
         "on a 10-min sweep. A session you are actively using is never reaped "
         "mid-conversation, and unmerged `agent/*` branches are never "
         "auto-pruned \u2014 the branch is the record of the work.\n"
@@ -1538,11 +1542,18 @@ async def release_session(chat_id: str, why: str = "session ended") -> dict:
     reaper collecting an orphan. Terminal teardown of the chat's session
     worktree — the adr/0002 trash contract runs HERE, once: provably
     harness-generated uncommitted files are dropped, authored-looking
-    leftovers are salvaged to a patch (never silently deleted), the
-    worktree directory is removed, and the branch is deleted when it
-    carries no unmerged commits (merged or zero-commit sessions leave no
-    branch litter). A branch with unmerged commits is kept for
-    inspection (the reaper prunes it after the branch TTL)."""
+    leftovers are salvaged to a patch (never silently deleted).
+
+    Physical teardown (worktree directory removal, branch deletion) is
+    NOT done here: the salvage patch is only a diff against the branch,
+    and a salvage heuristic that misclassifies authored work as trash is
+    unrecoverable once the tree is gone. Instead the released worktree is
+    left in place (binding cleared, so the reaper sees an orphan) and the
+    reaper performs the teardown after the worktree TTL (48h default) —
+    plenty of time to notice a bad salvage and recover from the intact
+    tree. A released session whose chat comes back is re-adopted by
+    ensure_isolated's restart-recovery (same dir, same branch), so a
+    lingering worktree is recovered state, not stranded state."""
     info = binding_for(chat_id)
     wt_str = _chat_bindings.get(chat_id, "")
     if info is None:
@@ -1569,16 +1580,45 @@ async def release_session(chat_id: str, why: str = "session ended") -> dict:
             f"uncommitted changes salvaged to {patch or '(salvage failed)'}"
         )
     commits = await _new_commits(root, branch)
-    await _remove_worktree(root, wt, force=True)
     _unbind()
-    # Branch hygiene (adr/0003): a session branch whose commits are all
-    # merged (or that never had any) is deleted with the worktree — one
-    # read-only chat must not litter agent/* for three days. A branch
-    # with unmerged commits is kept for inspection (reaper prunes later).
-    if commits <= 0:
-        with contextlib.suppress(Exception):
-            await _git(root, "branch", "-D", branch)
-    out: dict = {"released": True, "branch": branch}
+    # Recovery over tidiness (worktree reaper owns deletion): the trash
+    # contract above already captured anything droppable to patches, but
+    # the physical tree and the branch stay until the reaper's TTL —
+    # EXCEPT a truly quiesced session (clean tree after the trash drop,
+    # zero commits): removal there is lossless by the deletion test, and
+    # a drained read-only chat must not pin a dir for two days.
+    quiesced = commits <= 0 and not await _dirty(wt)
+    if quiesced:
+        await _remove_worktree(root, wt, force=True)
+        # With the tree gone the branch is unchecked-out: a zero-commit
+        # branch is deleted outright (nothing to lose); otherwise git's
+        # exact merged-ness decides (-d refuses an unmerged branch).
+        if commits <= 0:
+            with contextlib.suppress(Exception):
+                await _git(root, "branch", "-D", branch)
+            merged_note = "branch deleted (zero commits)"
+        else:
+            rc, out = await _git(
+                root, "branch", "--merged", "HEAD", "--list", branch
+            )
+            if rc == 0 and branch in out.split():
+                with contextlib.suppress(Exception):
+                    await _git(root, "branch", "-d", branch)
+                merged_note = "branch fully merged into HEAD: deleted"
+            else:
+                merged_note = "branch retained (not fully merged)"
+    else:
+        # The dir stays (reaper removes it after the TTL), so the branch
+        # is checked out and MUST survive — deletion here would fail
+        # anyway. The reaper deletes it after teardown, exact-merged only.
+        merged_note = (
+            "worktree kept for the reaper's TTL cleanup "
+            "(branch retained: checked out in the kept worktree)"
+        )
+    out: dict = {"released": True, "branch": branch, "worktree": str(wt)}
+    if quiesced:
+        out["drained"] = True
+        merged_note = "quiesced session: worktree removed (nothing to preserve); " + merged_note
     if dropped:
         out["dropped_trash"] = dropped
     if insurance:
@@ -1590,6 +1630,9 @@ async def release_session(chat_id: str, why: str = "session ended") -> dict:
         out["note"] = (
             (out.get("note") + "; " if out.get("note") else "") + salvage_note
         )
+    out["note"] = (
+        (out.get("note") + "; " if out.get("note") else "") + merged_note
+    )
     return out
 
 
@@ -1782,7 +1825,19 @@ async def reap_stale(now: float | None = None) -> dict:
     for wt_str, info in list(_active.items()):
         if wt_str not in live_paths and now - info.get("created", now) > ttl:
             roots.add(Path(info["root"]))
-    # discover leftovers on disk even after a restart (info lost):
+    # discover leftovers on disk even after a restart (info lost): roots
+    # come from every registered workspace (DB), not just _active — a
+    # RELEASED session (release_session leaves the dir for the reaper)
+    # and a crashed run have no _active entry at all.
+    with contextlib.suppress(Exception):
+        from backend.db.database import list_workspaces
+
+        for ws in await list_workspaces() or []:
+            path = ws.get("path") if isinstance(ws, dict) else None
+            if path and Path(path).is_dir():
+                roots.add(Path(path))
+    # any root already referenced by a live binding (covers tests and
+    # embedded runs where the DB may be empty)
     for info in list(_active.values()):
         roots.add(Path(info["root"]))
 
@@ -1817,14 +1872,23 @@ async def reap_stale(now: float | None = None) -> dict:
                 _reap_failed.add(str(child))
                 continue
             _reap_failed.discard(str(child))
-            # adr/0003 branch hygiene: an orphan whose branch carries no
-            # unmerged commits is deleted, not kept for three days.
-            if await _new_commits(root, branch) <= 0:
-                with contextlib.suppress(Exception):
-                    await _git(root, "branch", "-D", branch)
+            # adr/0003 branch hygiene: an orphan whose branch is fully
+            # merged (or that never had any) is deleted, not kept for
+            # three days. Exact merged-ness, same as release_session —
+            # never a commits-beyond-HEAD approximation.
+            rc, out = await _git(root, "rev-parse", "--verify", branch)
+            if rc != 0:
+                pass  # branch gone already
+            else:
+                rc, out = await _git(
+                    root, "branch", "--merged", "HEAD", "--list", branch
+                )
+                if rc == 0 and branch in out.split():
+                    with contextlib.suppress(Exception):
+                        await _git(root, "branch", "-d", branch)
             reaped.append(str(child))
         # Branch pruning: the 3-day TTL now applies only to branches that
-        # carry NO unmerged commits (merged or zero-commit litter). Under
+        # are fully merged (merged or zero-commit litter). Under
         # the branch-first contract an unmerged agent/* branch IS the
         # record of the work — the user deletes it, never the reaper.
         rc, out = await _git(
@@ -1844,8 +1908,11 @@ async def reap_stale(now: float | None = None) -> dict:
                 except ValueError:
                     continue
                 if now - date > BRANCH_TTL_SECONDS and name not in live_branches:
-                    if await _new_commits(root, name) <= 0:
-                        await _git(root, "branch", "-D", name)
+                    rc, out = await _git(
+                        root, "branch", "--merged", "HEAD", "--list", name
+                    )
+                    if rc == 0 and name in out.split():
+                        await _git(root, "branch", "-d", name)
     return {"reaped": reaped, "salvaged": salvaged}
 
 

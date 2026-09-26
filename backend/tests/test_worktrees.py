@@ -313,14 +313,28 @@ async def test_turn_end_keeps_uncommitted_state_across_turns(repo: Path):
     # the draft is STILL THERE for the next turn — same worktree, same file
     assert (Path(wt) / "draft.md").read_text(encoding="utf-8") == "half-done\n"
     assert worktrees.binding_for("8") is not None
-    # session end: authored leftover is salvaged (never silently deleted)
+    # session end: authored leftover is salvaged (never silently deleted);
+    # the physical tree stays until the reaper (recovery over tidiness)
     rel = await worktrees.release_session("8", why="test")
-    assert not (Path(wt) / "draft.md").exists()
+    assert (Path(wt) / "draft.md").exists(), (
+        "released worktree is kept until the reaper's TTL"
+    )
     salvages = list((repo / ".yaah" / "worktrees").glob("*.salvage.patch"))
     assert salvages, "authored dirt must be salvaged at session end"
     assert "half-done" in salvages[0].read_text(encoding="utf-8")
     assert worktrees.binding_for("8") is None
-    # zero-commit session: the branch is deleted, not kept for 3 days
+    # zero commits, but the branch is checked out in the RETAINED worktree:
+    # it survives until the reaper (which deletes it after teardown — a
+    # zero-commit branch is contained in HEAD, so --merged covers it)
+    assert rel["branch"] in _git(repo, "branch", "--list", rel["branch"])
+    info = {
+        "root": str(repo),
+        "branch": rel["branch"],
+        "created": time.time() - worktrees._ttl() - 1,
+    }
+    worktrees._active[str(wt)] = info
+    await worktrees.reap_stale()
+    assert not Path(wt).exists(), "the reaper finishes the teardown"
     assert rel["branch"] not in _git(repo, "branch", "--list", rel["branch"])
 
 
@@ -497,7 +511,7 @@ async def test_turn_end_keeps_trash_until_session_end(repo: Path):
     # UNMERGED commits now — the user decides, so the branch is kept
     rel = await worktrees.release_session("11", why="test")
     assert rel.get("dropped_trash") == ["tsc-out2.txt"]
-    assert not Path(wt).exists()
+    assert Path(wt).exists(), "teardown is the reaper's job now, not release_session's"
     assert rel["branch"] in _git(repo, "branch", "--list", rel["branch"])
 
 
@@ -542,9 +556,10 @@ async def test_probe_retries_then_final_merge(repo: Path):
     assert turn2["commits_ahead"] == 2
     assert not (repo / "feature.txt").exists()
     assert not (repo / "notes.md").exists()
-    # session end tears down; the branch keeps its unmerged commits
+    # session end: teardown deferred to the reaper; the branch keeps its
+    # unmerged commits
     rel = await worktrees.release_session("13", why="test")
-    assert not Path(wt).exists()
+    assert Path(wt).exists(), "released worktree is kept until the reaper's TTL"
     assert rel["branch"] in _git(repo, "branch", "--list", rel["branch"])
 
 
