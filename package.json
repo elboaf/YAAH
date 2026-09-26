@@ -1,7 +1,7 @@
 {
   "name": "ai-coding-agent",
   "private": true,
-  "version": "1.0.12-rc.20",
+  "version": "1.0.12-rc.21",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:frontend\" \"npm:dev:backend\"",
