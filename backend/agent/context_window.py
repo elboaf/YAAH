@@ -136,8 +136,12 @@ async def get_context_window(
     if not model:
         return None
     cfg = cfg or {}
-    overrides = cfg.get("context_window_overrides") or {}
-    override = overrides.get(model)
+    # Per-model Settings map first (model id -> {context_window}); the
+    # legacy flat map is the fallback for pre-upgrade rows.
+    mc = cfg.get("model_context") or {}
+    override = (mc.get(model) or {}).get("context_window")
+    if not override:
+        override = (cfg.get("context_window_overrides") or {}).get(model)
     if override:
         try:
             return int(override)

@@ -9,6 +9,7 @@ import {
   setActiveModel,
   getProviders,
   listAvailableModels,
+  getResolvedContextWindow,
   type ProviderModels,
   streamAgentTurn,
   type AgentEvent,
@@ -96,6 +97,7 @@ import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError,
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
+import { AgentContextPerProvider } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
@@ -5470,13 +5472,29 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
   const [activeTab, setActiveTab] = useState<'general' | 'providers' | 'voice' | 'mcp'>('general')
   // Per-model context-window overrides (model id -> tokens); blank = auto.
+  // Legacy flat form kept for a lossless save; the per-model editors write
+  // `model_context`, which the backend prefers.
   const [ctxOverrides, setCtxOverrides] = useState<Record<string, number>>({})
-  const [ctxModelDraft, setCtxModelDraft] = useState('')
-  const [ctxTokensDraft, setCtxTokensDraft] = useState<number | ''>('')
-  // History compaction: on/off + absolute trigger threshold in k tokens
-  // (the field holds 250 for 250k; 0/blank = fraction-of-window only).
-  const [compactionEnabled, setCompactionEnabled] = useState(true)
-  const [compactionTriggerK, setCompactionTriggerK] = useState<number | ''>('')
+  // Per-model context windows: model id -> tokens (per-provider editors).
+  const [modelCtx, setModelCtx] = useState<Record<string, { context_window: number }>>({})
+  // Per-model compaction: model id -> settings (per-provider editors).
+  const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
+  // Per-provider agent settings (the provider tab's Agent & context block).
+  const [provMaxSteps, setProvMaxSteps] = useState<Record<string, number | ''>>({})
+  // Editor drafts for the expanded provider: selected model + field values.
+  const [agentModelSel, setAgentModelSel] = useState<Record<string, string>>({})
+  const [ctxDraft, setCtxDraft] = useState<Record<string, number | ''>>({})
+  // Resolved (detected) context windows per model id, for pre-filling.
+  const [compEnabledDraft, setCompEnabledDraft] = useState<Record<string, boolean>>({})
+  const [compDraft, setCompDraft] = useState<Record<string, number | ''>>({})
+  // Model catalogs per provider (from /api/models/available, fetched once).
+  const [providerModels, setProviderModels] = useState<Record<string, string[]>>({})
+  // Resolved (detected) context windows per model id, for pre-filling.
+  const [detectedWindows, setDetectedWindows] = useState<Record<string, number | null>>({})
+  /** Default history-compaction trigger (k tokens) shown in the field. */
+  const COMPACTION_DEFAULT_K = 300
+  /** Default per-provider max steps (0 = unlimited). */
+  const MAX_STEPS_DEFAULT = 200
   // Interface scale draft (1.0 / 1.1 / 1.25 / 1.5) — applied live on save.
   const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
@@ -5555,8 +5573,15 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setActive(c.active_provider)
           setMaxSteps(c.max_steps ?? '')
           setCtxOverrides(c.context_window_overrides ?? {})
-          setCompactionEnabled(c.compaction?.enabled !== false)
-          setCompactionTriggerK(c.compaction?.trigger_tokens ? c.compaction.trigger_tokens / 1000 : '')
+          setModelCtx(c.model_context ?? {})
+          setModelComp(c.model_compaction ?? {})
+          // Per-provider max steps live on each provider entry (Settings
+          // edits them there); legacy blank = fall back to the global.
+          const steps: Record<string, number | ''> = {}
+          for (const [n, p] of Object.entries(c.providers)) {
+            steps[n] = (p as unknown as { max_steps?: number }).max_steps ?? ''
+          }
+          setProvMaxSteps(steps)
           setUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
@@ -5588,6 +5613,14 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     }
     void loadConfig()
     getProviders().then(setPresets).catch(() => {})
+    // Model catalogs for the per-provider model dropdowns (Settings editors).
+    listAvailableModels()
+      .then((r) => {
+        const cats: Record<string, string[]> = {}
+        for (const [n, pm] of Object.entries(r.providers)) cats[n] = pm.models ?? []
+        setProviderModels(cats)
+      })
+      .catch(() => {})
     transcribeStatus()
       .then((s) => {
         setVoiceLocalReady(s.local_available)
@@ -5605,6 +5638,42 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
+
+  // Per-provider editor hydration: when a provider is expanded (or its
+  // selected model changes), seed the drafts from the saved per-model maps
+  // — the saved context window, or the model's detected default; the saved
+  // compaction trigger, or the shipped 300k default. Seeds only blank
+  // fields so the user's typing is never overwritten.
+  useEffect(() => {
+    if (!expanded) return
+    const name = expanded
+    const model = (agentModelSel[name] || providers[name]?.model || '').trim()
+    if (!model) return
+    const savedWin = modelCtx[model]?.context_window
+    const detected = detectedWindows[model]
+    if (detected === undefined && !savedWin) {
+      getResolvedContextWindow(model)
+        .then((r) => setDetectedWindows((d) => ({ ...d, [model]: r.context_window })))
+        .catch(() => setDetectedWindows((d) => ({ ...d, [model]: null })))
+    }
+    setCtxDraft((s) => {
+      if (s[name] !== undefined && s[name] !== '') return s
+      const seed = savedWin ?? detected
+      return { ...s, [name]: seed === undefined || seed === null ? '' : seed }
+    })
+    setCompDraft((s) => {
+      if (s[name] !== undefined && s[name] !== '') return s
+      const saved = modelComp[model]?.trigger_tokens
+      return { ...s, [name]: saved ? saved / 1000 : COMPACTION_DEFAULT_K }
+    })
+    setCompEnabledDraft((s) =>
+      s[name] !== undefined ? s : { ...s, [name]: modelComp[model]?.enabled ?? true },
+    )
+    setProvMaxSteps((s) =>
+      s[name] !== undefined ? s : { ...s, [name]: MAX_STEPS_DEFAULT },
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, expanded ? agentModelSel[expanded] : null])
 
   // Live hotkey capture: the next non-modifier keydown becomes the
   // accelerator. Capture-phase listener so Esc cancels the capture instead
@@ -5688,7 +5757,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     setErr(null)
     try {
       // Send only providers that still exist; blank key fields keep saved keys
-      const out: Record<string, { api_base: string; model: string; api_key?: string }> = {}
+      const out: Record<string, { api_base: string; model: string; api_key?: string; max_steps?: number }> = {}
       for (const [name, p] of Object.entries(providers)) {
         out[name] = {
           api_base: p.api_base,
@@ -5696,15 +5765,36 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           ...(p.apiKeyInput ? { api_key: p.apiKeyInput } : {}),
         }
       }
+      // Per-provider agent settings: steps ride on each provider entry;
+      // context windows + compaction go to the per-model maps.
+      for (const [name, p] of Object.entries(providers)) {
+        const ms = provMaxSteps[name]
+        if (ms !== '' && ms !== undefined) out[name].max_steps = Number(ms)
+      }
+      const outCtx: Record<string, { context_window: number }> = { ...modelCtx }
+      const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = { ...modelComp }
+      for (const name of Object.keys(providers)) {
+        const model = (agentModelSel[name] || '').trim()
+        if (!model) continue
+        const cw = ctxDraft[name]
+        if (cw !== '' && cw !== undefined && Number(cw) > 0) {
+          outCtx[model] = { context_window: Number(cw) }
+        }
+        if (compEnabledDraft[name] !== undefined) {
+          const tk = compDraft[name]
+          outComp[model] = {
+            enabled: compEnabledDraft[name],
+            trigger_tokens: tk === '' || tk === undefined ? 0 : Number(tk) * 1000,
+          }
+        }
+      }
       await updateConfig({
         providers: out,
         active_provider: active || undefined,
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
         context_window_overrides: ctxOverrides,
-        compaction: {
-          enabled: compactionEnabled,
-          trigger_tokens: compactionTriggerK === '' ? 0 : Number(compactionTriggerK) * 1000,
-        },
+        model_context: outCtx,
+        model_compaction: outComp,
         ui_scale: uiScale,
         voice: {
           engine: voiceEngine,
@@ -5906,6 +5996,53 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                             onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
                             aria-label={`${name} API key`}
                           />
+                          {/* Per-provider agent & context: max steps + the
+                              per-model context/compaction editors. */}
+                          <AgentContextPerProvider
+                            name={name}
+                            models={providerModels[name] ?? []}
+                            modelSel={agentModelSel[name] ?? ''}
+                            onModelSel={(m) => {
+                              setAgentModelSel((s) => ({ ...s, [name]: m }))
+                              // Model switch: clear the drafts so the
+                              // hydration effect re-seeds for the new model.
+                              setCtxDraft((s) => {
+                                const n = { ...s }
+                                delete n[name]
+                                return n
+                              })
+                              setCompDraft((s) => {
+                                const n = { ...s }
+                                delete n[name]
+                                return n
+                              })
+                              setCompEnabledDraft((s) => {
+                                const n = { ...s }
+                                delete n[name]
+                                return n
+                              })
+                            }}
+                            currentModel={p.model}
+                            maxSteps={provMaxSteps[name] === undefined ? MAX_STEPS_DEFAULT : provMaxSteps[name]}
+                            onMaxSteps={(v) => setProvMaxSteps((s) => ({ ...s, [name]: v }))}
+                            ctxDraft={ctxDraft[name] ?? ''}
+                            onCtxDraft={(v) => setCtxDraft((s) => ({ ...s, [name]: v }))}
+                            ctxAuto={(() => {
+                              const m = agentModelSel[name] || p.model
+                              return m ? (detectedWindows[m] ?? null) : null
+                            })()}
+                            ctxSaved={(() => {
+                              const m = agentModelSel[name] || p.model
+                              return m ? modelCtx[m]?.context_window : undefined
+                            })()}
+                            compEnabled={compEnabledDraft[name]}
+                            onCompEnabled={(v) => setCompEnabledDraft((s) => ({ ...s, [name]: v }))}
+                            compK={compDraft[name] ?? COMPACTION_DEFAULT_K}
+                            onCompK={(v) => setCompDraft((s) => ({ ...s, [name]: v }))}
+                            compactionDefaultK={COMPACTION_DEFAULT_K}
+                            maxStepsDefault={MAX_STEPS_DEFAULT}
+                            inputCls={settingsInputCls}
+                          />
                           <div className="mt-2 flex justify-end">
                             <button
                               type="button"
@@ -5954,124 +6091,6 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             </SettingsCard>
             )}
 
-            {activeTab === 'general' && (
-              <SettingsCard title="Agent & context" className="col-span-4">
-              <div className="max-w-sm">
-                <label className="mb-1 block text-[10px] text-zinc-500">Max steps</label>
-                <input
-                  type="number"
-                  min="0"
-                  className={`${settingsInputCls} w-full`}
-                  value={maxSteps}
-                  onChange={(e) => setMaxSteps(e.target.value === '' ? '' : Number(e.target.value))}
-                />
-                <p className="mt-1 text-[10px] text-zinc-600">0 = unlimited (Stop still works)</p>
-              </div>
-
-              <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
-                <label className="mb-1 block text-[10px] text-zinc-500">Context window overrides</label>
-                <p className="mb-1.5 text-[10px] text-zinc-600">
-                  Tokens per model id — wins over the provider-reported value and the built-in
-                  table (powers the context readout in the chat panel).
-                </p>
-                <div className="flex gap-1.5">
-                  <input
-                    type="text"
-                    placeholder="model id"
-                    aria-label="Model id for the context window override"
-                    className={`${settingsInputCls} min-w-0 flex-1`}
-                    value={ctxModelDraft}
-                    onChange={(e) => setCtxModelDraft(e.target.value)}
-                  />
-                  <input
-                    type="number"
-                    min="0"
-                    placeholder="tokens"
-                    aria-label="Context window in tokens"
-                    className={`${settingsInputCls} w-24 shrink-0`}
-                    value={ctxTokensDraft}
-                    onChange={(e) => setCtxTokensDraft(e.target.value === '' ? '' : Number(e.target.value))}
-                  />
-                  <button
-                    type="button"
-                    className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-                    onClick={() => {
-                      const id = ctxModelDraft.trim()
-                      if (!id || !ctxTokensDraft || ctxTokensDraft <= 0) return
-                      setCtxOverrides((o) => ({ ...o, [id]: ctxTokensDraft as number }))
-                      setCtxModelDraft('')
-                      setCtxTokensDraft('')
-                    }}
-                  >
-                    Set
-                  </button>
-                </div>
-                {Object.keys(ctxOverrides).length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {Object.entries(ctxOverrides).map(([id, win]) => (
-                      <span
-                        key={id}
-                        className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
-                      >
-                        {id}: {win.toLocaleString()}
-                        <button
-                          aria-label={`Remove override for ${id}`}
-                          className="text-zinc-500 hover:text-red-400"
-                          onClick={() =>
-                            setCtxOverrides((o) => {
-                              const n = { ...o }
-                              delete n[id]
-                              return n
-                            })
-                          }
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
-                <label className="mb-1 block text-[10px] text-zinc-500">History compaction</label>
-                <div className="flex items-center gap-2.5">
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={compactionEnabled}
-                    aria-label="Enable history compaction"
-                    className={`relative h-4 w-8 shrink-0 rounded-full transition-colors ${
-                      compactionEnabled ? 'bg-blue-600' : 'bg-zinc-700'
-                    }`}
-                    onClick={() => setCompactionEnabled((v) => !v)}
-                  >
-                    <span
-                      className={`absolute top-0.5 h-3 w-3 rounded-full bg-zinc-100 transition-all ${
-                        compactionEnabled ? 'left-4.5' : 'left-0.5'
-                      }`}
-                    />
-                  </button>
-                  <span className="text-[10px] text-zinc-400">
-                    {compactionEnabled ? 'On' : 'Off'} — fold old history into a summary when the prompt grows past
-                  </span>
-                  <input
-                    type="number"
-                    min="0"
-                    aria-label="Compaction trigger threshold in thousands of tokens"
-                    className={`${settingsInputCls} w-20 shrink-0`}
-                    value={compactionTriggerK}
-                    onChange={(e) => setCompactionTriggerK(e.target.value === '' ? '' : Number(e.target.value))}
-                  />
-                  <span className="text-[10px] text-zinc-600">k tokens (0 = 70% of the model's window)</span>
-                </div>
-                <p className="mt-1 text-[10px] text-zinc-600">
-                  An absolute threshold never fires before the model's window allows: the trigger is the smaller of
-                  the threshold and 70% of the window, so small-window models still compact before overflowing.
-                </p>
-              </div>
-            </SettingsCard>
-            )}
 
             {activeTab === 'voice' && (
               <>

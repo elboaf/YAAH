@@ -27,6 +27,8 @@ COMPACTION_TRIGGER_FRACTION = 0.70
 # min(trigger_tokens, window * trigger_fraction) — a big-window model
 # waits until the absolute threshold, while a small-window model still
 # compacts before overflowing. 0 = fraction-only (legacy behavior).
+# Legacy absolute default: 0 = fraction-of-window only. The per-model
+# Settings editor overrides this per model (300k shown as the default).
 COMPACTION_TRIGGER_TOKENS = 0
 # Compact DOWN to this fraction of the window: the recent tail stays
 # verbatim, the summarized prefix carries the rest.
@@ -50,6 +52,12 @@ _DEFAULTS = {
     "enabled": COMPACTION_ENABLED,
     "trigger_fraction": COMPACTION_TRIGGER_FRACTION,
     "trigger_tokens": COMPACTION_TRIGGER_TOKENS,
+    # "enabled"/"trigger_tokens" defaults for models without a per-model
+    # entry in config.model_compaction (trigger in absolute tokens; 300k
+    # shown and used as the shipped default by the Settings editor).
+    "per_model_enabled": True,
+    "per_model_trigger_tokens": 300_000,
+    "model_compaction": {},
     "keep_fraction": COMPACTION_KEEP_FRACTION,
     "keep_recent_messages": COMPACTION_MIN_TAIL_MESSAGES,
     "default_window": COMPACTION_DEFAULT_WINDOW,
@@ -88,6 +96,31 @@ def _compaction_cfg() -> dict:
         cfg["default_window"] = max(int(cfg["default_window"]), 4_000)
     except (TypeError, ValueError):
         cfg["default_window"] = COMPACTION_DEFAULT_WINDOW
+    pm = load_config().get("model_compaction") or {}
+    cfg["model_compaction"] = pm if isinstance(pm, dict) else {}
+    return cfg
+
+
+def _compaction_cfg_for_model(bare_model: str, ccfg: dict) -> dict:
+    """Compaction settings for one bare model id: the per-model entry
+    (config.model_compaction) when present, else the shipped defaults."""
+    entry = (ccfg.get("model_compaction") or {}).get(bare_model)
+    if isinstance(entry, dict):
+        cfg = dict(ccfg)
+        cfg["enabled"] = bool(entry.get("enabled", True))
+        try:
+            cfg["trigger_tokens"] = max(int(entry.get("trigger_tokens") or 0), 0)
+        except (TypeError, ValueError):
+            cfg["trigger_tokens"] = 0
+        return cfg
+    cfg = dict(ccfg)
+    cfg["enabled"] = bool(ccfg.get("per_model_enabled", True))
+    try:
+        cfg["trigger_tokens"] = max(
+            int(ccfg.get("per_model_trigger_tokens") or 0), 0
+        )
+    except (TypeError, ValueError):
+        cfg["trigger_tokens"] = 300_000
     return cfg
 
 
@@ -140,15 +173,20 @@ async def resolve_window(model: str | None, cfg: dict | None = None) -> int:
     return ccfg["default_window"]
 
 
-def should_compact(context_tokens: int | None, context_window: int) -> bool:
+def should_compact(context_tokens: int | None, context_window: int, model: str | None = None) -> bool:
     """Measured prompt size vs the trigger threshold.
 
     With an absolute `trigger_tokens` set (> 0), the trigger is
     min(trigger_tokens, window * trigger_fraction): big-window models
     wait for the absolute threshold, small-window models still compact
     before overflowing. Without it, fraction-of-window only.
+
+    `model` (bare id) selects the per-model settings when present;
+    without it the global compaction block applies.
     """
     ccfg = _compaction_cfg()
+    if model:
+        ccfg = _compaction_cfg_for_model(model, ccfg)
     if not ccfg["enabled"] or not context_tokens or not context_window:
         return False
     trigger = context_window * ccfg["trigger_fraction"]
@@ -314,9 +352,19 @@ async def compact_history_for_context(
     if not conv:
         return None
     cfg = load_config()
+    if model_id:
+        bare = model_id.partition("::")[2] if "::" in model_id else model_id
+    else:
+        cfg_model = cfg.get("model") or ""
+        bare = cfg_model.partition("::")[2] if "::" in cfg_model else cfg_model
+    # Per-model settings: the model's own entry decides on/off + trigger.
+    if bare:
+        ccfg = _compaction_cfg_for_model(bare, ccfg)
+        if not ccfg["enabled"]:
+            return None
     window = model_window or await resolve_window(model_id or cfg.get("model"), cfg)
     measured = conv.get("context_tokens")
-    if not should_compact(measured, window):
+    if not should_compact(measured, window, bare or None):
         return None
 
     rows = await db.get_messages(conversation_id)

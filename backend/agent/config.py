@@ -79,12 +79,17 @@ DEFAULTS = {
     },
     # Per-model context-window overrides (model id -> tokens). Wins over the
     # provider-reported value and the built-in table; set from Settings.
+    # `model_context` (model id -> {context_window}) is the newer per-model
+    # Settings map and takes precedence over the flat form.
     "context_window_overrides": {},
+    "model_context": {},
     # Access mode gating tool execution (PLAN-access-modes.md): "ask" =
     # prompt before mutating/shell tools, "plan" = block them entirely,
     # "full" = run everything without confirmation. Read at gate time so a
     # header switch applies to the next tool call of a running turn.
     "access_mode": "ask",
+    # Per-model compaction settings (model id -> {enabled, trigger_tokens}).
+    "model_compaction": {},
     # Scheduled agents (issue #41) GLOBAL settings: failed fires retry with
     # backoff up to retry_count times. Per-agent settings live in the
     # SQLite `agents` table, not here.

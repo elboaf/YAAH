@@ -464,6 +464,21 @@ async def api_conversation_context(conversation_id: int):
     }
 
 
+@app.get("/api/context-window")
+async def api_context_window(model: str = ""):
+    """Resolved context window for one model id (Settings pre-fills the
+    override field with it). Resolution: per-model setting -> provider
+    report -> built-in table -> null."""
+    from backend.agent.context_window import get_context_window
+
+    cfg = load_config()
+    bare = model.partition("::")[2] if "::" in model else model
+    return {
+        "model": bare,
+        "context_window": await get_context_window(bare, cfg) if bare else None,
+    }
+
+
 @app.get("/api/workspaces/git-branches")
 async def api_workspace_git_branches(workspace: str = ""):
     """Current branch and local branch names for an unsaved draft workspace.
@@ -948,6 +963,7 @@ class ProviderEntry(BaseModel):
     api_base: str | None = None
     api_key: str | None = None
     model: str | None = None
+    max_steps: int | None = None
 
 
 class ConfigUpdate(BaseModel):
@@ -960,8 +976,10 @@ class ConfigUpdate(BaseModel):
     remote: dict | None = None
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
+    model_context: dict[str, dict[str, int | None]] | None = None
     access_mode: str | None = None
     compaction: dict | None = None
+    model_compaction: dict[str, dict] | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -1840,12 +1858,16 @@ async def api_get_config():
         "remote": cfg.get("remote") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
+        # Per-model context windows (the per-model Settings editor).
+        "model_context": cfg.get("model_context") or {},
         # History compaction (Settings edits these; trigger_tokens is an
         # absolute token threshold, 0 = fraction-of-window only).
         "compaction": {
             "enabled": (cfg.get("compaction") or {}).get("enabled", True),
             "trigger_tokens": (cfg.get("compaction") or {}).get("trigger_tokens", 0),
         },
+        # Per-model compaction settings (the per-model Settings editor).
+        "model_compaction": cfg.get("model_compaction") or {},
         # Access mode: ask | plan | full (header control; see
         # PLAN-access-modes.md).
         "access_mode": cfg.get("access_mode", "ask"),
@@ -1890,6 +1912,19 @@ async def api_set_config(body: ConfigUpdate):
             if w > 0:
                 merged[str(model_id)] = w
         updates["context_window_overrides"] = merged
+    # Per-model context windows: when present this is the authoritative full
+    # map (Settings sends everything it shows, so removals persist).
+    mc = updates.get("model_context")
+    if isinstance(mc, dict):
+        merged_mc: dict[str, dict[str, int]] = {}
+        for model_id, entry in mc.items():
+            try:
+                w = int((entry or {}).get("context_window") or 0)
+            except (TypeError, ValueError):
+                continue
+            if w > 0:
+                merged_mc[str(model_id)] = {"context_window": w}
+        updates["model_context"] = merged_mc
     # Access mode is validated against the shipped set; anything else falls
     # back to "ask" (safe default) rather than 422ing a whole settings save.
     if "access_mode" in updates:
@@ -1907,6 +1942,21 @@ async def api_set_config(body: ConfigUpdate):
         except (TypeError, ValueError):
             merged_c["trigger_tokens"] = 0
         updates["compaction"] = merged_c
+    # Per-model compaction merges the same way: each entry's fields are
+    # normalized (None clears the field, numbers are clamped >= 0).
+    mcomp = updates.get("model_compaction")
+    if isinstance(mcomp, dict):
+        merged_m: dict[str, dict] = {}
+        for model_id, entry in mcomp.items():
+            if not isinstance(entry, dict):
+                continue
+            out: dict = {"enabled": bool(entry.get("enabled", True))}
+            try:
+                out["trigger_tokens"] = max(int(entry.get("trigger_tokens") or 0), 0)
+            except (TypeError, ValueError):
+                out["trigger_tokens"] = 0
+            merged_m[str(model_id)] = out
+        updates["model_compaction"] = merged_m
     save_config(updates)
     # Hosting toggles need the mDNS advertiser to follow.
     if isinstance(remote, dict):

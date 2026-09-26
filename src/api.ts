@@ -209,13 +209,18 @@ export interface AgentConfig {
   access_mode?: 'ask' | 'plan' | 'full'
   /** Interface scale (CSS zoom on the app root); 1.0 = default ramp. */
   ui_scale?: number
-  /** Per-model context-window overrides (model id -> tokens). */
+  /** Per-model context-window overrides (model id -> tokens). Legacy
+   *  flat form; superseded by `model_context` but still honored. */
   context_window_overrides?: Record<string, number>
+  /** Per-model context windows (model id -> { context_window }). */
+  model_context?: Record<string, { context_window: number }>
   /** History compaction; trigger_tokens is an absolute threshold (0 = off). */
   compaction?: {
     enabled: boolean
     trigger_tokens: number
   }
+  /** Per-model compaction settings (model id -> settings). */
+  model_compaction?: Record<string, { enabled: boolean; trigger_tokens: number }>
   /** Voice dictation; cloud_api_key arrives masked ("set" | ""). */
   voice?: {
     engine: 'local' | 'cloud'
@@ -256,10 +261,17 @@ export const updateConfig = (
     ui_scale: number
     access_mode: 'ask' | 'plan' | 'full'
     context_window_overrides: Record<string, number | null>
+    /** Per-model context windows: the authoritative map when present. */
+    model_context?: Record<string, { context_window: number | null }>
     compaction: {
       enabled?: boolean
       trigger_tokens?: number
     }
+    /** Per-model compaction settings: authoritative map when present. */
+    model_compaction?: Record<string, {
+      enabled: boolean | null
+      trigger_tokens: number | null
+    }>
     voice: {
       engine?: 'local' | 'cloud'
       cloud_endpoint?: string
@@ -300,8 +312,7 @@ export interface ProviderPreset {
 export const getProviders = () =>
   api<Record<string, ProviderPreset>>('/api/providers')
 
-/** Per-provider model listing, with the error when a provider is unreachable. */
-export interface ProviderModelInfo {
+/** Per-provider model listing, with the error when a provider is unreachable. */export interface ProviderModelInfo {
   id: string
   reasoning_efforts: string[]
   supports_reasoning: boolean
@@ -324,6 +335,14 @@ export const listAvailableModels = () =>
     active_provider: string
     model: string
   }>('/api/models/available')
+
+/** Resolved context window for one model: Settings override (per-model
+ *  context) -> provider report -> built-in table -> null. Used by Settings
+ *  to pre-fill the context-window field with the model's known default. */
+export const getResolvedContextWindow = (model: string) =>
+  api<{ model: string; context_window: number | null }>(
+    `/api/context-window?model=${encodeURIComponent(model)}`,
+  )
 
 // ---------------------------------------------------------------- files
 
