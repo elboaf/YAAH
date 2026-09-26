@@ -1642,21 +1642,40 @@ async def execute_tool(
     return result
 
 
-def get_schemas() -> list:
-    """Schemas matching the EXECUTION TARGET's platform: a remote host that
-    is Linux must never see `powershell`, and a Linux client driving a
-    Windows host must. Same rule as the local case (powershell exists only
-    on Windows), just evaluated against the connected host when there is
-    one."""
+def get_schemas(workspace: str | None = None) -> list:
+    """Return schemas for the actual execution target.
+
+    A namespaced workspace selects its own host. The legacy active connection
+    remains a fallback only for callers that do not provide a workspace.
+    """
     from backend.agent import remote as remote_mod
 
-    host = remote_mod.get_remote()
-    windows = host.windows if host is not None else os.name == "nt"
+    remote_target = workspace is not None and remote_mod.parse_ns(workspace) is not None
+    host = (
+        remote_mod.remote_for_workspace(workspace)
+        if remote_target
+        else remote_mod.get_remote()
+    )
+    windows = host.windows if host is not None else (os.name == "nt" and not remote_target)
     schemas = TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA
+    if remote_target and host is None:
+        # Never expose local-only host-computer tools when an explicitly
+        # selected remote host is unavailable; execution will fail closed.
+        _local_computer_names = {
+            "screenshot", "list_windows", "read_ui_tree", "focus_window",
+            "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
+            "type_text", "press_key", "wait", "sandbox_test", "sandbox_run",
+            "sandbox_status", "sandbox_stop",
+        }
+        schemas = [
+            s for s in schemas
+            if s["function"]["name"] not in _SANDBOX_NAMES
+            and s["function"]["name"] not in _local_computer_names
+        ]
     # install_git installs on THIS machine with the client's bundled
     # installer, so it's only offered in local sessions when git is
     # actually missing and the installer shipped in this build.
-    if host is None and os.name == "nt":
+    if host is None and os.name == "nt" and not remote_target:
         from backend.agent import gitenv
 
         if not gitenv.find_git() and gitenv.find_installer():
@@ -1665,9 +1684,18 @@ def get_schemas() -> list:
     # TOOLS_SCHEMA only when os.name == "nt"): strip them whenever a remote
     # host is connected — a remote Windows host must not see the client's
     # sandbox any more than a Linux one should.
-    if host is not None:
+    if host is not None or remote_target:
         schemas = [s for s in schemas
                    if s["function"]["name"] not in _SANDBOX_NAMES]
+        if remote_target:
+            schemas = [
+                s for s in schemas
+                if s["function"]["name"] not in {
+                    "screenshot", "list_windows", "read_ui_tree", "focus_window",
+                    "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
+                    "type_text", "press_key", "wait",
+                }
+            ]
     # MCP server tools (mcp_<server>_<tool>) merge in dynamically — they're
     # client-local like web/ask_user, regardless of where file tools run.
     from backend.agent import mcp_client
