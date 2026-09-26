@@ -110,15 +110,13 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 
 **Implementation notes:** Protocol v4 requires matching client/host builds. Remote transcript edits are limited to editing existing message text in the isolated viewer; no composer sends, turns, workspace dispatch, message additions/deletions, or broad main-chat owner identity are enabled. Pending full-snapshot commits are retained durably, and background refresh does not overwrite them. A stale-revision conflict stays pending for explicit human resolution; it is never silently rebased or discarded.
 
-### Phase 6 — Local agent turns with per-workspace remote tool dispatch (in progress)
+### Phase 6 — Local agent turns with per-workspace remote tool dispatch
 
-- [x] Keep the model/provider and agent loop local for local-owned conversations with remote workspaces.
-- [x] Resolve workspace tool schemas and platform capabilities from the selected workspace owner, independently of the legacy active remote device.
-- [x] Keep local filesystem snapshots and local worktree isolation from operating on remote-namespaced paths.
-- [ ] Add the owner-qualified transcript adapter and integrate it with the agent loop, run/cancel controls, durable pending commits, and streaming for remote-owned conversations.
-- [ ] Verify simultaneous local/remote turns, same-chat exclusion, cancellation, reconnect/pending-commit recovery, and no local workspace regression.
+- Keep the model/provider and agent loop local for all conversations.
+- Bind each turn to explicit conversation owner and workspace owner. Route workspace tools to that workspace's host; leave local tools and local workspaces local.
+- Preserve streaming and allow simultaneous independent turns in local and remote chats across devices. Ensure switching chats affects only selection.
 
-**Implementation notes (best-effort slice):** The workspace-owner schema selection and remote-path safeguards are implemented and covered by backend tests. An isolated `backend/agent/remote_turn.py` prototype covers explicit owner resolution plus lease/snapshot/commit lifecycle, but it is not integrated into `main.py` or `loop.py` and must not be treated as enabling remote-owned turns. The existing loop still couples transcript persistence, cancellation/queues, worktrees, compaction, title, and usage updates to local integer IDs. Authenticated remote peers therefore remain rejected from local `/api/conversations/...` and `/api/agent/...` routes; this fail-closed boundary stays until the complete owner-qualified runner is implemented. Best-effort verification: backend suite 622 passed, 2 skipped. Real multi-device reconnect and pending-commit recovery remain unverified.
+**Safety boundary:** Until an owner-qualified transcript and run-state adapter exists, authenticated remote peers are rejected from local `/api/conversations/...` and `/api/agent/...` routes (including reads, run controls, queues, and ask-user answers). This keeps colliding remote numeric IDs out of local conversation storage and integer-keyed run state. The Phase 5 snapshot/lease/commit routes remain unchanged. Remote turn execution and workspace tools are not enabled by the run-state foundation: `backend/agent/remote_run_state.py` provides owner-qualified claim/query/cancel/release state only, while the existing loop still couples transcript persistence, cancellation/queues, worktrees, compaction, title, and usage updates to local integer IDs. Implement an isolated owner-aware runner and explicit workspace dispatch before enabling Phase 6 turns.
 
 ### Phase 7 — Migration, hardening, and end-to-end verification
 
