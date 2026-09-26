@@ -33,6 +33,7 @@ from backend.agent import subagents as subagents_mod
 from backend.agent import worktrees
 from backend.agent.tools import execute_tool, get_schemas, tool_risk, workspace_root
 from backend.agent.remote import CMD_TOOLS_NOTE
+from backend.agent.shell import resolve_git_bash, windows_bash_note
 from backend.db.database import (
     RemoteProtocolError,
     add_message,
@@ -173,12 +174,11 @@ DEFAULT_MAX_STEPS = 200
 MAX_TOOL_RESULT_CHARS = 20_000
 MAX_AGENTS_NOTES_CHARS = 8_000
 
-# The env line's shell dialect must match what create_subprocess_shell
-# actually spawns — COMSPEC on Windows (near-universally cmd.exe), $SHELL
-# on POSIX. Saying "bash" on a cmd host (or vice versa) costs the model a
-# turn per Unix reflex (ls, grep, tail) before it falls back to findstr.
+# Keep model guidance aligned with run_bash's runtime selection.
 def _shell_phrase(windows: bool) -> str:
     if windows:
+        if resolve_git_bash():
+            return f"Git Bash; {windows_bash_note(True)}"
         shell = Path(os.environ.get("COMSPEC") or "cmd.exe").name.lower()
         phrase = f"the system shell ({shell})"
         if "cmd" in shell:

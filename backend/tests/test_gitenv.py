@@ -1,6 +1,6 @@
 """install_git + gitenv: bundled Git-for-Windows installer (issue #12)."""
+import asyncio
 import os
-from pathlib import Path
 
 import pytest
 
@@ -52,6 +52,33 @@ async def test_install_git_noop_when_git_present(monkeypatch):
     monkeypatch.setattr(gitenv, "find_git", lambda: "/usr/bin/git")
     res = await gitenv.run_install_git("unused")
     assert res["ok"] is True and res.get("already_installed") is True
+
+
+@pytest.mark.asyncio
+async def test_install_git_adds_installed_wrapper_to_live_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(gitenv.os, "name", "nt")
+    monkeypatch.setattr(gitenv, "find_git", lambda: None)
+    installer = tmp_path / "installer.exe"
+    installer.write_bytes(b"MZ")
+    monkeypatch.setattr(gitenv, "find_installer", lambda: installer)
+    git = tmp_path / "Git" / "cmd" / "git.exe"
+    git.parent.mkdir(parents=True)
+    git.write_bytes(b"git")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.setenv("PATH", "C:\\Windows\\System32")
+
+    class Process:
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    result = await gitenv.run_install_git("unused")
+    assert result["installed"] is True
+    assert str(git.parent) in os.environ["PATH"].split(";")
+    assert result["git"] == str(git)
 
 
 @pytest.mark.asyncio

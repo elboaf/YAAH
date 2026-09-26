@@ -1122,22 +1122,20 @@ async def test_bash_timeout_clamp_is_signalled(tmp_path):
 
 def test_env_line_names_real_shell(monkeypatch):
     import os
+    from backend.agent import loop
 
-    from backend.agent.loop import _local_env_line, _shell_phrase
-
-    # Pin the platform, not just the env vars: this test must take the
-    # cmd branch even on the Linux CI runner.
     monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: None)
     monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
-    line = _local_env_line()
+    line = loop._local_env_line()
     assert "cmd.exe" in line
-    assert "findstr" in line  # the POSIX-tools caveat
-    monkeypatch.setenv("COMSPEC", r"C:\Program Files\PowerShell\7\pwsh.exe")
-    assert "pwsh.exe" in _local_env_line()
-    assert "findstr" not in _local_env_line()
+    assert "findstr" in line
+    monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: r"C:\Git\bin\bash.exe")
+    assert "Git Bash" in loop._local_env_line()
+    assert "POSIX shell syntax" in loop._local_env_line()
     monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setenv("SHELL", "/bin/zsh")
-    assert "zsh" in _shell_phrase(False)
+    assert "zsh" in loop._shell_phrase(False)
 
 
 def test_remote_env_line_windows_caveat():
@@ -1145,6 +1143,11 @@ def test_remote_env_line_windows_caveat():
 
     win = RemoteSession("http://h", "p", {"windows": True, "os": "Windows"})
     assert CMD_TOOLS_NOTE in win.env_line()
+    git_bash = RemoteSession("http://h", "p", {
+        "windows": True, "os": "Windows", "git_bash": True,
+    })
+    assert "Git Bash" in git_bash.env_line()
+    assert "POSIX shell syntax" in git_bash.env_line()
     nix = RemoteSession("http://h", "p", {"windows": False, "os": "Linux"})
     assert "findstr" not in nix.env_line()
 

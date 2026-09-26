@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 from backend.agent.ghenv import command_env
+from backend.agent.shell import resolve_git_bash
 
 
 # ---------------------------------------------------------------- path safety
@@ -240,10 +241,11 @@ INSTALL_GIT_SCHEMA = {
 # lives here only reaches the model when it calls get_help("tool_name").
 HELP_DOCS: dict = {
     "bash": (
-        "Runs through the system shell (cmd.exe on Windows; POSIX tools "
-        "like ls/grep may be absent there - use dir, findstr, or "
-        "PowerShell Select-String / Get-Content -Tail instead). The "
-        "result reports the real exit code and combined stdout/stderr; "
+        "On Windows, runs through Git Bash when installed (the Git for "
+        "Windows wrapper, with POSIX shell syntax); otherwise uses the "
+        "system shell, normally cmd.exe. On Linux/macOS, uses the system "
+        "shell. Commands are not retried in another shell after failure. "
+        "The result reports the real exit code and combined stdout/stderr; "
         "output is truncated at a cap, so tail or filter large output "
         "in the command itself. On timeout the whole process tree is "
         "killed - partial output is still returned."
@@ -1032,6 +1034,37 @@ async def _run_capturing(
         raise
 
 
+async def _create_bash_process(
+    command: str, cwd: Path, env: dict, *, windows: bool | None = None
+):
+    """Start the command in Git Bash on Windows when its wrapper is available."""
+    windows = os.name == "nt" if windows is None else windows
+    if windows:
+        bash = resolve_git_bash(env)
+        if bash:
+            try:
+                return await asyncio.create_subprocess_exec(
+                    bash, "-c", command,
+                    cwd=cwd,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    **_NO_WINDOW, **_NEW_SESSION,
+                )
+            except OSError:
+                # Only startup failure may fall back. Never rerun a failed
+                # user command under a different shell dialect.
+                pass
+    return await asyncio.create_subprocess_shell(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        **_NO_WINDOW, **_NEW_SESSION,
+    )
+
+
 async def run_bash(
     workspace: str, command: str, timeout_seconds: int = 60, on_chunk=None
 ) -> dict:
@@ -1040,13 +1073,8 @@ async def run_bash(
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
     note = _clamp_note(timeout_seconds)
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=workspace_root(workspace),
-            env=_tool_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            **_NO_WINDOW, **_NEW_SESSION,
+        proc = await _create_bash_process(
+            command, workspace_root(workspace), _tool_env()
         )
         job = _job_create()
         if job:

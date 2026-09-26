@@ -84,10 +84,23 @@ async def run_install_git(workspace: str) -> dict:
     if rc != 0:
         return {"error": f"Git installer exited {rc} (setup logs: "
                          f"%TEMP%\\Git for Windows)."}
-    # New installs land on PATH only for fresh processes; probe both the
-    # refreshed PATH and the default location before reporting success.
-    git = find_git() or str(Path(os.environ.get(
-        "ProgramFiles", r"C:\Program Files")) / "Git" / "cmd" / "git.exe")
+    # The running backend does not inherit installer PATH updates. Add the
+    # installed Git command wrapper to this process environment immediately.
+    installed_git = next((
+        candidate for candidate in (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "cmd" / "git.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Git" / "cmd" / "git.exe",
+            Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Programs" / "Git" / "cmd" / "git.exe",
+        ) if candidate.is_file()
+    ), None)
+    git = find_git() or (str(installed_git) if installed_git else None)
+    if installed_git:
+        path_key = next((key for key in os.environ if key.casefold() == "path"), "PATH")
+        current = os.environ.get(path_key, "")
+        directory = str(installed_git.parent)
+        separator = ";" if os.name == "nt" else os.pathsep
+        entries = current.split(separator)
+        if directory.casefold() not in {p.casefold() for p in entries}:
+            os.environ[path_key] = directory + (separator + current if current else "")
     return {"ok": rc == 0, "installed": True, "git": git,
-            "note": ("Installed silently. Already-open shells need a "
-                     "restart to see the new PATH.")}
+            "note": "Installed. Git and Git Bash are available to subsequent tool calls now."}

@@ -21,14 +21,17 @@ from pathlib import Path
 
 import httpx
 
+from backend.agent.shell import resolve_git_bash, windows_bash_note
+
 # Bump on any change to the remote endpoints' request/response shape.
+# v5: advertises whether Windows host uses Git Bash for bash-tool calls.
 # v4: adds expiring host-enforced conversation leases, revision-aware snapshot
 # refresh/commit, and idempotent commit IDs.
 # v3: adds authenticated read-only remote conversation metadata/history endpoints.
 # v2: /api/remote/exec carries the client's selected workspace, and
 # host-bound workspace paths are proxied raw (the client no longer
 # normalizes them with its own OS's path rules).
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 # Random per-process identity: a host that is also a client can recognize
 # itself at handshake time and refuse the self-connection (which would
@@ -101,6 +104,7 @@ def host_info() -> dict:
         "os_version": platform.release(),
         "machine": platform.machine(),
         "windows": windows,
+        "git_bash": bool(resolve_git_bash()) if windows else False,
         # The host's tools run in this (its Default workspace = home dir).
         "workspace_root": str(Path.home()),
     }
@@ -146,8 +150,12 @@ class RemoteSession:
         reports the host's home as its cwd even mid-project."""
         i = self.info
         windows = bool(i.get("windows"))
-        shell = "cmd.exe" if windows else "bash/sh"
-        caveat = f" {CMD_TOOLS_NOTE}" if windows else ""
+        git_bash = windows and bool(i.get("git_bash", False))
+        shell = "Git Bash" if git_bash else ("cmd.exe" if windows else "bash/sh")
+        caveat = (
+            f" {windows_bash_note(True)}" if git_bash
+            else (f" {CMD_TOOLS_NOTE}" if windows else "")
+        )
         ns = parse_ns(workspace)
         if ns is not None and ns[0] == self.host_id and ns[1]:
             ws = f"The workspace is {ns[1]} on the host"
@@ -159,7 +167,7 @@ class RemoteSession:
         return (
             f"Runtime environment: {i.get('os', '?')} {i.get('os_version', '')} "
             f"({i.get('machine', '?')}) on the remote host '{self.name}'. "
-            f"The shell tool runs commands there through {shell};{caveat} use commands "
+            f"The bash tool runs commands there through {shell};{caveat} use commands "
             f"and paths valid for THAT operating system. {ws}; "
             "file and shell tools operate there, not on this machine."
         )
