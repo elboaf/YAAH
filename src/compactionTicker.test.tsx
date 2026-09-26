@@ -76,14 +76,15 @@ describe('live compaction ticker', () => {
     act(() => { vi.advanceTimersByTime(8_100) })
     expect(document.querySelector('[data-synthetic-telemetry]')).toBeTruthy()
     expect(screen.getByLabelText('Synthetic idle animation; no new agent output')).toBeTruthy()
-    expect(screen.getByText(/\[synthetic idle\]/)).toBeTruthy()
+    const syntheticStrip = document.querySelector('[data-synthetic-telemetry]')!
+    expect(syntheticStrip.textContent).toContain('ATTENTION HUMAN! 市民请注意!')
+    expect(syntheticStrip.textContent).toContain('⡿⠟⠋⠁')
     expect(document.querySelectorAll('[data-synthetic-telemetry]')).toHaveLength(1)
     expect(document.querySelector('[data-subagent-tool-ticker] [data-synthetic-telemetry]')).toBeNull()
-
-    act(() => { vi.advanceTimersByTime(1_300) })
-    expect(screen.getByText(/\[synthetic idle\]/).textContent).not.toBe(
-      '[synthetic idle] ATTENTION HUMAN! 市民请注意! ⣿⣿⣿⣿⣿⠟⠋',
-    )
+    const marquee = syntheticStrip.querySelector('.idle-telemetry-marquee') as HTMLElement
+    expect(marquee).toBeTruthy()
+    expect(marquee.style.animation).toBe('idle-telemetry-scroll 0.8s linear infinite')
+    expect(marquee.textContent!.match(/ATTENTION HUMAN!/g)).toHaveLength(3)
   })
 
   it('returns the primary ticker to real telemetry as soon as the tape changes', () => {

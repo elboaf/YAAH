@@ -85,6 +85,23 @@ body,
   animation: run-pulse 1s ease-in-out infinite;
 }
 
+/* Synthetic idle tape: continuous, intentionally unreadably fast keepalive.
+   Only used while the primary agent's real telemetry is quiet. */
+@keyframes idle-telemetry-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-33.3333%);
+  }
+}
+
+.idle-telemetry-marquee {
+  width: max-content;
+  animation: idle-telemetry-scroll 0.8s linear infinite;
+  will-change: transform;
+}
+
 /* Block caret at the tail of the live telemetry tape. */
 @keyframes caret-blink {
   0%,

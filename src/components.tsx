@@ -809,13 +809,19 @@ function ElapsedBadge({ startedAt, className = 'text-zinc-500' }: { startedAt?: 
  *  primary ticker. This is visual keepalive only: it never enters the stored
  *  telemetry tape or pretends to report a real tool/test. */
 const IDLE_TELEMETRY_DELAY_MS = 8_000
-const IDLE_PATTERN_STEP_MS = 1_200
-const IDLE_TELEMETRY_PATTERNS = [
-  '[synthetic idle] ATTENTION HUMAN! 市民请注意! ⣿⣿⣿⣿⣿⠟⠋',
-  '[synthetic idle] ⣿⣿⣿⣿⣿⠃⠄⠄⠄⠄⠄⠄⠄⠄⠄⠈',
-  '[synthetic idle] signal persists · awaiting real output · ⣿⣿⣿',
-  '[synthetic idle] 市民请注意! ⠄⠄⠄⠄⠄⠄⠄⠄⣿⣿⣿',
-]
+const IDLE_TELEMETRY_SAMPLE = `ATTENTION HUMAN! 市民请注意!⣿⣿⣿⣿⣿⠟⠋⠄⠄⠄⠄⠄⠄⠄⢁⠈⢻⢿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⠃⠄⠄⠄⠄⠄⠄⠄⠄⠄⠄⠈⡀⠭⢿⣿⣿⣿⣿
+⣿⣿⣿⣿⡟⠄⢀⣾⣿⣿⣿⣷⣶⣿⣷⣶⣶⡆⠄⠄⠄⣿⣿⣿⣿
+⣿⣿⣿⣿⡇⢀⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⠄⠄⢸⣿⣿⣿⣿
+⣿⣿⣿⣿⣇⣼⣿⣿⠿⠶⠙⣿⡟⠡⣴⣿⣽⣿⣧⠄⢸⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣾⣿⣿⣟⣭⣾⣿⣷⣶⣶⣴⣶⣿⣿⢄⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⡟⣩⣿⣿⣿⡏⢻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣹⡋⠘⠷⣦⣀⣠⡶⠁⠈⠁⠄⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣍⠃⣴⣶⡔⠒⠄⣠⢀⠄⠄⠄⡨⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣦⡘⠿⣷⣿⠿⠟⠃⠄⠄⣠⡇⠈⠻⣿⣿⣿⣿
+⣿⣿⣿⣿⡿⠟⠋⢁⣷⣠⠄⠄⠄⠄⣀⣠⣾⡟⠄⠄⠄⠄⠉⠙⠻
+⡿⠟⠋⠁⠄⠄⠄⢸⣿⣿⡯⢓⣴⣾⣿⣿⡟⠄⠄⠄⠄⠄⠄⠄⠄
+⠄⠄⠄⠄⠄⠄⠄⣿⡟⣷⠄⠹⣿⣿⣿⡿⠁⠄⠄⠄⠄⠄⠄⠄⠄`
 
 /** The telemetry tape: one borderless terminal line per conversation where
  *  every tool event of the session flows by — call, arguments, streamed
@@ -849,10 +855,8 @@ function IdleAgentTelemetry({ tape, compact }: { tape: string; compact: boolean 
   }
 
   const idle = now - lastActivityAtRef.current >= IDLE_TELEMETRY_DELAY_MS
-  const pattern = IDLE_TELEMETRY_PATTERNS[
-    Math.floor(now / IDLE_PATTERN_STEP_MS) % IDLE_TELEMETRY_PATTERNS.length
-  ]
-  const visibleTape = idle ? `${tape}${tape ? '    ' : ''}${pattern}` : tape
+  const idleSample = `[synthetic idle] ${IDLE_TELEMETRY_SAMPLE.replace(/[\r\n]+/g, '    ')}`
+  const visibleTape = idle ? idleSample : tape
   return <AgentTelemetryLine tape={visibleTape} compact={compact} synthetic={idle} />
 }
 
@@ -891,10 +895,10 @@ function AgentTelemetryLine({
     >
       <span
         ref={tapeRef}
-        className="block whitespace-pre font-mono text-[10px] leading-4 text-zinc-400"
-        style={{ transform: `translateX(${offset}px)` }}
+        className={`block whitespace-pre font-mono text-[10px] leading-4 text-zinc-400 ${synthetic ? 'idle-telemetry-marquee' : ''}`}
+        style={synthetic ? { animation: 'idle-telemetry-scroll 0.8s linear infinite' } : { transform: `translateX(${offset}px)` }}
       >
-        {visibleTape}
+        {synthetic ? `${visibleTape}${visibleTape}${visibleTape}` : visibleTape}
       </span>
     </div>
   )
