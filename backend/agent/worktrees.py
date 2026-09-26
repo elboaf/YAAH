@@ -78,6 +78,7 @@ import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 # Wire-in triggers (issue #58 §1): a write-capable tool call before which
@@ -1219,6 +1220,175 @@ async def turn_end(chat_id: str) -> dict:
         "commits_ahead": max(commits, 0),
         "dirty": bool(await _dirty(wt)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Domain operations (issue #58 seam deepening): callers bind before a write
+# and settle at turn end through these two functions instead of assembling
+# lifecycle semantics from primitives. Results carry pre-interpreted events,
+# notes, and status so the loop stays an emitter, not a policy owner.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BindResult:
+    """Outcome of bind_for_write — everything the caller needs to keep the
+    UI chip, the model context, and the run state honest, already resolved.
+
+    workspace: the path tools must run in after this call (unchanged when
+    no binding was needed). refires_only: True means the binding already
+    existed for this chat and no fresh bind happened — do not re-emit
+    worktree_bound / append a second note (a fresh binding that actually
+    rebinds away from the main tree is the only event-worthy case).
+    refusals ride on IsolationRefused, never in this result.
+    """
+    workspace: str
+    reused: bool
+    worktree: str
+    branch: str
+    base_branch: str
+    worktree_id: str
+    model_note: str
+    lifecycle: dict  # raw event, recorded to git activity by the caller
+
+
+@dataclass(frozen=True)
+class SettleResult:
+    """Outcome of settle_session — the turn-end interpretation of turn_end().
+
+    drained=True means the session was quiesced and released (worktree
+    removed, chip reverts to the main tree). Otherwise branch/commits_ahead/
+    dirty describe the surviving session. status_note is the honest-status
+    payload for worktree_status persistence/events, or None when there is
+    nothing to report (no commits ahead, no drain)."""
+    drained: bool
+    branch: str
+    base_branch: str
+    worktree_id: str
+    worktree: str
+    commits_ahead: int
+    dirty: bool
+    worktree_removed: bool
+    status_note: dict | None
+
+
+async def _session_note(chat_id: str) -> dict:
+    """The binding info a fresh (non-reused) bind must surface."""
+    return binding_for(str(chat_id)) or {}
+
+
+def _worktree_note_text(wt_path: str, info: dict, main_workspace: str) -> str:
+    branch = info.get("branch", "")
+    main_root = info.get("root") or main_workspace
+    return (
+        "# Workspace integration\n\n"
+        f"Your isolated working copy is `{wt_path}` on `{branch}`; the main "
+        f"workspace is `{main_root}`. This is implementation plumbing: treat "
+        "the main workspace as the user's task target and do not ask them to "
+        "manage checkouts or branches.\n"
+        "- For requested code changes, verify proportionately, commit when "
+        "needed, and integrate with `git_merge_back` before reporting complete. "
+        "Turn end itself never merges. Never say work is in main until the "
+        "merge succeeds.\n"
+        "- If integration fails, never stash or overwrite user work. First "
+        "classify the outcome: dirty overlap (name the user's changed paths), "
+        "content conflict (name the conflicted paths and confirm the merge "
+        "was aborted), or another refusal (state the exact reason and inspect "
+        "both trees). Then offer safe options with trade-offs, such as resolve "
+        "on the isolated branch and retry, leave it isolated, or have the user "
+        "resolve specific main-workspace edits. Explain what changed and what "
+        "did not before asking how to proceed; never claim unmerged work is "
+        "in main.\n"
+        "- `git_push` pushes this isolated branch, not the primary branch. For "
+        "a requested primary-branch push, preserve the user's requested order, "
+        "verify the main branch, remote, and status, and push from main. Never "
+        "force-push; stop if unexpected changes or a non-fast-forward make "
+        "the target unsafe. Verify the remote ref and report the result."
+    )
+
+
+async def bind_for_write(
+    workspace: str,
+    chat_id: str,
+    *,
+    note: str | None = None,
+    on_lifecycle=None,
+) -> BindResult:
+    """Bind this conversation to its session worktree before a write
+    (issue #58 / adr/0003).
+
+    One operation for the loop's gate and approval paths (and the
+    sub-agent runner): decides whether isolation applies, reuses or
+    creates the session binding, and returns everything the caller must
+    surface — the rebound workspace, the lifecycle event to record, and
+    the model note for a FRESH binding. Raises IsolationRefused when
+    isolation cannot happen (the caller turns that into the tool's
+    error result — never a dead turn).
+
+    note: an optional extra line appended to the fresh-bind note (used by
+    the sub-agent runner to carry its own context line).
+    """
+    wt_path = await ensure_isolated(workspace, chat_id, on_lifecycle=on_lifecycle)
+    fresh = wt_path != str(workspace)
+    info = await _session_note(chat_id) if fresh else {}
+    lifecycle = dict(info) if fresh else {}
+    return BindResult(
+        workspace=wt_path,
+        reused=not fresh,
+        worktree=wt_path if fresh else "",
+        branch=str(info.get("branch") or ""),
+        base_branch=str(info.get("base_branch") or ""),
+        worktree_id=str(chat_id),
+        model_note=(
+            _worktree_note_text(wt_path, info, workspace)
+            + (f"\n{note}" if note else "")
+            if fresh
+            else ""
+        ),
+        lifecycle=lifecycle,
+    )
+
+
+async def settle_session(chat_id: str) -> SettleResult:
+    """Settle/release the session at turn end (adr/0003 revised).
+
+    Interpretation of turn_end(): drains a quiesced session, otherwise
+    reports the surviving branch. Returns the git-activity context facts
+    and the honest-status note (None when there is nothing to persist —
+    the loop emits worktree_status only when work exists on the branch).
+    """
+    settle = await turn_end(chat_id)
+    if settle.get("noop"):
+        return SettleResult(
+            drained=False, branch="", base_branch="", worktree_id=chat_id,
+            worktree="", commits_ahead=0, dirty=False, worktree_removed=False,
+            status_note=None,
+        )
+    drained = bool(settle.get("drained"))
+    status_note = None
+    if drained:
+        status_note = None
+    elif settle.get("commits_ahead"):
+        status_note = {
+            "branch": str(settle.get("branch") or ""),
+            "base_branch": str(settle.get("base_branch") or ""),
+            "worktree_id": str(settle.get("worktree_id") or chat_id),
+            "worktree": str(settle.get("worktree") or ""),
+            "commits": int(settle.get("commits_ahead") or 0),
+            "dirty": bool(settle.get("dirty")),
+            "worktree_removed": bool(settle.get("worktree_removed")),
+        }
+    return SettleResult(
+        drained=drained,
+        branch=str(settle.get("branch") or ""),
+        base_branch=str(settle.get("base_branch") or ""),
+        worktree_id=str(settle.get("worktree_id") or chat_id),
+        worktree=str(settle.get("worktree") or ""),
+        commits_ahead=int(settle.get("commits_ahead") or 0),
+        dirty=bool(settle.get("dirty")),
+        worktree_removed=bool(settle.get("worktree_removed")),
+        status_note=status_note,
+    )
 
 
 async def release_session(chat_id: str, why: str = "session ended") -> dict:

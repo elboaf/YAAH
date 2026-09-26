@@ -450,18 +450,20 @@ async def run_sub_agent(
                     pass
                 return result
             try:
-                run_workspace = await worktrees.ensure_isolated(
+                _bind = await worktrees.bind_for_write(
                     run_workspace,
                     chat_id=_iso_key,
                     on_lifecycle=lambda info: git_activity_mod.record_worktree_lifecycle(
                         activity, actor_id, actor_label, info
                     ),
                 )
+                run_workspace = _bind.workspace
+                _used_worktree = run_workspace
+                if _bind.model_note:
+                    _isolation_note = _bind.model_note
             except worktrees.IsolationRefused as e:
                 _isolation_note = str(e)
                 return {"error": str(e)}
-            else:
-                _used_worktree = run_workspace
         result = await execute(name, args, run_workspace)
         if not (initial_child_wt and needs_child_worktree):
             try:

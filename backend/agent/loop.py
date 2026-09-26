@@ -239,40 +239,6 @@ def _memory_notes(workspace: str) -> str:
         return ""
 
 
-def _worktree_note(wt_path: str, info: dict, main_workspace: str) -> str:
-    """Branch-first transparency for the model: isolation is invisible
-    plumbing to the file tools, but branch/ref semantics leak into every
-    push, merge, and 'where are you' answer — so say the relationship
-    out loud instead of letting the model guess it from tool output."""
-    branch = info.get("branch", "")
-    main_root = info.get("root") or main_workspace
-    return (
-        "# Workspace integration\n\n"
-        f"Your isolated working copy is `{wt_path}` on `{branch}`; the main "
-        f"workspace is `{main_root}`. This is implementation plumbing: treat "
-        "the main workspace as the user's task target and do not ask them to "
-        "manage checkouts or branches.\n"
-        "- For requested code changes, verify proportionately, commit when "
-        "needed, and integrate with `git_merge_back` before reporting complete. "
-        "Turn end itself never merges. Never say work is in main until the "
-        "merge succeeds.\n"
-        "- If integration fails, never stash or overwrite user work. First "
-        "classify the outcome: dirty overlap (name the user's changed paths), "
-        "content conflict (name the conflicted paths and confirm the merge "
-        "was aborted), or another refusal (state the exact reason and inspect "
-        "both trees). Then offer safe options with trade-offs, such as resolve "
-        "on the isolated branch and retry, leave the change isolated, or have "
-        "the user resolve specific main-workspace edits. Ask how to proceed "
-        "only after explaining what changed and what did not; never claim it "
-        "landed.\n"
-        "- `git_push` pushes this isolated branch, not the primary branch. For "
-        "a requested primary-branch push, preserve the user's requested order, "
-        "verify the main branch, remote, and status, and push from main. Never "
-        "force-push; stop if unexpected changes or a non-fast-forward make "
-        "the target unsafe. Verify the remote ref and report the result."
-    )
-
-
 def _computer_use_prompt() -> str:
     """Computer-use section for the system prompt (Windows local only).
     General principles only — tool mechanics live in the tool schemas,
@@ -1268,9 +1234,6 @@ async def _run_agent_claimed(
         None if remote_workspace else await file_changes.snapshot_workspace(turn_workspace)
     )
     file_summary_emitted = False
-    # Captured before any rebinding: worktree_bound fires only when the
-    # turn actually leaves this path (a nested-parent binding must not).
-    original_workspace = str(workspace)
     run_id = uuid.uuid4().hex
     git_activity = git_activity_mod.GitActivity(run_id=run_id)
     git_activity_emitted = False
@@ -1840,7 +1803,7 @@ async def _run_agent_claimed(
                             if (not remote_workspace and tool_risk(name) != "read" and not _isolated
                                     and worktrees.should_isolate(name, args)):
                                 try:
-                                    turn_workspace = await worktrees.ensure_isolated(
+                                    _bind = await worktrees.bind_for_write(
                                         workspace,
                                         chat_id=str(conversation_id),
                                         on_lifecycle=lambda info: _record_worktree_lifecycle(
@@ -1848,41 +1811,24 @@ async def _run_agent_claimed(
                                         ),
                                     )
                                     _isolated = True
-                                    workspace = turn_workspace
-                                    if turn_workspace != original_workspace:
+                                    workspace = _bind.workspace
+                                    turn_workspace = _bind.workspace
+                                    if _bind.worktree:
                                         change_baseline = await file_changes.snapshot_workspace(
-                                            turn_workspace
-                                        )
-                                    # Mid-run branch visibility: the branch
-                                    # chip shows the ephemeral agent branch
-                                    # while the turn runs. Only a FRESH
-                                    # binding that actually rebinds away
-                                    # from the main tree emits (a nested
-                                    # parent's worktree binding is not a
-                                    # new isolation).
-                                    if turn_workspace != original_workspace:
-                                        _binfo = (
-                                            worktrees.binding_for(str(conversation_id))
-                                            or {}
+                                            _bind.workspace
                                         )
                                         yield _ndjson(
                                             {
                                                 "type": "worktree_bound",
-                                                "branch": _binfo.get("branch", ""),
-                                                "base_branch": _binfo.get(
-                                                    "base_branch", ""
-                                                ),
+                                                "branch": _bind.branch,
+                                                "base_branch": _bind.base_branch,
                                                 "worktree_id": str(conversation_id),
                                             }
                                         )
                                         messages.append(
                                             {
                                                 "role": "system",
-                                                "content": _worktree_note(
-                                                    turn_workspace,
-                                                    _binfo,
-                                                    original_workspace,
-                                                ),
+                                                "content": _bind.model_note,
                                             }
                                         )
                                 except worktrees.IsolationRefused as e:
@@ -1942,46 +1888,32 @@ async def _run_agent_claimed(
                                     and worktrees.should_isolate(name, args)
                                 ):
                                     try:
-                                        turn_workspace = (
-                                            await worktrees.ensure_isolated(
-                                                workspace,
-                                                chat_id=str(conversation_id),
-                                                on_lifecycle=lambda info: _record_worktree_lifecycle(
-                                                    git_activity, "parent", "Agent", info
-                                                ),
-                                            )
+                                        _bind = await worktrees.bind_for_write(
+                                            workspace,
+                                            chat_id=str(conversation_id),
+                                            on_lifecycle=lambda info: _record_worktree_lifecycle(
+                                                git_activity, "parent", "Agent", info
+                                            ),
                                         )
                                         _isolated = True
-                                        workspace = turn_workspace
-                                        if turn_workspace != original_workspace:
+                                        workspace = _bind.workspace
+                                        turn_workspace = _bind.workspace
+                                        if _bind.worktree:
                                             change_baseline = await file_changes.snapshot_workspace(
-                                                turn_workspace
-                                            )
-                                        if turn_workspace != original_workspace:
-                                            _binfo = (
-                                                worktrees.binding_for(
-                                                str(conversation_id)
-                                                )
-                                                or {}
+                                                _bind.workspace
                                             )
                                             yield _ndjson(
                                                 {
                                                     "type": "worktree_bound",
-                                                    "branch": _binfo.get("branch", ""),
-                                                    "base_branch": _binfo.get(
-                                                        "base_branch", ""
-                                                    ),
+                                                    "branch": _bind.branch,
+                                                    "base_branch": _bind.base_branch,
                                                     "worktree_id": str(conversation_id),
                                                 }
                                             )
                                             messages.append(
                                                 {
                                                     "role": "system",
-                                                    "content": _worktree_note(
-                                                        turn_workspace,
-                                                        _binfo,
-                                                        original_workspace,
-                                                    ),
+                                                    "content": _bind.model_note,
                                                 }
                                             )
                                     except worktrees.IsolationRefused as e:
@@ -2340,60 +2272,52 @@ async def _run_agent_claimed(
             # truth between turns. The user merges deliberately.
             try:
                 _settle = await asyncio.wait_for(
-                    asyncio.shield(worktrees.turn_end(str(conversation_id))),
+                    asyncio.shield(worktrees.settle_session(str(conversation_id))),
                     timeout=60,
                 )
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                _settle = {
-                    "drained": False,
-                    "reason": "turn-end settlement did not complete; session kept",
-                }
-            if _settle.get("drained"):
-                git_activity.set_context(
-                    "parent", "Agent",
-                    branch=str(_settle.get("branch") or ""),
-                    base_branch=str(_settle.get("base_branch") or ""),
-                    worktree="removed",
-                )
-                git_activity.set_settlement(
-                    "parent", "Agent", commits_ahead=0, dirty=False,
-                    worktree="removed",
-                )
-                # Quiesced session released: the chip reverts to the main
-                # tree's branch.
-                yield _ndjson({"type": "worktree_released"})
-            elif _settle.get("branch"):
-                git_activity.set_context(
-                    "parent", "Agent",
-                    branch=str(_settle.get("branch") or ""),
-                    base_branch=str(_settle.get("base_branch") or ""),
-                    worktree="kept",
-                )
-                git_activity.set_settlement(
-                    "parent", "Agent",
-                    commits_ahead=int(_settle.get("commits_ahead") or 0),
-                    dirty=bool(_settle.get("dirty")), worktree="kept",
-                    integrated=False,
-                )
-            if _settle.get("commits_ahead"):
-                # Honest status instead of an implicit merge: the work
-                # lives on the branch until the user says otherwise.
-                _note = {
-                    "branch": _settle.get("branch", ""),
-                    "base_branch": _settle.get("base_branch", ""),
-                    "worktree_id": _settle.get("worktree_id", str(conversation_id)),
-                    "worktree": _settle.get("worktree", ""),
-                    "commits": _settle["commits_ahead"],
-                    "dirty": bool(_settle.get("dirty")),
-                    "worktree_removed": bool(_settle.get("worktree_removed")),
-                    "integrated": bool(git_activity.lanes.get("parent", {}).get("integrated")),
-                }
-                await add_message(
-                    conversation_id,
-                    "system",
-                    json.dumps({"worktree_status": _note}, default=str),
-                )
-                yield _ndjson({"type": "worktree_status", **_note})
+                _settle = None
+            if _settle is not None:
+                if _settle.drained:
+                    git_activity.set_context(
+                        "parent", "Agent",
+                        branch=_settle.branch,
+                        base_branch=_settle.base_branch,
+                        worktree="removed",
+                    )
+                    git_activity.set_settlement(
+                        "parent", "Agent", commits_ahead=0, dirty=False,
+                        worktree="removed",
+                    )
+                    # Quiesced session released: the chip reverts to the main
+                    # tree's branch.
+                    yield _ndjson({"type": "worktree_released"})
+                elif _settle.branch:
+                    git_activity.set_context(
+                        "parent", "Agent",
+                        branch=_settle.branch,
+                        base_branch=_settle.base_branch,
+                        worktree="kept",
+                    )
+                    git_activity.set_settlement(
+                        "parent", "Agent",
+                        commits_ahead=_settle.commits_ahead,
+                        dirty=_settle.dirty, worktree="kept",
+                        integrated=False,
+                    )
+                if _settle.status_note:
+                    # Honest status instead of an implicit merge: the work
+                    # lives on the branch until the user says otherwise.
+                    _note = {
+                        **_settle.status_note,
+                        "integrated": bool(git_activity.lanes.get("parent", {}).get("integrated")),
+                    }
+                    await add_message(
+                        conversation_id,
+                        "system",
+                        json.dumps({"worktree_status": _note}, default=str),
+                    )
+                    yield _ndjson({"type": "worktree_status", **_note})
         summary = git_activity.summary(
             "cancelled" if cancel_ev.is_set() else run_outcome
         )

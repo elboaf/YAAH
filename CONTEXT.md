@@ -87,3 +87,25 @@ _Avoid_: cleanup, garbage collection
 The per-workspace lock that serializes every merge into the main tree
 — git_merge_back and UI git operations alike.
 _Avoid_: git lock, merge lock file
+
+### Worktree operations
+
+**Bind for write**:
+The single operation a caller performs before its first write-capable
+tool call: decide whether isolation applies, reuse or create the chat's
+session worktree, and return a BindResult carrying the rebound
+workspace path, the lifecycle event to record, and the model note for a
+FRESH binding only (a reused binding emits nothing). Refusal rides on
+IsolationRefused — the caller turns it into the tool's error result,
+never a dead turn. Callers: the parent turn's gate and approval paths,
+and the sub-agent runner.
+_Avoid_: ensure_isolate-and-interpret, rebinding seam (that name stays
+in the issue history, not the code)
+
+**Settle session**:
+The single operation a caller performs at turn end: drain a quiesced
+session (no commits, clean tree) or report the surviving branch — as a
+typed SettleResult whose status_note is the honest-status payload to
+persist and emit (None when there is nothing to report). Turn end never
+merges into the main tree; settling is not integration.
+_Avoid_: turn-end cleanup, interpret turn_end dict
