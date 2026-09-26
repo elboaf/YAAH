@@ -223,7 +223,7 @@ The app's pulse: a 6px dot (amber pulsing = working, red = error, emerald = idle
 ## Do's and Don'ts
 
 ### Do:
-- **Do** separate in-flow surfaces with 1px hairlines (#27272a; #3f3f46 on raised fills).
+- **Do** separate in-flow surfaces with 1px hairlines (#27272a; #3f3f46 ONLY on borders of inputs/fields filled with #27272a, where the border must read against the raised fill). #3f3f46 is never the default separator.
 - **Do** set machine output in JetBrains Mono at 10–11px; labels uppercase with 0.1em tracking.
 - **Do** keep Action Blue (#2563eb) exclusively on human-initiated controls.
 - **Do** report state with the status colors: amber working, orange asking, emerald done, red error.
@@ -234,4 +234,7 @@ The app's pulse: a 6px dot (amber pulsing = working, red = error, emerald = idle
 - **Don't** use pure black (#000) as a surface; the floor is #09090b, and only for code.
 - **Don't** introduce new accent hues; the tool spectrum colors appear only where a tool is named, indigo only for skills.
 - **Don't** animate for delight — motion is chip-in (0.25s ease-out) and run-pulse (1s ease-in-out) or nothing; no bounce or elastic easing.
-- **Don't** render a button in a state color (amber/orange/emerald/red); state colors are indicators, not actions.
+- **Don't** render a button in a state color (amber/orange/emerald/red); state colors are indicators, not actions. Human-initiated buttons are blue or ghost zinc.
+- **Don't** spend amber on anything but progress/working (status dot, ticker, run pulse, slow-turn, Steer). Approval cards are ORANGE (an approval is the agent asking); queued chips, git drift, cached-offline labels, warnings, and capture affordances are neutral zinc ink — only their glyph may carry color when it must read.
+- **Don't** give machine-config inputs a blue focus border; their focus neutralizes to zinc-500. Blue focus is the composer's and other named human-action surfaces' alone.
+- **Don't** change the composer border to signal streaming — the status dot and ticker own that. Dashed 1px border means exactly two things: the "Something else…" free-text affordance and an active drag-over drop target.
