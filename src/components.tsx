@@ -5487,12 +5487,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
   // Per-provider agent settings (the provider tab's Agent & context block).
   const [provMaxSteps, setProvMaxSteps] = useState<Record<string, number | ''>>({})
-  // Editor drafts for the expanded provider: selected model + field values.
+  // Editor drafts for the expanded provider: the selected model + field
+  // values, keyed by MODEL ID (each configured model keeps its own settings
+  // in the editor, so switching the dropdown never loses another model's
+  // values). The per-provider fields (max steps) stay provider-keyed.
   const [agentModelSel, setAgentModelSel] = useState<Record<string, string>>({})
   const [ctxDraft, setCtxDraft] = useState<Record<string, number | ''>>({})
   // Resolved (detected) context windows per model id, for pre-filling.
   const [compEnabledDraft, setCompEnabledDraft] = useState<Record<string, boolean>>({})
   const [compDraft, setCompDraft] = useState<Record<string, number | ''>>({})
+  /** Models manually added to a provider's editor (not in the catalog). */
+  const [extraModels, setExtraModels] = useState<Record<string, string[]>>({})
   // Model catalogs per provider (from /api/models/available, fetched once).
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({})
   // Resolved (detected) context windows per model id, for pre-filling.
@@ -5646,10 +5651,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
 
   // Per-provider editor hydration: when a provider is expanded (or its
-  // selected model changes), seed the drafts from the saved per-model maps
-  // — the saved context window, or the model's detected default; the saved
-  // compaction trigger, or the shipped 300k default. Seeds only blank
-  // fields so the user's typing is never overwritten.
+  // selected model changes), seed that MODEL's drafts from the saved
+  // per-model maps — the saved context window, or the model's detected
+  // default; the saved compaction trigger, or the shipped 300k default.
+  // Seeds only blank fields so the user's typing is never overwritten, and
+  // since drafts are model-keyed, another model's values survive a switch.
   useEffect(() => {
     if (!expanded) return
     const name = expanded
@@ -5663,17 +5669,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         .catch(() => setDetectedWindows((d) => ({ ...d, [model]: null })))
     }
     setCtxDraft((s) => {
-      if (s[name] !== undefined && s[name] !== '') return s
+      if (s[model] !== undefined && s[model] !== '') return s
       const seed = savedWin ?? detected
-      return { ...s, [name]: seed === undefined || seed === null ? '' : seed }
+      return { ...s, [model]: seed === undefined || seed === null ? '' : seed }
     })
     setCompDraft((s) => {
-      if (s[name] !== undefined && s[name] !== '') return s
+      if (s[model] !== undefined && s[model] !== '') return s
       const saved = modelComp[model]?.trigger_tokens
-      return { ...s, [name]: saved ? saved / 1000 : COMPACTION_DEFAULT_K }
+      return { ...s, [model]: saved ? saved / 1000 : COMPACTION_DEFAULT_K }
     })
     setCompEnabledDraft((s) =>
-      s[name] !== undefined ? s : { ...s, [name]: modelComp[model]?.enabled ?? true },
+      s[model] !== undefined ? s : { ...s, [model]: modelComp[model]?.enabled ?? true },
     )
     setProvMaxSteps((s) =>
       s[name] !== undefined ? s : { ...s, [name]: MAX_STEPS_DEFAULT },
@@ -5779,17 +5785,24 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       }
       const outCtx: Record<string, { context_window: number }> = { ...modelCtx }
       const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = { ...modelComp }
-      for (const name of Object.keys(providers)) {
-        const model = (agentModelSel[name] || '').trim()
-        if (!model) continue
-        const cw = ctxDraft[name]
+      for (const model of new Set([
+        ...Object.keys(modelCtx),
+        ...Object.keys(modelComp),
+        ...Object.keys(ctxDraft),
+        ...Object.keys(compDraft),
+        ...Object.keys(compEnabledDraft),
+      ])) {
+        const cw = ctxDraft[model]
         if (cw !== '' && cw !== undefined && Number(cw) > 0) {
           outCtx[model] = { context_window: Number(cw) }
+        } else {
+          delete outCtx[model]
         }
-        if (compEnabledDraft[name] !== undefined) {
-          const tk = compDraft[name]
+        const en = compEnabledDraft[model]
+        if (en !== undefined) {
+          const tk = compDraft[model]
           outComp[model] = {
-            enabled: compEnabledDraft[name],
+            enabled: en,
             trigger_tokens: tk === '' || tk === undefined ? 0 : Number(tk) * 1000,
           }
         }
@@ -6006,33 +6019,41 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                               per-model context/compaction editors. */}
                           <AgentContextPerProvider
                             name={name}
-                            models={providerModels[name] ?? []}
+                            models={[
+                              ...(providerModels[name] ?? []),
+                              ...(extraModels[name] ?? []).filter(
+                                (id) => !(providerModels[name] ?? []).includes(id),
+                              ),
+                            ]}
                             modelSel={agentModelSel[name] ?? ''}
                             onModelSel={(m) => {
+                              // Model switch: the new model's drafts re-hydrate
+                              // from the saved maps; the previous model's drafts
+                              // stay in their model-keyed slots, so nothing is
+                              // lost when switching back or saving.
                               setAgentModelSel((s) => ({ ...s, [name]: m }))
-                              // Model switch: clear the drafts so the
-                              // hydration effect re-seeds for the new model.
-                              setCtxDraft((s) => {
-                                const n = { ...s }
-                                delete n[name]
-                                return n
-                              })
-                              setCompDraft((s) => {
-                                const n = { ...s }
-                                delete n[name]
-                                return n
-                              })
-                              setCompEnabledDraft((s) => {
-                                const n = { ...s }
-                                delete n[name]
-                                return n
-                              })
+                            }}
+                            onAddModel={(id) => {
+                              // Register the model in this provider's dropdown
+                              // (extraModels is additive; deduped by React key
+                              // below) and make it the one being configured.
+                              setExtraModels((s) => ({
+                                ...s,
+                                [name]: (s[name] ?? []).includes(id) ? (s[name] ?? []) : [...(s[name] ?? []), id],
+                              }))
+                              setAgentModelSel((s) => ({ ...s, [name]: id }))
                             }}
                             currentModel={p.model}
                             maxSteps={provMaxSteps[name] === undefined ? MAX_STEPS_DEFAULT : provMaxSteps[name]}
                             onMaxSteps={(v) => setProvMaxSteps((s) => ({ ...s, [name]: v }))}
-                            ctxDraft={ctxDraft[name] ?? ''}
-                            onCtxDraft={(v) => setCtxDraft((s) => ({ ...s, [name]: v }))}
+                            ctxDraft={(() => {
+                              const m = agentModelSel[name] || p.model
+                              return m ? (ctxDraft[m] ?? '') : ''
+                            })()}
+                            onCtxDraft={(v) => {
+                              const m = agentModelSel[name] || p.model
+                              if (m) setCtxDraft((s) => ({ ...s, [m]: v }))
+                            }}
                             ctxAuto={(() => {
                               const m = agentModelSel[name] || p.model
                               return m ? (detectedWindows[m] ?? null) : null
@@ -6041,10 +6062,22 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                               const m = agentModelSel[name] || p.model
                               return m ? modelCtx[m]?.context_window : undefined
                             })()}
-                            compEnabled={compEnabledDraft[name]}
-                            onCompEnabled={(v) => setCompEnabledDraft((s) => ({ ...s, [name]: v }))}
-                            compK={compDraft[name] ?? COMPACTION_DEFAULT_K}
-                            onCompK={(v) => setCompDraft((s) => ({ ...s, [name]: v }))}
+                            compEnabled={(() => {
+                              const m = agentModelSel[name] || p.model
+                              return m ? compEnabledDraft[m] : undefined
+                            })()}
+                            onCompEnabled={(v) => {
+                              const m = agentModelSel[name] || p.model
+                              if (m) setCompEnabledDraft((s) => ({ ...s, [m]: v }))
+                            }}
+                            compK={(() => {
+                              const m = agentModelSel[name] || p.model
+                              return m ? (compDraft[m] ?? COMPACTION_DEFAULT_K) : COMPACTION_DEFAULT_K
+                            })()}
+                            onCompK={(v) => {
+                              const m = agentModelSel[name] || p.model
+                              if (m) setCompDraft((s) => ({ ...s, [m]: v }))
+                            }}
                             compactionDefaultK={COMPACTION_DEFAULT_K}
                             maxStepsDefault={MAX_STEPS_DEFAULT}
                             inputCls={settingsInputCls}

@@ -6,6 +6,7 @@
  *  pre-fills with the shipped 300k default. */
 
 import type React from 'react'
+import { useState } from 'react'
 
 interface AgentCtxPerProviderProps {
   /** Provider name being edited. */
@@ -34,6 +35,9 @@ interface AgentCtxPerProviderProps {
   compactionDefaultK: number
   /** Default max steps shown in the field. */
   maxStepsDefault: number
+  /** Add a model id not present in the catalog (e.g. an unreleased or
+   *  custom-routed model) and make it the configured one. */
+  onAddModel: (id: string) => void
   inputCls: string
 }
 
@@ -55,6 +59,7 @@ export function AgentContextPerProvider({
   onCompK,
   compactionDefaultK,
   maxStepsDefault,
+  onAddModel,
   inputCls,
 }: AgentCtxPerProviderProps) {
   /** The model being configured: explicit selection, else the provider's
@@ -64,6 +69,18 @@ export function AgentContextPerProvider({
   /** Model switch: the parent re-hydrates the drafts for the new model
    *  (its hydration effect keys on the selection per provider). */
   const onModelChange = onModelSel
+
+  /** Inline "add model" affordance: type a model id not in the catalog and
+   *  configure it. Small state, local to this editor. */
+  const [adding, setAdding] = useState(false)
+  const [newModel, setNewModel] = useState('')
+  const submitNewModel = () => {
+    const id = newModel.trim()
+    if (!id) return
+    onAddModel(id)
+    setNewModel('')
+    setAdding(false)
+  }
 
   return (
     <div className="mt-2.5 border-t border-zinc-800 pt-2.5" data-agent-ctx={name}>
@@ -104,6 +121,56 @@ export function AgentContextPerProvider({
           ))}
           {model && !models.includes(model) && <option value={model}>{model}</option>}
         </select>
+
+        {/* Add a model the catalog doesn't list (unreleased ids, custom
+            OpenRouter routes) and start configuring it immediately. */}
+        {adding ? (
+          <span className="mt-1.5 flex gap-1.5">
+            <input
+              className={`${inputCls} min-w-0 flex-1`}
+              placeholder="model id (e.g. openai/gpt-5.2)"
+              value={newModel}
+              autoFocus
+              onChange={(e) => setNewModel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  submitNewModel()
+                } else if (e.key === 'Escape') {
+                  setAdding(false)
+                  setNewModel('')
+                }
+              }}
+              aria-label="New model id to configure"
+            />
+            <button
+              type="button"
+              className="shrink-0 rounded border border-zinc-700 px-2 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              onClick={submitNewModel}
+            >
+              add
+            </button>
+            <button
+              type="button"
+              className="shrink-0 rounded px-1 text-[11px] text-zinc-500 hover:text-zinc-300"
+              onClick={() => {
+                setAdding(false)
+                setNewModel('')
+              }}
+              aria-label="Cancel adding a model"
+            >
+              cancel
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="mt-1.5 block text-[10px] text-zinc-500 hover:text-zinc-300"
+            onClick={() => setAdding(true)}
+          >
+            + add another model to configure
+          </button>
+        )}
 
         <label className="mb-1 mt-2.5 block text-[10px] text-zinc-500">Context window override</label>
         <p className="mb-1.5 text-[10px] text-zinc-600">
