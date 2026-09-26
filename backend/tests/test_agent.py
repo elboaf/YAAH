@@ -1688,6 +1688,20 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert "safe options with trade-offs" in note_text
     assert "Never say work is in main until the merge succeeds" in note_text
     assert "at end of turn the harness merges your committed work back" not in note_text
+    # Worktree lifecycle facts (issue #102): the note must state when the
+    # worktree is created/recreated, that turn end does not tear it down,
+    # and the reaper's actual TTLs \u2014 so the model never re-derives a wrong
+    # lifecycle theory from timestamps or branch names.
+    assert "Worktree lifecycle" in note_text
+    assert "Created lazily" in note_text
+    assert "isolation plumbing recreates it" in note_text
+    assert "not the reaper" in note_text
+    assert "Turn end does NOT tear it down" in note_text
+    assert "uncommitted files persist across turns" in note_text
+    assert "ORPHANED" in note_text and ">6h" in note_text
+    assert "YAAH_WORKTREE_TTL_SECONDS" in note_text
+    assert "10-min sweep" in note_text
+    assert "never 'clean up'" in note_text.lower()
 
     # Tool descriptions are also model-facing prompt surface: keep them
     # accurate and avoid repeating the full release policy in git_push.
