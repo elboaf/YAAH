@@ -1400,9 +1400,19 @@ async def _run_agent_claimed(
     loaded_skills: list[str] = list(invoked)
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
-    # the turn). Configured in Settings → General → Max steps or config.json `max_steps`.
+    # the turn). Per-provider in Settings (the provider the turn runs on
+    # wins); config.json `max_steps` is the legacy global fallback.
     try:
-        max_steps = int(load_config().get("max_steps") or 0)
+        _cfg_steps = load_config()
+        _prov_name = (
+            (model_override.partition("::")[0] if "::" in model_override else "")
+            or _cfg_steps.get("active_provider")
+        )
+        _prov = (_cfg_steps.get("providers") or {}).get(_prov_name) or {}
+        max_steps = int(
+            _prov.get("max_steps") if _prov.get("max_steps") is not None
+            else _cfg_steps.get("max_steps") or 0
+        )
     except (TypeError, ValueError):
         max_steps = DEFAULT_MAX_STEPS
 
