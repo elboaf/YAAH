@@ -115,10 +115,34 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 - [x] Keep the model/provider and agent loop local for local-owned conversations with remote workspaces.
 - [x] Resolve workspace tool schemas and platform capabilities from the selected workspace owner, independently of the legacy active remote device.
 - [x] Keep local filesystem snapshots and local worktree isolation from operating on remote-namespaced paths.
-- [ ] Add the owner-qualified transcript adapter and integrate it with the agent loop, run/cancel controls, durable pending commits, and streaming for remote-owned conversations.
+- [~] Add the owner-qualified transcript adapter and integrate it with the agent loop, run/cancel controls, durable pending commits, and streaming for remote-owned conversations. **(runner module drafted; API wiring + tests pending — see hand-off below)**
 - [ ] Verify simultaneous local/remote turns, same-chat exclusion, cancellation, reconnect/pending-commit recovery, and no local workspace regression.
 
 **Implementation notes (best-effort slice):** The workspace-owner schema selection and remote-path safeguards are implemented and covered by backend tests. An isolated `backend/agent/remote_turn.py` prototype covers explicit owner resolution plus lease/snapshot/commit lifecycle, but it is not integrated into `main.py` or `loop.py` and must not be treated as enabling remote-owned turns. The existing loop still couples transcript persistence, cancellation/queues, worktrees, compaction, title, and usage updates to local integer IDs. Authenticated remote peers therefore remain rejected from local `/api/conversations/...` and `/api/agent/...` routes; this fail-closed boundary stays until the complete owner-qualified runner is implemented. Best-effort verification: backend suite 622 passed, 2 skipped. Real multi-device reconnect and pending-commit recovery remain unverified.
+
+#### Phase 6 hand-off (owner-qualified runner, 2026-02-14 session)
+
+**Done in the worktree (`agent/324/...` branch):**
+
+- `backend/agent/remote_runner.py` (new, drafted): owner-qualified turn runner.
+  - `run_remote_turn(owner_id, conversation_id, user_text, workspace, model_override, effort_override)` async generator; yields the same NDJSON event shapes as `loop.run_agent` (`text`, `thinking`, `model_call`, `tool_start`, `tool_result`, `stopped`, `error`, `done`, plus new `remote_turn_started` / `remote_turn_committed` / `remote_commit_pending`) so the existing frontend stream consumer works.
+  - Fail-closed entry: requires a `remote:<host-id>:<path>` workspace (no legacy active-host fallback), claims `(owner_id, conversation_id)` in `remote_run_state.remote_runs`, then `begin_remote_turn` (snapshot + owner lease) BEFORE any model call.
+  - Transcript persistence is in-memory (`_InMemoryTranscript`) during the turn; appended message IDs are `turn-<n>` strings so host-side snapshot commit normalization allocates fresh integer IDs instead of colliding with another conversation's rows.
+  - Completion path: `queue_remote_commit` (durable, on the client) THEN idempotent `turn.commit()` to the owner, THEN `acknowledge_remote_commit`. A network loss between queue and commit keeps the durable pending intent for the existing sync-pending replay; the turn reports `remote_commit_pending` + `done` rather than erroring the transcript away.
+  - Lease heartbeat: renews at 45s (owner leases expire at 120s); a lost lease mid-run ends the turn with `error` and releases what it can.
+  - Cancellation: checks `remote_runs.cancel_event` between steps and mid-stream; a mid-emission cancel keeps arrived content (goes into the pending commit) then yields `stopped`.
+  - Tool dispatch: workspace tools through `turn.dispatch_tool` (owner-verified), everything else local; local-only tools (computer-use, sandbox, `search_conversation_history`, `spawn_agent`) are excluded from the schema list — sub-agent delegation stays out of Phase 6 scope.
+  - Same-chat exclusion is two-sided: this runner holds the owner lease for its whole duration and the host's local loop refuses to start while that lease is live (`assert_no_active_remote_edit_lease` in `_try_begin_run_excluding_remote_lease`), so a host-local turn and this remote turn cannot interleave. Different chats never serialize (claim key is the exact owner/chat pair).
+
+**Not yet done (pick up here):**
+
+1. **API wiring in `backend/main.py`**: add `/api/remote/devices/{host_id}/turns/{conversation_id}` (POST → `StreamingResponse(run_remote_turn(...), media_type="application/x-ndjson")`, resolving the workspace from the request body / the cached remote conversation row) and `/api/remote/devices/{host_id}/turns/{conversation_id}/cancel` (→ `remote_runs.cancel(owner_id, conversation_id)`). Keep the `/api/agent/...` fail-closed guard for remote peers unchanged. `_remote_device_session(host_id)` already exists for owner resolution.
+2. **Stream→owner bridging**: the new turn endpoint is called on the OWNER side by the client. The client-side call path (extend `src/api.ts` with a `streamRemoteTurn` mirroring `streamAgentTurn`, pointed at the device turn endpoint with `X-Yaah-Passphrase`) and the frontend composer hookup for remote-owned chats in the viewer are still open.
+3. **Tests**: unit tests for `remote_runner.py` with fake sessions (mirror `backend/tests/test_remote_turn.py`'s `FakeSession` pattern): happy path, lease-lost mid-run, cancel mid-step/mid-emission, commit-network-loss → pending intent retained, same-chat double-claim rejected, different-chat parallelism, tool dispatch routing, and step budget. Then an API test for the new endpoints (claim conflict → 409; cancel while running).
+4. **Wire `remote_turn.commit()` payload**: verify `commit()` sends `conversation` (the mutated row with title/workspace) and `messages` (full in-memory transcript) — `_InMemoryTranscript` assumes `turn.commit()` reads the mutated dicts; confirm against `remote_turn.RemoteTurn.commit` and the `RemoteCommitRequest` shape.
+5. **Known simplifications in the draft, decide whether to keep**: no `usage`/context-window accounting per step (final usage event only), no compaction pass for remote transcripts (snapshot can grow unboundedly — likely needs Phase 7 work), no ask_user / steer / queue on remote turns yet, no title generation (owner owns the title field), and `_history_from_snapshot` replays image rows as parts lists but remote image rel paths need the `remote-image:<host>:<rel>` media mapping pass before they render for the model.
+
+**Verification done:** `python -m pytest backend/tests/test_remote_turn.py -q` (existing prototype tests still pass with the runner module present; runner itself not yet covered). Suite was 622 passed / 2 skipped before this session's changes.
 
 ### Phase 7 — Migration, hardening, and end-to-end verification
 
