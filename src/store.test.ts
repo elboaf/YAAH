@@ -594,6 +594,31 @@ describe('notification chimes (#29) - pure helpers', () => {
 })
 
 
+describe('steering transcript order', () => {
+  beforeEach(() => {
+    useAgent.setState({ messagesByConv: {} })
+  })
+
+  it('starts subsequent assistant emissions after injected user messages', () => {
+    const store = useAgent.getState()
+    store.appendAssistantPlaceholder('42')
+    store.appendTextDelta('42', useAgent.getState().messagesByConv['42'][0].id, 'before steering')
+    store.appendUserMessage('42', 'first steering message', [], [], true)
+    store.appendUserMessage('42', 'second steering message', [], [], true)
+
+    const firstId = useAgent.getState().appendAssistantAfterUser('42')
+    expect(firstId).toBeTruthy()
+    if (firstId) useAgent.getState().appendTextDelta('42', firstId, 'after steering')
+    expect(useAgent.getState().appendAssistantAfterUser('42')).toBeNull()
+
+    const messages = useAgent.getState().messagesByConv['42']
+    expect(messages.map((message) => message.role)).toEqual(['assistant', 'user', 'user', 'assistant'])
+    expect(messages[0].content).toBe('before steering')
+    expect(messages[3].id).toBe(firstId)
+    expect(messages[3].content).toBe('after steering')
+  })
+})
+
 describe('agentBranch persistence (branch-first chip)', () => {
   it('mirrors bound branches to localStorage and drops them on release; merged flag survives', () => {
     useAgent.getState().setAgentBranch('c1', { branch: 'agent/1/fix-x-runabc123', boundAt: 1 })

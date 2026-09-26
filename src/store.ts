@@ -376,6 +376,8 @@ interface AgentState {
 
   appendUserMessage: (key: string, text: string, images?: string[], skills?: string[], queued?: boolean) => string
   appendAssistantPlaceholder: (key: string) => string
+  /** Open the next assistant emission after a user row when steering splits a live turn. */
+  appendAssistantAfterUser: (key: string) => string | null
   /** Capture a `say` briefing onto its message (#66): speech-only, never
    *  rendered; consumed by the narrator when the emission completes. */
   setSay: (key: string, msgId: string, say: string) => void
@@ -852,6 +854,12 @@ export const useAgent = create<AgentState>((set, get) => ({
       },
     }))
     return id
+  },
+
+  appendAssistantAfterUser: (key) => {
+    const messages = get().messagesByConv[key] ?? []
+    if (messages[messages.length - 1]?.role !== 'user') return null
+    return get().appendAssistantPlaceholder(key)
   },
 
   setSay: (key, msgId, say) => {

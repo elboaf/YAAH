@@ -7333,9 +7333,9 @@ export function ChatPanel() {
     agents.some((a) => a.running && a.conversation_id === conversationId)
   // Only the in-flight assistant message shows the ephemeral ticker; every
   // finished turn collapses to the one-line trace. The steer path (#steer)
-  // appends the injected user message AFTER the still-streaming assistant
-  // block, so the LAST message is a user row while the turn keeps running —
-  // keying liveness on it would flip the assistant's ticker to the finished
+  // splits after an injected user message, so the last message can be an
+  // assistant emission or a user row while the turn keeps running — keying
+  // liveness on the absolute tail would flip the active ticker to a finished
   // TraceLine summary mid-run. Key it on the last ASSISTANT message instead.
   const bufKey = conversationId === null ? 'draft' : String(conversationId)
   const liveId = (() => {
@@ -8385,10 +8385,17 @@ function Composer() {
    *  the execution half of the turn streams into its own message. */
   const handleStreamEvent = (bufKey: string, asstId: string) => {
     let curId = asstId
+    let awaitingPostSteerEmission = false
     // True while text is allowed to flow without an emission separator: the
     // stream starts mid-emission (first emission of a fresh message), and a
     // tool event closes the emission — the next text opens a new one (#17).
     let textSinceTool = true
+    const startPostSteerEmission = () => {
+      if (!awaitingPostSteerEmission) return
+      curId = useAgent.getState().appendAssistantAfterUser(bufKey) ?? curId
+      awaitingPostSteerEmission = false
+      textSinceTool = true
+    }
     return (ev: AgentEvent) => {
     if (ev.type === 'skill_not_found') {
       // The user invoked a skill the backend registry doesn't know (the chip
@@ -8404,6 +8411,7 @@ function Composer() {
     } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')
       if (ev.text) {
+        startPostSteerEmission()
         const text = textSinceTool ? ev.text : '\n' + ev.text
         textSinceTool = true
         appendTextDelta(bufKey, curId, text)
@@ -8418,6 +8426,7 @@ function Composer() {
       const chunk = tapeChunkForEvent(ev)
       if (chunk) appendTape(bufKey, chunk)
     } else if (ev.type === 'tool_start') {
+      startPostSteerEmission()
       setStatus(bufKey, 'running-tool')
       textSinceTool = false
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
@@ -8566,6 +8575,7 @@ function Composer() {
         }
       }
     } else if (ev.type === 'approval_request') {
+      startPostSteerEmission()
       setStatus(bufKey, 'running-tool')
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
@@ -8671,7 +8681,9 @@ function Composer() {
       }
     } else if (ev.type === 'user_injected') {
       // Soft injection landed (#7): promote the optimistic echo (matched
-      // by the backend's queued-item id) into a real message.
+      // by the backend's queued-item id). Later assistant text must not keep
+      // appending to the earlier emission above this user message.
+      awaitingPostSteerEmission = true
       const echoes = useAgent.getState().queueEchoByConv[bufKey] ?? []
       const echo = echoes.find((e) => e.id === ev.id)
       if (echo) {
