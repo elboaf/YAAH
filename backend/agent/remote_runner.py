@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from typing import AsyncIterator
 
 from backend.agent import remote as remote_mod
@@ -190,12 +191,20 @@ async def _commit_via_owner(
     """Durable-then-network commit of the full snapshot to the owner."""
     owner_id = turn.identity.owner_id
     conversation_id = turn.identity.conversation_id
-    commit_id = await queue_remote_commit(
+    # Pre-assign the commit ID so the durable intent and the network commit
+    # share one identity: a replay of the pending entry after an ambiguous
+    # outcome must hit the host's idempotency window, not create a duplicate.
+    commit_id = secrets.token_urlsafe(24)
+    await queue_remote_commit(
         owner_id, conversation_id, turn.revision,
-        transcript.conversation, transcript.messages,
+        transcript.conversation, transcript.messages, commit_id,
     )
     try:
-        result = await turn.commit()
+        result = await turn.commit(
+            conversation=transcript.conversation,
+            messages=transcript.messages,
+            commit_id=commit_id,
+        )
     except RemoteTurnError:
         # The durable intent stays queued with this exact commit ID; the
         # existing sync-pending path replays it idempotently on reconnect.

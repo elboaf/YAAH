@@ -2452,6 +2452,61 @@ async def api_remote_device_commit(host_id: str, conversation_id: str, body: Rem
         raise HTTPException(status_code=503, detail="commit outcome unknown; pending commit retained") from exc
 
 
+class RemoteDeviceTurn(BaseModel):
+    message: str
+    workspace: str = ""
+    model_override: str = ""
+    effort_override: str | None = None
+
+
+@app.post("/api/remote/devices/{host_id}/turns/{conversation_id}")
+async def api_remote_device_turn(host_id: str, conversation_id: str, body: RemoteDeviceTurn):
+    """Run one owner-qualified agent turn for a remote-owned conversation.
+
+    The local model/provider executes; transcript persistence goes through the
+    owner's lease-checked snapshot commit, never the local integer-keyed
+    tables. Streaming NDJSON, same shapes as /api/agent/{id}.
+    """
+    from backend.agent.remote_runner import remote_runs_is_running, run_remote_turn
+
+    owner_id = host_id  # the conversation's owner IS this device
+    if remote_runs_is_running(owner_id, conversation_id):
+        raise HTTPException(status_code=409, detail="a turn is already running in this conversation")
+
+    # Resolve the turn workspace: request body first, then the cached
+    # conversation row. A remote-owned chat needs a remote:<host>:<path>
+    # workspace for tool dispatch; the runner fails closed without one.
+    workspace = body.workspace
+    if not workspace:
+        for row in await list_remote_conversations(owner_id):
+            if str(row.get("conversation_id")) == conversation_id:
+                workspace = row.get("workspace") or ""
+                break
+    if not workspace:
+        raise HTTPException(
+            status_code=400,
+            detail="remote turns require a workspace; pass one or cache this conversation's workspace first",
+        )
+
+    return StreamingResponse(
+        run_remote_turn(
+            owner_id, conversation_id, body.message, workspace,
+            model_override=body.model_override, effort_override=body.effort_override,
+        ),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/remote/devices/{host_id}/turns/{conversation_id}/cancel")
+async def api_remote_device_turn_cancel(host_id: str, conversation_id: str):
+    """Signal the remote runner to stop after its current step."""
+    from backend.agent.remote_runner import remote_runs_cancel
+
+    cancelled = await remote_runs_cancel(host_id, conversation_id)
+    return {"ok": True, "cancelled": cancelled}
+
+
 @app.post("/api/remote/devices/{host_id}/conversations/{conversation_id}/sync-pending")
 async def api_remote_device_sync_pending(host_id: str, conversation_id: str):
     session = _remote_device_session(host_id)

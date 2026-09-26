@@ -142,17 +142,39 @@ class RemoteTurn:
             raise RemoteTurnConflict("remote lease renewal returned a different token")
         return result
 
-    async def commit(self) -> dict:
-        """Commit the full snapshot; retries after ambiguous I/O reuse its ID/payload."""
+    async def commit(
+        self,
+        *,
+        conversation: dict | None = None,
+        messages: list[dict] | None = None,
+        commit_id: str | None = None,
+    ) -> dict:
+        """Commit the full snapshot; retries after ambiguous I/O reuse its ID/payload.
+
+        ``conversation``/``messages``/``commit_id`` let a caller (the remote
+        turn runner) supply its own mutated transcript copy and a durable
+        pre-assigned commit ID; without them this turn's pristine snapshot is
+        committed under a fresh ID. Retries must pass the same values so the
+        payload — and therefore host-side idempotency — is unchanged.
+        """
         self._ensure_open()
-        if self._commit_payload is None:
-            self._commit_id = secrets.token_urlsafe(24)
+        if (
+            self._commit_payload is None
+            or conversation is not None
+            or messages is not None
+            or commit_id is not None
+        ):
+            self._commit_id = commit_id or secrets.token_urlsafe(24)
             self._commit_payload = {
                 "lease_token": self.lease_token,
                 "revision": self.revision,
                 "commit_id": self._commit_id,
-                "conversation": copy.deepcopy(self.conversation),
-                "messages": copy.deepcopy(self.messages),
+                "conversation": copy.deepcopy(
+                    conversation if conversation is not None else self.conversation
+                ),
+                "messages": copy.deepcopy(
+                    messages if messages is not None else self.messages
+                ),
             }
         # Use owner lookup again instead of assuming that any globally active
         # connection still belongs to this conversation.
