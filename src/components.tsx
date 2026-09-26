@@ -5477,12 +5477,6 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [newName, setNewName] = useState('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
   const [activeTab, setActiveTab] = useState<'general' | 'providers' | 'voice' | 'mcp'>('general')
-  // Per-model context-window overrides (model id -> tokens); blank = auto.
-  // Legacy flat form kept for a lossless save; the per-model editors write
-  // `model_context`, which the backend prefers.
-  const [ctxOverrides, setCtxOverrides] = useState<Record<string, number>>({})
-  // Per-model context windows: model id -> tokens (per-provider editors).
-  const [modelCtx, setModelCtx] = useState<Record<string, { context_window: number }>>({})
   // Per-model compaction: model id -> settings (per-provider editors).
   const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
   // Per-provider agent settings (the provider tab's Agent & context block).
@@ -5492,8 +5486,6 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   // in the editor, so switching the dropdown never loses another model's
   // values). The per-provider fields (max steps) stay provider-keyed.
   const [agentModelSel, setAgentModelSel] = useState<Record<string, string>>({})
-  const [ctxDraft, setCtxDraft] = useState<Record<string, number | ''>>({})
-  // Resolved (detected) context windows per model id, for pre-filling.
   const [compEnabledDraft, setCompEnabledDraft] = useState<Record<string, boolean>>({})
   const [compDraft, setCompDraft] = useState<Record<string, number | ''>>({})
   /** Models manually added to a provider's editor (not in the catalog). */
@@ -5583,8 +5575,6 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setProviders(next)
           setActive(c.active_provider)
           setMaxSteps(c.max_steps ?? '')
-          setCtxOverrides(c.context_window_overrides ?? {})
-          setModelCtx(c.model_context ?? {})
           setModelComp(c.model_compaction ?? {})
           // Per-provider max steps live on each provider entry (Settings
           // edits them there); legacy blank = fall back to the global.
@@ -5652,27 +5642,21 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
   // Per-provider editor hydration: when a provider is expanded (or its
   // selected model changes), seed that MODEL's drafts from the saved
-  // per-model maps — the saved context window, or the model's detected
-  // default; the saved compaction trigger, or the shipped 300k default.
-  // Seeds only blank fields so the user's typing is never overwritten, and
-  // since drafts are model-keyed, another model's values survive a switch.
+  // per-model map — the saved compaction trigger, or the shipped 300k
+  // default. Seeds only blank fields so the user's typing is never
+  // overwritten, and since drafts are model-keyed, another model's values
+  // survive a switch.
   useEffect(() => {
     if (!expanded) return
     const name = expanded
     const model = (agentModelSel[name] || providers[name]?.model || '').trim()
     if (!model) return
-    const savedWin = modelCtx[model]?.context_window
     const detected = detectedWindows[model]
-    if (detected === undefined && !savedWin) {
+    if (detected === undefined) {
       getResolvedContextWindow(model)
         .then((r) => setDetectedWindows((d) => ({ ...d, [model]: r.context_window })))
         .catch(() => setDetectedWindows((d) => ({ ...d, [model]: null })))
     }
-    setCtxDraft((s) => {
-      if (s[model] !== undefined && s[model] !== '') return s
-      const seed = savedWin ?? detected
-      return { ...s, [model]: seed === undefined || seed === null ? '' : seed }
-    })
     setCompDraft((s) => {
       if (s[model] !== undefined && s[model] !== '') return s
       const saved = modelComp[model]?.trigger_tokens
@@ -5778,26 +5762,18 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         }
       }
       // Per-provider agent settings: steps ride on each provider entry;
-      // context windows + compaction go to the per-model maps.
+      // compaction goes to the per-model map (the context window is not a
+      // setting — it's detected and shown read-only in the editor).
       for (const [name, p] of Object.entries(providers)) {
         const ms = provMaxSteps[name]
         if (ms !== '' && ms !== undefined) out[name].max_steps = Number(ms)
       }
-      const outCtx: Record<string, { context_window: number }> = { ...modelCtx }
       const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = { ...modelComp }
       for (const model of new Set([
-        ...Object.keys(modelCtx),
         ...Object.keys(modelComp),
-        ...Object.keys(ctxDraft),
         ...Object.keys(compDraft),
         ...Object.keys(compEnabledDraft),
       ])) {
-        const cw = ctxDraft[model]
-        if (cw !== '' && cw !== undefined && Number(cw) > 0) {
-          outCtx[model] = { context_window: Number(cw) }
-        } else {
-          delete outCtx[model]
-        }
         const en = compEnabledDraft[model]
         if (en !== undefined) {
           const tk = compDraft[model]
@@ -5811,8 +5787,6 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         providers: out,
         active_provider: active || undefined,
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
-        context_window_overrides: ctxOverrides,
-        model_context: outCtx,
         model_compaction: outComp,
         ui_scale: uiScale,
         voice: {
@@ -6046,21 +6020,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                             currentModel={p.model}
                             maxSteps={provMaxSteps[name] === undefined ? MAX_STEPS_DEFAULT : provMaxSteps[name]}
                             onMaxSteps={(v) => setProvMaxSteps((s) => ({ ...s, [name]: v }))}
-                            ctxDraft={(() => {
-                              const m = agentModelSel[name] || p.model
-                              return m ? (ctxDraft[m] ?? '') : ''
-                            })()}
-                            onCtxDraft={(v) => {
-                              const m = agentModelSel[name] || p.model
-                              if (m) setCtxDraft((s) => ({ ...s, [m]: v }))
-                            }}
                             ctxAuto={(() => {
                               const m = agentModelSel[name] || p.model
                               return m ? (detectedWindows[m] ?? null) : null
-                            })()}
-                            ctxSaved={(() => {
-                              const m = agentModelSel[name] || p.model
-                              return m ? modelCtx[m]?.context_window : undefined
                             })()}
                             compEnabled={(() => {
                               const m = agentModelSel[name] || p.model
@@ -6937,15 +6899,14 @@ function GitChipCluster({
 }
 
 /** Context thresholds for the status-strip bar (mirrors the backend):
- *  - compaction trigger (adr/0004): min(config.trigger_tokens, 70% of the
- *    window) — past it the NEXT turn rewrites history before the model sees
+ *  - compaction trigger (adr/0004): the absolute config.trigger_tokens
+ *    value — past it the NEXT turn rewrites history before the model sees
  *    it, so the visible count is no longer the full transcript.
  *  - the "dumb zone": past ~120k tokens model quality measurably degrades
  *    on most families, independent of the hard window.
  *  Config values come from /api/config (cached per page load — Settings
  *  changes refresh on the next reload of this module's cache). */
 const DUMB_ZONE_TOKENS = 120_000
-const COMPACTION_TRIGGER_FRACTION = 0.7
 
 let compactionCfgCache: { enabled: boolean; trigger_tokens: number } | null = null
 let compactionCfgPromise: Promise<void> | null = null
@@ -7003,9 +6964,9 @@ function DialTick({ frac, color }: { frac: number; color: string }) {
 /** Context gauge (status strip): a circular dial whose fill arc is the
  *  exact context size against the model's window, climbing with every
  *  model call during a run. Two rim ticks mark the thresholds:
- *  - compaction trigger (light tick, adr/0004): min(Settings trigger_tokens,
- *    70% of window) — past it the NEXT turn rewrites history, so the
- *    visible count is no longer the full transcript.
+ *  - compaction trigger (light tick, adr/0004): the absolute
+ *    Settings trigger_tokens value — past it the NEXT turn rewrites
+ *    history, so the visible count is no longer the full transcript.
  *  - the "dumb zone" (red tick, 120k): past it model quality measurably
  *    degrades on most families, independent of the hard window.
  *  Nothing renders until the first turn completes (the count comes from
@@ -7016,14 +6977,10 @@ function ContextChip({ info }: { info: { tokens: number; window: number | null; 
   if (!info) return null
   const windowTokens = info.window
   const frac = windowTokens ? Math.min(1, info.tokens / windowTokens) : null
-  // Absolute compaction threshold for this model: the Settings override
-  // caps the fraction-based trigger (the backend fires at the min of both).
+  // Absolute compaction threshold (pure token value, no window fraction).
   const trigger =
-    windowTokens && compaction.enabled
-      ? Math.min(
-          compaction.trigger_tokens > 0 ? compaction.trigger_tokens : Infinity,
-          windowTokens * COMPACTION_TRIGGER_FRACTION,
-        )
+    windowTokens && compaction.enabled && compaction.trigger_tokens > 0
+      ? compaction.trigger_tokens
       : null
   const triggerFrac = trigger !== null && windowTokens ? Math.min(1, trigger / windowTokens) : null
   const dumbFrac = windowTokens ? DUMB_ZONE_TOKENS / windowTokens : null

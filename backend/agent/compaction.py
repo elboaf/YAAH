@@ -19,15 +19,8 @@ log = logging.getLogger("yaah.compaction")
 # Master switch + knobs (config.json `compaction` section overrides;
 # _compaction_cfg merges so partial configs keep the rest).
 COMPACTION_ENABLED = True
-# Fire when measured tokens exceed this fraction of the window. Headroom
-# below 1.0 leaves room for the system prompt, tool plumbing, and a long
-# reply without re-tripping the trigger on the very next call.
-COMPACTION_TRIGGER_FRACTION = 0.70
-# Optional ABSOLUTE trigger (tokens): when > 0, compaction fires at
-# min(trigger_tokens, window * trigger_fraction) — a big-window model
-# waits until the absolute threshold, while a small-window model still
-# compacts before overflowing. 0 = fraction-only (legacy behavior).
-# Legacy absolute default: 0 = fraction-of-window only. The per-model
+# Absolute trigger (tokens): fire when measured tokens exceed this value.
+# Purely a token threshold — no fraction-of-window component. The per-model
 # Settings editor overrides this per model (300k shown as the default).
 COMPACTION_TRIGGER_TOKENS = 0
 # Compact DOWN to this fraction of the window: the recent tail stays
@@ -50,7 +43,6 @@ _TOOL_ARGS_CHARS = 200
 
 _DEFAULTS = {
     "enabled": COMPACTION_ENABLED,
-    "trigger_fraction": COMPACTION_TRIGGER_FRACTION,
     "trigger_tokens": COMPACTION_TRIGGER_TOKENS,
     # "enabled"/"trigger_tokens" defaults for models without a per-model
     # entry in config.model_compaction (trigger in absolute tokens; 300k
@@ -76,10 +68,6 @@ def _compaction_cfg() -> dict:
     if isinstance(section, dict):
         cfg.update(section)
     # Clamp numeric knobs into sane ranges; garbage falls back.
-    try:
-        cfg["trigger_fraction"] = min(max(float(cfg["trigger_fraction"]), 0.1), 1.0)
-    except (TypeError, ValueError):
-        cfg["trigger_fraction"] = COMPACTION_TRIGGER_FRACTION
     try:
         cfg["keep_fraction"] = min(max(float(cfg["keep_fraction"]), 0.05), 0.95)
     except (TypeError, ValueError):
@@ -115,12 +103,17 @@ def _compaction_cfg_for_model(bare_model: str, ccfg: dict) -> dict:
         return cfg
     cfg = dict(ccfg)
     cfg["enabled"] = bool(ccfg.get("per_model_enabled", True))
+    # No per-model entry: a configured global trigger_tokens (> 0) applies;
+    # otherwise the shipped default (300k).
     try:
-        cfg["trigger_tokens"] = max(
-            int(ccfg.get("per_model_trigger_tokens") or 0), 0
-        )
+        cfg["trigger_tokens"] = int(ccfg.get("trigger_tokens") or 0)
     except (TypeError, ValueError):
-        cfg["trigger_tokens"] = 300_000
+        cfg["trigger_tokens"] = 0
+    if cfg["trigger_tokens"] <= 0:
+        try:
+            cfg["trigger_tokens"] = max(int(ccfg.get("per_model_trigger_tokens") or 0), 0)
+        except (TypeError, ValueError):
+            cfg["trigger_tokens"] = 300_000
     return cfg
 
 
@@ -174,12 +167,11 @@ async def resolve_window(model: str | None, cfg: dict | None = None) -> int:
 
 
 def should_compact(context_tokens: int | None, context_window: int, model: str | None = None) -> bool:
-    """Measured prompt size vs the trigger threshold.
+    """Measured prompt size vs the absolute `trigger_tokens` threshold.
 
-    With an absolute `trigger_tokens` set (> 0), the trigger is
-    min(trigger_tokens, window * trigger_fraction): big-window models
-    wait for the absolute threshold, small-window models still compact
-    before overflowing. Without it, fraction-of-window only.
+    Purely a token value (no fraction-of-window component): compaction
+    fires when measured tokens exceed trigger_tokens. `context_window`
+    only guards the call (0 = unknown window, don't fire).
 
     `model` (bare id) selects the per-model settings when present;
     without it the global compaction block applies.
@@ -189,11 +181,8 @@ def should_compact(context_tokens: int | None, context_window: int, model: str |
         ccfg = _compaction_cfg_for_model(model, ccfg)
     if not ccfg["enabled"] or not context_tokens or not context_window:
         return False
-    trigger = context_window * ccfg["trigger_fraction"]
     absolute = int(ccfg.get("trigger_tokens") or 0)
-    if absolute > 0:
-        trigger = min(trigger, absolute)
-    return context_tokens > trigger
+    return absolute > 0 and context_tokens > absolute
 
 
 def find_cut_index(messages: list, keep_tokens: int, min_tail: int = 0) -> int:
