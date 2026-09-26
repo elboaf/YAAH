@@ -6457,12 +6457,8 @@ function fmtTok(n: number): string {
   return String(n)
 }
 
-/** Color ramp for the context bar as the window fills. */
-function ctxColor(frac: number): string {
-  if (frac >= 0.9) return 'bg-red-500'
-  if (frac >= 0.7) return 'bg-amber-500'
-  return 'bg-emerald-500'
-}
+/** (The context bar's color ramp lives in contextFillClass, next to
+ *  ContextChip — threshold-aware, not window-fraction based.) */
 
 /** Access-mode dropdown for the composer toolbar: ask / plan / full, each
  *  with a one-line description. Writes through to config so the backend's
@@ -6882,31 +6878,120 @@ function GitChipCluster({
   )
 }
 
-/** Context-size readout: exact tokens + % + fill bar. Nothing renders until
- *  the first turn completes (the count comes from the API's usage report). */
+/** Context thresholds for the status-strip bar (mirrors the backend):
+ *  - compaction trigger (adr/0004): min(config.trigger_tokens, 70% of the
+ *    window) — past it the NEXT turn rewrites history before the model sees
+ *    it, so the visible count is no longer the full transcript.
+ *  - the "dumb zone": past ~120k tokens model quality measurably degrades
+ *    on most families, independent of the hard window.
+ *  Config values come from /api/config (cached per page load — Settings
+ *  changes refresh on the next reload of this module's cache). */
+const DUMB_ZONE_TOKENS = 120_000
+const COMPACTION_TRIGGER_FRACTION = 0.7
+
+let compactionCfgCache: { enabled: boolean; trigger_tokens: number } | null = null
+let compactionCfgPromise: Promise<void> | null = null
+function useCompactionConfig(): { enabled: boolean; trigger_tokens: number } {
+  const [cfg, setCfg] = useState(compactionCfgCache)
+  useEffect(() => {
+    if (compactionCfgCache) return
+    compactionCfgPromise ??= getConfig()
+      .then((c) => {
+        compactionCfgCache = {
+          enabled: c.compaction?.enabled ?? true,
+          trigger_tokens: c.compaction?.trigger_tokens ?? 0,
+        }
+      })
+      .catch(() => {
+        compactionCfgCache = { enabled: true, trigger_tokens: 0 }
+      })
+      .then(() => setCfg(compactionCfgCache))
+  }, [])
+  return cfg ?? { enabled: true, trigger_tokens: 0 }
+}
+
+/** Where the bar's fill flips to warning colors, as a fraction of the bar:
+ *  compaction first, then the dumb zone (the more severe of the two marks
+ *  the color for the moment the count passes it). */
+function contextFillClass(
+  tokens: number,
+  trigger: number | null,
+  dumbFrac: number | null,
+): string {
+  if (dumbFrac !== null && tokens >= DUMB_ZONE_TOKENS) return 'bg-red-500'
+  if (trigger !== null && tokens >= trigger) return 'bg-amber-500'
+  return 'bg-emerald-500'
+}
+
+/** Context-size readout: exact tokens + a window-relative bar carrying two
+ *  threshold ticks — the compaction trigger (dashed, history gets rewritten
+ *  past it) and the 120k "dumb zone" (model quality degrades). Nothing
+ *  renders until the first turn completes (the count comes from the API's
+ *  usage report); during a run the bar climbs with every model call. */
 function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
+  const compaction = useCompactionConfig()
   if (!info) return null
-  const frac = info.window ? Math.min(1, info.tokens / info.window) : null
+  const windowTokens = info.window
+  const frac = windowTokens ? Math.min(1, info.tokens / windowTokens) : null
+  // Absolute compaction threshold for this model: the Settings override
+  // caps the fraction-based trigger (the backend fires at the min of both).
+  const trigger =
+    windowTokens && compaction.enabled
+      ? Math.min(
+          compaction.trigger_tokens > 0 ? compaction.trigger_tokens : Infinity,
+          windowTokens * COMPACTION_TRIGGER_FRACTION,
+        )
+      : null
+  const triggerFrac = trigger !== null && windowTokens ? Math.min(1, trigger / windowTokens) : null
+  const dumbFrac = windowTokens ? DUMB_ZONE_TOKENS / windowTokens : null
+  // The dumb-zone mark only exists inside the visible bar when the window
+  // is larger than 120k; a smaller window overflows it before the zone.
+  const dumbVisible = dumbFrac !== null && dumbFrac < 1
+  const fill = contextFillClass(info.tokens, trigger, dumbVisible ? dumbFrac : null)
+  const pct = frac !== null ? ` (${Math.round((frac as number) * 100)}%)` : ''
+  const dumbLine =
+    dumbFrac !== null && windowTokens
+      ? windowTokens > DUMB_ZONE_TOKENS
+        ? `dumb zone from ${fmtTok(DUMB_ZONE_TOKENS)} (${Math.round(dumbFrac * 100)}%)`
+        : `whole bar is dumb zone (window < ${fmtTok(DUMB_ZONE_TOKENS)})`
+      : 'dumb zone unmarked (window unknown)'
   return (
     <span
       className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"
       title={
-        info.window
-          ? `${info.tokens.toLocaleString()} / ${info.window.toLocaleString()} tokens`
+        windowTokens
+          ? [
+              `${info.tokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens${pct}`,
+              trigger !== null
+                ? `compaction at ${fmtTok(trigger)} tok (history rewritten past this)`
+                : 'compaction off',
+              dumbLine,
+            ].join('\n')
           : `${info.tokens.toLocaleString()} tokens (unknown context window — set an override in Settings)`
       }
     >
       {frac !== null && (
-        <span className="relative inline-block h-1 w-14 overflow-hidden rounded bg-zinc-700">
-          <span
-            className={`absolute inset-y-0 left-0 rounded ${ctxColor(frac)}`}
-            style={{ width: `${Math.max(2, frac * 100)}%` }}
-          />
+        <span className="relative inline-block h-1.5 w-24 overflow-hidden rounded bg-zinc-700">
+          <span className={`absolute inset-y-0 left-0 rounded ${fill}`} style={{ width: `${Math.max(2, frac * 100)}%` }} />
+          {/* Compaction trigger tick: past it, the next turn compacts. */}
+          {triggerFrac !== null && (
+            <span
+              className="absolute inset-y-0 w-px bg-zinc-300/80"
+              style={{ left: `calc(${triggerFrac * 100}% - 0.5px)` }}
+            />
+          )}
+          {/* Dumb-zone tick: past it, model quality degrades. */}
+          {dumbVisible && (
+            <span
+              className="absolute inset-y-0 w-px bg-red-400/70"
+              style={{ left: `calc(${dumbFrac! * 100}% - 0.5px)` }}
+            />
+          )}
         </span>
       )}
       <span>
         {fmtTok(info.tokens)}
-        {info.window ? ` / ${fmtTok(info.window)}` : ''} tok
+        {windowTokens ? ` / ${fmtTok(windowTokens)}` : ''} tok
       </span>
     </span>
   )
@@ -8789,18 +8874,25 @@ function Composer() {
         result: { skipped: true, error: ev.error ?? 'unknown error' },
       })
     } else if (ev.type === 'usage') {
-      // Exact context size of the turn's final model call, straight from
-      // the provider's usage report. Numeric conversation ids only — the
-      // draft buffer has no row yet; the open-time fetch covers it.
+      // Exact context size of the latest model call — now emitted per call
+      // (live ticks during the run), not just at turn end. Numeric
+      // conversation ids only — the draft buffer has no row yet; the
+      // open-time fetch covers it.
       const convId = Number(bufKey)
       if (Number.isInteger(convId) && convId > 0) {
-        setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null)
-        // Resolve the window (override -> provider -> table) for the bar.
-        getContext(convId)
-          .then((c) => {
-            setContext(convId, ev.usage_tokens ?? 0, c.context_window, c.context_model)
-          })
-          .catch(() => {})
+        // Window re-resolution is sticky: once resolved, reuse the known
+        // value instead of re-fetching per tick.
+        const known = useAgent.getState().contextByConv[String(convId)]
+        if (known?.window) {
+          setContext(convId, ev.usage_tokens ?? 0, known.window, ev.model ?? known.model ?? null)
+        } else {
+          setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null)
+          getContext(convId)
+            .then((c) => {
+              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model)
+            })
+            .catch(() => {})
+        }
       }
     }
     }

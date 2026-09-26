@@ -1595,6 +1595,17 @@ async def _run_agent_claimed(
                         conversation_id, int(usage["prompt_tokens"]), _model_id
                     )
                 )
+                # Live context-strip tick: emit after EVERY model call, not
+                # only the turn's last one — the status strip's bar must
+                # climb while the run is still in progress. The frontend
+                # treats this as authoritative for the running conversation.
+                yield _ndjson(
+                    {
+                        "type": "usage",
+                        "usage_tokens": int(usage["prompt_tokens"]),
+                        "model": _model_id,
+                    }
+                )
 
             # Two-channel split (#66): the <say> briefing is speech-only —
             # it is stripped from the stored transcript, and the spoken line
@@ -1643,18 +1654,8 @@ async def _run_agent_claimed(
                             "Try shortening the request or splitting it into smaller steps.]",
                         }
                     )
-                # Final usage readout for the UI's context strip (the last
-                # model call of the turn = the peak context this turn used).
-                if usage.get("prompt_tokens") is not None:
-                    yield _ndjson(
-                        {
-                            "type": "usage",
-                            "usage_tokens": usage["prompt_tokens"],
-                            "model": (
-                                model_override or load_config().get("model") or None
-                            ),
-                        }
-                    )
+                # (The per-model-call `usage` emission above already covered
+                # the turn's final call — this spot used to re-emit it.)
                 # Replace the mechanical first-message title after a successful
                 # turn. Failures are silent/best-effort; the sidebar receives
                 # the event before the next conversation-list refresh.
