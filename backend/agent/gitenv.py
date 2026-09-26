@@ -19,6 +19,11 @@ GIT_INSTALLER_VERSION = "2.51.0"
 _GIT_INSTALLER_ENV = "YAAH_GIT_INSTALLER"
 
 
+def _is_windows() -> bool:
+    """Whether the current process is running on Windows."""
+    return os.name == "nt"
+
+
 def find_git() -> str | None:
     """Path to a runnable git, or None when git is missing."""
     return shutil.which("git")
@@ -56,7 +61,7 @@ def find_installer() -> Path | None:
 async def run_install_git(workspace: str) -> dict:
     """Silently install the bundled Git for Windows. Windows-only;
     refuses when git already exists or no installer shipped."""
-    if os.name != "nt":
+    if not _is_windows():
         return {"error": "install_git is Windows-only."}
     if find_git():
         return {"ok": True, "already_installed": True,
@@ -98,7 +103,7 @@ async def run_install_git(workspace: str) -> dict:
         path_key = next((key for key in os.environ if key.casefold() == "path"), "PATH")
         current = os.environ.get(path_key, "")
         directory = str(installed_git.parent)
-        separator = ";" if os.name == "nt" else os.pathsep
+        separator = ";" if _is_windows() else os.pathsep
         entries = current.split(separator)
         if directory.casefold() not in {p.casefold() for p in entries}:
             os.environ[path_key] = directory + (separator + current if current else "")

@@ -48,7 +48,7 @@ def test_find_installer_none_when_absent(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_install_git_noop_when_git_present(monkeypatch):
-    monkeypatch.setattr(gitenv.os, "name", "nt")  # executor gate
+    monkeypatch.setattr(gitenv, "_is_windows", lambda: True)  # executor gate
     monkeypatch.setattr(gitenv, "find_git", lambda: "/usr/bin/git")
     res = await gitenv.run_install_git("unused")
     assert res["ok"] is True and res.get("already_installed") is True
@@ -56,7 +56,7 @@ async def test_install_git_noop_when_git_present(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_install_git_adds_installed_wrapper_to_live_path(monkeypatch, tmp_path):
-    monkeypatch.setattr(gitenv.os, "name", "nt")
+    monkeypatch.setattr(gitenv, "_is_windows", lambda: True)
     monkeypatch.setattr(gitenv, "find_git", lambda: None)
     installer = tmp_path / "installer.exe"
     installer.write_bytes(b"MZ")
@@ -83,7 +83,7 @@ async def test_install_git_adds_installed_wrapper_to_live_path(monkeypatch, tmp_
 
 @pytest.mark.asyncio
 async def test_install_git_refuses_without_installer(monkeypatch, tmp_path):
-    monkeypatch.setattr(gitenv.os, "name", "nt")
+    monkeypatch.setattr(gitenv, "_is_windows", lambda: True)
     monkeypatch.setattr(gitenv, "find_git", lambda: None)
     monkeypatch.setattr(gitenv, "find_installer", lambda: None)
     res = await gitenv.run_install_git("unused")
