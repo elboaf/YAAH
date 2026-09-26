@@ -8532,10 +8532,11 @@ function Composer() {
 
   const pickSkill = (s: SkillInfo) => {
     if (skillTrigger === '$') {
-      // $ picks a chip too, stripping the raw $name from the text —
-      // identical to /, just without clearing the rest of the prompt.
+      // $ picks a chip too — but the literal $name stays in the text (#105):
+      // the chip carries the invocation while the message keeps its in-context
+      // wording ("if i wanted to $handoff something"). The send path dedupes
+      // chip names against the $-scan, so the skill loads exactly once.
       setPickedSkills((p) => (p.some((x) => x.name === s.name) ? p : [...p, s]))
-      setInput((prev) => prev.replace(/\$[A-Za-z0-9_-]*$/, ''))
       setSkillMenuOpen(false)
       setSkillNavigated(false)
       textareaRef.current?.focus()
