@@ -9617,39 +9617,24 @@ function Composer() {
             e.target.value = ''
           }}
         />
-        {/* Queued messages pill (#7): sits above the composer while a run
-            streams. Shows the count; expands to per-message rows with
-            remove buttons; Steer interrupts the current step so the queue
-            lands now. Rendered only while there is something queued. */}
+        {/* Queued messages chip (B redesign): the old pill that popped in
+            above the composer duplicated the transcript bubble's amber
+            "queued · lands next boundary" label AND shifted layout mid-run.
+            Now the affordance lives in the toolbar as a quiet chip next to
+            the send button — same count, same expandable per-message rows
+            with remove, but nothing pops in and the composer never resizes. */}
         {queueEchoes?.length ? (
-          <div className="mb-2 rounded border border-amber-700/60 bg-amber-950/20">
+          <div className="relative">
             <button
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left font-mono text-[10px] uppercase tracking-widest text-amber-400"
+              title={`${queueEchoes.length} queued message${queueEchoes.length === 1 ? '' : 's'} — will land at the next boundary`}
+              className="flex items-center gap-1.5 rounded border border-amber-700/60 bg-amber-950/30 px-2 py-1 font-mono text-[10px] uppercase tracking-widest text-amber-400 hover:bg-amber-950/60"
               onClick={() => setQueueOpen((o) => !o)}
             >
-              <span className="text-amber-600">{queueOpen ? '▼' : '▸'}</span>
-              <span>
-                {queueEchoes.length} queued message{queueEchoes.length === 1 ? '' : 's'}
-              </span>
-              <span className="ml-auto flex items-center gap-2 tracking-normal normal-case">
-                {streaming && conversationId !== null && !pendingQuestion && !pendingApproval && !pendingPlanApproval && (
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      void steerNow()
-                    }}
-                    className="rounded bg-amber-600/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-zinc-950 hover:bg-amber-500"
-                  >
-                    {steering ? 'steering…' : 'steer'}
-                  </span>
-                )}
-                <span className="text-zinc-600">{queueOpen ? 'hide' : 'show'}</span>
-              </span>
+              <span className="text-amber-600">{queueOpen ? '▾' : '▴'}</span>
+              queued {queueEchoes.length}
             </button>
             {queueOpen && (
-              <div className="border-t border-amber-800/40 px-2.5 py-1.5">
+              <div className="absolute bottom-full right-0 z-30 mb-2 w-72 rounded border border-amber-800/50 bg-zinc-900 p-2 shadow-lg">
                 {queueEchoes.map((q) => (
                   <div key={q.tempId} className="flex items-center gap-2 py-0.5">
                     <span className="min-w-0 flex-1 truncate text-xs text-amber-100">
@@ -9675,6 +9660,8 @@ function Composer() {
             )}
           </div>
         ) : null}
+        {/* Unified toolbar: host + mode on the left, attach/mic/send on the
+            right — one hairline-separated row inside the composer card. */}
         {/* Unified toolbar: host + mode on the left, attach/mic/send on the
             right — one hairline-separated row inside the composer card. */}
         <div className="flex items-center gap-1 border-t border-zinc-700/70 px-1.5 py-1.5">
