@@ -157,8 +157,6 @@ describe('live compaction ticker', () => {
     expect(screen.getByText('nested thinking telemetry')).toBeTruthy()
     const preview = document.querySelector('[data-subagent-preview]')
     expect(preview?.classList.contains('overflow-hidden')).toBe(true)
-    expect(preview?.classList.contains('font-mono')).toBe(true)
-    expect(preview?.classList.contains('text-zinc-500')).toBe(true)
     expect(document.querySelector('[data-subagent-tool-ticker]')).toBeTruthy()
 
     fireEvent.click(document.querySelector('[data-subagent-toggle]')!)

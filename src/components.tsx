@@ -1259,7 +1259,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
             </div>
           ) : null
         ) : run.preview ? (
-          <div className="overflow-hidden font-mono text-[11px] leading-4 text-zinc-500" data-subagent-preview>
+          <div className="overflow-hidden text-sm leading-relaxed text-zinc-200" data-subagent-preview>
             <span className="relative block overflow-hidden whitespace-pre">
               <span
                 className="block whitespace-pre"
