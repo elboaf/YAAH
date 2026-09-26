@@ -565,6 +565,14 @@ async def test_search_escape_blocked(tmp_path):
 
 # ---------------------------------------------------------------- loop extras
 
+def test_system_prompt_explains_shell_workspace_and_cd_lifetime(tmp_path):
+    prompt = loop._default_system_prompt(str(tmp_path))
+
+    assert "Shell calls start in the selected workspace" in prompt
+    assert "Each shell call is a fresh process. `cd` does not persist" in prompt
+    assert "workspace-relative" in prompt
+
+
 @pytest.mark.asyncio
 async def test_system_prompt_override(fake_model, tmp_path, monkeypatch):
     from backend.db.database import create_conversation, update_conversation
