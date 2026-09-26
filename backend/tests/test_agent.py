@@ -46,7 +46,7 @@ async def test_bash_stream_timeout_kills_tree(tmp_path):
     import sys
 
     if sys.platform == "win32":
-        command = 'start /b ping -n 30 127.0.0.1 >nul'
+        command = "ping -n 30 127.0.0.1 >/dev/null &"
     else:
         command = "sleep 30 &"
     chunks: list[str] = []
@@ -83,7 +83,7 @@ async def test_bash_timeout_kills_backgrounded_child(tmp_path):
     import sys
 
     if sys.platform == "win32":
-        command = 'start /b ping -n 30 127.0.0.1 >nul'
+        command = "ping -n 30 127.0.0.1 >/dev/null &"
     else:
         command = "sleep 30 &"
     r = await asyncio.wait_for(
@@ -1116,27 +1116,38 @@ def test_env_line_names_real_shell(monkeypatch):
     import os
 
     from backend.agent.loop import _local_env_line, _shell_phrase
+    from backend.agent import shell
 
     # Pin the platform, not just the env vars: this test must take the
     # cmd branch even on the Linux CI runner.
     monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(shell, "find_git_bash", lambda path=None: r"C:\Git\usr\bin\bash.exe")
+    line = _local_env_line()
+    assert "Git Bash" in line
+    assert "POSIX shell syntax and utilities" in line
+    monkeypatch.setattr(shell, "find_git_bash", lambda path=None: None)
     monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
     line = _local_env_line()
     assert "cmd.exe" in line
-    assert "findstr" in line  # the POSIX-tools caveat
+    assert "Windows command syntax" in line
     monkeypatch.setenv("COMSPEC", r"C:\Program Files\PowerShell\7\pwsh.exe")
     assert "pwsh.exe" in _local_env_line()
-    assert "findstr" not in _local_env_line()
     monkeypatch.setattr(os, "name", "posix")
     monkeypatch.setenv("SHELL", "/bin/zsh")
     assert "zsh" in _shell_phrase(False)
 
 
 def test_remote_env_line_windows_caveat():
-    from backend.agent.remote import CMD_TOOLS_NOTE, RemoteSession
+    from backend.agent.remote import RemoteSession
 
-    win = RemoteSession("http://h", "p", {"windows": True, "os": "Windows"})
-    assert CMD_TOOLS_NOTE in win.env_line()
+    win = RemoteSession("http://h", "p", {
+        "windows": True, "os": "Windows", "git_bash": True,
+    })
+    assert "Git Bash" in win.env_line()
+    assert "POSIX shell syntax and utilities" in win.env_line()
+    cmd = RemoteSession("http://h", "p", {"windows": True, "os": "Windows"})
+    assert "cmd.exe" in cmd.env_line()
+    assert "Windows command syntax" in cmd.env_line()
     nix = RemoteSession("http://h", "p", {"windows": False, "os": "Linux"})
     assert "findstr" not in nix.env_line()
 

@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 from backend.agent.ghenv import command_env
+from backend.agent.shell import find_git_bash
 
 
 # ---------------------------------------------------------------- path safety
@@ -240,13 +241,14 @@ INSTALL_GIT_SCHEMA = {
 # lives here only reaches the model when it calls get_help("tool_name").
 HELP_DOCS: dict = {
     "bash": (
-        "Runs through the system shell (cmd.exe on Windows; POSIX tools "
-        "like ls/grep may be absent there - use dir, findstr, or "
-        "PowerShell Select-String / Get-Content -Tail instead). The "
-        "result reports the real exit code and combined stdout/stderr; "
-        "output is truncated at a cap, so tail or filter large output "
-        "in the command itself. On timeout the whole process tree is "
-        "killed - partial output is still returned."
+        "On Windows, runs commands through Git Bash when available "
+        "(bash.exe -c, POSIX syntax); if unavailable or unable to start, "
+        "falls back to the system shell, normally cmd.exe. On Linux/macOS, "
+        "uses the system shell as before. It does not retry a failed command "
+        "in another shell. The result reports the real exit code and "
+        "combined stdout/stderr; output is truncated at a cap, so tail or "
+        "filter large output in the command itself. On timeout the whole "
+        "process tree is killed - partial output is still returned."
     ),
     "powershell": (
         "Prefer PowerShell for structured Windows data: Get-ChildItem, "
@@ -919,6 +921,42 @@ MAX_BASH_TIMEOUT = 900
 MAX_OUTPUT_CHARS = 20_000
 
 
+async def _create_bash_process(
+    command: str, cwd: Path, env: dict, *, windows: bool | None = None
+):
+    """Start one bash-tool command using the target platform's shell.
+
+    Windows prefers Git for Windows' Bash and falls back to the system shell
+    only when Bash is unavailable or fails to start. POSIX platforms retain
+    asyncio's native system-shell behavior.
+    """
+    windows = os.name == "nt" if windows is None else windows
+    if windows:
+        bash = find_git_bash(env.get("PATH", ""))
+        if bash:
+            try:
+                return await asyncio.create_subprocess_exec(
+                    bash, "-c", command,
+                    cwd=cwd,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    **_NO_WINDOW, **_NEW_SESSION,
+                )
+            except OSError:
+                # Fall back only when Bash itself failed to launch, never
+                # when a command launched by Bash returned an error.
+                pass
+    return await asyncio.create_subprocess_shell(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        **_NO_WINDOW, **_NEW_SESSION,
+    )
+
+
 def _kill_tree(proc: asyncio.subprocess.Process, job=None) -> None:
     """Kill a timed-out process and its children. Children matter: a
     backgrounded server (``cmd &``) inherits the output pipe, so killing
@@ -1040,13 +1078,8 @@ async def run_bash(
     timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
     note = _clamp_note(timeout_seconds)
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=workspace_root(workspace),
-            env=_tool_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            **_NO_WINDOW, **_NEW_SESSION,
+        proc = await _create_bash_process(
+            command, workspace_root(workspace), _tool_env()
         )
         job = _job_create()
         if job:
