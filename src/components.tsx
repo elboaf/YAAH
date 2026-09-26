@@ -7314,9 +7314,19 @@ export function ChatPanel() {
     conversationId !== null &&
     agents.some((a) => a.running && a.conversation_id === conversationId)
   // Only the in-flight assistant message shows the ephemeral ticker; every
-  // finished turn collapses to the one-line trace.
-  const liveId =
-    (streaming || agentRunLive) && messages.length > 0 ? messages[messages.length - 1].id : null
+  // finished turn collapses to the one-line trace. The steer path (#steer)
+  // appends the injected user message AFTER the still-streaming assistant
+  // block, so the LAST message is a user row while the turn keeps running —
+  // keying liveness on it would flip the assistant's ticker to the finished
+  // TraceLine summary mid-run. Key it on the last ASSISTANT message instead.
+  const bufKey = conversationId === null ? 'draft' : String(conversationId)
+  const liveId = (() => {
+    if (!(streaming || agentRunLive) || messages.length === 0) return null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id
+    }
+    return messages[messages.length - 1].id
+  })()
 
   // ---- session metadata: context size + git branch (status strip) ----
   const setContext = useAgent((s) => s.setContext)
