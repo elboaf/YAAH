@@ -28,12 +28,12 @@ branch-first 2026-09-23):
   their final message (results are clipped; the parent must always be
   able to act on the branch name).
 - Top-level chat agents are bound to ONE worktree for the chat's whole
-  session (adr/0003): the first write-capable tool call creates it, and
-  it is never released mid-session. The harness NEVER merges into the
-  main tree on its own: commits stay on the session branch until the
-  user merges deliberately (git_merge_back, or plain git). The old
-  per-turn auto-merge hid the work in a phantom branch while the UI
-  claimed master — and made a follow-up "push" publish the wrong ref.
+  session (adr/0003): the first isolating workspace mutation creates it,
+  and it is never released mid-session. The harness NEVER merges into the
+  main tree on its own: commits stay on the session branch until the agent
+  explicitly integrates requested code changes with git_merge_back. The old
+  per-turn auto-merge hid the work in a phantom branch while the UI claimed
+  master — and made a follow-up "push" publish the wrong ref.
   Uncommitted worktree state is left in place across turns — turn N+1
   works in exactly the tree turn N left behind. A session whose branch
   carries no commits and no uncommitted files is drained at turn end
@@ -81,18 +81,26 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-# Wire-in triggers (issue #58 §1): a write-capable tool call before which
-# the caller's workspace must be rebound to a worktree. git_add/git_commit
-# are deliberately NOT triggers — by the time an agent can commit it must
-# already be isolated (write access can only have come from one of these).
-WRITER_TRIGGERS = {"bash", "powershell", "write_file", "edit_file", "create_file"}
+# Keep placement separate from access-mode authorization: these tools don't
+# write the selected workspace, even though some still require approval.
+_NON_WORKSPACE_MUTATIONS = {
+    "install_git", "sandbox_test", "sandbox_run", "sandbox_stop",
+    "memory_save", "memory_delete", "mouse_move", "mouse_click",
+    "mouse_drag", "mouse_scroll", "type_text", "press_key", "focus_window",
+}
+_PLACEMENT_READ_TOOLS = {
+    "read_file", "search_files", "git_status", "git_diff",
+    "web_search", "web_fetch", "view_image", "load_skill", "get_help",
+    "memory_read", "search_conversation_history", "sandbox_status",
+    "screenshot", "list_windows", "read_ui_tree", "wait",
+}
+_DIRECT_MAIN_TREE_TOOLS = {"git_merge_back"}
+_CHILD_DIRECT_WRITERS = {"delete_file", "move_file", "git_add", "git_commit"}
 
-# A shell call is only a writer when its command actually mutates: repo
-# inspection and sync (status/diff/fetch/pull/push) run on the main tree —
-# a plain "pull from origin" must move the user's branch, not mint an
-# agent/<chat> worktree for it. The classifier only gates the FIRST
-# binding: once a chat is bound, every later call runs in the session
-# worktree regardless. Fail-closed: anything unrecognized isolates.
+# A shell call is only a writer when its command actually mutates. The
+# classifier gates the first session binding: explicit target=main structured
+# Git operations resolve main independently in their executor. Fail-closed:
+# unknown workspace-mutating tools isolate.
 _READONLY_GIT = {
     "status", "log", "diff", "show", "branch", "remote", "rev-parse",
     "tag", "fetch", "pull", "push",
@@ -140,21 +148,33 @@ def _readonly_shell_command(command: str) -> bool:
     )
 
 
-def should_isolate(tool_name: str, args: dict) -> bool:
-    """Whether this tool call must run isolated. True for the file writers
-    and powershell (no per-command grammar); for bash, decided by the
-    command itself — read-only commands stay on the main tree. The
-    git_pull/git_push tools are the structured form of `git pull/push`,
-    so they follow the same repo-sync rule (a plain "pull from origin"
-    must move the user's branch, not mint a session worktree)."""
-    if tool_name in ("git_pull", "git_push"):
+def should_isolate(tool_name: str, args: dict, *, child: bool = False) -> bool:
+    """Whether this call needs a session worktree.
+
+    Tree placement is separate from access-mode authorization. Child callers
+    pass ``child=True`` because a child must isolate before any workspace
+    mutation, including direct file deletion and structured Git changes. Git
+    sync remains in the selected tree for parents; unknown placements fail
+    closed.
+    """
+    if tool_name in (
+        _NON_WORKSPACE_MUTATIONS | _PLACEMENT_READ_TOOLS | _DIRECT_MAIN_TREE_TOOLS
+    ):
         return False
-    if tool_name != "bash":
+    if tool_name in {"git_pull", "git_push"}:
+        # Primary-tree sync operations need no session binding. For current-tree
+        # sync, child callers first isolate the inherited tree.
+        return child and (args or {}).get("target", "current") == "current"
+    if tool_name == "bash":
+        command = str((args or {}).get("command") or "").strip()
+        return not command or not _readonly_shell_command(command)
+    # Direct file/git mutations don't independently trigger a parent bind,
+    # but a sub-agent needs its own tree before invoking them.
+    if child and tool_name in _CHILD_DIRECT_WRITERS:
         return True
-    command = str((args or {}).get("command") or "").strip()
-    if not command:
-        return True  # no command to vouch for — fail closed
-    return not _readonly_shell_command(command)
+    # Callers invoke this for tools they already permit to affect the
+    # workspace; unknown placements default to isolation.
+    return True
 
 
 BRANCH_PREFIX = "agent/"
@@ -1240,9 +1260,12 @@ class BindResult:
     existed for this chat and no fresh bind happened — do not re-emit
     worktree_bound / append a second note (a fresh binding that actually
     rebinds away from the main tree is the only event-worthy case).
-    refusals ride on IsolationRefused, never in this result.
+    required: False means this tool did not require a session worktree and
+    workspace is unchanged. When required is True, reused distinguishes an
+    existing chat binding from a fresh one. Refusals ride on IsolationRefused.
     """
     workspace: str
+    required: bool
     reused: bool
     worktree: str
     branch: str
@@ -1299,11 +1322,14 @@ def _worktree_note_text(wt_path: str, info: dict, main_workspace: str) -> str:
         "resolve specific main-workspace edits. Explain what changed and what "
         "did not before asking how to proceed; never claim unmerged work is "
         "in main.\n"
-        "- `git_push` pushes this isolated branch, not the primary branch. For "
-        "a requested primary-branch push, preserve the user's requested order, "
-        "verify the main branch, remote, and status, and push from main. Never "
-        "force-push; stop if unexpected changes or a non-fast-forward make "
-        "the target unsafe. Verify the remote ref and report the result."
+        "- For structured git_status, git_diff, git_pull, and git_push, choose "
+        "target=current or target=main explicitly. Use main only when the user "
+        "explicitly asks about or operates on the primary checkout; clarify "
+        "if ambiguous. Main "
+        "pulls are clean-tree, upstream-checked, and fast-forward-only. For a "
+        "primary-branch push, preserve requested order, verify branch, upstream, "
+        "and clean status, then use target=main. Never force-push; stop on "
+        "unexpected state or non-fast-forward and verify the remote ref."
     )
 
 
@@ -1311,6 +1337,9 @@ async def bind_for_write(
     workspace: str,
     chat_id: str,
     *,
+    tool_name: str | None = None,
+    args: dict | None = None,
+    child: bool = False,
     note: str | None = None,
     on_lifecycle=None,
 ) -> BindResult:
@@ -1318,9 +1347,9 @@ async def bind_for_write(
     (issue #58 / adr/0003).
 
     One operation for the loop's gate and approval paths (and the
-    sub-agent runner): decides whether isolation applies, reuses or
-    creates the session binding, and returns everything the caller must
-    surface — the rebound workspace, the lifecycle event to record, and
+    sub-agent runner): decides whether this tool needs a session worktree,
+    reuses or creates the binding when required, and returns everything the
+    caller must surface — the rebound workspace, lifecycle event to record, and
     the model note for a FRESH binding. Raises IsolationRefused when
     isolation cannot happen (the caller turns that into the tool's
     error result — never a dead turn).
@@ -1328,12 +1357,28 @@ async def bind_for_write(
     note: an optional extra line appended to the fresh-bind note (used by
     the sub-agent runner to carry its own context line).
     """
+    required = (
+        tool_name is None or should_isolate(tool_name, args or {}, child=child)
+    )
+    if not required:
+        return BindResult(
+            workspace=str(workspace),
+            required=False,
+            reused=False,
+            worktree="",
+            branch="",
+            base_branch="",
+            worktree_id=str(chat_id),
+            model_note="",
+            lifecycle={},
+        )
     wt_path = await ensure_isolated(workspace, chat_id, on_lifecycle=on_lifecycle)
     fresh = wt_path != str(workspace)
     info = await _session_note(chat_id) if fresh else {}
     lifecycle = dict(info) if fresh else {}
     return BindResult(
         workspace=wt_path,
+        required=True,
         reused=not fresh,
         worktree=wt_path if fresh else "",
         branch=str(info.get("branch") or ""),

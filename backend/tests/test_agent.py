@@ -546,12 +546,12 @@ async def test_git_tools(tmp_path):
     ws = str(tmp_path)
     await execute_tool("bash", {"command": "git init -q && git config user.email t@t && git config user.name t"}, ws)
     await execute_tool("write_file", {"path": "f.txt", "content": "v1"}, ws)
-    r = await execute_tool("git_status", {}, ws)
+    r = await execute_tool("git_status", {"target": "current"}, ws)
     assert "f.txt" in r["output"]
     await execute_tool("git_add", {}, ws)
     r = await execute_tool("git_commit", {"message": "first"}, ws)
     assert r["exit_code"] == 0
-    r = await execute_tool("git_status", {}, ws)
+    r = await execute_tool("git_status", {"target": "current"}, ws)
     assert "f.txt" not in r["output"]  # clean tree
 
 
@@ -1520,6 +1520,45 @@ async def test_stubborn_dirt_survives_turns_and_salvages_at_session_end(fake_mod
 # --------------------------------------------------- mid-run branch visibility
 
 @pytest.mark.asyncio
+async def test_primary_tree_git_push_does_not_bind_session(fake_model, tmp_path, monkeypatch):
+    from backend.db.database import create_conversation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "master")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "initial")
+    calls = []
+
+    async def fake_execute(name, arguments, workspace, on_chunk=None):
+        calls.append((name, arguments, workspace))
+        return {"output": "pushed", "exit_code": 0}
+
+    monkeypatch.setattr(loop, "execute_tool", fake_execute)
+    cid = await create_conversation("primary-target")
+    fake_model.append([{
+        "type": "tool_calls",
+        "tool_calls": [{
+            "id": "push-main",
+            "type": "function",
+            "function": {
+                "name": "git_push",
+                "arguments": json.dumps({"target": "main"}),
+            },
+        }],
+    }, {"type": "finish", "reason": "tool_calls"}])
+    fake_model.append([{"type": "content", "text": "pushed primary"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "push primary", str(repo)))
+    assert calls == [("git_push", {"target": "main"}, str(repo))]
+    assert not [event for event in events if event["type"] == "worktree_bound"]
+    assert not (repo / ".yaah" / "worktrees").exists()
+
+
+@pytest.mark.asyncio
 async def test_worktree_bound_released_events(fake_model, tmp_path, monkeypatch):
     """A turn that isolates emits worktree_bound (carrying the agent branch
     name) before its first write-tool result and worktree_released after the
@@ -1657,7 +1696,8 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     push_description = schemas["git_push"]["description"]
     assert "uncommitted target-workspace changes overlap" in merge_description
     assert "target tree is dirty" not in merge_description
-    assert "Pushes the current branch" in push_description
+    assert "target=current or target=main" in push_description
+    assert "target=main" in push_description
     assert "clearly implied continuation" not in push_description
 
     # turn end: honest status event, nothing merged
@@ -1678,8 +1718,8 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert "Turn end itself never merges" in base_prompt
     assert "integrate them with `git_merge_back` before reporting" in base_prompt
     assert "do not ask the user to manage checkouts or merge routine work" in base_prompt
-    assert "Classify dirty overlap, content conflict, or other refusal" in base_prompt
-    assert "Offer safe options with" in base_prompt
+    assert "Classify dirty overlap, content conflict, or other" in base_prompt
+    assert "Offer safe" in base_prompt
     assert "routine tool calls need" in base_prompt
     assert "Do not ask again for decisions already stated" in base_prompt
     assert "at end of turn the harness merges your committed work back" not in base_prompt

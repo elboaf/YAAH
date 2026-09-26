@@ -347,7 +347,9 @@ def _default_system_prompt(workspace: str = "") -> str:
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
-        "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull)",
+        "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull); "
+        "git_status/git_diff/git_pull/git_push require target=current or target=main; "
+        "use main only when the primary checkout is explicitly requested",
         "get_help (full docs for any tool; call with no argument to list them)",
         "spawn_agent (delegate self-contained work to a sub-agent; see the "
         "sub-agents index below)",
@@ -391,13 +393,18 @@ Guidelines:
   workspace as the user's task target. Complete requested code changes in
   the worktree, then integrate them with `git_merge_back` before reporting
   completion; do not ask the user to manage checkouts or merge routine work.
-  Turn end itself never merges. If integration fails, never overwrite user
-  work. Classify dirty overlap, content conflict, or other refusal; name
-  affected files and confirm if a merge was aborted. Offer safe options with
-  trade-offs (for example, resolve on the isolated branch and retry, leave
-  it isolated, or have the user resolve named main-workspace edits). Explain
-  what changed and what did not before asking how to proceed. Never claim
-  unmerged work is in the main workspace.
+  Turn end itself never merges. For structured `git_status`, `git_diff`,
+  `git_pull`, and `git_push`, target defaults to the current tree (the
+  session worktree when bound); use `target="main"` only when the user
+  explicitly requests the primary checkout. If that target is ambiguous,
+  clarify rather than guessing. Never use a primary-tree target to bypass
+  session isolation for ordinary code edits. If integration fails, never
+  overwrite user work. Classify dirty overlap, content conflict, or other
+  refusal; name affected files and confirm if a merge was aborted. Offer safe
+  options with trade-offs (for example, resolve on the isolated branch and
+  retry, leave it isolated, or have the user resolve named main-workspace
+  edits). Explain what changed and what did not before asking how to proceed.
+  Never claim unmerged work is in the main workspace.
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
 - Commit changes when needed to preserve and integrate the requested work;
@@ -1795,22 +1802,26 @@ async def _run_agent_claimed(
                         if policy == "autonomous":
                             mode = "full"
                         if tool_risk(name) == "read" or mode == "full":
-                            # Issue #58 rebinding seam: before the first
-                            # write-capable call, rebind the turn to its own
-                            # worktree (refusal surfaces as the tool's error
-                            # result — never a dead turn).
+                            # Placement seam: before a workspace-mutating
+                            # call, bind only when policy says isolation is
+                            # required (refusal becomes a tool error result).
                             _refused = False
-                            if (not remote_workspace and tool_risk(name) != "read" and not _isolated
-                                    and worktrees.should_isolate(name, args)):
+                            if (
+                                not remote_workspace
+                                and tool_risk(name) != "read"
+                                and not _isolated
+                            ):
                                 try:
                                     _bind = await worktrees.bind_for_write(
                                         workspace,
                                         chat_id=str(conversation_id),
+                                        tool_name=name,
+                                        args=args,
                                         on_lifecycle=lambda info: _record_worktree_lifecycle(
                                             git_activity, "parent", "Agent", info
                                         ),
                                     )
-                                    _isolated = True
+                                    _isolated = _bind.required
                                     workspace = _bind.workspace
                                     turn_workspace = _bind.workspace
                                     if _bind.worktree:
@@ -1880,22 +1891,28 @@ async def _run_agent_claimed(
                             # Approved (None) -> execute for real now; a
                             # denial/plan-block carries its own error result.
                             if result is None:
-                                # Issue #58 rebinding seam (gated path):
+                                # Placement seam after approval:
                                 if (
                                     not remote_workspace
                                     and tool_risk(name) != "read"
                                     and not _isolated
-                                    and worktrees.should_isolate(name, args)
                                 ):
                                     try:
                                         _bind = await worktrees.bind_for_write(
                                             workspace,
                                             chat_id=str(conversation_id),
-                                            on_lifecycle=lambda info: _record_worktree_lifecycle(
-                                                git_activity, "parent", "Agent", info
+                                            tool_name=name,
+                                            args=args,
+                                            on_lifecycle=lambda info: (
+                                                _record_worktree_lifecycle(
+                                                    git_activity,
+                                                "parent",
+                                                "Agent",
+                                                info,
+                                                )
                                             ),
                                         )
-                                        _isolated = True
+                                        _isolated = _bind.required
                                         workspace = _bind.workspace
                                         turn_workspace = _bind.workspace
                                         if _bind.worktree:

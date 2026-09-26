@@ -21,9 +21,10 @@ semantics touched four places.
 
 Callers use exactly two operations:
 
-- **`bind_for_write(workspace, chat_id)`** → `BindResult` (typed): the
-  rebound workspace, lifecycle event, branch facts, and the model note
-  for a FRESH binding (empty when reused). Refusals raise
+- **`bind_for_write(workspace, chat_id, tool_name, args, child)`** → `BindResult` (typed):
+  owns the tree-placement decision as well as binding, and returns the selected
+  workspace, whether isolation was required, lifecycle event, branch facts,
+  and the model note for a FRESH binding (empty when reused). Refusals raise
   `IsolationRefused` — surfaced as the tool's error result, never a dead
   turn.
 - **`settle_session(chat_id)`** → `SettleResult` (typed): drained flag,
@@ -43,6 +44,8 @@ implementation details of the two operations.
   and salvage rules land in one place.
 - New callers (scheduler fires, future turn engines) cross one seam
   instead of learning the primitives.
+- Parent and child execution share one placement classifier; child mode
+  preserves the extra isolation needed for structured Git mutations.
 - New tests assert on `BindResult`/`SettleResult` directly, without
   driving the whole turn loop.
 - Does not change behavior: `test_agent.py` and `test_worktrees.py`

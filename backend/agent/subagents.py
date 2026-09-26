@@ -19,7 +19,7 @@ Execution contract (v1):
   - no ask_user: a sub-agent must decide for itself and report the
     assumption in its final message;
   - isolated writes (issue #58): sub-agents read the parent's folder;
-    the first write-capable tool call rebinds a writing sub-agent to
+    the first workspace mutation rebinds a writing sub-agent to
     its own git worktree — the branch is reported on the first line of
     the result and the parent/chat merges it (sub-agents never merge);
   - parent cancellation cancels children; a child failure returns a
@@ -76,9 +76,11 @@ class AgentDef:
 
 
 # Tool sets for the built-ins. Sub-agents never get ask_user (they cannot
-# block on the user), spawn_agent (no nesting), or computer-use tools (two
-# agents cannot share one mouse/keyboard).
-_ALWAYS_EXCLUDED = {"ask_user", "spawn_agent", "search_conversation_history"}
+# block on the user), spawn_agent (no nesting), git_merge_back (integration
+# belongs to the parent), or computer-use tools (one shared mouse/keyboard).
+_ALWAYS_EXCLUDED = {
+    "ask_user", "spawn_agent", "search_conversation_history", "git_merge_back",
+}
 _COMPUTER_TOOLS = {
     "screenshot", "list_windows", "focus_window", "read_ui_tree",
     "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
@@ -338,7 +340,8 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
-        "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull)",
+        "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull); "
+        "target defaults to the current tree; target=main selects the primary checkout",
     ]
     prompt = (
         f"You are a sub-agent (agent_type: {defn.name}) spawned by a "
@@ -386,10 +389,10 @@ async def run_sub_agent(
     permissions.
     """
     cancel_ev = cancel_ev or asyncio.Event()
-    # Issue #58: the sub-agent starts on the workspace it was handed (the
-    # parent's tree, or the parent's own worktree for nested fan-out). The
-    # first write-capable tool call rebinds `run_workspace` to this
-    # agent's own worktree; every tool call goes through _exec so file,
+    # The sub-agent starts on the workspace it was handed (the parent's
+    # tree, or the parent's own worktree for nested fan-out). The placement
+    # policy binds before its first workspace mutation; every tool call goes
+    # through _exec so file,
     # shell, and git tools all follow the rebinding in one place.
     run_workspace = str(workspace)
     activity = git_activity_mod.GitActivity(run_id=run_label or f"sub-{id(defn):x}")
@@ -416,12 +419,7 @@ async def run_sub_agent(
             return await execute_tool(
                 name, args, path, on_chunk=on_chunk if on_event else None
             )
-        needs_child_worktree = (
-            name in worktrees.WRITER_TRIGGERS
-            or name == "powershell"
-            or (name == "bash" and worktrees.should_isolate(name, args))
-            or name in {"git_add", "git_commit"}
-        )
+        needs_child_worktree = worktrees.should_isolate(name, args, child=True)
         if _used_worktree is None and needs_child_worktree:
             owned = worktrees.worktree_of(run_workspace)
             if owned is not None:
@@ -453,12 +451,16 @@ async def run_sub_agent(
                 _bind = await worktrees.bind_for_write(
                     run_workspace,
                     chat_id=_iso_key,
+                    tool_name=name,
+                    args=args,
+                    child=True,
                     on_lifecycle=lambda info: git_activity_mod.record_worktree_lifecycle(
                         activity, actor_id, actor_label, info
                     ),
                 )
                 run_workspace = _bind.workspace
-                _used_worktree = run_workspace
+                if _bind.required:
+                    _used_worktree = run_workspace
                 if _bind.model_note:
                     _isolation_note = _bind.model_note
             except worktrees.IsolationRefused as e:
@@ -476,8 +478,6 @@ async def run_sub_agent(
             except Exception:
                 pass
         return result
-
-    _used_worktree: str | None = None
 
     _used_worktree: str | None = None
     messages = [

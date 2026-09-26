@@ -39,8 +39,22 @@ def _clean_state():
     worktrees._active.clear()
 
 
+async def test_bind_for_write_returns_unchanged_for_tools_without_isolation(repo: Path):
+    for name in ("git_status", "git_push", "git_merge_back", "sandbox_test"):
+        result = await worktrees.bind_for_write(
+            str(repo), chat_id=f"60-{name}", tool_name=name, args={}
+        )
+        assert result.required is False, name
+        assert result.workspace == str(repo), name
+        assert not result.worktree, name
+        assert not worktrees.binding_for(f"60-{name}"), name
+
+
 async def test_bind_for_write_fresh_returns_note_and_event(repo: Path):
-    result = await worktrees.bind_for_write(str(repo), chat_id="61")
+    result = await worktrees.bind_for_write(
+        str(repo), chat_id="61", tool_name="write_file", args={}
+    )
+    assert result.required is True
     assert result.workspace == result.worktree
     assert result.reused is False
     assert result.worktree_id == "61"
@@ -67,6 +81,7 @@ async def test_bind_for_write_refusal_raises(repo: Path, tmp_path: Path):
     await worktrees.bind_for_write(str(nonrepo), chat_id="63a")
     with pytest.raises(worktrees.IsolationRefused):
         await worktrees.bind_for_write(str(nonrepo), chat_id="63b")
+    await worktrees.release_session("63a", why="test")
 
 
 async def test_settle_session_drains_quiesced(repo: Path):

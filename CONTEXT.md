@@ -91,14 +91,14 @@ _Avoid_: git lock, merge lock file
 ### Worktree operations
 
 **Bind for write**:
-The single operation a caller performs before its first write-capable
-tool call: decide whether isolation applies, reuse or create the chat's
-session worktree, and return a BindResult carrying the rebound
-workspace path, the lifecycle event to record, and the model note for a
-FRESH binding only (a reused binding emits nothing). Refusal rides on
-IsolationRefused — the caller turns it into the tool's error result,
-never a dead turn. Callers: the parent turn's gate and approval paths,
-and the sub-agent runner.
+The single operation a caller performs before an eligible tool call:
+decide whether placement requires isolation, reuse or create the chat's
+session worktree when required, and return a BindResult carrying the selected
+workspace path, whether isolation was required, the lifecycle event to
+record, and the model note for a FRESH binding only (a reused binding emits
+nothing). Refusal rides on IsolationRefused — the caller turns it into the
+tool's error result, never a dead turn. Callers: the parent turn's gate and
+approval paths, and the sub-agent runner.
 _Avoid_: ensure_isolate-and-interpret, rebinding seam (that name stays
 in the issue history, not the code)
 

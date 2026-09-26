@@ -332,11 +332,14 @@ HELP_DOCS: dict = {
         "matches."
     ),
     "git_status": (
-        "Short wrapper over `git status` in the workspace; read-only."
+        "Short wrapper over `git status`; read-only. Specify target=current "
+        "for the active session tree or target=main only when the user "
+        "explicitly asks about the primary checkout."
     ),
     "git_diff": (
         "Wraps `git diff`; pass path to limit scope, staged=true for "
-        "the index. Read-only."
+        "the index. Specify target=current or target=main; use main only "
+        "when the user explicitly asks about the primary checkout."
     ),
     "git_add": (
         "Stages paths (omit to stage everything). Does not commit."
@@ -346,11 +349,16 @@ HELP_DOCS: dict = {
         "Empty staged set errors - check git_status first."
     ),
     "git_push": (
-        "Pushes the current branch; publishes with --set-upstream "
-        "when none exists. Never force-pushes."
+        "Pushes a branch; specify target=current for the active session tree "
+        "or target=main only for an explicit primary-branch request. Never "
+        "force-push. Main-target pushes require a clean primary checkout, "
+        "a non-agent branch, and a configured upstream."
     ),
     "git_pull": (
-        "Fetches and integrates remote changes for the current branch."
+        "Fetches and integrates remote changes; specify target=current or "
+        "target=main. Use main only when the user explicitly asks to update "
+        "the primary checkout. Main-target pulls require a clean tree and "
+        "use fast-forward-only integration."
     ),
     "get_help": (
         "With no argument, lists every tool with its full one-line "
@@ -675,24 +683,45 @@ TOOLS_SCHEMA += [
         "function": {
             "name": "git_status",
             "description": (
-                "Show git working tree status for the workspace. If this "
-                "or any git tool fails because git is missing (Windows), "
-                "offer install_git to the user via ask_user."
+                "Show git status. Specify target=current for the active tree; "
+                "use target=main only when the user explicitly asks about the "
+                "primary checkout. If git is missing on Windows, offer install_git "
+                "via ask_user."
             ),
-            "parameters": {"type": "object", "properties": {}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["current", "main"],
+                        "description": "choose current tree or primary checkout",
+                    },
+                },
+                "required": ["target"],
+            },
         },
     },
     {
         "type": "function",
         "function": {
             "name": "git_diff",
-            "description": "Show git diff. Set staged=true for staged changes, or pass a path.",
+            "description": (
+                "Show git diff; set staged=true or pass a path. Specify "
+                "target=current or target=main; use main only when explicitly "
+                "asking about the primary checkout."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "staged": {"type": "boolean", "description": "Diff staged changes only"},
                     "path": {"type": "string", "description": "Limit diff to this path"},
+                    "target": {
+                        "type": "string",
+                        "enum": ["current", "main"],
+                        "description": "choose current tree or primary checkout",
+                    },
                 },
+                "required": ["target"],
             },
         },
     },
@@ -744,19 +773,45 @@ TOOLS_SCHEMA += [
         "function": {
             "name": "git_push",
             "description": (
-                "Pushes the current branch to its remote; sets upstream if "
-                "needed. In a session worktree this is the agent branch, not "
-                "the primary branch."
+                "Pushes a branch; specify target=current or target=main. Use main "
+                "only for an explicit primary-branch request; never force-push. "
+                "Main-target push requires a clean primary checkout, a non-agent "
+                "branch, and a configured upstream."
             ),
-            "parameters": {"type": "object", "properties": {}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["current", "main"],
+                        "description": "choose current tree or primary checkout",
+                    },
+                },
+                "required": ["target"],
+            },
         },
     },
     {
         "type": "function",
         "function": {
             "name": "git_pull",
-            "description": "Pull and integrate changes from the remote.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": (
+                "Pull and integrate changes; specify target=current or target=main. "
+                "Use main only for an explicit request to update the primary checkout. "
+                "Main-target pull requires a clean primary checkout and uses "
+                "fast-forward-only integration."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["current", "main"],
+                        "description": "choose current tree or primary checkout",
+                    },
+                },
+                "required": ["target"],
+            },
         },
     },
     {
@@ -1370,17 +1425,45 @@ async def _git(workspace: str, *args: str) -> dict:
     return {"output": output.strip()[:MAX_OUTPUT_CHARS], "exit_code": 0}
 
 
-async def git_status(workspace: str) -> dict:
-    return await _git(workspace, "status", "--short", "--branch")
+async def _git_target(workspace: str, target: str) -> str | dict:
+    """Resolve an explicit tree target; never reinterpret invalid intent."""
+    if not isinstance(target, str) or target not in {"current", "main"}:
+        return {"error": "target must be 'current' or 'main'"}
+    if target == "current":
+        return workspace
+    from backend.agent import remote as remote_mod
+
+    # A remote workspace is resolved on its owning host, which receives the
+    # target argument through the normal remote executor path.
+    if remote_mod.parse_ns(workspace) is not None:
+        return workspace
+    from backend.agent import worktrees as wt
+
+    root = await wt.main_repo_root(workspace)
+    if root is None:
+        return {"error": "the primary checkout could not be resolved from this workspace"}
+    return str(root)
 
 
-async def git_diff(workspace: str, staged: bool = False, path: str = None) -> dict:
+async def git_status(workspace: str, target: str) -> dict:
+    selected = await _git_target(workspace, target)
+    if isinstance(selected, dict):
+        return selected
+    return await _git(selected, "status", "--short", "--branch")
+
+
+async def git_diff(
+    workspace: str, target: str, staged: bool = False, path: str = None
+) -> dict:
+    selected = await _git_target(workspace, target)
+    if isinstance(selected, dict):
+        return selected
     args = ["diff"]
     if staged:
         args.append("--staged")
     if path:
         args += ["--", path]
-    return await _git(workspace, *args)
+    return await _git(selected, *args)
 
 
 async def git_add(workspace: str, paths: list = None) -> dict:
@@ -1408,27 +1491,82 @@ async def git_merge_back(workspace: str, branch: str) -> dict:
     return await wt.merge_back(real, branch.strip())
 
 
-async def git_push(workspace: str) -> dict:
-    """Push the current branch. In a session worktree that is the agent
-    branch, not the primary branch; callers that intend to publish main
-    must target the main workspace explicitly."""
+async def _verify_primary_sync_target(workspace: str, operation: str) -> dict | None:
+    status = await _git(workspace, "status", "--porcelain")
+    if status.get("exit_code") != 0:
+        return {
+            "error": f"could not verify primary checkout status before {operation}",
+            "details": status,
+        }
+    if status.get("output", "").strip():
+        return {
+            "error": f"primary checkout has uncommitted changes; refusing target=main {operation}"
+        }
+    branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch.get("exit_code") != 0:
+        return {
+            "error": f"could not resolve primary checkout branch before {operation}",
+            "details": branch,
+        }
+    branch_name = str(branch.get("output") or "").strip()
+    if not branch_name or branch_name == "HEAD" or branch_name.startswith("agent/"):
+        return {
+            "error": (
+                f"refusing target=main {operation} from unexpected branch "
+                f"{branch_name or '(unknown)'}"
+            )
+        }
+    upstream = await _git(
+        workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"
+    )
+    if upstream.get("exit_code") != 0:
+        return {
+            "error": (
+                "primary checkout branch has no upstream; "
+                f"refusing to guess a remote for {operation}"
+            )
+        }
+    return None
+
+
+async def git_push(workspace: str, target: str) -> dict:
+    """Push the selected tree's current branch; never force-push."""
+    selected = await _git_target(workspace, target)
+    if isinstance(selected, dict):
+        return selected
+    workspace = selected
+    if target == "main":
+        refusal = await _verify_primary_sync_target(workspace, "push")
+        if refusal:
+            return refusal
+        return await _git(workspace, "push")
     r = await _git(workspace, "push")
     if r.get("exit_code") == 0:
         return r
     err = str(r.get("error") or "")
     if "has no upstream branch" not in err and "no upstream configured" not in err:
         return r
-    rc, branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
-    if rc != 0 or not branch.strip() or branch.strip() == "HEAD":
+    branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
+    branch_name = str(branch.get("output") or "").strip()
+    if branch.get("exit_code") != 0 or not branch_name or branch_name == "HEAD":
         return r
-    pushed = await _git(workspace, "push", "--set-upstream", "origin", branch.strip())
+    pushed = await _git(workspace, "push", "--set-upstream", "origin", branch_name)
     if pushed.get("exit_code") == 0:
-        pushed["note"] = f"no upstream was configured; published {branch.strip()} to origin with --set-upstream"
+        pushed["note"] = f"no upstream was configured; published {branch_name} to origin with --set-upstream"
     return pushed
 
 
-async def git_pull(workspace: str) -> dict:
-    return await _git(workspace, "pull")
+async def git_pull(workspace: str, target: str) -> dict:
+    selected = await _git_target(workspace, target)
+    if isinstance(selected, dict):
+        return selected
+    if target == "main":
+        refusal = await _verify_primary_sync_target(selected, "pull")
+        if refusal:
+            return refusal
+        # Never create an implicit merge on the user's primary checkout.
+        return await _git(selected, "pull", "--ff-only")
+    return await _git(selected, "pull")
 
 
 # ---------------------------------------------------------------- dispatch

@@ -104,8 +104,14 @@ remote, and tree state, merge the follow-up, then push that primary
 branch (never force-push). `git_push` in a session worktree publishes
 the agent branch only; do not mistake it for pushing the primary branch.
 If the push target is unclear, there are unexpected changes, or the
-push is non-fast-forward, stop and ask. The invariant remains: the main
-tree must not move as a side effect of turn end.
+push is non-fast-forward, stop and ask. Structured git_status/git_diff/
+git_pull/git_push tools now default to the current tree and accept an
+explicit `target=main` to operate on the primary checkout. A main-target
+push verifies a clean tree, non-agent branch, and configured upstream;
+it never guesses a remote. A main-target pull also requires a clean tree
+and upstream and uses fast-forward-only integration. This tool routing does
+not change the invariant:
+the main tree must not move as a side effect of turn end.
 
 ## Revision (2026-09-24): agent-owned integration, worktree as plumbing
 

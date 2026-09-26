@@ -877,14 +877,114 @@ def test_git_push_sets_upstream_when_missing(repo: Path, monkeypatch):
         if args[:1] == ("push",) and "--set-upstream" not in args:
             return {"error": "fatal: The current branch agent/x/1 has no upstream branch.", "exit_code": 128}
         if args[:1] == ("rev-parse",):
-            return (0, "agent/x/1")  # real _git returns a tuple
+            return {"output": "agent/x/1", "exit_code": 0}
         return {"output": "pushed", "exit_code": 0}
 
     monkeypatch.setattr(tools_mod, "_git", fake_git)
-    result = asyncio.run(tools_mod.git_push(str(repo)))
+    result = asyncio.run(tools_mod.git_push(str(repo), target="current"))
     assert result["exit_code"] == 0
     assert ("push", "--set-upstream", "origin", "agent/x/1") in calls
     assert "set-upstream" in (result.get("note") or "")
+
+
+def test_git_push_target_main_uses_primary_checkout(repo: Path, monkeypatch):
+    from backend.agent import tools as tools_mod
+
+    calls: list[tuple[str, tuple]] = []
+    main = repo / "primary"
+
+    async def fake_root(_workspace):
+        return main
+
+    async def fake_git(workspace, *args, **kw):
+        calls.append((workspace, args))
+        if args == ("status", "--porcelain"):
+            return {"output": "", "exit_code": 0}
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return {"output": "main", "exit_code": 0}
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            return {"output": "origin/main", "exit_code": 0}
+        return {"output": "pushed", "exit_code": 0}
+
+    monkeypatch.setattr(worktrees, "main_repo_root", fake_root)
+    monkeypatch.setattr(tools_mod, "_git", fake_git)
+    result = asyncio.run(tools_mod.git_push(str(repo / ".yaah" / "worktrees" / "chat"), target="main"))
+    assert result["exit_code"] == 0
+    assert calls == [
+        (str(main), ("status", "--porcelain")),
+        (str(main), ("rev-parse", "--abbrev-ref", "HEAD")),
+        (str(main), ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")),
+        (str(main), ("push",)),
+    ]
+
+
+def test_git_pull_main_is_fast_forward_only_and_requires_clean_primary(repo: Path, monkeypatch):
+    from backend.agent import tools as tools_mod
+
+    calls: list[tuple] = []
+
+    async def fake_root(_workspace):
+        return repo
+
+    async def fake_git(_workspace, *args, **_kw):
+        calls.append(args)
+        if args == ("status", "--porcelain"):
+            return {"output": "", "exit_code": 0}
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return {"output": "main", "exit_code": 0}
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            return {"output": "origin/main", "exit_code": 0}
+        return {"output": "updated", "exit_code": 0}
+
+    monkeypatch.setattr(worktrees, "main_repo_root", fake_root)
+    monkeypatch.setattr(tools_mod, "_git", fake_git)
+    result = asyncio.run(tools_mod.git_pull(str(repo / "worktree"), target="main"))
+    assert result["exit_code"] == 0
+    assert calls[-1] == ("pull", "--ff-only")
+
+
+def test_git_push_main_refuses_dirty_or_agent_branch(repo: Path, monkeypatch):
+    from backend.agent import tools as tools_mod
+
+    async def fake_root(_workspace):
+        return repo
+
+    calls: list[tuple] = []
+
+    async def fake_git(_workspace, *args, **_kw):
+        calls.append(args)
+        if args == ("status", "--porcelain"):
+            return {"output": " M user.txt", "exit_code": 0}
+        return {"output": "agent/chat/run", "exit_code": 0}
+
+    monkeypatch.setattr(worktrees, "main_repo_root", fake_root)
+    monkeypatch.setattr(tools_mod, "_git", fake_git)
+    dirty = asyncio.run(tools_mod.git_push(str(repo), target="main"))
+    assert "uncommitted changes" in dirty["error"]
+    assert not any(args[:1] == ("push",) for args in calls)
+
+    async def clean_agent_git(_workspace, *args, **_kw):
+        calls.append(args)
+        if args == ("status", "--porcelain"):
+            return {"output": "", "exit_code": 0}
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return {"output": "agent/chat/run", "exit_code": 0}
+        raise AssertionError("agent branch must be rejected before upstream or push")
+
+    monkeypatch.setattr(tools_mod, "_git", clean_agent_git)
+    agent = asyncio.run(tools_mod.git_push(str(repo), target="main"))
+    assert "unexpected branch" in agent["error"]
+
+
+def test_git_status_rejects_unknown_target(repo: Path, monkeypatch):
+    from backend.agent import tools as tools_mod
+
+    async def unexpected_git(*_args, **_kwargs):
+        raise AssertionError("invalid target must not execute git")
+
+    monkeypatch.setattr(tools_mod, "_git", unexpected_git)
+    result = asyncio.run(tools_mod.git_status(str(repo), target="primary-ish"))
+    assert "target must be" in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -898,14 +998,24 @@ class TestShouldIsolate:
         for name in ("write_file", "edit_file", "create_file", "powershell"):
             assert worktrees.should_isolate(name, {"command": "git status"})
 
-    def test_git_sync_tools_do_not_isolate(self):
-        # rc.23 regression: git_pull/git_push are "shell"-risk tools, so
-        # they still minted a session worktree before the first bash call
-        assert not worktrees.should_isolate("git_pull", {})
-        assert not worktrees.should_isolate("git_push", {})
-        # repo mutation stays isolated
-        for name in ("git_add", "git_commit", "git_merge_back"):
-            assert worktrees.should_isolate(name, {}), name
+    def test_read_only_tools_stay_in_current_tree_for_parent_and_child(self):
+        for name in ("read_file", "search_files", "git_status", "git_diff", "web_search"):
+            assert not worktrees.should_isolate(name, {})
+            assert not worktrees.should_isolate(name, {}, child=True)
+
+    def test_git_sync_placement_differs_for_parent_and_child(self):
+        # Parent sync/publish acts on main before binding. A child must first
+        # bind because it otherwise inherits the parent's shared tree.
+        for name in ("git_pull", "git_push"):
+            assert not worktrees.should_isolate(name, {})
+            assert worktrees.should_isolate(name, {}, child=True)
+            assert not worktrees.should_isolate(name, {"target": "main"}, child=True)
+        # repo mutations are isolated in both contexts
+        for name in ("git_add", "git_commit"):
+            assert worktrees.should_isolate(name, {})
+            assert worktrees.should_isolate(name, {}, child=True)
+        assert not worktrees.should_isolate("git_merge_back", {})
+        assert not worktrees.should_isolate("git_merge_back", {}, child=True)
 
     def test_readonly_git_commands(self):
         for cmd in (

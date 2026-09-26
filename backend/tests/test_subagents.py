@@ -12,10 +12,28 @@ from backend.agent.subagents import AgentDef
 # ---------------------------------------------------------------- registry
 
 
+def test_tree_target_tools_require_explicit_target():
+    from backend.agent.tools import get_schemas
+
+    schemas = {schema["function"]["name"]: schema["function"]["parameters"]
+               for schema in get_schemas()}
+    for name in ("git_status", "git_diff", "git_pull", "git_push"):
+        assert "target" in schemas[name]["required"]
+        assert schemas[name]["properties"]["target"]["enum"] == ["current", "main"]
+
+
 def test_builtins_present():
     names = {d["name"] for d in subagents.list_agents()}
     assert "general-purpose" in names
     assert "explore" in names
+
+
+def test_sub_agents_cannot_merge_back():
+    for defn in (subagents.get_agent_def("general-purpose"), subagents.get_agent_def("explore")):
+        assert "git_merge_back" not in {
+            schema["function"]["name"]
+            for schema in subagents._resolve_tools(defn, windows=True)
+        }
 
 
 def test_explore_is_read_only():
