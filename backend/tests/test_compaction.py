@@ -52,7 +52,6 @@ REAL_SUMMARIZE = comp.summarize_messages
 def _patch_cfg(monkeypatch, **over):
     cfg = {
         "enabled": True,
-        "trigger_fraction": 0.7,
         "keep_fraction": 0.4,
         "keep_recent_messages": 6,
         "trigger_tokens": 0,
@@ -81,32 +80,26 @@ def test_defaults_on():
 
 
 @pytest.mark.asyncio
-async def test_should_compact_threshold(monkeypatch):
-    _patch_cfg(monkeypatch)
-    # 0.7 trigger: strictly above the fraction fires.
-    assert comp.should_compact(69_999, 100_000) is False
-    assert comp.should_compact(70_000, 100_000) is False
-    assert comp.should_compact(70_001, 100_000) is True
-    assert comp.should_compact(None, 100_000) is False  # nothing measured yet
-    assert comp.should_compact(70_001, 0) is False  # unknown window
-    _patch_cfg(monkeypatch, enabled=False)
-    assert comp.should_compact(999_999, 100_000) is False
-
-
 async def test_should_compact_absolute_threshold(monkeypatch):
-    """trigger_tokens caps the trigger at an absolute size but never
-    RAISES it past the window fraction (small-window protection)."""
-    # 250k absolute on a 1M-window model: fires at 250k, not 700k.
+    """Pure absolute threshold: fires strictly above trigger_tokens,
+    regardless of how large the window is."""
     _patch_cfg(monkeypatch, trigger_tokens=250_000)
+    # 250k threshold on a 1M-window model: fires at 250k, not 700k.
     assert comp.should_compact(250_000, 1_000_000) is False
     assert comp.should_compact(250_001, 1_000_000) is True
-    # 250k absolute on a 200k-window model: the fraction (140k) still wins.
-    assert comp.should_compact(140_000, 200_000) is False
-    assert comp.should_compact(140_001, 200_000) is True
-    # 0 = legacy fraction-only behavior.
+    # Same threshold on a small 200k window: still the absolute value —
+    # no fraction-of-window component.
+    assert comp.should_compact(250_000, 200_000) is False
+    assert comp.should_compact(250_001, 200_000) is True
+    # 0 = never fires (no threshold configured).
     _patch_cfg(monkeypatch, trigger_tokens=0)
-    assert comp.should_compact(250_001, 1_000_000) is False
-    assert comp.should_compact(700_001, 1_000_000) is True
+    assert comp.should_compact(700_001, 1_000_000) is False
+    # Guards: nothing measured, or unknown window.
+    _patch_cfg(monkeypatch, trigger_tokens=250_000)
+    assert comp.should_compact(None, 1_000_000) is False
+    assert comp.should_compact(250_001, 0) is False
+    _patch_cfg(monkeypatch, enabled=False)
+    assert comp.should_compact(999_999, 1_000_000) is False
 
 
 def test_find_cut_index_respects_user_boundary():
@@ -271,7 +264,7 @@ async def test_legacy_compaction_summary_is_replayed_without_system_row():
 async def test_compact_history_for_context_end_to_end(monkeypatch):
     """Trigger fires -> prefix folded -> event payload -> next pass no-ops
     (context_tokens is NULL until a fresh measurement lands)."""
-    _patch_cfg(monkeypatch, default_window=8_000, keep_recent_messages=4)
+    _patch_cfg(monkeypatch, default_window=8_000, keep_recent_messages=4, trigger_tokens=5_600)
 
     async def fake_resolve_window(model, cfg=None):
         return 8_000
@@ -282,7 +275,7 @@ async def test_compact_history_for_context_end_to_end(monkeypatch):
     for m in _make_history():
         await db.add_message(cid, m["role"], m["content"])
     # The provider's last measurement: ~14k chars of history + overhead
-    # crosses 0.7 * 8_000 = 5_600 tokens.
+    # crosses the 5_600-token absolute trigger.
     await db.set_conversation_usage(cid, 6_000, "test-model")
 
     result = await comp.compact_history_for_context(cid, model_id="test-model")
@@ -304,7 +297,7 @@ async def test_compact_history_for_context_end_to_end(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_repeated_compaction_carries_previous_summary(monkeypatch):
-    _patch_cfg(monkeypatch, default_window=8_000, keep_recent_messages=4)
+    _patch_cfg(monkeypatch, default_window=8_000, keep_recent_messages=4, trigger_tokens=5_600)
 
     async def fake_resolve_window(model, cfg=None):
         return 8_000
@@ -346,7 +339,7 @@ async def test_loop_runs_compaction_before_history(monkeypatch, tmp_path):
     call is rebuilt on the compacted history."""
     from backend.agent import loop
 
-    _patch_cfg(monkeypatch, default_window=8_000, keep_recent_messages=4)
+    _patch_cfg(monkeypatch, default_window=8_000, keep_recent_messages=4, trigger_tokens=5_600)
 
     async def fake_resolve_window(model, cfg=None):
         return 8_000

@@ -1,9 +1,9 @@
 /** Per-provider "Agent & context" editor, shown inside the expanded
- *  provider row on the Providers tab. Max steps are per provider; context
- *  window and history compaction are per provider+model (model chosen
- *  from the provider's catalog, not typed). The context-window field is
- *  pre-filled with the model's detected default; the compaction trigger
- *  pre-fills with the shipped 300k default. */
+ *  provider row on the Providers tab. Max steps are per provider; history
+ *  compaction is per provider+model (model chosen from the provider's
+ *  catalog or added by hand). The context window is NOT a setting: the
+ *  detected value (provider report -> built-in table) shows read-only as
+ *  the reference for the context gauge. */
 
 import type React from 'react'
 import { useState } from 'react'
@@ -20,12 +20,8 @@ interface AgentCtxPerProviderProps {
   currentModel: string
   maxSteps: number | ''
   onMaxSteps: (v: number | '') => void
-  /** Context window draft (tokens) for the selected model. */
-  ctxDraft: number | ''
-  onCtxDraft: (v: number | '') => void
-  /** Detected (unoverridden) window for the selected model, or null. */
+  /** Detected (auto-resolved) window for the selected model, or null. */
   ctxAuto: number | null
-  ctxSaved: number | undefined
   /** Compaction drafts. */
   compEnabled: boolean | undefined
   onCompEnabled: (v: boolean) => void
@@ -49,10 +45,7 @@ export function AgentContextPerProvider({
   currentModel,
   maxSteps,
   onMaxSteps,
-  ctxDraft,
-  onCtxDraft,
   ctxAuto,
-  ctxSaved,
   compEnabled,
   onCompEnabled,
   compK,
@@ -104,7 +97,8 @@ export function AgentContextPerProvider({
         </p>
       </div>
 
-      {/* Context window override: per provider+model, dropdown selection */}
+      {/* History compaction: per provider+model, 300k default. The context
+          window is detected, not set — it only clamps the trigger. */}
       <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
         <label className="mb-1 block text-[10px] text-zinc-500">Model</label>
         <select
@@ -172,36 +166,16 @@ export function AgentContextPerProvider({
           </button>
         )}
 
-        <label className="mb-1 mt-2.5 block text-[10px] text-zinc-500">Context window override</label>
-        <p className="mb-1.5 text-[10px] text-zinc-600">
-          Tokens for this model — wins over the detected value (powers the context readout in the chat panel).
+        {/* Detected context window: read-only reference for the gauge and
+            the % readout — never a user setting. The compaction trigger
+            below is a pure token value. */}
+        <p className="mt-1.5 font-mono text-[10px] text-zinc-600">
+          {ctxAuto != null
+            ? `context window (detected): ${ctxAuto.toLocaleString()} tokens`
+            : 'context window: not detected — no % readout for this model'}
         </p>
-        <div className="flex gap-1.5">
-          <input
-            type="number"
-            min="0"
-            placeholder={ctxAuto ? String(ctxAuto) : 'auto'}
-            aria-label={`Context window in tokens for ${model}`}
-            className={`${inputCls} w-40 shrink-0`}
-            value={ctxDraft}
-            onChange={(e) => onCtxDraft(e.target.value === '' ? '' : Number(e.target.value))}
-          />
-          {ctxAuto != null && (
-            <span className="self-center font-mono text-[10px] text-zinc-600">
-              detected: {ctxAuto.toLocaleString()}
-            </span>
-          )}
-          {ctxSaved != null && (
-            <span className="self-center font-mono text-[10px] text-blue-400">
-              saved: {ctxSaved.toLocaleString()}
-            </span>
-          )}
-        </div>
-      </div>
 
-      {/* History compaction: per provider+model, 300k default */}
-      <div className="mt-2.5 border-t border-zinc-800 pt-2.5">
-        <label className="mb-1 block text-[10px] text-zinc-500">History compaction</label>
+        <label className="mb-1 mt-2.5 block text-[10px] text-zinc-500">History compaction</label>
         <div className="flex items-center gap-2.5">
           <button
             type="button"
@@ -233,8 +207,8 @@ export function AgentContextPerProvider({
           <span className="text-[10px] text-zinc-600">k tokens (default {compactionDefaultK}k)</span>
         </div>
         <p className="mt-1 text-[10px] text-zinc-600">
-          The trigger is the smaller of the threshold and 70% of the window, so small-window models still compact
-          before overflowing. Blank restores the {compactionDefaultK}k default.
+          The trigger is a plain token value: compaction fires once the prompt
+          passes it. Blank restores the {compactionDefaultK}k default.
         </p>
       </div>
     </div>
