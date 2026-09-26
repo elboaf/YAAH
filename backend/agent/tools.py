@@ -354,6 +354,17 @@ HELP_DOCS: dict = {
         "force-push. Main-target pushes require a clean primary checkout, "
         "a non-agent branch, and a configured upstream."
     ),
+    "git_merge_back": (
+        "Integrates completed requested work into the main workspace. "
+        "Omit branch to merge the current session's own branch - your "
+        "context's Workspace integration note names it, and that is the "
+        "only branch you should pass by name. A prefix like agent/352 "
+        "resolves only when exactly one agent/* branch matches; anything "
+        "ambiguous is refused, never guessed. The result carries "
+        "session_branch (what this session owns) so a follow-up merge "
+        "needs no reconstruction. A refusal is not a failed merge you "
+        "cannot recover from: read the reason, fix the cause, call again."
+    ),
     "git_pull": (
         "Fetches and integrates remote changes; specify target=current or "
         "target=main. Use main only when the user explicitly asks to update "
@@ -756,15 +767,26 @@ TOOLS_SCHEMA += [
             "name": "git_merge_back",
             "description": (
                 "Merge an agent worktree branch into the main workspace. "
-                "Refuses and reports when the branch has no new commits, "
-                "uncommitted target-workspace changes overlap files the merge "
-                "would update, or a conflict occurs. Conflicts are aborted; "
-                "user work is never stashed or overwritten."
+                "Omit branch to merge the current session's own branch (the "
+                "usual case); a branch prefix resolves when exactly one "
+                "agent/* branch matches. Refuses and reports when the branch "
+                "has no new commits, uncommitted target-workspace changes "
+                "overlap files the merge would update, or a conflict occurs. "
+                "Conflicts are aborted; user work is never stashed or "
+                "overwritten."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"branch": {"type": "string"}},
-                "required": ["branch"],
+                "properties": {
+                    "branch": {
+                        "type": "string",
+                        "description": (
+                            "The session's exact agent/* branch name from "
+                            "context, a unique prefix, or omitted for the "
+                            "current session's branch"
+                        ),
+                    },
+                },
             },
         },
     },
@@ -1475,19 +1497,30 @@ async def git_commit(workspace: str, message: str) -> dict:
     return await _git(workspace, "commit", "-m", message)
 
 
-async def git_merge_back(workspace: str, branch: str) -> dict:
-    """Integrate an `agent/*` branch into the primary workspace. Full
-    refusal rules live in worktrees.merge_back: no new commits, overlapping
-    uncommitted changes, and conflicts are reported without stashing or
-    overwriting user work."""
+async def git_merge_back(workspace: str, branch: str = "") -> dict:
+    """Integrate an `agent/*` branch into the primary workspace. An empty
+    branch means the calling session's own branch (issue #103: the
+    integration step needs no reconstructed name); a prefix resolves when
+    exactly one agent/* branch matches. Full refusal rules live in
+    worktrees.merge_back: no new commits, overlapping uncommitted changes,
+    and conflicts are reported without stashing or overwriting user work."""
     from backend.agent import worktrees as wt
 
-    if not branch.strip():
-        return {"error": "merge branch is empty"}
     root = wt.worktree_of(workspace) or workspace
     real = await wt.main_repo_root(root)
     if real is None:
         real = workspace_root(workspace)
+    if not branch.strip():
+        session = wt.live_session_branch(real)
+        if session:
+            branch = session
+        else:
+            return {
+                "error": (
+                    "merge branch is empty and no session worktree is bound "
+                    "to this workspace — pass the agent branch to merge"
+                )
+            }
     return await wt.merge_back(real, branch.strip())
 
 

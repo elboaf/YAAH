@@ -393,6 +393,9 @@ Guidelines:
   workspace as the user's task target. Complete requested code changes in
   the worktree, then integrate them with `git_merge_back` before reporting
   completion; do not ask the user to manage checkouts or merge routine work.
+  `git_merge_back` with no branch argument merges the current session's own
+  branch — prefer that; if you pass a branch at all, copy the exact
+  `agent/*` name from your context, never an abbreviation.
   Turn end itself never merges. For structured `git_status`, `git_diff`,
   `git_pull`, and `git_push`, target defaults to the current tree (the
   session worktree when bound); use `target="main"` only when the user

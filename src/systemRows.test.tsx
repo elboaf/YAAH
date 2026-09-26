@@ -256,6 +256,27 @@ describe('persisted merge-back system rows', () => {
     expect(chip!.className).not.toContain('text-red-300')
   })
 
+  it('a no-session merge-back refusal (issue #103) is a benign probe, not red', () => {
+    // The session drained; the agent re-verified with an empty branch.
+    // Nothing exists to fail - red stays reserved for work that did not
+    // reach the main tree.
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            worktree_merge: {
+              merged: false,
+              reason: 'no session worktree is bound to this workspace - pass the agent branch to merge',
+            },
+          }),
+        )}
+      />,
+    )
+    const chip = screen.getByText('git_merge_back').closest('span.inline-flex') as HTMLElement | null
+    expect(chip).toBeTruthy()
+    expect(chip!.className).not.toContain('text-red-300')
+  })
+
   it('explains that committed work is not yet integrated without asking the user to manage branches', () => {
     render(
       <MessageView
