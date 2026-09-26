@@ -43,12 +43,12 @@ async def test_bash_streams_chunks_live(tmp_path):
 async def test_bash_stream_timeout_kills_tree(tmp_path):
     """The incremental read loop must enforce the deadline and kill the
     tree just like the old communicate() path did."""
-    import sys
-
-    if sys.platform == "win32":
-        command = 'start /b ping -n 30 127.0.0.1 >nul'
-    else:
-        command = "sleep 30 &"
+    # run_bash executes commands through Git Bash on Windows (msys2), so the
+    # POSIX backgrounding form is the portable shape. cmd's `start /b` must
+    # NOT be used here: msys2 path-converts the single-slash argument to a
+    # drive path (B:\), popping a "B:\ cannot be found" dialog, and the
+    # detached cmd child escapes the kill-on-terminate Job Object anyway.
+    command = "sleep 30 &"
     chunks: list[str] = []
     r = await asyncio.wait_for(
         execute_tool(
@@ -80,12 +80,10 @@ async def test_bash_timeout_kills_backgrounded_child(tmp_path):
     """A backgrounded child inherits the output pipe; the timeout path must
     kill the whole tree or run_bash hangs in the post-kill communicate()
     (and leaks an orphan server)."""
-    import sys
-
-    if sys.platform == "win32":
-        command = 'start /b ping -n 30 127.0.0.1 >nul'
-    else:
-        command = "sleep 30 &"
+    # Same shape as test_bash_stream_timeout_kills_tree: Git Bash runs the
+    # command on Windows too, so `start /b` (msys2 converts `/b` to a drive
+    # path) and the detached child it spawns are both wrong here.
+    command = "sleep 30 &"
     r = await asyncio.wait_for(
         execute_tool("bash", {"command": command, "timeout_seconds": 2}, str(tmp_path)),
         timeout=15,
