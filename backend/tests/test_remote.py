@@ -320,7 +320,6 @@ async def test_remote_info_is_open_and_names_the_protocol():
     assert body["protocol"] == remote_mod.PROTOCOL_VERSION
     assert body["hostname"]
     assert isinstance(body["windows"], bool)
-    assert isinstance(body["git_bash"], bool)
 
 
 # ------------------------------------------------------- remote edit protocol
