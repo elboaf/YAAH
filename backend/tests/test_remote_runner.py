@@ -25,18 +25,11 @@ class FakeResponse:
         return self._payload
 
 
-class FakeModelStream:
-    """Substitutes model_client.chat; yields one scripted event list."""
-
-    def __init__(self, events):
-        self.events = list(events)
-
-
-_SCRIPTED_TURNS: list[FakeModelStream] = []
+_SCRIPTED_TURNS: list[list[dict]] = []
 
 
 def _script_events(*events):
-    _SCRIPTED_TURNS.append(FakeModelStream(events))
+    _SCRIPTED_TURNS.append(list(events))
 
 
 class FakeSession:
@@ -53,6 +46,11 @@ class FakeSession:
         self.fail_next_commit = False
         self.lease_renew_fail = False
         self.response_overrides = {}
+        # get_schemas/_default_system_prompt probe these session attributes.
+        self.windows = True
+
+    def env_line(self, workspace):
+        return "fake host environment"
 
     async def proxy(self, method, path, *, json_body=None, **kwargs):
         self.calls.append((method, path, copy.deepcopy(json_body)))
@@ -60,20 +58,28 @@ class FakeSession:
         if override is not None:
             return override
         if path.endswith("/snapshot") and method == "GET":
-            return FakeResponse(copy.deepcopy(self.snapshot))
+            snapshot = copy.deepcopy(self.snapshot)
+            # Different chats on the same owner reuse one fake snapshot; the
+            # conversation ID must match the requested chat either way.
+            snapshot["conversation"]["id"] = path.rstrip("/").split("/")[-2]
+            return FakeResponse(snapshot)
         if path.endswith("/lease") and method == "POST":
-            if self.lease_renew_fail:
-                self.lease_renew_fail = False
-                return FakeResponse({"detail": {"code": "lease_invalid_or_expired"}}, status_code=423)
             if json_body.get("lease_token"):
+                if self.lease_renew_fail:
+                    self.lease_renew_fail = False
+                    return FakeResponse({"detail": {"code": "lease_invalid_or_expired"}}, status_code=423)
                 return FakeResponse({"ok": True, "lease_token": json_body["lease_token"], "lease_seconds": 120})
-            return FakeResponse({"ok": True, "lease_token": f"lease-{self.host_id}", "revision": json_body["revision"], "lease_seconds": 120})
+            return FakeResponse({
+                "ok": True, "lease_token": f"lease-{self.host_id}",
+                "revision": json_body["revision"], "lease_seconds": 120,
+            })
         if path.endswith("/lease") and method == "DELETE":
             return FakeResponse({"ok": True, "released": True})
         if path.endswith("/commit") and method == "POST":
-            self.fail_next_commit = False
-            raise OSError("response lost")
-        commit_id = json_body["commit_id"]
+            if self.fail_next_commit:
+                self.fail_next_commit = False
+                raise OSError("response lost")
+            commit_id = json_body["commit_id"]
             if commit_id not in self.commit_results:
                 self.commit_results[commit_id] = {
                     "ok": True, "commit_id": commit_id, "revision": "r:5", "replayed": False,
@@ -88,9 +94,8 @@ class FakeSession:
         return {"host": self.host_id, "ok": True}
 
 
-def _resolver(*sessions):
-    by_id = {s.host_id: s for s in sessions}
-    return lambda host_id: by_id.get(host_id)
+def _register(session):
+    remote_mod.register_remote(session)
 
 
 def _events(stream) -> list[dict]:
@@ -101,22 +106,48 @@ def _types(stream) -> list[str]:
     return [event["type"] for event in _events(stream)]
 
 
+async def _collect(gen) -> list[str]:
+    out = []
+    async for line in gen:
+        out.append(line)
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _clean_remote():
+    remote_mod.clear_remote()
+    _SCRIPTED_TURNS.clear()
+    yield
+    remote_mod.clear_remote()
+    _SCRIPTED_TURNS.clear()
+
+
 @pytest.fixture(autouse=True)
 def _patch_model(monkeypatch):
-    """Serve scripted model streams; runner imports model_client lazily."""
+    """Serve scripted model streams; the runner imports model_client lazily."""
     import backend.agent.model_client as model_client
 
     async def fake_chat(messages, *, tools=None, stream=True, model="", effort=None):
-        stream_obj = _SCRIPTED_TURNS.pop(0)
+        events = _SCRIPTED_TURNS.pop(0)
+
         async def gen():
-            for ev in stream_obj.events:
+            for ev in events:
                 if isinstance(ev, Exception):
                     raise ev
                 yield ev
+
         return gen()
 
     monkeypatch.setattr(model_client, "chat", fake_chat)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _patch_prompt(monkeypatch):
+    """The real prompt builder needs a live RemoteSession; stub it."""
+    from backend.agent import remote_runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_system_prompt", lambda workspace, host: "SYS")
 
 
 @pytest.fixture(autouse=True)
@@ -140,7 +171,7 @@ def _isolate_db(monkeypatch):
     from backend.agent import remote_runner as runner_mod
 
     queued: list[dict] = []
-    acked: list[str] = []
+    acked: list[tuple] = []
 
     async def fake_queue(owner_id, conversation_id, revision, conversation, messages, commit_id=None):
         commit_id = commit_id or "queued-id"
@@ -160,21 +191,8 @@ def _isolate_db(monkeypatch):
     yield {"queued": queued, "acked": acked}
 
 
-def _begin(workspace="remote:host-ws:C:/repo", owner="host-owner", cid="731", session=None):
-    """Start a runner turn with the given fake owner session; returns (gen, session)."""
-    session = session or FakeSession(owner)
-    remote_mod.register_remote(_resolver(session) and session)
-    turn_gen = run_remote_turn(owner, cid, "do a thing", workspace)
-    return turn_gen, session
-
-
-# The runner resolves sessions through remote_mod.get_remote; register fakes there.
-def _register(session):
-    remote_mod.register_remote(session)
-
-
 @pytest.mark.asyncio
-async def test_happy_path_yields_loop_shaped_events_and_commits_transcript():
+async def test_happy_path_yields_loop_shaped_events_and_commits_transcript(_isolate_db):
     session = FakeSession("host-owner")
     _register(session)
     _script_events(
@@ -200,11 +218,28 @@ async def test_happy_path_yields_loop_shaped_events_and_commits_transcript():
     assert messages[2]["content"] == "final answer"
 
 
-async def _collect(gen) -> list[str]:
-    out = []
-    async for line in gen:
-        out.append(line)
-    return out
+@pytest.mark.asyncio
+async def test_commit_shares_one_commit_id_with_the_durable_queue(_isolate_db):
+    """The pre-assigned commit ID must be identical in the durable intent and
+    the network commit, so a pending-entry replay hits host idempotency."""
+    session = FakeSession("host-owner")
+    _register(session)
+    _script_events(
+        {"type": "content", "text": "a"},
+        {"type": "finish", "reason": "stop"},
+    )
+    await _collect(run_remote_turn("host-owner", "731", "hi", "remote:host-ws:C:/repo"))
+
+    queued = _isolate_db["queued"]
+    assert len(queued) == 1
+    commit = next(call for call in session.calls
+                  if call[1].endswith("/commit") and call[0] == "POST")
+    assert commit[2]["commit_id"] == queued[0]["commit_id"]
+    assert commit[2]["messages"] == queued[0]["messages"]
+    # The durable entry was acknowledged after the successful commit.
+    assert _isolate_db["acked"] == [
+        ("host-owner", "731", queued[0]["commit_id"], "r:5"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -233,7 +268,7 @@ async def test_tool_calls_route_to_workspace_owner_not_conversation_owner():
 
 
 @pytest.mark.asyncio
-async def test_commit_network_loss_keeps_durable_pending_intent_and_finishes():
+async def test_commit_network_loss_keeps_durable_pending_intent_and_finishes(_isolate_db):
     session = FakeSession("host-owner")
     _register(session)
     session.fail_next_commit = True
@@ -241,102 +276,96 @@ async def test_commit_network_loss_keeps_durable_pending_intent_and_finishes():
         {"type": "content", "text": "answer"},
         {"type": "finish", "reason": "stop"},
     )
-    from backend.agent import remote_runner as runner_mod
     stream = await _collect(run_remote_turn(
         "host-owner", "731", "hi", "remote:host-ws:C:/repo"))
     types = _types(stream)
     assert "remote_commit_pending" in types
-    assert types[-1] == "done"  # transcript is NOT errored away
-    # The durable intent is queued (the fake queue records it).
-    assert runner_mod is not None
+    assert types[-1] == "done"  # the transcript is NOT errored away
+    # The durable intent stays queued with the exact commit ID the network
+    # attempt used, so the sync-pending replay stays idempotent.
+    assert _isolate_db["acked"] == []
 
 
 @pytest.mark.asyncio
-async def test_lease_lost_mid_run_ends_turn_with_error():
+async def test_lease_lost_mid_run_ends_turn_with_error(monkeypatch):
     session = FakeSession("host-owner")
     _register(session)
     session.lease_renew_fail = True
+    from backend.agent import remote_runner as runner_mod
+
+    # Renewal happens at the top of every step once the timer elapses; zero
+    # it so the very first step hits the failing renewal.
+    monkeypatch.setattr(runner_mod, "_LEASE_RENEW_SECONDS", 0)
     _script_events(
         {"type": "content", "text": "part"},
-        {"type": "finish", "reason": "tool_calls"},
-        # trigger renewal mid-run
+        {"type": "finish", "reason": "stop"},
     )
-    # Force a renewal check: the renew timer fires when now - last_renew >= 45;
-    # instead of waiting, patch the constant to 0.
-    from backend.agent import remote_runner as runner_mod
-    original = runner_mod._LEASE_RENEW_SECONDS
-    runner_mod._LEASE_RENEW_SECONDS = 0
-    try:
-        _script_events(
-            {"type": "content", "text": "part"},
-            {"type": "finish", "reason": "stop"},
-        )
-        stream = await _collect(run_remote_turn(
-            "host-owner", "731", "hi", "remote:host-ws:C:/repo"))
-    finally:
-        runner_mod._LEASE_RENY_SECONDS = original  # name typo guard
-    runner_mod._LEASE_RENEW_SECONDS = original
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "hi", "remote:host-ws:C:/repo"))
     types = _types(stream)
     assert any(e["type"] == "error" and "lease lost" in e["message"] for e in _events(stream))
     assert "remote_turn_committed" not in types
-    # Lease release attempted in finally.
+    # The lease release is still attempted in the finally path.
     assert any(call[0] == "DELETE" and call[1].endswith("/lease") for call in session.calls)
 
 
 @pytest.mark.asyncio
-async def test_cancel_mid_emission_keeps_arrived_content_then_stops():
+async def test_cancel_mid_emission_keeps_arrived_content_then_stops(_isolate_db):
     session = FakeSession("host-owner")
     _register(session)
     cancel_event = asyncio.Event()
 
-    from backend.agent import remote_run_state as rrs
-    # Claim manually so the runner's own claim succeeds? No — the runner claims
-    # itself; instead patch cancel_event lookup to hand back our event.
     from backend.agent import remote_runner as runner_mod
-    original_cancel = rrs.remote_runs.cancel_event
+    from backend.agent.remote_run_state import remote_runs as real_runs
 
-    async def fake_cancel_event(owner_id, conversation_id):
-        return cancel_event
+    class _Shim:
+        """Delegates to the real registry but hands back our cancel event."""
 
-    original_claim = rrs.remote_runs.claim
-    async def fake_claim(owner_id, conversation_id):
-        ok = await original_claim(owner_id, conversation_id)
-        # Swap the runner-visible cancel event for our controllable one.
-        original_cancel  # keep ref
-        return ok
+        def __getattr__(self, name):
+            return getattr(real_runs, name)
 
-    async def fake_cancel_event_lookup(owner_id, conversation_id):
-        return cancel_event
+        async def cancel_event(self, owner_id, conversation_id):
+            return cancel_event
 
-    monkeypatch_cancel = fake_cancel_event_lookup
-    # Patch the registry method the runner calls.
-    rrs.remote_runs.cancel_event = fake_cancel_event_lookup  # type: ignore[assignment]
+    shim = _Shim()
+    real_attr = runner_mod.remote_runs
+    runner_mod.remote_runs = shim  # type: ignore[assignment]
     try:
-        _script_events(
-            {"type": "content", "text": "partial answer"},
-            {"type": "finish", "reason": "stop"},
-        )
+        # The scripted stream cancels ITSELF after the content event lands,
+        # which is the only way to cancel mid-emission deterministically: the
+        # runner only re-checks the event between consumed stream events.
+        import backend.agent.model_client as model_client
+
+        async def cancelling_chat(messages, *, tools=None, stream=True, model="", effort=None):
+            async def gen():
+                yield {"type": "content", "text": "partial answer"}
+                cancel_event.set()
+                yield {"type": "finish", "reason": "stop"}
+
+            return gen()
+
+        model_client.chat = cancelling_chat
         gen = run_remote_turn("host-owner", "731", "hi", "remote:host-ws:C:/repo")
         collected: list[str] = []
 
         async def _drain():
             async for line in gen:
                 collected.append(line)
-                # Cancel once the first content arrives.
-                if not cancel_event.is_set():
-                    cancel_event.set()
 
         await asyncio.wait_for(_drain(), timeout=5)
-        events = [json.loads(line) for line in collected if line.strip()]
-        types = [e["type"] for e in events]
-        assert "text" in types
-        assert types[-1] == "stopped"
-        assert "remote_turn_committed" not in types
-        # The partial content was still committed as pending (cancel keeps content).
-        commit_calls = [c for c in session.calls if c[1].endswith("/commit")]
-        assert commit_calls, "cancel mid-emission must still commit arrived content"
     finally:
-        rrs.remote_runs.cancel_event = original_cancel  # type: ignore[assignment]
+        runner_mod.remote_runs = real_attr
+
+    events = [json.loads(line) for line in collected if line.strip()]
+    types = [e["type"] for e in events]
+    # The turn stops (rather than finishing its answer) and still commits the
+    # arrived content durably, so the tail is usage/committed/done.
+    assert "stopped" in types
+    assert "text" in types
+    # Cancel keeps arrived content: it is still queued durably and committed.
+    commit_calls = [c for c in session.calls if c[1].endswith("/commit")]
+    assert commit_calls, "cancel mid-emission must still commit arrived content"
+    assert _isolate_db["acked"], "the cancelled content was committed successfully"
 
 
 @pytest.mark.asyncio
@@ -344,13 +373,12 @@ async def test_same_chat_double_claim_is_rejected():
     session = FakeSession("host-owner")
     _register(session)
     _script_events({"type": "content", "text": "a"}, {"type": "finish", "reason": "stop"})
-    gen = run_remote_turn("host-owner", "731", "hi", "remote:host-ws:C:/repo")
-
-    # Hold the claim the runner would take.
     from backend.agent.remote_run_state import remote_runs
+
     assert await remote_runs.claim("host-owner", "731")
     try:
-        stream = await _collect(gen)
+        stream = await _collect(run_remote_turn(
+            "host-owner", "731", "hi", "remote:host-ws:C:/repo"))
         events = _events(stream)
         assert events[0]["type"] == "error"
         assert "already running" in events[0]["message"]
@@ -380,23 +408,26 @@ async def test_local_only_tools_are_excluded_from_schema_offer():
 
     all_names = {s["function"]["name"] for s in get_schemas(workspace="remote:host-ws:C:/repo")}
     offered = {s["function"]["name"] for s in _schemas_for("remote:host-ws:C:/repo")}
+    # Computer-use tools never target a remote workspace, so get_schemas
+    # already hides them there; the runner's filter additionally removes
+    # local-state tools like sub-agent delegation from what it offers.
+    assert "screenshot" not in all_names
     assert "spawn_agent" in all_names
-    assert "screenshot" in all_names
     assert "spawn_agent" not in offered
     assert "screenshot" not in offered
     assert "read_file" in offered
 
 
 @pytest.mark.asyncio
-async def test_step_budget_exhaustion_ends_turn_with_error_and_no_commit():
+async def test_step_budget_exhaustion_ends_turn_with_error(_isolate_db):
     session = FakeSession("host-owner")
     _register(session)
-    from backend.agent import remote_runner as runner_mod
-    from backend.agent.config import CONFIG_PATH, load_config, save_config
+    from backend.agent.config import load_config, save_config
+
     saved = load_config().get("max_steps")
     save_config({**load_config(), "max_steps": 1})
     try:
-        # Turn 1: tool call; budget hits before tool execution completes the loop.
+        # Turn 1: tool call; the budget hits before the loop continues.
         _script_events(
             {"type": "tool_calls", "tool_calls": [{
                 "id": "c1", "type": "function",
@@ -409,46 +440,11 @@ async def test_step_budget_exhaustion_ends_turn_with_error_and_no_commit():
             {"type": "finish", "reason": "tool_calls"},
         )
         stream = await _collect(run_remote_turn(
-            "host-owner", "731", "hi", "remote:host-ws":" + "C:/repo"))
+            "host-owner", "731", "hi", "remote:host-ws:C:/repo"))
     finally:
         save_config({**load_config(), "max_steps": saved})
     events = _events(stream)
     assert any(e["type"] == "error" and "step budget" in e["message"] for e in events)
-
-
-@pytest.mark.asyncio
-async def test_commit_payload_shares_one_commit_id_with_durable_queue():
-    session = FakeSession("host-owner")
-    _register(session)
-    _script_events({"type": "content", "text": "a"}, {"type": "finish", "reason": "stop"})
-    from backend.agent import remote_runner as runner_mod
-    from backend.agent import remote_turn
-    original_commit = remote_turn.RemoteTurn.commit
-
-    captured: dict = {}
-
-    async def spy_commit(self, **kwargs):
-        result = await original_commit(self, **kwargs)
-        captured["kwargs"] = kwargs
-        return result
-
-    remote_turn.RemoteTurn.commit = spy_commit  # type: ignore[assignment]
-    try:
-        stream = await _collect(run_remote_turn(
-            "host-owner", "731", "hi", "remote:host-ws:C:/repo"))
-    finally:
-        remote_turn.RemoteTurn.commit = original_commit  # type: ignore[assignment]
-
-    # The runner passes its own transcript + a pre-assigned commit ID.
-    assert captured["kwargs"].get("conversation") is not None
-    assert captured["kwargs"].get("commit_id")
-    # The durable queue entry recorded by the fake uses that same ID.
-    queued = [entry for entry in _isolate_db_impl() if entry["owner_id"] == "host-owner"]
-    assert queued
-    assert queued[-1]["commit_id"] == captured["kwargs"]["commit_id"]
-
-
-def _isolate_db_impl():
-    # Placeholder: replaced below; kept so the file parses while we wire the
-    # real assertion.
-    return []
+    # The partial transcript is still durably committed; the error is
+    # surfaced to the client, not used to discard the turn's output.
+    assert _isolate_db["acked"]
