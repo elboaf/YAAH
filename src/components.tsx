@@ -4257,29 +4257,29 @@ export function Sidebar() {
   return (
     <>
       <aside className="flex w-64 min-w-[220px] flex-col border-r border-zinc-800 bg-zinc-900 p-2 text-sm">
-        <div className="mb-2 flex items-center gap-1.5">
-          <button
-            className="min-w-0 flex-1 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500"
-            onClick={() => {
-              newConversation()
-              clearLog()
-            }}
-          >
-            New chat
-          </button>
-          <button
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-dashed border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-            aria-label="Add local workspace"
-            title="Add local workspace…"
-            onClick={() => void browseWorkspace()}
-          >
-            <FolderPlusIcon />
-          </button>
-        </div>
         <ConversationList />
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}
         <div className="relative mt-auto border-t border-zinc-800 pt-2">
+          <div className="mb-1.5 flex items-center gap-1.5">
+            <button
+              className="min-w-0 flex-1 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500"
+              onClick={() => {
+                newConversation()
+                clearLog()
+              }}
+            >
+              New chat
+            </button>
+            <button
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-dashed border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+              aria-label="Add local workspace"
+              title="Add local workspace…"
+              onClick={() => void browseWorkspace()}
+            >
+              <FolderPlusIcon />
+            </button>
+          </div>
           <div className="flex items-center gap-1.5">
             <select
               id="default-model"
