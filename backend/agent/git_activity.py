@@ -212,7 +212,16 @@ class GitActivity:
         elif tool == "git_push" and outcome != "succeeded":
             detail = _clean_detail((result or {}).get("error"))
         elif tool == "git_merge_back":
-            source_branch = str((result or {}).get("branch") or args.get("branch") or "")
+            # The harness-resolved branch (result.branch, or the session's
+            # own branch when the call omitted the argument), never the
+            # model-supplied string alone (#103): the lane must name the
+            # branch that actually merged.
+            source_branch = str(
+                (result or {}).get("branch")
+                or (result or {}).get("session_branch")
+                or args.get("branch")
+                or ""
+            )
             target_branch = str((result or {}).get("target_branch") or "")
             branch = await _branch(workspace)
             detail = _clean_detail((result or {}).get("reason") or (result or {}).get("error") or (result or {}).get("note"))

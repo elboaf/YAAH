@@ -988,6 +988,159 @@ def test_git_status_rejects_unknown_target(repo: Path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Issue #103: agents guess abbreviated branch names and misreport the
+# refusal as a failed merge. merge_back resolves a unique agent/* prefix,
+# accepts an empty branch as "this session", and its refusal names the
+# session's actual branch so the next call can recover.
+# ---------------------------------------------------------------------------
+
+
+async def test_merge_back_resolves_unique_branch_prefix(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="103")
+    info = worktrees.binding_for("103")
+    (Path(wt) / "f.txt").write_text("x" + chr(10), encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "work")
+    prefix = info["branch"].rsplit("/", 1)[0]  # agent/<chat>
+    assert prefix != info["branch"]
+    result = await worktrees.merge_back(repo, prefix)
+    assert result["merged"] is True
+    assert result["branch"] == info["branch"]
+
+
+async def test_merge_back_prefix_ambiguity_refused_not_guessed(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="103a")
+    info_a = worktrees.binding_for("103a")
+    # A second session in the same repo sharing the chat-id prefix.
+    wt2 = await worktrees.ensure_isolated(str(repo), chat_id="103b")
+    info_b = worktrees.binding_for("103b")
+    # The over-short prefix "agent" is a path-component glob matching BOTH
+    # sessions' branches - genuinely ambiguous.
+    assert info_a["branch"].startswith("agent/")
+    assert info_b["branch"].startswith("agent/")
+    for wt_p in (wt, wt2):
+        (Path(wt_p) / "f.txt").write_text("x" + chr(10), encoding="utf-8")
+        _git(Path(wt_p), "add", "-A")
+        _git(Path(wt_p), "commit", "-q", "-m", "work")
+    result = await worktrees.merge_back(repo, "agent")
+    assert result["merged"] is False
+    assert "does not exist" in result["reason"]
+    # the session's real branch is named so the next call can recover
+    assert info_a["branch"] in result["reason"]
+    # ...and the recovery call with the exact name works.
+    ok = await worktrees.merge_back(repo, info_a["branch"])
+    assert ok["merged"] is True
+
+
+async def test_merge_back_empty_branch_means_this_session(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="103c")
+    info = worktrees.binding_for("103c")
+    (Path(wt) / "f.txt").write_text("x" + chr(10), encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "work")
+    result = await worktrees.merge_back(repo, "")
+    assert result["merged"] is True
+    assert result["branch"] == info["branch"]
+
+
+async def test_merge_back_no_session_branch_named(repo: Path):
+    result = await worktrees.merge_back(repo, "")
+    assert result["merged"] is False
+    assert "no session worktree is bound" in result["reason"]
+
+
+async def test_live_session_branch_tracks_the_bound_root(repo: Path):
+    assert worktrees.live_session_branch(repo) == ""
+    await worktrees.ensure_isolated(str(repo), chat_id="103d")
+    info = worktrees.binding_for("103d")
+    assert worktrees.live_session_branch(repo) == info["branch"]
+
+
+async def test_merge_back_unknown_branch_names_session_branch(repo: Path):
+    await worktrees.ensure_isolated(str(repo), chat_id="103e")
+    info = worktrees.binding_for("103e")
+    result = await worktrees.merge_back(repo, "agent/does-not-exist")
+    assert result["merged"] is False
+    assert info["branch"] in result["reason"]
+    assert "pass it verbatim" in result["reason"]
+
+
+async def test_merge_back_success_carries_session_branch(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="103f")
+    info = worktrees.binding_for("103f")
+    (Path(wt) / "f.txt").write_text("x" + chr(10), encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "work")
+    result = await worktrees.merge_back(repo, info["branch"])
+    assert result["merged"] is True
+    assert result["session_branch"] == info["branch"]
+
+
+async def test_resolve_session_branch_unit_cases(repo: Path):
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="103g")
+    info = worktrees.binding_for("103g")
+    (Path(wt) / "f.txt").write_text("x" + chr(10), encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "work")
+    full = info["branch"]
+    # exact name passes through even without resolution
+    assert await worktrees.resolve_session_branch(repo, full) == full
+    # unique prefix resolves
+    assert await worktrees.resolve_session_branch(repo, full.rsplit("/", 1)[0]) == full
+    # non-agent branches are out of scope
+    assert await worktrees.resolve_session_branch(repo, "master") is None
+    assert await worktrees.resolve_session_branch(repo, "agent") is None
+    assert await worktrees.resolve_session_branch(repo, "") is None
+# ---------------------------------------------------------------------------
+# Issue #103 (tool layer): git_merge_back's branch argument is optional and
+# defaults to the calling session's own branch; an empty arg with no bound
+# session refuses with a recovery hint instead of a bare "empty" error.
+# ---------------------------------------------------------------------------
+
+
+async def test_git_merge_back_defaults_to_session_branch(repo: Path):
+    from backend.agent import tools as tools_mod
+
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="103t")
+    info = worktrees.binding_for("103t")
+    (Path(wt) / "f.txt").write_text("x" + chr(10), encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "work")
+    result = await tools_mod.git_merge_back(wt)
+    assert result.get("merged") is True
+    assert result["branch"] == info["branch"]
+
+
+def test_git_merge_back_no_bound_session_names_it(repo: Path):
+    from backend.agent import tools as tools_mod
+
+    result = asyncio.run(tools_mod.git_merge_back(str(repo)))
+    assert "error" in result
+    assert "no session worktree is bound" in result["error"]
+
+
+def test_git_merge_back_schema_branch_is_optional():
+    from backend.agent.tools import get_schemas
+
+    schema = next(
+        s["function"] for s in get_schemas() if s["function"]["name"] == "git_merge_back"
+    )
+    assert "branch" not in schema["parameters"].get("required", [])
+    assert "current session" in schema["description"]
+
+
+def test_worktree_note_names_the_session_branch(repo: Path):
+    """The isolation note must state the exact branch string and that
+    git_merge_back takes it verbatim (issue #103 root cause)."""
+    note = worktrees._worktree_note_text(
+        str(repo / ".yaah" / "worktrees" / "c"),
+        {"branch": "agent/c/run1", "root": str(repo)},
+        str(repo),
+    )
+    assert "Your session branch is exactly `agent/c/run1`" in note
+    assert "git_merge_back" in note
+    assert "Never reconstruct or abbreviate" in note
+# ---------------------------------------------------------------------------
 # should_isolate: read-only shell commands must not mint session worktrees
 # (a plain "pull from origin" used to create an agent/<chat> branch).
 # ---------------------------------------------------------------------------

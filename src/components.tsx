@@ -737,12 +737,18 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
   const done = tc.result !== undefined
   // A refused merge-back is an error even though it's "just" a tool result:
   // the turn's work did NOT reach the main tree. Red keeps meaning failure.
-  // Exception: zero_commits means the work was already merged mid-turn —
-  // a benign no-op, not a failure.
+  // Exceptions: zero_commits means the work was already merged mid-turn —
+  // a benign no-op, not a failure. A no-session refusal (issue #103) is
+  // the probe shape — "is there anything left to integrate?" after the
+  // session drained; nothing exists to fail.
+  const r = tc.result as
+    | { merged?: unknown; zero_commits?: unknown; reason?: unknown }
+    | undefined
   const mergeFailed =
     tc.name === 'git_merge_back' &&
-    (tc.result as { merged?: unknown; zero_commits?: unknown } | undefined)?.merged === false &&
-    (tc.result as { zero_commits?: unknown } | undefined)?.zero_commits !== true
+    r?.merged === false &&
+    r?.zero_commits !== true &&
+    !/no session worktree is bound/i.test(String(r?.reason ?? ''))
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${

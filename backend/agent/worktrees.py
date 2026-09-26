@@ -1075,6 +1075,54 @@ async def _drop_session_trash(
     return dropped, insurance
 
 
+def live_session_branch(root: Path | str) -> str:
+    """The branch of the live session bound to this main tree, or "".
+
+    The merge refusal for a mistyped branch name (issue #103) carries
+    this so the model can recover on the next call instead of
+    misreporting the refusal as a failed merge. Bound session only —
+    nothing is guessed from the path shape or the ref list.
+    """
+    try:
+        root_key = Path(root).resolve()
+    except OSError:
+        root_key = Path(str(root))
+    for wt_str in _chat_bindings.values():
+        info = _active.get(wt_str)
+        if not info:
+            continue
+        try:
+            if Path(str(info.get("root", ""))).resolve() == root_key:
+                return str(info.get("branch") or "")
+        except OSError:
+            continue
+    return ""
+
+
+async def resolve_session_branch(root: Path, branch: str) -> str | None:
+    """Resolve an abbreviated `agent/*` branch name (issue #103).
+
+    An exact `agent/*` ref wins untouched. A prefix like `agent/352` —
+    the full slug is long and models abbreviate from memory — resolves
+    only when exactly ONE `agent/*` branch starts with it plus a `/`;
+    ambiguity or a miss returns None. Never a guess: merging the wrong
+    agent branch is the one failure a merge cannot undo.
+    """
+    branch = (branch or "").strip()
+    if not branch.startswith(BRANCH_PREFIX):
+        return None
+    rc, _ = await _git(root, "rev-parse", "--verify", branch)
+    if rc == 0:
+        return branch
+    rc, out = await _git(
+        root, "branch", "--list", "--format=%(refname:short)", f"{branch}/*"
+    )
+    if rc != 0:
+        return None
+    matches = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return matches[0] if len(matches) == 1 else None
+
+
 async def merge_back(root: Path, branch: str) -> dict:
     """Merge `branch` into the main tree under the merge mutex.
 
@@ -1089,13 +1137,40 @@ async def merge_back(root: Path, branch: str) -> dict:
     first classified — provably harness-generated output (provenance or
     machine shape) is dropped; authored-looking files keep the old
     refuse+salvage path via release_session.
+
+    Issue #103: `branch` may be an abbreviation (e.g. `agent/352`) and
+    resolves when exactly one `agent/*` branch matches; an empty name
+    means this session's own branch.
     """
+    branch = (branch or "").strip()
+    if not branch:
+        session = live_session_branch(root)
+        if not session:
+            return {
+                "merged": False,
+                "reason": (
+                    "no session worktree is bound to this workspace — "
+                    "pass the agent branch to merge"
+                ),
+            }
+        branch = session
     rc_head, _ = await _git(root, "rev-parse", "--verify", "HEAD")
     if rc_head != 0:
         return {"merged": False, "reason": "main tree has no commits to merge into"}
     rcv, _ = await _git(root, "rev-parse", "--verify", branch)
     if rcv != 0:
-        return {"merged": False, "reason": f"branch {branch} does not exist"}
+        resolved = await resolve_session_branch(root, branch)
+        if resolved and resolved != branch:
+            branch = resolved
+        else:
+            reason = f"branch {branch} does not exist"
+            session = live_session_branch(root)
+            if session:
+                reason += (
+                    f"; this session's branch is '{session}' — pass it verbatim"
+                    " (or omit the branch argument to merge this session)"
+                )
+            return {"merged": False, "reason": reason}
     async with merge_mutex(root):
         if (root / ".git" / "MERGE_HEAD").exists():
             return {
@@ -1162,6 +1237,7 @@ async def merge_back(root: Path, branch: str) -> dict:
         "merged": True,
         "commits": count,
         "branch": branch,
+        "session_branch": live_session_branch(root),
         "target_branch": target_branch.strip() if target_rc == 0 else "",
     }
     if dirty_note:
@@ -1309,6 +1385,10 @@ def _worktree_note_text(wt_path: str, info: dict, main_workspace: str) -> str:
         f"workspace is `{main_root}`. This is implementation plumbing: treat "
         "the main workspace as the user's task target and do not ask them to "
         "manage checkouts or branches.\n"
+        f"- Your session branch is exactly `{branch}`. `git_merge_back` takes "
+        "this exact string, or no branch argument at all to merge this "
+        "session. Never reconstruct or abbreviate the name from memory; the "
+        "main tree cannot be un-merged.\n"
         "- For requested code changes, verify proportionately, commit when "
         "needed, and integrate with `git_merge_back` before reporting complete. "
         "Turn end itself never merges. Never say work is in main until the "

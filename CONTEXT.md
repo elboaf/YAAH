@@ -56,13 +56,17 @@ not the primary branch. Never force-push.
 _Avoid_: treating `git_push` as a primary-branch push; claiming isolated work is in main
 
 **git_merge_back**:
-The agent's explicit integration step for completed requested work. It
-preserves unrelated user changes, but refuses overlapping uncommitted work
-or conflicts. Never stash or overwrite user work. If integration fails,
+The agent's explicit integration step for completed requested work. With
+no branch argument it merges the current session's own branch (the normal
+case — the agent never reconstructs a branch name); a prefix resolves only
+when exactly one `agent/*` branch matches, never guessed. It preserves
+unrelated user changes, but refuses overlapping uncommitted work or
+conflicts. Never stash or overwrite user work. If integration fails,
 classify dirty overlap, conflict, or other refusal; name affected paths;
 confirm if the merge was aborted; and offer safe options with trade-offs
 before asking how to proceed. Never claim unmerged work is in main.
-_Avoid_: asking the user to merge routine changes; papering over conflicts
+_Avoid_: asking the user to merge routine changes; papering over conflicts;
+abbreviating the session branch name from memory
 
 **Dirty overlap**:
 Uncommitted main-tree files that a merge would overwrite. The only
