@@ -585,8 +585,12 @@ async def test_pausing_mid_run_cancels_and_clears_retry(fake_model, tmp_path, mo
     sched.cancel_agent_run(conv)
     sched.clear_retry_state(agent_row["id"])
     hang.set()
-    while loop.agent_is_running(conv):
-        await asyncio.sleep(0.05)
+
+    async def wait_for_settle():
+        while (await get_agent(agent_row["id"]))["last_status"] == "running":
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(wait_for_settle(), timeout=10)
     row = await get_agent(agent_row["id"])
     assert row["last_status"] == "ok"
     assert agent_row["id"] not in sched._retry_state
