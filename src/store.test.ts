@@ -599,22 +599,21 @@ describe('steering transcript order', () => {
     useAgent.setState({ messagesByConv: {} })
   })
 
-  it('starts subsequent assistant emissions after injected user messages', () => {
+  it('starts a new assistant emission after injected users with its first text delta', () => {
     const store = useAgent.getState()
     store.appendAssistantPlaceholder('42')
     store.appendTextDelta('42', useAgent.getState().messagesByConv['42'][0].id, 'before steering')
     store.appendUserMessage('42', 'first steering message', [], [], true)
     store.appendUserMessage('42', 'second steering message', [], [], true)
 
-    const firstId = useAgent.getState().appendAssistantAfterUser('42')
-    expect(firstId).toBeTruthy()
-    if (firstId) useAgent.getState().appendTextDelta('42', firstId, 'after steering')
-    expect(useAgent.getState().appendAssistantAfterUser('42')).toBeNull()
+    const emissionId = useAgent.getState().startAssistantEmissionAfterUser('42', 'after steering')
+    expect(emissionId).toBeTruthy()
+    expect(useAgent.getState().startAssistantEmissionAfterUser('42')).toBeNull()
 
     const messages = useAgent.getState().messagesByConv['42']
     expect(messages.map((message) => message.role)).toEqual(['assistant', 'user', 'user', 'assistant'])
     expect(messages[0].content).toBe('before steering')
-    expect(messages[3].id).toBe(firstId)
+    expect(messages[3].id).toBe(emissionId)
     expect(messages[3].content).toBe('after steering')
   })
 })

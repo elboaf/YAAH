@@ -8390,11 +8390,13 @@ function Composer() {
     // stream starts mid-emission (first emission of a fresh message), and a
     // tool event closes the emission — the next text opens a new one (#17).
     let textSinceTool = true
-    const startPostSteerEmission = () => {
-      if (!awaitingPostSteerEmission) return
-      curId = useAgent.getState().appendAssistantAfterUser(bufKey) ?? curId
+    const startPostSteerEmission = (firstText?: string) => {
+      if (!awaitingPostSteerEmission) return false
+      const nextId = useAgent.getState().startAssistantEmissionAfterUser(bufKey, firstText)
+      if (nextId) curId = nextId
       awaitingPostSteerEmission = false
       textSinceTool = true
+      return nextId !== null
     }
     return (ev: AgentEvent) => {
     if (ev.type === 'skill_not_found') {
@@ -8411,14 +8413,14 @@ function Composer() {
     } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')
       if (ev.text) {
-        startPostSteerEmission()
         const text = textSinceTool ? ev.text : '\n' + ev.text
+        if (!startPostSteerEmission(text)) appendTextDelta(bufKey, curId, text)
         textSinceTool = true
-        appendTextDelta(bufKey, curId, text)
       }
     } else if (ev.type === 'say') {
       // Spoken briefing (#66): captured on its message for read-aloud,
       // never rendered.
+      startPostSteerEmission()
       setSay(bufKey, curId, ev.say ?? '')
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')

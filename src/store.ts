@@ -376,8 +376,8 @@ interface AgentState {
 
   appendUserMessage: (key: string, text: string, images?: string[], skills?: string[], queued?: boolean) => string
   appendAssistantPlaceholder: (key: string) => string
-  /** Open the next assistant emission after a user row when steering splits a live turn. */
-  appendAssistantAfterUser: (key: string) => string | null
+  /** Start a fresh assistant emission after injected user rows, optionally with its first text delta. */
+  startAssistantEmissionAfterUser: (key: string, firstText?: string) => string | null
   /** Capture a `say` briefing onto its message (#66): speech-only, never
    *  rendered; consumed by the narrator when the emission completes. */
   setSay: (key: string, msgId: string, say: string) => void
@@ -856,10 +856,21 @@ export const useAgent = create<AgentState>((set, get) => ({
     return id
   },
 
-  appendAssistantAfterUser: (key) => {
-    const messages = get().messagesByConv[key] ?? []
-    if (messages[messages.length - 1]?.role !== 'user') return null
-    return get().appendAssistantPlaceholder(key)
+  startAssistantEmissionAfterUser: (key, firstText = '') => {
+    const id = genId()
+    let started = false
+    set((s) => {
+      const messages = s.messagesByConv[key] ?? []
+      if (messages[messages.length - 1]?.role !== 'user') return s
+      started = true
+      return {
+        messagesByConv: {
+          ...s.messagesByConv,
+          [key]: [...messages, { id, role: 'assistant', content: firstText }],
+        },
+      }
+    })
+    return started ? id : null
   },
 
   setSay: (key, msgId, say) => {
