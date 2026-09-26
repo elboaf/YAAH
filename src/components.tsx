@@ -1779,7 +1779,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
               ))}
             </div>
           ) : null}
-          <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+          {renderUserContent(msg.content)}
           {msg.skills?.length ? (
             <div className="mt-1.5 flex flex-wrap justify-end gap-1">
               {msg.skills.map((name) => (
@@ -7703,6 +7703,97 @@ const attachmentText = (a: Attachment): string => {
   }
   const kb = Math.max(1, Math.round(a.size / 1_000))
   return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
+}
+
+/** Matches the header line `attachmentText` emits before each inline block:
+ *  "\n\n--- attached file: <name> ---\n". The fenced body follows up to the
+ *  next header (or end of message); the fence lines are stripped when the
+ *  segment carries them, tolerating fence-like lines inside the body. */
+const ATTACHED_HEADER_RE = /\n\n--- attached file: ([^\n]+) ---\n/g
+
+/** Renders the outgoing message text with inline attached-file blocks collapsed
+ *  to a chip; expanding shows the fenced body. The model still receives the
+ *  full text verbatim — this is presentation-only, for live and persisted
+ *  messages alike. Returns null when there is nothing to collapse, so the
+ *  caller falls back to the plain-text render (free whitespace collapse is
+ *  unacceptable for user prose). */
+function AttachedFileChips({ content }: { content: string }) {
+  const parts: (string | { name: string; body: string })[] = []
+  let last = 0
+  for (const m of content.matchAll(ATTACHED_HEADER_RE)) {
+    const start = m.index ?? 0
+    if (start > last) parts.push(content.slice(last, start))
+    last = start + m[0].length
+    // Body runs to the next header or the end of the message.
+    const next = content.slice(last).search(/\n\n--- attached file: [^\n]+ ---\n/)
+    const end = next === -1 ? content.length : last + next
+    let segment = content.slice(last, end)
+    last = end
+    // `attachmentText` wraps the body in a fence: "```\n<body>\n```".
+    // Close on the last fence line so prose following the block stays prose.
+    if (segment.startsWith('```\n')) {
+      const close = segment.lastIndexOf('\n```')
+      if (close >= 4) {
+        parts.push({ name: m[1].trim(), body: segment.slice(4, close) })
+        const after = segment.slice(close + 4)
+        if (after.trim()) parts.push(after)
+        continue
+      }
+    }
+    parts.push({ name: m[1].trim(), body: segment })
+  }
+  if (parts.length === 0) return null
+  if (last < content.length) parts.push(content.slice(last))
+  return (
+    <>
+      {parts.map((p, i) =>
+        typeof p === 'string' ? (
+          <span key={i} className="whitespace-pre-wrap break-words">{p}</span>
+        ) : (
+          <AttachedFileChip key={i} name={p.name} body={p.body} />
+        ),
+      )}
+    </>
+  )
+}
+
+function AttachedFileChip({ name, body }: { name: string; body: string }) {
+  const [open, setOpen] = useState(false)
+  const kb = Math.max(1, Math.round(body.length / 1_000))
+  return (
+    <span className="my-1 block">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+          open
+            ? 'border-zinc-600 bg-zinc-700/60 text-zinc-200'
+            : 'border-zinc-700 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200'
+        }`}
+        title={open ? 'Hide attached file contents' : `Show attached file contents (${kb} KB)`}
+      >
+        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          {open ? <path d="M2 3.5 5 6.5 8 3.5" /> : <path d="M3 4 5 6 7 4" />}
+        </svg>
+        📎 {name} · {kb} KB
+      </button>
+      {open && (
+        <pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded border border-zinc-700/70 bg-zinc-950/60 p-2 text-left text-xs text-zinc-300">
+          {body}
+        </pre>
+      )}
+    </span>
+  )
+}
+
+/** User-message content renderer: collapses inline attached-file blocks to
+ *  expandable chips so full file dumps never regurgitate into the chat.
+ *  Messages without attachments render exactly as before. */
+function renderUserContent(content: string) {
+  return content.includes('\n--- attached file: ')
+    ? <AttachedFileChips content={content} />
+    : <span className="whitespace-pre-wrap break-words">{content}</span>
 }
 
 /** Execution is selected by each chat workspace, not by a global host toggle. */
