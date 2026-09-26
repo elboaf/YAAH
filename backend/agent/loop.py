@@ -671,7 +671,13 @@ def _apply_injected_skills(
     block = skill_registry.bodies_for_prompt(names)
     if block and messages and messages[0].get("role") == "system":
         messages[0]["content"] = (
-            f"{messages[0]['content']}\n\n---\n\n# Invoked skills\n\n{block}"
+            f"{messages[0]['content']}\n\n---\n\n"
+            f"# Invoked skills\n\n"
+            f"The user explicitly invoked the skill(s) below for this turn. "
+            f"They are authoritative: follow them. A skill invoked this way "
+            f"may legitimately be absent from the Skills available list \u2014 "
+            f"manual-invocation skills are deliberately hidden from it.\n\n"
+            f"{block}"
         )
 
 
@@ -1297,10 +1303,28 @@ async def _run_agent_claimed(
     # persisted, so later turns don't replay them.
     invoked = [n for n in (skill_names or []) if isinstance(n, str) and n.strip()]
     if invoked:
+        # Unknown skill names must be visible to the USER, not just injected
+        # as "# Skill not found" into the prompt: the chip still renders from
+        # the UI's own skills list, so without this event the failure is
+        # silent and the model truthfully denies having the skill.
+        not_found = [
+            n for n in invoked if skill_registry.get_skill(n) is None
+        ]
+        if not_found:
+            yield _ndjson({"type": "skill_not_found", "skills": not_found})
         skill_block = skill_registry.bodies_for_prompt(invoked)
         if skill_block:
             system_prompt = (
-                f"{system_prompt}\n\n---\n\n# Invoked skills\n\n{skill_block}"
+                f"{system_prompt}\n\n---\n\n"
+                f"# Invoked skills\n\n"
+                f"The user explicitly invoked the skill(s) below (a chip or "
+                f"/name in the composer) for this turn. They are authoritative: "
+                f"follow them. A skill invoked this way may legitimately be "
+                f"absent from the Skills available list above \u2014 that list only "
+                f"carries model-invocable skills, and manual-invocation skills "
+                f"are deliberately hidden from it. Never tell the user an "
+                f"invoked skill is unavailable because it is missing there.\n\n"
+                f"{skill_block}"
             )
 
     # The project's own agent instructions (baseline failures, shell quirks,

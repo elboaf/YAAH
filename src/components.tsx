@@ -1659,6 +1659,24 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         </div>
       )
     }
+    // Invoked skill the backend registry doesn't know (chip rendered from the
+    // UI list which can drift from the backend cache): say so plainly.
+    try {
+      const parsed: unknown = JSON.parse(msg.content)
+      if (parsed && typeof parsed === 'object' && 'skill_not_found' in (parsed as object)) {
+        const names = ((parsed as { skill_not_found: { skills?: string[] } }).skill_not_found.skills) ?? []
+        return (
+          <div className="pl-3">
+            <div className="font-mono text-[11px] text-amber-300/90">
+              ◆ Skill not found{names.length > 1 ? 's' : ''}: {names.join(', ')} — the skill was
+              not loaded this turn. Refresh skills in Settings if it should exist.
+            </div>
+          </div>
+        )
+      }
+    } catch {
+      // not JSON — fall through
+    }
     // Legacy history compaction marker (adr/0004): old versions stored a
     // summary as a system row after deleting the summarized transcript.
     try {
@@ -8372,7 +8390,18 @@ function Composer() {
     // tool event closes the emission — the next text opens a new one (#17).
     let textSinceTool = true
     return (ev: AgentEvent) => {
-    if (ev.type === 'text') {
+    if (ev.type === 'skill_not_found') {
+      // The user invoked a skill the backend registry doesn't know (the chip
+      // renders from the UI list, which can drift from the backend cache):
+      // surface it as a visible system row instead of a silent prompt note.
+      appendRawMessage(bufKey, {
+        id: `skill-not-found-${(ev.skills ?? []).join('-')}-${Date.now()}`,
+        role: 'system',
+        content: JSON.stringify({
+          skill_not_found: { skills: ev.skills ?? [] },
+        }),
+      })
+    } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')
       if (ev.text) {
         const text = textSinceTool ? ev.text : '\n' + ev.text
