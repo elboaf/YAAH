@@ -639,3 +639,60 @@ describe('agentBranch persistence (branch-first chip)', () => {
     useAgent.getState().setAgentBranch('c1', null)
   })
 })
+
+describe('pendingMerge dismiss + staleness (issue #126)', () => {
+  beforeEach(() => {
+    useAgent.getState().setAgentBranch('c1', null)
+    useAgent.getState().setAgentBranch('c2', null)
+  })
+
+  const bindPending = (key: string) => {
+    useAgent.getState().setAgentBranch(key, {
+      branch: `agent/9/fix-run${key}`,
+      boundAt: 1,
+      pendingMerge: true,
+    })
+  }
+
+  it('dismiss marks the binding merged and persists across a reload of the mirror', () => {
+    bindPending('c1')
+    useAgent.getState().dismissPendingMerge('c1')
+    const info = useAgent.getState().agentBranchByConv['c1']
+    expect(info?.pendingMerge).toBe(false)
+    expect(info?.merged).toBe(true)
+    // the branch is untouched — dismissal is display state only
+    expect(info?.branch).toBe(`agent/9/fix-runc1`)
+    const stored = JSON.parse(localStorage.getItem('yaah-agent-branch-by-conv') || '{}')
+    expect(stored.c1.pendingMerge).toBe(false)
+    expect(stored.c1.merged).toBe(true)
+  })
+
+  it('dismiss on a conversation with no binding is a no-op', () => {
+    expect(() => useAgent.getState().dismissPendingMerge('nope')).not.toThrow()
+    expect(useAgent.getState().agentBranchByConv['nope']).toBeUndefined()
+  })
+
+  it('clearStalePendingMerge suppresses the warning when the branch is gone or merged', () => {
+    bindPending('c1')
+    bindPending('c2')
+    expect(useAgent.getState().clearStalePendingMerge('c1', { exists: false, merged_into_base: false })).toBe(true)
+    expect(useAgent.getState().agentBranchByConv['c1']?.pendingMerge).toBe(false)
+    expect(useAgent.getState().clearStalePendingMerge('c2', { exists: true, merged_into_base: true })).toBe(true)
+    expect(useAgent.getState().agentBranchByConv['c2']?.merged).toBe(true)
+    const stored = JSON.parse(localStorage.getItem('yaah-agent-branch-by-conv') || '{}')
+    expect(stored.c1.pendingMerge).toBe(false)
+    expect(stored.c2.pendingMerge).toBe(false)
+  })
+
+  it('an unmerged, still-existing branch keeps its warning', () => {
+    bindPending('c1')
+    expect(useAgent.getState().clearStalePendingMerge('c1', { exists: true, merged_into_base: false })).toBe(false)
+    expect(useAgent.getState().agentBranchByConv['c1']?.pendingMerge).toBe(true)
+    expect(useAgent.getState().agentBranchByConv['c1']?.merged).toBeUndefined()
+  })
+
+  it('revalidation on an already-clear binding is a no-op', () => {
+    useAgent.getState().setAgentBranch('c1', { branch: 'agent/9/x', boundAt: 1, merged: true })
+    expect(useAgent.getState().clearStalePendingMerge('c1', { exists: false, merged_into_base: false })).toBe(false)
+  })
+})

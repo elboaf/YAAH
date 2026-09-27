@@ -531,6 +531,23 @@ async def api_workspace_git_branches(workspace: str = ""):
     }
 
 
+@app.get("/api/conversations/{conversation_id}/agent-branch-status")
+async def api_conversation_agent_branch_status(conversation_id: int, branch: str = ""):
+    """Merged-ness probe for the agent-branch chip revalidation (issue #126):
+    `{exists, merged_into_base}` for a named local branch of this
+    conversation's workspace. Read-only — runs lock-free like `status`,
+    since it changes nothing; the merge mutex guards writers. No local
+    workspace (unset/remote:/non-repo) means the recorded branch can no
+    longer be validated, reported as not-existing so stale warnings are
+    suppressed."""
+    from backend.agent import worktrees
+
+    root = await _conversation_git_root(conversation_id)
+    if root is None:
+        return {"exists": False, "merged_into_base": False}
+    return await worktrees.agent_branch_status(root, branch)
+
+
 class WorkspaceGitCheckoutBody(BaseModel):
     workspace: str
     branch: str

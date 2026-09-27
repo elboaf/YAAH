@@ -501,6 +501,18 @@ export interface WorkspaceGitBranches {
 export const getWorkspaceGitBranches = (workspace: string) =>
   api<WorkspaceGitBranches>(`/api/workspaces/git-branches?workspace=${encodeURIComponent(workspace)}`)
 
+/** Issue #126: read-only merged-ness probe for the agent branch a
+ *  conversation's pendingMerge warning is pinned to. */
+export interface AgentBranchStatus {
+  exists: boolean
+  merged_into_base: boolean
+}
+
+export const getAgentBranchStatus = (conversationId: number, branch: string) =>
+  api<AgentBranchStatus>(
+    `/api/conversations/${conversationId}/agent-branch-status?branch=${encodeURIComponent(branch)}`,
+  )
+
 export const checkoutWorkspaceBranch = (workspace: string, branch: string) =>
   api<GitCommandResult>('/api/workspaces/git-checkout', {
     method: 'POST',

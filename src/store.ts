@@ -237,6 +237,15 @@ interface AgentState {
    *  (see AgentBranchInfo). Drives the status strip's branch chip. */
   agentBranchByConv: Record<string, AgentBranchInfo | null>
   setAgentBranch: (key: string, info: AgentBranchInfo | null) => void
+  /** User dismissed the unmerged-work warning (issue #126) — display only. */
+  dismissPendingMerge: (key: string) => void
+  /** Revalidation result (issue #126): the branch is gone or fully merged,
+   *  so the stale warning is suppressed (persisted like a dismissal).
+   *  Returns whether suppression happened. */
+  clearStalePendingMerge: (
+    key: string,
+    status: { exists: boolean; merged_into_base: boolean },
+  ) => boolean
   workspace: string
   /**
    * #51/#76: the current global defaults, hydrated from /api/config by
@@ -642,6 +651,29 @@ export const useAgent = create<AgentState>((set, get) => ({
       storeAgentBranches(map)
       return { agentBranchByConv: map }
     }),
+  /** Issue #126: the user cleared the unmerged-work warning by hand. Marks
+   *  the binding merged (neutral chip) and persists through the same
+   *  localStorage mirror — no merge runs, no branch is touched, only the
+   *  displayed state changes. */
+  dismissPendingMerge: (key) => {
+    const cur = useAgent.getState().agentBranchByConv[key]
+    if (!cur) return
+    useAgent.getState().setAgentBranch(key, { ...cur, pendingMerge: false, merged: true })
+  },
+  /** Issue #126: suppress the warning when reality has drifted — the
+   *  recorded branch no longer exists, is fully merged into the base
+   *  branch, or the workspace itself is gone. Pure display-state fix,
+   *  same no-side-effect contract as dismissPendingMerge. Returns true
+   *  when a stale warning was cleared (caller may skip revalidation). */
+  clearStalePendingMerge: (key, status) => {
+    const cur = useAgent.getState().agentBranchByConv[key]
+    if (!cur?.pendingMerge) return false
+    const stale = !status.exists || status.merged_into_base
+    if (stale) {
+      useAgent.getState().setAgentBranch(key, { ...cur, pendingMerge: false, merged: true })
+    }
+    return stale
+  },
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),

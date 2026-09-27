@@ -1338,3 +1338,55 @@ class TestShouldIsolate:
     def test_missing_args_isolate(self):
         assert worktrees.should_isolate("bash", {})
         assert worktrees.should_isolate("bash", None)  # type: ignore[arg-type]
+
+
+# ------------------------------------------------------- issue #126 revalidation
+
+class TestAgentBranchStatus:
+    """agent_branch_status: read-only merged-ness probe behind the UI's
+    stale-warning revalidation. No mutation of any kind."""
+
+    @pytest.mark.asyncio
+    async def test_missing_and_empty_branch(self, repo: Path):
+        assert await worktrees.agent_branch_status(repo, "agent/9/never-existed") == {
+            "exists": False,
+            "merged_into_base": False,
+        }
+        assert await worktrees.agent_branch_status(repo, "") == {
+            "exists": False,
+            "merged_into_base": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_unmerged_branch_exists_but_not_merged(self, repo: Path):
+        run_git(repo, "checkout", "-q", "-b", "agent/9/feature")
+        (repo / "hello.txt").write_text("v2\n", encoding="utf-8")
+        run_git(repo, "commit", "-aqm", "wip")
+        run_git(repo, "checkout", "-q", "master")
+        out = await worktrees.agent_branch_status(repo, "agent/9/feature")
+        assert out == {"exists": True, "merged_into_base": False}
+
+    @pytest.mark.asyncio
+    async def test_merged_branch_reports_merged(self, repo: Path):
+        run_git(repo, "checkout", "-q", "-b", "agent/9/done")
+        (repo / "other.txt").write_text("x\n", encoding="utf-8")
+        run_git(repo, "add", "-A")
+        run_git(repo, "commit", "-qm", "work")
+        # land it via a fast-forward merge, as git_merge_back would
+        run_git(repo, "checkout", "-q", "master")
+        run_git(repo, "merge", "-q", "--ff-only", "agent/9/done")
+        out = await worktrees.agent_branch_status(repo, "agent/9/done")
+        assert out == {"exists": True, "merged_into_base": True}
+
+    @pytest.mark.asyncio
+    async def test_probe_never_mutates(self, repo: Path):
+        run_git(repo, "checkout", "-q", "-b", "agent/9/keep")
+        (repo / "hello.txt").write_text("v2\n", encoding="utf-8")
+        run_git(repo, "commit", "-aqm", "wip")
+        run_git(repo, "checkout", "-q", "master")
+        await worktrees.agent_branch_status(repo, "agent/9/keep")
+        # branch still there, still unmerged, main HEAD untouched
+        branches = run_git(repo, "branch", "--list").stdout
+        assert "agent/9/keep" in branches
+        head = run_git(repo, "rev-parse", "HEAD").stdout
+        assert head.startswith(run_git(repo, "rev-parse", "master").stdout[:7]) or head == run_git(repo, "rev-parse", "master").stdout

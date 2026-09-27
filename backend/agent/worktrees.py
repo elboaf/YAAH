@@ -523,6 +523,29 @@ async def merge_mutex(root: Path):
         lock.release()
 
 
+async def agent_branch_status(root: Path, branch: str) -> dict:
+    """Read-only merged-ness probe for the UI's pendingMerge revalidation
+    (issue #126): does the recorded agent/* branch still exist, and is it
+    fully merged into the main-tree HEAD? Mirrors the exact `--merged`
+    logic release_session and the reaper use — no deletion, no merge, no
+    state change. A branch checked out in a live worktree still reports
+    `merged` per git; the caller (UI) only suppresses the stale warning,
+    the reaper's own hygiene is untouched."""
+    root = Path(root)
+    branch = str(branch or "").strip()
+    if not branch:
+        return {"exists": False, "merged_into_base": False}
+    # Branch existence: git rev-parse --verify resolves both a branch name
+    # and a full ref; ask for the branch ref specifically so a stray
+    # commit-ish never masquerades as the recorded branch.
+    rc, _ = await _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
+    if rc != 0:
+        return {"exists": False, "merged_into_base": False}
+    rc, out = await _git(root, "branch", "--merged", "HEAD", "--list", branch)
+    merged = rc == 0 and branch in out.split()
+    return {"exists": True, "merged_into_base": merged}
+
+
 # ---------------------------------------------------------------------------
 # creation / rebinding (issue §1)
 # ---------------------------------------------------------------------------

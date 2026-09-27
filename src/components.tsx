@@ -28,6 +28,7 @@ import {
   listSkills,
   refreshSkills,
   getContext,
+  getAgentBranchStatus,
   getGitBranch,
   getGitInfo,
   getGitBranches,
@@ -3402,6 +3403,31 @@ function ConversationList({
     // and the new registry row must appear without any other refresh trigger.
   }, [conversationId, workspace, refresh])
 
+  // Issue #126: revalidate every persisted pendingMerge warning against the
+  // backend before showing it. A recorded branch that no longer exists, is
+  // fully merged into the main-tree HEAD, or whose workspace is gone can no
+  // longer carry unmerged work — clear the stale warning (persisted, same
+  // as a manual dismissal). Read-only probes; a conversation with no row
+  // (deleted) gets its binding dropped wholesale.
+  useEffect(() => {
+    const map = useAgent.getState().agentBranchByConv
+    const ids = new Set(convs.map((c) => String(c.id)))
+    for (const [key, info] of Object.entries(map)) {
+      if (!info?.pendingMerge || !info.branch) continue
+      if (!ids.has(key)) {
+        useAgent.getState().setAgentBranch(key, null)
+        continue
+      }
+      const conv = convs.find((c) => String(c.id) === key)
+      if (!conv) continue
+      getAgentBranchStatus(conv.id, info.branch)
+        .then((status) => useAgent.getState().clearStalePendingMerge(key, status))
+        .catch(() => {}) // backend unreachable: keep showing the last known state
+    }
+    // Reruns whenever the conversation rows reload (mount, refresh).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convs])
+
   // Expanded state persists per workspace (Q14); a group with no remembered
   // state starts expanded.
   useEffect(() => {
@@ -3568,6 +3594,11 @@ function ConversationList({
       finished={finishedByConv[String(c.id)] ?? null}
       pendingMerge={Boolean(agentBranchByConv[String(c.id)]?.pendingMerge)}
       pendingMergeBranch={agentBranchByConv[String(c.id)]?.branch}
+      onDismissPendingMerge={
+        agentBranchByConv[String(c.id)]?.pendingMerge
+          ? () => useAgent.getState().dismissPendingMerge(String(c.id))
+          : undefined
+      }
       isAgent={isAgent}
       menuOpen={menuOpenId === c.id}
       setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
@@ -3888,6 +3919,7 @@ function ConversationRow({
   finished,
   pendingMerge,
   pendingMergeBranch,
+  onDismissPendingMerge,
   isAgent,
   onAgentSettings,
   onToggleEnable,
@@ -3916,6 +3948,9 @@ function ConversationRow({
   /** Session branch still has pending work; this survives opening/switching chats. */
   pendingMerge?: boolean
   pendingMergeBranch?: string
+  /** Issue #126: clears the unmerged-work warning for this conversation
+   *  (display state only — no merge runs, no branch is deleted). */
+  onDismissPendingMerge?: () => void
   /** A scheduled agent's pinned chat (issue #41) — silhouette badge. */
   isAgent?: boolean
   /** Open the agent settings dialogue (agent chats only). */
@@ -3971,11 +4006,25 @@ function ConversationRow({
           />
         ) : pendingMerge ? (
           <span
-            aria-hidden="true"
-            className="mr-1.5 inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full border border-orange-500/70 font-mono text-[9px] leading-none text-orange-300"
+            className="group/badge relative mr-1.5 inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full border border-orange-500/70 font-mono text-[9px] leading-none text-orange-300"
             title={`Unmerged session work on ${pendingMergeBranch ?? 'agent branch'} — open chat for details`}
           >
-            !
+            <span aria-hidden="true">!</span>
+            {/* Issue #126: the warning must be clearable by hand — hover
+                reveals an × that dismisses it (display state only). */}
+            {onDismissPendingMerge && (
+              <button
+                className="absolute -right-1.5 -top-1.5 hidden h-3 w-3 items-center justify-center rounded-full bg-zinc-700 font-sans text-[8px] leading-none text-zinc-200 hover:bg-zinc-600 group-hover/badge:flex"
+                title="Dismiss — mark this work as handled (does not merge or delete the branch)"
+                aria-label={`Dismiss unmerged-work warning for ${pendingMergeBranch ?? 'agent branch'}`}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onDismissPendingMerge()
+                }}
+              >
+                ×
+              </button>
+            )}
           </span>
         ) : finished === 'error' ? (
           <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
