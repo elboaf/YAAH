@@ -6,8 +6,8 @@
 // (2) The menu closed only via the toggle button, an item click, or Escape;
 //     clicking elsewhere left it floating over content — a document-level
 //     pointerdown outside the menu (and its toggle) must close it.
-// Escape dismissal (already implemented in the sidebar) and item behavior
-// are regression-guarded here too.
+// Escape dismissal lives at the sidebar level (components.tsx, menuOpenId
+// effect) and is unchanged by this feature.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -95,7 +95,7 @@ describe('conversation row "…" menu (#127)', () => {
     expect(setMenuOpen).toHaveBeenCalledWith(true)
   })
 
-  it('Escape still closes the menu (sidebar-level contract, regression guard)', () => {
+  it('menu is presented as expanded to the toggle while open (Escape dismissal lives in the sidebar, guarded there)', () => {
     // The Escape listener lives in the sidebar component; guard the
     // component-level contract by asserting the menu is open to begin with
     // and that the toggle reflects expanded state (aria-expanded).
