@@ -3945,8 +3945,8 @@ export function ConversationRow({
   // Issue #127: the open menu must close on any pointerdown outside it (the
   // toggle button keeps its own toggle behavior, so it is exempt). Document-
   // level listener, added only while open, cleaned up on close/unmount.
-  const menuRef = useRef<HTMLDivElement | null>(null)
-  const toggleRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const toggleRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     if (!menuOpen) return
     const onPointerDown = (e: PointerEvent) => {
@@ -4063,7 +4063,7 @@ export function ConversationRow({
             className="absolute right-0 top-6 z-20 w-44 rounded border border-zinc-600/80 bg-zinc-800 py-1 shadow-xl"
           >
             <button
-              className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+              className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700"
               onClick={() => {
                 setMenuOpen(false)
                 onExport()
@@ -4072,7 +4072,7 @@ export function ConversationRow({
               Export as Markdown
             </button>
             <button
-              className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+              className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700"
               onClick={() => {
                 setMenuOpen(false)
                 onSys()
@@ -4082,7 +4082,7 @@ export function ConversationRow({
             </button>
             {onMove && (
               <button
-                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700"
                 onClick={() => {
                   setMenuOpen(false)
                   onMove()
@@ -4093,7 +4093,7 @@ export function ConversationRow({
             )}
             {onAgentSettings && (
               <button
-                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700"
                 onClick={() => {
                   setMenuOpen(false)
                   onAgentSettings()
@@ -4104,7 +4104,7 @@ export function ConversationRow({
             )}
             {onToggleEnable && (
               <button
-                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700"
                 onClick={() => {
                   setMenuOpen(false)
                   onToggleEnable()
@@ -4114,7 +4114,7 @@ export function ConversationRow({
               </button>
             )}
             <button
-              className="block w-full px-3 py-1.5 text-left text-xs text-red-400 hover:bg-zinc-800"
+              className="block w-full px-3 py-1.5 text-left text-xs text-red-400 hover:bg-zinc-700"
               onClick={() => {
                 setMenuOpen(false)
                 onDelete()
