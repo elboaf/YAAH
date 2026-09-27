@@ -3911,7 +3911,7 @@ function ConversationList({
 
 /** One conversation row: title + relative timestamp, hover-revealed ⋯ menu
  *  with labeled actions (replaces the bare md↓/sys/✕ glyph strip). */
-function ConversationRow({
+export function ConversationRow({
   conv,
   active,
   running,
@@ -3977,6 +3977,23 @@ function ConversationRow({
   onMove?: () => void
 }) {
   const liveTitle = useAgent((s) => s.titleByConv[String(conv.id)])
+  // Issue #127: the open menu must close on any pointerdown outside it (the
+  // toggle button keeps its own toggle behavior, so it is exempt). Document-
+  // level listener, added only while open, cleaned up on close/unmount.
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const toggleRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (!menuOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null
+      if (!target) return
+      if (menuRef.current?.contains(target)) return
+      if (toggleRef.current?.contains(target)) return
+      setMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [menuOpen, setMenuOpen])
   return (
     <div className="group relative flex items-center">
       <button
@@ -4078,6 +4095,7 @@ function ConversationRow({
           </button>
         )}
         <button
+          ref={toggleRef}
           className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800"
           aria-label="Conversation actions"
           aria-haspopup="menu"
@@ -4087,7 +4105,12 @@ function ConversationRow({
           ⋯
         </button>
         {menuOpen && (
-          <div className="absolute right-0 top-6 z-20 w-44 rounded   bg-zinc-900 py-1 shadow-xl">
+          <div
+            ref={menuRef}
+            role="menu"
+            aria-label="Conversation actions"
+            className="absolute right-0 top-6 z-20 w-44 rounded border border-zinc-600/80 bg-zinc-800 py-1 shadow-xl"
+          >
             <button
               className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
               onClick={() => {
