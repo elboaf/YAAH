@@ -1001,3 +1001,99 @@ def test_bundled_toolkit_payload_is_valid():
     assert (src / "bin" / "vm-capture.ps1").is_file()
     assert (src / "gitconfig").is_file()
     assert "[safe]" in (src / "gitconfig").read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------------ #117: persistent boot/run instrumentation
+
+
+def _start_for_timing(isolated, monkeypatch):
+    """Shared setup: fake spawn that writes a fully timestamped init.log."""
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
+    logs = isolated / "sb" / "ws-abc" / "logs"
+
+    def fake_spawn(exe, wsb, logs_path):
+        (logs_path / "init.log").write_text(
+            "[2026-01-01T00:00:00.0000000] sandbox-vm-start\n"
+            "[2026-01-01T00:00:01.0000000] bootstrap-step\n"
+            "[2026-01-01T00:00:02.0000000] yaah-sandbox-ready",
+            encoding="utf-8")
+        return _FakeProc()
+
+    monkeypatch.setattr(sb, "_spawn", fake_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+    return logs
+
+
+def test_bootstrap_logs_per_segment_timestamps():
+    script = sb._bootstrap_script()
+    # Every segment gets a timestamped line, not just the final ready signal.
+    assert "sandbox-vm-start" in script
+    assert "bootstrap-path" in script
+    assert "bootstrap-mcp" in script
+    assert "yaah-sandbox-ready" in script
+    # Timestamps are ISO-8601 stamped by the bootstrap itself.
+    assert script.count("Get-Date -Format o") >= 4
+
+
+def test_start_returns_boot_breakdown(isolated, monkeypatch):
+    logs = _start_for_timing(isolated, monkeypatch)
+    result = sb.start_sync("C:\proj")
+    boot = result["boot"]
+    assert boot["cold"] is True
+    assert isinstance(boot["spawn_to_ready_ms"], int)
+    assert boot["spawn_to_ready_ms"] >= 0
+    # Breakdown keys mirror the issue's segments.
+    assert set(boot["phases"]) == {"host_spawn", "guest_boot"}
+
+
+def test_run_reports_elapsed_and_pickup(isolated, monkeypatch):
+    logs = _start_for_timing(isolated, monkeypatch)
+    sb.start_sync("C:\proj")
+    n = sb._next_seq(logs)
+    # VM-side ack carries its own clock; simulate a pickup measured by the VM.
+    (logs / f"res.{n}.json").write_text(json.dumps({
+        "exit_code": 0, "timed_out": False,
+        "pickup_ms": 30, "run_ms": 120}), encoding="ascii")
+    (logs / "output.txt").write_text("ok", encoding="utf-8-sig")
+    (logs / f"done.{n}").write_text("1", encoding="ascii")
+    result = sb.run_sync("Get-Date", 10)
+    assert result["pickup_ms"] == 30
+    assert result["run_ms"] == 120
+    assert result["elapsed_ms"] >= 0
+
+
+def test_run_metrics_tolerate_missing_vm_side_data(isolated, monkeypatch):
+    logs = _start_for_timing(isolated, monkeypatch)
+    sb.start_sync("C:\proj")
+    n = sb._next_seq(logs)
+    _write_done(logs, n, output="ok")  # old-style res file, no timings
+    result = sb.run_sync("Get-Date", 10)
+    assert result["elapsed_ms"] is None
+    assert result["pickup_ms"] is None
+
+
+def test_start_clears_stale_init_log_before_spawn(isolated, monkeypatch):
+    """Issue #117: a previous boot's init.log (still containing the ready
+    marker) must not satisfy the new boot's readiness poll."""
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    logs = isolated / "sb" / "ws-abc" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "init.log").write_text("yaah-sandbox-ready", encoding="utf-8")
+
+    spawn_calls = []
+
+    def fake_spawn(exe, wsb, logs_path):
+        spawn_calls.append(1)
+        assert not (logs_path / "init.log").exists()
+        (logs_path / "init.log").write_text(
+            "[$(date)] yaah-sandbox-ready", encoding="utf-8")
+        return _FakeProc()
+
+    monkeypatch.setattr(sb, "_spawn", fake_spawn)
+    monkeypatch.setattr(sb, "session_dir",
+                        lambda ws: isolated / "sb" / "ws-abc")
+
+    sb.start_sync("C:\proj")
+    assert spawn_calls  # the fake asserted the log was cleared pre-spawn

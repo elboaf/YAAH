@@ -351,6 +351,10 @@ $dir = '{SB_LOGS}'
 $tk  = '{SB_TOOLKIT}'
 $ws  = '{SB_WS}'
 $processed = @{{}}
+# Persistent boot instrumentation (issue #117): every segment gets its own
+# timestamped line in init.log so a cold/warm latency regression is visible
+# from the session record alone.
+"[$(Get-Date -Format o)] sandbox-vm-start" | Out-File -FilePath "$dir\\init.log" -Encoding utf8
 $env:Path = "$tk;$tk\\bin;$tk\\Scripts;$tk\\node_modules\\.bin;$env:Path"
 # git must never open an interactive editor inside the VM: the command
 # channel would hang until the host-side timeout (an editor-less `git
@@ -397,7 +401,9 @@ $mcpKey = if ($env:WMCP_KEY) {{ $env:WMCP_KEY }} else {{ 'sandbox-demo-key' }}
 $mcpPort = if ($env:WMCP_PORT) {{ $env:WMCP_PORT }} else {{ '8000' }}
 ('{{' + '"url": "http://' + $mcpIp + ':' + $mcpPort + '/mcp", "auth": "Bearer ' + $mcpKey + '"}}') |
   Out-File -FilePath "$dir\\mcp.json" -Encoding utf8
-"[$(Get-Date -Format o)] yaah-sandbox-ready" | Out-File -FilePath "$dir\\init.log" -Encoding utf8
+"[$(Get-Date -Format o)] bootstrap-path" | Out-File -FilePath "$dir\\init.log" -Append -Encoding utf8
+"[$(Get-Date -Format o)] bootstrap-mcp" | Out-File -FilePath "$dir\\init.log" -Append -Encoding utf8
+"[$(Get-Date -Format o)] yaah-sandbox-ready" | Out-File -FilePath "$dir\\init.log" -Append -Encoding utf8
 while ($true) {{
   $pending = Get-ChildItem -Path $dir -Filter 'cmd.*.ps1' -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime
@@ -406,6 +412,9 @@ while ($true) {{
     $processed[$f.Name] = 1
     if ($f.Name -match '^cmd\\.(\\d+)\\.ps1$') {{
       $n = $Matches[1]
+      # Issue #117 timing: pickup = first observation -> process start,
+      # run = process wall time.
+      $pickupSw = [System.Diagnostics.Stopwatch]::StartNew()
       $tmo = 900
       try {{
         $rt = Get-Content -Raw "$dir\\runtime.json" | ConvertFrom-Json
@@ -426,6 +435,8 @@ while ($true) {{
       $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
       $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
       $p = [System.Diagnostics.Process]::Start($psi)
+      $pickupSw.Stop()
+      $runSw = [System.Diagnostics.Stopwatch]::StartNew()
       # Drain both pipes concurrently: sequential ReadToEnd deadlocks when
       # stdout fills the pipe buffer while we are blocked reading stderr.
       $ot = $p.StandardOutput.ReadToEndAsync()
@@ -435,6 +446,7 @@ while ($true) {{
         $timedOut = $true
         try {{ $p.Kill() }} catch {{}}
         $p.WaitForExit()
+      $runSw.Stop()
       }}
       $dl = [System.DateTime]::UtcNow.AddSeconds(5)
       while ((-not $ot.IsCompleted -or -not $et.IsCompleted) -and
@@ -443,7 +455,9 @@ while ($true) {{
       if ($ot.IsCompleted) {{ try {{ $o = $ot.Result }} catch {{}} }}
       if ($et.IsCompleted) {{ try {{ $e = $et.Result }} catch {{}} }}
       [IO.File]::WriteAllText("$dir\\output.txt", "$o$e", [System.Text.Encoding]::UTF8)
-      $meta = @{{ exit_code = $p.ExitCode; timed_out = $timedOut }} | ConvertTo-Json -Compress
+      $meta = @{{ exit_code = $p.ExitCode; timed_out = $timedOut;
+                  pickup_ms = [int]$pickupSw.ElapsedMilliseconds;
+                  run_ms = [int]$runSw.ElapsedMilliseconds }} | ConvertTo-Json -Compress
       # ASCII: the payload is pure ASCII and avoids a BOM that would
       # break the host's json.loads; output.txt stays UTF-8 on purpose.
       [IO.File]::WriteAllText("$dir\\res.$n.json", $meta, [System.Text.Encoding]::ASCII)
@@ -590,6 +604,7 @@ def start_sync(workspace: str) -> dict:
         from backend.agent.tools import workspace_root
 
         ws_root = workspace_root(workspace)
+        request_t = time.time()
         wsb, _boot, logs = _write_session_files(sdir, ws_root)
 
         # A sandbox left running from a previous app session: adopt it only if
@@ -608,9 +623,18 @@ def start_sync(workspace: str) -> dict:
                          "sandbox_test again."
             }
 
+        # A stale init.log from the previous boot still contains
+        # 'yaah-sandbox-ready' (issue #117: false-ready detection — the host
+        # saw a 0ms boot while the guest was still starting). Clear it before
+        # spawning so readiness detection reads THIS boot's log only.
+        try:
+            (logs / "init.log").unlink()
+        except OSError:
+            pass
         proc = _spawn(exe, wsb, logs)
         _SESSION = {"proc": proc, "pid": proc.pid, "dir": sdir, "logs": logs,
-                    "workspace": workspace, "adopted": False}
+                    "workspace": workspace, "adopted": False,
+                    "spawn_t": time.time(), "request_t": request_t}
         _set_last_workspace(workspace)
 
         deadline = time.time() + max(15, int(cfg.get("startup_timeout") or 180))
@@ -625,6 +649,7 @@ def start_sync(workspace: str) -> dict:
                 try:
                     if "yaah-sandbox-ready" in init.read_text(
                             encoding="utf-8", errors="replace"):
+                        _SESSION["ready_t"] = time.time()
                         return _session_info()
                 except OSError:
                     pass
@@ -695,6 +720,9 @@ def _session_info(note: str | None = None) -> dict:
     _start_preview()
     s = _SESSION or {}
     first_marker = s.get("dir", Path()) / "launched_once"
+    # Issue #117: capture cold BEFORE the marker write below — the marker
+    # is itself the cold signal.
+    cold = not first_marker.exists()
     note_text = note
     if not first_marker.exists():
         note_text = (note_text or "") + (
@@ -713,9 +741,30 @@ def _session_info(note: str | None = None) -> dict:
             "toolkit": SB_TOOLKIT,
             "toolkit_host": str(toolkit_dir()),
         },
+        **({"boot": _boot_breakdown(cold=cold)}
+           if _boot_breakdown() else {}),
         **({"note": note_text} if note_text else {}),
     }
     return info
+
+
+def _boot_breakdown(cold: bool = False) -> dict | None:
+    """Issue #117: persistent boot-phase timings. None for adopted or
+    reused sessions (their spawn predates this call, or was never ours).
+    `cold` is decided by the caller (see the launched_once logic in
+    _session_info — this call shares that first-boot signal)."""
+    s = _SESSION or {}
+    spawn_t, ready_t = s.get("spawn_t"), s.get("ready_t")
+    if not (spawn_t and ready_t and ready_t >= spawn_t):
+        return None
+    return {
+        "cold": cold,
+        "spawn_to_ready_ms": int((ready_t - spawn_t) * 1000),
+        "phases": {
+            "host_spawn": int((spawn_t - s.get("request_t", spawn_t)) * 1000),
+            "guest_boot": int((ready_t - spawn_t) * 1000),
+        },
+    }
 
 
 # Crash-classified failures (issue #27): the VM dies silently mid-session
@@ -813,6 +862,7 @@ def _run_command(command: str, timeout: int) -> dict:
         res_file = logs / f"res.{n}.json"
         (logs / "runtime.json").write_text(
             json.dumps({"command_timeout_seconds": timeout}), encoding="utf-8")
+        send_t = time.time()
         cmd_file.write_text(command, encoding="utf-8")
 
         # The sandbox enforces the deadline itself and still reports partial
@@ -860,6 +910,15 @@ def _run_command(command: str, timeout: int) -> dict:
         "exit_code": meta.get("exit_code"),
         "timed_out": bool(meta.get("timed_out")),
         "output": output,
+        # Issue #117: persistent round-trip timing. pickup_ms = send -> VM
+        # process start (VM-side stopwatch), elapsed_ms = host send -> done
+        # (host clock). Missing VM-side fields (older bootstraps, crashes)
+        # degrade to None without failing the result.
+        **({"pickup_ms": int(meta["pickup_ms"]),
+            "run_ms": int(meta["run_ms"]),
+            "elapsed_ms": int((time.time() - send_t) * 1000)}
+           if {"pickup_ms", "run_ms"} <= meta.keys() else
+           {"pickup_ms": None, "elapsed_ms": None}),
         **({"truncated": True} if truncated else {}),
     }
 
