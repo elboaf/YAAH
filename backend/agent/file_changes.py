@@ -18,12 +18,12 @@ class WorkspaceSnapshot:
 
 
 async def _run_git(workspace: str, *args: str) -> tuple[int, bytes]:
-    # Use the same portable Git discovery as worktree isolation on Windows.
-    from backend.agent.worktrees import _git_exe
+    # Portable Git discovery (gitproc), shared across the codebase.
+    from backend.agent.gitproc import git_exe
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            _git_exe(),
+            git_exe(),
             *args,
             cwd=workspace,
             stdout=asyncio.subprocess.PIPE,

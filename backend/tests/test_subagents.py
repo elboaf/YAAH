@@ -10,40 +10,17 @@ from backend.agent.subagents import AgentDef
 
 
 # ---------------------------------------------------------------- registry
-
-
-def test_tree_target_tools_require_explicit_target():
-    from backend.agent.tools import get_schemas
-
-    schemas = {schema["function"]["name"]: schema["function"]["parameters"]
-               for schema in get_schemas()}
-    for name in ("git_status", "git_diff", "git_pull", "git_push"):
-        assert "target" in schemas[name]["required"]
-        assert schemas[name]["properties"]["target"]["enum"] == ["current", "main"]
-
-
 def test_builtins_present():
     names = {d["name"] for d in subagents.list_agents()}
     assert "general-purpose" in names
     assert "explore" in names
-
-
-def test_sub_agents_cannot_merge_back():
-    for defn in (subagents.get_agent_def("general-purpose"), subagents.get_agent_def("explore")):
-        assert "git_merge_back" not in {
-            schema["function"]["name"]
-            for schema in subagents._resolve_tools(defn, windows=True)
-        }
-
-
 def test_explore_is_read_only():
     ex = subagents.get_agent_def("explore")
     tools = {s["function"]["name"] for s in subagents._resolve_tools(ex, windows=True)}
     for forbidden in ("bash", "write_file", "edit_file", "create_file",
-                      "delete_file", "move_file", "git_add", "git_commit",
-                      "git_push", "git_pull", "powershell"):
+                      "delete_file", "move_file", "powershell"):
         assert forbidden not in tools, forbidden
-    for required in ("read_file", "search_files", "web_search", "git_status"):
+    for required in ("read_file", "search_files", "web_search"):
         assert required in tools, required
 
 
@@ -866,72 +843,3 @@ async def test_no_warning_note_early_in_budget(fake_model, tmp_path):
     )
 
 
-# ------------------------------------------------- review fixes (2026-09-23)
-
-
-@pytest.mark.asyncio
-async def test_sub_agent_in_parent_worktree_shares_it(fake_model, tmp_path):
-    """A sub-agent spawned while the parent is already isolated works in
-    the PARENT's session worktree (adr/0003: one worktree per chat) — and
-    finalize must NOT tear it down or unbind the parent's session."""
-    from backend.agent import worktrees
-    from backend.tests.gitutil import run_git
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    run_git(repo, "init", "-q", "-b", "master")
-    run_git(repo, "config", "user.email", "t@t")
-    run_git(repo, "config", "user.name", "t")
-    (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
-    run_git(repo, "add", "-A")
-    run_git(repo, "commit", "-q", "-m", "init")
-    parent_wt = await worktrees.ensure_isolated(str(repo), chat_id="55")
-
-    fake_model.append([
-        {"type": "tool_calls", "tool_calls": [{
-            "id": "c1", "type": "function",
-            "function": {"name": "write_file",
-                         "arguments": json.dumps({"path": "sub.txt", "content": "hi"})},
-        }]},
-        {"type": "finish", "reason": "tool_calls"},
-    ])
-    fake_model.append([{"type": "content", "text": "wrote it"}, {"type": "finish"}])
-    result = await subagents.run_sub_agent(
-        subagents.get_agent_def("general-purpose"), "write sub.txt",
-        parent_wt, run_label="call-1",
-    )
-    assert result["status"] == "completed"
-    # finalize never saw the parent's worktree: no branch pin, no teardown
-    assert "worktree_branch" not in result
-    assert Path(parent_wt).exists()
-    assert worktrees._chat_bindings.get("55") == parent_wt
-    assert worktrees.binding_for("55") is not None
-    # the sub-agent's write landed in the shared session worktree
-    assert (Path(parent_wt) / "sub.txt").read_text(encoding="utf-8") == "hi"
-
-
-@pytest.mark.asyncio
-async def test_sub_agent_nonrepo_writer_token_released(fake_model, tmp_path):
-    """Sequential sub-agents in a NON-REPO workspace each release their
-    shared-writer token — a leak used to refuse every later writer until
-    backend restart."""
-    from backend.agent import worktrees
-
-    for i, label in enumerate(("s1", "s2")):
-        fake_model.append([
-            {"type": "tool_calls", "tool_calls": [{
-                "id": f"c{i}", "type": "function",
-                "function": {"name": "write_file",
-                             "arguments": json.dumps(
-                                 {"path": f"f{label}.txt", "content": "x"})},
-            }]},
-            {"type": "finish", "reason": "tool_calls"},
-        ])
-        fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
-        result = await subagents.run_sub_agent(
-            subagents.get_agent_def("general-purpose"), "write a file",
-            str(tmp_path), run_label=label,
-        )
-        assert result["status"] == "completed", result.get("worktree_note")
-        assert (tmp_path / f"f{label}.txt").read_text(encoding="utf-8") == "x"
-    assert not any(worktrees._shared_writers.values()), "writer tokens must not leak"

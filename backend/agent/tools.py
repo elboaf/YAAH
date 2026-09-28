@@ -331,46 +331,6 @@ HELP_DOCS: dict = {
         "when the cap is hit rather than assuming nothing else "
         "matches."
     ),
-    "git_status": (
-        "Short wrapper over `git status`; read-only. Specify target=current "
-        "for the active session tree or target=main only when the user "
-        "explicitly asks about the primary checkout."
-    ),
-    "git_diff": (
-        "Wraps `git diff`; pass path to limit scope, staged=true for "
-        "the index. Specify target=current or target=main; use main only "
-        "when the user explicitly asks about the primary checkout."
-    ),
-    "git_add": (
-        "Stages paths (omit to stage everything). Does not commit."
-    ),
-    "git_commit": (
-        "Commits the staged index with -m; never opens an editor. "
-        "Empty staged set errors - check git_status first."
-    ),
-    "git_push": (
-        "Pushes a branch; specify target=current for the active session tree "
-        "or target=main only for an explicit primary-branch request. Never "
-        "force-push. Main-target pushes require a clean primary checkout, "
-        "a non-agent branch, and a configured upstream."
-    ),
-    "git_merge_back": (
-        "Integrates completed requested work into the main workspace. "
-        "Omit branch to merge the current session's own branch - your "
-        "context's Workspace integration note names it, and that is the "
-        "only branch you should pass by name. A prefix like agent/352 "
-        "resolves only when exactly one agent/* branch matches; anything "
-        "ambiguous is refused, never guessed. The result carries "
-        "session_branch (what this session owns) so a follow-up merge "
-        "needs no reconstruction. A refusal is not a failed merge you "
-        "cannot recover from: read the reason, fix the cause, call again."
-    ),
-    "git_pull": (
-        "Fetches and integrates remote changes; specify target=current or "
-        "target=main. Use main only when the user explicitly asks to update "
-        "the primary checkout. Main-target pulls require a clean tree and "
-        "use fast-forward-only integration."
-    ),
     "get_help": (
         "With no argument, lists every tool with its full one-line "
         "description. With a name, returns the tool's parameter "
@@ -686,153 +646,6 @@ TOOLS_SCHEMA += [
                     "max_results": {"type": "integer", "description": "Maximum matches (default 10, max 50)"},
                 },
                 "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_status",
-            "description": (
-                "Show git status. Specify target=current for the active tree; "
-                "use target=main only when the user explicitly asks about the "
-                "primary checkout. If git is missing on Windows, offer install_git "
-                "via ask_user."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "enum": ["current", "main"],
-                        "description": "choose current tree or primary checkout",
-                    },
-                },
-                "required": ["target"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_diff",
-            "description": (
-                "Show git diff; set staged=true or pass a path. Specify "
-                "target=current or target=main; use main only when explicitly "
-                "asking about the primary checkout."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "staged": {"type": "boolean", "description": "Diff staged changes only"},
-                    "path": {"type": "string", "description": "Limit diff to this path"},
-                    "target": {
-                        "type": "string",
-                        "enum": ["current", "main"],
-                        "description": "choose current tree or primary checkout",
-                    },
-                },
-                "required": ["target"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_add",
-            "description": "Stage files in git. Omit paths to stage everything.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "paths": {"type": "array", "items": {"type": "string"}},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_commit",
-            "description": "Commit staged changes with a message.",
-            "parameters": {
-                "type": "object",
-                "properties": {"message": {"type": "string"}},
-                "required": ["message"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_merge_back",
-            "description": (
-                "Merge an agent worktree branch into the main workspace. "
-                "Omit branch to merge the current session's own branch (the "
-                "usual case); a branch prefix resolves when exactly one "
-                "agent/* branch matches. Refuses and reports when the branch "
-                "has no new commits, uncommitted target-workspace changes "
-                "overlap files the merge would update, or a conflict occurs. "
-                "Conflicts are aborted; user work is never stashed or "
-                "overwritten."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "branch": {
-                        "type": "string",
-                        "description": (
-                            "The session's exact agent/* branch name from "
-                            "context, a unique prefix, or omitted for the "
-                            "current session's branch"
-                        ),
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_push",
-            "description": (
-                "Pushes a branch; specify target=current or target=main. Use main "
-                "only for an explicit primary-branch request; never force-push. "
-                "Main-target push requires a clean primary checkout, a non-agent "
-                "branch, and a configured upstream."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "enum": ["current", "main"],
-                        "description": "choose current tree or primary checkout",
-                    },
-                },
-                "required": ["target"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_pull",
-            "description": (
-                "Pull and integrate changes; specify target=current or target=main. "
-                "Use main only for an explicit request to update the primary checkout. "
-                "Main-target pull requires a clean primary checkout and uses "
-                "fast-forward-only integration."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "enum": ["current", "main"],
-                        "description": "choose current tree or primary checkout",
-                    },
-                },
-                "required": ["target"],
             },
         },
     },
@@ -1300,7 +1113,6 @@ async def edit_file(workspace: str, path: str, old_text: str, new_text: str) -> 
 IGNORED_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "dist",
     "build", ".pytest_cache", ".mypy_cache", "target", ".next",
-    # issue #58 R7: sibling agents' half-finished worktrees are search
     # noise — the model must never wade into another run's tree
     ".yaah",
 }
@@ -1447,159 +1259,6 @@ async def _git(workspace: str, *args: str) -> dict:
     return {"output": output.strip()[:MAX_OUTPUT_CHARS], "exit_code": 0}
 
 
-async def _git_target(workspace: str, target: str) -> str | dict:
-    """Resolve an explicit tree target; never reinterpret invalid intent."""
-    if not isinstance(target, str) or target not in {"current", "main"}:
-        return {"error": "target must be 'current' or 'main'"}
-    if target == "current":
-        return workspace
-    from backend.agent import remote as remote_mod
-
-    # A remote workspace is resolved on its owning host, which receives the
-    # target argument through the normal remote executor path.
-    if remote_mod.parse_ns(workspace) is not None:
-        return workspace
-    from backend.agent import worktrees as wt
-
-    root = await wt.main_repo_root(workspace)
-    if root is None:
-        return {"error": "the primary checkout could not be resolved from this workspace"}
-    return str(root)
-
-
-async def git_status(workspace: str, target: str) -> dict:
-    selected = await _git_target(workspace, target)
-    if isinstance(selected, dict):
-        return selected
-    return await _git(selected, "status", "--short", "--branch")
-
-
-async def git_diff(
-    workspace: str, target: str, staged: bool = False, path: str = None
-) -> dict:
-    selected = await _git_target(workspace, target)
-    if isinstance(selected, dict):
-        return selected
-    args = ["diff"]
-    if staged:
-        args.append("--staged")
-    if path:
-        args += ["--", path]
-    return await _git(selected, *args)
-
-
-async def git_add(workspace: str, paths: list = None) -> dict:
-    args = ["add", "-A"] if not paths else ["add", *paths]
-    return await _git(workspace, *args)
-
-
-async def git_commit(workspace: str, message: str) -> dict:
-    return await _git(workspace, "commit", "-m", message)
-
-
-async def git_merge_back(workspace: str, branch: str = "") -> dict:
-    """Integrate an `agent/*` branch into the primary workspace. An empty
-    branch means the calling session's own branch (issue #103: the
-    integration step needs no reconstructed name); a prefix resolves when
-    exactly one agent/* branch matches. Full refusal rules live in
-    worktrees.merge_back: no new commits, overlapping uncommitted changes,
-    and conflicts are reported without stashing or overwriting user work."""
-    from backend.agent import worktrees as wt
-
-    root = wt.worktree_of(workspace) or workspace
-    real = await wt.main_repo_root(root)
-    if real is None:
-        real = workspace_root(workspace)
-    if not branch.strip():
-        session = wt.live_session_branch(real)
-        if session:
-            branch = session
-        else:
-            return {
-                "error": (
-                    "merge branch is empty and no session worktree is bound "
-                    "to this workspace — pass the agent branch to merge"
-                )
-            }
-    return await wt.merge_back(real, branch.strip())
-
-
-async def _verify_primary_sync_target(workspace: str, operation: str) -> dict | None:
-    status = await _git(workspace, "status", "--porcelain")
-    if status.get("exit_code") != 0:
-        return {
-            "error": f"could not verify primary checkout status before {operation}",
-            "details": status,
-        }
-    if status.get("output", "").strip():
-        return {
-            "error": f"primary checkout has uncommitted changes; refusing target=main {operation}"
-        }
-    branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
-    if branch.get("exit_code") != 0:
-        return {
-            "error": f"could not resolve primary checkout branch before {operation}",
-            "details": branch,
-        }
-    branch_name = str(branch.get("output") or "").strip()
-    if not branch_name or branch_name == "HEAD" or branch_name.startswith("agent/"):
-        return {
-            "error": (
-                f"refusing target=main {operation} from unexpected branch "
-                f"{branch_name or '(unknown)'}"
-            )
-        }
-    upstream = await _git(
-        workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"
-    )
-    if upstream.get("exit_code") != 0:
-        return {
-            "error": (
-                "primary checkout branch has no upstream; "
-                f"refusing to guess a remote for {operation}"
-            )
-        }
-    return None
-
-
-async def git_push(workspace: str, target: str) -> dict:
-    """Push the selected tree's current branch; never force-push."""
-    selected = await _git_target(workspace, target)
-    if isinstance(selected, dict):
-        return selected
-    workspace = selected
-    if target == "main":
-        refusal = await _verify_primary_sync_target(workspace, "push")
-        if refusal:
-            return refusal
-        return await _git(workspace, "push")
-    r = await _git(workspace, "push")
-    if r.get("exit_code") == 0:
-        return r
-    err = str(r.get("error") or "")
-    if "has no upstream branch" not in err and "no upstream configured" not in err:
-        return r
-    branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
-    branch_name = str(branch.get("output") or "").strip()
-    if branch.get("exit_code") != 0 or not branch_name or branch_name == "HEAD":
-        return r
-    pushed = await _git(workspace, "push", "--set-upstream", "origin", branch_name)
-    if pushed.get("exit_code") == 0:
-        pushed["note"] = f"no upstream was configured; published {branch_name} to origin with --set-upstream"
-    return pushed
-
-
-async def git_pull(workspace: str, target: str) -> dict:
-    selected = await _git_target(workspace, target)
-    if isinstance(selected, dict):
-        return selected
-    if target == "main":
-        refusal = await _verify_primary_sync_target(selected, "pull")
-        if refusal:
-            return refusal
-        # Never create an implicit merge on the user's primary checkout.
-        return await _git(selected, "pull", "--ff-only")
-    return await _git(selected, "pull")
 
 
 # ---------------------------------------------------------------- dispatch
@@ -1645,13 +1304,6 @@ EXECUTORS = {
     "move_file": move_file,
     "search_files": search_files,
     "search_conversation_history": search_conversation_history,
-    "git_status": git_status,
-    "git_diff": git_diff,
-    "git_add": git_add,
-    "git_commit": git_commit,
-    "git_merge_back": git_merge_back,
-    "git_push": git_push,
-    "git_pull": git_pull,
     "install_git": _install_git_executor,
     "get_help": get_help,
     "memory_save": _memory_executor("save"),
@@ -1692,7 +1344,7 @@ SCHEMAS = {s["function"]["name"]: s for s in TOOLS_SCHEMA}
 # unknown or MCP tool always prompts under ask mode and blocks under plan).
 
 _READ_TOOLS = {
-    "read_file", "search_files", "git_status", "git_diff",
+    "read_file", "search_files",
     "web_search", "web_fetch", "view_image", "load_skill",
     # observation-only computer-use tools (no input injection)
     "screenshot", "list_windows", "read_ui_tree", "wait",
@@ -1710,10 +1362,6 @@ _READ_TOOLS = {
 }
 _MUTATING_TOOLS = {
     "write_file", "edit_file", "create_file", "delete_file", "move_file",
-    "git_add", "git_commit",
-    # merges an agent worktree branch back into the shared tree (#58) —
-    # mutating: it changes the target tree (refusal rules apply)
-    "git_merge_back",
     # installs software on the host (silently, but gated: prompts in ask
     # mode, blocked in plan mode)
     "install_git",
@@ -1725,7 +1373,7 @@ _MUTATING_TOOLS = {
     "memory_save", "memory_delete",
 }
 _SHELL_TOOLS = {
-    "bash", "powershell", "git_push", "git_pull",
+    "bash", "powershell",
     # computer-use control tools drive the real mouse/keyboard
     "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
     "type_text", "press_key", "focus_window",
@@ -1775,12 +1423,7 @@ async def execute_tool(
     runs locally. on_chunk, when given, is forwarded to the local shell
     executors for incremental output (remote/MCP tools ignore it).
 
-    Issue #98 / adr/0002: write-provenance seeding. Before the call, shell
-    redirection targets in the command are registered (the harness, not the
-    model, writes those capture files); after it, file-tool writes and any
-    output path a tool result reports are registered as model-authored.
-    The registry feeds the merge-back trash classifier only — it is never
-    consulted for access control."""
+"""
     from backend.agent import remote as remote_mod
 
     namespaced = remote_mod.parse_ns(workspace)
@@ -1804,14 +1447,6 @@ async def execute_tool(
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
     if name == "search_conversation_history":
         arguments = {**arguments, "conversation_id": conversation_id}
-    # --- provenance seeding (pre-call) -------------------------------------
-    try:
-        from backend.agent import worktrees as _wt
-
-        if name in ("bash", "powershell"):
-            _wt.note_shell_writes(workspace, str(arguments.get("command") or ""))
-    except Exception:  # noqa: BLE001 — provenance must never gate a tool
-        pass
     try:
         if on_chunk is not None and name in ("bash", "powershell"):
             result = await fn(workspace=workspace, on_chunk=on_chunk, **arguments)
@@ -1821,23 +1456,6 @@ async def execute_tool(
         return _with_help_nudge(name, {"error": f"Bad arguments for {name}: {e}"})
     except Exception as e:  # noqa: BLE001
         return _with_help_nudge(name, {"error": f"{type(e).__name__}: {e}"})
-    # --- provenance recording (post-call) ----------------------------------
-    try:
-        from backend.agent import worktrees as _wt
-
-        if name in ("write_file", "create_file", "edit_file"):
-            path = arguments.get("path")
-            if path:
-                _wt.note_write(workspace, str(path), "model")
-        else:
-            # Only explicit save-target keys — NOT `path` (read_file
-            # returns it, and a read is not a write).
-            for key in ("file", "saved", "written"):
-                value = result.get(key)
-                if isinstance(value, str) and "/" in value:
-                    _wt.note_write(workspace, value, "model")
-    except Exception:  # noqa: BLE001
-        pass
     return result
 
 

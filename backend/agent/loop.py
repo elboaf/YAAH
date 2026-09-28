@@ -18,19 +18,15 @@ import itertools
 import json
 import os
 import re
-import sys
-import uuid
 from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
 from backend.agent import file_changes
-from backend.agent import git_activity as git_activity_mod
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
-from backend.agent import worktrees
 from backend.agent.tools import execute_tool, get_schemas, tool_risk, workspace_root
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.agent.shell import resolve_git_bash, windows_bash_note
@@ -76,24 +72,6 @@ async def _persist_file_change_summary(conversation_id: int, summary: dict) -> N
     except Exception:
         # Persistence must not mask the run's terminal status.
         pass
-
-
-async def _persist_git_activity_summary(conversation_id: int, summary: dict) -> None:
-    try:
-        await add_message(
-            conversation_id, "system", json.dumps({"git_activity": summary})
-        )
-    except Exception:
-        # Git accounting is best-effort and must not mask run status.
-        pass
-
-
-def _record_worktree_lifecycle(activity, actor: str, label: str, info: dict) -> None:
-    git_activity_mod.record_worktree_lifecycle(activity, actor, label, info)
-
-
-def _emit_git_activity_payload(activity, outcome: str) -> dict | None:
-    return activity.summary(outcome)
 
 
 async def _generate_conversation_title(
@@ -416,26 +394,6 @@ Guidelines:
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists
   before assuming your change caused them.
-- Write isolation is automatic implementation plumbing: the first write
-  uses this chat's session worktree on an `agent/*` branch. Treat the main
-  workspace as the user's task target. Complete requested code changes in
-  the worktree, then integrate them with `git_merge_back` before reporting
-  completion; do not ask the user to manage checkouts or merge routine work.
-  `git_merge_back` with no branch argument merges the current session's own
-  branch — prefer that; if you pass a branch at all, copy the exact
-  `agent/*` name from your context, never an abbreviation.
-  Turn end itself never merges. For structured `git_status`, `git_diff`,
-  `git_pull`, and `git_push`, target defaults to the current tree (the
-  session worktree when bound); use `target="main"` only when the user
-  explicitly requests the primary checkout. If that target is ambiguous,
-  clarify rather than guessing. Never use a primary-tree target to bypass
-  session isolation for ordinary code edits. If integration fails, never
-  overwrite user work. Classify dirty overlap, content conflict, or other
-  refusal; name affected files and confirm if a merge was aborted. Offer safe
-  options with trade-offs (for example, resolve on the isolated branch and
-  retry, leave it isolated, or have the user resolve named main-workspace
-  edits). Explain what changed and what did not before asking how to proceed.
-  Never claim unmerged work is in the main workspace.
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
 - Commit changes when needed to preserve and integrate the requested work;
@@ -444,8 +402,7 @@ Guidelines:
   delegation, consequential actions, or a blocker); routine tool calls need
   no play-by-play. Keep updates concise and useful, and give a clear final
   outcome. Explain isolation only when it affects delivery or user choices.
-- Shell calls start in the selected workspace (possibly this chat's session worktree);
-  no setup `cd` is needed.
+- Shell calls start in the selected workspace; no setup `cd` is needed.
 - Each shell call is a fresh process. `cd` does not persist; use workspace-relative
   paths unless the task specifically requires the main checkout.
 
@@ -1272,29 +1229,6 @@ async def _run_agent_claimed(
         None if remote_workspace else await file_changes.snapshot_workspace(turn_workspace)
     )
     file_summary_emitted = False
-    run_id = uuid.uuid4().hex
-    git_activity = git_activity_mod.GitActivity(run_id=run_id)
-    git_activity_emitted = False
-    actor_id = "parent"
-    actor_label = "Agent"
-    initial_binding = None if remote_workspace else worktrees.binding_for(str(conversation_id))
-    _isolated = False if remote_workspace else worktrees.worktree_of(turn_workspace) is not None
-    if initial_binding:
-        _record_worktree_lifecycle(git_activity, actor_id, actor_label, {
-            "event": "reused",
-            "branch": str(initial_binding.get("branch") or ""),
-            "base_branch": str(initial_binding.get("base_branch") or ""),
-        })
-    elif _isolated:
-        _record_worktree_lifecycle(git_activity, actor_id, actor_label, {
-            "event": "inherited",
-            "branch": await git_activity_mod._branch(turn_workspace),
-        })
-    run_outcome = "completed"
-    # adr/0003 revised: the worktree is a SESSION binding — turn end
-    # settles (drains a quiesced session) but otherwise the binding and
-    # its branch persist, so the next turn of
-    # this chat works in exactly the tree this turn left behind.
 
     if persist_user:
         await add_message(
@@ -1410,18 +1344,8 @@ async def _run_agent_claimed(
     _cancel_events[conversation_id] = cancel_ev
 
     async def _record_parent_tool(name: str, args: dict, result: object, tool_workspace: str) -> None:
-        try:
-            await git_activity.record_tool(
-                "parent", "Agent", name, args, result, tool_workspace
-            )
-            if name in {"bash", "powershell"} and isinstance(result, dict):
-                await git_activity.record_shell(
-                    "parent", "Agent", str((args or {}).get("command") or ""),
-                    result, tool_workspace,
-                )
-        except Exception:
-            # Summary collection cannot disrupt the actual tool/run.
-            pass
+        # Git-activity telemetry was removed with worktree isolation (ADR 0008).
+        return None
     steer_ev = asyncio.Event()
     _steer_flags[conversation_id] = steer_ev
 
@@ -1670,11 +1594,6 @@ async def _run_agent_claimed(
 
             # No tool calls => final answer; turn complete
             if not tool_calls:
-                # adr/0003: no end-of-turn probe or supervised retry — the
-                # session worktree keeps uncommitted state across turns by
-                # design, so a turn may end with WIP in place (the next
-                # turn sees exactly this tree). The finally block below
-                # still merges the session branch's commits every turn.
                 if finish_reason == "length":
                     yield _ndjson(
                         {
@@ -1832,50 +1751,6 @@ async def _run_agent_claimed(
                         if policy == "autonomous":
                             mode = "full"
                         if tool_risk(name) == "read" or mode == "full":
-                            # Placement seam: before a workspace-mutating
-                            # call, bind only when policy says isolation is
-                            # required (refusal becomes a tool error result).
-                            _refused = False
-                            if (
-                                not remote_workspace
-                                and tool_risk(name) != "read"
-                                and not _isolated
-                            ):
-                                try:
-                                    _bind = await worktrees.bind_for_write(
-                                        workspace,
-                                        chat_id=str(conversation_id),
-                                        tool_name=name,
-                                        args=args,
-                                        on_lifecycle=lambda info: _record_worktree_lifecycle(
-                                            git_activity, "parent", "Agent", info
-                                        ),
-                                    )
-                                    _isolated = _bind.required
-                                    workspace = _bind.workspace
-                                    turn_workspace = _bind.workspace
-                                    if _bind.worktree:
-                                        change_baseline = await file_changes.snapshot_workspace(
-                                            _bind.workspace
-                                        )
-                                        yield _ndjson(
-                                            {
-                                                "type": "worktree_bound",
-                                                "branch": _bind.branch,
-                                                "base_branch": _bind.base_branch,
-                                                "worktree_id": str(conversation_id),
-                                            }
-                                        )
-                                        messages.append(
-                                            {
-                                                "role": "system",
-                                                "content": _bind.model_note,
-                                            }
-                                        )
-                                except worktrees.IsolationRefused as e:
-                                    result = {"error": str(e)}
-                                    _refused = True
-                            if not _refused:
                                 box: dict = {}
                                 async for pev in _execute_with_progress(
                                     name,
@@ -1921,50 +1796,6 @@ async def _run_agent_claimed(
                             # Approved (None) -> execute for real now; a
                             # denial/plan-block carries its own error result.
                             if result is None:
-                                # Placement seam after approval:
-                                if (
-                                    not remote_workspace
-                                    and tool_risk(name) != "read"
-                                    and not _isolated
-                                ):
-                                    try:
-                                        _bind = await worktrees.bind_for_write(
-                                            workspace,
-                                            chat_id=str(conversation_id),
-                                            tool_name=name,
-                                            args=args,
-                                            on_lifecycle=lambda info: (
-                                                _record_worktree_lifecycle(
-                                                    git_activity,
-                                                "parent",
-                                                "Agent",
-                                                info,
-                                                )
-                                            ),
-                                        )
-                                        _isolated = _bind.required
-                                        workspace = _bind.workspace
-                                        turn_workspace = _bind.workspace
-                                        if _bind.worktree:
-                                            change_baseline = await file_changes.snapshot_workspace(
-                                                _bind.workspace
-                                            )
-                                            yield _ndjson(
-                                                {
-                                                    "type": "worktree_bound",
-                                                    "branch": _bind.branch,
-                                                    "base_branch": _bind.base_branch,
-                                                    "worktree_id": str(conversation_id),
-                                                }
-                                            )
-                                            messages.append(
-                                                {
-                                                    "role": "system",
-                                                    "content": _bind.model_note,
-                                                }
-                                            )
-                                    except worktrees.IsolationRefused as e:
-                                        result = {"error": str(e)}
                                 if result is None:
                                     box = {}
                                     async for pev in _execute_with_progress(
@@ -2206,7 +2037,6 @@ async def _run_agent_claimed(
                     result = batch_results.get(
                         tc.get("id", ""), {"error": "sub-agent produced no result"}
                     )
-                    git_activity.add_child(result.get("git_activity"), str(tc.get("id", "")))
                     summary, result_str = await _persist_spawn_result(tc, result)
                     yield _ndjson(
                         {
@@ -2228,7 +2058,6 @@ async def _run_agent_claimed(
             f"Step budget ({max_steps}) exhausted — raise it in "
             "Settings → General → Max steps (or config.json `max_steps`; 0 = unlimited)"
         )
-        run_outcome = "failed"
         await add_message(conversation_id, "system", f"turn failed: {budget_msg}")
         file_summary = await _emit_file_changes(
             conversation_id, turn_workspace, change_baseline
@@ -2261,7 +2090,6 @@ async def _run_agent_claimed(
             yield _ndjson({"type": "queued_autosend", "items": remaining})
 
     except model_client.ModelError as e:
-        run_outcome = "failed"
         # The user message is already stored; without a record of the
         # failure the transcript would read as if the turn never happened.
         await add_message(conversation_id, "system", f"turn failed: {e}")
@@ -2272,7 +2100,6 @@ async def _run_agent_claimed(
         if file_summary:
             await _persist_file_change_summary(conversation_id, file_summary)
             yield _ndjson({"type": "file_changes", **file_summary})
-        run_outcome = "failed"
         yield _ndjson({"type": "error", "message": str(e)})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
@@ -2289,7 +2116,6 @@ async def _run_agent_claimed(
         if file_summary:
             await _persist_file_change_summary(conversation_id, file_summary)
             yield _ndjson({"type": "file_changes", **file_summary})
-        run_outcome = "failed"
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
@@ -2306,73 +2132,6 @@ async def _run_agent_claimed(
             )
             if file_summary:
                 await _persist_file_change_summary(conversation_id, file_summary)
-        # adr/0003 revised (branch-first): turn end never merges into the
-        # main tree, whatever exit the turn took. The session settles
-        # (drain when quiesced) and the binding otherwise survives into
-        # the next turn; teardown runs only in release_session (chat
-        # deletion, drain, reaper).
-        if _isolated:
-            # adr/0003 revised (branch-first): turn end NEVER merges into
-            # the main tree. The session worktree settles instead — a
-            # quiesced session (no commits, clean tree) drains; otherwise
-            # the branch + binding persist and the chip keeps telling the
-            # truth between turns. The user merges deliberately.
-            try:
-                _settle = await asyncio.wait_for(
-                    asyncio.shield(worktrees.settle_session(str(conversation_id))),
-                    timeout=60,
-                )
-            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                _settle = None
-            if _settle is not None:
-                if _settle.drained:
-                    git_activity.set_context(
-                        "parent", "Agent",
-                        branch=_settle.branch,
-                        base_branch=_settle.base_branch,
-                        worktree="removed",
-                    )
-                    git_activity.set_settlement(
-                        "parent", "Agent", commits_ahead=0, dirty=False,
-                        worktree="removed",
-                    )
-                    # Quiesced session released: the chip reverts to the main
-                    # tree's branch.
-                    yield _ndjson({"type": "worktree_released"})
-                elif _settle.branch:
-                    git_activity.set_context(
-                        "parent", "Agent",
-                        branch=_settle.branch,
-                        base_branch=_settle.base_branch,
-                        worktree="kept",
-                    )
-                    git_activity.set_settlement(
-                        "parent", "Agent",
-                        commits_ahead=_settle.commits_ahead,
-                        dirty=_settle.dirty, worktree="kept",
-                        integrated=False,
-                    )
-                if _settle.status_note:
-                    # Honest status instead of an implicit merge: the work
-                    # lives on the branch until the user says otherwise.
-                    _note = {
-                        **_settle.status_note,
-                        "integrated": bool(git_activity.lanes.get("parent", {}).get("integrated")),
-                    }
-                    await add_message(
-                        conversation_id,
-                        "system",
-                        json.dumps({"worktree_status": _note}, default=str),
-                    )
-                    yield _ndjson({"type": "worktree_status", **_note})
-        summary = git_activity.summary(
-            "cancelled" if cancel_ev.is_set() else run_outcome
-        )
-        if summary and not git_activity_emitted:
-            await _persist_git_activity_summary(conversation_id, summary)
-            git_activity_emitted = True
-            if sys.exc_info()[0] is None:
-                yield _ndjson({"type": "git_activity", **summary})
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

@@ -18,10 +18,6 @@ Execution contract (v1):
   - no nesting: a sub-agent cannot spawn sub-agents;
   - no ask_user: a sub-agent must decide for itself and report the
     assumption in its final message;
-  - isolated writes (issue #58): sub-agents read the parent's folder;
-    the first workspace mutation rebinds a writing sub-agent to
-    its own git worktree — the branch is reported on the first line of
-    the result and the parent/chat merges it (sub-agents never merge);
   - parent cancellation cancels children; a child failure returns a
     structured error result and never kills the parent's turn.
 """
@@ -35,9 +31,7 @@ from pathlib import Path
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
-from backend.agent import worktrees
 from backend.agent.tools import execute_tool, get_schemas, workspace_root
-from backend.agent import git_activity as git_activity_mod
 
 # ------------------------------------------------------------------ registry
 
@@ -76,10 +70,10 @@ class AgentDef:
 
 
 # Tool sets for the built-ins. Sub-agents never get ask_user (they cannot
-# block on the user), spawn_agent (no nesting), git_merge_back (integration
-# belongs to the parent), or computer-use tools (one shared mouse/keyboard).
+# block on the user), spawn_agent (no nesting), or computer-use tools (one
+# shared mouse/keyboard).
 _ALWAYS_EXCLUDED = {
-    "ask_user", "spawn_agent", "search_conversation_history", "git_merge_back",
+    "ask_user", "spawn_agent", "search_conversation_history",
 }
 _COMPUTER_TOOLS = {
     "screenshot", "list_windows", "focus_window", "read_ui_tree",
@@ -389,28 +383,10 @@ async def run_sub_agent(
     permissions.
     """
     cancel_ev = cancel_ev or asyncio.Event()
-    # The sub-agent starts on the workspace it was handed (the parent's
-    # tree, or the parent's own worktree for nested fan-out). The placement
-    # policy binds before its first workspace mutation; every tool call goes
-    # through _exec so file,
-    # shell, and git tools all follow the rebinding in one place.
+    # The sub-agent starts on the workspace it was handed.
     run_workspace = str(workspace)
-    activity = git_activity_mod.GitActivity(run_id=run_label or f"sub-{id(defn):x}")
-    actor_id = "subagent"
-    actor_label = defn.name
-    initial_child_wt = worktrees.worktree_of(run_workspace)
-    if initial_child_wt:
-        activity.set_context(
-            actor_id, actor_label, branch=await git_activity_mod._branch(initial_child_wt),
-            branch_action="reused", worktree="shared",
-        )
-    _isolation_note: str | None = None
-    # The key this sub-agent would bind under (its own chat id slot).
-    _iso_key = run_label or f"sub-{id(defn):x}"
 
     async def _exec(name: str, args: dict, tool_call_id: str = "") -> dict:
-        nonlocal run_workspace, _isolation_note, _used_worktree
-
         def on_chunk(chunk: str) -> None:
             if on_event and chunk:
                 on_event({"type": "tool_progress", "tool_call_id": tool_call_id, "chunk": chunk})
@@ -419,67 +395,9 @@ async def run_sub_agent(
             return await execute_tool(
                 name, args, path, on_chunk=on_chunk if on_event else None
             )
-        needs_child_worktree = worktrees.should_isolate(name, args, child=True)
-        if _used_worktree is None and needs_child_worktree:
-            owned = worktrees.worktree_of(run_workspace)
-            if owned is not None:
-                # Nested parent: the parent's session worktree IS this
-                # sub-agent's tree (adr/0003 — one worktree per chat).
-                # Its commits ride the parent's session branch and merge
-                # at the parent's turn end, so no worktree of our own is
-                # minted and finalize must NOT see this path — finalizing
-                # the parent's worktree here would delete it mid-turn and
-                # unbind the parent's session.
-                run_workspace = owned
-                activity.set_context(
-                    actor_id, actor_label,
-                    branch=await git_activity_mod._branch(run_workspace),
-                    branch_action="reused", worktree="shared",
-                )
-                result = await execute(name, args, run_workspace)
-                try:
-                    await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
-                    if name in {"bash", "powershell"}:
-                        await activity.record_shell(
-                            actor_id, actor_label, str((args or {}).get("command") or ""),
-                            result, run_workspace,
-                        )
-                except Exception:
-                    pass
-                return result
-            try:
-                _bind = await worktrees.bind_for_write(
-                    run_workspace,
-                    chat_id=_iso_key,
-                    tool_name=name,
-                    args=args,
-                    child=True,
-                    on_lifecycle=lambda info: git_activity_mod.record_worktree_lifecycle(
-                        activity, actor_id, actor_label, info
-                    ),
-                )
-                run_workspace = _bind.workspace
-                if _bind.required:
-                    _used_worktree = run_workspace
-                if _bind.model_note:
-                    _isolation_note = _bind.model_note
-            except worktrees.IsolationRefused as e:
-                _isolation_note = str(e)
-                return {"error": str(e)}
         result = await execute(name, args, run_workspace)
-        if not (initial_child_wt and needs_child_worktree):
-            try:
-                await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
-                if name in {"bash", "powershell"}:
-                    await activity.record_shell(
-                        actor_id, actor_label, str((args or {}).get("command") or ""),
-                        result, run_workspace,
-                    )
-            except Exception:
-                pass
         return result
 
-    _used_worktree: str | None = None
     messages = [
         {"role": "system", "content": _sub_agent_system_prompt(defn, workspace)},
         {"role": "user", "content": prompt},
@@ -654,11 +572,6 @@ async def run_sub_agent(
                             result = None
                         if result is None:
                             result = await _exec(name, args, tc.get("id", ""))
-                        else:
-                            try:
-                                await activity.record_tool(actor_id, actor_label, name, args, result, run_workspace)
-                            except Exception:
-                                pass
                     if on_event:
                         on_event(
                             {
@@ -835,10 +748,6 @@ async def run_sub_agent(
         )
         transcript = [{"note": "transcript too large to store"}]
 
-    # Issue #58: the sub-agent's worktree never merges itself — the branch
-    # goes on the first line of the final message (clipped results must
-    # still carry it), uncommitted work is salvaged, the directory is
-    # removed, the branch is kept for the parent to merge.
     result: dict = {
         "agent_type": defn.name,
         "status": status,
@@ -848,33 +757,6 @@ async def run_sub_agent(
         **({"note": grace_note} if grace_note else {}),
         "transcript": transcript,
     }
-    # finalize only when a worktree was actually BOUND for this sub-agent
-    # (git-repo path). A non-repo workspace returns the original path with
-    # no binding — finalize has nothing to do there, and the non-repo
-    # writer token must be released or every later sub-agent in the same
-    # non-repo workspace is refused until backend restart.
-    if _used_worktree is not None and worktrees.binding_for(_iso_key) == _used_worktree:
-        try:
-            result = await worktrees.finalize_sub_agent(_used_worktree, result)
-            lane = activity._lane(actor_id, actor_label)
-            lane["commits_ahead"] = result.get("commits_ahead")
-            lane["worktree"] = "removed"
-            lane["dirty"] = bool(result.get("worktree_note"))
-            lane["integrated"] = False
-        except Exception:  # noqa: BLE001 — reporting must not kill the parent
-            lane = activity._lane(actor_id, actor_label)
-            lane["worktree"] = "kept"
-            lane["integrated"] = False
-            result["worktree_note"] = "worktree finalization failed; branch kept"
-    else:
-        worktrees.release_chat(_iso_key)
-        if not initial_child_wt:
-            lane = activity.lanes.get(actor_id)
-            if lane:
-                lane["worktree"] = "not-isolated"
-    if _isolation_note:
-        result["worktree_note"] = _isolation_note
-    result["git_activity"] = activity.summary(str(result.get("status") or "completed"))
     return result
 
 

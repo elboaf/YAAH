@@ -617,6 +617,7 @@ describe('steering transcript order', () => {
     expect(messages[3].content).toBe('after steering')
   })
 })
+<<<<<<< HEAD
 
 describe('agentBranch persistence (branch-first chip)', () => {
   it('mirrors bound branches to localStorage and drops them on release; merged flag survives', () => {
@@ -639,3 +640,5 @@ describe('agentBranch persistence (branch-first chip)', () => {
     useAgent.getState().setAgentBranch('c1', null)
   })
 })
+=======
+>>>>>>> a1cc9fc (ADR 0008: remove worktree isolation entirely)
