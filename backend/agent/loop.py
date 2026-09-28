@@ -1054,6 +1054,12 @@ async def load_history(
                 tc_id = meta.get("id", "")
             if tc_id and tc_id not in valid_call_ids:
                 continue  # orphaned tool result; skip to keep history valid
+            if not tc_id:
+                # Degenerate row (issue: empty-id tool call persisted by an
+                # older build). Replay is rejected by the provider with a
+                # 400 ("tool messages must include a non-empty string
+                # tool_call_id") — skip it instead of poisoning every turn.
+                continue
             answered_call_ids.add(tc_id)
             content = r["content"]
             if r.get("images"):

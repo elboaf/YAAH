@@ -291,7 +291,16 @@ async def _stream_response(
     if usage and usage.get("prompt_tokens") is not None:
         yield {"type": "usage", "usage": usage}
     if tool_calls:
-        yield {
-            "type": "tool_calls",
-            "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
-        }
+        # A provider glitch (or a hung stream that emitted only the slot
+        # initializer) can leave a call with an empty id or name. Persisting
+        # or replaying it poisons the history — every later turn then fails
+        # with "tool messages must include a non-empty string tool_call_id".
+        # Drop degenerate slots; an emission that becomes empty becomes a
+        # normal no-tool-call reply.
+        live = [
+            tool_calls[i]
+            for i in sorted(tool_calls)
+            if tool_calls[i].get("id") and tool_calls[i].get("function", {}).get("name")
+        ]
+        if live:
+            yield {"type": "tool_calls", "tool_calls": live}

@@ -318,6 +318,23 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
     return "started"
 
 
+def _is_rate_limit(error_text: str) -> bool:
+    """True when a fire failure is a provider rate-limit / quota error.
+
+    Matched loosely on the message text — the error arrives either as a
+    ModelError string ("Model API error 429: ...") or as an in-band error
+    event, and providers word their quota messages differently."""
+    t = (error_text or "").lower()
+    return (
+        "429" in t
+        or "rate limit" in t
+        or "rate-limit" in t
+        or "limit exhausted" in t
+        or "quota" in t
+        or "too many requests" in t
+    )
+
+
 async def _run_and_settle(
     aid: str,
     conv_id: int,
@@ -381,11 +398,17 @@ async def _run_and_settle(
             retry_at = (datetime.now() + timedelta(minutes=backoff)).isoformat(
                 timespec="seconds"
             )
+            # Rate-limit fires (429 / quota exhausted) are transient provider
+            # outages, not agent failures: record them as 'error_quiet' — the
+            # toast watcher only fires on exact 'error' — so one outage
+            # doesn't spam the user with a toast per retry fire. The final
+            # failure after retries are exhausted still settles 'error'.
+            status = "error_quiet" if _is_rate_limit(error_text) else "error"
             await _patch(
                 aid,
                 next_fire_at=retry_at,
                 last_finished_at=datetime.now().isoformat(timespec="seconds"),
-                last_status="error",
+                last_status=status,
             )
             return
     # Success, or retries exhausted: the parked slot becomes the schedule.
