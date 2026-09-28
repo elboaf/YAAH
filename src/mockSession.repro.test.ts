@@ -5,14 +5,12 @@
  * `loadHistory` poll at the moment the running-guard misses, and dumps the
  * rendered transcript after every phase.
  *
- * Run: npx vitest run src/mockSession.repro.test.ts
- * Output: .scratch/mock-session/transcript.md
+ * Run: npx vitest run src/mockSession.repro.test.ts --reporter=verbose
+ * (the transcript goes to stdout — CI's typecheck has no node types here).
  */
 import { describe, it, beforeEach, expect } from 'vitest'
-import { writeFileSync, mkdirSync } from 'node:fs'
 import { useAgent } from './store'
 
-const OUT_DIR = '.scratch/mock-session'
 const lines: string[] = []
 let liveKey = 'draft'
 const snap = (label: string) => {
@@ -47,7 +45,8 @@ describe('mock session: emissions disappear mid run', () => {
     // A fresh chat starts as a DRAFT: the run streams under key 'draft'
     // until the first response files the conversation and adoptDraft
     // re-keys the buffer to the real conversation id (42).
-    let key = 'draft'; liveKey = key
+    let key = 'draft'
+    liveKey = key
 
     // --- turn starts (as `send()` does) ---
     s().setStatus(key, 'thinking')
@@ -76,7 +75,8 @@ describe('mock session: emissions disappear mid run', () => {
     // the MESSAGE buffer draft→42 — but statusByConv.draft is left behind,
     // so statusByConv['42'] stays unset ('idle') while the run streams on.
     s().adoptDraft(42)
-    key = '42'; liveKey = key
+    key = '42'
+    liveKey = key
     lines.push(`\n> after adoptDraft: statusByConv['42'] = ${s().statusByConv['42'] ?? 'idle (unset!)'}, statusByConv['draft'] = ${s().statusByConv['draft'] ?? '(gone)'}\n`)
     // This is what AgentChatLiveFollow / conversation-open do every 2.5s.
     // The rows here are the *persisted* rows — the last chat block and the
@@ -104,7 +104,7 @@ describe('mock session: emissions disappear mid run', () => {
     s().appendTextDelta(key, asst, 'Post-tool-2 tail text.')
     snap('Phase 5 — post-incident emissions (tool round 2 + tail text)')
 
-    writeFileSync(`${OUT_DIR}/transcript.md`, lines.join('\n'))
+    console.log(lines.join('\n'))
   })
 
   it('CONTROL: same session without the mid-run poll (baseline)', () => {
@@ -133,6 +133,6 @@ describe('mock session: emissions disappear mid run', () => {
     s().appendTextDelta(key, asst, 'Post-tool-2 tail text.')
     snap('Phase 5 — post-incident emissions (tool round 2 + tail text)')
 
-    writeFileSync(`${OUT_DIR}/transcript-control.md`, lines.join('\n'))
+    console.log(lines.join('\n'))
   })
 })
