@@ -198,3 +198,53 @@ def test_resize_keep_ratio_unknown_source_falls_back_to_base():
 def test_preview_size_clamp_defaults_match_issue_122():
     assert (preview._PREVIEW_MIN_WIDTH, preview._PREVIEW_MIN_HEIGHT) == (100, 80)
     assert (preview._PREVIEW_MAX_WIDTH, preview._PREVIEW_MAX_HEIGHT) == (640, 400)
+
+
+# ---- anchored gesture targets (#122 fix): absolute, not incremental ----
+
+
+def test_move_target_is_anchored_absolute_rect_plus_delta():
+    # target = start_rect + (cursor - start_cursor): a pure function of the
+    # anchor, so a missed or duplicated WM_MOUSEMOVE cannot compound error
+    # and the window can never "stick" away from the cursor.
+    assert preview.move_target(
+        start_rect=(100, 200, 500, 600), start=(1000, 1000), current=(1030, 985)
+    ) == (130, 185, 530, 585)
+
+
+def test_resize_target_grows_bottom_right_from_anchor():
+    # Top-left anchored: start_rect.x/y stay fixed; bottom-right follows the
+    # anchored delta, ratio-locked to the source.
+    rect = preview.resize_target(
+        start_rect=(100, 200, 500, 600),
+        start=(1000, 1000),
+        current=(1080, 1000),
+        aspect=16 / 9,
+    )
+    assert (rect[0], rect[1]) == (100, 200)
+    assert abs((rect[2] - rect[0]) / (rect[3] - rect[1]) - 16 / 9) < 0.02
+    assert rect[2] - rect[0] == 480  # 400 + dx of 80
+
+
+def test_resize_target_clamps_to_min_max_within_ratio():
+    # A huge outward drag clamps to the max box (640x400 defaults) while the
+    # ratio stays exact inside the clamp box.
+    rect = preview.resize_target(
+        start_rect=(0, 0, 420, 236),
+        start=(0, 0),
+        current=(900, 900),
+        aspect=16 / 9,
+    )
+    assert (rect[2] - rect[0], rect[3] - rect[1]) == (640, 360)
+
+
+def test_resize_target_unknown_aspect_is_freeform():
+    rect = preview.resize_target(
+        start_rect=(10, 20, 110, 100),
+        start=(0, 0),
+        current=(40, 50),
+        aspect=None,
+    )
+    assert rect == (10, 20, 150, 150)
+
+

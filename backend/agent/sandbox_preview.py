@@ -132,6 +132,64 @@ def pinned_position(
 # ---- Pure gesture helpers (#122, eve-o-preview-style) ----
 
 
+def move_target(
+    start_rect: tuple[int, int, int, int],
+    start: tuple[int, int],
+    current: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    """Absolute window rect for a move gesture, anchored at button-down.
+
+    target = start_rect + (cursor - start_cursor): a pure function of the
+    anchor, computed absolutely each move. The bug this replaces: incremental
+    read-modify-write (GetWindowRect + per-event delta) compounds any missed
+    or duplicated WM_MOUSEMOVE, desynchronising the window from the cursor so
+    the drag "sticks" after the first gesture.
+    """
+    dx, dy = current[0] - start[0], current[1] - start[1]
+    x, y, r, b = start_rect
+    return (x + dx, y + dy, r + dx, b + dy)
+
+
+def resize_target(
+    start_rect: tuple[int, int, int, int],
+    start: tuple[int, int],
+    current: tuple[int, int],
+    aspect: float | None,
+    min_w: int = _PREVIEW_MIN_WIDTH,
+    min_h: int = _PREVIEW_MIN_HEIGHT,
+    max_w: int = _PREVIEW_MAX_WIDTH,
+    max_h: int = _PREVIEW_MAX_HEIGHT,
+) -> tuple[int, int, int, int]:
+    """Absolute window rect for a right-drag resize, anchored at button-down.
+
+    Top-left stays fixed; the bottom-right edge follows the anchored cursor
+    delta, aspect-locked (the dominant axis drives, like resize_keep_ratio)
+    and clamped to min/max within the ratio. aspect=None resizes freeform.
+    Like move_target this is absolute per move: the size is a pure function
+    of the anchor, so per-event deltas can never compound into jumps.
+    """
+    x, y, _, _ = start_rect
+    dx, dy = current[0] - start[0], current[1] - start[1]
+    if aspect is None or aspect <= 0:
+        return (x, y, x + max(min_w, min(max_w, start_rect[2] - x + dx)),
+                y + max(min_h, min(max_h, start_rect[3] - y + dy)))
+    # Same clamp-box ∩ ratio-line bounds as resize_keep_ratio, expressed
+    # against a synthetic 1000px-high source so the ratio drives the clamp.
+    ratio = aspect
+    base_w = start_rect[2] - x
+    base_h = start_rect[3] - y
+    src_w = max(1, round(ratio * 1000))
+    src_h = 1000
+    w_lo = max(min_w, -(-min_h * src_w // src_h))
+    w_hi = min(max_w, max_h * src_w // src_h)
+    candidate_w = float(base_w + dx)
+    if abs(dy) > abs(dx):
+        candidate_w = (base_h + dy) * ratio
+    width = max(w_lo, min(w_hi, candidate_w))
+    height = max(1, round(width / ratio))
+    return (x, y, x + round(width), y + height)
+
+
 def gesture_action(left_down: bool, right_down: bool) -> str | None:
     """Map the held mouse buttons to the #122 gesture set.
 
@@ -469,7 +527,14 @@ class _PreviewManager:
             "pinned": False,
             "offset": (_PIN_GAP, 24),
             "hook": None,
-            "drag": {"active": False, "button": 0, "last": (0, 0), "size": (0, 0), "moved": False},
+            "drag": {
+                "active": False,
+                "button": 0,
+                "start": (0, 0),
+                "start_rect": (0, 0, 0, 0),
+                "aspect": None,
+                "moved": False,
+            },
         }
 
         def _client_size() -> tuple[int, int]:
@@ -555,12 +620,6 @@ class _PreviewManager:
                 return rect.left, rect.top, rect.right, rect.bottom
             return None
 
-        def _window_size() -> tuple[int, int]:
-            rect = _window_rect()
-            if rect:
-                return max(1, rect[2] - rect[0]), max(1, rect[3] - rect[1])
-            return _PREVIEW_WIDTH, _PREVIEW_HEIGHT
-
         def _source_size() -> tuple[int, int]:
             """Source window client size for the aspect ratio lock."""
             size = SIZE()
@@ -574,6 +633,9 @@ class _PreviewManager:
             return 0, 0
 
         def _handle_drag_move(wparam_live: int) -> None:
+            # Anchored targets per move (#122 fix): the rect is computed
+            # absolutely from the button-down anchor via move_target /
+            # resize_target, never from per-event deltas against live state.
             # Live button state per move (eve-o polls buttons each event):
             # wparam's MK_* flags tell us what is held right now, so a
             # chord (both buttons) turns the gesture inert mid-drag.
@@ -585,44 +647,66 @@ class _PreviewManager:
             )
             if action is None:
                 # Button chord with no #122 gesture: swallow the movement.
-                drag["last"] = _cursor_pos()
                 return
-            x, y = _cursor_pos()
-            last_x, last_y = drag["last"]
-            dx, dy = x - last_x, y - last_y
-            drag["last"] = (x, y)
+            current = _cursor_pos()
+            dx, dy = (
+                current[0] - drag["start"][0],
+                current[1] - drag["start"][1],
+            )
             if dx == 0 and dy == 0:
                 return
             drag["moved"] = True
             if action == "move":
-                # Top-left follows the cursor deltas.
-                current = _window_rect()
-                if not current:
-                    return
+                left, top, right, bottom = move_target(
+                    drag["start_rect"], drag["start"], current
+                )
                 user32.SetWindowPos(
                     hwnd,
                     None,
-                    current[0] + dx,
-                    current[1] + dy,
+                    left,
+                    top,
                     0,
                     0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                 )
-            else:  # resize: bottom-right follows, top-left anchored
-                base_w, base_h = drag["size"]
-                src_w, src_h = _source_size()
-                new_w, new_h = resize_keep_ratio(
-                    src_w, src_h, dx, dy, base_w, base_h
+            else:  # resize: top-left anchored, bottom-right follows
+                left, top, right, bottom = resize_target(
+                    drag["start_rect"], drag["start"], current, drag["aspect"]
                 )
                 user32.SetWindowPos(
                     hwnd,
                     None,
                     0,
                     0,
-                    new_w,
-                    new_h,
+                    right - left,
+                    bottom - top,
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                 )
+
+        def finish_gesture() -> None:
+            """Single end-of-gesture funnel (#122 fix, Wingman pattern).
+
+            Clears the session BEFORE ReleaseCapture (which synchronously
+            re-enters WM_CAPTURECHANGED), then re-anchors the pin offset
+            once — the button-up, WM_CAPTURECHANGED and WM_EXITSIZEMOVE
+            paths all land here, so ownership of the rect is never stale
+            and the pinned preview never teleports after a gesture.
+            """
+            drag = state["drag"]
+            was_moving = drag["active"]
+            was_pinned_moved = drag["active"] and state["pinned"] and drag["moved"]
+            drag["active"] = False
+            if user32.GetCapture() == hwnd:
+                user32.ReleaseCapture()
+            if not was_moving:
+                return
+            if was_pinned_moved:
+                yaah = _yaah_rect()
+                prev = _window_rect()
+                if yaah is not None and prev is not None:
+                    state["offset"] = pin_offset(yaah, prev)
+                _apply_pin()
+
 
         def _win_event_proc(_hook, _event, event_hwnd, id_object, _child, _t1, _t2):
             # Only the yaah main window's window-object moves matter.
@@ -686,14 +770,21 @@ class _PreviewManager:
                 # button belongs to the resize gesture alone.
                 return 0
             if message == WM_LBUTTONDOWN or message == WM_RBUTTONDOWN:
-                x, y = _cursor_pos()
+                # Anchor once (#122 fix): absolute start cursor + start rect
+                # + aspect sampled once per gesture (never per move).
                 state["drag"] = {
                     "active": True,
                     "button": message,
-                    "last": (x, y),
-                    "size": _window_size(),
+                    "start": _cursor_pos(),
+                    "start_rect": _window_rect()
+                    or (0, 0, _PREVIEW_WIDTH, _PREVIEW_HEIGHT),
+                    "aspect": None,
                     "moved": False,
                 }
+                if message == WM_RBUTTONDOWN:
+                    src_w, src_h = _source_size()
+                    if src_w > 0 and src_h > 0:
+                        state["drag"]["aspect"] = src_w / src_h
                 user32.SetCapture(window)
                 return 0
             if message == WM_MOUSEMOVE and state["drag"]["active"]:
@@ -702,24 +793,17 @@ class _PreviewManager:
             if message == WM_LBUTTONUP or message == WM_RBUTTONUP:
                 drag = state["drag"]
                 if drag["active"] and drag["button"] == message:
-                    drag["active"] = False
-                    user32.ReleaseCapture()
-                    if state["pinned"] and drag["moved"]:
-                        # Custom drags bypass the modal move/resize loop, so
-                        # WM_EXITSIZEMOVE never fires: re-anchor the pin
-                        # offset to wherever the gesture left the window.
-                        yaah = _yaah_rect()
-                        prev = _window_rect()
-                        if yaah is not None and prev is not None:
-                            state["offset"] = pin_offset(yaah, prev)
+                    finish_gesture()
                 return 0
             if message == WM_CAPTURECHANGED:
-                # Lost capture (alt-tab, dialog): end the drag session so a
-                # stale session can't hijack the next gesture.
-                state["drag"]["active"] = False
+                # Lost capture (alt-tab, dialog): end the gesture through the
+                # single funnel so the pin re-anchor always happens.
+                finish_gesture()
                 return 0
             if message == WM_EXITSIZEMOVE and state["pinned"]:
-                # Drag/resize finished: re-anchor to wherever the user left it.
+                # Native modal move/resize loop finished: re-anchor wherever
+                # the user left it. (Custom drags never enter that loop, so
+                # their re-anchor happens in finish_gesture instead.)
                 yaah = _yaah_rect()
                 prev = _window_rect()
                 if yaah is not None and prev is not None:
@@ -729,14 +813,21 @@ class _PreviewManager:
             return user32.DefWindowProcW(window, message, wparam, lparam)
 
         try:
-            # Per-monitor-v2 DPI awareness before any window exists (#122):
-            # physical pixels everywhere, matching eve-o's PerMonitorV2.
+            # Per-monitor-v2 DPI awareness on THIS thread before the window
+            # exists (#122 + architecture review fix): SetThreadDpiAwarenessContext
+            # can always be set mid-process, unlike SetProcessDpiAwarenessContext,
+            # which silently returns FALSE once process awareness is fixed
+            # (long since the case here) — the old except-fallback was dead.
+            # Physical pixels everywhere, matching eve-o's PerMonitorV2.
+            _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = wintypes.HANDLE(-4)
             try:
-                user32.SetProcessDpiAwarenessContext(
-                    wintypes.HANDLE(-4)
-                )  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-            except Exception:
-                user32.SetProcessDPIAware()
+                set_thread_ctx = user32.SetThreadDpiAwarenessContext
+                set_thread_ctx.restype = wintypes.HANDLE
+                # Kept for the thread's lifetime: this thread exists to pump
+                # this window's messages, so physical pixels stay the rule.
+                set_thread_ctx(_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            except AttributeError:
+                log.warning("SetThreadDpiAwarenessContext unavailable; coordinates may be virtualised")
             wnd_class = WNDCLASSEXW()
             wnd_class.cbSize = ctypes.sizeof(WNDCLASSEXW)
             wnd_class.lpfnWndProc = wnd_proc
