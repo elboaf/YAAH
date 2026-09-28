@@ -724,15 +724,29 @@ export const useAgent = create<AgentState>((set, get) => ({
       const draft = s.messagesByConv.draft ?? []
       const rest = { ...s.messagesByConv }
       delete rest.draft
+      const cid = String(id)
+      // Re-home the DRAFT's live run state alongside its buffer: the first
+      // send sets statusByConv.draft = 'thinking' and adoptDraft fires
+      // MID-RUN (after createConversation resolves). If the running status
+      // stayed under 'draft', statusByConv[cid] stayed unset ('idle') and
+      // the next loadHistory poll for cid passed the running-guard and
+      // wholesale-replaced the live buffer with lagging DB rows — every
+      // unpersisted emission (chat + tool calls) vanished mid-run, and all
+      // later deltas targeted an id no longer in the buffer.
+      const st = s.statusByConv.draft
+      const nextStatus = st
+        ? { ...s.statusByConv, draft: undefined, [cid]: st } as typeof s.statusByConv
+        : s.statusByConv
       return {
         conversationId: opts?.preserveSelection ? s.conversationId : id,
         messagesByConv: {
           ...rest,
           // Merge rather than stomp: nothing should be under a fresh id,
           // but a rematch must never drop messages either way.
-          [String(id)]: [...(rest[String(id)] ?? []), ...draft],
+          [cid]: [...(rest[cid] ?? []), ...draft],
           draft: [],
         },
+        statusByConv: nextStatus,
         // The draft is filed now (#32): the destination card's job is done.
         draftDestination: null,
         // #51/#76: the draft-held model/effort are in the row now.
