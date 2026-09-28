@@ -84,100 +84,26 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-# Keep placement separate from access-mode authorization: these tools don't
-# write the selected workspace, even though some still require approval.
-_NON_WORKSPACE_MUTATIONS = {
-    "install_git", "sandbox_test", "sandbox_run", "sandbox_stop",
-    "memory_save", "memory_delete", "mouse_move", "mouse_click",
-    "mouse_drag", "mouse_scroll", "type_text", "press_key", "focus_window",
-}
-_PLACEMENT_READ_TOOLS = {
-    "read_file", "search_files", "git_status", "git_diff",
-    "web_search", "web_fetch", "view_image", "load_skill", "get_help",
-    "memory_read", "search_conversation_history", "sandbox_status",
-    "screenshot", "list_windows", "read_ui_tree", "wait",
-}
-_DIRECT_MAIN_TREE_TOOLS = {"git_merge_back"}
-_CHILD_DIRECT_WRITERS = {"delete_file", "move_file", "git_add", "git_commit"}
+# Placement classification lives in wtclassify (ADR 0007 ticket 2: pure
+# decision logic, no lifecycle state). Re-exported so existing callers
+# (`worktrees.should_isolate`) keep working.
+from backend.agent.wtclassify import (  # noqa: F401
+    _NON_WORKSPACE_MUTATIONS,
+    _PLACEMENT_READ_TOOLS,
+    _DIRECT_MAIN_TREE_TOOLS,
+    _CHILD_DIRECT_WRITERS,
+    _readonly_segment,
+    _readonly_shell_command,
+    should_isolate,
+)
+# Git process plumbing lives in gitproc (ADR 0007 ticket 2). `_git_exe`
+# keeps its old (private) name as a re-export: file_changes and
+# git_activity still import it under that name; they migrate to
+# `gitproc.git_exe` in ticket 4.
+from backend.agent.gitproc import NO_WINDOW as _NO_WINDOW  # noqa: F401
+from backend.agent.gitproc import NEW_SESSION as _NEW_SESSION  # noqa: F401
+from backend.agent.gitproc import git_exe as _git_exe  # noqa: F401
 
-# A shell call is only a writer when its command actually mutates. The
-# classifier gates the first session binding: explicit target=main structured
-# Git operations resolve main independently in their executor. Fail-closed:
-# unknown workspace-mutating tools isolate.
-_READONLY_GIT = {
-    "status", "log", "diff", "show", "branch", "remote", "rev-parse",
-    "tag", "fetch", "pull", "push",
-}
-_READONLY_COMMANDS = {
-    "ls", "cat", "head", "tail", "pwd", "rg", "grep", "find", "wc",
-    "which", "where", "dir", "type", "echo",
-}
-
-_SHELL_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
-
-
-def _readonly_segment(seg: str) -> bool:
-    """One shell pipeline stage: recognized read-only, or env/cd prefixes
-    in front of one. Anything else (unknown binary, flags that could hide
-    a write, subshells) fails closed."""
-    tokens = seg.strip().split()
-    while tokens:
-        first = tokens[0]
-        if first in ("env", "time") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first):
-            tokens = tokens[1:]
-            continue
-        if first == "cd":
-            return False
-        break
-    if not tokens:
-        return False
-    if tokens[0] == "git":
-        return len(tokens) > 1 and tokens[1] in _READONLY_GIT
-    if tokens[0] in _READONLY_COMMANDS:
-        # Version probes like `node --version` and bare `ls` are fine;
-        # don't try to whitelist every flag combination of every tool.
-        return True
-    if len(tokens) == 2 and tokens[1] in ("--version", "-v", "--help", "-h"):
-        return True
-    return False
-
-
-def _readonly_shell_command(command: str) -> bool:
-    if ">" in command or "<" in command or "$(" in command or "`" in command:
-        return False
-    return all(
-        _readonly_segment(seg) or not seg.strip()
-        for seg in _SHELL_SPLIT_RE.split(command)
-    )
-
-
-def should_isolate(tool_name: str, args: dict, *, child: bool = False) -> bool:
-    """Whether this call needs a session worktree.
-
-    Tree placement is separate from access-mode authorization. Child callers
-    pass ``child=True`` because a child must isolate before any workspace
-    mutation, including direct file deletion and structured Git changes. Git
-    sync remains in the selected tree for parents; unknown placements fail
-    closed.
-    """
-    if tool_name in (
-        _NON_WORKSPACE_MUTATIONS | _PLACEMENT_READ_TOOLS | _DIRECT_MAIN_TREE_TOOLS
-    ):
-        return False
-    if tool_name in {"git_pull", "git_push"}:
-        # Primary-tree sync operations need no session binding. For current-tree
-        # sync, child callers first isolate the inherited tree.
-        return child and (args or {}).get("target", "current") == "current"
-    if tool_name == "bash":
-        command = str((args or {}).get("command") or "").strip()
-        return not command or not _readonly_shell_command(command)
-    # Direct file/git mutations don't independently trigger a parent bind,
-    # but a sub-agent needs its own tree before invoking them.
-    if child and tool_name in _CHILD_DIRECT_WRITERS:
-        return True
-    # Callers invoke this for tools they already permit to affect the
-    # workspace; unknown placements default to isolation.
-    return True
 
 
 BRANCH_PREFIX = "agent/"
@@ -304,40 +230,11 @@ def session_rows() -> list[dict]:
 # git plumbing
 # ---------------------------------------------------------------------------
 
-_GIT_EXE: str | None = None
-
-
-def _git_exe() -> str:
-    """A directly-spawnable git executable. `shutil.which('git')` normally
-    lands on a real .exe; hosts that only expose a .cmd shim (dev sandboxes)
-    need the fallback probe — CreateProcess cannot exec a .cmd."""
-    global _GIT_EXE
-    if _GIT_EXE:
-        return _GIT_EXE
-    found = shutil.which("git")
-    if found and found.lower().endswith(".exe"):
-        _GIT_EXE = found
-        return _GIT_EXE
-    import sys
-
-    candidates = [
-        Path(Path(sys.executable).anchor) / "Program Files" / "Git" / "cmd" / "git.exe",
-        Path.home() / "Desktop" / "toolkit" / "mingit" / "cmd" / "git.exe",
-        Path.home() / "scoop" / "apps" / "git" / "current" / "cmd" / "git.exe",
-    ]
-    for cand in candidates:
-        if cand.is_file():
-            _GIT_EXE = str(cand)
-            return _GIT_EXE
-    _GIT_EXE = found or "git"  # last resort; the spawn error will explain
-    return _GIT_EXE
 
 
 async def _git(
     cwd: Path | str, *args: str, timeout: float = 30.0, raw: bool = False
 ) -> tuple[int, str]:
-    from backend.agent.tools import _NEW_SESSION, _NO_WINDOW
-
     try:
         proc = await asyncio.create_subprocess_exec(
             _git_exe(),
@@ -841,233 +738,20 @@ async def _salvage(root: Path, wt: Path, branch: str, why: str) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
-# write provenance (issue #98 / docs/adr/0002): what did this turn WRITE?
-#
-# The classifier below can only refuse-or-drop a file when it can tell WORK
-# from TRASH. Tools report what they wrote here as they write it; the
-# harness seeds the registry before a write tool call and clears it when
-# the worktree is torn down. Two classes:
-#   model — content the model authored (write_file/create_file/edit_file
-#           payloads): real work, treated as precious.
-#   tool  — harness-generated captures (bash/powershell output redirect
-#           captures written by the harness): trash unless the model then
-#           edited the same path itself.
-# Provenance is a hint, never a veto: an unknown path (say, an `npm install`
-# that wrote package-lock.json) falls through to the shape heuristics, and
-# the user's own files in the main tree are untouched by all of this.
-# ---------------------------------------------------------------------------
-
-_WRITE_PROVENANCE: dict[str, dict[str, set[str]]] = {}
-# workspace -> {"model": {relpath, ...}, "tool": {relpath, ...}}
-
-# Windows/POSIX path normalization for registry keys: forward slashes,
-# lowercased drive, so `C:\x\y` and `c:/x/y` are one entry.
-def _norm_path(p: str | Path) -> str:
-    s = str(p).replace("\\", "/")
-    if len(s) > 1 and s[1] == ":":
-        s = s[0].upper() + s[1:]
-    return s
 
 
-def note_write(workspace: str, path: str, kind: str) -> None:
-    """Record that a tool wrote `path` in `workspace` (kind: model|tool)."""
-    if kind not in ("model", "tool"):
-        return
-    ws = _WRITE_PROVENANCE.setdefault(_norm_path(workspace), {})
-    ws.setdefault(kind, set()).add(_norm_path(path))
-
-
-def provenance_for(workspace: str, path: str) -> str | None:
-    """'model' | 'tool' when this turn wrote the path, else None.
-
-    Accepts the path relative to `workspace` or absolute; both registered
-    forms are checked, and MODEL always wins (a capture the model later
-    edited is authored work, not a capture)."""
-    ws = _WRITE_PROVENANCE.get(_norm_path(workspace))
-    if not ws:
-        return None
-    np = _norm_path(path)
-    cands = {np}
-    try:
-        cands.add(_norm_path(Path(workspace) / path))
-    except OSError:
-        pass
-    if any(c in ws.get("model", ()) for c in cands):
-        return "model"
-    if any(c in ws.get("tool", ()) for c in cands):
-        return "tool"
-    return None
-
-
-def clear_provenance(workspace: str) -> None:
-    _WRITE_PROVENANCE.pop(_norm_path(workspace), None)
-
-
-# Shell output redirections: `cmd > f`, `cmd >> f`, `cmd 2> f`, `cmd &> f`,
-# `cmd 2>&1 > f`, and the PowerShell twins `Out-File f` / `> f`. The harness
-# itself writes these capture files when a command's stdout is redirected
-# into the workspace — content the model never authored — so they register
-# as `tool` provenance and the classifier can drop them at merge time.
-_REDIRECT_RE = re.compile(
-    r"(?:^|[\s;&|(])(?:\d?\s*>+|\d?&>|&>)\s*([^\s|&;<>]+)"
-    r"|(?:^|[\s;&|(])out-file\s+(?:-\w+\s+)*([^\s|&;<>-]+)",
-    re.IGNORECASE,
+# Write provenance + trash classification live in provenance (ADR 0007
+# ticket 2). Re-exported under the old names: callers (tools.py) and
+# tests still import them from here.
+from backend.agent.provenance import (  # noqa: F401
+    provenance_classify as _provenance_classify,
+    trash_class as _trash_class,
+    is_machine_shape as _is_machine_shape,
+    note_write,
+    note_shell_writes,
+    provenance_for,
+    clear_provenance,
 )
-
-
-def note_shell_writes(workspace: str, command: str) -> None:
-    """Register redirection targets in `command` as tool-written paths.
-    Best-effort by contract: parsing is heuristic (quotes, subshells and
-    expansions are not interpreted); a miss just means the file falls back
-    to the shape heuristics."""
-    for m in _REDIRECT_RE.finditer(command or ""):
-        target = m.group(1) or m.group(2)
-        if target:
-            note_write(workspace, target, "tool")
-
-
-def _provenance_classify(workspace: str, wt: Path, paths: list[str]) -> dict[str, str]:
-    """provenance class per dirty path: model > tool > unknown."""
-    out: dict[str, str] = {}
-    for rel in paths:
-        cls = provenance_for(wt, rel) or provenance_for(wt, wt / rel)
-        out[rel] = cls or "unknown"
-    return out
-
-
-# Machine-shape fingerprints (adr/0002): content that only a build tool,
-# test runner, or redirect produces. Conservative by design — a miss just
-# means the file takes the precious path (salvage + refusal), exactly the
-# pre-#98 behavior; a false TRASH is the only dangerous direction, so the
-# checks are structural, not name-based wishful thinking.
-_TRASH_EXTS = {
-    ".log", ".tmp", ".temp", ".swp", ".swo", ".pyc", ".pyo",
-    ".patch", ".rej", ".orig", ".bak", ".salvage", ".out",
-    # .txt (adr/0002): in a WORKTREE, uncommitted .txt is overwhelmingly a
-    # command capture or tool dump — authored text goes through
-    # write_file/create_file (provenance `model`, protected regardless).
-    # This is the one knowingly-imperfect extension: an agent-authored
-    # .txt that arrived via a parse-missed redirect would be dropped
-    # (residual risk accepted; the content also lives in the transcript).
-    ".txt",
-}
-
-_TRASH_NAMES = {"npm-debug.log", "yarn-error.log", "yarn.lock.check", ".DS_Store"}
-
-# Extensions a redirect capture plausibly uses (adr/0002): tool-provenance
-# files with these extensions are captures, not authored documents. Authored
-# extensions (.md, code files) keep the precious path even when the model
-# created them via a redirect — `gh pr view 96 > notes.md` is intent.
-_CAPTURE_EXTS = {".txt", ".json", ".csv", ".tsv", ".ndjson", ".xml", ".yaml", ".yml"}
-
-
-def _is_machine_shape(p: Path) -> bool:
-    """Structural fingerprints of generated output. All byte sniffing is
-    capped (32 KB head / 4 KB tail) — this runs per dirty file at merge
-    time and must stay cheap."""
-    try:
-        if not p.is_file():
-            return False
-        with p.open("rb") as f:
-            head = f.read(32768)
-            if p.stat().st_size > 4096:
-                f.seek(-4096, 2)  # tail window, relative to EOF
-            tail = f.read(4096)
-    except OSError:
-        return False
-    if not head:
-        return False
-    # diff/patch walls: git salvage patches, compiler error dumps
-    stripped = head.lstrip()
-    if any(
-        stripped.startswith(sig)
-        for sig in (b"diff ", b"--- ", b"+++ ", b"@@ -", b"Index:")
-    ):
-        return True
-    # unified-diff body (our salvage patches carry a comment header first)
-    if b"\ndiff --git " in head and b"\n+++" in head:
-        return True
-    # base64 wall: saved crash dumps / image captures dropped as text
-    dense = sum(1 for ch in head if 48 <= ch <= 122)
-    if len(head) >= 1024 and dense / len(head) > 0.97:
-        return True
-    # JSON object/array with a parsed balanced-bracket budget: build
-    # manifests, test-output envelopes, tsbuildinfo — but NOT a hand-written
-    # config the model may have authored (those are short; the size gate
-    # plus the depth requirement keeps them out of TRASH).
-    body = head.strip()
-    if body[:1] in (b"{", b"[") and len(body) > 256:
-        depth = curly = 0
-        in_str = False
-        esc = False
-        for ch in body:
-            byte = ch.to_bytes(1, "big")
-            if esc:
-                esc = False
-            elif byte == b"\\":
-                esc = True
-            elif byte == b'"':
-                in_str = not in_str
-            elif not in_str:
-                if byte == b"{":
-                    curly += 1
-                    depth = max(depth, curly)
-                elif byte == b"}":
-                    curly -= 1
-        if depth >= 2 and curly == 0:
-            return True
-    # log-ish tail: line after line of timestamps/levels/severities
-    lines = [ln for ln in tail.splitlines() if ln.strip()]
-    if len(lines) >= 4:
-        logish = sum(
-            1
-            for ln in lines
-            if ln[:1].isdigit()
-            or ln[:1] == b"["
-            or b"ERROR" in ln
-            or b"DEBUG" in ln
-            or b"WARNING" in ln
-        )
-        if logish / len(lines) >= 0.75:
-            return True
-    return False
-
-
-def _trash_class(worktree_dirty: list[str], wt: Path) -> dict[str, str]:
-    """Classify each dirty path: 'work' (precious) or 'trash' (droppable).
-
-    A path is TRASH only when provenance says harness-generated, or when it
-    carries a machine-shape fingerprint (extension, name, or content shape).
-    Everything else — anything authored-looking, anything uncertain — is
-    WORK, which takes the old refuse+salvage path. (adr/0002: only a false
-    'trash' can lose work, so uncertainty always lands on WORK.)
-    """
-    classes = _provenance_classify(wt, wt, worktree_dirty)
-    out: dict[str, str] = {}
-    for rel, cls in classes.items():
-        if cls == "model":
-            out[rel] = "work"
-            continue
-        p = wt / rel
-        ext = p.suffix.lower()
-        if cls == "tool":
-            # The harness captured it — trash when the extension says
-            # capture (a redirected .md / code file stays precious: the
-            # model aimed output at a real artifact).
-            if ext in _CAPTURE_EXTS or ext in _TRASH_EXTS:
-                out[rel] = "trash"
-                continue
-            out[rel] = "work"
-            continue
-        if ext in _TRASH_EXTS or p.name in _TRASH_NAMES:
-            out[rel] = "trash"
-            continue
-        if _is_machine_shape(p):
-            out[rel] = "trash"
-            continue
-        out[rel] = "work"
-    return out
 
 
 async def _drop_trash(wt: Path, rels: list[str]) -> list[str]:
