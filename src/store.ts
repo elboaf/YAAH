@@ -187,13 +187,6 @@ interface AgentState {
    *  shows "steering..." until the injection lands. */
   steerByConv: Record<string, boolean>
   setSteer: (key: string, on: boolean) => void
-<<<<<<< HEAD
-  /** Ephemeral agent branch per conversation while a run is isolated
-   *  (see AgentBranchInfo). Drives the status strip's branch chip. */
-  agentBranchByConv: Record<string, AgentBranchInfo | null>
-  setAgentBranch: (key: string, info: AgentBranchInfo | null) => void
-=======
->>>>>>> a1cc9fc (ADR 0008: remove worktree isolation entirely)
   workspace: string
   /**
    * #51/#76: the current global defaults, hydrated from /api/config by
@@ -590,18 +583,6 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({ queueEchoByConv: { ...s.queueEchoByConv, [key]: items } })),
   steerByConv: {},
   setSteer: (key, on) => set((s) => ({ steerByConv: { ...s.steerByConv, [key]: on } })),
-<<<<<<< HEAD
-  agentBranchByConv: loadAgentBranches(),
-  setAgentBranch: (key, info) =>
-    set((s) => {
-      const map = { ...s.agentBranchByConv }
-      if (info === null) delete map[key]
-      else map[key] = info
-      storeAgentBranches(map)
-      return { agentBranchByConv: map }
-    }),
-=======
->>>>>>> a1cc9fc (ADR 0008: remove worktree isolation entirely)
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),

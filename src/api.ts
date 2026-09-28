@@ -592,17 +592,33 @@ export interface McpToolInfo {
 
 export interface McpServerInfo {
   name: string
-  status: 'starting' | 'connected' | 'failed' | 'stopped'
+  status: 'starting' | 'connected' | 'failed' | 'stopped' | `failed (won't retry)`
   error: string
   command: string
   args: string[]
+  url: string
+  transport: string
+  headers: Record<string, string>
+  env: Record<string, string>
+  protocol_version: string
   tools: McpToolInfo[]
 }
 
 export const listMcpServers = () =>
   api<{ servers: McpServerInfo[] }>('/api/mcp/servers')
 
-export const addMcpServer = (body: { name: string; command: string; args: string[] }) =>
+export interface McpServerBody {
+  name: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  transport?: string
+  previous_name?: string
+}
+
+export const addMcpServer = (body: McpServerBody) =>
   api<{ servers: McpServerInfo[] }>('/api/mcp/servers', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -613,8 +629,19 @@ export const removeMcpServer = (name: string) =>
     method: 'DELETE',
   })
 
-export const reloadMcpServers = () =>
-  api<{ servers: McpServerInfo[] }>('/api/mcp/reload', { method: 'POST' })
+export const reloadMcpServers = (name?: string) =>
+  api<{ servers: McpServerInfo[] }>('/api/mcp/reload', {
+    method: 'POST',
+    ...(name
+      ? { body: JSON.stringify({ name }) }
+      : {}),
+  })
+
+export const checkMcpCommand = (command: string) =>
+  api<{ command: string; found: boolean }>(
+    `/api/mcp/command-check?command=${encodeURIComponent(command)}`,
+  )
+
 
 // ---- Scheduled agents (issue #41) ----
 

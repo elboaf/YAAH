@@ -617,28 +617,3 @@ describe('steering transcript order', () => {
     expect(messages[3].content).toBe('after steering')
   })
 })
-<<<<<<< HEAD
-
-describe('agentBranch persistence (branch-first chip)', () => {
-  it('mirrors bound branches to localStorage and drops them on release; merged flag survives', () => {
-    useAgent.getState().setAgentBranch('c1', { branch: 'agent/1/fix-x-runabc123', boundAt: 1 })
-    useAgent.getState().setAgentBranch('c2', { branch: 'agent/2/fix-y-rundef456', boundAt: 2 })
-    let stored = JSON.parse(localStorage.getItem('yaah-agent-branch-by-conv') || '{}')
-    expect(Object.keys(stored).sort()).toEqual(['c1', 'c2'])
-
-    // an explicit merge keeps the binding but flips the chip to merged
-    const cur = useAgent.getState().agentBranchByConv['c1']
-    if (!cur) throw new Error('c1 binding missing')
-    useAgent.getState().setAgentBranch('c1', { ...cur, merged: true })
-    expect(useAgent.getState().agentBranchByConv['c1']?.merged).toBe(true)
-
-    // release removes the entry from the mirror too — no stale chips
-    useAgent.getState().setAgentBranch('c2', null)
-    stored = JSON.parse(localStorage.getItem('yaah-agent-branch-by-conv') || '{}')
-    expect(Object.keys(stored).sort()).toEqual(['c1'])
-    expect(stored.c1.merged).toBe(true)
-    useAgent.getState().setAgentBranch('c1', null)
-  })
-})
-=======
->>>>>>> a1cc9fc (ADR 0008: remove worktree isolation entirely)
