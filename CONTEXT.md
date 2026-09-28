@@ -92,6 +92,14 @@ The per-workspace lock that serializes every merge into the main tree
 — git_merge_back and UI git operations alike.
 _Avoid_: git lock, merge lock file
 
+**Invisible isolation**:
+The model's ignorance of isolation, by design: it believes it works on
+the branch the user selected, in the only tree that exists. The harness
+owns branch creation, integration (at completion report), pushing, and
+every git topology decision; tool outputs are laundered of session
+branch names. See adr/0007.
+_Avoid_: telling the model its session branch; git ceremony in prompts
+
 ### Worktree operations
 
 **Bind for write**:
