@@ -1781,11 +1781,17 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
     (call) => call.name === 'spawn_agent' && call.subAgent,
   )
 
+  // Say-only emission fallback: a model emission that carried ALL its text
+  // inside the <say> briefing (no chat text before the tag) persisted as an
+  // empty string — a blank row above the tool calls. The briefing is readable
+  // prose; show it as the chat body rather than a blank line. Speech still
+  // reads the same line (msg.say is unchanged).
+  const chatText = msg.content || msg.say || ''
   const body = (
     <>
-      {msg.content ? (
+      {chatText ? (
         <div className="text-sm leading-relaxed text-zinc-200">
-          <MessageBody content={msg.content} />
+          <MessageBody content={chatText} />
         </div>
       ) : null}
       {!inlineSubAgents.length && live ? (
@@ -1793,7 +1799,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       ) : !inlineSubAgents.length && msg.toolCalls?.length ? (
         <TraceLine calls={msg.toolCalls} />
       ) : null}
-      {!msg.content && !msg.toolCalls?.length && (
+      {!chatText && !msg.toolCalls?.length && (
         <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
       )}
       {/* Issue #43: live "waiting for <provider> · <elapsed>s" while the
