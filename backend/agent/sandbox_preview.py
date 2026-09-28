@@ -1,8 +1,13 @@
 """Best-effort live preview of the Windows Sandbox client window.
 
-The preview is a native, click-through Win32 window backed by a DWM thumbnail.
-It is deliberately independent from sandbox command transport and never moves,
-minimizes, or changes the z-order of the real sandbox window.
+The preview is a native, borderless overlay window backed by a DWM thumbnail
+(#122, eve-o-preview-style interaction): no titlebar or frame; left-drag
+anywhere moves it, right-drag resizes it with the source's aspect ratio
+locked, clamped to a min/max size. It is deliberately independent from
+sandbox command transport and never moves, minimizes, or changes the z-order
+of the real sandbox window. All input the preview receives is consumed by its
+own window management: DWM thumbnails are view-only, so nothing is ever
+relayed to the sandbox client — not clicks, drags, or keyboard input.
 """
 
 from __future__ import annotations
@@ -22,6 +27,13 @@ _PREVIEW_HEIGHT = 236
 # Default horizontal gap from the yaah GUI's right edge when the preview is
 # pinned without a user-established offset (fresh start while pinned, #116).
 _PIN_GAP = 24
+# Preview size clamps (#122), applied per-dimension on every resize. Default
+# min/max follow the issue's spec; call sites may pass overrides (the eve-o
+# defaults in its code are 192x108 .. 960x540, but #122 chose these).
+_PREVIEW_MIN_WIDTH = 100
+_PREVIEW_MIN_HEIGHT = 80
+_PREVIEW_MAX_WIDTH = 640
+_PREVIEW_MAX_HEIGHT = 400
 # EventFireModes / event constants for the SetWinEventHook pin-follow hook.
 _EVENT_OBJECT_LOCATIONCHANGE = 0x800B
 _WINEVENT_OUTOFCONTEXT = 0x0
@@ -113,8 +125,71 @@ def pinned_position(
     yaah_rect: tuple[int, int, int, int], offset: tuple[int, int]
 ) -> tuple[int, int]:
     """Preview top-left that reproduces the anchor for a moved yaah window."""
-    x, y, right = yaah_rect[0], yaah_rect[1], yaah_rect[2]
+    y, right = yaah_rect[1], yaah_rect[2]
     return right + offset[0], y + offset[1]
+
+
+# ---- Pure gesture helpers (#122, eve-o-preview-style) ----
+
+
+def gesture_action(left_down: bool, right_down: bool) -> str | None:
+    """Map the held mouse buttons to the #122 gesture set.
+
+    eve-o-preview maps right-only drag to move and both-buttons to resize;
+    #122 rebinds those to left-only drag = move and right-drag = resize so a
+    plain left click stays inert. Anything else (plain clicks, button chords)
+    returns None: no activation, no context menu, no side effects.
+    """
+    if left_down and not right_down:
+        return "move"
+    if right_down and not left_down:
+        return "resize"
+    return None
+
+
+def resize_keep_ratio(
+    src_w: int,
+    src_h: int,
+    drag_dx: int,
+    drag_dy: int,
+    base_w: int,
+    base_h: int,
+    min_w: int = _PREVIEW_MIN_WIDTH,
+    min_h: int = _PREVIEW_MIN_HEIGHT,
+    max_w: int = _PREVIEW_MAX_WIDTH,
+    max_h: int = _PREVIEW_MAX_HEIGHT,
+) -> tuple[int, int]:
+    """New preview size for a right-drag of (drag_dx, drag_dy).
+
+    Top-left anchored: only the bottom-right corner follows the drag. The
+    drag's dominant axis drives the size and the other axis follows exactly,
+    so the thumbnail is never stretched away from the source's aspect ratio
+    (eve-o-preview instead free-resizes and lets DWM letterbox; #122 locks
+    the window shape itself).
+
+    Clamped to min/max per-dimension like eve-o, but the clamp box is
+    intersected with the ratio line first: the effective width range is the
+    set of widths whose ratio-exact height also lands inside [min_h, max_h].
+    Both dimensions therefore stay within min/max at every drag position,
+    and the ratio stays exact at every position.
+    """
+    if src_w <= 0 or src_h <= 0:
+        # Unknown source: fall back to the clamped base shape.
+        return (
+            max(min_w, min(max_w, base_w)),
+            max(min_h, min(max_h, base_h)),
+        )
+    # Effective width bounds: clamp box ∩ ratio line (integer ceil/floor).
+    w_lo = max(min_w, -(-min_h * src_w // src_h))
+    w_hi = min(max_w, max_h * src_w // src_h)
+    # The drag's dominant axis picks the candidate; a vertical drag is
+    # converted into width space so one clamp serves both directions.
+    ratio = src_w / src_h
+    candidate_w = float(base_w + drag_dx)
+    if abs(drag_dy) > abs(drag_dx):
+        candidate_w = (base_h + drag_dy) * src_w / src_h
+    width = max(w_lo, min(w_hi, candidate_w))
+    return int(round(width)), max(1, int(round(width / ratio)))
 
 
 def _find_yaah_window(user32=None) -> int:
@@ -329,6 +404,20 @@ class _PreviewManager:
         user32.SetWinEventHook.restype = wintypes.HANDLE
         user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
         user32.UnhookWinEvent.restype = wintypes.BOOL
+        # Gesture/interaction plumbing (#122). Pointer-sized signatures are
+        # declared for the same truncation reason as above.
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        user32.SetCapture.argtypes = [wintypes.HWND]
+        user32.SetCapture.restype = wintypes.HWND
+        user32.ReleaseCapture.argtypes = []
+        user32.ReleaseCapture.restype = wintypes.BOOL
+        user32.GetSystemMetrics.restype = ctypes.c_int
+        try:
+            user32.SetProcessDPIAware.argtypes = []
+            user32.SetProcessDPIAware.restype = wintypes.BOOL
+        except AttributeError:  # very old Windows; per-monitor fallback below
+            pass
 
         dwmapi.DwmRegisterThumbnail.argtypes = [
             wintypes.HWND,
@@ -350,14 +439,21 @@ class _PreviewManager:
         dwmapi.DwmUpdateThumbnailProperties.restype = ctypes.c_long
 
         WM_SIZE = 0x0005
-        WM_SYSCOMMAND = 0x0112
+        WM_MOUSEACTIVATE = 0x0021
+        WM_CONTEXTMENU = 0x007B
         WM_EXITSIZEMOVE = 0x0232
-        MF_STRING = 0x0
-        MF_CHECKED = 0x8
-        MF_UNCHECKED = 0x0
-        MF_BYCOMMAND = 0x0
-        # App-command id for the "Pin to yaah" system-menu toggle (#116).
-        SC_PIN = 0x7100
+        # Mouse gesture messages (#122, eve-o-preview mechanics).
+        WM_MOUSEMOVE = 0x0200
+        WM_LBUTTONDOWN = 0x0201
+        WM_LBUTTONUP = 0x0202
+        WM_RBUTTONDOWN = 0x0204
+        WM_RBUTTONUP = 0x0205
+        WM_CAPTURECHANGED = 0x0215
+        MA_NOACTIVATE = 3
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
         OBJID_WINDOW = 0
 
         class_name = f"YAAHSandboxPreview_{uuid.uuid4().hex}"
@@ -365,7 +461,16 @@ class _PreviewManager:
         thumbnail = wintypes.HANDLE()
         hwnd = None
         class_registered = False
-        state = {"pinned": False, "offset": (_PIN_GAP, 24), "hook": None}
+        # "drag" holds the active gesture session (#122): which button started
+        # it, the last cursor position (incremental deltas, eve-o style), the
+        # window size when the gesture began (resize base), and whether the
+        # gesture actually moved (reserved for future snap/threshold logic).
+        state = {
+            "pinned": False,
+            "offset": (_PIN_GAP, 24),
+            "hook": None,
+            "drag": {"active": False, "button": 0, "last": (0, 0), "size": (0, 0), "moved": False},
+        }
 
         def _client_size() -> tuple[int, int]:
             rect = RECT()
@@ -412,6 +517,11 @@ class _PreviewManager:
             """Move the preview to the yaah anchor (pinned mode only)."""
             if not state["pinned"] or not hwnd:
                 return
+            if state["drag"]["active"]:
+                # Never fight an in-flight gesture (#122): the drag owns the
+                # window until the button is released; the offset is then
+                # re-anchored in the button-up handler.
+                return
             yaah = _yaah_rect()
             if yaah is None:
                 return
@@ -425,6 +535,94 @@ class _PreviewManager:
                 0,
                 0x0001 | 0x0004 | 0x0010,  # NOSIZE | NOZORDER | NOACTIVATE
             )
+
+        # ---- eve-o-preview-style gestures (#122) ----
+        # Mechanics per docs/research/eve-o-preview-implementation-reference.md:
+        # poll incremental cursor deltas per WM_MOUSEMOVE (no drag threshold),
+        # SetCapture on button-down so the gesture continues outside the
+        # window. DWM thumbnails are view-only, so none of this input is ever
+        # forwarded to the sandbox client — the preview only ever calls
+        # SetWindowPos on itself.
+
+        def _cursor_pos() -> tuple[int, int]:
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            return int(pt.x), int(pt.y)
+
+        def _window_rect() -> tuple[int, int, int, int] | None:
+            rect = RECT()
+            if hwnd and user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return rect.left, rect.top, rect.right, rect.bottom
+            return None
+
+        def _window_size() -> tuple[int, int]:
+            rect = _window_rect()
+            if rect:
+                return max(1, rect[2] - rect[0]), max(1, rect[3] - rect[1])
+            return _PREVIEW_WIDTH, _PREVIEW_HEIGHT
+
+        def _source_size() -> tuple[int, int]:
+            """Source window client size for the aspect ratio lock."""
+            size = SIZE()
+            if thumbnail.value and dwmapi.DwmQueryThumbnailSourceSize(
+                thumbnail, ctypes.byref(size)
+            ) == 0 and size.cx > 0 and size.cy > 0:
+                return int(size.cx), int(size.cy)
+            rect = RECT()
+            if user32.GetClientRect(source, ctypes.byref(rect)):
+                return max(1, rect.right - rect.left), max(1, rect.bottom - rect.top)
+            return 0, 0
+
+        def _handle_drag_move(wparam_live: int) -> None:
+            # Live button state per move (eve-o polls buttons each event):
+            # wparam's MK_* flags tell us what is held right now, so a
+            # chord (both buttons) turns the gesture inert mid-drag.
+            MK_LBUTTON = 0x0001
+            MK_RBUTTON = 0x0002
+            drag = state["drag"]
+            action = gesture_action(
+                bool(wparam_live & MK_LBUTTON), bool(wparam_live & MK_RBUTTON)
+            )
+            if action is None:
+                # Button chord with no #122 gesture: swallow the movement.
+                drag["last"] = _cursor_pos()
+                return
+            x, y = _cursor_pos()
+            last_x, last_y = drag["last"]
+            dx, dy = x - last_x, y - last_y
+            drag["last"] = (x, y)
+            if dx == 0 and dy == 0:
+                return
+            drag["moved"] = True
+            if action == "move":
+                # Top-left follows the cursor deltas.
+                current = _window_rect()
+                if not current:
+                    return
+                user32.SetWindowPos(
+                    hwnd,
+                    None,
+                    current[0] + dx,
+                    current[1] + dy,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            else:  # resize: bottom-right follows, top-left anchored
+                base_w, base_h = drag["size"]
+                src_w, src_h = _source_size()
+                new_w, new_h = resize_keep_ratio(
+                    src_w, src_h, dx, dy, base_w, base_h
+                )
+                user32.SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    new_w,
+                    new_h,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
 
         def _win_event_proc(_hook, _event, event_hwnd, id_object, _child, _t1, _t2):
             # Only the yaah main window's window-object moves matter.
@@ -442,11 +640,10 @@ class _PreviewManager:
                 state["pinned"] = pinned
                 if hwnd:
                     yaah = _yaah_rect()
-                    prev = RECT()
-                    if user32.GetWindowRect(hwnd, ctypes.byref(prev)):
-                        prev_rect = (prev.left, prev.top, prev.right, prev.bottom)
+                    prev = _window_rect()
+                    if prev is not None:
                         if pinned and yaah is not None:
-                            state["offset"] = pin_offset(yaah, prev_rect)
+                            state["offset"] = pin_offset(yaah, prev)
                         if pinned:
                             _apply_pin()
                 if pinned:
@@ -480,22 +677,66 @@ class _PreviewManager:
             if message == WM_SIZE:
                 _update_thumbnail()
                 return 0
-            if message == WM_SYSCOMMAND and (wparam & 0xFFF0) == SC_PIN:
-                _set_pinned(not state["pinned"])
+            if message == WM_MOUSEACTIVATE:
+                # Borderless overlay must never take focus from the user's
+                # work; the thumbnail is view-only.
+                return MA_NOACTIVATE
+            if message == WM_CONTEXTMENU:
+                # No context menu anywhere on the preview (#122): the right
+                # button belongs to the resize gesture alone.
+                return 0
+            if message == WM_LBUTTONDOWN or message == WM_RBUTTONDOWN:
+                x, y = _cursor_pos()
+                state["drag"] = {
+                    "active": True,
+                    "button": message,
+                    "last": (x, y),
+                    "size": _window_size(),
+                    "moved": False,
+                }
+                user32.SetCapture(window)
+                return 0
+            if message == WM_MOUSEMOVE and state["drag"]["active"]:
+                _handle_drag_move(wparam)
+                return 0
+            if message == WM_LBUTTONUP or message == WM_RBUTTONUP:
+                drag = state["drag"]
+                if drag["active"] and drag["button"] == message:
+                    drag["active"] = False
+                    user32.ReleaseCapture()
+                    if state["pinned"] and drag["moved"]:
+                        # Custom drags bypass the modal move/resize loop, so
+                        # WM_EXITSIZEMOVE never fires: re-anchor the pin
+                        # offset to wherever the gesture left the window.
+                        yaah = _yaah_rect()
+                        prev = _window_rect()
+                        if yaah is not None and prev is not None:
+                            state["offset"] = pin_offset(yaah, prev)
+                return 0
+            if message == WM_CAPTURECHANGED:
+                # Lost capture (alt-tab, dialog): end the drag session so a
+                # stale session can't hijack the next gesture.
+                state["drag"]["active"] = False
                 return 0
             if message == WM_EXITSIZEMOVE and state["pinned"]:
                 # Drag/resize finished: re-anchor to wherever the user left it.
                 yaah = _yaah_rect()
-                prev = RECT()
-                if yaah is not None and user32.GetWindowRect(hwnd, ctypes.byref(prev)):
-                    state["offset"] = pin_offset(
-                        yaah, (prev.left, prev.top, prev.right, prev.bottom)
-                    )
+                prev = _window_rect()
+                if yaah is not None and prev is not None:
+                    state["offset"] = pin_offset(yaah, prev)
                 _apply_pin()
                 return 0
             return user32.DefWindowProcW(window, message, wparam, lparam)
 
         try:
+            # Per-monitor-v2 DPI awareness before any window exists (#122):
+            # physical pixels everywhere, matching eve-o's PerMonitorV2.
+            try:
+                user32.SetProcessDpiAwarenessContext(
+                    wintypes.HANDLE(-4)
+                )  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+            except Exception:
+                user32.SetProcessDPIAware()
             wnd_class = WNDCLASSEXW()
             wnd_class.cbSize = ctypes.sizeof(WNDCLASSEXW)
             wnd_class.lpfnWndProc = wnd_proc
@@ -505,14 +746,13 @@ class _PreviewManager:
                 raise ctypes.WinError(ctypes.get_last_error())
             class_registered = True
 
-            # Draggable + resizeable (#116): caption (title bar) + thickframe
-            # (resize borders) + system menu. Still WS_EX_TOPMOST and a
-            # tool window (no taskbar entry); no longer click-through, so the
-            # user can move, resize, and reach the system menu.
+            # Borderless overlay (#122, eve-o-preview style): WS_POPUP with no
+            # caption, no thickframe, no system menu — the titlebar from #116
+            # is gone. Still topmost tool window (no taskbar/Alt-Tab entry),
+            # not click-through: the preview consumes its own input for the
+            # move/resize gestures below and forwards nothing to the sandbox.
             ex_style = 0x00000008 | 0x00000080  # WS_EX_TOPMOST | WS_EX_TOOLWINDOW
-            # WS_OVERLAPPEDWINDOW minus WS_MAXIMIZEBOX (thumbnail letterboxes,
-            # maximizing adds nothing).
-            style = 0x00C00000 | 0x00080000 | 0x00040000 | 0x00020000
+            style = 0x80000000  # WS_POPUP
             hwnd = user32.CreateWindowExW(
                 ex_style,
                 class_name,
@@ -529,14 +769,6 @@ class _PreviewManager:
             )
             if not hwnd:
                 raise ctypes.WinError(ctypes.get_last_error())
-
-            # "Pin to yaah" toggle in the system menu (title-bar icon), #116.
-            try:
-                menu = user32.GetSystemMenu(hwnd, False)
-                if menu:
-                    user32.AppendMenuW(menu, MF_STRING, SC_PIN, "Pin to yaah")
-            except Exception:
-                log.debug("could not add Pin to yaah menu item", exc_info=True)
 
             if dwmapi.DwmRegisterThumbnail(hwnd, source, ctypes.byref(thumbnail)) != 0:
                 raise OSError("DwmRegisterThumbnail failed")
@@ -569,9 +801,6 @@ class _PreviewManager:
             if not _update_thumbnail():
                 return
             if state["pinned"]:
-                menu = user32.GetSystemMenu(hwnd, False)
-                if menu:
-                    user32.CheckMenuItem(menu, SC_PIN, MF_CHECKED | MF_BYCOMMAND)
                 _set_pinned(True)
 
             def _pump_messages() -> bool:

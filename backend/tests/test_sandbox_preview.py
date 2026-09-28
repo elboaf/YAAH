@@ -142,3 +142,59 @@ def test_find_yaah_window_returns_zero_when_absent():
             return 0
 
     assert preview._find_yaah_window(FakeUser32()) == 0
+
+
+# ---- #122: eve-o-preview-style gestures ----
+
+
+def test_gesture_action_maps_left_to_move_and_right_to_resize():
+    assert preview.gesture_action(True, False) == "move"
+    assert preview.gesture_action(False, True) == "resize"
+
+
+def test_gesture_action_clicks_and_chords_are_inert():
+    # A plain click (no drag) must have no other effect: no activation, no
+    # context menu (#122). Button chords define no gesture either.
+    assert preview.gesture_action(False, False) is None
+    assert preview.gesture_action(True, True) is None
+
+
+def test_resize_keep_ratio_preserves_source_ratio_both_axes():
+    # 16:9 source; x-dominant drag drives width, height follows exactly.
+    w, h = preview.resize_keep_ratio(1920, 1080, 210, 8, 420, 236)
+    assert abs(w / h - 16 / 9) < 0.01
+    # y-dominant drag drives height, width follows exactly.
+    w2, h2 = preview.resize_keep_ratio(1920, 1080, 8, 94, 420, 236)
+    assert abs(w2 / h2 - 16 / 9) < 0.01
+
+
+def test_resize_keep_ratio_is_top_left_anchored_by_construction():
+    # Only sizes are returned; the caller keeps x/y fixed (bottom-right
+    # corner follows the drag). A zero drag returns the base size.
+    assert preview.resize_keep_ratio(1920, 1080, 0, 0, 420, 236) == (420, 236)
+
+
+def test_resize_keep_ratio_clamps_to_max_and_stays_in_ratio():
+    w, h = preview.resize_keep_ratio(1920, 1080, 5000, 5000, 420, 236)
+    assert w <= 640 and h <= 400
+    # 16:9 hits the height clamp first: 400 tall -> 711 wide -> clamped to
+    # 640 wide -> 360 tall (ratio exact inside the clamp box).
+    assert (w, h) == (640, 360)
+    assert abs(w / h - 16 / 9) < 0.01
+
+
+def test_resize_keep_ratio_clamps_to_min_and_stays_in_ratio():
+    w, h = preview.resize_keep_ratio(1920, 1080, -5000, -5000, 420, 236)
+    assert w >= 100 and h >= 80
+    # 16:9 hits the height floor first: 80 tall -> 142.2 wide.
+    assert (w, h) == (143, 80)
+    assert abs(w / h - 16 / 9) < 0.02
+
+
+def test_resize_keep_ratio_unknown_source_falls_back_to_base():
+    assert preview.resize_keep_ratio(0, 0, 50, 50, 420, 236) == (420, 236)
+
+
+def test_preview_size_clamp_defaults_match_issue_122():
+    assert (preview._PREVIEW_MIN_WIDTH, preview._PREVIEW_MIN_HEIGHT) == (100, 80)
+    assert (preview._PREVIEW_MAX_WIDTH, preview._PREVIEW_MAX_HEIGHT) == (640, 400)
