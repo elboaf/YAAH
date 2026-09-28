@@ -99,7 +99,6 @@ import {
 import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentBranchInfo } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
-import { MCP_PRESETS, type McpPreset } from './mcpPresets'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { AgentContextPerProvider } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
@@ -4596,34 +4595,30 @@ export function Sidebar() {
 /** MCP tool servers (Settings panel section). Each registered server is a
  *  local program the backend launches; its tools appear to the model as
  *  mcp_<server>_<tool>. Registration is trust — no per-call confirmations. */
-// Replacement for McpSection in src/components.tsx (lines 4594-4981).
-// This file is a staging copy; the content is spliced in by the patch step.
-
-
 type TransportKind = 'stdio' | 'http' | 'sse'
 
-/** MCP tool servers (Settings panel section). Guided add/edit flow
- *  (issue #129): transport picker first, preset catalog, field-level
- *  validation, per-server retry. Registration is trust. */
+/** MCP tool servers (Settings panel section). Add flow mirrors Claude
+ * Code's `claude mcp add`: pick stdio|http, then name + command/args or
+ * url. env/headers live behind a collapsed disclosure; legacy SSE is a
+ * checkbox there. Presets dropped (user decision, #129 follow-up).
+ * Registration is trust. */
 function McpSection() {
   const [servers, setServers] = useState<McpServerInfo[]>([])
-  const [kind, setKind] = useState<TransportKind | null>(null) // null = not chosen yet
+  const [kind, setKind] = useState<TransportKind | null>(null)
   const [name, setName] = useState('')
   const [command, setCommand] = useState('')
   const [url, setUrl] = useState('')
   const [args, setArgs] = useState('') // one arg per line
   const [env, setEnv] = useState('') // one KEY=value per line
   const [headers, setHeaders] = useState('') // one KEY=value per line
+  const [sse, setSse] = useState(false)
   const [busy, setBusy] = useState(false)
   const [fieldErr, setFieldErr] = useState<Record<string, string>>({})
-  const [warn, setWarn] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
-  const [editingOriginal, setEditingOriginal] = useState<McpServerInfo | null>(null)
-  const [preset, setPreset] = useState<string | null>(null)
   const [masked, setMasked] = useState(true)
   const [cmdWarn, setCmdWarn] = useState<string | null>(null)
-  const [switchConfirm, setSwitchConfirm] = useState(false)
+  const [more, setMore] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -4677,7 +4672,7 @@ function McpSection() {
   // Pre-save command check (issue #129): non-blocking warning when the
   // command can't be found on PATH.
   useEffect(() => {
-    if (kind !== 'stdio' || !command.trim() || editing) {
+    if (isRemote || !command.trim() || editing) {
       setCmdWarn(null)
       return
     }
@@ -4698,25 +4693,23 @@ function McpSection() {
       alive = false
       clearTimeout(t)
     }
-  }, [command, kind, editing])
+  }, [command, isRemote, editing])
 
-  const applyPreset = (p: McpPreset) => {
-    setPreset(p.id)
-    setKind(p.kind === 'remote' ? 'http' : 'stdio')
-    if (p.kind === 'stdio') {
-      setCommand(p.command ?? '')
-      setUrl('')
-      setArgs((p.args ?? []).join('\n'))
-    } else {
-      setUrl(p.url ?? '')
-      setCommand('')
-    }
-    setEnv((p.envKeys ?? []).map((k) => `${k}=`).join('\n'))
-    setHeaders((p.headerKeys ?? []).map((k) => `${k}=`).join('\n'))
+  const resetForm = () => {
+    setName('')
+    setCommand('')
+    setUrl('')
+    setArgs('')
+    setEnv('')
+    setHeaders('')
+    setKind(null)
+    setSse(false)
+    setEditing(null)
+    setMore(false)
+    setFieldErr({})
   }
 
   const fillForm = (srv: McpServerInfo) => {
-    setName(srv.name)
     const remote = srv.url !== ''
     setKind(remote ? (srv.transport === 'sse' ? 'sse' : 'http') : 'stdio')
     setCommand(remote ? '' : srv.command)
@@ -4724,7 +4717,11 @@ function McpSection() {
     setArgs(remote ? '' : srv.args.join('\n'))
     setEnv(Object.entries(srv.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'))
     setHeaders(Object.entries(srv.headers ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'))
-setPreset(null)
+    setSse(srv.transport === 'sse')
+    // env/headers exist? open the disclosure so they're visible.
+    setMore(
+      remote ? Object.keys(srv.headers ?? {}).length > 0 : Object.keys(srv.env ?? {}).length > 0,
+    )
   }
 
   const submit = async (target?: string) => {
@@ -4753,7 +4750,11 @@ setPreset(null)
       const body = {
         name: name.trim(),
         ...(remote
-          ? { url: url.trim(), headers: parseKv(headers).values, transport: kind === 'sse' ? 'sse' : '' }
+          ? {
+              url: url.trim(),
+              headers: parseKv(headers).values,
+              transport: kind === 'sse' ? 'sse' : '',
+            }
           : { command: command.trim(), args: args.split('\n').map((l) => l.trim()).filter(Boolean) }),
         env: envParsed.values,
         ...(target ? { previous_name: target } : {}),
@@ -4762,19 +4763,9 @@ setPreset(null)
       // that IS the edit path. previous_name renames when it changed.
       const saved = await addMcpServer(body)
       setServers(saved.servers)
-      setFieldErr({})
-      setName('')
-      setCommand('')
-      setUrl('')
-      setArgs('')
-      setEnv('')
-      setHeaders('')
-      setKind(null)
-      setPreset(null)
-      setEditing(null)
-      setEditingOriginal(null)
+      resetForm()
     } catch (e) {
-      setErr('submit', String((e as { message?: string }).message ?? e))
+      setErr('row', String((e as { message?: string }).message ?? e))
     } finally {
       setBusy(false)
     }
@@ -4791,10 +4782,10 @@ setPreset(null)
     }
   }
 
-  const reload = async (name?: string) => {
+  const retryOne = async (server: string) => {
     setBusy(true)
     try {
-      setServers((await reloadMcpServers(name)).servers)
+      setServers((await reloadMcpServers(server)).servers)
     } catch (e) {
       setErr('row', String((e as { message?: string }).message ?? e))
     } finally {
@@ -4804,22 +4795,11 @@ setPreset(null)
 
   const toggleEdit = (srv: McpServerInfo) => {
     if (editing === srv.name) {
-      setEditing(null)
-      setEditingOriginal(null)
+      resetForm()
       return
     }
     setEditing(srv.name)
-    setEditingOriginal(srv)
     fillForm(srv)
-  }
-
-  const switchKind = (k: TransportKind) => {
-    if (editing && kind !== null && kind !== k) {
-      // Switching an existing entry's type replaces its fields — say so.
-      if (!confirm('Switching between local and remote replaces this entry\'s command/URL fields. Continue?'))
-        return
-    }
-    setKind(k)
   }
 
   const statusColor = (s: McpServerInfo['status']) =>
@@ -4831,37 +4811,97 @@ setPreset(null)
           ? 'text-zinc-500'
           : 'text-amber-400'
 
-  const field = (
+  const textField = (
     value: string,
     onChange: (v: string) => void,
     placeholder: string,
-    errKey: string,
     ariaLabel: string,
     type = 'text',
   ) => (
-    <div>
-      <input
-        className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
-        value={value}
-        type={type}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        aria-label={ariaLabel}
-      />
-      {fieldErr[errKey] && <p className="mt-0.5 text-[10px] text-red-400">{fieldErr[errKey]}</p>}
+    <input
+      className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+      value={value}
+      type={type}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+    />
+  )
+
+  const fieldError = (key: string) =>
+    fieldErr[key] ? <p className="mt-0.5 text-[10px] text-red-400">{fieldErr[key]}</p> : null
+
+  const kvFields = (which: 'env' | 'headers') =>
+    which === 'env' ? (
+      <div>
+        {textField(
+          env,
+          setEnv,
+          'env: KEY=value (one per line)',
+          'Server env',
+          masked ? 'password' : 'text',
+        )}
+        <p className="mt-0.5 text-[10px] text-zinc-600">
+          Use $&#123;env:VAR&#125; as the value to reference an environment variable without
+          storing the secret.
+        </p>
+        {fieldError('env')}
+      </div>
+    ) : (
+      <div>
+        {textField(
+          headers,
+          setHeaders,
+          'headers: Authorization=Bearer token (one per line)',
+          'Server headers',
+          masked ? 'password' : 'text',
+        )}
+        {fieldError('headers')}
+      </div>
+    )
+
+  // The transport-specific fields shared by add and edit modes.
+  const transportFields = (
+    <>
+      {isRemote ? (
+        <>
+          {textField(url, setUrl, 'https://example.com/mcp', 'Server URL')}
+          {fieldError('url')}
+        </>
+      ) : (
+        <>
+          {textField(command, setCommand, 'npx -y @modelcontextprotocol/server-filesystem', 'Server command')}
+          {fieldError('command')}
+        </>
+      )}
+    </>
+  )
+
+  const advancedFields = (
+    <div className="space-y-1">
+      {isRemote && kvFields('headers')}
+      {kind === 'stdio' && (
+        <div>
+          {textField(args, setArgs, 'args, one per line', 'Server args')}
+          {fieldError('args')}
+        </div>
+      )}
+      {kvFields('env')}
+      {isRemote && (
+        <label className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+          <input type="checkbox" checked={sse} onChange={(e) => setSse(e.target.checked)} />
+          legacy SSE (try this if the connection fails)
+        </label>
+      )}
     </div>
   )
 
   return (
     <>
-      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-        MCP tool servers
-      </h3>
       <div className="mb-2 space-y-1.5">
         {servers.length === 0 && (
           <p className="text-[10px] text-zinc-600">
-            No servers registered. An MCP server is a tool provider — a local program (command) or
-            a remote endpoint (URL) — whose tools the agent can call directly.
+            No servers yet. Add a tool provider: a local command (stdio) or a remote URL (http).
           </p>
         )}
         {servers.map((s) => (
@@ -4893,8 +4933,8 @@ setPreset(null)
               <button
                 className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
                 disabled={busy}
-                onClick={() => void reload(s.name)}
-                title="Retry this server (restarts just this one and resets its failure budget)"
+                onClick={() => void retryOne(s.name)}
+                title="Restart this server and reset its failure budget"
               >
                 retry
               </button>
@@ -4918,9 +4958,6 @@ setPreset(null)
             )}
             {editing === s.name && (
               <div className="mt-1.5 space-y-1">
-                <p className="text-[10px] text-zinc-500">
-                  Editing <span className="font-mono text-zinc-300">{s.name}</span>
-                </p>
                 {s.status.startsWith('failed') && s.error && (
                   <p className="text-[10px] text-red-400">
                     Last error: {s.error} — fix the fields below and Save.
@@ -4933,34 +4970,16 @@ setPreset(null)
                   aria-label={`Edit name for ${s.name}`}
                   placeholder="name"
                 />
-                {fieldErr.name && <p className="text-[10px] text-red-400">{fieldErr.name}</p>}
-                {kind === 'stdio'
-                  ? field(command, setCommand, 'command — e.g. npx', 'command', `Edit command for ${s.name}`)
-                  : field(url, setUrl, 'https://…', 'url', `Edit URL for ${s.name}`)}
-                {(fieldErr.command || fieldErr.url) && (
-                  <p className="text-[10px] text-red-400">
-                    {fieldErr.command ?? fieldErr.url}
-                  </p>
-                )}
-                {kind !== 'stdio' && (
-                  <>
-                    <select
-                      className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
-                      value={kind ?? 'http'}
-                      onChange={(e) => setKind(e.target.value as TransportKind)}
-                      aria-label="Remote transport"
-                    >
-                      <option value="http">Streamable HTTP (modern)</option>
-                      <option value="sse">Legacy SSE (older servers)</option>
-                    </select>
-                    {field(headers, setHeaders, 'headers, one per line: Authorization=Bearer ${env:MCP_TOKEN}', 'headers', `Edit headers for ${s.name}`, masked ? 'password' : 'text')}
-                  </>
-                )}
-                {kind === 'stdio' &&
-                  field(args, setArgs, 'args, one per line (e.g. -y)', 'args', `Edit args for ${s.name}`)}
-                {field(env, setEnv, 'env: KEY=value (one per line)', 'env', `Edit env for ${s.name}`)}
-                {fieldErr.headers && <p className="text-[10px] text-red-400">{fieldErr.headers}</p>}
-                <div className="flex justify-end">
+                {fieldError('name')}
+                {transportFields}
+                {more && advancedFields}
+                <button
+                  className="text-[10px] text-zinc-500 hover:bg-zinc-800 rounded px-1.5 py-0.5"
+                  onClick={() => setMore((m) => !m)}
+                >
+                  {more ? '− env / args / headers' : '+ env / args / headers'}
+                </button>
+                <div className="flex justify-end gap-1.5">
                   <button
                     className="rounded px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                     disabled={busy}
@@ -4987,49 +5006,37 @@ setPreset(null)
           </div>
         ))}
 
-        {/* ---- add flow: kind picker -> presets -> transport-specific fields ---- */}
+        {/* ---- add flow: stdio|http, then name + command/args or url ---- */}
         {!editing && (
           <div className="rounded bg-zinc-900/60 p-2">
             <div className="mb-1.5 flex gap-1.5">
               {(
                 [
-                  ['stdio', 'Local (stdio)'],
-                  ['http', 'Remote (HTTP)'],
+                  ['stdio', 'stdio'],
+                  ['http', 'http'],
                 ] as const
               ).map(([k, label]) => (
                 <button
                   key={k}
-                  className={`rounded px-2 py-1 text-xs ${kind === k ? 'bg-zinc-700 text-zinc-100' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-800'}`}
-                  onClick={() => switchKind(k)}
+                  className={`rounded px-2 py-1 text-xs ${kind === k || (k === 'http' && kind === 'sse') ? 'bg-zinc-700 text-zinc-100' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-800'}`}
+                  onClick={() => {
+                    setKind(k)
+                    setSse(false)
+                  }}
                 >
                   {label}
                 </button>
               ))}
-              {kind === null && (
-                <span className="self-center text-[10px] text-zinc-600">
-                  Pick how the server runs, then fill in the details.
-                </span>
-              )}
+              <span className="self-center text-[10px] text-zinc-600">
+                {kind === null
+                  ? 'pick a transport'
+                  : isRemote
+                    ? 'remote server over HTTP'
+                    : 'local program'}
+              </span>
             </div>
             {kind !== null && (
               <>
-                <div className="mb-1.5 flex flex-wrap gap-1">
-                  {MCP_PRESETS.filter((p) => p.kind === 'stdio' || kind !== 'stdio').map((p) => (
-                    <button
-                      key={p.id}
-                      className={`rounded px-1.5 py-0.5 text-[10px] ${preset === p.id ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-800'}`}
-                      onClick={() => applyPreset(p)}
-                      title={p.trust}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-                {preset && (
-                  <p className="mb-1.5 text-[10px] text-zinc-500">
-                    {MCP_PRESETS.find((p) => p.id === preset)?.trust}
-                  </p>
-                )}
                 <div className="flex gap-1.5">
                   <input
                     className="w-24 shrink-0 rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
@@ -5038,21 +5045,21 @@ setPreset(null)
                     placeholder="name"
                     aria-label="Server name"
                   />
-                  {kind === 'stdio' ? (
-                    <input
-                      className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
-                      value={command}
-                      onChange={(e) => setCommand(e.target.value)}
-                      placeholder="command — e.g. npx  (pick a preset above to pre-fill)"
-                      aria-label="Server command"
-                    />
-                  ) : (
+                  {isRemote ? (
                     <input
                       className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
                       value={url}
                       onChange={(e) => setUrl(e.target.value)}
-                      placeholder="https://mcp.example.com/mcp"
+                      placeholder="https://example.com/mcp"
                       aria-label="Server URL"
+                    />
+                  ) : (
+                    <input
+                      className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+                      value={command}
+                      onChange={(e) => setCommand(e.target.value)}
+                      placeholder="npx -y @modelcontextprotocol/server-filesystem"
+                      aria-label="Server command"
                     />
                   )}
                   <button
@@ -5063,40 +5070,22 @@ setPreset(null)
                     Add
                   </button>
                 </div>
+                {fieldError('name') ?? fieldError('url') ?? fieldError('command')}
                 {cmdWarn && <p className="mt-1 text-[10px] text-amber-400">{cmdWarn}</p>}
-                <div className="mt-1.5 space-y-1">
-                  {kind === 'stdio' &&
-                    field(args, setArgs, 'args, one per line — e.g. -y', 'args', 'Server args')}
-                  {kind === 'http' && (
-                    <select
-                      className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
-                      value={kind ?? 'http'}
-                      onChange={(e) => setKind(e.target.value as TransportKind)}
-                      aria-label="Remote transport"
-                    >
-                      <option value="http">Streamable HTTP (default)</option>
-                      <option value="sse">Legacy SSE (older servers)</option>
-                    </select>
-                  )}
-                  {kind === 'http' &&
-                    field(headers, setHeaders, 'headers, one per line: Authorization=Bearer ${env:MCP_TOKEN}', 'headers', 'Server headers')}
-                  {(kind === 'http' || env.trim() || fieldErr.env) &&
-                    field(env, setEnv, 'env: KEY=value (one per line; ${env:VAR} references your environment)', 'env', 'Server env')}
-                </div>
+                {more && <div className="mt-1.5">{advancedFields}</div>}
+                <button
+                  className="mt-1 text-[10px] text-zinc-500 hover:bg-zinc-800 rounded px-1.5 py-0.5"
+                  onClick={() => setMore((m) => !m)}
+                >
+                  {more ? '− env / args / headers' : '+ env / args / headers'}
+                </button>
               </>
-            )}
-            {Object.keys(fieldErr).length > 0 && (
-              <p className="mt-1 text-[10px] text-red-400">
-                {Object.entries(fieldErr).map(([k, v]) => `${k}: ${v}`).join(' · ')}
-              </p>
             )}
           </div>
         )}
         <p className="text-[10px] text-zinc-600">
-          Runs with your permissions — registering a server (local command or remote URL) trusts
-          it. Its tools appear to the agent as mcp_&lt;name&gt;_&lt;tool&gt;. Config is stored in
-          config.json (mcpServers). Use $&#123;env:VAR&#125; in env/headers values to reference
-          environment variables without storing secrets.
+          Runs with your permissions — a server's tools appear to the agent as
+          mcp_&lt;name&gt;_&lt;tool&gt;.
         </p>
       </div>
       {fieldErr.row && <p className="mb-2 text-xs text-red-400">{fieldErr.row}</p>}
