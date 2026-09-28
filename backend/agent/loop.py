@@ -353,9 +353,6 @@ def _default_system_prompt(workspace: str = "") -> str:
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
-        "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull); "
-        "git_status/git_diff/git_pull/git_push require target=current or target=main; "
-        "use main only when the primary checkout is explicitly requested",
         "get_help (full docs for any tool; call with no argument to list them)",
         "spawn_agent (delegate self-contained work to a sub-agent; see the "
         "sub-agents index below)",
