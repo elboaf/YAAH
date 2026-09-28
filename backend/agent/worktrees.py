@@ -600,6 +600,17 @@ async def create_worktree(workspace: str, chat_id: str, run_id: str, label: str 
     # lets the UI distinguish the agent branch from the branch it was based on.
     base_rc, base_branch = await _git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
     base_branch = base_branch.strip() if base_rc == 0 else ""
+    # Issue #115: remember who selected the branch. When the workspace the
+    # session was started FROM is itself a managed session worktree, the
+    # user explicitly picked its branch in the UI (e.g. `dev`) — record
+    # that as the merge-back context so a later merge is confirmed against
+    # it instead of silently landing on whatever the main tree shows.
+    parent = worktree_of(workspace)
+    if parent is not None:
+        parent_info = _active.get(parent) or {}
+        selected = str(parent_info.get("branch") or "")
+        if selected and selected != base_branch:
+            base_branch = f"{selected} (selected in {Path(parent).name})"
     wt = worktree_base(root) / _component(chat_id)
     rc, out = await _git(root, "worktree", "add", "-b", branch, str(wt))
     if rc != 0:
@@ -1157,6 +1168,29 @@ def live_session_branch(root: Path | str) -> str:
     return ""
 
 
+def base_branch_for(root: Path | str, branch: str) -> str:
+    """The branch context a merge-back should be confirmed against
+    (issue #115): the base branch recorded for the session whose branch
+    is `branch` — i.e. what the user had selected when the session
+    started. Empty when there is no live binding for `branch`."""
+    try:
+        root_key = Path(root).resolve()
+    except OSError:
+        root_key = Path(str(root))
+    for wt_str in _chat_bindings.values():
+        info = _active.get(wt_str)
+        if not info:
+            continue
+        try:
+            if Path(str(info.get("root", ""))).resolve() != root_key:
+                continue
+        except OSError:
+            continue
+        if str(info.get("branch") or "") == branch:
+            return str(info.get("base_branch") or "")
+    return ""
+
+
 async def resolve_session_branch(root: Path, branch: str) -> str | None:
     """Resolve an abbreviated `agent/*` branch name (issue #103).
 
@@ -1181,7 +1215,7 @@ async def resolve_session_branch(root: Path, branch: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-async def merge_back(root: Path, branch: str) -> dict:
+async def merge_back(root: Path, branch: str, confirm: bool = False) -> dict:
     """Merge `branch` into the main tree under the merge mutex.
 
     Refuses (and says why) on: a branch with no commits beyond HEAD,
@@ -1199,6 +1233,16 @@ async def merge_back(root: Path, branch: str) -> dict:
     Issue #103: `branch` may be an abbreviation (e.g. `agent/352`) and
     resolves when exactly one `agent/*` branch matches; an empty name
     means this session's own branch.
+
+    Issue #115 (decision: explicit confirmation when target differs):
+    before executing, the resolved merge direction is stated. When the
+    target branch the main tree currently has checked out differs from
+    the session's base branch context (the branch the user had selected
+    when the session started), the merge is NOT run on the first call —
+    the payload returns `needs_confirmation` with the source→target
+    preview, and the caller must surface that preview to the user and
+    re-call with `confirm=True`. Plain `agent/*` sessions (whose base
+    branch is the primary checkout's own) merge directly as before.
     """
     branch = (branch or "").strip()
     if not branch:
@@ -1229,21 +1273,61 @@ async def merge_back(root: Path, branch: str) -> dict:
                     " (or omit the branch argument to merge this session)"
                 )
             return {"merged": False, "reason": reason}
+    # Issue #115: state the merge direction before executing. When the
+    # main tree's checked-out branch differs from this session's branch
+    # context, the first call is a preview, not a merge.
+    target_rc, target_branch = await _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    target = target_branch.strip() if target_rc == 0 else ""
+    base = base_branch_for(root, branch)
+    if not confirm and target and base and target != base:
+        return {
+            "merged": False,
+            "needs_confirmation": True,
+            "reason": (
+                f"merge direction needs confirmation: '{branch}' \u2192 '{target}' "
+                f"(this session's branch context is '{base}'). Surface this "
+                "preview to the user and re-call with confirm=true to proceed"
+            ),
+            "source": branch,
+            "target": target,
+            "base_branch": base,
+            "commits": count if (count := await _new_commits(root, branch)) else 0,
+        }
+    # Issue #115: state the merge direction before executing. When the
+    # main tree's checked-out branch differs from this session's branch
+    # context, the first call is a preview, not a merge.
+    target_rc, target_branch = await _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    target = target_branch.strip() if target_rc == 0 else ""
+    count = await _new_commits(root, branch)
+    if count == 0:
+        return {
+            "merged": False,
+            "reason": f"branch {branch} has no commits beyond HEAD",
+            "zero_commits": True,
+        }
+    if count < 0:
+        return {"merged": False, "reason": f"cannot inspect branch {branch}"}
+    base = base_branch_for(root, branch)
+    if not confirm and target and base and target != base:
+        return {
+            "merged": False,
+            "needs_confirmation": True,
+            "reason": (
+                f"merge direction needs confirmation: '{branch}' \u2192 '{target}' "
+                f"(this session's branch context is '{base}'). Surface this "
+                "preview to the user and re-call with confirm=true to proceed"
+            ),
+            "source": branch,
+            "target": target,
+            "base_branch": base,
+            "commits": count,
+        }
     async with merge_mutex(root):
         if (root / ".git" / "MERGE_HEAD").exists():
             return {
                 "merged": False,
                 "reason": "main tree is mid-merge; resolve that merge first",
             }
-        count = await _new_commits(root, branch)
-        if count == 0:
-            return {
-                "merged": False,
-                "reason": f"branch {branch} has no commits beyond HEAD",
-                "zero_commits": True,
-            }
-        if count < 0:
-            return {"merged": False, "reason": f"cannot inspect branch {branch}"}
         dirty_note = ""
         if await _dirty(root):
             dirty = await _dirty_paths(root)
@@ -1305,13 +1389,12 @@ async def merge_back(root: Path, branch: str) -> dict:
     from backend.agent import gitinfo
 
     gitinfo.invalidate_git_caches(root)
-    target_rc, target_branch = await _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     result: dict = {
         "merged": True,
         "commits": count,
         "branch": branch,
         "session_branch": live_session_branch(root),
-        "target_branch": target_branch.strip() if target_rc == 0 else "",
+        "target_branch": target,
     }
     if dirty_note:
         result["note"] = dirty_note

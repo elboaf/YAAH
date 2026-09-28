@@ -423,7 +423,12 @@ Guidelines:
   completion; do not ask the user to manage checkouts or merge routine work.
   `git_merge_back` with no branch argument merges the current session's own
   branch — prefer that; if you pass a branch at all, copy the exact
-  `agent/*` name from your context, never an abbreviation.
+  `agent/*` name from your context, never an abbreviation. When
+  `git_merge_back` returns `needs_confirmation`, the merge direction
+  (source \u2192 target) differs from the session's branch context \u2014
+  show the user the preview and re-call with `confirm=true` only after
+  they agree (issue #115: "merge it" must never silently pick the
+  target).
   Turn end itself never merges. For structured `git_status`, `git_diff`,
   `git_pull`, and `git_push`, target defaults to the current tree (the
   session worktree when bound); use `target="main"` only when the user

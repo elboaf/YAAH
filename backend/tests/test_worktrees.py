@@ -251,6 +251,55 @@ async def test_merge_back_refuses_dirty_overlap(repo: Path):
     )
 
 
+async def test_merge_back_target_diff_needs_confirmation(repo: Path):
+    """Issue #115 (decision: explicit confirmation when target differs):
+    when the main tree's checked-out branch differs from the session's
+    base branch context, the first call is a preview, not a merge. The
+    payload names the direction and the caller must re-call with
+    confirm=True; only then does the merge execute."""
+    _git(repo, "checkout", "-q", "-b", "dev")
+    (repo / "dev.txt").write_text("dev\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "dev work")
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
+    info = worktrees.binding_for("1")
+    assert info["base_branch"] == "dev"
+    # the user then switches the main tree to master before the merge
+    _git(repo, "checkout", "-q", "master")
+    (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "feature")
+    result = await worktrees.merge_back(repo, info["branch"])
+    assert result["needs_confirmation"] is True
+    assert result["merged"] is False
+    assert result["source"] == info["branch"]
+    assert result["target"] == "master"
+    assert result["base_branch"] == "dev"
+    # dev's commit + the feature commit: the branch carries both
+    assert result["commits"] == 2
+    # nothing landed
+    assert not (repo / "feature.txt").exists()
+    # confirmed call merges into the checked-out target
+    confirmed = await worktrees.merge_back(repo, info["branch"], confirm=True)
+    assert confirmed["merged"] is True
+    assert (repo / "feature.txt").read_text(encoding="utf-8") == "work\n"
+
+
+async def test_merge_back_same_target_merges_without_confirmation(repo: Path):
+    """Issue #115: when the session's base branch context matches the main
+    tree's checked-out branch (the usual agent/* case), merging proceeds
+    directly — no confirmation round-trip is added."""
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
+    info = worktrees.binding_for("1")
+    (Path(wt) / "feature.txt").write_text("work\n", encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "feature")
+    result = await worktrees.merge_back(repo, info["branch"])
+    assert result["merged"] is True
+    assert result.get("needs_confirmation") is None
+    assert (repo / "feature.txt").read_text(encoding="utf-8") == "work\n"
+
+
 async def test_merge_back_mid_merge_refusal_names_files_structurally(repo: Path):
     """Issue #123: when git's own pre-flight refuses mid-merge (dirt that
     slipped past the pre-flight check), the payload carries the blocked

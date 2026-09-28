@@ -365,7 +365,11 @@ HELP_DOCS: dict = {
         "ambiguous is refused, never guessed. The result carries "
         "session_branch (what this session owns) so a follow-up merge "
         "needs no reconstruction. A refusal is not a failed merge you "
-        "cannot recover from: read the reason, fix the cause, call again."
+        "cannot recover from: read the reason, fix the cause, call again. "
+        "When the result carries needs_confirmation, the merge direction "
+        "(source \u2192 target) differs from this session's branch context: "
+        "surface the preview to the user and re-call with confirm=true "
+        "only after they agree."
     ),
     "git_pull": (
         "Fetches and integrates remote changes; specify target=current or "
@@ -776,11 +780,17 @@ TOOLS_SCHEMA += [
                 "overlap files the merge would update (payload carries the "
                 "file list in `dirty_overlap`), or a "
                 "conflict occurs. Conflicts are aborted; user work is never "
-                "stashed or overwritten. A refusal is a decision point: on a "
-                "dirty-overlap refusal, escalate to the user with ONE "
-                "ask_user (commit it / discard it and merge / leave it "
-                "isolated) naming the blocked files \u2014 do not re-run "
-                "diagnostics or start new work until it is resolved."
+                "stashed or overwritten. Issue #115: the merge direction is "
+                "always stated in the result; when the target branch "
+                "differs from the session's branch context, the first call "
+                "returns needs_confirmation with a 'X \u2192 Y' preview \u2014 "
+                "show that preview to the user and re-call with "
+                "confirm=true only after they agree (a refusal is a "
+                "decision point: on a dirty-overlap refusal, escalate to "
+                "the user with ONE ask_user (commit it / discard it and "
+                "merge / leave it isolated) naming the blocked files \u2014 "
+                "do not re-run diagnostics or start new work until it is "
+                "resolved."
             ),
             "parameters": {
                 "type": "object",
@@ -791,6 +801,15 @@ TOOLS_SCHEMA += [
                             "The session's exact agent/* branch name from "
                             "context, a unique prefix, or omitted for the "
                             "current session's branch"
+                        ),
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true to execute a merge whose target "
+                            "differs from the session's branch context, "
+                            "after surfacing the needs_confirmation "
+                            "preview to the user"
                         ),
                     },
                 },
@@ -1506,13 +1525,16 @@ async def git_commit(workspace: str, message: str) -> dict:
     return await _git(workspace, "commit", "-m", message)
 
 
-async def git_merge_back(workspace: str, branch: str = "") -> dict:
+async def git_merge_back(workspace: str, branch: str = "", confirm: bool = False) -> dict:
     """Integrate an `agent/*` branch into the primary workspace. An empty
     branch means the calling session's own branch (issue #103: the
     integration step needs no reconstructed name); a prefix resolves when
     exactly one agent/* branch matches. Full refusal rules live in
     worktrees.merge_back: no new commits, overlapping uncommitted changes,
-    and conflicts are reported without stashing or overwriting user work."""
+    and conflicts are reported without stashing or overwriting user work.
+    Issue #115: when the merge target differs from the session's branch
+    context, the first call returns a needs_confirmation preview of the
+    direction — surface it to the user and re-call with confirm=True."""
     from backend.agent import worktrees as wt
 
     root = wt.worktree_of(workspace) or workspace
@@ -1530,7 +1552,7 @@ async def git_merge_back(workspace: str, branch: str = "") -> dict:
                     "to this workspace — pass the agent branch to merge"
                 )
             }
-    return await wt.merge_back(real, branch.strip())
+    return await wt.merge_back(real, branch.strip(), confirm=confirm)
 
 
 async def _verify_primary_sync_target(
