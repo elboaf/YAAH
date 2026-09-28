@@ -59,8 +59,9 @@ inherited by every future sandbox** — it is the persistence mechanism.
 git/python/node/AutoHotkey/browsers are NOT bundled (download size). The VM is
 a clean Windows image each boot; only this folder persists. Install what you
 need INTO the toolkit (zip/portable distributions preferred — never run
-interactive installers unattended), then add a line to `state.json` so the
-next session (and every future sandbox) knows it's there.
+interactive installers unattended), then record it with
+`bin\toolkit.ps1 install <name> ...` so the next session (and every future
+sandbox) knows it's there. Do not edit `state.json` by hand.
 
 ## Layout conventions (already on PATH inside the VM)
 

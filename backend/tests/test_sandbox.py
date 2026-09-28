@@ -7,6 +7,7 @@ override + fake spawn), so the suite is green on Linux CI too.
 import asyncio
 import json
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -1047,9 +1048,23 @@ def test_bundled_toolkit_payload_is_valid():
 _TOOLKIT_PS1 = Path(sb.__file__).parent.parent / "bundled_toolkit" / "bin" / "toolkit.ps1"
 
 
+def _pwsh() -> str | None:
+    """Best available PowerShell binary (Windows PowerShell or PowerShell
+    Core), so the wrapper tests run on Linux CI with pwsh and skip cleanly
+    where neither exists."""
+    for name in ("pwsh", "powershell"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
 def _run_toolkit(*args: str, tk: Path) -> subprocess.CompletedProcess:
+    exe = _pwsh()
+    if exe is None:
+        pytest.skip("no powershell/pwsh available on this platform")
     return subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        [exe, "-NoProfile", "-ExecutionPolicy", "Bypass",
          "-File", str(_TOOLKIT_PS1), *args, "-ToolkitDir", str(tk)],
         capture_output=True, text=True, timeout=60, check=False)
 
