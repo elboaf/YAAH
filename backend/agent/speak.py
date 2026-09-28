@@ -379,8 +379,12 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
 # as a spoken briefing; transcript stripping is more lenient below.
 SAY_TAG = re.compile(r"<\s*say\s*>(.*?)</\s*say\s*>\s*$", re.S | re.I)
 SAY_TAG_ANY = re.compile(r"<\s*say\s*>(.*?)</\s*say\s*>", re.S | re.I)
-# A truncated trailing briefing is still not chat, even without a closing tag.
-SAY_TAG_UNCLOSED = re.compile(r"<\s*say\s*>[\s\S]*$", re.I)
+# A truncated trailing briefing is still not chat, even without a closing
+# tag — but ONLY while it is briefing-sized (SAY_MAX_CHARS). An unclosed
+# opener followed by a longer body is a stray tag inside a real answer:
+# blanking the message from the opener onward blanked whole transcripts
+# (be053e5 regression), so the swallow is now length-gated.
+SAY_TAG_UNCLOSED = re.compile(r"<\s*say\s*>([\s\S]*)$", re.I)
 SAY_TAG_PARTIAL = re.compile(r"<\s*(?:s(?:a(?:y)?)?)?\s*$", re.I)
 SAY_TAG_CLOSE = re.compile(r"</\s*say\s*>", re.I)
 
@@ -395,7 +399,11 @@ _BRIEFING_MAX = SAY_MAX_CHARS
 def _strip_say_tags(content: str) -> str:
     """Remove complete tags anywhere and a trailing truncated briefing."""
     text = SAY_TAG_CLOSE.sub("", SAY_TAG_ANY.sub("", content))
-    text = SAY_TAG_UNCLOSED.sub("", text)
+    m = SAY_TAG_UNCLOSED.search(text)
+    # Only swallow the unclosed tail when it is briefing-sized; a longer body
+    # after an unclosed opener is real chat and must survive (see regex note).
+    if m and len(m.group(1)) <= SAY_MAX_CHARS:
+        text = text[: m.start()]
     return SAY_TAG_PARTIAL.sub("", text).rstrip()
 
 

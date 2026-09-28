@@ -82,16 +82,35 @@ export function liveProse(md: string): string {
 // Keep transcript cleanup here as the frontend counterpart to speak.py; it is
 // also applied at render time to protect historical rows and stream regressions.
 const SAY_TAG_ANY = /<\s*say\s*>([\s\S]*?)<\/\s*say\s*>/gi
-const SAY_TAG_UNCLOSED = /<\s*say\s*>[\s\S]*$/i
-const SAY_TAG_PARTIAL = /<\s*(?:s(?:a(?:y)?)?)?\s*$/i
+// Unclosed-opener source WITHOUT the '$' anchor: stripSay applies it
+// length-gated (only when the swallowed tail is briefing-sized), so a stray
+// opener can never delete an arbitrarily large message body. Mirrors
+// speak.py's SAY_TAG_UNCLOSED minus its unconditional end-of-string behavior.
+const SAY_TAG_UNCLOSED_SOURCE = '<\\s*say\\s*>([\\s\\S]*)'
+const SAY_TAG_CLOSE = /<\/\s*say\s*>/gi
+// Only a PARTIAL TAG FRAGMENT at the very end is stripped ('<', '<s', '<sa'):
+// it is a stream-boundary artifact. A complete opener — even unclosed — must
+// not delete the message body (be053e5 regression: a truncated briefing
+// blanked the entire transcript row).
+// Only a partial TAG FRAGMENT at the very end is stripped ('<', '<s', '<sa'):
+// that is a stream cut mid-opener. A complete opener — even unclosed — must
+// not delete the rest of the message at render time.
+const SAY_TAG_PARTIAL = /<\s*(?:s(?:a(?:y)?)?)?$/i
+// A briefing is at most SAY_MAX_CHARS long (mirrors speak.py). If an unclosed
+// opener has more than a briefing's worth of content after it, it cannot be a
+// truncated briefing — it's a stray tag in real chat, and the text must show.
+function looksLikeTruncatedBriefing(unclosed: string): boolean {
+  return unclosed.length <= SAY_MAX_CHARS
+}
 
-/** Remove spoken-briefing markup and any truncated trailing briefing. */
+/** Remove spoken-briefing markup and a trailing truncated tag fragment. */
 export function stripSay(md: string): string {
-  return md
-    .replace(SAY_TAG_ANY, '')
-    .replace(SAY_TAG_UNCLOSED, '')
-    .replace(/<\/\s*say\s*>/gi, '')
-    .replace(SAY_TAG_PARTIAL, '')
+  let out = md.replace(SAY_TAG_ANY, '')
+  const unclosed = out.match(new RegExp(SAY_TAG_UNCLOSED_SOURCE, 'i'))
+  if (unclosed && looksLikeTruncatedBriefing(unclosed[1])) {
+    out = out.replace(new RegExp(SAY_TAG_UNCLOSED_SOURCE, 'i'), '')
+  }
+  return out.replace(SAY_TAG_CLOSE, '').replace(SAY_TAG_PARTIAL, '')
 }
 // Mirrors speak.py's SAY_MAX_CHARS / spoken_line / heuristic_briefing â€” the
 // cap lives in one place per side and both sides stay in sync.

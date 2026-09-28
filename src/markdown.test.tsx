@@ -139,4 +139,28 @@ describe('AgentMarkdown', () => {
     expect(screen.getByText('bash')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'docs' })).toHaveAttribute('href', 'https://example.com')
   })
+
+  // be053e5 regression: stripSay's unclosed-tag rule applied to ANY position,
+  // so one <say> opener without a closer deleted the whole message at render.
+  // A long body (> SAY_MAX_CHARS) after an unclosed opener is chat, not a
+  // truncated briefing, and must render.
+  it('renders a long body after an unclosed <say> tag', () => {
+    const answer =
+      'Lesson 1 is ready. ' +
+      'It covers the object model: blobs, trees, commits and refs. '.repeat(12) +
+      'Try the quiz at the end of the lesson.'
+    expect(answer.length).toBeGreaterThan(400)
+    render(<AgentMarkdown content={`<say>Briefing cut off mid-sent\n\n${answer}`} />)
+    expect(screen.getByText(/Lesson 1 is ready/)).toBeInTheDocument()
+  })
+
+  it('renders surrounding text when a <say> block sits mid-message', () => {
+    render(<AgentMarkdown content={'<say>Briefing</say>\n\nLesson 1 is ready. Try the quiz.'} />)
+    expect(screen.getByText(/Lesson 1 is ready/)).toBeInTheDocument()
+  })
+
+  it('does not strip a trailing < that is not a say-tag fragment', () => {
+    render(<AgentMarkdown content={'Compare x < y in the table below.'} />)
+    expect(screen.getByText(/Compare x/)).toBeInTheDocument()
+  })
 })
