@@ -4598,10 +4598,15 @@ function McpSection() {
   const [servers, setServers] = useState<McpServerInfo[]>([])
   const [name, setName] = useState('')
   const [command, setCommand] = useState('')
+  const [url, setUrl] = useState('')
   const [args, setArgs] = useState('')
+  const [env, setEnv] = useState('')
+  const [headers, setHeaders] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [more, setMore] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -4611,34 +4616,117 @@ function McpSection() {
     }
   }, [])
 
-  // Poll while any server is still starting, so status/ticks arrive live.
+  // Poll whenever any server isn't settled: 'starting' needs the ticks,
+  // but a 'failed' server also moves in the background (backoff sleep,
+  // manual retry), so a status frozen at the last render would lie.
   useEffect(() => {
     void refresh()
     const t = setInterval(() => {
       setServers((cur) => {
-        if (cur.some((s) => s.status === 'starting')) void refresh()
+        if (cur.some((s) => s.status !== 'connected')) void refresh()
         return cur
       })
     }, 1500)
     return () => clearInterval(t)
   }, [refresh])
 
-  const add = async () => {
+  // "KEY=value, OTHER=v2" (or one per line) -> record. Parts without '='
+  // are ignored; values may contain '='.
+  const parseKv = (text: string): Record<string, string> => {
+    const out: Record<string, string> = {}
+    for (const part of text.split(/[\n,]/)) {
+      const p = part.trim()
+      if (!p) continue
+      const eq = p.indexOf('=')
+      if (eq > 0) out[p.slice(0, eq).trim()] = p.slice(eq + 1).trim()
+    }
+    return out
+  }
+
+  // Shell-like args tokenization: whitespace splits, '…' and "…" group,
+  // backslash escapes the next char outside quotes (and \" \\ inside
+  // double quotes). Replaces the old \s+ split that broke quoted args
+  // and paths with spaces (issue #128).
+  const parseArgs = (input: string): string[] => {
+    const out: string[] = []
+    let cur = ''
+    let quote: string | null = null
+    let started = false
+    for (let i = 0; i < input.length; i++) {
+      const c = input[i]
+      if (quote === null && /\s/.test(c)) {
+        if (started) out.push(cur)
+        cur = ''
+        started = false
+        continue
+      }
+      started = true
+      if (quote === "'") {
+        if (c === "'") quote = null
+        else cur += c
+      } else if (quote === '"') {
+        if (c === '"') quote = null
+        else if (c === '\\' && (input[i + 1] === '"' || input[i + 1] === '\\')) cur += input[++i]
+        else cur += c
+      } else if (c === "'" || c === '"') {
+        quote = c
+      } else if (c === '\\' && input[i + 1]) {
+        cur += input[++i]
+      } else {
+        cur += c
+      }
+    }
+    if (started) out.push(cur)
+    return out
+  }
+
+  const fillForm = (srv: McpServerInfo) => {
+    setName(srv.name)
+    setCommand(srv.command)
+    setUrl(srv.url)
+    setArgs(srv.args.join(' '))
+    setEnv(Object.entries(srv.env ?? {}).map(([k, v]) => `${k}=${v}`).join(', '))
+    setHeaders(Object.entries(srv.headers ?? {}).map(([k, v]) => `${k}=${v}`).join(', '))
+  }
+
+  const submit = async (target?: string) => {
     setErr(null)
-    if (!name.trim() || !command.trim()) {
-      setErr('name and command are required')
+    const isRemote = url.trim() !== ''
+    if (!name.trim()) {
+      setErr('name is required')
+      return
+    }
+    if (isRemote ? !/^https?:\/\//.test(url.trim()) : !command.trim()) {
+      setErr(isRemote ? 'a URL must start with http(s)://' : 'command or URL is required')
+      return
+    }
+    if (isRemote && command.trim()) {
+      setErr('use either command (local) or URL (remote), not both')
       return
     }
     setBusy(true)
     try {
-      const argList = args
-        .split(/\s+/)
-        .map((a) => a.trim())
-        .filter(Boolean)
-      setServers((await addMcpServer({ name: name.trim(), command: command.trim(), args: argList })).servers)
+      const body = {
+        name: name.trim(),
+        ...(isRemote
+          ? { url: url.trim(), headers: parseKv(headers) }
+          : { command: command.trim(), args: parseArgs(args) }),
+        env: parseKv(env),
+      }
+      // Upsert: POST with a distinct `name` updates an existing entry —
+      // that IS the edit path (the backend has upserted all along).
+      const saved = target
+        ? await addMcpServer({ ...body, name: target })
+        : await addMcpServer(body)
+      setServers(saved.servers)
       setName('')
       setCommand('')
+      setUrl('')
       setArgs('')
+      setEnv('')
+      setHeaders('')
+      setEditing(null)
+      setMore(false)
     } catch (e) {
       setErr(String((e as { message?: string }).message ?? e))
     } finally {
@@ -4657,10 +4745,30 @@ function McpSection() {
     }
   }
 
+  const reload = async () => {
+    setBusy(true)
+    try {
+      setServers((await reloadMcpServers()).servers)
+    } catch (e) {
+      setErr(String((e as { message?: string }).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleEdit = (srv: McpServerInfo) => {
+    if (editing === srv.name) {
+      setEditing(null)
+      return
+    }
+    setEditing(srv.name)
+    fillForm(srv)
+  }
+
   const statusColor = (s: McpServerInfo['status']) =>
     s === 'connected'
       ? 'text-emerald-400'
-      : s === 'failed'
+      : s.startsWith('failed')
         ? 'text-red-400'
         : s === 'stopped'
           ? 'text-zinc-500'
@@ -4674,9 +4782,9 @@ function McpSection() {
       <div className="mb-2 space-y-1.5">
         {servers.length === 0 && (
           <p className="text-[10px] text-zinc-600">
-            No servers registered. An MCP server is a local tool program (browser control, git,
-            databases...) whose tools the agent can call directly — more reliable than GUI
-            automation.
+            No servers registered. An MCP server is a tool provider — a local program (command) or
+            a remote endpoint (URL) — whose tools the agent can call directly. Remote servers can
+            authenticate with headers, e.g. Authorization=Bearer $&#123;env:MY_TOKEN&#125;.
           </p>
         )}
         {servers.map((s) => (
@@ -4687,13 +4795,38 @@ function McpSection() {
               </span>
               <span className="font-mono text-xs text-zinc-200">{s.name}</span>
               <span className="flex-1 truncate font-mono text-[10px] text-zinc-600">
-                {s.command} {s.args.join(' ')}
+                {s.url
+                  ? `${s.url}${s.transport === 'sse' ? ' (sse)' : ''}`
+                  : `${s.command} ${s.args.join(' ')}`}
               </span>
+              {s.protocol_version && (
+                <span
+                  className="shrink-0 font-mono text-[10px] text-zinc-600"
+                  title="negotiated MCP protocol version"
+                >
+                  {s.protocol_version}
+                </span>
+              )}
               <button
                 className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
                 onClick={() => setExpanded(expanded === s.name ? null : s.name)}
               >
                 {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}
+              </button>
+              <button
+                className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                disabled={busy}
+                onClick={() => void reload()}
+                title="Re-read config and restart every changed/failed server (resets the failure budget)"
+              >
+                retry
+              </button>
+              <button
+                className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                disabled={busy}
+                onClick={() => toggleEdit(s)}
+              >
+                {editing === s.name ? 'cancel' : 'edit'}
               </button>
               <button
                 className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
@@ -4703,8 +4836,55 @@ function McpSection() {
                 remove
               </button>
             </div>
-            {s.status === 'failed' && s.error && (
+            {s.status.startsWith('failed') && s.error && (
               <p className="mt-1 text-[10px] text-red-400">{s.error}</p>
+            )}
+            {editing === s.name && (
+              <div className="mt-1.5 space-y-1">
+                <input
+                  className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
+                  value={url || command}
+                  onChange={(e) => {
+                    setCommand(e.target.value)
+                    setUrl(e.target.value)
+                  }}
+                  placeholder="command or https://… URL (switching type replaces the entry)"
+                  aria-label={`Edit command or URL for ${s.name}`}
+                />
+                {url.trim() !== '' ? (
+                  <input
+                    className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
+                    value={headers}
+                    onChange={(e) => setHeaders(e.target.value)}
+                    placeholder="headers: Authorization=Bearer ${env:MCP_TOKEN}"
+                    aria-label={`Edit headers for ${s.name}`}
+                  />
+                ) : (
+                  <input
+                    className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
+                    value={args}
+                    onChange={(e) => setArgs(e.target.value)}
+                    placeholder='args (quotes group, e.g. --root "C:\my dir")'
+                    aria-label={`Edit args for ${s.name}`}
+                  />
+                )}
+                <input
+                  className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
+                  value={env}
+                  onChange={(e) => setEnv(e.target.value)}
+                  placeholder="env: KEY=value (comma-separated)"
+                  aria-label={`Edit env for ${s.name}`}
+                />
+                <div className="flex justify-end">
+                  <button
+                    className="rounded   px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => void submit(s.name)}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
             )}
             {expanded === s.name && (
               <ul className="mt-1.5 space-y-0.5">
@@ -4731,41 +4911,73 @@ function McpSection() {
           />
           <input
             className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            placeholder='command, e.g. npx -y @modelcontextprotocol/server-filesystem ~'
-            aria-label="Server command"
-          />
-          <input
-            className="w-40 shrink-0 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-            value={args}
-            onChange={(e) => setArgs(e.target.value)}
-            placeholder="args (space-separated)"
-            aria-label="Server args"
+            value={url || command}
+            onChange={(e) => {
+              setCommand(e.target.value)
+              setUrl(e.target.value)
+            }}
+            placeholder="command or URL — e.g. npx -y @modelcontextprotocol/server-filesystem ~  |  https://mcp.example.com/mcp"
+            aria-label="Server command or URL"
           />
           <button
             className="shrink-0 rounded   px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
             disabled={busy}
-            onClick={() => void add()}
+            onClick={() => void submit()}
           >
             Add
           </button>
         </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {more && (
+            <>
+              <input
+                className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={args}
+                onChange={(e) => setArgs(e.target.value)}
+                placeholder='args (quotes group, e.g. --root "C:\my dir")'
+                aria-label="Server args"
+              />
+              <input
+                className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={env}
+                onChange={(e) => setEnv(e.target.value)}
+                placeholder="env: KEY=value, TOKEN=${env:MY_TOKEN} (comma-separated)"
+                aria-label="Server env"
+              />
+              <input
+                className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
+                value={headers}
+                onChange={(e) => setHeaders(e.target.value)}
+                placeholder="headers (URL servers): Authorization=Bearer ${env:MCP_TOKEN}"
+                aria-label="Server headers"
+              />
+            </>
+          )}
+          <button
+            className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800"
+            onClick={() => {
+              setMore((m) => !m)
+              if (more) {
+                setArgs('')
+                setEnv('')
+                setHeaders('')
+              }
+            }}
+          >
+            {more ? 'fewer' : '+ args / env / headers'}
+          </button>
+        </div>
         <p className="text-[10px] text-zinc-600">
-          Runs locally with your permissions — registering a server trusts it. Its tools appear to
-          the agent as mcp_&lt;name&gt;_&lt;tool&gt;. Config is stored in config.json (mcpServers).
+          Runs with your permissions — registering a server (local command or remote URL) trusts
+          it. Its tools appear to the agent as mcp_&lt;name&gt;_&lt;tool&gt;. Config is stored in
+          config.json (mcpServers). Use $&#123;env:VAR&#125; in env/headers values to reference
+          environment variables without storing secrets.
         </p>
       </div>
       {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
     </>
   )
 }
-
-/** Scheduled agents (issue #41): first-class recurring runs in pinned chats.
- *  The dialogue opens from the on-hover silhouette icon on each workspace
- *  (list + new) and as "Agent settings…" from the pinned chat's row menu.
- *  Typed messages in an agent chat become standing instructions (the
- *  Composer routes them to the API); they never trigger a run. */
 
 function PersonIcon({ className = '' }: { className?: string }) {
   return (

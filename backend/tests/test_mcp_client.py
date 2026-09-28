@@ -108,3 +108,75 @@ def test_name_validation_via_api():
         assert r.status_code == 400
         servers = client.get("/api/mcp/servers").json()["servers"]
         assert isinstance(servers, list)
+
+
+def test_url_server_upsert_and_status_payload(monkeypatch):
+    """Issue #128: url entries register like command entries (exactly one
+    of command/url), headers/env are stored raw (${env:} unresolved) and
+    the status payload exposes url/headers/env/protocol_version."""
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    started = []
+
+    def fake_start_all(self):
+        started.extend(self.servers.keys())
+
+    monkeypatch.setattr(mcp_client.McpManager, "start_all", fake_start_all)
+    cfg: dict = {}
+
+    def fake_configured(self):
+        return cfg
+
+    def fake_save(d):
+        # copy first: the payload aliases the live dict returned by
+        # configured(), and clearing before reading would wipe it
+        entries = dict(d.get("mcpServers") or {})
+        cfg.clear()
+        cfg.update(entries)
+
+    monkeypatch.setattr(mcp_client.McpManager, "configured", fake_configured)
+    monkeypatch.setattr("backend.main._save_config", fake_save)
+
+    with TestClient(app) as client:
+        # neither -> 400
+        r = client.post("/api/mcp/servers", json={"name": "nourl"})
+        assert r.status_code == 400
+        # both -> 400
+        r = client.post(
+            "/api/mcp/servers", json={"name": "both", "command": "x", "url": "https://a/mcp"}
+        )
+        assert r.status_code == 400
+        # bad scheme -> 400
+        r = client.post("/api/mcp/servers", json={"name": "ftp", "url": "ftp://a/mcp"})
+        assert r.status_code == 400
+        # valid remote entry
+        r = client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "remote1",
+                "url": "https://mcp.example.com/mcp",
+                "headers": {"Authorization": "Bearer ${env:MCP_TOKEN}"},
+                "env": {"A": "1"},
+            },
+        )
+        assert r.status_code == 200, r.text
+        row = next(s for s in r.json()["servers"] if s["name"] == "remote1")
+        assert row["url"] == "https://mcp.example.com/mcp"
+        assert row["headers"]["Authorization"] == "Bearer ${env:MCP_TOKEN}"  # raw, not resolved
+        assert row["env"] == {"A": "1"}
+        # upsert: same name again updates (edit path), spec changes propagate
+        r = client.post(
+            "/api/mcp/servers",
+            json={"name": "remote1", "url": "https://other.example.com/mcp"},
+        )
+        assert r.status_code == 200
+        row = next(s for s in r.json()["servers"] if s["name"] == "remote1")
+        assert row["url"] == "https://other.example.com/mcp"
+        assert row["headers"] == {}
+        # local entry still works
+        r = client.post("/api/mcp/servers", json={"name": "loc1", "command": "demo-cmd", "args": ["a"]})
+        assert r.status_code == 200
+        row = next(s for s in r.json()["servers"] if s["name"] == "loc1")
+        assert row["command"] == "demo-cmd" and row["args"] == ["a"] and row["url"] == ""

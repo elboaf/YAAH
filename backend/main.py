@@ -1262,17 +1262,26 @@ async def api_mcp_servers():
     panel isn't empty right after a save."""
     rows = []
     for name, spec in _mcp.manager.configured().items():
+        sp = spec if isinstance(spec, dict) else {}
         s = _mcp.manager.servers.get(name)
         if s is None:
-            s = _mcp.McpServerState(name, spec if isinstance(spec, dict) else {})
+            s = _mcp.McpServerState(name, sp)
             s.status = "starting"
         rows.append(
             {
                 "name": s.name,
-                "status": s.status,
+                "status": s.api_status(),
                 "error": s.error,
-                "command": s.spec.get("command", ""),
-                "args": s.spec.get("args") or [],
+                # Editable fields reflect the raw config entry, NOT the
+                # interpolated runtime spec, so re-saving an edit never
+                # persists resolved ${env:} values.
+                "command": sp.get("command", ""),
+                "args": sp.get("args") or [],
+                "env": sp.get("env") or {},
+                "url": sp.get("url", ""),
+                "transport": sp.get("transport", ""),
+                "headers": sp.get("headers") or {},
+                "protocol_version": s.protocol_version,
                 "tools": [
                     {
                         "name": t["function"]["name"],
@@ -1286,23 +1295,46 @@ async def api_mcp_servers():
 
 
 class McpServerBody(BaseModel):
+    """Local servers use command+args+env; remote servers use url
+    (+ optional headers for auth). Exactly one of command/url required.
+    Values may reference environment variables as ${env:VAR} — resolved
+    at connect time, never persisted resolved (issue #128)."""
+
     name: str
-    command: str
+    command: str = ""
     args: list[str] = []
     env: dict[str, str] = {}
+    url: str = ""
+    headers: dict[str, str] = {}
+    transport: str = ""  # "" = auto (streamable HTTP) | "sse" legacy
 
 
 @app.post("/api/mcp/servers")
 async def api_mcp_add_server(body: McpServerBody):
     """Register (or update) a server and (re)connect it. Registration is
-    trust: the command runs locally with user permissions."""
+    trust: the command runs locally with user permissions / the URL is
+    contacted with the given headers."""
     name = body.name.strip()
     if not _re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
         raise HTTPException(status_code=400, detail="name: letters/digits/-/_ only")
-    if not body.command.strip():
-        raise HTTPException(status_code=400, detail="command is required")
+    command, url = body.command.strip(), body.url.strip()
+    if bool(command) == bool(url):
+        raise HTTPException(
+            status_code=400, detail="exactly one of command or url is required"
+        )
+    if url and not _re.match(r"^https?://", url):
+        raise HTTPException(status_code=400, detail="url must start with http(s)://")
+    spec: dict = {"args": body.args, "env": body.env}
+    if command:
+        spec["command"] = command
+    else:
+        spec["url"] = url
+        if body.headers:
+            spec["headers"] = body.headers
+        if body.transport:
+            spec["transport"] = body.transport
     cfg = _mcp.manager.configured()
-    cfg[name] = {"command": body.command.strip(), "args": body.args, "env": body.env}
+    cfg[name] = spec
     _save_config({"mcpServers": cfg})
     _mcp.manager.start_all()
     return await api_mcp_servers()
