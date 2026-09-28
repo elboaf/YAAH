@@ -38,6 +38,7 @@ import {
   addMcpServer,
   removeMcpServer,
   reloadMcpServers,
+  checkMcpCommand,
   type McpServerInfo,
   listAgents,
   addAgent,
@@ -98,6 +99,7 @@ import {
 import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentBranchInfo } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
+import { MCP_PRESETS, type McpPreset } from './mcpPresets'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
 import { AgentContextPerProvider } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
@@ -4594,19 +4596,34 @@ export function Sidebar() {
 /** MCP tool servers (Settings panel section). Each registered server is a
  *  local program the backend launches; its tools appear to the model as
  *  mcp_<server>_<tool>. Registration is trust — no per-call confirmations. */
+// Replacement for McpSection in src/components.tsx (lines 4594-4981).
+// This file is a staging copy; the content is spliced in by the patch step.
+
+
+type TransportKind = 'stdio' | 'http' | 'sse'
+
+/** MCP tool servers (Settings panel section). Guided add/edit flow
+ *  (issue #129): transport picker first, preset catalog, field-level
+ *  validation, per-server retry. Registration is trust. */
 function McpSection() {
   const [servers, setServers] = useState<McpServerInfo[]>([])
+  const [kind, setKind] = useState<TransportKind | null>(null) // null = not chosen yet
   const [name, setName] = useState('')
   const [command, setCommand] = useState('')
   const [url, setUrl] = useState('')
-  const [args, setArgs] = useState('')
-  const [env, setEnv] = useState('')
-  const [headers, setHeaders] = useState('')
+  const [args, setArgs] = useState('') // one arg per line
+  const [env, setEnv] = useState('') // one KEY=value per line
+  const [headers, setHeaders] = useState('') // one KEY=value per line
   const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
+  const [fieldErr, setFieldErr] = useState<Record<string, string>>({})
+  const [warn, setWarn] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
-  const [more, setMore] = useState(false)
+  const [editingOriginal, setEditingOriginal] = useState<McpServerInfo | null>(null)
+  const [preset, setPreset] = useState<string | null>(null)
+  const [masked, setMasked] = useState(true)
+  const [cmdWarn, setCmdWarn] = useState<string | null>(null)
+  const [switchConfirm, setSwitchConfirm] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -4630,105 +4647,134 @@ function McpSection() {
     return () => clearInterval(t)
   }, [refresh])
 
-  // "KEY=value, OTHER=v2" (or one per line) -> record. Parts without '='
-  // are ignored; values may contain '='.
-  const parseKv = (text: string): Record<string, string> => {
-    const out: Record<string, string> = {}
+  // "KEY=value" pairs, one per line (comma separated also accepted).
+  // Malformed parts are COLLECTED, not silently dropped (issue #129).
+  const parseKv = (
+    text: string,
+  ): { values: Record<string, string>; bad: string[] } => {
+    const values: Record<string, string> = {}
+    const bad: string[] = []
     for (const part of text.split(/[\n,]/)) {
       const p = part.trim()
       if (!p) continue
       const eq = p.indexOf('=')
-      if (eq > 0) out[p.slice(0, eq).trim()] = p.slice(eq + 1).trim()
+      if (eq <= 0) bad.push(p)
+      else if (!values[p.slice(0, eq).trim()]) values[p.slice(0, eq).trim()] = p.slice(eq + 1).trim()
     }
-    return out
+    return { values, bad }
   }
 
-  // Shell-like args tokenization: whitespace splits, '…' and "…" group,
-  // backslash escapes the next char outside quotes (and \" \\ inside
-  // double quotes). Replaces the old \s+ split that broke quoted args
-  // and paths with spaces (issue #128).
-  const parseArgs = (input: string): string[] => {
-    const out: string[] = []
-    let cur = ''
-    let quote: string | null = null
-    let started = false
-    for (let i = 0; i < input.length; i++) {
-      const c = input[i]
-      if (quote === null && /\s/.test(c)) {
-        if (started) out.push(cur)
-        cur = ''
-        started = false
-        continue
-      }
-      started = true
-      if (quote === "'") {
-        if (c === "'") quote = null
-        else cur += c
-      } else if (quote === '"') {
-        if (c === '"') quote = null
-        else if (c === '\\' && (input[i + 1] === '"' || input[i + 1] === '\\')) cur += input[++i]
-        else cur += c
-      } else if (c === "'" || c === '"') {
-        quote = c
-      } else if (c === '\\' && input[i + 1]) {
-        cur += input[++i]
-      } else {
-        cur += c
-      }
+  const isRemote = kind === 'http' || kind === 'sse'
+
+  const setErr = (field: string, msg: string | null) =>
+    setFieldErr((prev) => {
+      const next = { ...prev }
+      if (msg) next[field] = msg
+      else delete next[field]
+      return next
+    })
+
+  // Pre-save command check (issue #129): non-blocking warning when the
+  // command can't be found on PATH.
+  useEffect(() => {
+    if (kind !== 'stdio' || !command.trim() || editing) {
+      setCmdWarn(null)
+      return
     }
-    if (started) out.push(cur)
-    return out
+    let alive = true
+    const t = setTimeout(() => {
+      checkMcpCommand(command.trim())
+        .then((r) => {
+          if (alive)
+            setCmdWarn(
+              r.found
+                ? null
+                : `"${command.trim().split(/\s+/)[0]}" was not found on PATH — this server will fail to start unless it is installed or the path is absolute.`,
+            )
+        })
+        .catch(() => {})
+    }, 400)
+    return () => {
+      alive = false
+      clearTimeout(t)
+    }
+  }, [command, kind, editing])
+
+  const applyPreset = (p: McpPreset) => {
+    setPreset(p.id)
+    setKind(p.kind === 'remote' ? 'http' : 'stdio')
+    if (p.kind === 'stdio') {
+      setCommand(p.command ?? '')
+      setUrl('')
+      setArgs((p.args ?? []).join('\n'))
+    } else {
+      setUrl(p.url ?? '')
+      setCommand('')
+    }
+    setEnv((p.envKeys ?? []).map((k) => `${k}=`).join('\n'))
+    setHeaders((p.headerKeys ?? []).map((k) => `${k}=`).join('\n'))
   }
 
   const fillForm = (srv: McpServerInfo) => {
     setName(srv.name)
-    setCommand(srv.command)
-    setUrl(srv.url)
-    setArgs(srv.args.join(' '))
-    setEnv(Object.entries(srv.env ?? {}).map(([k, v]) => `${k}=${v}`).join(', '))
-    setHeaders(Object.entries(srv.headers ?? {}).map(([k, v]) => `${k}=${v}`).join(', '))
+    const remote = srv.url !== ''
+    setKind(remote ? (srv.transport === 'sse' ? 'sse' : 'http') : 'stdio')
+    setCommand(remote ? '' : srv.command)
+    setUrl(remote ? srv.url : '')
+    setArgs(remote ? '' : srv.args.join('\n'))
+    setEnv(Object.entries(srv.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'))
+    setHeaders(Object.entries(srv.headers ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'))
+setPreset(null)
   }
 
   const submit = async (target?: string) => {
-    setErr(null)
-    const isRemote = url.trim() !== ''
-    if (!name.trim()) {
-      setErr('name is required')
-      return
+    const errs: Record<string, string> = {}
+    const remote = kind === 'http' || kind === 'sse'
+    if (!name.trim()) errs.name = 'name is required'
+    else if (!/^[A-Za-z0-9_-]{1,40}$/.test(name.trim()))
+      errs.name = 'letters, digits, - and _ only (max 40 chars)'
+    if (remote) {
+      if (!/^https?:\/\//.test(url.trim())) errs.url = 'a URL must start with http(s)://'
+    } else {
+      if (!command.trim()) errs.command = 'a command is required for a local server'
     }
-    if (isRemote ? !/^https?:\/\//.test(url.trim()) : !command.trim()) {
-      setErr(isRemote ? 'a URL must start with http(s)://' : 'command or URL is required')
-      return
+    const envParsed = parseKv(env)
+    if (envParsed.bad.length) errs.env = `malformed entries (need KEY=value): ${envParsed.bad.join(', ')}`
+    if (remote) {
+      const h = parseKv(headers)
+      if (h.bad.length) errs.headers = `malformed entries (need KEY=value): ${h.bad.join(', ')}`
     }
-    if (isRemote && command.trim()) {
-      setErr('use either command (local) or URL (remote), not both')
+    if (Object.keys(errs).length) {
+      setFieldErr(errs)
       return
     }
     setBusy(true)
     try {
       const body = {
         name: name.trim(),
-        ...(isRemote
-          ? { url: url.trim(), headers: parseKv(headers) }
-          : { command: command.trim(), args: parseArgs(args) }),
-        env: parseKv(env),
+        ...(remote
+          ? { url: url.trim(), headers: parseKv(headers).values, transport: kind === 'sse' ? 'sse' : '' }
+          : { command: command.trim(), args: args.split('\n').map((l) => l.trim()).filter(Boolean) }),
+        env: envParsed.values,
+        ...(target ? { previous_name: target } : {}),
       }
       // Upsert: POST with a distinct `name` updates an existing entry —
-      // that IS the edit path (the backend has upserted all along).
-      const saved = target
-        ? await addMcpServer({ ...body, name: target })
-        : await addMcpServer(body)
+      // that IS the edit path. previous_name renames when it changed.
+      const saved = await addMcpServer(body)
       setServers(saved.servers)
+      setFieldErr({})
       setName('')
       setCommand('')
       setUrl('')
       setArgs('')
       setEnv('')
       setHeaders('')
+      setKind(null)
+      setPreset(null)
       setEditing(null)
-      setMore(false)
+      setEditingOriginal(null)
     } catch (e) {
-      setErr(String((e as { message?: string }).message ?? e))
+      setErr('submit', String((e as { message?: string }).message ?? e))
     } finally {
       setBusy(false)
     }
@@ -4739,18 +4785,18 @@ function McpSection() {
     try {
       setServers((await removeMcpServer(server)).servers)
     } catch (e) {
-      setErr(String((e as { message?: string }).message ?? e))
+      setErr('row', String((e as { message?: string }).message ?? e))
     } finally {
       setBusy(false)
     }
   }
 
-  const reload = async () => {
+  const reload = async (name?: string) => {
     setBusy(true)
     try {
-      setServers((await reloadMcpServers()).servers)
+      setServers((await reloadMcpServers(name)).servers)
     } catch (e) {
-      setErr(String((e as { message?: string }).message ?? e))
+      setErr('row', String((e as { message?: string }).message ?? e))
     } finally {
       setBusy(false)
     }
@@ -4759,10 +4805,21 @@ function McpSection() {
   const toggleEdit = (srv: McpServerInfo) => {
     if (editing === srv.name) {
       setEditing(null)
+      setEditingOriginal(null)
       return
     }
     setEditing(srv.name)
+    setEditingOriginal(srv)
     fillForm(srv)
+  }
+
+  const switchKind = (k: TransportKind) => {
+    if (editing && kind !== null && kind !== k) {
+      // Switching an existing entry's type replaces its fields — say so.
+      if (!confirm('Switching between local and remote replaces this entry\'s command/URL fields. Continue?'))
+        return
+    }
+    setKind(k)
   }
 
   const statusColor = (s: McpServerInfo['status']) =>
@@ -4774,6 +4831,27 @@ function McpSection() {
           ? 'text-zinc-500'
           : 'text-amber-400'
 
+  const field = (
+    value: string,
+    onChange: (v: string) => void,
+    placeholder: string,
+    errKey: string,
+    ariaLabel: string,
+    type = 'text',
+  ) => (
+    <div>
+      <input
+        className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+        value={value}
+        type={type}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+      />
+      {fieldErr[errKey] && <p className="mt-0.5 text-[10px] text-red-400">{fieldErr[errKey]}</p>}
+    </div>
+  )
+
   return (
     <>
       <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
@@ -4783,12 +4861,11 @@ function McpSection() {
         {servers.length === 0 && (
           <p className="text-[10px] text-zinc-600">
             No servers registered. An MCP server is a tool provider — a local program (command) or
-            a remote endpoint (URL) — whose tools the agent can call directly. Remote servers can
-            authenticate with headers, e.g. Authorization=Bearer $&#123;env:MY_TOKEN&#125;.
+            a remote endpoint (URL) — whose tools the agent can call directly.
           </p>
         )}
         {servers.map((s) => (
-          <div key={s.name} className="rounded   bg-zinc-900/60 p-2">
+          <div key={s.name} className="rounded bg-zinc-900/60 p-2">
             <div className="flex items-center gap-2">
               <span className={`font-mono text-[10px] uppercase ${statusColor(s.status)}`}>
                 {s.status}
@@ -4808,28 +4885,28 @@ function McpSection() {
                 </span>
               )}
               <button
-                className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
                 onClick={() => setExpanded(expanded === s.name ? null : s.name)}
               >
                 {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}
               </button>
               <button
-                className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
                 disabled={busy}
-                onClick={() => void reload()}
-                title="Re-read config and restart every changed/failed server (resets the failure budget)"
+                onClick={() => void reload(s.name)}
+                title="Retry this server (restarts just this one and resets its failure budget)"
               >
                 retry
               </button>
               <button
-                className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
                 disabled={busy}
                 onClick={() => toggleEdit(s)}
               >
                 {editing === s.name ? 'cancel' : 'edit'}
               </button>
               <button
-                className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
+                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-zinc-800"
                 disabled={busy}
                 onClick={() => void remove(s.name)}
               >
@@ -4841,43 +4918,51 @@ function McpSection() {
             )}
             {editing === s.name && (
               <div className="mt-1.5 space-y-1">
-                <input
-                  className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-                  value={url || command}
-                  onChange={(e) => {
-                    setCommand(e.target.value)
-                    setUrl(e.target.value)
-                  }}
-                  placeholder="command or https://… URL (switching type replaces the entry)"
-                  aria-label={`Edit command or URL for ${s.name}`}
-                />
-                {url.trim() !== '' ? (
-                  <input
-                    className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-                    value={headers}
-                    onChange={(e) => setHeaders(e.target.value)}
-                    placeholder="headers: Authorization=Bearer ${env:MCP_TOKEN}"
-                    aria-label={`Edit headers for ${s.name}`}
-                  />
-                ) : (
-                  <input
-                    className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-                    value={args}
-                    onChange={(e) => setArgs(e.target.value)}
-                    placeholder='args (quotes group, e.g. --root "C:\my dir")'
-                    aria-label={`Edit args for ${s.name}`}
-                  />
+                <p className="text-[10px] text-zinc-500">
+                  Editing <span className="font-mono text-zinc-300">{s.name}</span>
+                </p>
+                {s.status.startsWith('failed') && s.error && (
+                  <p className="text-[10px] text-red-400">
+                    Last error: {s.error} — fix the fields below and Save.
+                  </p>
                 )}
                 <input
-                  className="w-full rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-                  value={env}
-                  onChange={(e) => setEnv(e.target.value)}
-                  placeholder="env: KEY=value (comma-separated)"
-                  aria-label={`Edit env for ${s.name}`}
+                  className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  aria-label={`Edit name for ${s.name}`}
+                  placeholder="name"
                 />
+                {fieldErr.name && <p className="text-[10px] text-red-400">{fieldErr.name}</p>}
+                {kind === 'stdio'
+                  ? field(command, setCommand, 'command — e.g. npx', 'command', `Edit command for ${s.name}`)
+                  : field(url, setUrl, 'https://…', 'url', `Edit URL for ${s.name}`)}
+                {(fieldErr.command || fieldErr.url) && (
+                  <p className="text-[10px] text-red-400">
+                    {fieldErr.command ?? fieldErr.url}
+                  </p>
+                )}
+                {kind !== 'stdio' && (
+                  <>
+                    <select
+                      className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+                      value={kind ?? 'http'}
+                      onChange={(e) => setKind(e.target.value as TransportKind)}
+                      aria-label="Remote transport"
+                    >
+                      <option value="http">Streamable HTTP (modern)</option>
+                      <option value="sse">Legacy SSE (older servers)</option>
+                    </select>
+                    {field(headers, setHeaders, 'headers, one per line: Authorization=Bearer ${env:MCP_TOKEN}', 'headers', `Edit headers for ${s.name}`, masked ? 'password' : 'text')}
+                  </>
+                )}
+                {kind === 'stdio' &&
+                  field(args, setArgs, 'args, one per line (e.g. -y)', 'args', `Edit args for ${s.name}`)}
+                {field(env, setEnv, 'env: KEY=value (one per line)', 'env', `Edit env for ${s.name}`)}
+                {fieldErr.headers && <p className="text-[10px] text-red-400">{fieldErr.headers}</p>}
                 <div className="flex justify-end">
                   <button
-                    className="rounded   px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                    className="rounded px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                     disabled={busy}
                     onClick={() => void submit(s.name)}
                   >
@@ -4901,72 +4986,112 @@ function McpSection() {
             )}
           </div>
         ))}
-        <div className="flex gap-1.5">
-          <input
-            className="w-24 shrink-0 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="name"
-            aria-label="Server name"
-          />
-          <input
-            className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-            value={url || command}
-            onChange={(e) => {
-              setCommand(e.target.value)
-              setUrl(e.target.value)
-            }}
-            placeholder="command or URL — e.g. npx -y @modelcontextprotocol/server-filesystem ~  |  https://mcp.example.com/mcp"
-            aria-label="Server command or URL"
-          />
-          <button
-            className="shrink-0 rounded   px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
-            disabled={busy}
-            onClick={() => void submit()}
-          >
-            Add
-          </button>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {more && (
-            <>
-              <input
-                className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={args}
-                onChange={(e) => setArgs(e.target.value)}
-                placeholder='args (quotes group, e.g. --root "C:\my dir")'
-                aria-label="Server args"
-              />
-              <input
-                className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={env}
-                onChange={(e) => setEnv(e.target.value)}
-                placeholder="env: KEY=value, TOKEN=${env:MY_TOKEN} (comma-separated)"
-                aria-label="Server env"
-              />
-              <input
-                className="min-w-0 flex-1 rounded   bg-zinc-800 px-2 py-1 font-mono text-xs"
-                value={headers}
-                onChange={(e) => setHeaders(e.target.value)}
-                placeholder="headers (URL servers): Authorization=Bearer ${env:MCP_TOKEN}"
-                aria-label="Server headers"
-              />
-            </>
-          )}
-          <button
-            className="shrink-0 rounded   px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800"
-            onClick={() => {
-              setMore((m) => !m)
-              if (more) {
-                setArgs('')
-                setEnv('')
-                setHeaders('')
-              }
-            }}
-          >
-            {more ? 'fewer' : '+ args / env / headers'}
-          </button>
-        </div>
+
+        {/* ---- add flow: kind picker -> presets -> transport-specific fields ---- */}
+        {!editing && (
+          <div className="rounded bg-zinc-900/60 p-2">
+            <div className="mb-1.5 flex gap-1.5">
+              {(
+                [
+                  ['stdio', 'Local (stdio)'],
+                  ['http', 'Remote (HTTP)'],
+                ] as const
+              ).map(([k, label]) => (
+                <button
+                  key={k}
+                  className={`rounded px-2 py-1 text-xs ${kind === k ? 'bg-zinc-700 text-zinc-100' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-800'}`}
+                  onClick={() => switchKind(k)}
+                >
+                  {label}
+                </button>
+              ))}
+              {kind === null && (
+                <span className="self-center text-[10px] text-zinc-600">
+                  Pick how the server runs, then fill in the details.
+                </span>
+              )}
+            </div>
+            {kind !== null && (
+              <>
+                <div className="mb-1.5 flex flex-wrap gap-1">
+                  {MCP_PRESETS.filter((p) => p.kind === 'stdio' || kind !== 'stdio').map((p) => (
+                    <button
+                      key={p.id}
+                      className={`rounded px-1.5 py-0.5 text-[10px] ${preset === p.id ? 'bg-zinc-600 text-zinc-100' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-800'}`}
+                      onClick={() => applyPreset(p)}
+                      title={p.trust}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                {preset && (
+                  <p className="mb-1.5 text-[10px] text-zinc-500">
+                    {MCP_PRESETS.find((p) => p.id === preset)?.trust}
+                  </p>
+                )}
+                <div className="flex gap-1.5">
+                  <input
+                    className="w-24 shrink-0 rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="name"
+                    aria-label="Server name"
+                  />
+                  {kind === 'stdio' ? (
+                    <input
+                      className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+                      value={command}
+                      onChange={(e) => setCommand(e.target.value)}
+                      placeholder="command — e.g. npx  (pick a preset above to pre-fill)"
+                      aria-label="Server command"
+                    />
+                  ) : (
+                    <input
+                      className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+                      value={url}
+                      onChange={(e) => setUrl(e.target.value)}
+                      placeholder="https://mcp.example.com/mcp"
+                      aria-label="Server URL"
+                    />
+                  )}
+                  <button
+                    className="shrink-0 rounded px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => void submit()}
+                  >
+                    Add
+                  </button>
+                </div>
+                {cmdWarn && <p className="mt-1 text-[10px] text-amber-400">{cmdWarn}</p>}
+                <div className="mt-1.5 space-y-1">
+                  {kind === 'stdio' &&
+                    field(args, setArgs, 'args, one per line — e.g. -y', 'args', 'Server args')}
+                  {kind === 'http' && (
+                    <select
+                      className="w-full rounded bg-zinc-800 px-2 py-1 font-mono text-xs"
+                      value={kind ?? 'http'}
+                      onChange={(e) => setKind(e.target.value as TransportKind)}
+                      aria-label="Remote transport"
+                    >
+                      <option value="http">Streamable HTTP (default)</option>
+                      <option value="sse">Legacy SSE (older servers)</option>
+                    </select>
+                  )}
+                  {kind === 'http' &&
+                    field(headers, setHeaders, 'headers, one per line: Authorization=Bearer ${env:MCP_TOKEN}', 'headers', 'Server headers')}
+                  {(kind === 'http' || env.trim() || fieldErr.env) &&
+                    field(env, setEnv, 'env: KEY=value (one per line; ${env:VAR} references your environment)', 'env', 'Server env')}
+                </div>
+              </>
+            )}
+            {Object.keys(fieldErr).length > 0 && (
+              <p className="mt-1 text-[10px] text-red-400">
+                {Object.entries(fieldErr).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+              </p>
+            )}
+          </div>
+        )}
         <p className="text-[10px] text-zinc-600">
           Runs with your permissions — registering a server (local command or remote URL) trusts
           it. Its tools appear to the agent as mcp_&lt;name&gt;_&lt;tool&gt;. Config is stored in
@@ -4974,7 +5099,7 @@ function McpSection() {
           environment variables without storing secrets.
         </p>
       </div>
-      {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
+      {fieldErr.row && <p className="mb-2 text-xs text-red-400">{fieldErr.row}</p>}
     </>
   )
 }

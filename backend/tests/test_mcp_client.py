@@ -174,9 +174,154 @@ def test_url_server_upsert_and_status_payload(monkeypatch):
         assert r.status_code == 200
         row = next(s for s in r.json()["servers"] if s["name"] == "remote1")
         assert row["url"] == "https://other.example.com/mcp"
-        assert row["headers"] == {}
+        # #129 merge semantics: fields the new POST doesn't carry are no
+        # longer wiped — headers round-trip through the edit.
+        assert row["headers"] == {"Authorization": "Bearer ${env:MCP_TOKEN}"}
         # local entry still works
         r = client.post("/api/mcp/servers", json={"name": "loc1", "command": "demo-cmd", "args": ["a"]})
         assert r.status_code == 200
         row = next(s for s in r.json()["servers"] if s["name"] == "loc1")
         assert row["command"] == "demo-cmd" and row["args"] == ["a"] and row["url"] == ""
+
+
+# ---- issue #129: config UX backend behaviors ----
+
+def _ux_client(monkeypatch):
+    """TestClient with a fake in-memory config and a no-op start_all."""
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    monkeypatch.setattr(mcp_client.McpManager, "start_all", lambda self: None)
+    cfg: dict = {}
+
+    def fake_configured(self):
+        return cfg
+
+    def fake_save(d):
+        entries = dict(d.get("mcpServers") or {})
+        cfg.clear()
+        cfg.update(entries)
+
+    monkeypatch.setattr(mcp_client.McpManager, "configured", fake_configured)
+    monkeypatch.setattr("backend.main._save_config", fake_save)
+    return TestClient(app), cfg
+
+
+def test_upsert_preserves_unknown_fields(monkeypatch):
+    """Hand-added keys in config.json survive a UI edit (issue #129)."""
+    client, cfg = _ux_client(monkeypatch)
+    with client:
+        client.post(
+            "/api/mcp/servers",
+            json={"name": "fs", "command": "npx", "args": ["-y", "pkg"]},
+        )
+        # simulate a hand-added advanced key
+        cfg["fs"]["timeout_s"] = 90
+        client.post(
+            "/api/mcp/servers",
+            json={"name": "fs", "command": "npx", "args": ["-y", "pkg", "new"]},
+        )
+        assert cfg["fs"]["timeout_s"] == 90
+        assert cfg["fs"]["args"] == ["-y", "pkg", "new"]
+
+
+def test_transport_switch_strips_wrong_fields(monkeypatch):
+    """Switching an entry between command and url drops the other
+    transport's stale fields (issue #129)."""
+    client, cfg = _ux_client(monkeypatch)
+    with client:
+        client.post(
+            "/api/mcp/servers",
+            json={"name": "x", "url": "https://a/mcp", "headers": {"A": "b"}},
+        )
+        assert cfg["x"]["headers"] == {"A": "b"}
+        # switch to a local entry: url/headers are stripped
+        client.post(
+            "/api/mcp/servers",
+            json={"name": "x", "command": "npx", "args": []},
+        )
+        assert "url" not in cfg["x"]
+        assert "headers" not in cfg["x"]
+        assert cfg["x"]["command"] == "npx"
+        # and back the other way: command/args are stripped
+        client.post(
+            "/api/mcp/servers",
+            json={"name": "x", "url": "https://b/mcp"},
+        )
+        assert "command" not in cfg["x"]
+        assert "args" not in cfg["x"]
+        assert cfg["x"]["url"] == "https://b/mcp"
+
+
+def test_rename_via_previous_name(monkeypatch):
+    """previous_name moves the entry: old key gone, new key present."""
+    client, cfg = _ux_client(monkeypatch)
+    with client:
+        client.post(
+            "/api/mcp/servers", json={"name": "old", "command": "npx", "args": []}
+        )
+        r = client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "new",
+                "command": "npx",
+                "args": [],
+                "previous_name": "old",
+            },
+        )
+        assert r.status_code == 200
+        assert "old" not in cfg
+        assert "new" in cfg
+
+
+def test_reload_scoped_to_one_server(monkeypatch):
+    """POST /api/mcp/reload {"name": ...} reconciles only that server;
+    unknown names 404 (issue #129)."""
+    import backend.main as main_mod
+
+    client, cfg = _ux_client(monkeypatch)
+    calls = []
+
+    def fake_start_all(self):
+        calls.append("all")
+
+    monkeypatch.setattr(mcp_client.McpManager, "start_all", fake_start_all)
+    launches = []
+
+    def fake_launch(self, state):
+        launches.append(state.name)
+
+    monkeypatch.setattr(mcp_client.McpManager, "_launch", fake_launch)
+    with client:
+        client.post(
+            "/api/mcp/servers", json={"name": "a", "command": "echo", "args": []}
+        )
+        client.post(
+            "/api/mcp/servers", json={"name": "b", "command": "npx", "args": []}
+        )
+        calls.clear()
+        launches.clear()
+        r = client.post("/api/mcp/reload", json={"name": "a"})
+        assert r.status_code == 200
+        assert calls == []  # global start_all NOT invoked
+        assert launches == ["a"]  # only the named server
+        # unknown name -> 404
+        r = client.post("/api/mcp/reload", json={"name": "ghost"})
+        assert r.status_code == 404
+
+
+def test_command_check(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    with TestClient(app) as client:
+        r = client.get("/api/mcp/command-check", params={"command": sys.executable})
+        assert r.status_code == 200 and r.json()["found"] is True
+        r = client.get(
+            "/api/mcp/command-check", params={"command": "definitely-not-a-real-cmd-xyz"}
+        )
+        assert r.status_code == 200 and r.json()["found"] is False
+        r = client.get("/api/mcp/command-check", params={"command": "  "})
+        assert r.status_code == 400

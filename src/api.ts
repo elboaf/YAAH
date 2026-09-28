@@ -627,6 +627,7 @@ export interface McpServerBody {
   url?: string
   headers?: Record<string, string>
   transport?: string
+  previous_name?: string
 }
 
 export const addMcpServer = (body: McpServerBody) =>
@@ -640,8 +641,19 @@ export const removeMcpServer = (name: string) =>
     method: 'DELETE',
   })
 
-export const reloadMcpServers = () =>
-  api<{ servers: McpServerInfo[] }>('/api/mcp/reload', { method: 'POST' })
+export const reloadMcpServers = (name?: string) =>
+  api<{ servers: McpServerInfo[] }>('/api/mcp/reload', {
+    method: 'POST',
+    ...(name
+      ? { body: JSON.stringify({ name }) }
+      : {}),
+  })
+
+export const checkMcpCommand = (command: string) =>
+  api<{ command: string; found: boolean }>(
+    `/api/mcp/command-check?command=${encodeURIComponent(command)}`,
+  )
+
 
 // ---- Scheduled agents (issue #41) ----
 

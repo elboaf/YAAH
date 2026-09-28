@@ -1294,6 +1294,27 @@ async def api_mcp_servers():
     return {"servers": sorted(rows, key=lambda r: r["name"])}
 
 
+class McpReloadBody(BaseModel):
+    """Optional body for /api/mcp/reload: {"name": "..."} scopes the
+    reconcile to a single server (per-server retry, issue #129)."""
+
+    name: str = ""
+
+
+@app.get("/api/mcp/command-check")
+async def api_mcp_command_check(command: str):
+    """Report whether a local server command resolves on PATH (issue #129):
+    a non-blocking pre-save warning for the add form. Windows-safe: PATHEXT
+    makes 'npx' find npx.cmd."""
+    from shutil import which
+
+    cmd = command.strip()
+    if not cmd:
+        raise HTTPException(status_code=400, detail="command is required")
+    first = cmd.split()[0]
+    return {"command": cmd, "found": which(first) is not None}
+
+
 class McpServerBody(BaseModel):
     """Local servers use command+args+env; remote servers use url
     (+ optional headers for auth). Exactly one of command/url required.
@@ -1307,6 +1328,7 @@ class McpServerBody(BaseModel):
     url: str = ""
     headers: dict[str, str] = {}
     transport: str = ""  # "" = auto (streamable HTTP) | "sse" legacy
+    previous_name: str = ""  # set when renaming an entry (UI edit path)
 
 
 @app.post("/api/mcp/servers")
@@ -1324,18 +1346,46 @@ async def api_mcp_add_server(body: McpServerBody):
         )
     if url and not _re.match(r"^https?://", url):
         raise HTTPException(status_code=400, detail="url must start with http(s)://")
-    spec: dict = {"args": body.args, "env": body.env}
+    spec: dict = {}
     if command:
         spec["command"] = command
+        spec["args"] = body.args
+        spec["env"] = body.env
     else:
         spec["url"] = url
         if body.headers:
             spec["headers"] = body.headers
         if body.transport:
             spec["transport"] = body.transport
+        spec["env"] = body.env
+    # Merge over the existing entry instead of replacing it (issue #129):
+    # hand-added keys in config.json survive a UI edit. Wrong-transport
+    # keys are stripped so a switched entry doesn't carry stale fields.
     cfg = _mcp.manager.configured()
+    prev = cfg.get(name)
+    if isinstance(prev, dict):
+        merged = dict(prev)
+        merged.update(spec)
+        # Drop fields that belong to the other transport.
+        if command:
+            merged.pop("url", None)
+            merged.pop("headers", None)
+            merged.pop("transport", None)
+        else:
+            merged.pop("command", None)
+            merged.pop("args", None)
+        spec = merged
     cfg[name] = spec
     _save_config({"mcpServers": cfg})
+    # Rename support (issue #129): the UI edits an entry under a new name
+    # by POSTing the new key and passing the old one; the old key is
+    # removed in the same call.
+    if body.previous_name and body.previous_name.strip() != name:
+        old = body.previous_name.strip()
+        if old in cfg:
+            del cfg[old]
+            _save_config({"mcpServers": cfg})
+            _mcp.manager._stop(old)
     _mcp.manager.start_all()
     return await api_mcp_servers()
 
@@ -1352,10 +1402,33 @@ async def api_mcp_remove_server(name: str):
 
 
 @app.post("/api/mcp/reload")
-async def api_mcp_reload():
-    """Re-read config and reconcile sessions (restart changed, stop removed)."""
+async def api_mcp_reload(body: "McpReloadBody | None" = None):
+    """Re-read config and reconcile sessions (restart changed, stop removed).
+
+    With a body {"name": "..."} only that server is reconciled — the
+    per-server retry affordance; a failed server can be retried without
+    resetting the failure budget of every other server (issue #129)."""
+    if body and body.name:
+        name = body.name.strip()
+        cfg = _mcp.manager.configured()
+        if name not in cfg:
+            raise HTTPException(status_code=404, detail=f"no server named {name!r}")
+        spec = cfg[name]
+        existing = _mcp.manager.servers.get(name)
+        if (
+            existing is not None
+            and existing.spec == spec
+            and existing.status in ("connected", "starting")
+        ):
+            pass  # unchanged and alive; nothing to retry
+        else:
+            _mcp.manager._launch(
+                _mcp.McpServerState(name, _mcp.interpolate_env(spec))
+            )
+        return await api_mcp_servers()
     _mcp.manager.start_all()
     return await api_mcp_servers()
+
 
 
 # ---- Scheduled agents (issue #41) ----
