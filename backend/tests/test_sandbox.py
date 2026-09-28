@@ -5,10 +5,11 @@ risk classes and the run protocol are exercised through fakes (YAAH_SANDBOX_EXE
 override + fake spawn), so the suite is green on Linux CI too.
 """
 import asyncio
-import threading
-import time
 import json
 import re
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ def isolated(tmp_path, monkeypatch):
     # A real WindowsSandbox.exe may be live on the dev host (issue #27's
     # crash tests ran one); the adoption branch would hijack these tests,
     # so default to "no VMs running". Tests exercising adoption override.
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
     return tmp_path
 
 
@@ -381,7 +382,7 @@ def test_run_round_trip_and_sequence(isolated, monkeypatch):
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
     monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
 
     start = sb.start_sync("C:\\proj")
     assert start["status"] == "running"
@@ -508,7 +509,6 @@ def _ack_on_cmd_write(logs: Path, ack_nonce):
         if name.startswith("cmd.") and name.endswith(".ps1") \
                 and self.parent == logs:
             ack_nonce(self)
-        return None
 
     return fake
 
@@ -850,8 +850,8 @@ def _session_up(isolated, monkeypatch, cfg=None):
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
     monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
-    start = sb.start_sync("C:\proj")
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
+    start = sb.start_sync(r"C:\proj")
     assert start["status"] == "running"
     return isolated / "sb" / "ws-abc" / "logs"
 
@@ -925,14 +925,14 @@ def test_start_sync_while_booting_reports_busy(isolated, monkeypatch):
     monkeypatch.setattr(sb, "_spawn", slow_spawn)
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
     monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
 
     holder = threading.Thread(target=sb.start_sync, args=(r"C:proj",))
     holder.start()
     time.sleep(0.1)  # let the holder take the mutex
     try:
-        second = sb.start_sync("C:\proj")
+        second = sb.start_sync(r"C:\proj")
         assert second.get("busy") is True
     finally:
         holder.join()
@@ -1080,7 +1080,7 @@ def test_bootstrap_logs_per_segment_timestamps():
 
 def test_start_returns_boot_breakdown(isolated, monkeypatch):
     logs = _start_for_timing(isolated, monkeypatch)
-    result = sb.start_sync("C:\proj")
+    result = sb.start_sync(r"C:\proj")
     boot = result["boot"]
     assert boot["cold"] is True
     assert isinstance(boot["spawn_to_ready_ms"], int)
@@ -1091,7 +1091,7 @@ def test_start_returns_boot_breakdown(isolated, monkeypatch):
 
 def test_run_reports_elapsed_and_pickup(isolated, monkeypatch):
     logs = _start_for_timing(isolated, monkeypatch)
-    sb.start_sync("C:\proj")
+    sb.start_sync(r"C:\proj")
     n = sb._next_seq(logs)
     # VM-side ack carries its own clock; simulate a pickup measured by the VM.
     (logs / f"res.{n}.json").write_text(json.dumps({
@@ -1107,7 +1107,7 @@ def test_run_reports_elapsed_and_pickup(isolated, monkeypatch):
 
 def test_run_metrics_tolerate_missing_vm_side_data(isolated, monkeypatch):
     logs = _start_for_timing(isolated, monkeypatch)
-    sb.start_sync("C:\proj")
+    sb.start_sync(r"C:\proj")
     n = sb._next_seq(logs)
     _write_done(logs, n, output="ok")  # old-style res file, no timings
     result = sb.run_sync("Get-Date", 10)
@@ -1136,5 +1136,112 @@ def test_start_clears_stale_init_log_before_spawn(isolated, monkeypatch):
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
 
-    sb.start_sync("C:\proj")
+    sb.start_sync(r"C:\proj")
     assert spawn_calls  # the fake asserted the log was cleared pre-spawn
+
+
+# --------------------------------------------------- #118: toolkit wrapper (state.json + INDEX.md)
+
+_TOOLKIT_PS1 = Path(sb.__file__).parent.parent / "bundled_toolkit" / "bin" / "toolkit.ps1"
+
+
+def _run_toolkit(*args: str, tk: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", str(_TOOLKIT_PS1), *args, "-ToolkitDir", str(tk)],
+        capture_output=True, text=True, timeout=60, check=False)
+
+
+def test_toolkit_wrapper_install_records_state_and_index(isolated, tmp_path):
+    """`toolkit install` merges the entry into state.json (installed_at
+    stamped, empty fields dropped) and regenerates INDEX.md."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    (tk / "state.json").write_text(json.dumps({"tools": {
+        "existing": {"version": "1.0", "kind": "zip"}}}), encoding="utf-8")
+
+    r = _run_toolkit("install", "mytool", "-Version", "2.1",
+                     "-Kind", "zip", "-Path", "mytool/bin/tool.exe",
+                     "-Check", r"Test-Path '<toolkit>\mytool\bin\tool.exe'",
+                     "-Invocation", r"mytool\bin\tool.exe --help",
+                     tk=tk)
+    assert r.returncode == 0, r.stderr
+
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert tools["existing"]["version"] == "1.0"          # untouched
+    assert tools["mytool"]["version"] == "2.1"
+    assert tools["mytool"]["path"] == "mytool/bin/tool.exe"
+    assert tools["mytool"]["installed_at"]                # stamped
+    assert "note" not in tools["mytool"]                  # empty fields dropped
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "| mytool | 2.1 | zip |" in index
+    assert "| existing |" in index
+
+
+def test_toolkit_wrapper_install_fresh_state(isolated, tmp_path):
+    """No state.json at all: the wrapper creates tools + the entry."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1", tk=tk)
+    assert r.returncode == 0, r.stderr
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert tools["t"]["version"] == "1"
+    assert (tk / "INDEX.md").is_file()
+
+
+def test_toolkit_wrapper_remove_and_idempotent_rerun(isolated, tmp_path):
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    assert _run_toolkit("install", "t", "-Version", "1", tk=tk).returncode == 0
+    assert _run_toolkit("remove", "t", tk=tk).returncode == 0
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert "t" not in tools
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "| t " not in index
+    # removing again is a no-op, not an error
+    r = _run_toolkit("remove", "t", tk=tk)
+    assert r.returncode == 0
+
+
+def test_toolkit_wrapper_survives_malformed_state(isolated, tmp_path):
+    """A hand-mangled state.json must fail loudly, not be silently
+    overwritten (the manifest is the record of every install)."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    (tk / "state.json").write_text("{not json", encoding="utf-8")
+    r = _run_toolkit("install", "t", "-Version", "1", tk=tk)
+    assert r.returncode != 0
+    assert (tk / "state.json").read_text(encoding="utf-8") == "{not json"
+
+
+def test_bundled_toolkit_ships_wrapper_and_index():
+    """The shipped payload includes the wrapper and a generated INDEX.md
+    consistent with the bundled state.json."""
+    src = sb.bundled_toolkit_source()
+    assert (src / "bin" / "toolkit.ps1").is_file()
+    assert (src / "bin" / "toolkit.cmd").is_file()
+    index = (src / "INDEX.md").read_text(encoding="utf-8")
+    tools = json.loads((src / "state.json").read_text(encoding="utf-8"))["tools"]
+    for name in tools:
+        assert f"| {name} " in index, name
+
+
+def test_ensure_toolkit_seed_copies_wrapper_and_index(isolated, monkeypatch, tmp_path):
+    """The wrapper + INDEX.md are part of the seeded baseline (copy-once,
+    like every other bundled file)."""
+    src = tmp_path / "bundled"
+    (src / "bin").mkdir(parents=True)
+    (src / "bin" / "toolkit.ps1").write_text("# wrapper", encoding="utf-8")
+    (src / "bin" / "toolkit.cmd").write_text("@echo off", encoding="utf-8")
+    (src / "INDEX.md").write_text("# Toolkit index", encoding="utf-8")
+    (src / "state.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    sb.ensure_toolkit_seed()
+
+    tk = sb.toolkit_dir()
+    assert (tk / "bin" / "toolkit.ps1").is_file()
+    assert (tk / "INDEX.md").is_file()
+    # re-run: copy-once, nothing new
+    assert sb.ensure_toolkit_seed() == []
