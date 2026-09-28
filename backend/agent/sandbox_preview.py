@@ -119,7 +119,7 @@ def pinned_position(
 
 def _find_yaah_window(user32=None) -> int:
     """HWND of the yaah main window by exact title ("YAAH"); 0 if absent."""
-    if os.name != "nt" or not hasattr(ctypes, "windll"):
+    if user32 is None and (os.name != "nt" or not hasattr(ctypes, "windll")):
         return 0
     user32 = user32 or ctypes.windll.user32
     find = getattr(user32, "FindWindowW")
