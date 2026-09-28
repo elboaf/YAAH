@@ -21,6 +21,14 @@ import time
 import uuid
 
 log = logging.getLogger(__name__)
+# YAAH_PREVIEW_DEBUG=1: trace gesture messages (down/move/up/capture) to the
+# log — for hands-on repros where scripted input injection is unreliable.
+_GESTURE_DEBUG = os.environ.get("YAAH_PREVIEW_DEBUG") == "1"
+
+
+def _gesture_debug(event: str, **fields) -> None:
+    if _GESTURE_DEBUG:
+        log.warning("preview-gesture %s %s", event, fields)
 
 _PREVIEW_WIDTH = 420
 _PREVIEW_HEIGHT = 236
@@ -131,6 +139,35 @@ def pinned_position(
 
 # ---- Pure gesture helpers (#122, eve-o-preview-style) ----
 
+# Button-down → paired button-up message. The gesture session stores the
+# UP constant as its button anchor: WM_*BUTTONUP handlers match against it
+# to decide whether to end the gesture (feedback round 2: storing the DOWN
+# constant never matched, so finish_gesture never ran from button-up — the
+# session leaked and the next click landed on a stale capture session).
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+_GESTURE_BUTTON_OF = {
+    WM_LBUTTONDOWN: WM_LBUTTONUP,
+    WM_RBUTTONDOWN: WM_RBUTTONUP,
+}
+
+# Uniform gesture surface (feedback round 2): the whole preview is one grab
+# handle, so WM_NCHITTEST must report the client area everywhere — returning
+# anything else (e.g. HTCAPTION from a DefWindowProc path) lets the system
+# modal move loop swallow presses that then never reach the gesture handler.
+HTCLIENT = 1
+
+
+def gesture_hit_test(x: int, y: int) -> int:
+    """Hit-test result for a borderless gesture overlay: always HTCLIENT.
+
+    Position-independent on purpose — right-drag resize must land anywhere
+    on the preview, not only near its center.
+    """
+    return HTCLIENT
+
 
 def move_target(
     start_rect: tuple[int, int, int, int],
@@ -157,35 +194,35 @@ def resize_target(
     aspect: float | None,
     min_w: int = _PREVIEW_MIN_WIDTH,
     min_h: int = _PREVIEW_MIN_HEIGHT,
-    max_w: int = _PREVIEW_MAX_WIDTH,
-    max_h: int = _PREVIEW_MAX_HEIGHT,
 ) -> tuple[int, int, int, int]:
     """Absolute window rect for a right-drag resize, anchored at button-down.
 
     Top-left stays fixed; the bottom-right edge follows the anchored cursor
-    delta, aspect-locked (the dominant axis drives, like resize_keep_ratio)
-    and clamped to min/max within the ratio. aspect=None resizes freeform.
+    delta, aspect-locked (the dominant axis drives, like resize_keep_ratio).
+    aspect=None resizes freeform. The preview may be sized however the user
+    wants (feedback round 2): no max clamp — only the min floor survives,
+    since a 1px sliver is never a useful preview.
     Like move_target this is absolute per move: the size is a pure function
     of the anchor, so per-event deltas can never compound into jumps.
     """
     x, y, _, _ = start_rect
     dx, dy = current[0] - start[0], current[1] - start[1]
     if aspect is None or aspect <= 0:
-        return (x, y, x + max(min_w, min(max_w, start_rect[2] - x + dx)),
-                y + max(min_h, min(max_h, start_rect[3] - y + dy)))
-    # Same clamp-box ∩ ratio-line bounds as resize_keep_ratio, expressed
-    # against a synthetic 1000px-high source so the ratio drives the clamp.
+        return (x, y, x + max(min_w, start_rect[2] - x + dx),
+                y + max(min_h, start_rect[3] - y + dy))
+    # Clamp-box ∩ ratio-line bounds, expressed against a synthetic 1000px
+    # source so the ratio drives the floor: the effective width range is the
+    # set of widths whose ratio-exact height also lands inside [min_h, ∞).
     ratio = aspect
     base_w = start_rect[2] - x
     base_h = start_rect[3] - y
     src_w = max(1, round(ratio * 1000))
     src_h = 1000
     w_lo = max(min_w, -(-min_h * src_w // src_h))
-    w_hi = min(max_w, max_h * src_w // src_h)
     candidate_w = float(base_w + dx)
     if abs(dy) > abs(dx):
         candidate_w = (base_h + dy) * ratio
-    width = max(w_lo, min(w_hi, candidate_w))
+    width = max(w_lo, candidate_w)
     height = max(1, round(width / ratio))
     return (x, y, x + round(width), y + height)
 
@@ -470,6 +507,10 @@ class _PreviewManager:
         user32.SetCapture.restype = wintypes.HWND
         user32.ReleaseCapture.argtypes = []
         user32.ReleaseCapture.restype = wintypes.BOOL
+        # Pointer-sized or the 64-bit HWND truncates and GetCapture()==hwnd
+        # can silently never be true (finish_gesture then skips ReleaseCapture).
+        user32.GetCapture.argtypes = []
+        user32.GetCapture.restype = wintypes.HWND
         user32.GetSystemMetrics.restype = ctypes.c_int
         try:
             user32.SetProcessDPIAware.argtypes = []
@@ -500,13 +541,16 @@ class _PreviewManager:
         WM_MOUSEACTIVATE = 0x0021
         WM_CONTEXTMENU = 0x007B
         WM_EXITSIZEMOVE = 0x0232
-        # Mouse gesture messages (#122, eve-o-preview mechanics).
+        # Mouse gesture messages (#122, eve-o-preview mechanics). The
+        # button constants also live at module level (with the paired
+        # button-up map); the local names shadow them for readability.
         WM_MOUSEMOVE = 0x0200
         WM_LBUTTONDOWN = 0x0201
         WM_LBUTTONUP = 0x0202
         WM_RBUTTONDOWN = 0x0204
         WM_RBUTTONUP = 0x0205
         WM_CAPTURECHANGED = 0x0215
+        WM_NCHITTEST = 0x0084
         MA_NOACTIVATE = 3
         SWP_NOSIZE = 0x0001
         SWP_NOMOVE = 0x0002
@@ -520,9 +564,9 @@ class _PreviewManager:
         hwnd = None
         class_registered = False
         # "drag" holds the active gesture session (#122): which button started
-        # it, the last cursor position (incremental deltas, eve-o style), the
-        # window size when the gesture began (resize base), and whether the
-        # gesture actually moved (reserved for future snap/threshold logic).
+        # it (stored as the PAIRED UP message so button-up handlers match),
+        # the button-down anchor (absolute cursor + rect, aspect sampled
+        # once), and whether the gesture actually moved.
         state = {
             "pinned": False,
             "offset": (_PIN_GAP, 24),
@@ -765,16 +809,30 @@ class _PreviewManager:
                 # Borderless overlay must never take focus from the user's
                 # work; the thumbnail is view-only.
                 return MA_NOACTIVATE
+            if message == WM_NCHITTEST:
+                # The whole preview is one grab handle (feedback round 2):
+                # always HTCLIENT, so a press anywhere — not just near the
+                # center — reaches the gesture handlers below.
+                _gesture_debug(
+                    "hittest",
+                    x=int(lparam & 0xFFFF),
+                    y=int((lparam >> 16) & 0xFFFF),
+                )
+                return HTCLIENT
             if message == WM_CONTEXTMENU:
                 # No context menu anywhere on the preview (#122): the right
                 # button belongs to the resize gesture alone.
                 return 0
             if message == WM_LBUTTONDOWN or message == WM_RBUTTONDOWN:
                 # Anchor once (#122 fix): absolute start cursor + start rect
-                # + aspect sampled once per gesture (never per move).
+                # + aspect sampled once per gesture (never per move). The
+                # button anchor is the PAIRED UP message (feedback round 2):
+                # the up handler matches drag["button"] against its own
+                # message, so storing the DOWN constant never matched and
+                # the session leaked into the next click.
                 state["drag"] = {
                     "active": True,
-                    "button": message,
+                    "button": _GESTURE_BUTTON_OF[message],
                     "start": _cursor_pos(),
                     "start_rect": _window_rect()
                     or (0, 0, _PREVIEW_WIDTH, _PREVIEW_HEIGHT),
@@ -786,18 +844,29 @@ class _PreviewManager:
                     if src_w > 0 and src_h > 0:
                         state["drag"]["aspect"] = src_w / src_h
                 user32.SetCapture(window)
+                _gesture_debug(
+                    "down", msg=message, up=_GESTURE_BUTTON_OF[message],
+                    start=state["drag"]["start"],
+                    rect=state["drag"]["start_rect"],
+                    aspect=state["drag"]["aspect"],
+                )
                 return 0
             if message == WM_MOUSEMOVE and state["drag"]["active"]:
+                state["_moves"] = state.get("_moves", 0) + 1
+                if state["_moves"] % 10 == 1:
+                    _gesture_debug("move", wparam=wparam, n=state["_moves"])
                 _handle_drag_move(wparam)
                 return 0
             if message == WM_LBUTTONUP or message == WM_RBUTTONUP:
                 drag = state["drag"]
+                _gesture_debug("up", msg=message, active=drag["active"], button=drag["button"])
                 if drag["active"] and drag["button"] == message:
                     finish_gesture()
                 return 0
             if message == WM_CAPTURECHANGED:
                 # Lost capture (alt-tab, dialog): end the gesture through the
                 # single funnel so the pin re-anchor always happens.
+                _gesture_debug("capturechanged", active=state["drag"]["active"])
                 finish_gesture()
                 return 0
             if message == WM_EXITSIZEMOVE and state["pinned"]:

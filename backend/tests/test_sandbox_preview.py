@@ -203,6 +203,45 @@ def test_preview_size_clamp_defaults_match_issue_122():
 # ---- anchored gesture targets (#122 fix): absolute, not incremental ----
 
 
+# ---- feedback round 2 (user reports): pairing, uniform hit, unclamped ----
+
+
+def test_button_up_message_pairs_with_its_down():
+    # finish_gesture is gated on drag["button"] == message at WM_*BUTTONUP;
+    # the stored anchor must therefore be the UP constant, not the DOWN one
+    # (the old DOWN store never matched, so the gesture session leaked and
+    # poisoned the next click — reported as alternating dead clicks).
+    assert preview._GESTURE_BUTTON_OF[preview.WM_LBUTTONDOWN] == preview.WM_LBUTTONUP
+    assert preview._GESTURE_BUTTON_OF[preview.WM_RBUTTONDOWN] == preview.WM_RBUTTONUP
+
+
+def test_gesture_hit_is_uniform_across_the_window():
+    # Right-drag must land anywhere on the preview, not just near its center:
+    # WM_NCHITTEST always returns HTCLIENT for a borderless gesture overlay.
+    assert preview.gesture_hit_test(0, 0) == preview.HTCLIENT
+    assert preview.gesture_hit_test(640, 400) == preview.HTCLIENT
+    assert preview.gesture_hit_test(320, 200) == preview.HTCLIENT
+
+
+def test_resize_target_has_no_size_ceiling():
+    # The preview may be sized however the user wants: the max clamp is gone
+    # (min stays — a 1px sliver is never a useful preview).
+    big = preview.resize_target(
+        start_rect=(0, 0, 420, 236),
+        start=(0, 0),
+        current=(3000, 3000),
+        aspect=16 / 9,
+    )
+    assert big[2] - big[0] > 2000
+    assert big[3] - big[1] > 1000
+    assert abs((big[2] - big[0]) / (big[3] - big[1]) - 16 / 9) < 0.02
+    # Freeform too.
+    free = preview.resize_target(
+        start_rect=(0, 0, 100, 100), start=(0, 0), current=(2500, 2500), aspect=None
+    )
+    assert (free[2] - free[0], free[3] - free[1]) == (2600, 2600)
+
+
 def test_move_target_is_anchored_absolute_rect_plus_delta():
     # target = start_rect + (cursor - start_cursor): a pure function of the
     # anchor, so a missed or duplicated WM_MOUSEMOVE cannot compound error
@@ -226,16 +265,17 @@ def test_resize_target_grows_bottom_right_from_anchor():
     assert rect[2] - rect[0] == 480  # 400 + dx of 80
 
 
-def test_resize_target_clamps_to_min_max_within_ratio():
-    # A huge outward drag clamps to the max box (640x400 defaults) while the
-    # ratio stays exact inside the clamp box.
+def test_resize_target_clamps_to_min_within_ratio():
+    # A huge inward drag floors at the min box (100x80 defaults) while the
+    # ratio stays exact: 80 tall -> 142.2 wide.
     rect = preview.resize_target(
         start_rect=(0, 0, 420, 236),
         start=(0, 0),
-        current=(900, 900),
+        current=(-900, -900),
         aspect=16 / 9,
     )
-    assert (rect[2] - rect[0], rect[3] - rect[1]) == (640, 360)
+    assert (rect[2] - rect[0], rect[3] - rect[1]) == (143, 80)
+    assert abs((rect[2] - rect[0]) / (rect[3] - rect[1]) - 16 / 9) < 0.02
 
 
 def test_resize_target_unknown_aspect_is_freeform():
