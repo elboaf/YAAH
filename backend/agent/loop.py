@@ -436,6 +436,14 @@ Guidelines:
   retry, leave it isolated, or have the user resolve named main-workspace
   edits). Explain what changed and what did not before asking how to proceed.
   Never claim unmerged work is in the main workspace.
+  ESCALATION CONTRACT (issue #123): a `merged: false` refusal is a decision
+  point, not a retry loop. On a dirty-overlap refusal, ask the user exactly
+  once, via `ask_user`, naming the blocked file(s) and offering commit /
+  discard-and-merge / leave-isolated. Re-running identical diagnostics
+  (git status, log, branch) more than 2 times on the same refusal state is a
+  hard stop; and once a merge-back has been requested and refused, do not
+  start new issues or side-quests until it is resolved or the user explicitly
+  parks it.
 - For web research, start with web_search and read pages with web_fetch;
   use view_image on an image URL you actually need to see.
 - Commit changes when needed to preserve and integrate the requested work;

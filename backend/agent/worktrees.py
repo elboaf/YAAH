@@ -1251,11 +1251,29 @@ async def merge_back(root: Path, branch: str) -> dict:
             # means the human dirtied a colliding file mid-merge — a veto,
             # not a content conflict. Surface git's message naming the file.
             refused = "would be overwritten" in (out or "")
-            return {
+            result = {
                 "merged": False,
                 "conflict": not refused,
                 "reason": out or "merge failed (aborted)",
             }
+            if refused:
+                # Issue #123: surface git's file list structurally so the
+                # agent can escalate to the user without parsing stderr.
+                blocked: list[str] = []
+                in_list = False
+                for ln in (out or "").splitlines():
+                    if "would be overwritten by merge" in ln:
+                        in_list = True
+                        continue
+                    if in_list:
+                        name = ln.strip()
+                        if not name:
+                            in_list = False
+                        elif name not in blocked:
+                            blocked.append(name)
+                if blocked:
+                    result["blocked_by_dirty"] = blocked
+            return result
     from backend.agent import gitinfo
 
     gitinfo.invalidate_git_caches(root)
@@ -1429,6 +1447,15 @@ def _worktree_note_text(wt_path: str, info: dict, main_workspace: str) -> str:
         "resolve specific main-workspace edits. Explain what changed and what "
         "did not before asking how to proceed; never claim unmerged work is "
         "in main.\n"
+        "- ESCALATION CONTRACT (issue #123): a `merged: false` refusal is a "
+        "decision point, not a retry loop. On a dirty-overlap refusal the "
+        "payload names the files (see `dirty_overlap` / `blocked_by_dirty`) "
+        "\u2014 use that list and ask the user exactly once via `ask_user` "
+        "(commit it / discard it and merge / leave the merge isolated). "
+        "Re-running identical diagnostics (git status, log, branch, worktree "
+        "list) more than 2 times against the same refusal state is a hard "
+        "stop; do not start new issues or side-quests while a merge-back "
+        "refusal is unresolved unless the user explicitly parks it.\n"
         "- For structured git_status, git_diff, git_pull, and git_push, choose "
         "target=current or target=main explicitly. Use main only when the user "
         "explicitly asks about or operates on the primary checkout; clarify "

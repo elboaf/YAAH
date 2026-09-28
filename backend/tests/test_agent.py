@@ -1687,6 +1687,9 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert "integrate with `git_merge_back` before reporting complete" in note_text
     assert "Turn end itself never merges" in note_text
     assert "safe options with trade-offs" in note_text
+    assert "ESCALATION CONTRACT" in note_text
+    assert "not a retry loop" in note_text
+    assert "dirty_overlap" in note_text
     assert "Never say work is in main until the merge succeeds" in note_text
     assert "at end of turn the harness merges your committed work back" not in note_text
     # Worktree lifecycle facts (issue #102): the note must state when the
@@ -1710,6 +1713,8 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     merge_description = schemas["git_merge_back"]["description"]
     push_description = schemas["git_push"]["description"]
     assert "uncommitted target-workspace changes overlap" in merge_description
+    assert "decision point" in merge_description
+    assert "ask_user" in merge_description
     assert "target tree is dirty" not in merge_description
     assert "target=current or target=main" in push_description
     assert "target=main" in push_description
@@ -1734,6 +1739,8 @@ async def test_worktree_isolation_note_and_status(monkeypatch, tmp_path):
     assert "integrate them with `git_merge_back` before reporting" in base_prompt
     assert "do not ask the user to manage checkouts or merge routine work" in base_prompt
     assert "Classify dirty overlap, content conflict, or other" in base_prompt
+    assert "ESCALATION CONTRACT" in base_prompt
+    assert "not a retry loop" in base_prompt
     assert "Offer safe" in base_prompt
     assert "routine tool calls need" in base_prompt
     assert "Do not ask again for decisions already stated" in base_prompt

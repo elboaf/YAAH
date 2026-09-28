@@ -773,9 +773,14 @@ TOOLS_SCHEMA += [
                 "usual case); a branch prefix resolves when exactly one "
                 "agent/* branch matches. Refuses and reports when the branch "
                 "has no new commits, uncommitted target-workspace changes "
-                "overlap files the merge would update, or a conflict occurs. "
-                "Conflicts are aborted; user work is never stashed or "
-                "overwritten."
+                "overlap files the merge would update (payload carries the "
+                "file list in `dirty_overlap` / `blocked_by_dirty`), or a "
+                "conflict occurs. Conflicts are aborted; user work is never "
+                "stashed or overwritten. A refusal is a decision point: on a "
+                "dirty-overlap refusal, escalate to the user with ONE "
+                "ask_user (commit it / discard it and merge / leave it "
+                "isolated) naming the blocked files \u2014 do not re-run "
+                "diagnostics or start new work until it is resolved."
             ),
             "parameters": {
                 "type": "object",

@@ -251,6 +251,38 @@ async def test_merge_back_refuses_dirty_overlap(repo: Path):
     )
 
 
+async def test_merge_back_mid_merge_refusal_names_files_structurally(repo: Path):
+    """Issue #123: when git's own pre-flight refuses mid-merge (dirt that
+    slipped past the pre-flight check), the payload carries the blocked
+    file list in `blocked_by_dirty` so the agent can escalate to the user
+    without parsing stderr text."""
+    wt = await worktrees.ensure_isolated(str(repo), chat_id="123")
+    info = worktrees.binding_for("123")
+    (Path(wt) / "hello.txt").write_text("branch edit\n", encoding="utf-8")
+    _git(Path(wt), "add", "-A")
+    _git(Path(wt), "commit", "-q", "-m", "branch edit")
+    # user dirties the same file, but the pre-flight check is (artificially)
+    # bypassed so the refusal surfaces from git's merge itself
+    (repo / "hello.txt").write_text("my unfinished edit\n", encoding="utf-8")
+    orig = worktrees._dirty_overlap
+
+    async def blind(root, branch, dirty):
+        return []
+
+    worktrees._dirty_overlap = blind
+    try:
+        result = await worktrees.merge_back(repo, info["branch"])
+    finally:
+        worktrees._dirty_overlap = orig
+    assert result["merged"] is False
+    assert result.get("conflict") is False  # a veto, not a content conflict
+    assert "hello.txt" in result.get("blocked_by_dirty", [])
+    # the WIP is intact and nothing from the branch landed
+    assert (repo / "hello.txt").read_text(encoding="utf-8") == (
+        "my unfinished edit\n"
+    )
+
+
 async def test_merge_back_conflict_aborts_clean(repo: Path):
     # a commit on main that will conflict with the worktree branch
     wt = await worktrees.ensure_isolated(str(repo), chat_id="1")
