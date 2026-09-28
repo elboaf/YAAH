@@ -289,9 +289,12 @@ def resize_keep_ratio(
 
 def _find_yaah_window(user32=None) -> int:
     """HWND of the yaah main window by exact title ("YAAH"); 0 if absent."""
-    if os.name != "nt" or not hasattr(ctypes, "windll"):
-        return 0
-    user32 = user32 or ctypes.windll.user32
+    if user32 is None:
+        # POSIX guard only for the implicit real lookup: an injected fake
+        # (unit tests, CI on Linux) must still be exercised.
+        if os.name != "nt" or not hasattr(ctypes, "windll"):
+            return 0
+        user32 = ctypes.windll.user32
     find = getattr(user32, "FindWindowW")
     if hasattr(ctypes, "WinDLL") and isinstance(user32, ctypes.WinDLL):
         find.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR]
