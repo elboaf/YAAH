@@ -18,7 +18,7 @@ from backend.agent.tools import tool_risk
 
 
 def test_read_tools_are_free_in_every_mode():
-    for name in ("read_file", "search_files", "git_status", "git_diff",
+    for name in ("read_file", "search_files",
                  "web_search", "web_fetch", "view_image", "load_skill",
                  "screenshot", "list_windows", "read_ui_tree", "wait",
                  "spawn_agent"):
@@ -27,12 +27,12 @@ def test_read_tools_are_free_in_every_mode():
 
 def test_mutating_tools_ask():
     for name in ("write_file", "edit_file", "create_file", "delete_file",
-                 "move_file", "git_add", "git_commit"):
+                 "move_file"):
         assert tool_risk(name) == "mutating", name
 
 
 def test_shell_tools_ask():
-    for name in ("bash", "powershell", "git_push", "git_pull",
+    for name in ("bash", "powershell",
                  "mouse_click", "type_text", "press_key", "focus_window"):
         assert tool_risk(name) == "shell", name
 

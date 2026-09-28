@@ -1,14 +1,12 @@
 """Git process plumbing: executable discovery + spawn conventions.
 
-Extracted from worktrees.py (ADR 0007 ticket 2: tenant split). This is
-platform plumbing, not worktree lifecycle: one module answers "how does
-this codebase locate and spawn git", so callers stop importing a
-private (`_git_exe`) from a module whose real subject is sessions, and
-worktrees no longer borrows subprocess flags back from tools.py.
+Platform plumbing, not lifecycle: one module answers "how does this
+codebase locate and spawn git". Worktree isolation (and its merge-back
+machinery) was removed in ADR 0008; this module survives because
+portable git discovery is needed regardless of isolation.
 
 Everything here is dependency-light on purpose: only stdlib, so any
-agent module (file_changes, git_activity, main's UI git path) can use
-it without import cycles.
+agent module can use it without import cycles.
 """
 
 from __future__ import annotations

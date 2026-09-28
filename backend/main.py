@@ -61,21 +61,9 @@ async def lifespan(app: FastAPI):
     from backend.agent import scheduler
 
     await scheduler.ensure_scheduled()
-    # Issue #58: the worktree reaper (salvage-before-delete for worktrees
-    # orphaned by crashed/aborted runs, then TTL pruning).
-    from backend.agent import worktrees as _worktrees
-
-    _worktrees.start_reaper()
-    # Issue #98 / adr/0002: keep every visible main tree fast-forwarded to
-    # its upstream on a background cadence (ff-only, overlap-aware) so a
-    # refused or crashed merge-back can never leave the user's folder
-    # silently behind the work that shipped.
-    _worktrees.start_background_sync()
     yield
     await mcp_client.manager.shutdown()
     scheduler.stop_scheduler()
-    _worktrees.stop_background_sync()
-    _worktrees.stop_reaper()
     discovery.stop_advertising()
 
 
@@ -516,7 +504,6 @@ async def api_workspace_git_branches(workspace: str = ""):
 
     from backend.agent.gitinfo import current_git_branch, list_local_branches
     from backend.agent.tools import workspace_root
-    from backend.agent import worktrees
 
     try:
         root = workspace_root(workspace)
@@ -527,25 +514,9 @@ async def api_workspace_git_branches(workspace: str = ""):
         return {"branch": None, "branches": []}
     return {
         "branch": await current_git_branch(root),
-        "branches": worktrees.filter_agent_branches(branches),
+        "branches": branches,
     }
 
-
-@app.get("/api/conversations/{conversation_id}/agent-branch-status")
-async def api_conversation_agent_branch_status(conversation_id: int, branch: str = ""):
-    """Merged-ness probe for the agent-branch chip revalidation (issue #126):
-    `{exists, merged_into_base}` for a named local branch of this
-    conversation's workspace. Read-only — runs lock-free like `status`,
-    since it changes nothing; the merge mutex guards writers. No local
-    workspace (unset/remote:/non-repo) means the recorded branch can no
-    longer be validated, reported as not-existing so stale warnings are
-    suppressed."""
-    from backend.agent import worktrees
-
-    root = await _conversation_git_root(conversation_id)
-    if root is None:
-        return {"exists": False, "merged_into_base": False}
-    return await worktrees.agent_branch_status(root, branch)
 
 
 class WorkspaceGitCheckoutBody(BaseModel):
@@ -564,7 +535,6 @@ async def api_workspace_git_checkout(body: WorkspaceGitCheckoutBody):
     from fastapi import HTTPException
     from backend.agent.gitinfo import invalidate_git_caches, list_local_branches
     from backend.agent.tools import workspace_root
-    from backend.agent import worktrees
 
     workspace = body.workspace.strip()
     branch = body.branch.strip()
@@ -579,19 +549,12 @@ async def api_workspace_git_checkout(body: WorkspaceGitCheckoutBody):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    try:
-        async with worktrees.merge_mutex(root):
-            branches = await list_local_branches(root)
-            if branch not in branches:
-                return {"ok": False, "error": f"not a local branch: {branch}"}
-            result = await _run_ui_git(root, "checkout", branch)
-            invalidate_git_caches(root)
-            return {"ok": "error" not in result, **result}
-    except TimeoutError:
-        return {
-            "ok": False,
-            "error": "another agent merge or git operation is in progress; try again",
-        }
+    branches = await list_local_branches(root)
+    if branch not in branches:
+        return {"ok": False, "error": f"not a local branch: {branch}"}
+    result = await _run_ui_git(root, "checkout", branch)
+    invalidate_git_caches(root)
+    return {"ok": "error" not in result, **result}
 
 
 @app.get("/api/conversations/{conversation_id}/git-branch")
@@ -654,8 +617,6 @@ async def api_conversation_git_branches(conversation_id: int):
     from backend.agent.gitinfo import list_local_branches
     from backend.agent.tools import workspace_root
 
-    from backend.agent import worktrees
-
     ws = conv.get("workspace") or ""
     if not ws.strip() or ws.startswith("remote:"):
         return {"branches": []}
@@ -664,9 +625,7 @@ async def api_conversation_git_branches(conversation_id: int):
     except ValueError:
         return {"branches": []}
     branches = await list_local_branches(root)
-    # Issue #58 hygiene: `agent/*` merge-back branches are harness
-    # artifacts, not checkout targets — never offer them to the user.
-    return {"branches": worktrees.filter_agent_branches(branches)}
+    return {"branches": branches}
 
 
 class GitCommandBody(BaseModel):
@@ -761,8 +720,6 @@ async def api_conversation_git_command(conversation_id: int, body: GitCommandBod
     conversation as a trace row."""
     from backend.agent.gitinfo import invalidate_git_caches
 
-    from backend.agent import worktrees
-
     action = body.action
     if action not in _GIT_ACTIONS:
         from fastapi import HTTPException
@@ -773,21 +730,6 @@ async def api_conversation_git_command(conversation_id: int, body: GitCommandBod
     if root is None:
         return {"ok": False, "error": "no local git workspace"}
 
-    # Issue #58 (review decision 3): UI git operations are writers too —
-    # they run under the same merge mutex so a checkout/pull/commit can
-    # never interleave with an agent merge-back. Mutating actions only;
-    # `status` stays lock-free.
-    if action != "status":
-        try:
-            async with worktrees.merge_mutex(root):
-                return await _ui_git_locked(
-                    root, conversation_id, action, body, invalidate_git_caches
-                )
-        except TimeoutError:
-            return {
-                "ok": False,
-                "error": "another agent merge or git operation is in progress; try again",
-            }
     return await _ui_git_locked(
         root, conversation_id, action, body, invalidate_git_caches
     )
@@ -910,14 +852,6 @@ async def api_move_conversation(conversation_id: int, body: ConversationMove):
 
 @app.delete("/api/conversations/{conversation_id}")
 async def api_delete_conversation(conversation_id: int):
-    # adr/0003: deleting the chat ends its worktree session — the
-    # session-end teardown (trash drop, salvage, branch hygiene) runs
-    # here, once, instead of at every turn end. A chat with a live run
-    # keeps its session: the turn's own finally still merges, and the
-    # reaper collects the orphan after the TTL.
-    from backend.agent import worktrees as _wt
-    from backend.agent.loop import agent_is_running
-
     try:
         ok = await delete_conversation(conversation_id)
     except RemoteProtocolError as error:
@@ -926,8 +860,6 @@ async def api_delete_conversation(conversation_id: int):
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
-    if not agent_is_running(conversation_id):
-        await _wt.release_session(str(conversation_id), why="chat deleted")
     return {"ok": True}
 
 
@@ -1650,13 +1582,6 @@ async def api_agents_remove(agent_id: str, delete_chat: bool = True):
     await db_delete_agent(agent_id)
     conv_id = existing.get("conversation_id")
     if delete_chat and conv_id:
-        # adr/0003: the agent's pinned chat ends its worktree session too
-        # (same live-run guard as chat deletion).
-        from backend.agent import worktrees as _wt
-        from backend.agent.loop import agent_is_running
-
-        if not agent_is_running(conv_id):
-            await _wt.release_session(str(conv_id), why="agent deleted")
         await delete_conversation(conv_id)
     return {"ok": True}
 

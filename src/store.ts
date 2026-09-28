@@ -126,52 +126,6 @@ export interface PendingPlanApproval {
   convKey: string
 }
 
-/** The session worktree branch a conversation is bound to (adr/0003
- *  revised, branch-first). Set by `worktree_bound`; kept across turns —
- *  the work lives on that branch until the user merges or the session
- *  drains (`worktree_released`, only on real release). Mirrored to
- *  localStorage: the binding survives backend restarts (path-shape
- *  recovery), so a reload must not falsely claim the main branch. */
-export interface AgentBranchInfo {
-  branch: string
-  /** Branch checked out in the primary working tree when this worktree began. */
-  baseBranch?: string
-  /** Conversation ID identifies the session worktree directory. */
-  worktreeId?: string
-  boundAt: number
-  /** The session has commits not yet merged into the shared repository. */
-  pendingMerge?: boolean
-  /** An explicit git_merge_back landed this branch's work in the shared
-   *  repository; the session stays bound but the chip drops to neutral. */
-  merged?: boolean
-}
-
-const AGENT_BRANCH_KEY = 'yaah-agent-branch-by-conv'
-
-function loadAgentBranches(): Record<string, AgentBranchInfo> {
-  if (typeof localStorage === 'undefined') return {}
-  try {
-    const raw = JSON.parse(localStorage.getItem(AGENT_BRANCH_KEY) || '{}') as Record<
-      string,
-      AgentBranchInfo
-    >
-    return raw && typeof raw === 'object' ? raw : {}
-  } catch {
-    return {}
-  }
-}
-
-function storeAgentBranches(map: Record<string, AgentBranchInfo | null>): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    // only live bindings are stored; nulls are deletions in disguise
-    const live: Record<string, AgentBranchInfo> = {}
-    for (const [k, v] of Object.entries(map)) if (v) live[k] = v
-    localStorage.setItem(AGENT_BRANCH_KEY, JSON.stringify(live))
-  } catch {
-    // best-effort mirror; in-memory state stays authoritative
-  }
-}
 
 /** One line in the right-panel activity log. */
 export interface LogEntry {
@@ -233,19 +187,6 @@ interface AgentState {
    *  shows "steering..." until the injection lands. */
   steerByConv: Record<string, boolean>
   setSteer: (key: string, on: boolean) => void
-  /** Ephemeral agent branch per conversation while a run is isolated
-   *  (see AgentBranchInfo). Drives the status strip's branch chip. */
-  agentBranchByConv: Record<string, AgentBranchInfo | null>
-  setAgentBranch: (key: string, info: AgentBranchInfo | null) => void
-  /** User dismissed the unmerged-work warning (issue #126) — display only. */
-  dismissPendingMerge: (key: string) => void
-  /** Revalidation result (issue #126): the branch is gone or fully merged,
-   *  so the stale warning is suppressed (persisted like a dismissal).
-   *  Returns whether suppression happened. */
-  clearStalePendingMerge: (
-    key: string,
-    status: { exists: boolean; merged_into_base: boolean },
-  ) => boolean
   workspace: string
   /**
    * #51/#76: the current global defaults, hydrated from /api/config by
@@ -642,38 +583,6 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({ queueEchoByConv: { ...s.queueEchoByConv, [key]: items } })),
   steerByConv: {},
   setSteer: (key, on) => set((s) => ({ steerByConv: { ...s.steerByConv, [key]: on } })),
-  agentBranchByConv: loadAgentBranches(),
-  setAgentBranch: (key, info) =>
-    set((s) => {
-      const map = { ...s.agentBranchByConv }
-      if (info === null) delete map[key]
-      else map[key] = info
-      storeAgentBranches(map)
-      return { agentBranchByConv: map }
-    }),
-  /** Issue #126: the user cleared the unmerged-work warning by hand. Marks
-   *  the binding merged (neutral chip) and persists through the same
-   *  localStorage mirror — no merge runs, no branch is touched, only the
-   *  displayed state changes. */
-  dismissPendingMerge: (key) => {
-    const cur = useAgent.getState().agentBranchByConv[key]
-    if (!cur) return
-    useAgent.getState().setAgentBranch(key, { ...cur, pendingMerge: false, merged: true })
-  },
-  /** Issue #126: suppress the warning when reality has drifted — the
-   *  recorded branch no longer exists, is fully merged into the base
-   *  branch, or the workspace itself is gone. Pure display-state fix,
-   *  same no-side-effect contract as dismissPendingMerge. Returns true
-   *  when a stale warning was cleared (caller may skip revalidation). */
-  clearStalePendingMerge: (key, status) => {
-    const cur = useAgent.getState().agentBranchByConv[key]
-    if (!cur?.pendingMerge) return false
-    const stale = !status.exists || status.merged_into_base
-    if (stale) {
-      useAgent.getState().setAgentBranch(key, { ...cur, pendingMerge: false, merged: true })
-    }
-    return stale
-  },
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),
@@ -1320,15 +1229,6 @@ export function useStatus(): AgentStatus {
     (s) => (s.conversationId === null ? 'draft' : String(s.conversationId)),
   )
   return useAgent((s) => s.statusByConv[key] ?? 'idle')
-}
-
-/** The live run's ephemeral agent branch for the on-screen conversation
- *  (null when idle or never isolated) — the branch chip's mid-run override. */
-export function useAgentBranch(): AgentBranchInfo | null {
-  const key = useAgent(
-    (s) => (s.conversationId === null ? 'draft' : String(s.conversationId)),
-  )
-  return useAgent((s) => s.agentBranchByConv[key] ?? null)
 }
 
 /** The on-screen conversation's last stream/failed-send error, if any. */

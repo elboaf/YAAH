@@ -28,7 +28,6 @@ import {
   listSkills,
   refreshSkills,
   getContext,
-  getAgentBranchStatus,
   getGitBranch,
   getGitInfo,
   getGitBranches,
@@ -96,7 +95,7 @@ import {
   getSandboxStatus,
   type SandboxStatus,
 } from './api'
-import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useAgentBranch, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentBranchInfo } from './store'
+import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
@@ -744,26 +743,10 @@ type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'starte
 
 function ToolChip({ tc }: { tc: TickerToolCall }) {
   const done = tc.result !== undefined
-  // A refused merge-back is an error even though it's "just" a tool result:
-  // the turn's work did NOT reach the main tree. Red keeps meaning failure.
-  // Exceptions: zero_commits means the work was already merged mid-turn —
-  // a benign no-op, not a failure. A no-session refusal (issue #103) is
-  // the probe shape — "is there anything left to integrate?" after the
-  // session drained; nothing exists to fail.
-  const r = tc.result as
-    | { merged?: unknown; zero_commits?: unknown; reason?: unknown }
-    | undefined
-  const mergeFailed =
-    tc.name === 'git_merge_back' &&
-    r?.merged === false &&
-    r?.zero_commits !== true &&
-    !/no session worktree is bound/i.test(String(r?.reason ?? ''))
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
-        mergeFailed
-          ? 'bg-red-950/60 text-red-300'
-          : done
+        done
             ? 'bg-zinc-800/70 text-zinc-400'
             : 'bg-zinc-700/60 text-zinc-200'
       }`}
@@ -1289,249 +1272,8 @@ function CompactionDivider({ summarized, summary }: { summarized?: number; summa
 
 type FileChange = { path: string; added: number; deleted: number; binary?: boolean }
 type FileChangeSummary = { files: FileChange[]; added: number; deleted: number }
-type GitActivityOperation = {
-  sequence: number
-  operation: string
-  outcome: string
-  source: string
-  certainty?: string
-  detail?: string
-  branch?: string
-  remote?: string
-  target_branch?: string
-  commit?: string
-  subject?: string
-}
-type GitActivityLane = {
-  id: string
-  label: string
-  branch?: string
-  base_branch?: string
-  branch_action?: string
-  commits_ahead?: number | null
-  dirty?: boolean | null
-  worktree?: string
-  integrated?: boolean | null
-  operations: GitActivityOperation[]
-}
-type GitActivitySummary = {
-  run_id: string
-  outcome: string
-  coverage?: string
-  lanes: GitActivityLane[]
-}
 
-const GIT_STEP_LABELS: Record<string, string> = {
-  checkout: 'Checkout / worktree',
-  stage: 'Stage changes',
-  commit: 'Commit',
-  push: 'Push',
-  pull: 'Pull',
-  merge: 'Merge back',
-  rebase: 'Rebase',
-  reset: 'Reset',
-  stash: 'Stash',
-  clean: 'Clean',
-  restore: 'Restore',
-  remove: 'Remove',
-  move: 'Move',
-  'cherry-pick': 'Cherry-pick',
-  revert: 'Revert',
-  worktree: 'Worktree',
-  branch: 'Branch',
-  tag: 'Tag',
-}
-
-function gitOutcomeLabel(outcome: string) {
-  switch (outcome) {
-    case 'succeeded': return 'completed'
-    case 'failed': return 'failed'
-    case 'blocked': return 'blocked'
-    case 'cancelled': return 'cancelled'
-    case 'no-op': return 'no changes'
-    case 'skipped': return 'skipped'
-    default: return 'outcome unknown'
-  }
-}
-
-let mermaidLoading: Promise<typeof import('mermaid')> | null = null
-
-function loadMermaid() {
-  if (!mermaidLoading) {
-    mermaidLoading = import('mermaid').then((module) => {
-      module.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', flowchart: { htmlLabels: false } })
-      return module
-    })
-  }
-  return mermaidLoading
-}
-
-function escapeMermaid(value: string): string {
-  return value.replace(/["\\[\]{}<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
-}
-
-export function gitMermaid(summary: GitActivitySummary): string {
-  const lines = ['flowchart LR', '  primary["Primary workspace"]']
-  const visibleLanes = summary.lanes.filter((lane) => {
-    // An explorer that only reused a parent worktree has no isolated changes
-    // of its own to show. Likewise, omit a drained, clean isolated worktree
-    // whose only recorded operation was the harness creating it.
-    if (lane.worktree === 'shared' && lane.operations.length === 0) return false
-    const hasNoUnmergedWork = lane.commits_ahead === 0 && lane.dirty === false
-    const onlyWorktreeSetup = lane.operations.every(
-      (op) => op.operation === 'checkout' && op.source === 'harness',
-    )
-    return !(hasNoUnmergedWork && onlyWorktreeSetup)
-  })
-  visibleLanes.forEach((lane, laneIndex) => {
-    const id = `lane${laneIndex}`
-    const branch = escapeMermaid(lane.branch || 'current branch')
-    const base = escapeMermaid(lane.base_branch || 'primary branch')
-    const start = `${id}Start`
-    const startLabel = lane.branch_action === 'created'
-      ? `${lane.label}: created ${branch}`
-      : lane.branch_action === 'reused'
-        ? `${lane.label}: reused ${branch}`
-        : `${lane.label}: ${branch}`
-    lines.push(`  ${start}["${escapeMermaid(startLabel)}"]`)
-    if (lane.branch_action !== 'none') lines.push(`  primary -. "from ${base}" .-> ${start}`)
-    let previous = start
-    lane.operations.forEach((op, opIndex) => {
-      const node = `${id}Op${opIndex}`
-      const operation = GIT_STEP_LABELS[op.operation] || op.operation
-      const detail = op.subject ? `${op.commit || ''} ${op.subject}` : op.detail || ''
-      const target = op.operation === 'push'
-        ? [op.remote, op.target_branch].filter(Boolean).join('/')
-        : op.target_branch ? `to ${op.target_branch}` : detail
-      lines.push(`  ${node}["${escapeMermaid(`${operation}: ${gitOutcomeLabel(op.outcome)}${target ? ` · ${target}` : ''}`)}"]`)
-      lines.push(`  ${previous} --> ${node}`)
-      previous = node
-    })
-    const confirmedMerge = lane.operations.find((op) => op.operation === 'merge' && op.outcome === 'succeeded')
-    if (lane.integrated === true && confirmedMerge) {
-      lines.push(`  ${previous} --> primary`)
-    }
-    const hasNoUnmergedWork = lane.commits_ahead === 0 && lane.dirty === false
-    if (lane.branch_action !== 'none' && lane.integrated !== true && !hasNoUnmergedWork) {
-      const end = `${id}End`
-      const lifecycle = lane.worktree === 'removed' ? 'worktree removed' : lane.worktree === 'kept' ? 'worktree retained' : 'worktree status unknown'
-      const count = typeof lane.commits_ahead === 'number' && lane.commits_ahead > 0 ? ` · ${lane.commits_ahead} cumulative commits ahead` : ''
-      lines.push(`  ${end}["Not merged · ${escapeMermaid(lifecycle + count)}"]`)
-      lines.push(`  ${previous} -.-> ${end}`)
-    }
-  })
-  return lines.join('\n')
-}
-
-function GitActivityDiagram({ summary }: { summary: GitActivitySummary }) {
-  const [svg, setSvg] = useState('')
-  const [failed, setFailed] = useState(false)
-  const [enlarged, setEnlarged] = useState(false)
-  const id = `git-activity-${summary.run_id.replace(/[^A-Za-z0-9_-]/g, '') || 'run'}`
-  const graph = gitMermaid(summary)
-  useEffect(() => {
-    let active = true
-    void loadMermaid().then((module) => module.default.render(id, graph)).then(({ svg: rendered }) => {
-      if (active) {
-        setSvg(rendered)
-        setFailed(false)
-      }
-    }).catch(() => {
-      if (active) setFailed(true)
-    })
-    return () => { active = false }
-  }, [id, graph])
-  if (failed || !svg) {
-    return <p className="text-[10px] text-zinc-500">Branch-flow diagram unavailable; the text timeline below contains the full summary.</p>
-  }
-  return (
-    <button
-      type="button"
-      aria-label={enlarged ? 'Restore Git branch activity diagram size' : 'Enlarge Git branch activity diagram'}
-      aria-pressed={enlarged}
-      title={enlarged ? 'Restore diagram size' : 'Enlarge diagram'}
-      onClick={() => setEnlarged((current) => !current)}
-      className={enlarged
-        ? 'fixed inset-[1%] z-40 cursor-zoom-out overflow-auto rounded   bg-zinc-950 p-[1.5%] text-left shadow-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
-        : 'block w-full cursor-zoom-in overflow-x-auto rounded   bg-zinc-950 p-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'}
-    >
-      <span className="sr-only">{enlarged ? 'Click to restore the diagram to its default size.' : 'Click to enlarge the diagram.'}</span>
-      <span className={enlarged ? 'block min-w-[720px] [&_svg]:h-auto [&_svg]:max-w-full' : 'block min-w-[520px] [&_svg]:h-auto [&_svg]:max-w-full'} aria-hidden="true" dangerouslySetInnerHTML={{ __html: svg }} />
-    </button>
-  )
-}
-
-function GitActivitySummary({ summary }: { summary: GitActivitySummary }) {
-  const [open, setOpen] = useState(false)
-  const panelId = useId()
-  const operations = summary.lanes.flatMap((lane) => lane.operations)
-  const failures = operations.filter((op) => ['failed', 'blocked', 'cancelled'].includes(op.outcome)).length
-  const label = operations.length
-    ? `${operations.length} Git ${operations.length === 1 ? 'operation' : 'operations'}`
-    : 'Git branch activity'
-  const scopeNote = summary.lanes.some((lane) => lane.branch_action !== 'none')
-    ? summary.lanes.map((lane) => lane.integrated === true
-      ? 'merged into primary workspace'
-      : lane.commits_ahead === 0 && lane.dirty === false
-        ? 'no unmerged work'
-        : `${lane.branch || 'branch'} remains separate`).join(' · ')
-    : 'Git operations recorded'
-  return (
-    <div className="w-fit max-w-full overflow-hidden rounded-md   bg-zinc-900/70 font-mono text-[11px]">
-      <button
-        type="button"
-        className="flex min-h-7 max-w-full items-center gap-2 px-2 py-1 text-left text-zinc-300 hover:bg-zinc-800/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-        aria-expanded={open}
-        aria-controls={panelId}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className="w-2 text-zinc-500" aria-hidden="true">{open ? '\u2304' : '\u203a'}</span>
-        <span>{label}</span>
-        <span className={failures ? 'text-red-400' : 'text-zinc-500'}>
-          {failures ? `${failures} unsuccessful` : scopeNote}
-        </span>
-      </button>
-      {open && (
-        <div id={panelId} className="max-w-[min(80vw,760px)] space-y-3   p-2">
-          <GitActivityDiagram summary={summary} />
-          <ol className="space-y-2" aria-label="Git operation timeline">
-            {summary.lanes.map((lane) => (
-              <li key={lane.id} className="space-y-1">
-                <div className="text-zinc-300">{lane.label} <span className="text-zinc-500">{lane.branch && `· ${lane.branch}`}</span></div>
-                {lane.branch_action !== 'none' && (
-                  <div className="pl-3 text-zinc-400">
-                    {lane.branch_action === 'created' ? `Created branch from ${lane.base_branch || 'the primary workspace'}` : lane.branch_action === 'reused' ? 'Reused existing branch/worktree' : 'Used the parent worktree'}
-                  </div>
-                )}
-                <ol className="space-y-1 pl-3">
-                  {lane.operations.map((op) => (
-                    <li key={`${lane.id}-${op.sequence}`} className="flex flex-wrap gap-x-2 text-zinc-400">
-                      <span className={op.outcome === 'succeeded' ? 'text-emerald-400' : ['failed', 'blocked'].includes(op.outcome) ? 'text-red-400' : 'text-amber-300'}>
-                        {GIT_STEP_LABELS[op.operation] || op.operation}: {gitOutcomeLabel(op.outcome)}
-                      </span>
-                      {op.commit && <span className="text-zinc-300">{op.commit} {op.subject}</span>}
-                      {op.operation === 'push' && <span>{[op.remote, op.target_branch].filter(Boolean).join('/') || op.detail}</span>}
-                      {op.operation === 'merge' && op.target_branch && <span>into {op.target_branch}</span>}
-                      {op.detail && op.operation !== 'push' && <span className="break-all">{op.detail}</span>}
-                      {op.certainty === 'uncertain' && <span className="text-amber-300">result may be incomplete</span>}
-                    </li>
-                  ))}
-                </ol>
-                {lane.branch_action !== 'none' && !(lane.integrated !== true && lane.commits_ahead === 0 && lane.dirty === false) && (
-                  <div className="pl-3 text-zinc-500">
-                    {lane.integrated === true ? `Merged into ${lane.operations.find((op) => op.operation === 'merge' && op.outcome === 'succeeded')?.target_branch || 'the primary workspace'}` : `Not merged${lane.worktree === 'removed' ? ' · worktree removed' : lane.worktree === 'kept' ? ' · worktree retained' : ' · worktree state unknown'}${typeof lane.commits_ahead === 'number' ? ` · ${lane.commits_ahead} commits ahead (cumulative)` : ''}${lane.dirty ? ' · uncommitted changes remain' : ''}`}
-                  </div>
-                )}
-              </li>
-            ))}
-          </ol>
-          {summary.coverage && <p className="text-[10px] leading-4 text-zinc-500">Coverage: {summary.coverage}</p>}
-        </div>
-      )}
-    </div>
-  )
-}
-
+/** Collapsible per-turn file-change summary (files added/removed + counts). */
 function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
   const [open, setOpen] = useState(false)
   const panelId = useId()
@@ -1574,32 +1316,13 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
 
 export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   // Persisted failure markers (backend writes role='system' when a turn
-  // dies): a slim machine line, not a fake agent message. EXCEPTION — the
-  // end-of-turn merge-back handshake (#58 decision 5) persists the same way
-  // and must NOT read as an error: a successful merge renders as the same
-  // neutral git_merge_back pill the live stream showed; red stays reserved
-  // for actual failures (the refusal's reason lives in the expandable
-  // detail, exactly like every other tool result).
+  // dies): a slim machine line, not a fake agent message.
     if (msg.role === 'system') {
     if (!msg.content) return null
-    let merge: { worktree_merge?: Record<string, unknown> } | null = null
     let fileChanges: FileChangeSummary | undefined
-    let gitActivity: GitActivitySummary | undefined
-    let status: {
-      worktree_status?: {
-        branch?: string
-        base_branch?: string
-        worktree_id?: string
-        commits?: number
-        dirty?: boolean
-        worktree?: string
-      }
-    } | null = null
     try {
       const parsed: unknown = JSON.parse(msg.content)
-      if (parsed && typeof parsed === 'object' && 'worktree_merge' in (parsed as object)) {
-        merge = parsed as { worktree_merge: Record<string, unknown> }
-      } else if (
+      if (
         parsed &&
         typeof parsed === 'object' &&
         'file_changes' in parsed &&
@@ -1607,70 +1330,14 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         typeof parsed.file_changes === 'object'
       ) {
         fileChanges = parsed.file_changes as FileChangeSummary
-      } else if (
-        parsed &&
-        typeof parsed === 'object' &&
-        'git_activity' in parsed &&
-        parsed.git_activity &&
-        typeof parsed.git_activity === 'object'
-      ) {
-        gitActivity = parsed.git_activity as GitActivitySummary
-      } else if (
-        parsed &&
-        typeof parsed === 'object' &&
-        'worktree_status' in (parsed as object)
-      ) {
-        status = parsed as {
-          worktree_status: {
-            branch?: string
-            base_branch?: string
-            worktree_id?: string
-            commits?: number
-            dirty?: boolean
-            worktree?: string
-          }
-        }
       }
     } catch {
       // not JSON — a genuine failure marker
     }
-    if (fileChanges || gitActivity) {
+    if (fileChanges) {
       return (
         <div className="space-y-1 pl-3">
-          {fileChanges && <FileChangesSummary summary={fileChanges} />}
-          {gitActivity && <GitActivitySummary summary={gitActivity} />}
-        </div>
-      )
-    }
-    if (status) {
-      // Turn end itself never integrates work. If commits remain, say plainly
-      // that the main workspace is still unchanged; the existing merge action
-      // is recovery UI, not a request for users to manage branches routinely.
-      const s = status.worktree_status ?? {}
-      const count = s.commits ?? 0
-      const bits: string[] = [
-        count > 0
-          ? `${count} committed change(s) are not yet integrated into the main workspace`
-          : 'No committed changes are waiting to be integrated',
-      ]
-      if (count > 0 && s.base_branch) bits.push(`target branch ${s.base_branch}`)
-      if (s.dirty) bits.push('additional uncommitted changes are not included')
-      return (
-        <div className="pl-3">
-          <div className="font-mono text-[11px] text-amber-300/90">◆ {bits.join(', ')}</div>
-        </div>
-      )
-    }
-    if (merge) {
-      const r = merge.worktree_merge ?? {}
-      const tc: ToolCall = {
-        id: `merge-back-${msg.id}`,
-        name: 'git_merge_back',
-        result: r,
-      }
-      return (
-        <div className="pl-3">
-          <ToolCallRow tc={tc} />
+          <FileChangesSummary summary={fileChanges} />
         </div>
       )
     }
@@ -3363,7 +3030,6 @@ function ConversationList({
   const pendingApprovals = useAgent((s) => s.pendingApprovals)
   const pendingPlanApprovals = useAgent((s) => s.pendingPlanApprovals)
   const finishedByConv = useAgent((s) => s.finishedByConv)
-  const agentBranchByConv = useAgent((s) => s.agentBranchByConv)
   const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; chat_type?: 'chat' | 'agent' }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
@@ -3404,30 +3070,6 @@ function ConversationList({
     // and the new registry row must appear without any other refresh trigger.
   }, [conversationId, workspace, refresh])
 
-  // Issue #126: revalidate every persisted pendingMerge warning against the
-  // backend before showing it. A recorded branch that no longer exists, is
-  // fully merged into the main-tree HEAD, or whose workspace is gone can no
-  // longer carry unmerged work — clear the stale warning (persisted, same
-  // as a manual dismissal). Read-only probes; a conversation with no row
-  // (deleted) gets its binding dropped wholesale.
-  useEffect(() => {
-    const map = useAgent.getState().agentBranchByConv
-    const ids = new Set(convs.map((c) => String(c.id)))
-    for (const [key, info] of Object.entries(map)) {
-      if (!info?.pendingMerge || !info.branch) continue
-      if (!ids.has(key)) {
-        useAgent.getState().setAgentBranch(key, null)
-        continue
-      }
-      const conv = convs.find((c) => String(c.id) === key)
-      if (!conv) continue
-      getAgentBranchStatus(conv.id, info.branch)
-        .then((status) => useAgent.getState().clearStalePendingMerge(key, status))
-        .catch(() => {}) // backend unreachable: keep showing the last known state
-    }
-    // Reruns whenever the conversation rows reload (mount, refresh).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convs])
 
   // Expanded state persists per workspace (Q14); a group with no remembered
   // state starts expanded.
@@ -3593,13 +3235,6 @@ function ConversationList({
           pendingPlanApprovals[String(c.id)],
       )}
       finished={finishedByConv[String(c.id)] ?? null}
-      pendingMerge={Boolean(agentBranchByConv[String(c.id)]?.pendingMerge)}
-      pendingMergeBranch={agentBranchByConv[String(c.id)]?.branch}
-      onDismissPendingMerge={
-        agentBranchByConv[String(c.id)]?.pendingMerge
-          ? () => useAgent.getState().dismissPendingMerge(String(c.id))
-          : undefined
-      }
       isAgent={isAgent}
       menuOpen={menuOpenId === c.id}
       setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
@@ -3850,9 +3485,6 @@ function ConversationList({
                   delete abortByConv[key]
                   const errorByConv = { ...s.errorByConv }
                   delete errorByConv[key]
-                  // Chat deletion releases the session server-side; the
-                  // chip must not keep claiming the agent branch.
-                  useAgent.getState().setAgentBranch(key, null)
                   return { statusByConv, abortByConv, errorByConv }
                 })
                 if (deleteTarget.id === conversationId) {
@@ -3918,9 +3550,6 @@ export function ConversationRow({
   running,
   blocked,
   finished,
-  pendingMerge,
-  pendingMergeBranch,
-  onDismissPendingMerge,
   isAgent,
   onAgentSettings,
   onToggleEnable,
@@ -3946,12 +3575,6 @@ export function ConversationRow({
   /** Finished-but-unacknowledged signal: 'ok' (green bar) | 'error' (red
    *  pill). Only set for background chats; cleared when the chat opens. */
   finished: 'ok' | 'error' | null
-  /** Session branch still has pending work; this survives opening/switching chats. */
-  pendingMerge?: boolean
-  pendingMergeBranch?: string
-  /** Issue #126: clears the unmerged-work warning for this conversation
-   *  (display state only — no merge runs, no branch is deleted). */
-  onDismissPendingMerge?: () => void
   /** A scheduled agent's pinned chat (issue #41) — silhouette badge. */
   isAgent?: boolean
   /** Open the agent settings dialogue (agent chats only). */
@@ -4002,48 +3625,18 @@ export function ConversationRow({
           active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/60'
         }`}
         onClick={onOpen}
-        title={
-          pendingMerge
-            ? `${liveTitle ?? conv.title} — unmerged session work on ${pendingMergeBranch ?? 'agent branch'}`
-            : liveTitle ?? conv.title
-        }
-        aria-label={
-          pendingMerge
-            ? `${liveTitle ?? conv.title}, unmerged session work on ${pendingMergeBranch ?? 'agent branch'}`
-            : liveTitle ?? conv.title
-        }
+        title={liveTitle ?? conv.title}
+        aria-label={liveTitle ?? conv.title}
       >
         {/* Issue #25: one status slot left of the title, same footprint for
             every state so the row never shifts. Precedence: needs-you (orange,
-            pulsing) > pending merge > finished (green bar / red pill) > working dots. */}
+            pulsing) > finished (green bar / red pill) > working dots. */}
         {blocked ? (
           <span
             aria-hidden="true"
             className="run-bar run-bar-orange mr-1.5 shrink-0"
             title="Waiting for you — a question or approval is pausing this run"
           />
-        ) : pendingMerge ? (
-          <span
-            className="group/badge relative mr-1.5 inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full border border-orange-500/70 font-mono text-[9px] leading-none text-orange-300"
-            title={`Unmerged session work on ${pendingMergeBranch ?? 'agent branch'} — open chat for details`}
-          >
-            <span aria-hidden="true">!</span>
-            {/* Issue #126: the warning must be clearable by hand — hover
-                reveals an × that dismisses it (display state only). */}
-            {onDismissPendingMerge && (
-              <button
-                className="absolute -right-1.5 -top-1.5 hidden h-3 w-3 items-center justify-center rounded-full bg-zinc-700 font-sans text-[8px] leading-none text-zinc-200 hover:bg-zinc-600 group-hover/badge:flex"
-                title="Dismiss — mark this work as handled (does not merge or delete the branch)"
-                aria-label={`Dismiss unmerged-work warning for ${pendingMergeBranch ?? 'agent branch'}`}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onDismissPendingMerge()
-                }}
-              >
-                ×
-              </button>
-            )}
-          </span>
         ) : finished === 'error' ? (
           <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
         ) : finished === 'ok' ? (
@@ -7188,13 +6781,11 @@ function GitChipCluster({
   streaming,
   conversationId,
   onCommandDone,
-  agentBranch,
 }: {
   info: GitInfo | null
   streaming: boolean
   conversationId: number | null
   onCommandDone: () => void
-  agentBranch: AgentBranchInfo | null
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [branches, setBranches] = useState<string[]>([])
@@ -7271,14 +6862,6 @@ function GitChipCluster({
       .catch(() => {})
   }
 
-  // Mid-run AND between-turns isolation (adr/0003 revised): the primary
-  // selector continues to represent the primary tree, while this separate
-  // indicator reports the conversation's agent checkout. Sub-agents are
-  // excluded — the parent turn owns the binding.
-  const showAgentBranch = Boolean(agentBranch)
-  // An explicit git_merge_back landed the agent branch in the primary tree;
-  // the status indicator remains visible and switches to a neutral merged state.
-  const agentMerged = Boolean(agentBranch?.merged)
   const pairAway = info.ahead > 0 || info.behind > 0
   const pairDiverged = info.ahead > 0 && info.behind > 0
   const pairColor = pairDiverged ? 'text-red-400' : pairAway ? 'text-zinc-400' : 'text-zinc-500'
@@ -7309,28 +6892,6 @@ function GitChipCluster({
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
       </button>
-
-      {showAgentBranch && (
-        <span
-          className={`flex min-w-0 items-center gap-1 rounded   px-1.5 py-0.5 font-mono text-[10px] ${
-            agentMerged
-              ? ' bg-zinc-800/40 text-zinc-400'
-              : ' bg-zinc-800/60 text-zinc-300'
-          }`}
-          title={
-            `Agent checkout branch ${agentBranch!.branch}` +
-            (agentBranch!.baseBranch ? `, based on ${agentBranch!.baseBranch}` : '') +
-            `, worktree ${agentBranch!.worktreeId ?? conversationId ?? 'unknown'}` +
-            (agentMerged ? `, merged into ${info.branch}; checkout remains active` : `, not yet merged into ${info.branch}`)
-          }
-          aria-label={`Agent checkout: branch ${agentBranch!.branch}, based on ${agentBranch!.baseBranch ?? 'unknown'}, worktree ${agentBranch!.worktreeId ?? conversationId ?? 'unknown'}${agentMerged ? ', merged' : ', unmerged'}`}
-        >
-          <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${agentMerged ? 'bg-zinc-500' : 'run-pulse bg-amber-400'}`} aria-hidden="true" />
-          <span className="shrink-0 text-zinc-500">AGENT</span>
-          <span className="min-w-0 max-w-[9rem] truncate font-semibold">{agentBranch!.branch}</span>
-          {agentMerged && <span className="shrink-0 text-zinc-300">merged</span>}
-        </span>
-      )}
 
       {/* checkout dropdown (opens upward — the strip is the floor) */}
       {menuOpen && (
@@ -8055,7 +7616,6 @@ export function ChatPanel() {
     [messages],
   )
   const streaming = status === 'thinking' || status === 'running-tool'
-  const agentBranch = useAgentBranch()
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
   // show on the newest message while the run is going.
@@ -8342,7 +7902,6 @@ export function ChatPanel() {
           streaming={streaming}
           conversationId={conversationId}
           onCommandDone={refreshGitInfo}
-          agentBranch={agentBranch}
         />
         {/* Access mode lives in the composer toolbar now. Plan approval is a
             live card above the composer (exit_plan), not a status-strip chip. */}
@@ -8441,7 +8000,6 @@ function Composer() {
     settleSubAgents,
     setStatus,
     setModelCall,
-    setAgentBranch,
     setError,
     setConversationId,
     adoptDraft,
@@ -9271,43 +8829,6 @@ function Composer() {
           convKey: bufKey,
         })
       }
-    } else if (ev.type === 'worktree_bound') {
-      // The turn isolated into its session worktree: the branch chip
-      // shows the agent branch — and keeps showing it after the turn
-      // (adr/0003 revised: the binding persists until drain/delete).
-      if (ev.branch) {
-        const existing = useAgent.getState().agentBranchByConv[bufKey]
-        setAgentBranch(
-          bufKey,
-          existing?.branch === ev.branch
-            ? {
-                ...existing,
-                baseBranch: ev.base_branch || existing.baseBranch,
-                worktreeId: ev.worktree_id || existing.worktreeId || String(conversationId),
-                boundAt: existing.boundAt,
-              }
-            : {
-                branch: ev.branch,
-                baseBranch: ev.base_branch || undefined,
-                worktreeId: ev.worktree_id || String(conversationId),
-                boundAt: Date.now(),
-              },
-        )
-      }
-    } else if (ev.type === 'git_activity') {
-      appendRawMessage(bufKey, {
-        id: `git-activity-${ev.run_id ?? Date.now()}`,
-        role: 'system',
-        content: JSON.stringify({
-          git_activity: {
-            version: 1,
-            run_id: ev.run_id ?? '',
-            outcome: ev.outcome ?? 'unknown',
-            coverage: ev.coverage ?? '',
-            lanes: ev.lanes ?? [],
-          },
-        }),
-      })
     } else if (ev.type === 'file_changes') {
       appendRawMessage(bufKey, {
         id: `file-changes-${Date.now()}`,
@@ -9319,35 +8840,6 @@ function Composer() {
             deleted: ev.deleted ?? 0,
           },
         }),
-      })
-    } else if (ev.type === 'worktree_status') {
-      // Turn-end settlement confirms commits remain on the agent branch.
-      appendRawMessage(bufKey, {
-        id: `worktree-status-${Date.now()}`,
-        role: 'system',
-        content: JSON.stringify({
-          worktree_status: {
-            branch: ev.branch ?? '',
-            base_branch: ev.base_branch ?? '',
-            worktree_id: ev.worktree_id ?? String(conversationId),
-            worktree: ev.worktree ?? '',
-            commits: ev.commits ?? 0,
-            dirty: ev.dirty ?? false,
-          },
-        }),
-      })
-      const currentBranch = useAgent.getState().agentBranchByConv[bufKey]
-      if (currentBranch) {
-        setAgentBranch(bufKey, { ...currentBranch, pendingMerge: true, merged: false })
-      }
-    } else if (ev.type === 'worktree_released') {
-      // Only fires when the session actually released (drained, chat
-      // deleted) — not every turn end.
-      setAgentBranch(bufKey, null)
-      pushLog({
-        kind: 'system',
-        name: 'worktree',
-        result: { released: true, note: 'session worktree removed' },
       })
     } else if (ev.type === 'tool_progress') {
       if (ev.chunk) {
@@ -9367,15 +8859,6 @@ function Composer() {
             ? formatElapsed(tc.finishedAt - tc.startedAt)
             : undefined
         appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
-      }
-      if (ev.name === 'git_merge_back') {
-        // An explicit merge landed the agent branch in the primary tree:
-        // keep its separate indicator visible, but switch it to neutral.
-        const r = ev.result as { merged?: boolean } | undefined
-        const cur = useAgent.getState().agentBranchByConv[bufKey]
-        if (r?.merged && cur) {
-          setAgentBranch(bufKey, { ...cur, merged: true, pendingMerge: false })
-        }
       }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))

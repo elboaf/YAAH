@@ -501,18 +501,6 @@ export interface WorkspaceGitBranches {
 export const getWorkspaceGitBranches = (workspace: string) =>
   api<WorkspaceGitBranches>(`/api/workspaces/git-branches?workspace=${encodeURIComponent(workspace)}`)
 
-/** Issue #126: read-only merged-ness probe for the agent branch a
- *  conversation's pendingMerge warning is pinned to. */
-export interface AgentBranchStatus {
-  exists: boolean
-  merged_into_base: boolean
-}
-
-export const getAgentBranchStatus = (conversationId: number, branch: string) =>
-  api<AgentBranchStatus>(
-    `/api/conversations/${conversationId}/agent-branch-status?branch=${encodeURIComponent(branch)}`,
-  )
-
 export const checkoutWorkspaceBranch = (workspace: string, branch: string) =>
   api<GitCommandResult>('/api/workspaces/git-checkout', {
     method: 'POST',
@@ -1094,11 +1082,7 @@ export interface AgentEvent {
     | 'sub_agent_spawned'
     | 'sub_agent_progress'
     | 'sub_agent_done'
-    | 'worktree_bound'
-    | 'worktree_status'
-    | 'worktree_released'
     | 'file_changes'
-    | 'git_activity'
     | 'compacted'
     | 'compaction_failed'
     | 'model_call'
@@ -1129,19 +1113,6 @@ export interface AgentEvent {
   items?: Array<{ id: number; text: string; skills?: string[]; images?: string[] }>
   /** Live output chunk while a shell tool runs (tool_progress). */
   chunk?: string
-  /** Branch name of the session worktree (worktree_bound /
-   *  worktree_status); worktree_released carries no payload. */
-  branch?: string
-  /** Primary-tree branch from which the session worktree was created. */
-  base_branch?: string
-  /** Conversation ID used to identify the managed session worktree. */
-  worktree_id?: string
-  /** Turn-end settlement (worktree_status, adr/0003 revised): commits on
-   *  the session branch, master untouched. */
-  commits?: number
-  dirty?: boolean
-  /** Session worktree path (worktree_status). */
-  worktree?: string
   /** Sub-agent identity (sub_agent_* events). */
   agent_id?: number
   /** Provider + model a pending chat call is waiting on (model_call, #43). */
@@ -1161,11 +1132,6 @@ export interface AgentEvent {
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number
   deleted?: number
-  /** Structured, run-scoped Git activity summary. */
-  run_id?: string
-  outcome?: string
-  lanes?: Array<Record<string, unknown>>
-  coverage?: string
   /** The provider+model this turn's chat call is waiting on (model_call).
    *  Unset between the response arriving and the next call of the turn. */
   modelCall?: { provider: string; model: string; startedAt: number }
