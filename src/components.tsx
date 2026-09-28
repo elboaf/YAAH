@@ -1512,12 +1512,20 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       node: <SubAgentBlock key={`subagent-${call.id}`} run={call.subAgent!} />,
     })),
   ].sort((a, b) => a.offset - b.offset || a.order - b.order)
-  const interleaved: ReactNode[] = []
-  if (
+  // ONE predicate decides both whether the interleaved emission segments are
+  // built AND whether the render branch below uses them. It used to be two
+  // diverging copies of the same condition: the render branch accepted
+  // asks-with-offsets (no sub-agents) while the population guard required
+  // sub-agent anchors too — so an answered ask_user (the #63 shape) took the
+  // branch with an EMPTY interleaved array and the block's whole text
+  // vanished from the transcript (only the tool trace remained). Keeping the
+  // guard in one place makes that mismatch unreachable again.
+  const canInterleave =
     textAnchors.length > 0 &&
     ordered.every((call) => typeof call.contentOffset === 'number') &&
     (hasSpawnAnchors || ordered.length === 0)
-  ) {
+  const interleaved: ReactNode[] = []
+  if (canInterleave) {
     let cursor = 0
     for (const anchor of textAnchors) {
       const cut = Math.min(Math.max(anchor.offset, cursor), msg.content.length)
@@ -1571,8 +1579,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
         <MessageStopButton msgId={msg.id} />
       </div>
       {msg.implementsPlan && <PlanBanner plan={msg.implementsPlan} />}
-      {textAnchors.length > 0 &&
-      (hasSpawnAnchors || ordered.every((call) => typeof call.contentOffset === 'number')) ? (
+      {canInterleave ? (
         <>
           {interleaved}
           {live && (
