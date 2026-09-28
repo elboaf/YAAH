@@ -32,8 +32,11 @@ topology decision, deterministically and testably.
 - Git tools shrink to `git_status`, `git_diff`, `git_add`, `git_commit`
   with no `target` parameter — from the model's seat there is one tree.
 - `git_merge_back` is removed from the model's tool list. Integration
-  fires when the model signals task completion (explicit completion
-  report — not turn end, not a user button).
+  is never the model's call: at task completion the harness raises a
+  merge decision card (branch, commits, dirty files, merge / keep /
+  discard) and the USER decides. AMENDED 2026-10-13 (grill follow-up):
+  the original auto-merge-at-completion was rejected — the user decides
+  when work lands, the harness executes, the model never touches it.
 - The model never initiates pushes. Push intent arrives through the
   user's chat and the harness resolves what to push (resolving cleanly
   to the branch the user selected) with existing safety rails (no
@@ -48,6 +51,15 @@ topology decision, deterministically and testably.
 **What the harness owns:**
 
 - Bind/settle, per ADR 0005 (unchanged).
+- USER-FACING HONESTY (amended 2026-10-13): the current system reports
+  the session under the user's selected branch while work lands on a
+  hidden `agent/*` branch the UI filters out of the dropdown — a false
+  report. The amended contract: the real session branch is always shown
+  to the user (chip and branch list, named after the task where
+  possible), work accumulating there is visible (commits, dirty files,
+  "not in main/dev" status), and the merge is a user decision (card at
+  completion). Nothing about isolation is fabricated to the user;
+  only the model is kept ignorant of it.
 - Output laundering: no `agent/*` strings or session-branch names reach
   the model through any tool result — including git_status output,
   merge results, and sub-agent spawn. Sub-agents get the same laundered
@@ -87,6 +99,8 @@ file.
   field of view, which ADR 0005 explicitly did not do.
 - Delivery is one arc, ordered: (1) this ADR + CONTEXT.md entry, (2)
   worktrees.py tenant split, (3) prompt surgery + tool-surface shrink,
-  (4) output laundering, (5) harness-owned merge at completion, (6)
-  sandbox/remote parity, (7) sub-agent parity. Interim mixed states
-  between tickets are acceptable; no stage ships the old ceremony back.
+  (4) output laundering, (5) user-confirmed merge card + honest
+  user-facing branch reporting (the amended ticket 5 absorbs the
+  transparency contract), (6) sandbox/remote parity, (7) sub-agent
+  parity. Interim mixed states between tickets are acceptable; no stage
+  ships the old ceremony back.

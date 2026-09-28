@@ -95,10 +95,13 @@ _Avoid_: git lock, merge lock file
 **Invisible isolation**:
 The model's ignorance of isolation, by design: it believes it works on
 the branch the user selected, in the only tree that exists. The harness
-owns branch creation, integration (at completion report), pushing, and
-every git topology decision; tool outputs are laundered of session
-branch names. See adr/0007.
-_Avoid_: telling the model its session branch; git ceremony in prompts
+owns branch creation, pushing, and every git topology decision; tool
+outputs are laundered of session branch names. Integration is a USER
+decision surfaced by the harness at completion (merge card) — the model
+never triggers it. The user, unlike the model, always sees the real
+session branch and its accumulating work. See adr/0007.
+_Avoid_: telling the model its session branch; git ceremony in prompts;
+reporting the session under the user's selected branch
 
 ### Worktree operations
 
