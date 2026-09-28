@@ -429,6 +429,37 @@ async def _dirty_overlap(root: Path, branch: str, dirty: list[str]) -> list[str]
     return sorted(set(dirty) & touched)
 
 
+def _parse_merge_veto_files(out: str) -> list[str]:
+    """Extract the colliding paths from git's dirty-file veto output
+    (issue #123). Only the tab-indented file list is accepted: the list
+    ends at the first non-indented line (git's trailers — `Please
+    commit...`, `Aborting`, `Updating ...` — and any further `error:`/
+    `warning:` line are stderr prose, never entries), so a structured key
+    never carries stderr-shaped junk. Git C-quotes non-ASCII paths
+    (core.quotePath); those quotes are unwrapped and the octal escapes
+    decoded back to the real path."""
+    files: list[str] = []
+    in_list = False
+    for ln in (out or "").splitlines():
+        if "would be overwritten by merge" in ln:
+            in_list = True
+            continue
+        if not in_list:
+            continue
+        if not ln.startswith("\t") or not ln.strip():
+            break  # first non-indented (or blank) line ends the list
+        name = ln[1:].strip()
+        if name.startswith('"') and name.endswith('"') and len(name) > 1:
+            try:
+                name = name[1:-1].encode("latin-1").decode("unicode_escape")
+                name = name.encode("latin-1").decode("utf-8", "replace")
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                pass
+        if name and name not in files:
+            files.append(name)
+    return files
+
+
 def _exclude_worktrees(root: Path) -> None:
     """R6 hygiene: hide .yaah/ via .git/info/exclude — never touch the
     user's tracked .gitignore (that edit would itself dirty the tree)."""
@@ -1259,20 +1290,17 @@ async def merge_back(root: Path, branch: str) -> dict:
             if refused:
                 # Issue #123: surface git's file list structurally so the
                 # agent can escalate to the user without parsing stderr.
-                blocked: list[str] = []
-                in_list = False
-                for ln in (out or "").splitlines():
-                    if "would be overwritten by merge" in ln:
-                        in_list = True
-                        continue
-                    if in_list:
-                        name = ln.strip()
-                        if not name:
-                            in_list = False
-                        elif name not in blocked:
-                            blocked.append(name)
+                # Issue #124 review: same key as the pre-flight payload
+                # (`dirty_overlap`) — one concept, one name.
+                blocked = _parse_merge_veto_files(out or "")
                 if blocked:
-                    result["blocked_by_dirty"] = blocked
+                    result["dirty_overlap"] = blocked
+                    result["reason"] = (
+                        "main tree has uncommitted changes to file(s) this "
+                        f"merge must update: {', '.join(blocked)} — commit "
+                        "or stash them first; YAAH never stashes user work "
+                        "to force a merge (issue #58 decision 1)"
+                    )
             return result
     from backend.agent import gitinfo
 
@@ -1449,7 +1477,7 @@ def _worktree_note_text(wt_path: str, info: dict, main_workspace: str) -> str:
         "in main.\n"
         "- ESCALATION CONTRACT (issue #123): a `merged: false` refusal is a "
         "decision point, not a retry loop. On a dirty-overlap refusal the "
-        "payload names the files (see `dirty_overlap` / `blocked_by_dirty`) "
+        "payload names the colliding files in `dirty_overlap`) "
         "\u2014 use that list and ask the user exactly once via `ask_user` "
         "(commit it / discard it and merge / leave the merge isolated). "
         "Re-running identical diagnostics (git status, log, branch, worktree "

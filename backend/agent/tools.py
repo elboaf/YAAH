@@ -774,7 +774,7 @@ TOOLS_SCHEMA += [
                 "agent/* branch matches. Refuses and reports when the branch "
                 "has no new commits, uncommitted target-workspace changes "
                 "overlap files the merge would update (payload carries the "
-                "file list in `dirty_overlap` / `blocked_by_dirty`), or a "
+                "file list in `dirty_overlap`), or a "
                 "conflict occurs. Conflicts are aborted; user work is never "
                 "stashed or overwritten. A refusal is a decision point: on a "
                 "dirty-overlap refusal, escalate to the user with ONE "

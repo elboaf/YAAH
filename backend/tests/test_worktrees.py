@@ -254,8 +254,10 @@ async def test_merge_back_refuses_dirty_overlap(repo: Path):
 async def test_merge_back_mid_merge_refusal_names_files_structurally(repo: Path):
     """Issue #123: when git's own pre-flight refuses mid-merge (dirt that
     slipped past the pre-flight check), the payload carries the blocked
-    file list in `blocked_by_dirty` so the agent can escalate to the user
-    without parsing stderr text."""
+    file list in `dirty_overlap` so the agent can escalate to the user
+    without parsing stderr text. Issue #124 (review of #123): the list
+    must be exact — no stderr-shaped junk entries (`Aborting`, trailers),
+    and git's C-quoted non-ASCII paths are unquoted."""
     wt = await worktrees.ensure_isolated(str(repo), chat_id="123")
     info = worktrees.binding_for("123")
     (Path(wt) / "hello.txt").write_text("branch edit\n", encoding="utf-8")
@@ -276,11 +278,53 @@ async def test_merge_back_mid_merge_refusal_names_files_structurally(repo: Path)
         worktrees._dirty_overlap = orig
     assert result["merged"] is False
     assert result.get("conflict") is False  # a veto, not a content conflict
-    assert "hello.txt" in result.get("blocked_by_dirty", [])
+    # exact list, no stderr junk (issue #124 review of #123)
+    assert result.get("dirty_overlap") == ["hello.txt"]
     # the WIP is intact and nothing from the branch landed
     assert (repo / "hello.txt").read_text(encoding="utf-8") == (
         "my unfinished edit\n"
     )
+
+
+def test_parse_merge_veto_stops_at_trailers():
+    """The parser accepts only the tab-indented file list from git's veto
+    output; trailer lines (`Please commit...`, `Aborting`, `Updating ...`,
+    further `error:`/`warning:` lines) are never entries — that stderr
+    text inside a structured key is the exact failure mode issue #123
+    was filed to eliminate."""
+    out = (
+        "error: Your local changes to the following files would be "
+        "overwritten by merge:\n"
+        "\thello.txt\n"
+        "Please commit your changes or stash them before you merge.\n"
+        "Aborting\n"
+        "Updating bac060d..45b052f\n"
+        "error: something else entirely\n"
+    )
+    assert worktrees._parse_merge_veto_files(out) == ["hello.txt"]
+    # untracked variant, plus C-quoted non-ASCII paths unquoted
+    out2 = (
+        "error: The following untracked working tree files would be "
+        "overwritten by merge:\n"
+        "\t\"\346\227\245\346\234\254\350\252\236.txt\"\n"
+        "\tnotes.md\n"
+        "Please move or remove them before you merge.\n"
+        "Aborting\n"
+    )
+    assert worktrees._parse_merge_veto_files(out2) == [
+        "日本語.txt",
+        "notes.md",
+    ]
+    # blank line still terminates the list (defensive)
+    out3 = (
+        "error: Your local changes to the following files would be "
+        "overwritten by merge:\n"
+        "\ta.txt\n"
+        "\tb.txt\n"
+        "\n"
+        "Please commit your changes or stash them before you merge.\n"
+    )
+    assert worktrees._parse_merge_veto_files(out3) == ["a.txt", "b.txt"]
 
 
 async def test_merge_back_conflict_aborts_clean(repo: Path):
