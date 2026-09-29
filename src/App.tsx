@@ -12,6 +12,17 @@ import { NotificationSounds } from './NotificationSounds'
  * the shell to kill and restart it.
  */
 function BackendRecoveryBanner() {
+  // How often to poll /api/health while it's down, and how long without a
+  // response before assuming the backend is hung (vs. briefly busy) and
+  // poking restart_backend to kill it. 8s poll / ~33s kill: short enough to
+  // recover reasonably fast, long enough that a momentary event-loop stall
+  // during an agent run is never mistaken for a hang.
+  const POLL_INTERVAL_MS = 8000
+  const KILL_AFTER_MS = 33000
+  // failures at which the first poke fires (ceil(33s / 8s) = 5), then every
+  // REPOKE_EVERY failures (~40s) after that.
+  const KILL_FAILURES = Math.ceil(KILL_AFTER_MS / POLL_INTERVAL_MS)
+  const REPOKE_EVERY = 5
   const [down, setDown] = useState(false)
   const [restarting, setRestarting] = useState(false)
   useEffect(() => {
@@ -19,7 +30,13 @@ function BackendRecoveryBanner() {
     let failures = 0
     const check = async () => {
       try {
-        const res = await fetch(`${BASE}/api/health`, { cache: 'no-store' })
+        // Abort after one poll interval: a fetch that hangs forever (rather
+        // than failing fast) would otherwise stall this check loop and mask
+        // the hang the poke exists to detect.
+        const res = await fetch(`${BASE}/api/health`, {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(POLL_INTERVAL_MS),
+        })
         if (res.ok) {
           // Backend is back: reload so all panels refetch fresh state.
           window.location.reload()
@@ -32,7 +49,16 @@ function BackendRecoveryBanner() {
         // backend dies instantly several times in a row, and needs a poke
         // (restart_backend) both for the hung case and to leave the parked
         // state. Pokes are throttled so a stuck situation can't ping-pong.
-        if (failures === 4 || (failures > 4 && (failures - 4) % 15 === 0)) {
+        //
+        // The kill threshold is deliberately generous (33s of no response at
+        // 8s poll intervals): /api/health is trivial, so a failure here means
+        // the process is dead OR the event loop is briefly blocked (e.g. a
+        // busy agent run). Killing on the first few seconds of unresponsiveness
+        // murdered healthy mid-run processes — the "backend crashed and I lost
+        // my runs" class of bug. A genuinely dead backend is respawned by the
+        // supervisor regardless; the poke is only for the hung case.
+        const downFor = failures * POLL_INTERVAL_MS
+        if (downFor >= KILL_AFTER_MS && (failures - KILL_FAILURES) % REPOKE_EVERY === 0) {
           setRestarting(true)
           if (IS_TAURI) {
             // Re-check health immediately before pulling the trigger: the
@@ -58,7 +84,7 @@ function BackendRecoveryBanner() {
       if (poll !== undefined) return
       setDown(true)
       failures = 0
-      poll = window.setInterval(check, 700)
+      poll = window.setInterval(check, POLL_INTERVAL_MS)
       void check()
     }
     const onDown = () => start()
