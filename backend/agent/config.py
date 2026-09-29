@@ -121,9 +121,9 @@ DEFAULTS = {
         "map_workspace": True,
         # How long sandbox_test waits for the first boot to signal ready.
         "startup_timeout": 180,
-        # Live sandbox preview (#116): "pin to yaah" toggle, persisted
-        # per-session preference (toggled from the preview's system menu).
-        "preview_pinned": False,
+        # Live sandbox preview (#116): the preview always lives inside
+        # yaah's client area and follows the yaah window (user round 3);
+        # there is no pin toggle anymore.
     },
 }
 

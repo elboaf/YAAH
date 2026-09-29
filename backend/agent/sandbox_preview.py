@@ -34,14 +34,11 @@ _PREVIEW_WIDTH = 420
 _PREVIEW_HEIGHT = 236
 # Default horizontal gap from the yaah GUI's right edge when the preview is
 # pinned without a user-established offset (fresh start while pinned, #116).
-_PIN_GAP = 24
 # Preview size clamps (#122), applied per-dimension on every resize. Default
 # min/max follow the issue's spec; call sites may pass overrides (the eve-o
 # defaults in its code are 192x108 .. 960x540, but #122 chose these).
 _PREVIEW_MIN_WIDTH = 100
 _PREVIEW_MIN_HEIGHT = 80
-_PREVIEW_MAX_WIDTH = 640
-_PREVIEW_MAX_HEIGHT = 400
 # EventFireModes / event constants for the SetWinEventHook pin-follow hook.
 _EVENT_OBJECT_LOCATIONCHANGE = 0x800B
 _WINEVENT_OUTOFCONTEXT = 0x0
@@ -84,22 +81,6 @@ def stop_preview() -> None:
             _manager = None
 
 
-# ---- Pin-to-yaah persistence (#116): `sandbox.preview_pinned` in config.json ----
-
-
-def get_preview_pinned() -> bool:
-    from backend.agent.config import load_config
-
-    return bool((load_config().get("sandbox") or {}).get("preview_pinned"))
-
-
-def set_preview_pinned(pinned: bool) -> None:
-    from backend.agent.config import load_config, save_config
-
-    existing = load_config().get("sandbox") or {}
-    save_config({"sandbox": {**existing, "preview_pinned": bool(pinned)}})
-
-
 # ---- Pure geometry helpers (#116), unit-tested without a display ----
 
 
@@ -117,24 +98,6 @@ def fit_thumbnail_rect(
     width, height = max(1, int(src_w * scale)), max(1, int(src_h * scale))
     left, top = (client_w - width) // 2, (client_h - height) // 2
     return left, top, width, height
-
-
-def pin_offset(
-    yaah_rect: tuple[int, int, int, int], prev_rect: tuple[int, int, int, int]
-) -> tuple[int, int]:
-    """Anchor of the preview relative to the yaah window's right edge:
-    preserves whatever horizontal gap the user left, plus vertical offset."""
-    _, yaah_y, yaah_r, _ = yaah_rect
-    prev_x, prev_y = prev_rect[0], prev_rect[1]
-    return prev_x - yaah_r, prev_y - yaah_y
-
-
-def pinned_position(
-    yaah_rect: tuple[int, int, int, int], offset: tuple[int, int]
-) -> tuple[int, int]:
-    """Preview top-left that reproduces the anchor for a moved yaah window."""
-    y, right = yaah_rect[1], yaah_rect[2]
-    return right + offset[0], y + offset[1]
 
 
 # ---- Pure gesture helpers (#122, eve-o-preview-style) ----
@@ -158,6 +121,38 @@ _GESTURE_BUTTON_OF = {
 # anything else (e.g. HTCAPTION from a DefWindowProc path) lets the system
 # modal move loop swallow presses that then never reach the gesture handler.
 HTCLIENT = 1
+
+# Confinement (user round 3): the preview lives inside yaah's client area,
+# always, and follows yaah's moves. Inset from the client top-left on a
+# fresh start so yaah's own toolbar stays visible.
+_START_INSET = 12
+
+
+def start_position(yaah_client_rect: tuple[int, int, int, int]) -> tuple[int, int]:
+    """Top-left for a fresh preview: yaah client top-left + inset."""
+    return (
+        yaah_client_rect[0] + _START_INSET,
+        yaah_client_rect[1] + _START_INSET,
+    )
+
+
+def clamp_to_rect(
+    rect: tuple[int, int, int, int], bounds: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """Confine rect fully inside bounds (user round 3).
+
+    Position is shifted back inside first; if the rect is larger than the
+    bounds it shrinks to fit, anchored at its own top-left (bounded below by
+    the caller's min-size handling — pass a rect no smaller than the min).
+    """
+    x, y, r, b = rect
+    bx0, by0, bx1, by1 = bounds
+    width, height = r - x, b - y
+    width = max(1, min(width, bx1 - bx0))
+    height = max(1, min(height, by1 - by0))
+    x = max(bx0, min(x, bx1 - width))
+    y = max(by0, min(y, by1 - height))
+    return (x, y, x + width, y + height)
 
 
 def gesture_hit_test(x: int, y: int) -> int:
@@ -194,35 +189,52 @@ def resize_target(
     aspect: float | None,
     min_w: int = _PREVIEW_MIN_WIDTH,
     min_h: int = _PREVIEW_MIN_HEIGHT,
+    bounds: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
     """Absolute window rect for a right-drag resize, anchored at button-down.
 
     Top-left stays fixed; the bottom-right edge follows the anchored cursor
-    delta, aspect-locked (the dominant axis drives, like resize_keep_ratio).
+    delta, aspect-locked (the dominant axis drives).
     aspect=None resizes freeform. The preview may be sized however the user
-    wants (feedback round 2): no max clamp — only the min floor survives,
-    since a 1px sliver is never a useful preview.
+    wants up to the confinement bounds (user round 3): bounds caps the size
+    at yaah's client dimensions, min floors it; there is no fixed max.
     Like move_target this is absolute per move: the size is a pure function
     of the anchor, so per-event deltas can never compound into jumps.
     """
     x, y, _, _ = start_rect
     dx, dy = current[0] - start[0], current[1] - start[1]
+    if bounds is not None:
+        max_w = max(min_w, bounds[2] - bounds[0])
+        max_h = max(min_h, bounds[3] - bounds[1])
+    else:
+        max_w = max_h = None
     if aspect is None or aspect <= 0:
-        return (x, y, x + max(min_w, start_rect[2] - x + dx),
-                y + max(min_h, start_rect[3] - y + dy))
+        w = start_rect[2] - x + dx
+        h = start_rect[3] - y + dy
+        if max_w is not None:
+            w = min(max_w, w)
+            h = min(max_h, h)
+        return (x, y, x + max(min_w, w), y + max(min_h, h))
     # Clamp-box ∩ ratio-line bounds, expressed against a synthetic 1000px
     # source so the ratio drives the floor: the effective width range is the
-    # set of widths whose ratio-exact height also lands inside [min_h, ∞).
+    # set of widths whose ratio-exact height also lands inside [min_h, max_h]
+    # (max_h is the confinement cap when bounds are given).
     ratio = aspect
     base_w = start_rect[2] - x
     base_h = start_rect[3] - y
     src_w = max(1, round(ratio * 1000))
     src_h = 1000
     w_lo = max(min_w, -(-min_h * src_w // src_h))
+    if max_h is not None:
+        w_hi = max_h * src_w // src_h
+    else:
+        w_hi = None
     candidate_w = float(base_w + dx)
     if abs(dy) > abs(dx):
         candidate_w = (base_h + dy) * ratio
     width = max(w_lo, candidate_w)
+    if w_hi is not None:
+        width = min(w_hi, width)
     height = max(1, round(width / ratio))
     return (x, y, x + round(width), y + height)
 
@@ -242,51 +254,6 @@ def gesture_action(left_down: bool, right_down: bool) -> str | None:
     return None
 
 
-def resize_keep_ratio(
-    src_w: int,
-    src_h: int,
-    drag_dx: int,
-    drag_dy: int,
-    base_w: int,
-    base_h: int,
-    min_w: int = _PREVIEW_MIN_WIDTH,
-    min_h: int = _PREVIEW_MIN_HEIGHT,
-    max_w: int = _PREVIEW_MAX_WIDTH,
-    max_h: int = _PREVIEW_MAX_HEIGHT,
-) -> tuple[int, int]:
-    """New preview size for a right-drag of (drag_dx, drag_dy).
-
-    Top-left anchored: only the bottom-right corner follows the drag. The
-    drag's dominant axis drives the size and the other axis follows exactly,
-    so the thumbnail is never stretched away from the source's aspect ratio
-    (eve-o-preview instead free-resizes and lets DWM letterbox; #122 locks
-    the window shape itself).
-
-    Clamped to min/max per-dimension like eve-o, but the clamp box is
-    intersected with the ratio line first: the effective width range is the
-    set of widths whose ratio-exact height also lands inside [min_h, max_h].
-    Both dimensions therefore stay within min/max at every drag position,
-    and the ratio stays exact at every position.
-    """
-    if src_w <= 0 or src_h <= 0:
-        # Unknown source: fall back to the clamped base shape.
-        return (
-            max(min_w, min(max_w, base_w)),
-            max(min_h, min(max_h, base_h)),
-        )
-    # Effective width bounds: clamp box ∩ ratio line (integer ceil/floor).
-    w_lo = max(min_w, -(-min_h * src_w // src_h))
-    w_hi = min(max_w, max_h * src_w // src_h)
-    # The drag's dominant axis picks the candidate; a vertical drag is
-    # converted into width space so one clamp serves both directions.
-    ratio = src_w / src_h
-    candidate_w = float(base_w + drag_dx)
-    if abs(drag_dy) > abs(drag_dx):
-        candidate_w = (base_h + drag_dy) * src_w / src_h
-    width = max(w_lo, min(w_hi, candidate_w))
-    return int(round(width)), max(1, int(round(width / ratio)))
-
-
 def _find_yaah_window(user32=None) -> int:
     """HWND of the yaah main window by exact title ("YAAH"); 0 if absent."""
     if user32 is None:
@@ -295,7 +262,7 @@ def _find_yaah_window(user32=None) -> int:
         if os.name != "nt" or not hasattr(ctypes, "windll"):
             return 0
         user32 = ctypes.windll.user32
-    find = getattr(user32, "FindWindowW")
+    find = user32.FindWindowW
     if hasattr(ctypes, "WinDLL") and isinstance(user32, ctypes.WinDLL):
         find.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR]
         find.restype = ctypes.wintypes.HWND
@@ -374,6 +341,9 @@ class _PreviewManager:
 
         class POINT(ctypes.Structure):
             _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+        user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(POINT)]
+        user32.ClientToScreen.restype = wintypes.BOOL
 
         class MSG(ctypes.Structure):
             _fields_ = [
@@ -569,10 +539,10 @@ class _PreviewManager:
         # "drag" holds the active gesture session (#122): which button started
         # it (stored as the PAIRED UP message so button-up handlers match),
         # the button-down anchor (absolute cursor + rect, aspect sampled
-        # once), and whether the gesture actually moved.
+        # once), and whether the gesture actually moved. "yaah_origin" is the
+        # last-seen yaah client top-left: the follow delta (user round 3).
         state = {
-            "pinned": False,
-            "offset": (_PIN_GAP, 24),
+            "yaah_origin": None,
             "hook": None,
             "drag": {
                 "active": False,
@@ -625,27 +595,51 @@ class _PreviewManager:
                 return None
             return (rect.left, rect.top, rect.right, rect.bottom)
 
-        def _apply_pin() -> None:
-            """Move the preview to the yaah anchor (pinned mode only)."""
-            if not state["pinned"] or not hwnd:
+        def _yaah_client_rect() -> tuple[int, int, int, int] | None:
+            """Yaah's client area in SCREEN coordinates — the confinement
+            boundary (user round 3 chose client area over the outer rect)."""
+            yaah = _find_yaah_window(user32)
+            if not yaah or not user32.IsWindow(yaah):
+                return None
+            rect = RECT()
+            if not user32.GetClientRect(yaah, ctypes.byref(rect)):
+                return None
+            pt = POINT(0, 0)
+            if not user32.ClientToScreen(yaah, ctypes.byref(pt)):
+                return None
+            return (pt.x, pt.y, pt.x + rect.right, pt.y + rect.bottom)
+
+        def _follow_and_confine() -> None:
+            """Always-on follow + confinement (user round 3).
+
+            Shifts the preview by however far yaah's client origin moved
+            (follow), then clamps the result fully inside yaah's client
+            rect (confinement, live). Never fights an in-flight gesture:
+            the drag owns the window until the button is released.
+            """
+            if not hwnd or state["drag"]["active"]:
                 return
-            if state["drag"]["active"]:
-                # Never fight an in-flight gesture (#122): the drag owns the
-                # window until the button is released; the offset is then
-                # re-anchored in the button-up handler.
+            yaah = _yaah_client_rect()
+            prev = _window_rect()
+            if yaah is None or prev is None:
                 return
-            yaah = _yaah_rect()
-            if yaah is None:
+            last = state["yaah_origin"]
+            state["yaah_origin"] = (yaah[0], yaah[1])
+            dx = dy = 0
+            if last is not None:
+                dx, dy = yaah[0] - last[0], yaah[1] - last[1]
+            target = (prev[0] + dx, prev[1] + dy, prev[2] + dx, prev[3] + dy)
+            confined = clamp_to_rect(target, yaah)
+            if confined == prev:
                 return
-            px, py = pinned_position(yaah, state["offset"])
             user32.SetWindowPos(
                 hwnd,
                 wintypes.HWND(-1),  # HWND_TOPMOST
-                px,
-                py,
-                0,
-                0,
-                0x0001 | 0x0004 | 0x0010,  # NOSIZE | NOZORDER | NOACTIVATE
+                confined[0],
+                confined[1],
+                confined[2] - confined[0],
+                confined[3] - confined[1],
+                SWP_NOZORDER | SWP_NOACTIVATE,
             )
 
         # ---- eve-o-preview-style gestures (#122) ----
@@ -703,10 +697,15 @@ class _PreviewManager:
             if dx == 0 and dy == 0:
                 return
             drag["moved"] = True
+            bounds = _yaah_client_rect()
             if action == "move":
                 left, top, right, bottom = move_target(
                     drag["start_rect"], drag["start"], current
                 )
+                if bounds is not None:
+                    left, top, right, bottom = clamp_to_rect(
+                        (left, top, right, bottom), bounds
+                    )
                 user32.SetWindowPos(
                     hwnd,
                     None,
@@ -718,8 +717,13 @@ class _PreviewManager:
                 )
             else:  # resize: top-left anchored, bottom-right follows
                 left, top, right, bottom = resize_target(
-                    drag["start_rect"], drag["start"], current, drag["aspect"]
+                    drag["start_rect"], drag["start"], current, drag["aspect"],
+                    bounds=bounds,
                 )
+                if bounds is not None:
+                    left, top, right, bottom = clamp_to_rect(
+                        (left, top, right, bottom), bounds
+                    )
                 user32.SetWindowPos(
                     hwnd,
                     None,
@@ -734,74 +738,47 @@ class _PreviewManager:
             """Single end-of-gesture funnel (#122 fix, Wingman pattern).
 
             Clears the session BEFORE ReleaseCapture (which synchronously
-            re-enters WM_CAPTURECHANGED), then re-anchors the pin offset
-            once — the button-up, WM_CAPTURECHANGED and WM_EXITSIZEMOVE
-            paths all land here, so ownership of the rect is never stale
-            and the pinned preview never teleports after a gesture.
+            re-enters WM_CAPTURECHANGED), then runs one follow+confine pass
+            — the button-up, WM_CAPTURECHANGED and WM_EXITSIZEMOVE paths all
+            land here, so a gesture can never leave the preview outside
+            yaah's client area.
             """
             drag = state["drag"]
             was_moving = drag["active"]
-            was_pinned_moved = drag["active"] and state["pinned"] and drag["moved"]
             drag["active"] = False
             if user32.GetCapture() == hwnd:
                 user32.ReleaseCapture()
-            if not was_moving:
-                return
-            if was_pinned_moved:
-                yaah = _yaah_rect()
-                prev = _window_rect()
-                if yaah is not None and prev is not None:
-                    state["offset"] = pin_offset(yaah, prev)
-                _apply_pin()
+            if was_moving:
+                _follow_and_confine()
 
 
         def _win_event_proc(_hook, _event, event_hwnd, id_object, _child, _t1, _t2):
             # Only the yaah main window's window-object moves matter.
             if (
-                state["pinned"]
-                and id_object == OBJID_WINDOW
+                id_object == OBJID_WINDOW
                 and _find_yaah_window(user32) == int(event_hwnd or 0)
             ):
-                _apply_pin()
+                _follow_and_confine()
 
         win_event_proc = WINEVENTPROC(_win_event_proc)
 
-        def _set_pinned(pinned: bool) -> None:
-            try:
-                state["pinned"] = pinned
-                if hwnd:
-                    yaah = _yaah_rect()
-                    prev = _window_rect()
-                    if prev is not None:
-                        if pinned and yaah is not None:
-                            state["offset"] = pin_offset(yaah, prev)
-                        if pinned:
-                            _apply_pin()
-                if pinned:
-                    hook = user32.SetWinEventHook(
-                        _EVENT_OBJECT_LOCATIONCHANGE,
-                        _EVENT_OBJECT_LOCATIONCHANGE,
-                        None,
-                        win_event_proc,
-                        0,
-                        0,
-                        _WINEVENT_OUTOFCONTEXT | _WINEVENT_SKIPOWNTHREAD,
-                    )
-                    if hook:
-                        state["hook"] = hook
-                    else:
-                        log.warning("could not install pin-follow WinEvent hook")
-                else:
-                    hook, state["hook"] = state["hook"], None
-                    if hook:
-                        user32.UnhookWinEvent(hook)
-            finally:
-                # Persistence must survive any follow-related failure so the
-                # toggle never lies about the saved preference.
-                try:
-                    set_preview_pinned(pinned)
-                except Exception:
-                    log.warning("could not persist preview pin state", exc_info=True)
+        def _install_follow_hook() -> None:
+            # Always-on follow (user round 3): track yaah's client origin and
+            # confine. WinEvents are opportunistic under a Python loop; the
+            # throttled tick in the pump loop guarantees follow reliability.
+            hook = user32.SetWinEventHook(
+                _EVENT_OBJECT_LOCATIONCHANGE,
+                _EVENT_OBJECT_LOCATIONCHANGE,
+                None,
+                win_event_proc,
+                0,
+                0,
+                _WINEVENT_OUTOFCONTEXT | _WINEVENT_SKIPOWNTHREAD,
+            )
+            if hook:
+                state["hook"] = hook
+            else:
+                log.warning("could not install follow WinEvent hook")
 
         @WNDPROC
         def wnd_proc(window, message, wparam, lparam):
@@ -872,15 +849,10 @@ class _PreviewManager:
                 _gesture_debug("capturechanged", active=state["drag"]["active"])
                 finish_gesture()
                 return 0
-            if message == WM_EXITSIZEMOVE and state["pinned"]:
-                # Native modal move/resize loop finished: re-anchor wherever
-                # the user left it. (Custom drags never enter that loop, so
-                # their re-anchor happens in finish_gesture instead.)
-                yaah = _yaah_rect()
-                prev = _window_rect()
-                if yaah is not None and prev is not None:
-                    state["offset"] = pin_offset(yaah, prev)
-                _apply_pin()
+            if message == WM_EXITSIZEMOVE:
+                # Native modal move/resize loop finished (custom drags never
+                # enter it): one follow+confine pass wherever the user left it.
+                _follow_and_confine()
                 return 0
             return user32.DefWindowProcW(window, message, wparam, lparam)
 
@@ -936,35 +908,33 @@ class _PreviewManager:
             if dwmapi.DwmRegisterThumbnail(hwnd, source, ctypes.byref(thumbnail)) != 0:
                 raise OSError("DwmRegisterThumbnail failed")
 
-            screen_w = user32.GetSystemMetrics(0)
-            x = max(0, screen_w - _PREVIEW_WIDTH - 24)
-            y = 24
-            try:
-                state["pinned"] = get_preview_pinned()
-            except Exception:
-                state["pinned"] = False
-            if state["pinned"]:
-                yaah = _yaah_rect()
-                if yaah is not None:
-                    # Fresh start has no user-established offset: default gap.
-                    state["offset"] = (_PIN_GAP, y - yaah[1])
-                    px, py = pinned_position(yaah, state["offset"])
-                    x, y = px, py
+            # Fresh start (user round 3): just inside yaah's client top-left
+            # with an inset, sized to the default dimensions, confined to
+            # yaah's client area.
+            yaah_client = _yaah_client_rect()
+            if yaah_client is not None:
+                x, y = start_position(yaah_client)
+                start_w = min(_PREVIEW_WIDTH, yaah_client[2] - yaah_client[0])
+                start_h = min(_PREVIEW_HEIGHT, yaah_client[3] - yaah_client[1])
+            else:
+                screen_w = user32.GetSystemMetrics(0)
+                x = max(0, screen_w - _PREVIEW_WIDTH - 24)
+                y = 24
+                start_w, start_h = _PREVIEW_WIDTH, _PREVIEW_HEIGHT
             if not user32.SetWindowPos(
                 hwnd,
                 wintypes.HWND(-1),
                 x,
                 y,
-                _PREVIEW_WIDTH,
-                _PREVIEW_HEIGHT,
+                start_w,
+                start_h,
                 0x0010,
             ):  # SWP_NOACTIVATE
                 raise ctypes.WinError(ctypes.get_last_error())
             user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
             if not _update_thumbnail():
                 return
-            if state["pinned"]:
-                _set_pinned(True)
+            _install_follow_hook()
 
             def _pump_messages() -> bool:
                 """Drain the message queue; False when WM_QUIT arrived."""
@@ -982,13 +952,13 @@ class _PreviewManager:
                 if not _pump_messages():
                     return
                 now = time.monotonic()
-                if state["pinned"] and now >= next_follow:
-                    # Guaranteed pin-follow: a WINEVENT_LOCATIONCHANGE hook
-                    # fires only when WinEvents reach this thread's queue,
-                    # which is not guaranteed for a Python message loop; a
-                    # throttled re-anchor piggybacking this loop keeps follow
-                    # reliable at negligible cost (one GetWindowRect per tick).
-                    _apply_pin()
+                if now >= next_follow:
+                    # Guaranteed follow+confine: a WINEVENT_LOCATIONCHANGE
+                    # hook fires only when WinEvents reach this thread's
+                    # queue, which is not guaranteed for a Python message
+                    # loop; a throttled pass piggybacking this loop keeps
+                    # follow reliable at negligible cost.
+                    _follow_and_confine()
                     next_follow = now + 0.06
                 if now >= next_check:
                     if not user32.IsWindow(source):

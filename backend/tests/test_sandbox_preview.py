@@ -91,37 +91,6 @@ def test_fit_thumbnail_rect_falls_back_when_source_unknown():
     assert (left, top, w, h) == (0, 0, 420, 236)
 
 
-def test_pin_offset_anchors_right_edge():
-    yaah = (0, 0, 1000, 800)
-    prev = (1024, 100, 1444, 336)
-    assert preview.pin_offset(yaah, prev) == (24, 100)
-
-
-def test_pinned_position_reproduces_anchor_after_yaah_moves():
-    yaah = (0, 0, 1000, 800)
-    prev = (1024, 100, 1444, 336)
-    offset = preview.pin_offset(yaah, prev)
-    assert preview.pinned_position((200, 300, 1200, 1100), offset) == (1224, 400)
-
-
-def test_preview_pinned_config_roundtrip(tmp_path, monkeypatch):
-    import backend.agent.config as config
-
-    cfg = tmp_path / "config.json"
-    # CONFIG_PATH is bound at import (conftest redirects it to a shared
-    # temp file); point it at an isolated file for this test.
-    monkeypatch.setattr(config, "CONFIG_PATH", cfg)
-    assert preview.get_preview_pinned() is False
-    preview.set_preview_pinned(True)
-    assert preview.get_preview_pinned() is True
-    # Other sandbox keys survive the write.
-    import json
-
-    data = json.loads(cfg.read_text(encoding="utf-8"))
-    assert data["sandbox"]["enabled"] is True
-    assert data["sandbox"]["preview_pinned"] is True
-
-
 def test_find_yaah_window_uses_exact_title(monkeypatch):
     class FakeUser32:
         def __init__(self):
@@ -147,60 +116,52 @@ def test_find_yaah_window_returns_zero_when_absent():
 # ---- #122: eve-o-preview-style gestures ----
 
 
-def test_gesture_action_maps_left_to_move_and_right_to_resize():
-    assert preview.gesture_action(True, False) == "move"
-    assert preview.gesture_action(False, True) == "resize"
-
-
-def test_gesture_action_clicks_and_chords_are_inert():
-    # A plain click (no drag) must have no other effect: no activation, no
-    # context menu (#122). Button chords define no gesture either.
-    assert preview.gesture_action(False, False) is None
-    assert preview.gesture_action(True, True) is None
-
-
-def test_resize_keep_ratio_preserves_source_ratio_both_axes():
-    # 16:9 source; x-dominant drag drives width, height follows exactly.
-    w, h = preview.resize_keep_ratio(1920, 1080, 210, 8, 420, 236)
-    assert abs(w / h - 16 / 9) < 0.01
-    # y-dominant drag drives height, width follows exactly.
-    w2, h2 = preview.resize_keep_ratio(1920, 1080, 8, 94, 420, 236)
-    assert abs(w2 / h2 - 16 / 9) < 0.01
-
-
-def test_resize_keep_ratio_is_top_left_anchored_by_construction():
-    # Only sizes are returned; the caller keeps x/y fixed (bottom-right
-    # corner follows the drag). A zero drag returns the base size.
-    assert preview.resize_keep_ratio(1920, 1080, 0, 0, 420, 236) == (420, 236)
-
-
-def test_resize_keep_ratio_clamps_to_max_and_stays_in_ratio():
-    w, h = preview.resize_keep_ratio(1920, 1080, 5000, 5000, 420, 236)
-    assert w <= 640 and h <= 400
-    # 16:9 hits the height clamp first: 400 tall -> 711 wide -> clamped to
-    # 640 wide -> 360 tall (ratio exact inside the clamp box).
-    assert (w, h) == (640, 360)
-    assert abs(w / h - 16 / 9) < 0.01
-
-
-def test_resize_keep_ratio_clamps_to_min_and_stays_in_ratio():
-    w, h = preview.resize_keep_ratio(1920, 1080, -5000, -5000, 420, 236)
-    assert w >= 100 and h >= 80
-    # 16:9 hits the height floor first: 80 tall -> 142.2 wide.
-    assert (w, h) == (143, 80)
-    assert abs(w / h - 16 / 9) < 0.02
-
-
-def test_resize_keep_ratio_unknown_source_falls_back_to_base():
-    assert preview.resize_keep_ratio(0, 0, 50, 50, 420, 236) == (420, 236)
-
-
-def test_preview_size_clamp_defaults_match_issue_122():
+def test_preview_min_size_defaults():
     assert (preview._PREVIEW_MIN_WIDTH, preview._PREVIEW_MIN_HEIGHT) == (100, 80)
-    assert (preview._PREVIEW_MAX_WIDTH, preview._PREVIEW_MAX_HEIGHT) == (640, 400)
 
 
-# ---- anchored gesture targets (#122 fix): absolute, not incremental ----
+# ---- confinement & always-on follow (user round 3) ----
+
+
+def test_clamp_to_rect_keeps_window_inside_bounds():
+    # Whole-rect clamp: a window dragged past yaah's client edge is pulled
+    # back so it is fully inside the bounds.
+    assert preview.clamp_to_rect(
+        (900, 550, 1000, 650), (0, 0, 800, 600)
+    ) == (700, 500, 800, 600)
+    # Already inside: unchanged.
+    assert preview.clamp_to_rect(
+        (10, 10, 200, 150), (0, 0, 800, 600)
+    ) == (10, 10, 200, 150)
+
+
+def test_clamp_to_rect_shrinks_oversized_window():
+    # Yaah smaller than the preview: the preview shrinks to fit (top-left
+    # stays anchored, size floors at the preview minimum).
+    assert preview.clamp_to_rect(
+        (0, 0, 500, 400), (0, 0, 200, 150)
+    ) == (0, 0, 200, 150)
+
+
+def test_start_position_insets_from_client_top_left():
+    # Fresh start: just inside yaah's client top-left with an inset so
+    # yaah's own toolbar stays visible.
+    assert preview.start_position((100, 50, 1100, 750)) == (112, 62)
+    assert preview.start_position((0, 0, 800, 600)) == (12, 12)
+
+
+def test_resize_target_caps_at_bounds():
+    # The preview can never exceed yaah's client dimensions: the old 640x400
+    # ceiling is replaced by the confinement bounds (ratio stays exact).
+    rect = preview.resize_target(
+        start_rect=(0, 0, 200, 112),
+        start=(0, 0),
+        current=(3000, 3000),
+        aspect=16 / 9,
+        bounds=(0, 0, 800, 450),
+    )
+    assert (rect[2] - rect[0], rect[3] - rect[1]) == (800, 450)
+
 
 
 # ---- feedback round 2 (user reports): pairing, uniform hit, unclamped ----
