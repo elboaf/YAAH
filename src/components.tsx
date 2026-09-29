@@ -3841,7 +3841,7 @@ export function ModelOptions({
         </optgroup>
       ))}
       {/* value isn't in any group (provider down / removed): keep it visible+selectable */}
-      {!Object.values(byProvider).some((pm) => pm.models.includes(modelId)) && (
+      {value !== '' && !Object.values(byProvider).some((pm) => pm.models.includes(modelId)) && (
         <option value={value}>{modelId}</option>
       )}
       {Object.keys(byProvider).length === 0 && (
@@ -5167,6 +5167,10 @@ function AgentsDialog({
   const [editing, setEditing] = useState<string | null>(editAgentId ?? null)
   const [deleteTarget, setDeleteTarget] = useState<ScheduledAgent | null>(null)
   const [busy, setBusy] = useState(false)
+  // Issue #130: one model-list probe for the whole panel (not per row), shared
+  // with the per-row inline model selectors via ModelOptions.
+  const { byProvider } = useModelList()
+  const [savingModelId, setSavingModelId] = useState<string | null>(null)
 
   useEffect(() => {
     void refreshAgents()
@@ -5211,6 +5215,29 @@ function AgentsDialog({
     }
   }
 
+  // Issue #130: inline per-row model write-through. Uses the targeted
+  // /model-effort endpoint (added for #51/#76) so the schedule clock is NOT
+  // reset — never the full-record PATCH that togglePause uses.
+  const setRowModel = async (a: ScheduledAgent, value: string) => {
+    if (value === a.model || savingModelId) return
+    setSavingModelId(a.id)
+    try {
+      await updateAgentModelEffort(a.id, value, a.effort)
+      await refreshAgents()
+    } catch (e) {
+      pushToast({ kind: 'error', title: `Could not change model for "${a.name}"`, body: String((e as { message?: string }).message ?? e) })
+    } finally {
+      setSavingModelId(null)
+    }
+  }
+
+  /** Row label for an agent's model scope: '' = inherit the global default. */
+  const rowModelLabel = (a: ScheduledAgent) => {
+    if (!a.model) return 'default'
+    const { model } = parseModelScope(a.model)
+    return model || a.model
+  }
+
   return (
     <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg   bg-zinc-900 shadow-2xl">
@@ -5241,12 +5268,25 @@ function AgentsDialog({
                     </span>
                     <span className="truncate font-mono text-xs text-zinc-200">{a.name}</span>
                     <span className="flex-1 truncate font-mono text-[10px] text-zinc-600">
-                      {a.schedule_text} · {a.approval_policy}
+                      {a.schedule_text} · {a.approval_policy} · <span title={a.model || 'default (inherit active model)'}>{rowModelLabel(a)}</span>
                       {a.next_fire_at && a.enabled ? ` · next ${relTime(a.next_fire_at)}` : ''}
                     </span>
                   </div>
                   <p className="mt-1 line-clamp-2 text-[10px] text-zinc-500">{a.prompt}</p>
                   <div className="mt-1.5 flex items-center gap-1.5">
+                    {/* Issue #130: inline model override — writes through
+                        /model-effort immediately, no edit drill-down. */}
+                    <select
+                      className="max-w-40 rounded px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                      value={a.model}
+                      disabled={savingModelId === a.id}
+                      onChange={(e) => void setRowModel(a, e.target.value)}
+                      aria-label={`Model for ${a.name}`}
+                      title={a.model || 'default (inherit active model)'}
+                    >
+                      <option value="">default</option>
+                      <ModelOptions byProvider={byProvider} value={a.model} />
+                    </select>
                     <button
                       className="rounded   px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                       disabled={busy || a.running}
