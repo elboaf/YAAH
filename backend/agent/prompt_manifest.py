@@ -52,6 +52,11 @@ from pathlib import Path
 # never touched; inside pytest, conftest.py has already set these.
 # ---------------------------------------------------------------------------
 
+# The host platform gates what this process can render: win-* combos
+# need the real Windows builders; posix-* renders are native on a
+# posix host and flip-simulated on Windows.
+HOST_WINDOWS = os.name == "nt"
+
 _TMP_ROOT = None
 
 
@@ -407,6 +412,29 @@ _KIND_COMBOS = [
 ]
 
 
+def _combo_targets_windows(combo: str) -> bool:
+    """Which platform a combo renders for (kind combos carry their
+    platform in the id; the auxiliary kind is host-neutral)."""
+    if combo.startswith("win-"):
+        return True
+    if combo.startswith("posix-"):
+        return False
+    if combo.startswith("kind-subagents-win"):
+        return True
+    if combo.startswith("kind-subagents-posix"):
+        return False
+    return True  # kind-auxiliary-prompts
+
+
+def combos_for_host() -> list:
+    """Combos renderable on THIS host (target platform must match)."""
+    return [
+        c
+        for c in iter_combos()
+        if _combo_targets_windows(c) == HOST_WINDOWS
+    ]
+
+
 def iter_combos() -> list:
     """All combo ids in the render matrix (deterministic order)."""
     return _iter_local(True) + _iter_local(False) + _iter_remote() + list(_KIND_COMBOS)
@@ -460,37 +488,44 @@ from contextlib import contextmanager
 
 @contextmanager
 def _platform_os_name(windows: bool):
-    """Flip os.name for the duration (test-suite precedent).
-
-    pathlib.Path dispatches on os.name at call time, so the flip
-    also rebinds backend modules' Path names to a WindowsPath
-    subclass (subclasses skip pathlib's os guard) and restores them
-    on exit.
+    """Flip os.name for the duration when the target differs from the
+    host. On a posix host rendering posix, this is a no-op (native).
+    On a Windows host rendering posix, pathlib.Path dispatches on
+    os.name at call time, so the flip also rebinds backend modules'
+    Path names to a WindowsPath subclass (subclasses skip pathlib's
+    os guard) and restores them on exit.
     """
     import os as _os
-    import pathlib as _pathlib
     import sys as _sys
 
-    real = _os.name
-    if windows:
+    target_windows = bool(windows)
+    if target_windows == HOST_WINDOWS:
         yield
         return
+    if HOST_WINDOWS:
+        import pathlib as _pathlib
 
-    class _AlwaysWinPath(_pathlib.WindowsPath):
-        pass
+        class _AlwaysWinPath(_pathlib.WindowsPath):
+            pass
 
-    swapped = []
-    for mod_name, mod in list(_sys.modules.items()):
-        if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
-            mod.Path = _AlwaysWinPath
-            swapped.append((mod, _pathlib.Path))
-    _os.name = "posix"
-    try:
-        yield
-    finally:
-        _os.name = real
-        for mod, orig in swapped:
-            mod.Path = orig
+        swapped = []
+        for mod_name, mod in list(_sys.modules.items()):
+            if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
+                mod.Path = _AlwaysWinPath
+                swapped.append((mod, _pathlib.Path))
+        _os.name = "posix"
+        try:
+            yield
+        finally:
+            _os.name = "nt"
+            for mod, orig in swapped:
+                mod.Path = orig
+    else:
+        _os.name = "nt"
+        try:
+            yield
+        finally:
+            _os.name = "posix"
 
 
 def _isolated_roots() -> dict:
@@ -869,10 +904,14 @@ def write_manifest(manifest: dict, out_dir: Path) -> Path:
 
 
 def generate_all(out_dir: str | Path = "backend/prompt_manifests") -> list:
-    """Render every combo in the matrix and write one manifest per combo."""
+    """Render every HOST-renderable combo (one manifest per combo).
+
+    The other platform's manifests stay as committed reference
+    artifacts; canonical bytes come from each platform's own host.
+    """
     out_dir = Path(out_dir)
     written = []
-    for combo in iter_combos():
+    for combo in combos_for_host():
         manifest = render_combo(combo)
         written.append(write_manifest(manifest, out_dir))
     return written
