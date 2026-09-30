@@ -109,6 +109,7 @@ import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
 import { parseModelScope, qualifyModelScope } from './modelScope'
+import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
@@ -1488,14 +1489,31 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
               ))}
             </div>
           ) : null}
-          {msg.attachments?.length ? (
-            <div className="mb-1.5 flex flex-wrap justify-end gap-1">
-              {msg.attachments.map((a, i) => (
-                <ExpandableAttachmentChip key={i} a={a} />
-              ))}
-            </div>
-          ) : null}
-          <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+          {(() => {
+            // Chips from structured records (#142), or — display-only — from
+            // exact-match legacy parsing of old raw-concatenated rows (#144).
+            // Legacy rows strip the attachment text from the displayed copy;
+            // rows that already carry structured records keep msg.content
+            // verbatim (replay sends it as-is, so nothing may be hidden).
+            const legacy =
+              msg.attachments?.length
+                ? null
+                : parseLegacyAttachments(msg.content)
+            const chips = msg.attachments ?? legacy?.attachments
+            const text = legacy ? legacy.text : msg.content
+            return (
+              <>
+                {chips?.length ? (
+                  <div className="mb-1.5 flex flex-wrap justify-end gap-1">
+                    {chips.map((a, i) => (
+                      <ExpandableAttachmentChip key={i} a={a} />
+                    ))}
+                  </div>
+                ) : null}
+                <div className="whitespace-pre-wrap break-words">{text}</div>
+              </>
+            )
+          })()}
           {msg.skills?.length ? (
             <div className="mt-1.5 flex flex-wrap justify-end gap-1">
               {msg.skills.map((name) => (

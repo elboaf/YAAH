@@ -1,7 +1,7 @@
 """Golden fixture for the attachment inline format (#142).
 
 The canonical name/content pairs and their exact expected inline strings,
-shared conceptually with the frontend's copy (src/attachmentFixture.ts).
+canonical frontend copy: src/attachmentFixture.ts (single source of truth).
 Backend: re-inlining structured attachments in load_history must produce
 these strings byte-identically.
 """
@@ -14,7 +14,7 @@ from backend.agent.attachments import (
 )
 
 
-# ---- The golden fixture (mirrored in src/attachmentFixture.ts) ----
+# ---- The golden fixture (canonical copy: src/attachmentFixture.ts) ----
 
 FIXTURE = [
     # (attachment record, exact expected inline string)
@@ -59,6 +59,18 @@ def test_staged_kb_rounds_up_to_at_least_one():
     record = {"name": "tiny.txt", "size": 10, "path": ".yaah-attachments/tiny.txt"}
     out = inline_attachment_text(record)
     assert "(1 KB)" in out
+
+
+def test_fixture_strings_are_display_parsable_mirror():
+    """#144 mirror: the frontend display parser (src/legacyAttachments.ts)
+    is pinned to these exact strings. This test re-derives them locally so a
+    wording change here breaks both sides loudly (see the spec's Further
+    Notes: the parser pins the OLD wording)."""
+    for record, expected in FIXTURE:
+        assert inline_attachment_text(record) == expected  # producer parity
+        # The strings below must stay in lockstep with src/attachmentFixture.ts.
+        assert expected.startswith("\n\n--- attached file: ")
+        assert expected.endswith("```") or expected.endswith("large files).")
 
 
 def test_malformed_records_degrade_safely():
