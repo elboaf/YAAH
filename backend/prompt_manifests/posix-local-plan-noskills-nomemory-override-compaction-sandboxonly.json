@@ -1,0 +1,139 @@
+{
+  "combo": "posix-local-plan-noskills-nomemory-override-compaction-sandboxonly",
+  "kind": "local",
+  "sections": [
+    {
+      "name": "override",
+      "bytes": 34,
+      "sha256": "f779f5a176017bfcbabd29daabf49ed20defe9e1d828eb82f10291d6dc4963a1",
+      "text": "You are a pirate. Speak in pirate."
+    },
+    {
+      "name": "project-notes",
+      "bytes": 330,
+      "sha256": "a3882d4200bddd04b0be8a44e111009d423dbc6431d50568d128115e8c835f75",
+      "text": "# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text."
+    },
+    {
+      "name": "plan-mode",
+      "bytes": 443,
+      "sha256": "4a03a6b0702f56de2ae739b2574f6f73bd0ceadba3539ca97626a7356aa2f150",
+      "text": "# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it."
+    },
+    {
+      "name": "sandbox-only",
+      "bytes": 442,
+      "sha256": "de72f6484ff85bc72883fef5b9b7b16b45583a9a0645e978979bd28350f0dc89",
+      "text": "# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+    }
+  ],
+  "system_messages": [
+    {
+      "role": "system",
+      "bytes": 1270,
+      "sha256": "7444b2f195b0fad94a76587af798563abebb8bd67c1f24c4c38803a999afb601"
+    }
+  ],
+  "total_bytes": 1270,
+  "rendered_sha256": "7444b2f195b0fad94a76587af798563abebb8bd67c1f24c4c38803a999afb601",
+  "tool_schemas": [
+    {
+      "name": "bash",
+      "bytes": 1271,
+      "sha256": "24640ccd735ac6cc74c65076139f8465d8d3063d55c27e213fd9ae596a1ff531"
+    },
+    {
+      "name": "get_help",
+      "bytes": 475,
+      "sha256": "a6f8198631959cf7d597b05edf43dd4162ea9a13052870408438ba6537149d07"
+    },
+    {
+      "name": "web_search",
+      "bytes": 395,
+      "sha256": "4781173e2c60c25583f9b4b5420bf565e6f3e128b0b824519bdf219c4a2a4046"
+    },
+    {
+      "name": "web_fetch",
+      "bytes": 557,
+      "sha256": "26b56c05ed4e94424958db1888c229ad357fc392bd81a5c44727744d70b8496e"
+    },
+    {
+      "name": "view_image",
+      "bytes": 619,
+      "sha256": "cd944ceb622f6e45d3e2807e33ce36bec903c9967a36461c1eb25b3b6ed1ce69"
+    },
+    {
+      "name": "ask_user",
+      "bytes": 885,
+      "sha256": "c0add842fd95e8c286d64988f1e4a817e24e417fea2bf301c869e47fca5b4ce1"
+    },
+    {
+      "name": "read_file",
+      "bytes": 663,
+      "sha256": "6504d95710a15095b77772d3257e0fd717fe8b643341f2d3f224e53c61396298"
+    },
+    {
+      "name": "write_file",
+      "bytes": 275,
+      "sha256": "dd8b9a9f347813df10a0209d7a2441937cd951c2dc2b143995dd70c5e79a3cd1"
+    },
+    {
+      "name": "edit_file",
+      "bytes": 383,
+      "sha256": "bc9cdd3aafd4b523b5b079d578c87956f7923a1ff4742d217d88f75a1f617889"
+    },
+    {
+      "name": "create_file",
+      "bytes": 312,
+      "sha256": "2f37fb4d1d4060ead38af526e6e1acb1fc588d42cacceddc34cea154bfad2342"
+    },
+    {
+      "name": "delete_file",
+      "bytes": 232,
+      "sha256": "6c13e71b37d41a00aec8f28e80720d88eea5eac8b0f14a93af46bce9b15705e3"
+    },
+    {
+      "name": "move_file",
+      "bytes": 346,
+      "sha256": "f694f96e49a2cd9cbe30d835189b9309ba0c3e2fb5eebc6a5f13344e5e589eda"
+    },
+    {
+      "name": "search_files",
+      "bytes": 557,
+      "sha256": "9de55d51cb04bae4ba9689634dd3f6e0e2f400ddc0976e1943858b0a9c8621a8"
+    },
+    {
+      "name": "search_conversation_history",
+      "bytes": 594,
+      "sha256": "f9c848a09744ac1d89247c923169ec888c5e27a609eb87df509a320381a44507"
+    },
+    {
+      "name": "spawn_agent",
+      "bytes": 1301,
+      "sha256": "065b018fac874ab087582394667ea82631539df37bef78363abf21f6510a90f8"
+    },
+    {
+      "name": "load_skill",
+      "bytes": 493,
+      "sha256": "f24564c9ad287f9729635966b715fcbd5f357222cf0a856b758639bf75613dcc"
+    },
+    {
+      "name": "memory_save",
+      "bytes": 1079,
+      "sha256": "91837d49891003c76a503d00dd9469cfe91d4953f6a2bc4b5a9aceb9c78ca0fb"
+    },
+    {
+      "name": "memory_read",
+      "bytes": 349,
+      "sha256": "b78825cc93de8377705ce77faa9753b7846ece0ae97aee4cdcf84f898a480efb"
+    },
+    {
+      "name": "memory_delete",
+      "bytes": 289,
+      "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
+    }
+  ],
+  "subagent_prompts": {},
+  "auxiliary_prompts": {},
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+}

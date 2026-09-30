@@ -1,0 +1,25 @@
+{
+  "combo": "kind-auxiliary-prompts",
+  "kind": "auxiliary",
+  "sections": [],
+  "system_messages": [],
+  "total_bytes": 844,
+  "rendered_sha256": "9e56e32463b3b53efe85f43edd839c4298509a856dfbb438afe56d5b1b1bab21",
+  "tool_schemas": [],
+  "subagent_prompts": {},
+  "auxiliary_prompts": {
+    "compaction_summarizer": {
+      "builder": "backend/agent/compaction.py:summarize_messages (captured)",
+      "bytes": 685,
+      "sha256": "e8c203fd5119ba6fe7e2fca79b8d9362a88ee3c471c248734db5d27b8b7ac105",
+      "text": "You compress the earlier portion of an AI agent session into a compact continuity summary. The conversation transcript remains preserved for review and search; this summary is only a bounded replacement in future model prompts. If an earlier summary is included, merge its important facts with the newly summarized messages.\nPreserve: the user's goals and explicit instructions; decisions made and why; concrete anchors — file paths, branch names, commands, function/variable names, error messages; what was attempted and what failed; the current state and obvious next steps.\nWrite at most 400 words, plain prose or terse bullets. Reply with JSON only, no fences: {\"summary\": \"...\"}"
+    },
+    "title_generation": {
+      "builder": "backend/agent/loop.py:_generate_conversation_title (captured)",
+      "bytes": 159,
+      "sha256": "13c5c3b26d960c46d2639d78e49cc7c29892ae99d726314b06fe19a6ccbee112",
+      "text": "Generate a concise title for this conversation. Reply with only the title: 3-6 words, no quotes or period, in the user's language.\n\n[user] fixture user message"
+    }
+  },
+  "rendered_text": ""
+}
