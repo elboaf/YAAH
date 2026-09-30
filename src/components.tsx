@@ -109,6 +109,7 @@ import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
 import { parseModelScope, qualifyModelScope } from './modelScope'
+import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
@@ -1336,6 +1337,71 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
   )
 }
 
+/** Clickable attachment chip (#143): clicking toggles an inline, monospace,
+ *  height-capped internally-scrolling expansion of the file's text. Chips
+ *  with inline content render from the message's own stored data (no
+ *  network); staged-path chips fetch via previewFile on first expand
+ *  (cached thereafter) and show a graceful not-found state if the file is
+ *  gone. */
+const EXPAND_MAX_HEIGHT_CLASS = 'max-h-64'
+
+function ExpandableAttachmentChip({
+  a,
+}: {
+  a: { name: string; content?: string; path?: string; size: number }
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [fetched, setFetched] = useState<string | null>(null)
+  const [missed, setMissed] = useState(false)
+  const workspace = useAgent((s) => s.workspace)
+
+  const toggle = () => {
+    if (expanded) {
+      setExpanded(false)
+      return
+    }
+    if (a.content === undefined && fetched === null && !missed) {
+      // Lazy fetch for staged files (#143); the preview API proxies to
+      // remote hosts already. A missing file degrades to not-found, not an
+      // error toast.
+      previewFile(workspace, a.path ?? '')
+        .then((r) => setFetched(r.content))
+        .catch(() => setMissed(true))
+    }
+    setExpanded(true)
+  }
+
+  return (
+    <div className="flex flex-col items-end">
+      <button
+        type="button"
+        title={a.path ?? a.name}
+        onClick={toggle}
+        className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300 hover:bg-zinc-700"
+      >
+        {a.name}
+        <span className="text-zinc-500">
+          {' '}· {Math.max(1, Math.round(a.size / 1_000))} KB
+        </span>
+      </button>
+      {expanded ? (
+        a.content === undefined && missed ? (
+          <div className="mt-0.5 rounded bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-500">
+            file no longer exists
+          </div>
+        ) : (
+          <pre
+            data-attachment-expand
+            className={`mt-0.5 w-full max-w-[85%] overflow-y-auto whitespace-pre-wrap break-words rounded bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-300 ${EXPAND_MAX_HEIGHT_CLASS}`}
+          >
+            {a.content ?? fetched ?? '…'}
+          </pre>
+        )
+      ) : null}
+    </div>
+  )
+}
+
 export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   // Persisted failure markers (backend writes role='system' when a turn
   // dies): a slim machine line, not a fake agent message.
@@ -1441,7 +1507,31 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
               ))}
             </div>
           ) : null}
-          <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+          {(() => {
+            // Chips from structured records (#142), or — display-only — from
+            // exact-match legacy parsing of old raw-concatenated rows (#144).
+            // Legacy rows strip the attachment text from the displayed copy;
+            // rows that already carry structured records keep msg.content
+            // verbatim (replay sends it as-is, so nothing may be hidden).
+            const legacy =
+              msg.attachments?.length
+                ? null
+                : parseLegacyAttachments(msg.content)
+            const chips = msg.attachments ?? legacy?.attachments
+            const text = legacy ? legacy.text : msg.content
+            return (
+              <>
+                {chips?.length ? (
+                  <div className="mb-1.5 flex flex-wrap justify-end gap-1">
+                    {chips.map((a, i) => (
+                      <ExpandableAttachmentChip key={i} a={a} />
+                    ))}
+                  </div>
+                ) : null}
+                <div className="whitespace-pre-wrap break-words">{text}</div>
+              </>
+            )
+          })()}
           {msg.skills?.length ? (
             <div className="mt-1.5 flex flex-wrap justify-end gap-1">
               {msg.skills.map((name) => (
@@ -5639,6 +5729,47 @@ export function SandboxSettingsCard() {
   )
 }
 
+/** Settings card: the GLOBAL screenshot-tool toggle (issue #140). Each
+ *  capture sends a full-resolution image to the model, so sessions that
+ *  don't need screen observation can disallow it. Applies to new turns. */
+function ScreenshotToolToggle() {
+  const [allowed, setAllowed] = useState(true)
+
+  useEffect(() => {
+    getConfig()
+      .then((c) => setAllowed(c.computer_use?.allow_screenshot !== false))
+      .catch(() => {})
+  }, [])
+
+  const toggle = async (next: boolean) => {
+    setAllowed(next)
+    try {
+      await updateConfig({ computer_use: { allow_screenshot: next } })
+    } catch {
+      setAllowed(!next)
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-xs text-zinc-300">
+        <input
+          type="checkbox"
+          className="accent-blue-600"
+          checked={allowed}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        Allow screenshot tool
+      </label>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        Screen captures are sent to the model as full-resolution images. Disabling removes the
+        tool from new turns; read_ui_tree and list_windows stay available. Applies to new turns
+        and sessions.
+      </p>
+    </div>
+  )
+}
+
 /** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
 function AgentsSettingsSection() {
   const [rc, setRc] = useState('2')
@@ -6620,6 +6751,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               <>
                 <SettingsCard title="Windows Sandbox" className="col-span-2">
                   <SandboxSettingsCard />
+                </SettingsCard>
+
+                <SettingsCard title="Screenshot tool" className="col-span-2">
+                  <ScreenshotToolToggle />
                 </SettingsCard>
 
                 <SettingsCard title="Remote hosting" className="col-span-2">
@@ -8030,6 +8165,8 @@ export function ChatPanel() {
 interface Attachment {
   name: string
   content?: string
+  path?: string
+  /** Legacy field name (pre-#142 composer state); normalized to `path` on send. */
   savedPath?: string
   size: number
 }
@@ -9186,18 +9323,22 @@ function Composer() {
     setSending(true)
     setSendError(null)
 
-    // Inline small attachments as fenced blocks; large staged files as
-    // workspace path pointers the agent can read_file. PTT skips this —
-    // the attachments belong to the untouched draft.
-    let fullText = text
-    if (!isPtt && !handedOffPayload) {
-      for (const a of attachments) {
-        fullText += attachmentText(a)
-      }
-      if (images.length) {
-        fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
-      }
-    }
+    // Structured attachments (#142): the attachments travel as data
+    // alongside the message — the visible text holds only the user's words.
+    // PTT skips this — the attachments belong to the untouched draft.
+    const attachmentRecords = (!isPtt && !handedOffPayload)
+      ? attachments.map((a) => ({
+          name: a.name,
+          size: a.size,
+          ...(a.content !== undefined
+            ? { content: a.content }
+            : { path: a.path ?? a.savedPath }),
+        }))
+      : []
+    const displayText =
+      (!isPtt && !handedOffPayload && !text && attachments.length > 0 && images.length === 0)
+        ? `[${attachments.length} attachment${attachments.length === 1 ? '' : 's'}]`
+        : text
     const imageDataUrls = opts?.images ?? images.map((i) => i.dataUrl)
     // Skill invocations derive entirely from the message text (#105 design):
     // every valid $name token (plus a whole-message leading /name) invokes,
@@ -9205,7 +9346,7 @@ function Composer() {
     // verbatim so the model sees the in-context usage. Menu chips are just
     // the rendered view of these tokens — there is no separate chip list.
     const knownSkillNames = new Set(skills.map((s) => s.name))
-    const invokedSkills = opts?.skills ?? deriveInvokedSkills(fullText, knownSkillNames)
+    const invokedSkills = opts?.skills ?? deriveInvokedSkills(displayText, knownSkillNames)
     // Captured draft: if the turn fails before the agent answers, the
     // composer gets it back — a failed send must not cost the prompt.
     const draft = { input, attachments, images }
@@ -9230,7 +9371,14 @@ function Composer() {
     // Fresh turn: the previous run's compaction chip is stale — clear it
     // alongside the tape so the ticker row starts clean.
     clearCompaction(bufKey)
-    const userId = appendUserMessage(bufKey, fullText, imageDataUrls, invokedSkills.length ? invokedSkills : undefined)
+    const userId = appendUserMessage(
+      bufKey,
+      displayText,
+      imageDataUrls,
+      invokedSkills.length ? invokedSkills : undefined,
+      false,
+      attachmentRecords,
+    )
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
     setAbortController(bufKey, ac)
@@ -9247,7 +9395,7 @@ function Composer() {
         // resolves through the conversation (the header values ARE what
         // runs). Falls back to the current defaults when untouched.
         const ds = useAgent.getState().draftScope
-        const created = await createConversation(fullText.slice(0, 40) || 'New chat', dest, {
+        const created = await createConversation(displayText.slice(0, 40) || 'New chat', dest, {
           model: ds?.model ?? useAgent.getState().globalModel,
           effort: ds?.effort ?? useAgent.getState().globalEffort,
         })
@@ -9268,7 +9416,7 @@ function Composer() {
       setStatus(bufKey, 'thinking')
       await streamAgentTurn(
         cid,
-        fullText,
+        displayText,
         dest,
         handleStreamEvent(bufKey, asstId),
         ac.signal,
@@ -9276,6 +9424,7 @@ function Composer() {
         invokedSkills,
         false,
         (mc) => setModelCall(bufKey, mc),
+        attachmentRecords,
       )
       if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {
@@ -9392,9 +9541,23 @@ function Composer() {
     const fromComposer = messageOverride === undefined
     const text = messageOverride ?? input.trim()
     if ((!text && (fromComposer ? attachments.length === 0 && images.length === 0 : true)) || targetConversationId === null) return false
-    const fullText = text + (fromComposer ? attachments.map(attachmentText).join('') : '')
+    // Structured attachments (#142): queued messages carry the records as
+    // data; the echoed text holds only the user's words.
+    const attachmentRecords = fromComposer
+      ? attachments.map((a) => ({
+          name: a.name,
+          size: a.size,
+          ...(a.content !== undefined
+            ? { content: a.content }
+            : { path: a.path ?? a.savedPath }),
+        }))
+      : []
+    const displayText =
+      !text && fromComposer && attachments.length > 0 && images.length === 0
+        ? `[${attachments.length} attachment${attachments.length === 1 ? '' : 's'}]`
+        : text
     const skillNames = fromComposer
-      ? deriveInvokedSkills(fullText, new Set(skills.map((s) => s.name)))
+      ? deriveInvokedSkills(displayText, new Set(skills.map((s) => s.name)))
       : []
     if (fromComposer && images.length > 4) {
       useAgent.getState().pushToast({
@@ -9407,17 +9570,18 @@ function Composer() {
     const imageDataUrls = fromComposer ? images.map((image) => image.dataUrl) : []
     try {
       const targetKey = String(targetConversationId)
-      const res = await queueMessage(targetConversationId, fullText || '[Image attachment]', skillNames, imageDataUrls)
+      const res = await queueMessage(targetConversationId, displayText || '[Image attachment]', skillNames, imageDataUrls, attachmentRecords)
       const tempId = appendUserMessage(
         targetKey,
-        fullText || '[Image attachment]',
+        displayText || '[Image attachment]',
         imageDataUrls,
         skillNames,
         true,
+        attachmentRecords,
       )
       const echoes = [
         ...(useAgent.getState().queueEchoByConv[targetKey] ?? []),
-        { id: res.item.id, tempId, text: fullText || '[Image attachment]', images: imageDataUrls, skills: skillNames },
+        { id: res.item.id, tempId, text: displayText || '[Image attachment]', images: imageDataUrls, skills: skillNames },
       ]
       setQueueEcho(targetKey, echoes)
       if (fromComposer && targetKey === bufKeyForQueue) {

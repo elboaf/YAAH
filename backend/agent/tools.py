@@ -1445,6 +1445,17 @@ async def execute_tool(
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
+    if name == "screenshot" and not screenshot_allowed():
+        # Setting changed after the schemas were sent (or a stale client):
+        # degrade gracefully instead of capturing (issue #140).
+        return {
+            "info": (
+                "The screenshot tool is currently disallowed in Settings "
+                "(General -> 'Allow screenshot tool'). Re-enable it there if "
+                "screen observation is needed; read_ui_tree and list_windows "
+                "remain available."
+            )
+        }
     if name == "search_conversation_history":
         arguments = {**arguments, "conversation_id": conversation_id}
     try:
@@ -1457,6 +1468,20 @@ async def execute_tool(
     except Exception as e:  # noqa: BLE001
         return _with_help_nudge(name, {"error": f"{type(e).__name__}: {e}"})
     return result
+
+
+def screenshot_allowed() -> bool:
+    """Issue #140: is the `screenshot` tool allowed? Global setting
+    (computer_use.allow_screenshot), read live so a toggle applies to new
+    turns without a restart. Any read failure keeps today's behavior."""
+    try:
+        from backend.agent.config import load_config
+
+        return bool((load_config().get("computer_use") or {}).get(
+            "allow_screenshot", True
+        ))
+    except Exception:  # noqa: BLE001 — fail open, never break a turn
+        return True
 
 
 def get_schemas(workspace: str | None = None) -> list:
@@ -1518,4 +1543,9 @@ def get_schemas(workspace: str | None = None) -> list:
     from backend.agent import mcp_client
 
     schemas = schemas + mcp_client.manager.schemas()
+    # Issue #140: the Settings toggle filters `screenshot` by name, the same
+    # pattern as the _local_computer_names strip above. Other computer-use
+    # tools stay (read_ui_tree / list_windows are the cheap alternatives).
+    if not screenshot_allowed():
+        schemas = [s for s in schemas if s["function"]["name"] != "screenshot"]
     return schemas
