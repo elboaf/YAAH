@@ -684,7 +684,7 @@ def render_local_family(combo: str, flags: dict) -> dict:
     # exists to run lazy imports (pydantic plugin scan, DB migration)
     # while os.name is real, so it must never enter a flip.
     windows = (
-        HOST_WINDOWS if combo == "warmup" else not combo.startswith("posix")
+        HOST_WINDOWS if combo == "warmup" else _combo_targets_windows(combo)
     )
     offline = flags["kind"] == "remote-offline"
     if not windows:
@@ -772,7 +772,7 @@ def render_subagents(combo: str, flags: dict) -> dict:
     from backend.agent.subagents import get_agent_def
 
     prompts = {}
-    with _platform_os_name(not combo.startswith("posix")):
+    with _platform_os_name(_combo_targets_windows(combo)):
         for name in ("general-purpose", "explore"):
             defn = get_agent_def(name)
             if defn is None:
