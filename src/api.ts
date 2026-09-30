@@ -52,6 +52,76 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return JSON.parse(text) as T
 }
 
+/**
+ * Stream one owner-qualified remote turn: same NDJSON event shapes as
+ * `streamAgentTurn`, but pointed at the device turn endpoint on the OWNER's
+ * own backend (#110). The local UI talks to its loopback backend, which
+ * resolves owner/lease state and dispatches workspace tools to the host —
+ * so no credentials or headers are sent here (mirrors the edit-API contract
+ * test above: the browser never holds the host passphrase).
+ */
+export async function streamRemoteTurn(
+  hostId: string,
+  conversationId: string,
+  message: string,
+  workspace: string,
+  onEvent: AgentEventHandler,
+  signal?: AbortSignal,
+  onModelCall?: (mc: { provider: string; model: string; startedAt: number } | null) => void,
+): Promise<void> {
+  onModelCall?.(null)
+  let res: Response
+  try {
+    res = await fetch(
+      url(`/api/remote/devices/${encodeURIComponent(hostId)}/turns/${encodeURIComponent(conversationId)}`),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, workspace }),
+        signal,
+      },
+    )
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e
+    signalBackendDown()
+    throw e
+  }
+  if (!res.ok || !res.body) {
+    throw new Error(`Remote turn error ${res.status}: ${await res.text()}`)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim()
+      buf = buf.slice(idx + 1)
+      if (!line) continue
+      const ev = JSON.parse(line) as AgentEvent
+      if (ev.type === 'model_call') {
+        onModelCall?.({
+          provider: ev.provider ?? '',
+          model: ev.model ?? '',
+          startedAt: Date.now(),
+        })
+      } else {
+        onModelCall?.(null)
+      }
+      onEvent(ev)
+    }
+  }
+}
+
+export const cancelRemoteDeviceTurn = (hostId: string, conversationId: string) =>
+  api<{ ok: boolean; cancelled: boolean }>(
+    `/api/remote/devices/${encodeURIComponent(hostId)}/turns/${encodeURIComponent(conversationId)}/cancel`,
+    { method: 'POST' },
+  )
+
 export interface ConversationRow {
   id: number
   title: string

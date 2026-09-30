@@ -5,15 +5,19 @@ import { DeviceGroups, RemoteTranscriptDialog } from './components'
 import { useAgent } from './store'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 
-const { getRemoteDeviceMessages, listRemoteDeviceConversations } = vi.hoisted(() => ({
+const { getRemoteDeviceMessages, listRemoteDeviceConversations, streamRemoteTurn, cancelRemoteDeviceTurn } = vi.hoisted(() => ({
   getRemoteDeviceMessages: vi.fn(),
   listRemoteDeviceConversations: vi.fn(),
+  streamRemoteTurn: vi.fn(),
+  cancelRemoteDeviceTurn: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
   getRemoteDeviceMessages,
   listRemoteDeviceConversations,
+  streamRemoteTurn,
+  cancelRemoteDeviceTurn,
 }))
 
 afterEach(() => {
@@ -81,7 +85,8 @@ describe('read-only remote transcript viewer', () => {
     expect(useRemoteConversations.getState().getTranscript('host-a', '7')?.[0].content).toBe('transcript from host-a')
     expect(useRemoteConversations.getState().getTranscript('host-b', '7')?.[0].content).toBe('transcript from host-b')
     expect(useRemoteConversations.getState().transcripts[remoteConversationKey('host-a', '7')]).toBeDefined()
-    expect(screen.getAllByText(/Remote turns and workspace execution remain Phase 6/)).toHaveLength(2)
+    // #110: remote chats are no longer read-only — each dialog offers a composer.
+    expect(screen.getAllByLabelText('Message this device chat')).toHaveLength(2)
     expect(screen.getAllByRole('button', { name: 'Edit transcript' })).toHaveLength(2)
   })
 
@@ -106,5 +111,50 @@ describe('read-only remote transcript viewer', () => {
     getRemoteDeviceMessages.mockResolvedValue([row('cached after retry')])
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(await screen.findByText('cached after retry')).toBeTruthy()
+  })
+})
+
+describe('remote turn composer (#110)', () => {
+  const renderDialog = () =>
+    render(
+      <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
+    )
+
+  it('offers a composer for online remote chats and streams the turn into the transcript', async () => {
+    getRemoteDeviceMessages.mockResolvedValue([row('earlier message')])
+    streamRemoteTurn.mockImplementation(async (_host, _cid, message, _ws, onEvent) => {
+      onEvent({ type: 'remote_turn_started' })
+      onEvent({ type: 'text', text: 'working on it' })
+      onEvent({ type: 'remote_turn_committed' })
+      onEvent({ type: 'done' })
+    })
+
+    renderDialog()
+    await screen.findByText('earlier message')
+
+    const input = screen.getByLabelText('Message this device chat')
+    fireEvent.change(input, { target: { value: 'run the tests' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await screen.findByText('run the tests')
+    expect(streamRemoteTurn).toHaveBeenCalledWith(
+      'host-a', '7', 'run the tests', expect.any(String), expect.any(Function), expect.anything(), expect.anything(),
+    )
+    await screen.findByText('working on it')
+  })
+
+  it('clears the input optimistically and restores it if the turn fails to start', async () => {
+    getRemoteDeviceMessages.mockResolvedValue([row('earlier message')])
+    streamRemoteTurn.mockRejectedValue(new Error('503 device offline'))
+
+    renderDialog()
+    await screen.findByText('earlier message')
+
+    const input = screen.getByLabelText('Message this device chat')
+    fireEvent.change(input, { target: { value: 'do a thing' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect((screen.getByLabelText('Message this device chat') as HTMLTextAreaElement).value).toBe('do a thing'))
+    expect(screen.getByRole('status').textContent).toContain('could not be sent')
   })
 })
