@@ -159,6 +159,33 @@ def test_bundled_shipped_skills_parse():
         assert skill.name == name
 
 
+PONYTAIL_SKILLS = [
+    "ponytail",
+    "ponytail-audit",
+    "ponytail-debt",
+    "ponytail-gain",
+    "ponytail-help",
+    "ponytail-review",
+]
+
+
+def test_ponytail_pack_shipped_and_parses():
+    """#56: the ponytail pack is vendored as opt-in skills, pinned to the
+    upstream commit recorded in PONYTAIL-PROVENANCE.md. The main skill uses
+    a YAML block-scalar description; its name must still parse even under
+    the no-PyYAML flat fallback."""
+    src = skill_registry.bundled_source_dir()
+    assert src is not None, "bundled skills missing from the repo"
+    assert (src / "PONYTAIL-PROVENANCE.md").is_file()
+    for name in PONYTAIL_SKILLS:
+        skill = skill_registry.parse_skill_md(src / name / "SKILL.md")
+        assert skill is not None, f"{name}/SKILL.md does not parse"
+        assert skill.name == name
+    main = skill_registry.parse_skill_md(src / "ponytail" / "SKILL.md")
+    assert main is not None
+    assert "minimal" in main.description.lower()
+
+
 def test_ensure_dir_existing_dir_only_adds_bundled(skills_dir, monkeypatch):
     """An existing dir is not reseeded wholesale — the only change allowed
     is adding bundled skills that are missing."""
