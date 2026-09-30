@@ -254,8 +254,17 @@ def gesture_action(left_down: bool, right_down: bool) -> str | None:
     return None
 
 
+_YAAH_TITLE_PREFIX = "YAAH"
+
+
 def _find_yaah_window(user32=None) -> int:
-    """HWND of the yaah main window by exact title ("YAAH"); 0 if absent."""
+    """HWND of the yaah main window; 0 if absent.
+
+    The production window title is "YAAH v<version>" (#14), so the lookup
+    must be a title PREFIX match, not exact ("YAAH" alone never matches and
+    the preview could never find yaah). Returns 0 when absent — with
+    restype=HWND a NULL return arrives as None, which must not reach int().
+    """
     if user32 is None:
         # POSIX guard only for the implicit real lookup: an injected fake
         # (unit tests, CI on Linux) must still be exercised.
@@ -266,7 +275,10 @@ def _find_yaah_window(user32=None) -> int:
     if hasattr(ctypes, "WinDLL") and isinstance(user32, ctypes.WinDLL):
         find.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR]
         find.restype = ctypes.wintypes.HWND
-    return int(find(None, "YAAH"))
+    hwnd = find(None, _YAAH_TITLE_PREFIX)
+    if hwnd is None:
+        return 0
+    return int(hwnd)
 
 
 class _PreviewManager:

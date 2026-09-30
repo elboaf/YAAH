@@ -91,7 +91,7 @@ def test_fit_thumbnail_rect_falls_back_when_source_unknown():
     assert (left, top, w, h) == (0, 0, 420, 236)
 
 
-def test_find_yaah_window_uses_exact_title(monkeypatch):
+def test_find_yaah_window_uses_title_prefix(monkeypatch):
     class FakeUser32:
         def __init__(self):
             self.calls = []
@@ -109,6 +109,17 @@ def test_find_yaah_window_returns_zero_when_absent():
     class FakeUser32:
         def FindWindowW(self, cls, title):
             return 0
+
+    assert preview._find_yaah_window(FakeUser32()) == 0
+
+
+def test_find_yaah_window_returns_zero_when_ctypes_returns_none():
+    # Regression (#131): with restype=HWND, FindWindowW's NULL comes back as
+    # None, and int(None) crashed the preview thread before it could show
+    # the window ("sandbox live preview failed" in the backend log).
+    class FakeUser32:
+        def FindWindowW(self, cls, title):
+            return None
 
     assert preview._find_yaah_window(FakeUser32()) == 0
 
