@@ -54,8 +54,10 @@ async def _emit_file_changes(
         return None
     try:
         current = await file_changes.snapshot_workspace(workspace)
-        summary = file_changes.summarize_file_changes(
-            await file_changes.diff_snapshots(baseline, current)
+        summary = await file_changes.summarize_file_changes(
+            await file_changes.diff_snapshots(baseline, current),
+            baseline=baseline,
+            current=current,
         )
         return summary
     except Exception:

@@ -1275,7 +1275,15 @@ function CompactionDivider({ summarized, summary }: { summarized?: number; summa
 }
 
 type FileChange = { path: string; added: number; deleted: number; binary?: boolean }
-type FileChangeSummary = { files: FileChange[]; added: number; deleted: number }
+type FileChangeSummary = {
+  files: FileChange[]
+  added: number
+  deleted: number
+  /** Short sha of the latest commit made during the run, or null/"not committed". */
+  commit?: string | null
+  /** Commits made during the run beyond the latest one. */
+  extra_commits?: number
+}
 
 /** Collapsible per-turn file-change summary (files added/removed + counts). */
 function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
@@ -1295,6 +1303,16 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
         <span className="whitespace-nowrap">{count} {count === 1 ? 'file changed' : 'files changed'}</span>
         <span className="whitespace-nowrap text-emerald-400">+{summary.added}</span>
         <span className="whitespace-nowrap text-red-400">-{summary.deleted}</span>
+        {/* Commit provenance (issue #147): latest sha when the run committed,
+            explicit "not committed" otherwise; absent on legacy rows. */}
+        {summary.commit !== undefined && (
+          <span className="whitespace-nowrap text-zinc-500">
+            · {summary.commit || 'not committed'}
+            {summary.commit && summary.extra_commits
+              ? ` (+${summary.extra_commits} more)`
+              : ''}
+          </span>
+        )}
       </button>
       {open && (
         <div id={panelId} className=" " role="list" aria-label="Changed files">
