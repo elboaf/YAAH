@@ -95,7 +95,7 @@ import {
   getSandboxStatus,
   type SandboxStatus,
 } from './api'
-import { buildMessages, lastAssistantId, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
+import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine } from './speech'
@@ -9129,7 +9129,16 @@ function Composer() {
     const isPtt = pttText !== undefined
     const target = isPtt ? opts?.target : undefined
     const targetConversationId = target ? target.conversationId : conversationId
-    const targetWorkspace = target?.workspace ?? workspace
+    // Draft destination (#94/#134): the pinned destination wins over the
+    // stale active workspace — the destination card's Change… picker and the
+    // + add-workspace flow both pin it; 0376bee dropped this read for
+    // click-sends, filing the chat under the previously-selected workspace.
+    const targetWorkspace = resolveSendTarget(
+      target,
+      conversationId,
+      useAgent.getState().draftDestination,
+      workspace,
+    )
     const handedOffPayload = opts?.images !== undefined || opts?.skills !== undefined
     const text = (pttText ?? input).trim()
     if (

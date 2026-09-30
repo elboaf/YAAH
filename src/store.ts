@@ -1235,6 +1235,23 @@ export const useAgent = create<AgentState>((set, get) => ({
 }))
 
 /**
+ * Which workspace a send files its conversation into (#134): an explicit
+ * target (PTT captures its own at release) wins, then a draft's pinned
+ * destination (the destination card's Change… / + add-workspace pick), then
+ * the active workspace. 0376bee dropped the pin read for click-sends, so a
+ * chat filed under whichever workspace was selected before the pick.
+ */
+export function resolveSendTarget(
+  target: { workspace: string } | undefined,
+  conversationId: number | null,
+  draftDestination: string | null,
+  workspace: string,
+): string {
+  if (target) return target.workspace
+  return (conversationId === null ? draftDestination : null) ?? workspace
+}
+
+/**
  * The on-screen conversation's run status — the replacement for the old
  * single global `status` now that several chats can run at once (issue #10).
  */

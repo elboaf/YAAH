@@ -4,7 +4,7 @@
 // messages, the execution one flagged with the plan it implements.
 
 import { describe, expect, it, beforeEach } from 'vitest'
-import { useAgent, buildMessages } from './store'
+import { useAgent, buildMessages, resolveSendTarget } from './store'
 import { shouldChimeFinish, isUnfocused } from './NotificationSounds'
 
 const row = (id: number, role: string, content: string, extra: Record<string, unknown> = {}) => ({
@@ -519,6 +519,24 @@ describe('draft destination (#32/#88/#94)', () => {
     useAgent.setState({ conversationId: 7 })
     useAgent.getState().clearOrphanedDraftPin()
     expect(useAgent.getState().draftDestination).toBe('C:/repos/pinned')
+  })
+
+  it('resolveSendTarget (#134): a click-send files under the pinned draft destination, not the stale active workspace', () => {
+    // Repro of #134: the user picked the new workspace in the destination
+    // card (pin set), the active workspace still points at the old one.
+    const ws = 'C:/repos/old-selection'
+    const pin = 'C:/repos/just-added'
+    // Click-send on a draft: the pin wins — 0376bee regressed this to
+    // `target?.workspace ?? workspace`, ignoring the pin entirely.
+    expect(resolveSendTarget(undefined, null, pin, ws)).toBe(pin)
+    // Same send once the chat is saved: no pin applies, the active
+    // workspace is irrelevant to an existing conversation anyway.
+    expect(resolveSendTarget(undefined, 42, pin, ws)).toBe(ws)
+    // No pin at all (plain New chat): falls back to the active workspace.
+    expect(resolveSendTarget(undefined, null, null, ws)).toBe(ws)
+    // PTT keeps its release-captured target, pin or not.
+    expect(resolveSendTarget({ workspace: pin }, null, null, ws)).toBe(pin)
+    expect(resolveSendTarget({ workspace: ws }, null, pin, ws)).toBe(ws)
   })
 })
 
