@@ -257,6 +257,12 @@ export interface AgentConfig {
     startup_timeout?: number
     auto_reboot_on_crash?: boolean
   }
+  /** Computer-use block (#140); Settings toggles only `allow_screenshot`. */
+  computer_use?: {
+    allow_screenshot?: boolean
+    observe_default?: boolean
+    panic_hotkey?: string
+  }
 }
 
 export const getConfig = () => api<AgentConfig>('/api/config')
@@ -307,6 +313,9 @@ export const updateConfig = (
     }
     sandbox?: {
       enabled?: boolean
+    }
+    computer_use?: {
+      allow_screenshot?: boolean
     }
   }>,
 ) =>

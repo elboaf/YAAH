@@ -980,6 +980,9 @@ class ConfigUpdate(BaseModel):
     # Windows Sandbox toggle (issue #112): only "enabled" is user-editable
     # from Settings; the rest of the block merges through untouched.
     sandbox: dict | None = None
+    # Computer-use settings block (issue #140): Settings toggles only
+    # `allow_screenshot`; the rest of the block merges through untouched.
+    computer_use: dict | None = None
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
     model_context: dict[str, dict[str, int | None]] | None = None
@@ -1979,6 +1982,8 @@ async def api_get_config():
         "remote": cfg.get("remote") or {},
         # Windows Sandbox block (Settings toggles sandbox.enabled, #112).
         "sandbox": cfg.get("sandbox") or {},
+        # Computer-use block (Settings toggles allow_screenshot, #140).
+        "computer_use": cfg.get("computer_use") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
         # Per-model context windows (the per-model Settings editor).
@@ -2027,6 +2032,15 @@ async def api_set_config(body: ConfigUpdate):
         if "enabled" in merged_sb:
             merged_sb["enabled"] = bool(merged_sb["enabled"])
         updates["sandbox"] = merged_sb
+    # Computer-use block merges the same way (#140): a Settings save that only
+    # touches allow_screenshot must not reset panic_hotkey / observe_default.
+    cu = updates.get("computer_use")
+    if isinstance(cu, dict):
+        existing = load_config().get("computer_use") or {}
+        merged_cu = {**existing, **cu}
+        if "allow_screenshot" in merged_cu:
+            merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
+        updates["computer_use"] = merged_cu
     # Interface scale is clamped to the shipped range (Settings offers
     # 100/110/125/150%; anything wilder would break the compact layout).
     if "ui_scale" in updates:

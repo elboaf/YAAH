@@ -79,6 +79,11 @@ DEFAULTS = {
     "computer_use": {
         "panic_hotkey": "<ctrl>+<alt>+y",
         "observe_default": True,
+        # Issue #140: Settings toggle to allow/disallow the `screenshot`
+        # tool (each capture sends a full-resolution image to the model).
+        # True = today's behavior; False filters the schema, suppresses the
+        # prompt line, and turns stray calls into a graceful pointer.
+        "allow_screenshot": True,
     },
     # Per-model context-window overrides (model id -> tokens). Wins over the
     # provider-reported value and the built-in table; set from Settings.

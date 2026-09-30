@@ -330,13 +330,21 @@ def _default_system_prompt(workspace: str = "") -> str:
         if host is None:
             # Computer use always drives THIS machine (never forwarded to a
             # remote host), so the section only appears without a host.
-            tools += [
-                "screenshot", "list_windows", "focus_window",
+            # Issue #140: never advertise `screenshot` when the Settings
+            # toggle disallows it — the model isn't invited to call a tool
+            # it doesn't have.
+            _cu_tools = [
+                "list_windows", "focus_window",
                 "read_ui_tree (structured UI elements of a window — prefer "
                 "this over screenshots for locating controls)",
                 "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
                 "type_text", "press_key", "wait",
             ]
+            from backend.agent.tools import screenshot_allowed
+
+            if screenshot_allowed():
+                _cu_tools.insert(0, "screenshot")
+            tools += _cu_tools
             computer_section = _computer_use_prompt()
             # Same rule: the sandbox integration drives THIS machine's
             # disposable VMs, so it's only offered in local sessions.
