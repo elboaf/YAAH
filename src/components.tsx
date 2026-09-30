@@ -7113,7 +7113,7 @@ function DialTick({ frac, color }: { frac: number; color: string }) {
  *  Nothing renders until the first turn completes (the count comes from
  *  the API's usage report). Config arrives from /api/config, cached per
  *  page load. */
-function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
+export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
   const compaction = useCompactionConfig()
   if (!info) return null
   const windowTokens = info.window
@@ -7122,20 +7122,20 @@ function ContextChip({ info }: { info: { tokens: number; window: number | null; 
   // model. The window stays in the tooltip and the text readout. Fill
   // keeps the safe green color until a threshold band is crossed.
   const scale = 200_000
-  const frac = Math.min(1, info.tokens / scale)
+  // Fill wraps at 100%: past one lap the arc starts a new lap from 12
+  // o'clock so the dial keeps moving. The hub readout shows the true,
+  // unclamped percentage (see tooltip note on DUMB_ZONE_TOKENS).
+  const rawFrac = info.tokens / scale
+  const frac = rawFrac % 1
   // Absolute compaction threshold (pure token value, no window fraction).
   const trigger = compaction.enabled && compaction.trigger_tokens > 0 ? compaction.trigger_tokens : null
   const triggerFrac = trigger !== null ? Math.min(1, trigger / scale) : null
   const dumbFrac = DUMB_ZONE_TOKENS / scale
   const dumbVisible = dumbFrac < 1
   const fill = contextDialColor(info.tokens, trigger, dumbVisible)
-  const pct = windowTokens ? ` (${Math.round((info.tokens / windowTokens) * 100)}% of window)` : ''
-  const dumbLine = `dumb zone from ${fmtTok(DUMB_ZONE_TOKENS)} (${Math.round(dumbFrac * 100)}% of dial)`
-  const dialLine = `dial scaled to ${fmtTok(scale)} tok (fixed, model-independent)`
   // Arc geometry: a 24x24 viewBox dial, ring from 12 o'clock clockwise.
   const r = 8.5
-  const c = 2 * Math.PI * r
-  const arcFrac = frac ?? 0
+  const arcFrac = frac
   const largeArc = arcFrac > 0.5 ? 1 : 0
   const endAngle = arcFrac * 2 * Math.PI - Math.PI / 2
   const endX = 12 + r * Math.cos(endAngle)
@@ -7147,51 +7147,36 @@ function ContextChip({ info }: { info: { tokens: number; window: number | null; 
   return (
     <span
       className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"
-      title={
-        windowTokens
-          ? [
-              `${info.tokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens${pct}`,
-              dialLine,
-              trigger !== null
-                ? `compaction at ${fmtTok(trigger)} tok (history rewritten past this)`
-                : 'compaction off',
-              dumbLine,
-            ].join('\n')
-          : [
-              `${info.tokens.toLocaleString()} tokens (unknown context window — set an override in Settings)`,
-              dialLine,
-              trigger !== null
-                ? `compaction at ${fmtTok(trigger)} tok (history rewritten past this)`
-                : 'compaction off',
-              dumbLine,
-            ].join('\n')
-      }
+      // The "120k" figure below must stay in sync with DUMB_ZONE_TOKENS.
+      title={[
+        'This is the recommended max context tracker.',
+        'This is not a rule, but starting a new chat is recommended before the dial reaches 100%',
+        'Over 120k context causes inefficient, inconsistent, and generally poor model behavior, not to mention higher token usage.',
+      ].join('\n')}
     >
-      {frac !== null && (
-        <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" className="shrink-0">
-          {/* Track: full ring, dim. */}
-          <circle cx="12" cy="12" r={r} fill="none" stroke="#3f3f46" strokeWidth="2.6" />
-          {/* Fill arc: context vs window, from 12 o'clock clockwise. */}
-          {arcPath && (
-            <path d={arcPath} fill="none" stroke={fill} strokeWidth="2.6" strokeLinecap="round" />
-          )}
-          {/* Threshold ticks on the rim. */}
-          {triggerFrac !== null && <DialTick frac={triggerFrac} color="#d4d4d8" />}
-          {dumbVisible && <DialTick frac={dumbFrac!} color="#f87171" />}
-          {/* Hub readout: percent (or "—" when the window is unknown). */}
-          <text
-            x="12"
-            y="12.8"
-            textAnchor="middle"
-            dominantBaseline="middle"
-            fontSize="7"
-            fontFamily="ui-monospace, monospace"
-            fill={frac !== null && frac > 0.92 ? fill : '#a1a1aa'}
-          >
-            {Math.round(arcFrac * 100)}%
-          </text>
-        </svg>
-      )}
+      <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" className="shrink-0">
+        {/* Track: full ring, dim. */}
+        <circle cx="12" cy="12" r={r} fill="none" stroke="#3f3f46" strokeWidth="2.6" />
+        {/* Fill arc: context vs window, from 12 o'clock clockwise. */}
+        {arcPath && (
+          <path d={arcPath} fill="none" stroke={fill} strokeWidth="2.6" strokeLinecap="round" />
+        )}
+        {/* Threshold ticks on the rim. */}
+        {triggerFrac !== null && <DialTick frac={triggerFrac} color="#d4d4d8" />}
+        {dumbVisible && <DialTick frac={dumbFrac!} color="#f87171" />}
+        {/* Hub readout: true, unclamped percentage of the fixed dial. */}
+        <text
+          x="12"
+          y="12.8"
+          textAnchor="middle"
+          dominantBaseline="middle"
+          fontSize="7"
+          fontFamily="ui-monospace, monospace"
+          fill={rawFrac > 0.92 ? fill : '#a1a1aa'}
+        >
+          {Math.round(rawFrac * 100)}%
+        </text>
+      </svg>
       <span className={tokenCountColor(info.tokens)}>
         {fmtTok(info.tokens)}
         {windowTokens ? ` / ${fmtTok(windowTokens)}` : ''} tok
