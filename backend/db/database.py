@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls TEXT,          -- JSON array of OpenAI-format tool calls
     tool_call_id TEXT,        -- for role='tool' responses
     images TEXT,              -- JSON array of image rel paths (bytes on disk)
+    attachments TEXT,         -- JSON array of structured text attachments (#142)
     sub_agent_transcript TEXT, -- JSON snapshot of a sub-agent run (spawn_agent results)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -200,6 +201,9 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE messages ADD COLUMN images TEXT")
     if "sub_agent_transcript" not in cols:
         await db.execute("ALTER TABLE messages ADD COLUMN sub_agent_transcript TEXT")
+    if "attachments" not in cols:
+        # #142: structured text attachments, one JSON record per file.
+        await db.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
     cur = await db.execute("PRAGMA table_info(conversations)")
     conv_cols = {r[1] for r in await cur.fetchall()}
     if "context_tokens" not in conv_cols:
@@ -927,6 +931,7 @@ async def add_message(
     tool_calls: list | None = None,
     tool_call_id: str | None = None,
     images: list | None = None,
+    attachments: list | None = None,
     sub_agent_transcript: dict | None = None,
 ):
     db = await get_db()
@@ -935,7 +940,8 @@ async def add_message(
         await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, tool_calls,"
-            " tool_call_id, images, sub_agent_transcript) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " tool_call_id, images, attachments, sub_agent_transcript)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
@@ -943,6 +949,7 @@ async def add_message(
                 json.dumps(tool_calls) if tool_calls else None,
                 tool_call_id,
                 json.dumps(images) if images else None,
+                json.dumps(attachments) if attachments else None,
                 json.dumps(sub_agent_transcript) if sub_agent_transcript else None,
             ),
         )
@@ -1430,6 +1437,11 @@ async def get_messages(conversation_id: int):
             if r["tool_calls"]:
                 r["tool_calls"] = json.loads(r["tool_calls"])
             r["images"] = json.loads(r["images"]) if r.get("images") else []
+            # #142: structured text attachments (parsed for the UI and for
+            # load_history's re-inlining; None when the row has none).
+            r["attachments"] = (
+                json.loads(r["attachments"]) if r.get("attachments") else None
+            )
             # Transcript snapshots ride along for the UI but are NOT replayed
             # into model context (load_history never reads this column).
             r["sub_agent_transcript"] = (
