@@ -5,7 +5,7 @@ content?|path?}); the visible message content holds only the user's typed
 text. The model still sees every byte: load_history re-inlines the
 attachment records into the user text in the EXACT legacy concatenated
 format, pinned by the golden fixture in test_attachment_inline.py
-(mirrored in src/attachmentFixture.ts).
+(canonical frontend copy: src/attachmentFixture.ts).
 """
 # Files at or under this ride inline (content present on the record);
 # anything bigger is staged in the workspace and referenced by path.
