@@ -2672,7 +2672,7 @@ export function RemoteTranscriptDialog({
   const renderedMessages = draftMessages ?? messages
 
   return (
-    <DialogShell onClose={editing ? () => void cancelEditing() : onClose} panelClassName="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg   bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
+    <DialogShell onClose={editing ? () => void cancelEditing() : onClose} panelClassName="flex max-h-[85%] w-full max-w-3xl flex-col rounded-lg   bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
       <header className="flex items-start justify-between gap-4   px-4 py-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-zinc-100">{title}</h2>
@@ -5250,7 +5250,10 @@ function AgentsDialog({
 
   return (
     <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg   bg-zinc-900 shadow-2xl">
+      {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
+          units double-zoom and the panel outgrows the screen (its body is
+          overflow-y-auto — the cap is what makes the scrollbar appear). */}
+      <div className="flex max-h-[85%] w-full max-w-2xl flex-col rounded-lg   bg-zinc-900 shadow-2xl">
         <div className="flex shrink-0 items-center justify-between   px-4 py-3">
           <h2 className="font-mono text-xs uppercase tracking-wider text-zinc-400">
             Agents — {wsPath ? wsBasename(wsPath) : 'Default (Home)'}
