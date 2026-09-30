@@ -209,7 +209,13 @@ async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path,
 
     persisted = await get_messages(cid)
     saved = next(json.loads(m["content"]) for m in persisted if m["role"] == "system" and "file_changes" in m["content"])
-    assert saved["file_changes"] == {"files": event["files"], "added": 3, "deleted": 2}
+    assert saved["file_changes"] == {
+        "files": event["files"],
+        "added": 3,
+        "deleted": 2,
+        "commit": None,
+        "extra_commits": 0,
+    }
 @pytest.mark.asyncio
 async def test_usage_event_uses_frontend_context_token_field(fake_model, tmp_path):
     """The streamed usage count must match the frontend's usage_tokens contract."""

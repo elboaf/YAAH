@@ -38,6 +38,63 @@ describe('persisted system rows', () => {
     expect(screen.getByText('src/App.tsx')).toBeTruthy()
   })
 
+  it('shows the short commit sha when the run was committed', () => {
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            file_changes: {
+              files: [{ path: 'src/App.tsx', added: 3, deleted: 1 }],
+              added: 3,
+              deleted: 1,
+              commit: '821438d',
+              extra_commits: 2,
+            },
+          }),
+        )}
+      />,
+    )
+    const chip = screen.getByRole('button', { name: /821438d/ })
+    expect(chip.textContent).toMatch(/\+2 more/)
+  })
+
+  it('shows "not committed" when changes stayed uncommitted', () => {
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            file_changes: {
+              files: [{ path: 'src/App.tsx', added: 3, deleted: 1 }],
+              added: 3,
+              deleted: 1,
+              commit: null,
+              extra_commits: 0,
+            },
+          }),
+        )}
+      />,
+    )
+    expect(screen.getByRole('button', { name: /not committed/ })).toBeTruthy()
+  })
+
+  it('legacy summaries without commit fields still render', () => {
+    render(
+      <MessageView
+        msg={sys(
+          JSON.stringify({
+            file_changes: {
+              files: [{ path: 'src/App.tsx', added: 3, deleted: 1 }],
+              added: 3,
+              deleted: 1,
+            },
+          }),
+        )}
+      />,
+    )
+    expect(screen.getByRole('button', { name: /1 file changed\+3-1/ })).toBeTruthy()
+    expect(screen.queryByText(/not committed/)).toBeNull()
+  })
+
   it('keeps genuine failure markers red (\u26a0 + turn failed)', () => {
     render(<MessageView msg={sys('turn failed: RuntimeError: provider down')} />)
     expect(screen.getByText(/turn failed/)).toBeTruthy()

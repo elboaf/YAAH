@@ -15,6 +15,7 @@ class WorkspaceSnapshot:
 
     workspace: str
     files: dict[str, bytes]
+    head_sha: str | None = None
 
 
 async def _run_git(workspace: str, *args: str) -> tuple[int, bytes]:
@@ -104,6 +105,15 @@ async def _git_files_snapshot(workspace: str, repo_root: Path) -> dict[str, byte
     return files
 
 
+async def resolve_head_sha(workspace: str) -> str | None:
+    """Current HEAD short-circuitable full sha, or None for non-Git/empty."""
+    rc, out = await _run_git(workspace, "rev-parse", "HEAD")
+    if rc != 0:
+        return None
+    sha = os.fsdecode(out).strip()
+    return sha or None
+
+
 async def snapshot_workspace(workspace: str) -> WorkspaceSnapshot:
     """Capture tracked and non-ignored files without modifying Git's index."""
     workspace = str(Path(workspace).resolve())
@@ -111,9 +121,11 @@ async def snapshot_workspace(workspace: str) -> WorkspaceSnapshot:
     if rc == 0:
         repo_root = Path(os.fsdecode(root_bytes).strip())
         files = await _git_files_snapshot(workspace, repo_root)
+        head_sha = await resolve_head_sha(workspace)
     else:
         files = _filesystem_snapshot(workspace)
-    return WorkspaceSnapshot(workspace=workspace, files=files)
+        head_sha = None
+    return WorkspaceSnapshot(workspace=workspace, files=files, head_sha=head_sha)
 
 
 def _text_line_counts(before: bytes, after: bytes) -> tuple[int, int, bool]:
@@ -153,12 +165,46 @@ async def diff_snapshots(
     return _filesystem_diff(before.files, after.files)
 
 
-def summarize_file_changes(files: list[dict]) -> dict | None:
-    """Add aggregate line counts and omit empty/no-op summaries."""
+async def summarize_file_changes(
+    files: list[dict],
+    baseline: WorkspaceSnapshot | None = None,
+    current: WorkspaceSnapshot | None = None,
+) -> dict | None:
+    """Add aggregate line counts and omit empty/no-op summaries.
+
+    Commit provenance: when the run's net changes ended up committed, the
+    chip shows the latest short sha plus a count of additional commits; any
+    git failure or uncommitted state degrades to ``commit=None`` ("not
+    committed"). Never raises on git trouble.
+    """
     if not files:
         return None
-    return {
+    summary: dict = {
         "files": files,
         "added": sum(file.get("added", 0) for file in files),
         "deleted": sum(file.get("deleted", 0) for file in files),
+        "commit": None,
+        "extra_commits": 0,
     }
+    if baseline is None or current is None:
+        return summary
+    before_sha, after_sha = baseline.head_sha, current.head_sha
+    if not after_sha:
+        # Non-Git workspace, empty repo at end of run, or rev-parse failure.
+        return summary
+    if before_sha == after_sha:
+        # HEAD unchanged: staged or working-tree-only changes.
+        return summary
+    summary["commit"] = after_sha[:7]
+    # Count commits made during the run beyond the latest one.
+    if before_sha is None:
+        summary["extra_commits"] = 0
+    else:
+        rc, out = await _run_git(
+            current.workspace, "rev-list", f"{before_sha}..{after_sha}"
+        )
+        if rc == 0:
+            summary["extra_commits"] = max(
+                0, len([line for line in out.decode().splitlines() if line.strip()]) - 1
+            )
+    return summary
