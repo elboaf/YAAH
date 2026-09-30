@@ -8,6 +8,8 @@ Default is ALLOWED (behavior unchanged). When disallowed:
 - the choice persists via the global config (``computer_use.allow_screenshot``).
 """
 
+import os
+
 import pytest
 
 from backend.agent import config, tools
@@ -15,13 +17,25 @@ from backend.agent import config, tools
 
 @pytest.fixture()
 def cfg(tmp_path, monkeypatch):
+    # Redirect config to a per-test file. CONFIG_PATH is captured from the
+    # environment at import time, so the module needs a reload to see the
+    # override — and every attribute the reload rebinds must be put back
+    # afterwards, or the rest of the suite keeps saving into this throwaway
+    # tmp file and later tests (e.g. test_remote's device-profile save)
+    # read back a config missing the keys they expect (the #140 CI run's
+    # remote_devices KeyError). A second importlib.reload at teardown would
+    # NOT work: monkeypatch has already removed the env var, so the reload
+    # would rebind CONFIG_PATH to the default backend/data path instead of
+    # the suite-wide path conftest installed. Snapshot and setattr instead.
     monkeypatch.setenv("YAAH_CONFIG_PATH", str(tmp_path / "config.json"))
-    # Reload the module-level CONFIG_PATH the test helpers read.
     import importlib
 
+    saved = dict(vars(config))
     importlib.reload(config)
     yield config
     monkeypatch.delenv("YAAH_CONFIG_PATH")
+    for key, value in saved.items():
+        setattr(config, key, value)
 
 
 def _disallow(c):
@@ -45,6 +59,12 @@ def test_schemas_exclude_screenshot_when_disallowed(cfg):
 
 
 def test_stray_call_returns_graceful_pointer(cfg):
+    if "screenshot" not in tools.EXECUTORS:
+        # Non-Windows toolset: the computer-use executors are never
+        # registered (backend/agent/tools.py imports computer.py behind
+        # os.name == "nt"), so there is no stray call to intercept here —
+        # get_schemas' filtering (above) is the whole platform contract.
+        pytest.skip("screenshot executor only exists on Windows")
     _disallow(cfg)
     import asyncio
 
@@ -90,10 +110,16 @@ def test_settings_api_roundtrip(tmp_path, monkeypatch):
         assert got["computer_use"]["allow_screenshot"] is False
 
 
-def test_system_prompt_suppresses_screenshot_when_disallowed(cfg, monkeypatch):
-    import os
-
-    monkeypatch.setattr(os, "name", "nt")
+def test_system_prompt_suppresses_screenshot_when_disallowed(cfg):
+    if os.name != "nt":
+        # Same skip as the allowed-case sibling below: on POSIX the prompt
+        # never contains the computer-use section at all (the `if windows`
+        # branch is skipped), so there is no suppression to assert — and
+        # faking os.name = "nt" is NOT an alternative: pathlib.Path()
+        # consults os.name per call, so a fake would make Path() build
+        # WindowsPath with POSIX paths and crash (the exact failure in the
+        # #140 CI run). The suppression path stays covered on Windows.
+        pytest.skip("windows-only prompt section")
     _disallow(cfg)
     from backend.agent import loop
 
@@ -105,8 +131,6 @@ def test_system_prompt_suppresses_screenshot_when_disallowed(cfg, monkeypatch):
 
 def test_system_prompt_keeps_screenshot_when_allowed(cfg):
     from backend.agent import loop
-
-    import os
 
     if os.name != "nt":
         pytest.skip("windows-only prompt section")
