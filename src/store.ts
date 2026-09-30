@@ -67,6 +67,10 @@ export interface ChatMessage {
   content: string
   /** Stored image rel paths (backend/data/images/...), rendered via imageUrl(). */
   images?: string[]
+  /** Structured text attachments (#142): one {name,size,content?|path?}
+   *  record per file; the bubble shows a filename+size chip, the model
+   *  context is rebuilt server-side. */
+  attachments?: Array<{ name: string; size: number; content?: string; path?: string }>
   /** Skills invoked for this turn via $name in the text (live display only). */
   skills?: string[]
   toolCalls?: ToolCall[]
@@ -324,7 +328,14 @@ interface AgentState {
   pushLog: (e: Omit<LogEntry, 'id' | 'time'>) => void
   clearLog: () => void
 
-  appendUserMessage: (key: string, text: string, images?: string[], skills?: string[], queued?: boolean) => string
+  appendUserMessage: (
+    key: string,
+    text: string,
+    images?: string[],
+    skills?: string[],
+    queued?: boolean,
+    attachments?: Array<{ name: string; size: number; content?: string; path?: string }>,
+  ) => string
   appendAssistantPlaceholder: (key: string) => string
   /** Start a fresh assistant emission after injected user rows, optionally with its first text delta. */
   startAssistantEmissionAfterUser: (key: string, firstText?: string) => string | null
@@ -777,14 +788,14 @@ export const useAgent = create<AgentState>((set, get) => ({
   // target at send time, so a turn streams into its own conversation's
   // buffer even when the user is looking at another one.
 
-  appendUserMessage: (key, text, images, skills, queued = false) => {
+  appendUserMessage: (key, text, images, skills, queued = false, attachments) => {
     const id = genId()
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
         [key]: [
           ...(s.messagesByConv[key] ?? []),
-          { id, role: 'user', content: text, images, skills, queued },
+          { id, role: 'user', content: text, images, skills, queued, attachments },
         ],
       },
     }))
@@ -1458,6 +1469,8 @@ export function buildMessages(
       role: r.role as Role,
       content: r.content,
       images: r.images ?? undefined,
+      // Structured attachments (#142): chips render from the row's own data.
+      attachments: (r as { attachments?: ChatMessage['attachments'] }).attachments ?? undefined,
     })
   }
   return out

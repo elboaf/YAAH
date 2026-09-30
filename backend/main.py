@@ -912,6 +912,10 @@ class AgentTurn(BaseModel):
     message: str
     workspace: str
     images: list[str] = []  # image data URLs attached by the user
+    # Structured text attachments (#142): {name, size, content?|path?} — the
+    # message text holds only the user's words; the loop persists these on
+    # the user row and load_history re-inlines them into model context.
+    attachments: list[dict] = []
     skills: list[str] = []  # skill names invoked via /s or chips
     # True when continuing an interrupted turn: the user message is already
     # stored, so the loop must not persist it again.
@@ -976,6 +980,9 @@ class ConfigUpdate(BaseModel):
     # Windows Sandbox toggle (issue #112): only "enabled" is user-editable
     # from Settings; the rest of the block merges through untouched.
     sandbox: dict | None = None
+    # Computer-use settings block (issue #140): Settings toggles only
+    # `allow_screenshot`; the rest of the block merges through untouched.
+    computer_use: dict | None = None
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
     model_context: dict[str, dict[str, int | None]] | None = None
@@ -1036,6 +1043,7 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
     return StreamingResponse(
         run_agent(conversation_id, body.message, turn_workspace,
                   image_paths=image_paths, skill_names=body.skills,
+                  attachments=body.attachments,
                   persist_user=not body.resume,
                   model_override=turn_model, effort_override=turn_effort),
         media_type="application/x-ndjson",
@@ -1116,6 +1124,7 @@ class QueueBody(BaseModel):
     message: str
     skills: list[str] | None = None
     images: list[str] | None = None
+    attachments: list[dict] | None = None  # #142 structured text attachments
 
 
 @app.post("/api/agent/{conversation_id}/queue")
@@ -1127,7 +1136,7 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
     if not agent_is_running(conversation_id):
         raise HTTPException(status_code=409, detail="conversation is not running")
     text = body.message.strip()
-    if not text and not body.images:
+    if not text and not body.images and not body.attachments:
         raise HTTPException(status_code=400, detail="message must not be empty")
     from backend.agent.imagedata import save_data_url
 
@@ -1138,7 +1147,8 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
             image_paths.append(rel)
     if not text and not image_paths:
         raise HTTPException(status_code=400, detail="message must contain text or a valid image")
-    item = enqueue_message(conversation_id, text, body.skills, image_paths)
+    item = enqueue_message(conversation_id, text, body.skills, image_paths,
+                           body.attachments)
     return {"ok": True, "item": item}
 
 
@@ -1972,6 +1982,8 @@ async def api_get_config():
         "remote": cfg.get("remote") or {},
         # Windows Sandbox block (Settings toggles sandbox.enabled, #112).
         "sandbox": cfg.get("sandbox") or {},
+        # Computer-use block (Settings toggles allow_screenshot, #140).
+        "computer_use": cfg.get("computer_use") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
         # Per-model context windows (the per-model Settings editor).
@@ -2020,6 +2032,15 @@ async def api_set_config(body: ConfigUpdate):
         if "enabled" in merged_sb:
             merged_sb["enabled"] = bool(merged_sb["enabled"])
         updates["sandbox"] = merged_sb
+    # Computer-use block merges the same way (#140): a Settings save that only
+    # touches allow_screenshot must not reset panic_hotkey / observe_default.
+    cu = updates.get("computer_use")
+    if isinstance(cu, dict):
+        existing = load_config().get("computer_use") or {}
+        merged_cu = {**existing, **cu}
+        if "allow_screenshot" in merged_cu:
+            merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
+        updates["computer_use"] = merged_cu
     # Interface scale is clamped to the shipped range (Settings offers
     # 100/110/125/150%; anything wilder would break the compact layout).
     if "ui_scale" in updates:

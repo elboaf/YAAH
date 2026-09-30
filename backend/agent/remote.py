@@ -80,12 +80,6 @@ REMOTE_TOOLS = {
     "delete_file",
     "move_file",
     "search_files",
-    "git_status",
-    "git_diff",
-    "git_add",
-    "git_commit",
-    "git_push",
-    "git_pull",
 }
 
 # Host shell tools may legitimately run up to 300s; leave headroom.

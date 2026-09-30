@@ -173,7 +173,7 @@ TOOLS_SCHEMA = [
                     "command": {"type": "string", "description": "The shell command to run"},
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 60, max 900)",
+                        "description": "Timeout in seconds (1-900, default 60)",
                     },
                 },
                 "required": ["command"],
@@ -212,7 +212,7 @@ POWERSHELL_SCHEMA = {
                     "command": {"type": "string", "description": "The PowerShell command to run"},
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 60, max 900)",
+                        "description": "Timeout in seconds (1-900, default 60)",
                     },
             },
             "required": ["command"],
@@ -277,11 +277,11 @@ HELP_DOCS: dict = {
     ),
     "view_image": (
         "Attaches the image to the conversation so a vision-capable "
-        "model can see it on the NEXT turn - the current turn's "
-        "reasoning does not include it. Local paths resolve relative "
-        "to the workspace root. Use it for screenshots, charts, "
-        "renders and UI captures; not for binary formats the model "
-        "cannot render."
+        "model sees it on the next model call - usually immediately "
+        "after this tool result, within the same turn. Local paths "
+        "resolve relative to the workspace root. Use it for "
+        "screenshots, charts, renders and UI captures; not for "
+        "binary formats the model cannot render."
     ),
     "ask_user": (
         "Blocks the turn until the user answers - batch open questions "
@@ -305,9 +305,9 @@ HELP_DOCS: dict = {
     "edit_file": (
         "Replaces the FIRST exact occurrence of old_text; it must be "
         "unique in the file or the call errors with a match count. "
-        "Copy old_text verbatim from read_file output - whitespace "
-        "and indentation must match exactly. For multiple edits to "
-        "one file, chain several edit_file calls."
+        "old_text must match the file bytes exactly - strip the "
+        "line-number prefix read_file adds to its output. For "
+        "multiple edits to one file, chain several edit_file calls."
     ),
     "create_file": (
         "Fails if the file already exists (use write_file to "
@@ -343,10 +343,10 @@ HELP_DOCS: dict = {
         "Sub-agents see ONLY the prompt you pass - include file "
         "paths, error messages, and every decision they need; they "
         "cannot ask the user questions. Launch several in one turn "
-        "for parallel independent work (max 4). Announce each "
-        "delegation to the user in one line. Do not delegate work "
-        "that needs this conversation's context or a user decision "
-        "mid-task."
+        "for parallel independent work (max 4 at once; extra calls "
+        "queue). Announce each delegation to the user in one line. "
+        "Do not delegate work that needs this conversation's "
+        "context or a user decision mid-task."
     ),
 }
 
@@ -1445,6 +1445,17 @@ async def execute_tool(
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
+    if name == "screenshot" and not screenshot_allowed():
+        # Setting changed after the schemas were sent (or a stale client):
+        # degrade gracefully instead of capturing (issue #140).
+        return {
+            "info": (
+                "The screenshot tool is currently disallowed in Settings "
+                "(General -> 'Allow screenshot tool'). Re-enable it there if "
+                "screen observation is needed; read_ui_tree and list_windows "
+                "remain available."
+            )
+        }
     if name == "search_conversation_history":
         arguments = {**arguments, "conversation_id": conversation_id}
     try:
@@ -1457,6 +1468,20 @@ async def execute_tool(
     except Exception as e:  # noqa: BLE001
         return _with_help_nudge(name, {"error": f"{type(e).__name__}: {e}"})
     return result
+
+
+def screenshot_allowed() -> bool:
+    """Issue #140: is the `screenshot` tool allowed? Global setting
+    (computer_use.allow_screenshot), read live so a toggle applies to new
+    turns without a restart. Any read failure keeps today's behavior."""
+    try:
+        from backend.agent.config import load_config
+
+        return bool((load_config().get("computer_use") or {}).get(
+            "allow_screenshot", True
+        ))
+    except Exception:  # noqa: BLE001 — fail open, never break a turn
+        return True
 
 
 def get_schemas(workspace: str | None = None) -> list:
@@ -1518,4 +1543,9 @@ def get_schemas(workspace: str | None = None) -> list:
     from backend.agent import mcp_client
 
     schemas = schemas + mcp_client.manager.schemas()
+    # Issue #140: the Settings toggle filters `screenshot` by name, the same
+    # pattern as the _local_computer_names strip above. Other computer-use
+    # tools stay (read_ui_tree / list_windows are the cheap alternatives).
+    if not screenshot_allowed():
+        schemas = [s for s in schemas if s["function"]["name"] != "screenshot"]
     return schemas

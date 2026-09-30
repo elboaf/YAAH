@@ -1,0 +1,180 @@
+"""Tests for the prompt-manifest harness (issue #161).
+
+Platform honesty: win-* combos render only on a Windows host (the
+canonical committer); posix-* combos render natively on posix hosts,
+and flip-simulated on Windows for local review. The committed directory
+carries the full matrix; each host byte-verifies only what it
+canonically renders.
+"""
+from pathlib import Path
+
+import pytest
+
+from backend.agent import prompt_manifest as pm
+
+MANIFEST_DIR = Path(__file__).parents[1] / "prompt_manifests"
+HOST_WIN = pm.HOST_WINDOWS
+PFX = "win" if HOST_WIN else "posix"
+
+# One representative per combo family, host-platform-correct, so every
+# renderer participates in the determinism checks without re-running
+# the whole matrix twice inside the test suite.
+REPRESENTATIVES = [
+    f"{PFX}-local",
+    f"{PFX}-local-plan-compaction",
+    f"{PFX}-local-override-compaction",
+    f"{PFX}-remote-plan-skills-memory-compaction-sandboxonly",
+    f"{PFX}-remote-offline-plan",
+    f"kind-subagents-{PFX}-skills",
+    "kind-auxiliary-prompts",
+]
+
+
+def test_matrix_shape():
+    combos = pm.iter_combos()
+    assert len(combos) == 215
+    assert len(set(combos)) == len(combos)
+    assert "win-local-plan-compaction" in combos
+    assert "posix-remote-offline-normal" in combos
+    assert "kind-subagents-posix-skills" in combos
+    assert "kind-auxiliary-prompts" in combos
+
+
+def test_host_filter_respects_platform():
+    for combo in pm.combos_for_host():
+        assert pm._combo_targets_windows(combo) == pm.HOST_WINDOWS, combo
+
+
+def test_render_is_deterministic_in_process():
+    for combo in REPRESENTATIVES:
+        first = pm.manifest_to_json(pm.render_combo(combo))
+        second = pm.manifest_to_json(pm.render_combo(combo))
+        assert first == second, f"nondeterministic render: {combo}"
+
+
+@pytest.mark.skipif(
+    not HOST_WIN,
+    reason=(
+        "byte-level drift guard runs on the canonical Windows host; "
+        "committed posix manifests are Windows-flip reference bytes "
+        "(native regeneration is a synthesis-ticket decision)"
+    ),
+)
+def test_committed_manifests_match_regeneration():
+    """Drift guard: committed manifests == what the current code renders."""
+    for combo in REPRESENTATIVES:
+        committed = (MANIFEST_DIR / f"{combo}.json").read_bytes()
+        fresh = pm.manifest_to_json(pm.render_combo(combo)).encode("utf-8")
+        assert committed == fresh, (
+            f"committed manifest out of date for {combo}; regenerate with "
+            "python -m backend.agent.prompt_manifest --all"
+        )
+
+
+def test_platform_sections_match_host_prefix():
+    """Windows-only sections appear in win renders, never in posix ones
+    (flipped on a Windows host, native elsewhere)."""
+    if HOST_WIN:
+        win = pm.render_combo("win-local-compaction")
+        posix = pm.render_combo("posix-local")
+        win_names = [s["name"] for s in win["sections"]]
+        posix_names = [s["name"] for s in posix["sections"]]
+        assert "computer-use" in win_names
+        assert "windows-sandbox" in win_names
+        assert "computer-use" not in posix_names
+        assert "windows-sandbox" not in posix_names
+    else:
+        posix = pm.render_combo("posix-local")
+        posix_names = [s["name"] for s in posix["sections"]]
+        assert "computer-use" not in posix_names
+        assert "windows-sandbox" not in posix_names
+
+
+
+
+def test_no_glued_section_headers():
+    """#173: a fragment joined without its separator glues the next
+    section's markdown H1 mid-line. No '#' section opening may ever sit
+    after a non-newline character in rendered text."""
+    import re
+
+    for combo in REPRESENTATIVES:
+        text = pm.render_combo(combo)["rendered_text"]
+        glued = re.search(r"(?<![#\n])# ", text)
+        assert not glued, (combo, glued.group(0) if glued else "")
+
+
+@pytest.mark.skipif(
+    not HOST_WIN,
+    reason="sandbox-section separator is a win-local render fact",
+)
+def test_sandbox_fragment_uses_standard_separator():
+    """#173: the sandbox fragment joins with the same SEPARATOR as every
+    other appended fragment, never raw."""
+    text = pm.render_combo("win-local-compaction")["rendered_text"]
+    assert pm.SEPARATOR + "# Windows Sandbox" in text
+
+
+def test_skills_axis_flips_skills_index_section():
+    with_skills = pm.render_combo(f"{PFX}-local-compaction")
+    without = pm.render_combo(f"{PFX}-local-noskills-compaction")
+    with_names = [s["name"] for s in with_skills["sections"]]
+    without_names = [s["name"] for s in without["sections"]]
+    assert "skills-index" in with_names
+    assert "skills-index" not in without_names
+
+
+def test_memory_axis_flips_memory_section():
+    with_memory = pm.render_combo(f"{PFX}-local-compaction")
+    without = pm.render_combo(f"{PFX}-local-nomemory-compaction")
+    with_names = [s["name"] for s in with_memory["sections"]]
+    without_names = [s["name"] for s in without["sections"]]
+    assert "persistent-memory" in with_names
+    assert "persistent-memory" not in without_names
+
+
+def test_override_replaces_base_prompt_wholesale():
+    overridden = pm.render_combo(f"{PFX}-local-override-compaction")
+    plain = pm.render_combo(f"{PFX}-local-compaction")
+    over_names = [s["name"] for s in overridden["sections"]]
+    plain_names = [s["name"] for s in plain["sections"]]
+    assert "override" in over_names
+    assert "identity" not in over_names
+    assert "identity" in plain_names
+    assert "override" not in plain_names
+
+
+@pytest.mark.skipif(not HOST_WIN, reason="screenshot axis exists only in win combos")
+def test_screenshot_axis_flips_screenshot_tool():
+    shot = pm.render_combo("win-local-compaction")
+    noshot = pm.render_combo("win-local-noshot-compaction")
+    shot_tools = {t["name"] for t in shot["tool_schemas"]}
+    noshot_tools = {t["name"] for t in noshot["tool_schemas"]}
+    assert "screenshot" in shot_tools
+    assert "screenshot" not in noshot_tools
+
+
+def test_offline_note_only_for_offline_remote():
+    offline = pm.render_combo(f"{PFX}-remote-offline-plan")
+    online = pm.render_combo(f"{PFX}-remote-plan-skills-memory-compaction-sandboxonly")
+    assert "the workspace's owning device is offline" in offline["rendered_text"]
+    assert "the workspace's owning device is offline" not in online["rendered_text"]
+
+
+def test_subagent_kind_covers_builtins():
+    manifest = pm.render_combo(f"kind-subagents-{PFX}-skills")
+    prompts = manifest["subagent_prompts"]
+    assert set(prompts) == {"general-purpose", "explore"}
+    for entry in prompts.values():
+        assert entry["bytes"] > 0
+        assert entry["sections"]
+
+
+def test_auxiliary_kind_captures_both_prompts():
+    manifest = pm.render_combo("kind-auxiliary-prompts")
+    prompts = manifest["auxiliary_prompts"]
+    assert "compaction_summarizer" in prompts
+    assert "title_generation" in prompts
+    for entry in prompts.values():
+        assert entry["bytes"] > 0
+        assert entry["text"]

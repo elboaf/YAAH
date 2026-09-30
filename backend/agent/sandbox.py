@@ -28,6 +28,7 @@ via a nonce handshake when its bootstrap is still watching our log dir.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -341,6 +342,57 @@ def generate_wsb(workspace_root: Path, toolkit: Path, logs: Path) -> str:
     )
 
 
+_HUD_SCRIPT = r"""$ErrorActionPreference = 'SilentlyContinue'
+$dir = '__SB_LOGS__'
+# Always-visible activity indicator (issue #119): a small always-on-top
+# overlay polling hud.state, so the VM window shows life even for
+# CLI-only work. If overlay rendering is unavailable (vGPU disabled),
+# fall back to a visible text-mode console reading the same file.
+Add-Type -AssemblyName System.Windows.Forms
+$st = $null
+try {{
+  $f = New-Object System.Windows.Forms.Form
+  $f.FormBorderStyle = 'None'
+  $f.TopMost = $true
+  $f.ShowInTaskbar = $false
+  $f.StartPosition = 'Manual'
+  $f.Location = New-Object System.Drawing.Point(20, 20)
+  $f.Size = New-Object System.Drawing.Size(360, 56)
+  $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+  $l = New-Object System.Windows.Forms.Label
+  $l.Dock = 'Fill'
+  $l.ForeColor = [System.Drawing.Color]::Lime
+  $l.Font = New-Object System.Drawing.Font('Consolas', 10)
+  $l.TextAlign = 'MiddleLeft'
+  $l.Padding = New-Object System.Windows.Forms.Padding(8, 0, 4, 0)
+  $f.Controls.Add($l)
+  $f.Show()
+  while ($true) {{
+    $s = [IO.File]::ReadAllText("$dir\\hud.state").Trim()
+    if ($s -ne $st) {{ $st = $s; $l.Text = "YAAH sandbox: $s" }}
+    $f.TopMost = $true
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 500
+  }}
+}} catch {{
+  # Overlay rendering unavailable: visible console fallback.
+  while ($true) {{
+    Clear-Host
+    $s = [IO.File]::ReadAllText("$dir\\hud.state").Trim()
+    Write-Host "YAAH sandbox: $s"
+    Start-Sleep -Seconds 2
+  }}
+}}
+"""
+
+
+def _hud_script_b64() -> str:
+    """The HUD overlay script, base64-encoded so the f-string bootstrap can
+    emit it without brace-escaping hazards."""
+    encoded = _HUD_SCRIPT.replace("__SB_LOGS__", SB_LOGS)
+    return base64.b64encode(encoded.encode("utf-8")).decode("ascii")
+
+
 def _bootstrap_script() -> str:
     """Runs inside the sandbox (started by LogonCommand). Prepends the
     toolkit to PATH, signals readiness on init.log, then polls the mapped
@@ -401,6 +453,19 @@ $mcpKey = if ($env:WMCP_KEY) {{ $env:WMCP_KEY }} else {{ 'sandbox-demo-key' }}
 $mcpPort = if ($env:WMCP_PORT) {{ $env:WMCP_PORT }} else {{ '8000' }}
 ('{{' + '"url": "http://' + $mcpIp + ':' + $mcpPort + '/mcp", "auth": "Bearer ' + $mcpKey + '"}}') |
   Out-File -FilePath "$dir\\mcp.json" -Encoding utf8
+# Always-visible activity indicator (issue #119): before anything else the
+# VM shows a HUD. Ship the overlay script base64 (it contains braces that
+# would fight the f-string) and start it detached so a render problem can
+# never stall the command channel.
+[IO.File]::WriteAllBytes("$dir\\__yaah_hud.ps1",
+  [Convert]::FromBase64String('{_hud_script_b64()}'))
+[IO.File]::WriteAllText("$dir\\hud.state", 'booting',
+  [System.Text.Encoding]::ASCII)
+Start-Process -FilePath "$PSHOME\\powershell.exe" `
+  -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$dir\\__yaah_hud.ps1" `
+  -WindowStyle Hidden
+# Issue #117 timing: segment markers land in init.log, ready line
+# last (-Append keeps the vm-start / bootstrap markers ahead of it).
 "[$(Get-Date -Format o)] bootstrap-path" | Out-File -FilePath "$dir\\init.log" -Append -Encoding utf8
 "[$(Get-Date -Format o)] bootstrap-mcp" | Out-File -FilePath "$dir\\init.log" -Append -Encoding utf8
 "[$(Get-Date -Format o)] yaah-sandbox-ready" | Out-File -FilePath "$dir\\init.log" -Append -Encoding utf8
@@ -415,6 +480,8 @@ while ($true) {{
       # Issue #117 timing: pickup = first observation -> process start,
       # run = process wall time.
       $pickupSw = [System.Diagnostics.Stopwatch]::StartNew()
+      [IO.File]::WriteAllText("$dir\\hud.state", "running cmd $n",
+        [System.Text.Encoding]::ASCII)
       $tmo = 900
       try {{
         $rt = Get-Content -Raw "$dir\\runtime.json" | ConvertFrom-Json
@@ -462,6 +529,8 @@ while ($true) {{
       # break the host's json.loads; output.txt stays UTF-8 on purpose.
       [IO.File]::WriteAllText("$dir\\res.$n.json", $meta, [System.Text.Encoding]::ASCII)
       [IO.File]::WriteAllText("$dir\\done.$n", '1')
+      [IO.File]::WriteAllText("$dir\\hud.state", 'idle',
+        [System.Text.Encoding]::ASCII)
     }}
   }}
   Start-Sleep -Milliseconds 500
@@ -530,7 +599,7 @@ def _spawn(exe: Path, wsb: Path, logs: Path):
 def _clean_logs(logs: Path) -> None:
     logs.mkdir(parents=True, exist_ok=True)
     for pat in ("cmd.*.ps1", "done.*", "res.*.json", "output.txt",
-                "out.tmp", "err.tmp", "runtime.json"):
+                "out.tmp", "err.tmp", "runtime.json", "hud.state"):
         for f in logs.glob(pat):
             try:
                 f.unlink()

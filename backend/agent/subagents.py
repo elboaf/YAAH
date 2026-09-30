@@ -83,7 +83,7 @@ _COMPUTER_TOOLS = {
 
 _EXPLORE_TOOLS = {
     "read_file", "search_files", "web_search", "web_fetch", "view_image",
-    "git_status", "git_diff", "load_skill",
+    "load_skill",
 }
 
 
@@ -334,8 +334,6 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
-        "git tools (git_status, git_diff, git_add, git_commit, git_push, git_pull); "
-        "target defaults to the current tree; target=main selects the primary checkout",
     ]
     prompt = (
         f"You are a sub-agent (agent_type: {defn.name}) spawned by a "
@@ -353,6 +351,8 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
         "- The user sees your streamed text live in the parent's transcript. "
         "Lead with a one-line summary of what you're doing, then work.\n"
         "- Paths are relative to the workspace root.\n"
+        "- Git work goes through the bash tool (git is on PATH); never "
+        "open git's interactive editor - pass -m to commit.\n"
     )
     notes = _agents_notes(workspace)
     if notes:
