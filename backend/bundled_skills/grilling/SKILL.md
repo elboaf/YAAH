@@ -7,7 +7,8 @@ Interview the user relentlessly until you reach a shared understanding. Map this
 
 Work the tree in **rounds**. The **frontier** is every decision whose prerequisites are already settled: the questions you can ask _now_ without guessing at answers you haven't heard yet. Ask the whole frontier in one round, then wait for the user's answers before the next round.
 
-One `ask_user` call per question: the question title and body in the `question` field, the choices as `options` with the recommended answer first. Do not also render the questions as formatted text in chat — `ask_user` is the only presentation.
+One `ask_user` call per question, and make the text card-native. The `question` field holds exactly one short plain-text sentence — no markdown, no lists, no multi-paragraph structure; the card renders it verbatim. Supporting context (rationale, trade-offs, what each path means) goes into each option's `description` field — that is what it is for. If a decision seems to need a long breakdown before it can be answered, split it into multiple questions across rounds (the round model above already supports this).
+Do not also render the questions as formatted text in chat — `ask_user` is the only presentation.
 
 Each round the user answers reshapes the tree: settled decisions push the frontier outward and unblock questions that depended on them. Recompute the frontier and ask the next round. A question whose answer depends on another question still open in this round belongs to a _later_ round, not this one.
 
