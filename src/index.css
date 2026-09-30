@@ -53,6 +53,18 @@ body,
   background-color: transparent;
 }
 
+/* Issue #133: a scrollbar appearing or disappearing on a scroll panel
+   reflows the whole client area by ~scrollbar-width — with the app zoomed,
+   that rounded to ~1px and read as the entire content dancing inside a
+   still window frame. Reserve the gutter on every scroll container so the
+   content width never depends on whether the scrollbar is currently shown.
+   (scrollbar-gutter only reserves for the vertical scrollbar; the custom
+   ::-webkit-scrollbar width above is what gets reserved.) */
+.overflow-y-auto,
+.overflow-auto {
+  scrollbar-gutter: stable;
+}
+
 /* New tool chips slide in from the left edge of the live ticker, matching the
    left-to-right flow that pushes older chips toward the fade-out zone. */
 @keyframes chip-in {

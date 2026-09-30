@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
+import { quantizeUiScale } from './jitter'
 import { AgentChatLiveFollow, AgentRunWatcher, ChatPanel, ImageLightbox, PreviewModal, Sidebar, ToastStack } from './components'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
@@ -123,6 +124,12 @@ function BackendRecoveryBanner() {
  */function UiScale() {
   useEffect(() => {
     const apply = (scale: number) => {
+      // Issue #133: quantize before it touches the DOM — a fractional zoom
+      // (hand-edited config, fp drift from a stored value) makes WebView2
+      // round device pixels differently frame-to-frame, reading as a ~1px
+      // dance of the whole client area inside a still window frame.
+      // Garbage (NaN/0/negative) quantizes back to 1.0.
+      const q = quantizeUiScale(Number(scale) || 1.0)
       // Inline styles only: WebView2's legacy zoom rejects var() in
       // stylesheets, but honors element.style.zoom. Zoom on #root with a
       // full-size box lands exactly on the visual viewport — no box
@@ -131,7 +138,7 @@ function BackendRecoveryBanner() {
       // subtree get zoomed a second time, so overlays use percentages.
       const rootEl = document.getElementById('root')
       if (!rootEl) return
-      rootEl.style.zoom = String(scale)
+      rootEl.style.zoom = String(q)
     }
     // Restore the persisted scale (backend config; blank = 1.0 default).
     getConfig()
