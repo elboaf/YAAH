@@ -151,6 +151,8 @@ export interface StoredMessage {
   role: string
   content: string
   images?: string[] | null
+  /** Structured text attachments (#142), parsed from the messages column. */
+  attachments?: Array<{ name: string; size: number; content?: string; path?: string }> | null
   tool_call_id?: string | null
   tool_calls: Array<{
     id?: string
@@ -555,11 +557,13 @@ export const queueMessage = (
   message: string,
   skills: string[] = [],
   images: string[] = [],
+  /** Structured text attachments (#142). */
+  attachments: Array<Record<string, unknown>> = [],
 ) =>
   api<{ ok: boolean; item: QueuedItem }>(`/api/agent/${id}/queue`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, skills, images }),
+    body: JSON.stringify({ message, skills, images, attachments }),
   })
 
 export const fetchQueue = (id: number) =>
@@ -1117,9 +1121,11 @@ export interface AgentEvent {
   /** Soft injection landed (#7): the queued message is now a real turn. */
   id?: number
   images?: string[]
+  /** Structured text attachments riding the injected message (#142). */
+  attachments?: Array<Record<string, unknown>>
   skills?: string[]
   /** Run ended with messages still queued (#7): auto-send them. */
-  items?: Array<{ id: number; text: string; skills?: string[]; images?: string[] }>
+  items?: Array<{ id: number; text: string; skills?: string[]; images?: string[]; attachments?: Array<Record<string, unknown>> }>
   /** Live output chunk while a shell tool runs (tool_progress). */
   chunk?: string
   /** Sub-agent identity (sub_agent_* events). */
@@ -1170,6 +1176,9 @@ export async function streamAgentTurn(
    *  event arrives — feeds the "waiting for <provider>" elapsed readout,
    *  which must tick between events, not just on them. */
   onModelCall?: (mc: { provider: string; model: string; startedAt: number } | null) => void,
+  /** Structured text attachments (#142): travel as data alongside the
+   *  message; the model context is rebuilt server-side. */
+  attachments: Array<Record<string, unknown>> = [],
 ): Promise<void> {
   onModelCall?.(null)
   let res: Response
@@ -1177,7 +1186,7 @@ export async function streamAgentTurn(
     res = await fetch(url(`/api/agent/${conversationId}`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, workspace, images, skills, resume }),
+      body: JSON.stringify({ message, workspace, images, skills, resume, attachments }),
       signal,
     })
   } catch (e) {

@@ -912,6 +912,10 @@ class AgentTurn(BaseModel):
     message: str
     workspace: str
     images: list[str] = []  # image data URLs attached by the user
+    # Structured text attachments (#142): {name, size, content?|path?} — the
+    # message text holds only the user's words; the loop persists these on
+    # the user row and load_history re-inlines them into model context.
+    attachments: list[dict] = []
     skills: list[str] = []  # skill names invoked via /s or chips
     # True when continuing an interrupted turn: the user message is already
     # stored, so the loop must not persist it again.
@@ -1039,6 +1043,7 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
     return StreamingResponse(
         run_agent(conversation_id, body.message, turn_workspace,
                   image_paths=image_paths, skill_names=body.skills,
+                  attachments=body.attachments,
                   persist_user=not body.resume,
                   model_override=turn_model, effort_override=turn_effort),
         media_type="application/x-ndjson",
@@ -1119,6 +1124,7 @@ class QueueBody(BaseModel):
     message: str
     skills: list[str] | None = None
     images: list[str] | None = None
+    attachments: list[dict] | None = None  # #142 structured text attachments
 
 
 @app.post("/api/agent/{conversation_id}/queue")
@@ -1130,7 +1136,7 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
     if not agent_is_running(conversation_id):
         raise HTTPException(status_code=409, detail="conversation is not running")
     text = body.message.strip()
-    if not text and not body.images:
+    if not text and not body.images and not body.attachments:
         raise HTTPException(status_code=400, detail="message must not be empty")
     from backend.agent.imagedata import save_data_url
 
@@ -1141,7 +1147,8 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
             image_paths.append(rel)
     if not text and not image_paths:
         raise HTTPException(status_code=400, detail="message must contain text or a valid image")
-    item = enqueue_message(conversation_id, text, body.skills, image_paths)
+    item = enqueue_message(conversation_id, text, body.skills, image_paths,
+                           body.attachments)
     return {"ok": True, "item": item}
 
 
