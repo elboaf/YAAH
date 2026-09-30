@@ -1,0 +1,5 @@
+# Prompt manifests are byte-compared by the drift guard
+# (test_prompt_manifest.py::test_committed_manifests_match_regeneration).
+# Pin them to raw LF so core.autocrlf can never smudge a checkout
+# into a false drift failure on the Windows canonical host.
+backend/prompt_manifests/*.json -text
