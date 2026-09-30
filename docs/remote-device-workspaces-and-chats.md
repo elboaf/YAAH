@@ -115,7 +115,7 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 - [x] Keep the model/provider and agent loop local for local-owned conversations with remote workspaces.
 - [x] Resolve workspace tool schemas and platform capabilities from the selected workspace owner, independently of the legacy active remote device.
 - [x] Keep local filesystem snapshots and local worktree isolation from operating on remote-namespaced paths.
-- [~] Add the owner-qualified transcript adapter and integrate it with the agent loop, run/cancel controls, durable pending commits, and streaming for remote-owned conversations. **(runner module drafted; API wiring + tests pending — see hand-off below)**
+- [x] Add the owner-qualified transcript adapter and integrate it with the agent loop, run/cancel controls, durable pending commits, and streaming for remote-owned conversations. (Runner + API wiring + tests landed; see the 2026-09-30 status note below.)
 - [ ] Verify simultaneous local/remote turns, same-chat exclusion, cancellation, reconnect/pending-commit recovery, and no local workspace regression.
 
 **Implementation notes (best-effort slice):** The workspace-owner schema selection and remote-path safeguards are implemented and covered by backend tests. An isolated `backend/agent/remote_turn.py` prototype covers explicit owner resolution plus lease/snapshot/commit lifecycle, but it is not integrated into `main.py` or `loop.py` and must not be treated as enabling remote-owned turns. The existing loop still couples transcript persistence, cancellation/queues, worktrees, compaction, title, and usage updates to local integer IDs. Authenticated remote peers therefore remain rejected from local `/api/conversations/...` and `/api/agent/...` routes; this fail-closed boundary stays until the complete owner-qualified runner is implemented. Best-effort verification: backend suite 622 passed, 2 skipped. Real multi-device reconnect and pending-commit recovery remain unverified.
@@ -143,6 +143,20 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 5. **Known simplifications in the draft, decide whether to keep**: no `usage`/context-window accounting per step (final usage event only), no compaction pass for remote transcripts (snapshot can grow unboundedly — likely needs Phase 7 work), no ask_user / steer / queue on remote turns yet, no title generation (owner owns the title field), and `_history_from_snapshot` replays image rows as parts lists but remote image rel paths need the `remote-image:<host>:<rel>` media mapping pass before they render for the model.
 
 **Verification done:** `python -m pytest backend/tests/test_remote_turn.py -q` (existing prototype tests still pass with the runner module present; runner itself not yet covered). Suite was 622 passed / 2 skipped before this session's changes.
+
+#### Phase 6 status update (2026-09-30 session, issue #110)
+
+The hand-off items above are now landed; this section is the current state of record.
+
+1. **API wiring — done.** `backend/main.py` has `POST /api/remote/devices/{host_id}/turns/{conversation_id}` (streaming NDJSON via `run_remote_turn`, workspace resolved from the body then the cached conversation row, model override qualified per #132) and `.../cancel` → `remote_runs_cancel`. The `/api/agent/...` fail-closed guard for remote peers is unchanged.
+2. **Stream→owner bridging — done.** `src/api.ts` has `streamRemoteTurn(hostId, conversationId, message, workspace, onEvent, signal, onModelCall)` mirroring `streamAgentTurn` against the device turn endpoint, plus `cancelRemoteDeviceTurn`. The remote transcript viewer (`RemoteTranscriptDialog`) offers a composer for online owner-qualified chats: optimistic user/assistant rows in the remote-keyed buffer, streamed text/tool events appended, failed sends rolled back with the draft restored. No passphrase or credentials are sent from the browser — the owner's loopback backend carries owner state (contract-tested in `src/api.test.ts`).
+3. **Runner tests — done.** `backend/tests/test_remote_runner.py` covers the happy path, lease-lost mid-run, cancel, commit-network-loss → durable pending intent, same-chat double-claim rejection, per-chat parallelism, workspace-owner tool dispatch, step budget, and (added 2026-09-30) a commit-payload regression test validating the commit body against `RemoteCommitRequest`.
+4. **Commit payload — done, locked by test.** `remote_turn.commit()` sends the mutated conversation row (title/workspace intact) plus the full in-memory transcript.
+5. **Known simplifications — unchanged, still owner decisions** (tracked on issue #110): no per-step usage/context accounting, no compaction for remote transcripts, no ask_user/steer/queue on remote turns, no title generation, and remote image rel-path media mapping before images render for the model.
+
+Still open: **Phase 5/6 real-device verification** (multi-device online/offline: lease, edit, reconnect, pending-commit recovery) — needs two actual devices; see issue #110 "Needs owner decision".
+
+**Verification after this update:** `python -m pytest backend/tests/test_remote_runner.py -q` → 11 passed.
 
 ### Phase 7 — Migration, hardening, and end-to-end verification
 

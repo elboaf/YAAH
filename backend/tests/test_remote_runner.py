@@ -448,3 +448,42 @@ async def test_step_budget_exhaustion_ends_turn_with_error(_isolate_db):
     # The partial transcript is still durably committed; the error is
     # surfaced to the client, not used to discard the turn's output.
     assert _isolate_db["acked"]
+
+
+@pytest.mark.asyncio
+async def test_commit_payload_matches_remote_commit_request_shape(_isolate_db):
+    """Regression lock (#110, pick-up item 4): ``remote_turn.commit()`` is
+    called with the mutated conversation row (title/workspace preserved) and
+    the FULL in-memory transcript, so the payload validates against the
+    owner-side ``RemoteCommitRequest`` model (lease_token, revision,
+    commit_id, conversation dict, messages list) — never a partial payload
+    that a host would reject or silently truncate."""
+    from backend.main import RemoteCommitRequest
+    from pydantic import ValidationError
+
+    session = FakeSession("host-owner")
+    _register(session)
+    _script_events(
+        {"type": "content", "text": "done"},
+        {"type": "finish", "reason": "stop"},
+    )
+    await _collect(run_remote_turn("host-owner", "731", "hi", "remote:host-ws:C:/repo"))
+
+    commit = next(call for call in session.calls
+                  if call[1].endswith("/commit") and call[0] == "POST")
+    body = commit[2]
+    # Validates against the exact wire model the owner endpoint parses.
+    try:
+        parsed = RemoteCommitRequest(**body)
+    except ValidationError as exc:  # pragma: no cover - failure path clarity
+        raise AssertionError(f"commit payload does not match RemoteCommitRequest: {exc}")
+    # conversation: the mutated snapshot row with title + workspace intact.
+    assert parsed.conversation["title"] == "Remote chat"
+    assert parsed.conversation["workspace"] == "remote:host-ws:C:/repo"
+    # messages: full transcript — prior rows plus this turn's user + assistant.
+    roles = [m["role"] for m in parsed.messages]
+    assert roles == ["user", "user", "assistant"]
+    assert parsed.messages[-1]["content"] == "done"
+    # lease/revision identity comes from the acquired owner lease.
+    assert parsed.lease_token == "lease-host-owner"
+    assert parsed.revision == "r:4"

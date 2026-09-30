@@ -92,6 +92,8 @@ import {
   releaseRemoteDeviceLease,
   commitRemoteDeviceSnapshot,
   syncPendingRemoteDeviceCommits,
+  streamRemoteTurn,
+  cancelRemoteDeviceTurn,
   getSandboxStatus,
   type SandboxStatus,
 } from './api'
@@ -2570,6 +2572,7 @@ export function RemoteTranscriptDialog({
   title,
   online,
   deviceName,
+  workspace: remoteConversationWorkspace,
   onClose,
 }: {
   hostId: string
@@ -2577,6 +2580,8 @@ export function RemoteTranscriptDialog({
   title: string
   online: boolean
   deviceName: string
+  /** Remote-namespaced workspace of this conversation (turn dispatch target). */
+  workspace?: string | null
   onClose: () => void
 }) {
   const messages = useRemoteConversations((state) => state.transcripts[remoteConversationKey(hostId, conversationId)] ?? null)
@@ -2675,6 +2680,93 @@ export function RemoteTranscriptDialog({
 
   const renderedMessages = draftMessages ?? messages
 
+  // ---- Remote turn composer (#110) ---------------------------------------
+  // Streams an owner-qualified turn through the device turn endpoint and
+  // appends the streamed transcript into this viewer's buffer. The remote
+  // key keeps it collision-safe against same-ID local chats.
+  const remoteKey = remoteConversationKey(hostId, conversationId)
+  const remoteStatus = useAgent((s) => s.statusByConv[remoteKey] ?? 'idle')
+  // The turn's workspace: the cached conversation row's workspace is resolved
+  // by the backend when the body omits it, but sending the remote-namespaced
+  // workspace here makes dispatch explicit (the runner fails closed without
+  // one). It flows in from the conversation row via the device chat list.
+  const [composerText, setComposerText] = useState('')
+  const [sendNote, setSendNote] = useState<string | null>(null)
+  const streamingRef = useRef(false)
+
+  // Live transcript updates stream into the SAME buffer the viewer renders
+  // from, so the optimistic rows are visible even before the backend cache
+  // refreshes. During lease-editing the composer stays out of the way.
+  const sendRemoteTurn = async () => {
+    const text = composerText.trim()
+    if (!text || streamingRef.current || editing || !online) return
+    streamingRef.current = true
+    setSendNote(null)
+    const userId = `remote-user-${Date.now()}`
+    const asstId = `remote-asst-${Date.now()}`
+    const workspace = remoteConversationWorkspace ?? ""
+    useAgent.setState((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        [remoteKey]: [
+          ...(s.messagesByConv[remoteKey] ?? renderedMessages ?? []),
+          { id: userId, role: 'user', content: text },
+          { id: asstId, role: 'assistant', content: '' },
+        ],
+      },
+    }))
+    useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
+    setComposerText('')
+    const ac = new AbortController()
+    const applyEvent = (ev: { type: string; text?: string; name?: string; result?: unknown; args?: unknown }) => {
+      if (ev.type === 'text' && ev.text) {
+        useAgent.getState().appendTextDelta(remoteKey, asstId, ev.text)
+      } else if (ev.type === 'thinking') {
+        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
+      } else if (ev.type === 'tool_start') {
+        useAgent.getState().startToolCall(remoteKey, asstId, `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
+        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'running-tool' } }))
+      } else if (ev.type === 'tool_result') {
+        useAgent.getState().finishToolCall(remoteKey, asstId, '', typeof ev.result === 'string' ? ev.result : JSON.stringify(ev.result ?? {}))
+      } else if (ev.type === 'error') {
+        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'error' } }))
+      }
+      setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+    }
+    try {
+      await streamRemoteTurn(
+        hostId,
+        conversationId,
+        text,
+        workspace ?? '',
+        applyEvent,
+        ac.signal,
+        () => {},
+      )
+      if (useAgent.getState().statusByConv[remoteKey] !== 'error') {
+        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'idle' } }))
+      }
+      // Persist the streamed rows into the viewer's own transcript cache.
+      setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+    } catch (error) {
+      // The turn never started (offline/409): roll the optimistic rows back
+      // and restore the draft so nothing is lost.
+      useAgent.setState((s) => {
+        const remaining = (s.messagesByConv[remoteKey] ?? []).filter((m) => m.id !== userId && m.id !== asstId)
+        return {
+          messagesByConv: { ...s.messagesByConv, [remoteKey]: remaining },
+          statusByConv: { ...s.statusByConv, [remoteKey]: 'idle' },
+        }
+      })
+      setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+      setComposerText(text)
+      setSendNote(`Message could not be sent — ${String((error as Error).message ?? error)}`)
+    } finally {
+      streamingRef.current = false
+    }
+  }
+
+
   return (
     <DialogShell onClose={editing ? () => void cancelEditing() : onClose} panelClassName="flex max-h-[85%] w-full max-w-3xl flex-col rounded-lg   bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
       <header className="flex items-start justify-between gap-4   px-4 py-3">
@@ -2692,11 +2784,38 @@ export function RemoteTranscriptDialog({
           {error && <div role="alert" className="flex items-center gap-2 py-4 text-xs text-red-400"><span>Could not load this transcript. {online ? 'Check the device connection and retry.' : 'Reconnect to this device to refresh its cached copy.'}</span><button className="shrink-0 rounded   px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500" onClick={() => setRetry((value) => value + 1)}>Retry</button></div>}
           {(loading && messages === null) && !error && <div aria-label="Loading remote transcript" className="space-y-3 py-2"><div className="h-3 w-1/3 animate-pulse rounded bg-zinc-800"/><div className="h-12 w-2/3 animate-pulse rounded bg-zinc-800/70"/><div className="h-8 w-1/2 animate-pulse rounded bg-zinc-800/50"/></div>}
           {syncMessage && <p role="status" className="mb-2 text-xs text-amber-300">{syncMessage}</p>}
-          {editing && draftMessages && <p className="mb-2 font-mono text-[10px] text-emerald-400">EDIT LEASE HELD · transcript-only changes; turns remain unavailable until Phase 6</p>}
+          {editing && draftMessages && <p className="mb-2 font-mono text-[10px] text-emerald-400">EDIT LEASE HELD · transcript-only changes; composer disabled while editing</p>}
+          {!editing && sendNote && <p role="status" className="mb-2 text-xs text-red-400">{sendNote}</p>}
           {renderedMessages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
         </div>
-      <footer className="  px-4 py-2 font-mono text-[10px] text-zinc-600">{editing ? 'LEASED TRANSCRIPT EDIT' : 'READ ONLY'} <span className="px-1 text-zinc-700">·</span> Remote turns and workspace execution remain Phase 6</footer>
+      {!editing && (
+        <footer className="flex items-end gap-2 border-t border-zinc-800 px-4 py-2">
+          <textarea
+            aria-label="Message this device chat"
+            className="min-h-9 flex-1 resize-none rounded bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-40"
+            placeholder={online ? 'Message this device chat…' : 'Device offline — reconnect to send'}
+            rows={1}
+            disabled={!online}
+            value={composerText}
+            onChange={(event) => setComposerText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                void sendRemoteTurn()
+              }
+            }}
+          />
+          <button
+            className="shrink-0 rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
+            disabled={!online || !composerText.trim() || remoteStatus !== 'idle'}
+            onClick={() => void sendRemoteTurn()}
+          >
+            {remoteStatus !== 'idle' ? 'Running…' : 'Send'}
+          </button>
+        </footer>
+      )}
+      {editing && <footer className="  px-4 py-2 font-mono text-[10px] text-zinc-600">LEASED TRANSCRIPT EDIT</footer>}
     </DialogShell>
   )
 }
@@ -2754,6 +2873,7 @@ export function DeviceGroups({
     conversationId: string
     title: string
     online: boolean
+    workspace?: string | null
   } | null>(null)
   const [addingFolderFor, setAddingFolderFor] = useState<string | null>(null)
 
@@ -2931,7 +3051,7 @@ export function DeviceGroups({
                 {deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <div role="alert" className="flex items-center justify-between gap-2 px-6 py-1 text-[10px] text-red-400"><span>Could not load device chats</span><button className="rounded px-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onClick={() => void refreshDeviceChats(device.host_id)}>Retry</button></div>}
                 {ownedConversations.map((conversation) => {
                   const transcriptOnline = connected && deviceChatStatus[device.host_id] === 'online'
-                  return <button key={`remote:${device.host_id}:${conversation.conversation_id}`} className="block w-full truncate rounded py-1 pl-6 pr-2 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · ${transcriptOnline ? 'read-only remote transcript' : 'cached transcript · read-only offline'}`} onClick={() => setRemoteConversation({ hostId: device.host_id, conversationId: conversation.conversation_id, title: conversation.title, online: transcriptOnline })}>{conversation.title}<span className={`ml-1 font-mono text-[9px] ${transcriptOnline ? 'text-zinc-600' : 'text-zinc-500'}`}>{transcriptOnline ? 'remote' : 'cached · read-only'}</span></button>
+                  return <button key={`remote:${device.host_id}:${conversation.conversation_id}`} className="block w-full truncate rounded py-1 pl-6 pr-2 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · ${transcriptOnline ? 'remote chat' : 'cached · read-only offline'}`} onClick={() => setRemoteConversation({ hostId: device.host_id, conversationId: conversation.conversation_id, title: conversation.title, online: transcriptOnline, workspace: conversation.workspace })}>{conversation.title}<span className={`ml-1 font-mono text-[9px] ${transcriptOnline ? 'text-zinc-600' : 'text-zinc-500'}`}>{transcriptOnline ? 'remote' : 'cached · read-only'}</span></button>
                 })}
                 {!loadingDeviceChats[device.host_id] && !deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">No cached device chats</p>}
               </div>
