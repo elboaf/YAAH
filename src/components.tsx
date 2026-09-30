@@ -5621,6 +5621,47 @@ export function SandboxSettingsCard() {
   )
 }
 
+/** Settings card: the GLOBAL screenshot-tool toggle (issue #140). Each
+ *  capture sends a full-resolution image to the model, so sessions that
+ *  don't need screen observation can disallow it. Applies to new turns. */
+function ScreenshotToolToggle() {
+  const [allowed, setAllowed] = useState(true)
+
+  useEffect(() => {
+    getConfig()
+      .then((c) => setAllowed(c.computer_use?.allow_screenshot !== false))
+      .catch(() => {})
+  }, [])
+
+  const toggle = async (next: boolean) => {
+    setAllowed(next)
+    try {
+      await updateConfig({ computer_use: { allow_screenshot: next } })
+    } catch {
+      setAllowed(!next)
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-xs text-zinc-300">
+        <input
+          type="checkbox"
+          className="accent-blue-600"
+          checked={allowed}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        Allow screenshot tool
+      </label>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        Screen captures are sent to the model as full-resolution images. Disabling removes the
+        tool from new turns; read_ui_tree and list_windows stay available. Applies to new turns
+        and sessions.
+      </p>
+    </div>
+  )
+}
+
 /** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
 function AgentsSettingsSection() {
   const [rc, setRc] = useState('2')
@@ -6602,6 +6643,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               <>
                 <SettingsCard title="Windows Sandbox" className="col-span-2">
                   <SandboxSettingsCard />
+                </SettingsCard>
+
+                <SettingsCard title="Screenshot tool" className="col-span-2">
+                  <ScreenshotToolToggle />
                 </SettingsCard>
 
                 <SettingsCard title="Remote hosting" className="col-span-2">
