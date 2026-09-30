@@ -563,6 +563,7 @@ def enqueue_message(
     text: str,
     skills: list[str] | None = None,
     images: list[str] | None = None,
+    attachments: list[dict] | None = None,
 ) -> dict:
     """Queue a user message for the running conversation; returns the item."""
     global _queue_seq
@@ -572,6 +573,7 @@ def enqueue_message(
         "text": text,
         "skills": skills or [],
         "images": images or [],
+        "attachments": attachments or [],
     }
     _message_queues.setdefault(conversation_id, []).append(item)
     return item
@@ -615,9 +617,18 @@ async def _take_injections(conversation_id: int) -> list[dict]:
     items = _drain_queue(conversation_id)
     for it in items:
         await add_message(
-            conversation_id, "user", it["text"], images=it.get("images") or None
+            conversation_id, "user", it["text"], images=it.get("images") or None,
+            attachments=it.get("attachments") or None,
         )
     return items
+
+
+def _reinline(item: dict) -> str:
+    """The text an injected queued message contributes to model context:
+    the user's words with structured attachments re-inlined (#142)."""
+    from backend.agent.attachments import reinline_attachments
+
+    return reinline_attachments(item.get("text", ""), item.get("attachments"))
 
 
 def _apply_injected_skills(
@@ -1026,6 +1037,13 @@ async def load_history(
         role = r["role"]
         if role == "user":
             content = r["content"]
+            if r.get("attachments"):
+                # #142: structured attachments re-inline byte-identically
+                # to the legacy concatenated format, at context-build time
+                # (never at persist time).
+                from backend.agent.attachments import reinline_attachments
+
+                content = reinline_attachments(content, r["attachments"])
             if r.get("images"):
                 content = _parts_with_images(content, r["images"])
             out.append({"role": "user", "content": content})
@@ -1128,6 +1146,7 @@ async def run_agent(
     workspace: str,
     image_paths: list | None = None,
     skill_names: list | None = None,
+    attachments: list | None = None,
     persist_user: bool = True,
     policy: str | None = None,
     allow_ask_user: bool = False,
@@ -1164,6 +1183,7 @@ async def run_agent(
             workspace,
             image_paths=image_paths,
             skill_names=skill_names,
+            attachments=attachments,
             persist_user=persist_user,
             policy=policy,
             allow_ask_user=allow_ask_user,
@@ -1184,6 +1204,7 @@ async def _run_agent_claimed(
     workspace: str,
     image_paths: list | None = None,
     skill_names: list | None = None,
+    attachments: list | None = None,
     persist_user: bool = True,
     policy: str | None = None,
     allow_ask_user: bool = False,
@@ -1235,7 +1256,8 @@ async def _run_agent_claimed(
 
     if persist_user:
         await add_message(
-            conversation_id, "user", user_text, images=image_paths or None
+            conversation_id, "user", user_text, images=image_paths or None,
+            attachments=attachments or None,
         )
 
     # Per-conversation system prompt override (Q17) wins over the global one
@@ -1331,7 +1353,14 @@ async def _run_agent_claimed(
         })
     messages.extend(history)
     if not include_history:
-        messages.append({"role": "user", "content": user_text})
+        # Fresh-context agent: this turn's text rides in explicitly, with
+        # its structured attachments re-inlined (#142).
+        from backend.agent.attachments import reinline_attachments
+
+        messages.append({
+            "role": "user",
+            "content": reinline_attachments(user_text, attachments),
+        })
 
     tools = get_schemas(workspace=workspace)
     if not include_history:
@@ -1642,10 +1671,10 @@ async def _run_agent_claimed(
             # + announcement as the tool-result boundary.
             for inj in await _take_injections(conversation_id):
                 yield _ndjson(
-                    {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "skills": inj.get("skills", [])}
+                    {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "attachments": inj.get("attachments", []), "skills": inj.get("skills", [])}
                 )
                 _apply_injected_skills(inj, loaded_skills, messages)
-                messages.append({"role": "user", "content": _parts_with_images(inj["text"], inj.get("images", []))})
+                messages.append({"role": "user", "content": _parts_with_images(_reinline(inj), inj.get("images", []))})
 
             # Partition this step's tool calls: spawn_agent delegations run
             # in parallel (foreground — the parent blocks until all finish);
@@ -1881,6 +1910,7 @@ async def _run_agent_claimed(
                             "text": inj["text"],
                             "id": inj["id"],
                             "images": inj.get("images", []),
+                            "attachments": inj.get("attachments", []),
                             "skills": inj.get("skills", []),
                         }
                     )
@@ -1889,7 +1919,7 @@ async def _run_agent_claimed(
                         {
                             "role": "user",
                             "content": _parts_with_images(
-                                inj["text"], inj.get("images", [])
+                                _reinline(inj), inj.get("images", [])
                             ),
                         }
                     )
@@ -2085,6 +2115,7 @@ async def _run_agent_claimed(
                     "text": inj["text"],
                     "id": inj["id"],
                     "images": inj.get("images", []),
+                    "attachments": inj.get("attachments", []),
                     "skills": inj.get("skills", []),
                 }
             )

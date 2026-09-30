@@ -1423,6 +1423,22 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
               ))}
             </div>
           ) : null}
+          {msg.attachments?.length ? (
+            <div className="mb-1.5 flex flex-wrap justify-end gap-1">
+              {msg.attachments.map((a, i) => (
+                <span
+                  key={i}
+                  title={a.path ?? a.name}
+                  className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300"
+                >
+                  {a.name}
+                  <span className="text-zinc-500">
+                    {' '}· {Math.max(1, Math.round(a.size / 1_000))} KB
+                  </span>
+                </span>
+              ))}
+            </div>
+          ) : null}
           <div className="whitespace-pre-wrap break-words">{msg.content}</div>
           {msg.skills?.length ? (
             <div className="mt-1.5 flex flex-wrap justify-end gap-1">
@@ -8012,6 +8028,8 @@ export function ChatPanel() {
 interface Attachment {
   name: string
   content?: string
+  path?: string
+  /** Legacy field name (pre-#142 composer state); normalized to `path` on send. */
   savedPath?: string
   size: number
 }
@@ -9168,18 +9186,22 @@ function Composer() {
     setSending(true)
     setSendError(null)
 
-    // Inline small attachments as fenced blocks; large staged files as
-    // workspace path pointers the agent can read_file. PTT skips this —
-    // the attachments belong to the untouched draft.
-    let fullText = text
-    if (!isPtt && !handedOffPayload) {
-      for (const a of attachments) {
-        fullText += attachmentText(a)
-      }
-      if (images.length) {
-        fullText += `\n\n[${images.length} image${images.length === 1 ? '' : 's'} attached]`
-      }
-    }
+    // Structured attachments (#142): the attachments travel as data
+    // alongside the message — the visible text holds only the user's words.
+    // PTT skips this — the attachments belong to the untouched draft.
+    const attachmentRecords = (!isPtt && !handedOffPayload)
+      ? attachments.map((a) => ({
+          name: a.name,
+          size: a.size,
+          ...(a.content !== undefined
+            ? { content: a.content }
+            : { path: a.path ?? a.savedPath }),
+        }))
+      : []
+    const displayText =
+      (!isPtt && !handedOffPayload && !text && attachments.length > 0 && images.length === 0)
+        ? `[${attachments.length} attachment${attachments.length === 1 ? '' : 's'}]`
+        : text
     const imageDataUrls = opts?.images ?? images.map((i) => i.dataUrl)
     // Skill invocations derive entirely from the message text (#105 design):
     // every valid $name token (plus a whole-message leading /name) invokes,
@@ -9187,7 +9209,7 @@ function Composer() {
     // verbatim so the model sees the in-context usage. Menu chips are just
     // the rendered view of these tokens — there is no separate chip list.
     const knownSkillNames = new Set(skills.map((s) => s.name))
-    const invokedSkills = opts?.skills ?? deriveInvokedSkills(fullText, knownSkillNames)
+    const invokedSkills = opts?.skills ?? deriveInvokedSkills(displayText, knownSkillNames)
     // Captured draft: if the turn fails before the agent answers, the
     // composer gets it back — a failed send must not cost the prompt.
     const draft = { input, attachments, images }
@@ -9212,7 +9234,14 @@ function Composer() {
     // Fresh turn: the previous run's compaction chip is stale — clear it
     // alongside the tape so the ticker row starts clean.
     clearCompaction(bufKey)
-    const userId = appendUserMessage(bufKey, fullText, imageDataUrls, invokedSkills.length ? invokedSkills : undefined)
+    const userId = appendUserMessage(
+      bufKey,
+      displayText,
+      imageDataUrls,
+      invokedSkills.length ? invokedSkills : undefined,
+      false,
+      attachmentRecords,
+    )
     const asstId = appendAssistantPlaceholder(bufKey)
     const ac = new AbortController()
     setAbortController(bufKey, ac)
@@ -9229,7 +9258,7 @@ function Composer() {
         // resolves through the conversation (the header values ARE what
         // runs). Falls back to the current defaults when untouched.
         const ds = useAgent.getState().draftScope
-        const created = await createConversation(fullText.slice(0, 40) || 'New chat', dest, {
+        const created = await createConversation(displayText.slice(0, 40) || 'New chat', dest, {
           model: ds?.model ?? useAgent.getState().globalModel,
           effort: ds?.effort ?? useAgent.getState().globalEffort,
         })
@@ -9250,7 +9279,7 @@ function Composer() {
       setStatus(bufKey, 'thinking')
       await streamAgentTurn(
         cid,
-        fullText,
+        displayText,
         dest,
         handleStreamEvent(bufKey, asstId),
         ac.signal,
@@ -9258,6 +9287,7 @@ function Composer() {
         invokedSkills,
         false,
         (mc) => setModelCall(bufKey, mc),
+        attachmentRecords,
       )
       if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {
@@ -9374,9 +9404,23 @@ function Composer() {
     const fromComposer = messageOverride === undefined
     const text = messageOverride ?? input.trim()
     if ((!text && (fromComposer ? attachments.length === 0 && images.length === 0 : true)) || targetConversationId === null) return false
-    const fullText = text + (fromComposer ? attachments.map(attachmentText).join('') : '')
+    // Structured attachments (#142): queued messages carry the records as
+    // data; the echoed text holds only the user's words.
+    const attachmentRecords = fromComposer
+      ? attachments.map((a) => ({
+          name: a.name,
+          size: a.size,
+          ...(a.content !== undefined
+            ? { content: a.content }
+            : { path: a.path ?? a.savedPath }),
+        }))
+      : []
+    const displayText =
+      !text && fromComposer && attachments.length > 0 && images.length === 0
+        ? `[${attachments.length} attachment${attachments.length === 1 ? '' : 's'}]`
+        : text
     const skillNames = fromComposer
-      ? deriveInvokedSkills(fullText, new Set(skills.map((s) => s.name)))
+      ? deriveInvokedSkills(displayText, new Set(skills.map((s) => s.name)))
       : []
     if (fromComposer && images.length > 4) {
       useAgent.getState().pushToast({
@@ -9389,17 +9433,18 @@ function Composer() {
     const imageDataUrls = fromComposer ? images.map((image) => image.dataUrl) : []
     try {
       const targetKey = String(targetConversationId)
-      const res = await queueMessage(targetConversationId, fullText || '[Image attachment]', skillNames, imageDataUrls)
+      const res = await queueMessage(targetConversationId, displayText || '[Image attachment]', skillNames, imageDataUrls, attachmentRecords)
       const tempId = appendUserMessage(
         targetKey,
-        fullText || '[Image attachment]',
+        displayText || '[Image attachment]',
         imageDataUrls,
         skillNames,
         true,
+        attachmentRecords,
       )
       const echoes = [
         ...(useAgent.getState().queueEchoByConv[targetKey] ?? []),
-        { id: res.item.id, tempId, text: fullText || '[Image attachment]', images: imageDataUrls, skills: skillNames },
+        { id: res.item.id, tempId, text: displayText || '[Image attachment]', images: imageDataUrls, skills: skillNames },
       ]
       setQueueEcho(targetKey, echoes)
       if (fromComposer && targetKey === bufKeyForQueue) {
