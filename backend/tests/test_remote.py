@@ -832,6 +832,25 @@ async def test_local_only_tools_stay_local(monkeypatch):
     assert called["n"] == 1
 
 
+def test_remote_tools_all_have_executors():
+    """#174: /api/remote/exec dispatches through EXECUTORS and rejects
+    non-members, so anything REMOTE_TOOLS forwards must execute host-side."""
+    from backend.agent import tools as tools_mod
+
+    missing = remote_mod.REMOTE_TOOLS - set(tools_mod.EXECUTORS)
+    assert not missing, missing
+
+
+@pytest.mark.asyncio
+async def test_remote_exec_rejects_nonworkspace_tool():
+    """The client-side gate must refuse a name outside REMOTE_TOOLS with
+    the 'workspace tool' error (defense in depth behind the host 400)."""
+    res = await remote_mod.RemoteSession(
+        "http://h", "p", {"windows": True, "os": "Windows"}
+    ).exec_tool("git_status", {})
+    assert "not a workspace tool" in res.get("error", "")
+
+
 def test_schemas_follow_host_platform():
     from backend.agent.tools import get_schemas
 

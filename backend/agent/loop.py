@@ -263,9 +263,8 @@ Computer use (desktop tools):
 - These move the USER'S REAL mouse and keyboard. For an app running
   inside the Windows Sandbox they are forbidden — the sandbox has its
   own input session; drive the sandbox GUI via the windows-mcp MCP
-  server (see the sandbox section) instead
-  (see the sandbox section). Host input here is only for apps running
-  on the host itself.
+  server (see the sandbox section) instead. Host input here is only
+  for apps running on the host itself.
 - Prefer shell/file tools for anything reachable that way; computer use
   is for GUI behavior you must observe or exercise.
 - Structured first, pixels second: read_ui_tree gives exact element
@@ -437,8 +436,12 @@ Interview the user (ask_user tool):
 - If a safety boundary blocks the requested outcome, explain the blocker,
   what remains unchanged, and safe options before asking how to proceed."""
 
-    prompt += computer_section
-    prompt += sandbox_section
+    if computer_section:
+        prompt += computer_section
+    if sandbox_section:
+        # #173: append with the standard separator — sandbox.prompt_section()
+        # opens with a markdown H1, which would glue mid-line otherwise.
+        prompt += "\n\n---\n\n" + sandbox_section
 
     # Skills index: only added when at least one model-invocable skill
     # exists, so a fresh install with no skills sees no extra noise.
