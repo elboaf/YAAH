@@ -43,3 +43,33 @@ _Avoid_: storing bare ids; treating bare as a legal stored scope
 **Default model** (sidebar):
 The global default for NEW chats and for scopes that are empty — the active provider plus its remembered model. Changing it must never affect a chat whose scope is complete.
 _Avoid_: "current model" (which chats read as their own scope)
+
+### Prompt surface
+
+**Prompt surface**:
+Everything YAAH can send to the model as instructions or tool descriptions, across every runtime configuration. The complete object a prompt review must walk.
+_Avoid_: "the system prompt" (names only the base), prompt text
+
+**Base prompt**:
+The instructions sent with every chat turn before conditional additions. An override replaces it wholesale — it never composes with one.
+_Avoid_: default prompt; system prompt (when the base is meant)
+
+**Conditional fragment**:
+A section of the prompt included only when its trigger condition holds at assembly time.
+_Avoid_: dynamic prompt, optional section
+
+**Injected content**:
+Model-context text authored outside the harness at runtime — project notes, the memory index, skill bodies — that the prompt surface carries but does not author.
+_Avoid_: dynamic content; attachments (those ride messages, not the prompt)
+
+**Auxiliary prompt**:
+A one-off prompt for a model call that is not a chat turn, such as compaction summaries or title generation.
+_Avoid_: side prompt, internal prompt
+
+**Sub-agent prompt**:
+The system prompt assembled for a spawned sub-agent, composed separately from the chat base prompt.
+_Avoid_: nested prompt
+
+**Render matrix**:
+The complete set of prompts the harness can assemble, enumerated across every fragment's trigger conditions; produced by the manifest harness for review and drift checks.
+_Avoid_: prompt snapshots (implies byte-goldens)
