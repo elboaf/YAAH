@@ -115,6 +115,47 @@ def test_bootstrap_signals_ready_and_batches(isolated, monkeypatch):
     assert script.index("netsh advfirewall") < script.index("yaah-sandbox-ready")
 
 
+def test_bootstrap_drives_hud_state_and_launches_overlay(isolated, monkeypatch):
+    """Issue #119: the VM window must show activity even for CLI-only work.
+    The bootstrap writes hud.state (booting / running cmd N / idle) and
+    launches the detached HUD overlay BEFORE the ready marker, so the window
+    is never an opaque 'nothing is happening' box."""
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    script = sb._bootstrap_script()
+    # initial booting state, then running/idle around each command
+    assert "hud.state" in script
+    assert script.index("hud.state") < script.index("yaah-sandbox-ready")
+    assert "running" in script and "idle" in script
+    # the overlay itself is shipped base64 (no f-string escaping hazards)
+    # and started detached so a render problem can never stall commands
+    assert "__yaah_hud.ps1" in script
+    assert "FromBase64String" in script
+    assert "Start-Process" in script
+    assert script.index("__yaah_hud.ps1") < script.index("yaah-sandbox-ready")
+
+
+def test_hud_overlay_is_topmost_with_console_fallback(isolated, monkeypatch):
+    """The HUD prefers an always-on-top WinForms overlay; if overlay
+    rendering is unavailable (e.g. vGPU auto-disabled), it falls back to a
+    visible text-mode console loop reading the same state file."""
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    hud = sb._HUD_SCRIPT
+    assert "TopMost" in hud
+    assert "System.Windows.Forms" in hud
+    assert "hud.state" in hud
+    # fallback path: a visible console rendering the same state file
+    assert "-NoExit" in hud or "Clear-Host" in hud
+
+
+def test_clean_logs_removes_hud_state(isolated, monkeypatch):
+    monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
+    logs = isolated / "logs"
+    logs.mkdir()
+    (logs / "hud.state").write_text("idle", encoding="utf-8")
+    sb._clean_logs(logs)
+    assert not (logs / "hud.state").exists()
+
+
 def test_bootstrap_neuters_interactive_git_editor(isolated, monkeypatch):
     """An editor-opening git command (commit without -m, rebase --continue)
     hangs the VM command channel until the host-side timeout: the bootstrap
