@@ -295,15 +295,18 @@ async def _stamp_conversation_scopes(db: aiosqlite.Connection):
     right now"). Agent-pinned chats are skipped — their selectors write
     through to the owning agent, so the agent's model/effort IS the chat's.
     Idempotent via the module flag (get_db runs on every API call).
-    """
+
+    #132: the stamp writes the global in PROVIDER-QUALIFIED form — a bare
+    id would lose the routing provider and the chat would silently follow
+    the active_provider of the day (the "model not found" re-route bug)."""
     global _stamp_scope_done
     if _stamp_scope_done:
         return
     _stamp_scope_done = True
-    from backend.agent.config import load_config
+    from backend.agent.config import load_config, qualify_model_scope
 
     cfg = load_config()
-    global_model = cfg.get("model") or ""
+    global_model = qualify_model_scope(cfg.get("model") or "", cfg.get("active_provider") or "")
     global_effort = cfg.get("reasoning_effort") or ""
     await db.execute(
         "UPDATE conversations SET model = ?, effort = ?"
@@ -317,6 +320,90 @@ async def _stamp_conversation_scopes(db: aiosqlite.Connection):
         "UPDATE conversations SET model = '', effort = '' WHERE chat_type = 'agent'"
     )
     await db.commit()
+
+
+_repair_scope_done = False
+
+
+async def repair_bare_model_scopes() -> dict:
+    """#132 one-time repair: qualify every conversations row still storing a
+    BARE model id (no provider). Bare rows were stamped bare by the #51/#76
+    upgrade stamp (and by first-sends that fell back to the bare global), so
+    their routing provider is lost — turns drifted to whichever provider the
+    sidebar default pointed at later ("model not found").
+
+    Resolution per bare id: match against every configured provider's
+    catalog (/models); a unique match names its provider; a match on several
+    providers resolves to the ACTIVE one (the user's latest default); no
+    match falls back to the active provider too. '' rows are deliberate
+    Defaults and stay untouched. Covers BOTH tables whose model column
+    resolves through the bare branch: conversations and agents (a scheduled
+    fire runs the agent's row through the same resolver). Idempotent:
+    qualified values are never rewritten, and the whole pass runs once per
+    process (flag).
+
+    Unlike the other one-time migrations, this does NOT live in get_db's
+    migration chain: it needs live provider catalogs (HTTP), and get_db runs
+    on every API call — probing /models per request would be unacceptable.
+    Hosted by lifespan instead (once per boot, before the scheduler starts);
+    tests invoke it directly and reset the flag themselves."""
+    global _repair_scope_done
+    if _repair_scope_done:
+        return {"repaired": 0, "skipped": True}
+    _repair_scope_done = True
+
+    from backend.agent.config import load_config
+    from backend.agent.providers import list_all_models
+
+    cfg = load_config()
+    active = cfg.get("active_provider") or ""
+    try:
+        catalogs = (await list_all_models(cfg.get("providers") or {}))["providers"]
+    except Exception as e:  # noqa: BLE001 — repair is best-effort, never fatal
+        # Providers unreachable: leave every row for the next boot to retry.
+        _repair_scope_done = False
+        return {"repaired": 0, "error": str(e)}
+
+    def _hosting_providers(model_id: str) -> list[str]:
+        return [
+            name
+            for name, pm in catalogs.items()
+            if not pm.get("error") and model_id in (pm.get("models") or [])
+        ]
+
+    db = await get_db()
+    try:
+        repaired = 0
+        found = 0
+        for table in ("conversations", "agents"):
+            cur = await db.execute(
+                f"SELECT id, model FROM {table}"
+                " WHERE model != '' AND model NOT LIKE '%::%'"
+            )
+            rows = await cur.fetchall()
+            found += len(rows)
+            for row in rows:
+                model_id = row["model"]
+                hosts = _hosting_providers(model_id)
+                provider = (
+                    active if active in hosts
+                    else (hosts[0] if len(hosts) == 1 else active)
+                )
+                if not provider:
+                    # No catalogs and no active provider to fall back on:
+                    # leave the row alone rather than write a value we can't
+                    # stand behind (a later boot with providers reachable
+                    # retries).
+                    continue
+                await db.execute(
+                    f"UPDATE {table} SET model = ? WHERE id = ?",
+                    (f"{provider}::{model_id}", row["id"]),
+                )
+                repaired += 1
+        await db.commit()
+        return {"repaired": repaired, "found": found}
+    finally:
+        await db.close()
 
 
 async def migrate_workspaces(db: aiosqlite.Connection):
@@ -552,7 +639,11 @@ async def create_conversation(
     """Create a conversation. model/effort: the chat's pinned scope (#51/#76).
     Blank strings are legal writes (the chat's deliberate Default); None
     stamps the current global default (drafts already carry explicit picks,
-    so None is the "unspecified" path for API callers)."""
+    so None is the "unspecified" path for API callers).
+
+    #132: an explicit-but-BARE model id is qualified with the active
+    provider at write time — the row must be self-describing, or a later
+    sidebar default change silently re-routes the chat ("model not found")."""
     if model is None or effort is None:
         from backend.agent.config import load_config
 
@@ -561,6 +652,11 @@ async def create_conversation(
             model = cfg.get("model") or ""
         if effort is None:
             effort = cfg.get("reasoning_effort") or ""
+    from backend.agent.config import qualify_model_scope
+
+    # No provider arg: qualify_model_scope resolves the active provider
+    # itself (the load_config above only ran when a default was needed).
+    model = qualify_model_scope(model or "")
     db = await get_db()
     try:
         cur = await db.execute(
@@ -651,11 +747,18 @@ async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
 
 async def update_conversation(conversation_id: int, **fields):
     """Update allowed conversation fields (title, workspace,
-    system_prompt_override, model, effort)."""
+    system_prompt_override, model, effort). #132: a bare model write is
+    qualified with the active provider — '' stays '' (deliberate Default)."""
     allowed = {"title", "workspace", "system_prompt_override", "model", "effort"}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
+    if updates.get("model"):
+        from backend.agent.config import load_config, qualify_model_scope
+
+        updates["model"] = qualify_model_scope(
+            updates["model"], load_config().get("active_provider") or ""
+        )
     sets = ", ".join(f"{k} = ?" for k in updates)
     db = await get_db()
     try:

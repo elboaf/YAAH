@@ -29,3 +29,17 @@ _Avoid_: transcript
 **Prompt summary**:
 A bounded, cumulative summary of transcript messages used in place of an older prefix in future model context. It does not replace or edit transcript messages.
 _Avoid_: compacted history, replacement transcript
+
+### Model scoping
+
+**Model scope**:
+What model (and routing provider) a chat, draft, or agent runs on: a stored value that must be COMPLETE (`provider::model`) or EMPTY (follow the global default). A complete scope is self-describing — the row names the provider that hosts its model, so later changes to the sidebar default cannot re-route it (#132).
+_Avoid_: half-scope; "the model follows the sidebar"
+
+**Bare id**:
+A model id stored or sent WITHOUT its provider (`llama-3.3-70b`, not `groq::llama-3.3-70b`). Storage never writes this shape (qualify at write; boot repair fixes legacy rows); the resolver's bare branch is back-compat only and routes through the ambient active provider.
+_Avoid_: storing bare ids; treating bare as a legal stored scope
+
+**Default model** (sidebar):
+The global default for NEW chats and for scopes that are empty — the active provider plus its remembered model. Changing it must never affect a chat whose scope is complete.
+_Avoid_: "current model" (which chats read as their own scope)

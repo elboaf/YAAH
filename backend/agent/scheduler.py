@@ -25,7 +25,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from backend.agent.config import load_config, save_config
+from backend.agent.config import load_config, qualify_model_scope, save_config
 from backend.db.database import (
     get_agent,
     get_conversation,
@@ -307,7 +307,11 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
             conv.get("workspace") or "",
             agent["approval_policy"],
             bool(agent["memory_enabled"]),
-            agent.get("model") or "",
+            # #132: qualify a legacy bare id at the fire site too — the
+            # repair pass normally handles old rows at boot, but a boot
+            # where providers were unreachable retries NEXT boot; a fire
+            # in that window must not drift to ambient active_provider.
+            qualify_model_scope(agent.get("model") or ""),
             agent.get("effort") or "",
             agent.get("retention") or 0,
             bool(agent.get("allow_ask_user")),

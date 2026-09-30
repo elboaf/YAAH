@@ -107,7 +107,7 @@ import { CodeBlock, AgentMarkdown } from './markdown'
 import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
-import { parseModelScope } from './modelScope'
+import { parseModelScope, qualifyModelScope } from './modelScope'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
@@ -4002,6 +4002,14 @@ export function Sidebar() {
   // Registry and device flows are owned by ConversationList/DeviceGroups;
   // the sidebar footer only manages local model defaults.
 
+  // #132: globalModel arrives provider-qualified from /api/config; fall
+  // back to composing with the probed active provider for legacy responses.
+  const parsedGlobal = parseModelScope(globalModel)
+  const defaultScopeValue =
+    parsedGlobal.provider
+      ? `${parsedGlobal.provider}::${parsedGlobal.model}`
+      : `${activeProvider ?? ''}::${globalModel}`
+
   // Merged model list: every configured provider, queried in parallel by the
   // backend (keys never reach the browser). Grouped per provider in the dropdown.
   const refreshModels = useCallback(() => {
@@ -4027,7 +4035,9 @@ export function Sidebar() {
     const provider = value.slice(0, idx)
     const m = value.slice(idx + 2)
     const previousProvider = activeProvider
-    if (!m || (m === globalModel && provider === activeProvider)) return
+    // #132: compare against the qualified global (globalModel is qualified
+    // from /api/config now), not the bare id.
+    if (!m || qualifyModelScope(globalModel, activeProvider ?? '') === `${provider}::${m}`) return
     setSavingModel(true)
     setModelError('')
     setActiveProvider(provider)
@@ -4130,14 +4140,14 @@ export function Sidebar() {
             <select
               id="default-model"
               className="min-w-0 flex-1 truncate rounded   bg-zinc-800 px-1.5 py-1 font-mono text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
-              value={`${activeProvider}::${globalModel}`}
+              value={defaultScopeValue}
               onChange={(e) => pickModel(e.target.value)}
               disabled={savingModel}
               aria-label="Default model"
               aria-describedby={modelError ? 'default-model-status' : undefined}
-              title={`${activeProvider} · ${globalModel}`}
+              title={defaultScopeValue}
             >
-              <ModelOptions byProvider={byProvider} value={`${activeProvider}::${globalModel}`} />
+              <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
             </select>
             <DefaultThoughtLevelPicker />
             <button
@@ -7522,7 +7532,10 @@ export function ChatScopePickers() {
     return ''
   }
   const parsedModel = parseModelScope(model)
-  const shownProvider = parsedModel.provider || activeProviderFor(model)
+  // #132: bare stored values (a legacy row not yet repaired, or a draft
+  // seeded before a qualified default arrived) show their effective routing
+  // — but WRITES are always qualified, so the stored value stays complete.
+  const shownProvider = parsedModel.provider || activeProviderFor(model) || activeProvider
   const shownModel = parsedModel.model
 
   const [savingModel, setSavingModel] = useState(false)
@@ -7534,6 +7547,8 @@ export function ChatScopePickers() {
     const provider = value.slice(0, idx)
     const m = value.slice(idx + 2)
     if (!m || (m === shownModel && provider === shownProvider)) return
+    // #132: writes are always provider-qualified — a bare id would lose its
+    // routing provider and drift with the sidebar default later.
     const newModel = `${provider}::${m}`
     const nextEffort = modelReasoningEfforts(byProvider, newModel).includes(effort) ? effort : ''
     if (conversationId === null) {

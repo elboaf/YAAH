@@ -84,8 +84,12 @@ def _resolve_call_cfg(cfg: dict, model: str = "", effort: str | None = "") -> di
     precedence rules are unit-testable without HTTP.
 
     model: "" = the active global model; a bare id swaps the model name and
-    keeps the active provider; "provider::model" routes the call at that
-    configured provider (base + key + model all swap).
+    keeps the active provider (back-compat branch — storage must never
+    write this shape, see config.qualify_model_scope/#132);
+    "provider::model" routes the call at that configured provider (base +
+    key + model all swap, and the copy's active_provider is resolved to the
+    targeted provider so consumers like the model_call event report the
+    truth, not the ambient default).
 
     effort: "" = inherit the global reasoning_effort setting; None = THIS
     call explicitly sends no reasoning_effort param (#51/#76 — a chat whose
@@ -104,7 +108,15 @@ def _resolve_call_cfg(cfg: dict, model: str = "", effort: str | None = "") -> di
             cfg["api_base"] = prov.get("api_base") or ""
             cfg["api_key"] = prov.get("api_key") or ""
             cfg["model"] = model_id
+            # #132: report the RESOLVED routing, not the ambient default —
+            # the model_call event ("waiting for <provider>") and any other
+            # consumer must name the provider this call actually targets.
+            cfg["active_provider"] = provider_name
         else:
+            # Bare ids stay the back-compat branch: the model swaps, the
+            # ambient provider does too. Storage must never write this
+            # shape (see qualify_model_scope) — a bare scope has no routing
+            # provider and drifts with the sidebar default.
             cfg["model"] = model
     if effort is None:
         cfg["reasoning_effort"] = ""

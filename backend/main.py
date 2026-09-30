@@ -7,6 +7,7 @@ flow through this server.
 from contextlib import asynccontextmanager
 
 import httpx
+import logging
 import os
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,10 +16,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend._version import __version__
 from backend.db.database import init_db
 
+log = logging.getLogger("yaah.main")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # #132 one-time repair: qualify conversations/agents rows still carrying
+    # bare model ids (no routing provider — turns silently followed the
+    # sidebar default's provider after a default change). Best-effort: if
+    # providers are unreachable, the next boot retries. Runs BEFORE the
+    # scheduler so a firing agent never resolves a half-scoped model.
+    from backend.db.database import repair_bare_model_scopes
+
+    _repair = await repair_bare_model_scopes()
+    if _repair.get("repaired") or _repair.get("error"):
+        log.info("model-scope repair: %s", _repair)
     # Skills are scanned once at startup; the UI can force a rescan via
     # POST /api/skills/refresh. The directory is created on first run so
     # there is an obvious place to drop skills.
@@ -228,9 +241,11 @@ from backend.db.database import (
 class NewConversation(BaseModel):
     title: str = "New Task"
     workspace: str | None = None
-    # Per-chat scope (#51/#76): the chat's pinned model ("provider::model" or
-    # bare id) and effort ('' = param not sent). Blank strings are legal —
-    # they are the chat's deliberate Default, distinct from "unspecified".
+    # Per-chat scope (#51/#76): the chat's pinned model, stored in complete
+    # ("provider::model") or empty (deliberate Default) form — #132: a bare
+    # id is qualified against the active provider at creation, never stored.
+    # Blank strings are legal — they are the chat's deliberate Default,
+    # distinct from "unspecified".
     model: str = ""
     effort: str = ""
 
@@ -883,7 +898,13 @@ async def api_add_message(conversation_id: int, body: NewMessage):
 
 from fastapi.responses import StreamingResponse
 
-from backend.agent.config import load_config, save_config, set_active_model, set_last_workspace
+from backend.agent.config import (
+    load_config,
+    qualify_model_scope,
+    save_config,
+    set_active_model,
+    set_last_workspace,
+)
 from backend.agent.loop import run_agent
 
 
@@ -918,14 +939,20 @@ def _resolve_turn_scope(
 
     Returns (model_override, effort_override) for run_agent. Provider-down
     fails the turn visibly in model_client — no fallback is substituted.
-    """
+
+    #132: both returned values are provider-qualified or empty — a bare
+    legacy id is qualified against the CURRENT config at resolve time (the
+    write paths and the boot repair normally guarantee this already; this
+    is the last-resort backstop so a turn can never half-resolve)."""
     if agent is not None:
+        # #132: qualify any legacy bare id so the turn routes at the
+        # provider that owned the model, not the active_provider of today.
         return (
-            agent.get("model") or "",
+            qualify_model_scope(agent.get("model") or ""),
             (agent.get("effort") or "").strip().lower(),
         )
     if conv is not None:
-        model = conv.get("model") or ""
+        model = qualify_model_scope(conv.get("model") or "")
         raw_effort = (conv.get("effort") or "").strip().lower()
         return model, (raw_effort or None)
     return "", None
@@ -1481,7 +1508,9 @@ async def api_agents_add(body: AgentBody):
         "schedule_type": stype,
         "schedule_spec": spec,
         "approval_policy": body.approval_policy,
-        "model": body.model.strip(),
+        # #132: qualify a bare id — the agent's row must be self-describing
+        # too (scheduler fires resolve through the same bare branch).
+        "model": qualify_model_scope(body.model.strip()),
         "effort": body.effort.strip(),
         "memory_enabled": int(body.memory_enabled),
         "allow_ask_user": int(body.allow_ask_user),
@@ -1521,7 +1550,11 @@ async def api_agents_model_effort(agent_id: str, body: AgentModelEffort):
         )
     record = await db_update_agent(
         agent_id,
-        {"model": body.model.strip(), "effort": body.effort.strip()},
+        {
+            # #132: qualify a bare id at the write-through path too.
+            "model": qualify_model_scope(body.model.strip()),
+            "effort": body.effort.strip(),
+        },
     )
     return await _agent_view(record)
 
@@ -1545,7 +1578,8 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         "schedule_type": stype,
         "schedule_spec": spec,
         "approval_policy": body.approval_policy,
-        "model": body.model.strip(),
+        # #132: qualify a bare id (full-record replace write path).
+        "model": qualify_model_scope(body.model.strip()),
         "effort": body.effort.strip(),
         "memory_enabled": int(body.memory_enabled),
         "allow_ask_user": int(body.allow_ask_user),
@@ -1917,7 +1951,11 @@ async def api_get_config():
         "active_provider": cfg["active_provider"],
         "api_base": cfg["api_base"],
         "api_key": "set" if cfg.get("api_key") else "",
-        "model": cfg["model"],
+        # #132: the DEFAULT model travels provider-qualified so frontend
+        # consumers (the store's draftScope seeding, first-send fallbacks)
+        # can never seed a chat with a bare id — a half-scope has no routing
+        # provider and drifts to the active_provider of the day later.
+        "model": qualify_model_scope(cfg["model"]),
         "max_steps": cfg.get("max_steps"),
         # Reasoning effort (#6): "" = don't send the param to the provider.
         "reasoning_effort": cfg.get("reasoning_effort") or "",
@@ -2670,7 +2708,10 @@ async def api_remote_device_turn(host_id: str, conversation_id: str, body: Remot
     return StreamingResponse(
         run_remote_turn(
             owner_id, conversation_id, body.message, workspace,
-            model_override=body.model_override, effort_override=body.effort_override,
+            # #132: a client-supplied bare id would route ambient on the
+            # owner machine — qualify it against the local config.
+            model_override=qualify_model_scope(body.model_override),
+            effort_override=body.effort_override,
         ),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
