@@ -680,7 +680,12 @@ def render_local_family(combo: str, flags: dict) -> dict:
     """Full chat-turn manifest: run_agent_turn's system message(s), tools,
     and schema summaries. The offline note comes from the production
     remote_runner._system_prompt wrapper."""
-    windows = not combo.startswith("posix")
+    # The bootstrap warm-up turn must ALWAYS render host-native: it
+    # exists to run lazy imports (pydantic plugin scan, DB migration)
+    # while os.name is real, so it must never enter a flip.
+    windows = (
+        HOST_WINDOWS if combo == "warmup" else not combo.startswith("posix")
+    )
     offline = flags["kind"] == "remote-offline"
     if not windows:
         import backend.agent.loop  # noqa: F401 (import under real os.name)
