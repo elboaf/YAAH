@@ -38,3 +38,6 @@ backend/data/models/
 README-server.txt
 # update shim build artifacts (#16)
 src-tauri/shim/target/
+
+# per-session scratch: reports, issue bodies, patch scripts (never committed)
+.scratch/
