@@ -1,0 +1,224 @@
+{
+  "combo": "win-local-plan-override",
+  "kind": "local",
+  "sections": [
+    {
+      "name": "override",
+      "bytes": 34,
+      "sha256": "f779f5a176017bfcbabd29daabf49ed20defe9e1d828eb82f10291d6dc4963a1",
+      "text": "You are a pirate. Speak in pirate."
+    },
+    {
+      "name": "project-notes",
+      "bytes": 330,
+      "sha256": "a3882d4200bddd04b0be8a44e111009d423dbc6431d50568d128115e8c835f75",
+      "text": "# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text."
+    },
+    {
+      "name": "persistent-memory",
+      "bytes": 1242,
+      "sha256": "e9830a10ec7d80bd84ba3ca27f7b8a1ea015ed05b100b14f02bb772e4c644bb0",
+      "text": "# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nSave proactively (don't wait to be asked) when you learn:\n- user: who the user is — role, expertise, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- project: ongoing work, goals, or constraints NOT derivable from the code or git history. Convert relative dates (\"next week\") to absolute.\n- reference: pointers to external resources (URLs, dashboards, tickets).\n\nDo NOT save: what the repo already records (code structure, CLAUDE.md/AGENTS.md content, past fixes, git history) or details that only matter to the current conversation. Before saving, reuse/update an existing memory rather than creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n"
+    },
+    {
+      "name": "plan-mode",
+      "bytes": 443,
+      "sha256": "4a03a6b0702f56de2ae739b2574f6f73bd0ceadba3539ca97626a7356aa2f150",
+      "text": "# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it."
+    }
+  ],
+  "system_messages": [
+    {
+      "role": "system",
+      "bytes": 2070,
+      "sha256": "2025ae323bebd815da334fc4055463462b385ea2c309a3ffc4189268ad407703"
+    }
+  ],
+  "total_bytes": 2070,
+  "rendered_sha256": "2025ae323bebd815da334fc4055463462b385ea2c309a3ffc4189268ad407703",
+  "tool_schemas": [
+    {
+      "name": "bash",
+      "bytes": 1271,
+      "sha256": "24640ccd735ac6cc74c65076139f8465d8d3063d55c27e213fd9ae596a1ff531"
+    },
+    {
+      "name": "get_help",
+      "bytes": 475,
+      "sha256": "a6f8198631959cf7d597b05edf43dd4162ea9a13052870408438ba6537149d07"
+    },
+    {
+      "name": "web_search",
+      "bytes": 395,
+      "sha256": "4781173e2c60c25583f9b4b5420bf565e6f3e128b0b824519bdf219c4a2a4046"
+    },
+    {
+      "name": "web_fetch",
+      "bytes": 557,
+      "sha256": "26b56c05ed4e94424958db1888c229ad357fc392bd81a5c44727744d70b8496e"
+    },
+    {
+      "name": "view_image",
+      "bytes": 619,
+      "sha256": "cd944ceb622f6e45d3e2807e33ce36bec903c9967a36461c1eb25b3b6ed1ce69"
+    },
+    {
+      "name": "ask_user",
+      "bytes": 885,
+      "sha256": "c0add842fd95e8c286d64988f1e4a817e24e417fea2bf301c869e47fca5b4ce1"
+    },
+    {
+      "name": "read_file",
+      "bytes": 663,
+      "sha256": "6504d95710a15095b77772d3257e0fd717fe8b643341f2d3f224e53c61396298"
+    },
+    {
+      "name": "write_file",
+      "bytes": 275,
+      "sha256": "dd8b9a9f347813df10a0209d7a2441937cd951c2dc2b143995dd70c5e79a3cd1"
+    },
+    {
+      "name": "edit_file",
+      "bytes": 383,
+      "sha256": "bc9cdd3aafd4b523b5b079d578c87956f7923a1ff4742d217d88f75a1f617889"
+    },
+    {
+      "name": "create_file",
+      "bytes": 312,
+      "sha256": "2f37fb4d1d4060ead38af526e6e1acb1fc588d42cacceddc34cea154bfad2342"
+    },
+    {
+      "name": "delete_file",
+      "bytes": 232,
+      "sha256": "6c13e71b37d41a00aec8f28e80720d88eea5eac8b0f14a93af46bce9b15705e3"
+    },
+    {
+      "name": "move_file",
+      "bytes": 346,
+      "sha256": "f694f96e49a2cd9cbe30d835189b9309ba0c3e2fb5eebc6a5f13344e5e589eda"
+    },
+    {
+      "name": "search_files",
+      "bytes": 557,
+      "sha256": "9de55d51cb04bae4ba9689634dd3f6e0e2f400ddc0976e1943858b0a9c8621a8"
+    },
+    {
+      "name": "search_conversation_history",
+      "bytes": 594,
+      "sha256": "f9c848a09744ac1d89247c923169ec888c5e27a609eb87df509a320381a44507"
+    },
+    {
+      "name": "spawn_agent",
+      "bytes": 1301,
+      "sha256": "065b018fac874ab087582394667ea82631539df37bef78363abf21f6510a90f8"
+    },
+    {
+      "name": "load_skill",
+      "bytes": 493,
+      "sha256": "f24564c9ad287f9729635966b715fcbd5f357222cf0a856b758639bf75613dcc"
+    },
+    {
+      "name": "memory_save",
+      "bytes": 1079,
+      "sha256": "91837d49891003c76a503d00dd9469cfe91d4953f6a2bc4b5a9aceb9c78ca0fb"
+    },
+    {
+      "name": "memory_read",
+      "bytes": 349,
+      "sha256": "b78825cc93de8377705ce77faa9753b7846ece0ae97aee4cdcf84f898a480efb"
+    },
+    {
+      "name": "memory_delete",
+      "bytes": 289,
+      "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
+    },
+    {
+      "name": "read_ui_tree",
+      "bytes": 856,
+      "sha256": "732e8a3dacc3dbb222a489236a1a0b5822942619c163e35c7ad0de94383d7a63"
+    },
+    {
+      "name": "screenshot",
+      "bytes": 1546,
+      "sha256": "02dc4208555de81340fad4119c64805fca6469885a20df9a3fe4139dc981f2da"
+    },
+    {
+      "name": "list_windows",
+      "bytes": 276,
+      "sha256": "40e3209003eed2e6eb301be397bdc1bf43dde14979c618da8c0bdadd918b4a7f"
+    },
+    {
+      "name": "focus_window",
+      "bytes": 600,
+      "sha256": "62de3aa6da4eb94a488e0eadf8772728f825b75adc2b57136a13c8f807bca699"
+    },
+    {
+      "name": "mouse_move",
+      "bytes": 1174,
+      "sha256": "6e93ed436f8e7a91b08feb57ff06352e4fb5b5d450284b0c8520973848f08411"
+    },
+    {
+      "name": "mouse_click",
+      "bytes": 1509,
+      "sha256": "319cd625269347fa0e4a445e3c1aea4f0a6b2be40eb17fc2542f1972c32c2cd4"
+    },
+    {
+      "name": "mouse_drag",
+      "bytes": 1537,
+      "sha256": "46d60132d5e0cd9f0babb4b3d2756f173a880a14160475d4339f424fd94997ce"
+    },
+    {
+      "name": "mouse_scroll",
+      "bytes": 1117,
+      "sha256": "d92be11aa06b729e11d01b5e8f5f30178b8d560071256516241a3e73651989a6"
+    },
+    {
+      "name": "type_text",
+      "bytes": 740,
+      "sha256": "0888eaca49727651c532ef1892c528bf720ba44f142d4b3d4cae0816f309bb62"
+    },
+    {
+      "name": "press_key",
+      "bytes": 831,
+      "sha256": "11a66cd28404236b9e0312d2e3af8453af759a3dab95b6ee9b4b426b49752b2a"
+    },
+    {
+      "name": "wait",
+      "bytes": 242,
+      "sha256": "2d4a4775fc48a564708c6c45596b6e233ea391b75ee981d6f6be60c3eec47b0c"
+    },
+    {
+      "name": "sandbox_test",
+      "bytes": 818,
+      "sha256": "20b8d7a11ca0ff00124be9abbb734a99da5021a719eb12ce914dcffa2b83e087"
+    },
+    {
+      "name": "sandbox_run",
+      "bytes": 1394,
+      "sha256": "75eb31dc5b8c0db90ea6470bfd84c77b44d72e6594abeddc4bcd8d6475e0fb28"
+    },
+    {
+      "name": "sandbox_status",
+      "bytes": 245,
+      "sha256": "6aa02471b97cf734811cb8a0f140d1349a29107a2495442fa08dc419b1edcce4"
+    },
+    {
+      "name": "sandbox_stop",
+      "bytes": 361,
+      "sha256": "1cde83185cdcea180e91b53aef5374a8ce98c5f691293adba8c1e7e974bb9930"
+    },
+    {
+      "name": "powershell",
+      "bytes": 1161,
+      "sha256": "88fc1230eb46d0e2d71769c0aa230c2c67bc79057004c0888093b9e54276dba4"
+    },
+    {
+      "name": "exit_plan",
+      "bytes": 516,
+      "sha256": "62c6b65dffd90d030a2bf1774d95b5db68bc4a51e4de2dd21c3444a2713df11b"
+    }
+  ],
+  "subagent_prompts": {},
+  "auxiliary_prompts": {},
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nSave proactively (don't wait to be asked) when you learn:\n- user: who the user is — role, expertise, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- project: ongoing work, goals, or constraints NOT derivable from the code or git history. Convert relative dates (\"next week\") to absolute.\n- reference: pointers to external resources (URLs, dashboards, tickets).\n\nDo NOT save: what the repo already records (code structure, CLAUDE.md/AGENTS.md content, past fixes, git history) or details that only matter to the current conversation. Before saving, reuse/update an existing memory rather than creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it."
+}

@@ -368,7 +368,10 @@ async def test_remote_snapshot_lease_commit_is_idempotent_and_preserves_ids(remo
             "conversation": {"title": "After edit", "workspace": "C:/repo"},
             "messages": [
                 {**snapshot["messages"][0], "content": "edited original"},
-                {"id": 99, "role": "assistant", "content": "reply"},
+                # Relative, not absolute: id preservation only requires
+                # an ascending, unallocated id, and the suite DB is
+                # shared, so 99 would silently break past that water mark.
+                {"id": message_id + 1, "role": "assistant", "content": "reply"},
             ],
         }
         first = await c.post(

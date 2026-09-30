@@ -67,7 +67,7 @@ async def test_migration_adds_column_to_existing_database(tmp_path, monkeypatch)
         )
         await raw.commit()
     from backend.db import database
-    database.DB_PATH = path
+    monkeypatch.setattr(database, "DB_PATH", path)
     await init_db()
     async with aiosqlite.connect(path) as raw:
         cur = await raw.execute("SELECT * FROM messages")
