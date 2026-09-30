@@ -173,7 +173,7 @@ TOOLS_SCHEMA = [
                     "command": {"type": "string", "description": "The shell command to run"},
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 60, max 900)",
+                        "description": "Timeout in seconds (1-900, default 60)",
                     },
                 },
                 "required": ["command"],
@@ -212,7 +212,7 @@ POWERSHELL_SCHEMA = {
                     "command": {"type": "string", "description": "The PowerShell command to run"},
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 60, max 900)",
+                        "description": "Timeout in seconds (1-900, default 60)",
                     },
             },
             "required": ["command"],
@@ -277,11 +277,11 @@ HELP_DOCS: dict = {
     ),
     "view_image": (
         "Attaches the image to the conversation so a vision-capable "
-        "model can see it on the NEXT turn - the current turn's "
-        "reasoning does not include it. Local paths resolve relative "
-        "to the workspace root. Use it for screenshots, charts, "
-        "renders and UI captures; not for binary formats the model "
-        "cannot render."
+        "model sees it on the next model call - usually immediately "
+        "after this tool result, within the same turn. Local paths "
+        "resolve relative to the workspace root. Use it for "
+        "screenshots, charts, renders and UI captures; not for "
+        "binary formats the model cannot render."
     ),
     "ask_user": (
         "Blocks the turn until the user answers - batch open questions "
@@ -305,9 +305,9 @@ HELP_DOCS: dict = {
     "edit_file": (
         "Replaces the FIRST exact occurrence of old_text; it must be "
         "unique in the file or the call errors with a match count. "
-        "Copy old_text verbatim from read_file output - whitespace "
-        "and indentation must match exactly. For multiple edits to "
-        "one file, chain several edit_file calls."
+        "old_text must match the file bytes exactly - strip the "
+        "line-number prefix read_file adds to its output. For "
+        "multiple edits to one file, chain several edit_file calls."
     ),
     "create_file": (
         "Fails if the file already exists (use write_file to "
@@ -343,10 +343,10 @@ HELP_DOCS: dict = {
         "Sub-agents see ONLY the prompt you pass - include file "
         "paths, error messages, and every decision they need; they "
         "cannot ask the user questions. Launch several in one turn "
-        "for parallel independent work (max 4). Announce each "
-        "delegation to the user in one line. Do not delegate work "
-        "that needs this conversation's context or a user decision "
-        "mid-task."
+        "for parallel independent work (max 4 at once; extra calls "
+        "queue). Announce each delegation to the user in one line. "
+        "Do not delegate work that needs this conversation's "
+        "context or a user decision mid-task."
     ),
 }
 

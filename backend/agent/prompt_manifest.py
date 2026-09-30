@@ -27,8 +27,8 @@ combos filter the schema list to the non-Windows shape instead.
 Remote-on-one-machine decision: a REAL backend.agent.remote.RemoteSession
 built from a fixture handshake info dict -- its env_line() only reads the
 info dict and never connects (precedent: test_remote_workspace_target.py,
-test_agent.py). No production seam was added. Recorded in
-backend/prompt_manifests/README.md.
+test_agent.py). No production seam was added; the fixture contract is
+documented in the committed backend/prompt_manifests/README.md.
 
 CLI:
   python -m backend.agent.prompt_manifest --list

@@ -90,6 +90,31 @@ def test_platform_sections_match_host_prefix():
         assert "windows-sandbox" not in posix_names
 
 
+
+
+def test_no_glued_section_headers():
+    """#173: a fragment joined without its separator glues the next
+    section's markdown H1 mid-line. No '#' section opening may ever sit
+    after a non-newline character in rendered text."""
+    import re
+
+    for combo in REPRESENTATIVES:
+        text = pm.render_combo(combo)["rendered_text"]
+        glued = re.search(r"(?<![#\n])# ", text)
+        assert not glued, (combo, glued.group(0) if glued else "")
+
+
+@pytest.mark.skipif(
+    not HOST_WIN,
+    reason="sandbox-section separator is a win-local render fact",
+)
+def test_sandbox_fragment_uses_standard_separator():
+    """#173: the sandbox fragment joins with the same SEPARATOR as every
+    other appended fragment, never raw."""
+    text = pm.render_combo("win-local-compaction")["rendered_text"]
+    assert pm.SEPARATOR + "# Windows Sandbox" in text
+
+
 def test_skills_axis_flips_skills_index_section():
     with_skills = pm.render_combo(f"{PFX}-local-compaction")
     without = pm.render_combo(f"{PFX}-local-noskills-compaction")

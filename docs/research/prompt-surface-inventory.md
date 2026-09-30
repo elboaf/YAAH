@@ -24,7 +24,7 @@ in the repo is the ops-level scheduled-agent prompt.
 |---|---|
 | **Role** | Base prompt |
 | **Where** | `backend/agent/loop.py:303–451` (`_default_system_prompt`) |
-| **Size** | ~149 source lines; rendered ≈5.5 KB bare on a Windows host, **≈24 KB / ~450 lines** once Windows-only sections + skill/sub-agent indexes are appended |
+| **Size** | ~149 source lines; measured at fb85de2 (see findings doc §3): bare base 5,176 B, default local Windows chat 17,785 B, max local combo 18,235 B — nothing in the render matrix approaches the folkloric 24 KB (absolute ceiling ≈19.7 KB) |
 
 Trigger: always, unless the conversation has a `system_prompt_override`
 (DB column `conversations.system_prompt_override`, backend/db/database.py:58; wins
@@ -103,7 +103,7 @@ plus dynamic MCP ones). Supporting description-like text:
 | Prompt | File:lines | Purpose / trigger |
 |---|---|---|
 | Compaction summarizer | `_SUMMARIZER_PROMPT` (backend/agent/compaction.py:260–272), called by `summarize_messages` (275–299) | fires when measured prompt_tokens crosses trigger fraction (ADR 0004); JSON-envelope 400-word summary |
-| Conversation title | `_generate_conversation_title` (loop.py:103–112) | after first successful turn, only while title is still the auto-slice; 3–6 words |
+| Conversation title | `_generate_conversation_title` (loop.py:79–124) | after first successful turn, only while title is still the auto-slice; 3–6 words |
 | Sub-agent system prompt builder | `_sub_agent_system_prompt` (backend/agent/subagents.py:314–363) | every `spawn_agent`; composes definition body + env line + its own tool prose list + guidelines + AGENTS.md notes + skills index |
 | Built-in sub-agent definitions | backend/agent/subagents.py:90–132: `general-purpose` (93–107), `explore` (115–131) | bodies + descriptions feed both the sub-agent prompt and the parent index |
 | Sub-agent budget nudges | subagents.py:437–454 | appended as system messages when max_turns nears ("Start converging now…") |
@@ -142,4 +142,4 @@ assertions (de-facto content guards) plus one true golden fixture:
   loop.py:657–666 (`_apply_injected_skills`) — same contract, slightly different wording.
 5. **`SAY_MAX_CHARS = 400` mirrored** in backend/agent/speak.py:393 and src/speech.ts:118 (documented mirror; drift would break transcript stripping).
 6. **windows-mcp playbook tripled**: sandbox prompt_section (sandbox.py:1229–1263), `sandbox_run` description (sandbox.py:1324–1347), and `_HOST_INPUT_NOTE` on every input tool (computer.py:31–35).
-7. **Orphan/legacy**: `_BRIEFING_MAX`, `CMD_TOOLS_NOTE` sharing is deliberate; the true orphans are the `git_*` names (no local schema/executor; schemas exist host-side on the remote device, built from the same tools.py source) and `REMOTE_TOOLS` listing tools with no local schema.
+7. **Orphan/legacy**: `_BRIEFING_MAX`, `CMD_TOOLS_NOTE` sharing is deliberate. The `git_*` names were removed with #174 (2026-09-30): they never had a schema or executor anywhere — the host's `/api/remote/exec` dispatches through the same `EXECUTORS` map, so the remote-forward path was a dead end too; `REMOTE_TOOLS` now lists only executable tools.

@@ -33,6 +33,45 @@ def test_general_purpose_excludes_ask_user_and_spawn():
     assert "write_file" in tools
 
 
+
+
+def test_no_phantom_git_tools_in_prompts():
+    """#174: the git_* names have no schema or executor anywhere (the host
+    endpoint dispatches through the same EXECUTORS map), so no prompt may
+    advertise them - a sub-agent following its own text would hit a
+    deterministic Unknown tool mid-task."""
+    from backend.agent import tools as tools_mod
+
+    phantom = {
+        "git_status", "git_diff", "git_add",
+        "git_commit", "git_push", "git_pull",
+    }
+    assert phantom.isdisjoint(tools_mod.EXECUTORS)
+    texts = {
+        "parent": loop._default_system_prompt(""),
+        "general-purpose": subagents._sub_agent_system_prompt(
+            subagents.get_agent_def("general-purpose"), ""
+        ),
+        "explore": subagents._sub_agent_system_prompt(
+            subagents.get_agent_def("explore"), ""
+        ),
+    }
+    for name, text in texts.items():
+        for tool in phantom:
+            assert tool not in text, (name, tool)
+
+
+def test_explore_allowlist_names_are_executable():
+    """#174 guard: every _EXPLORE_TOOLS name must resolve to a real schema,
+    so the allowlist can never re-acquire phantom tools silently."""
+    ex = subagents.get_agent_def("explore")
+    executable = {
+        s["function"]["name"] for s in subagents._resolve_tools(ex, windows=True)
+    }
+    for name in subagents._EXPLORE_TOOLS:
+        assert name in executable, name
+
+
 def test_computer_tools_never_reach_subagents():
     gp = subagents.get_agent_def("general-purpose")
     tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, windows=True)}

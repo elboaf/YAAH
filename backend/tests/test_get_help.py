@@ -12,6 +12,14 @@ def test_get_help_lists_all_tools():
     assert "get_help" in names
 
 
+def test_view_image_doc_matches_same_turn_attach():
+    """#175: the loop appends the image part before the next model call of
+    the SAME turn; the help text must not teach NEXT-turn-only visibility."""
+    doc = tools.HELP_DOCS["view_image"]
+    assert "NEXT turn" not in doc
+    assert "next model call" in doc
+
+
 def test_get_help_known_tool_returns_schema_and_notes():
     res = asyncio.run(
         tools.execute_tool("get_help", {"tool_name": "screenshot"}, workspace="")
