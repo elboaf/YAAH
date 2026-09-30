@@ -258,4 +258,4 @@ evidence does not model the real prompt:
 - 0 findings dropped: every one of the 59 source findings maps to a SYN row,
   and every SYN row maps to an issue or to §6 above.
 - The review itself changed no code; fixes flow from the issues.
-- 2026-09-30: the three Critical fixes landed together (glue separator SYN-01/#173, phantom git tools SYN-02/#174, view_image wording SYN-03/#175), with the SYN-43 duplicate-pointer cosmetic (#197 batch) folded in and README.md committed for the harness (#196). PR: elboaf/YAAH#__PR__.
+- 2026-09-30: the three Critical fixes landed together (glue separator SYN-01/#173, phantom git tools SYN-02/#174, view_image wording SYN-03/#175), with the SYN-43 duplicate-pointer cosmetic (#197 batch) folded in and README.md committed for the harness (#196). PR: elboaf/YAAH#200.
