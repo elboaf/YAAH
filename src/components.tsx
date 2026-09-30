@@ -1318,6 +1318,71 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
   )
 }
 
+/** Clickable attachment chip (#143): clicking toggles an inline, monospace,
+ *  height-capped internally-scrolling expansion of the file's text. Chips
+ *  with inline content render from the message's own stored data (no
+ *  network); staged-path chips fetch via previewFile on first expand
+ *  (cached thereafter) and show a graceful not-found state if the file is
+ *  gone. */
+const EXPAND_MAX_HEIGHT_CLASS = 'max-h-64'
+
+function ExpandableAttachmentChip({
+  a,
+}: {
+  a: { name: string; content?: string; path?: string; size: number }
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [fetched, setFetched] = useState<string | null>(null)
+  const [missed, setMissed] = useState(false)
+  const workspace = useAgent((s) => s.workspace)
+
+  const toggle = () => {
+    if (expanded) {
+      setExpanded(false)
+      return
+    }
+    if (a.content === undefined && fetched === null && !missed) {
+      // Lazy fetch for staged files (#143); the preview API proxies to
+      // remote hosts already. A missing file degrades to not-found, not an
+      // error toast.
+      previewFile(workspace, a.path ?? '')
+        .then((r) => setFetched(r.content))
+        .catch(() => setMissed(true))
+    }
+    setExpanded(true)
+  }
+
+  return (
+    <div className="flex flex-col items-end">
+      <button
+        type="button"
+        title={a.path ?? a.name}
+        onClick={toggle}
+        className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300 hover:bg-zinc-700"
+      >
+        {a.name}
+        <span className="text-zinc-500">
+          {' '}· {Math.max(1, Math.round(a.size / 1_000))} KB
+        </span>
+      </button>
+      {expanded ? (
+        a.content === undefined && missed ? (
+          <div className="mt-0.5 rounded bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-500">
+            file no longer exists
+          </div>
+        ) : (
+          <pre
+            data-attachment-expand
+            className={`mt-0.5 w-full max-w-[85%] overflow-y-auto whitespace-pre-wrap break-words rounded bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-300 ${EXPAND_MAX_HEIGHT_CLASS}`}
+          >
+            {a.content ?? fetched ?? '…'}
+          </pre>
+        )
+      ) : null}
+    </div>
+  )
+}
+
 export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   // Persisted failure markers (backend writes role='system' when a turn
   // dies): a slim machine line, not a fake agent message.
@@ -1426,16 +1491,7 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
           {msg.attachments?.length ? (
             <div className="mb-1.5 flex flex-wrap justify-end gap-1">
               {msg.attachments.map((a, i) => (
-                <span
-                  key={i}
-                  title={a.path ?? a.name}
-                  className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300"
-                >
-                  {a.name}
-                  <span className="text-zinc-500">
-                    {' '}· {Math.max(1, Math.round(a.size / 1_000))} KB
-                  </span>
-                </span>
+                <ExpandableAttachmentChip key={i} a={a} />
               ))}
             </div>
           ) : null}
