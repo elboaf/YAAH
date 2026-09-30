@@ -252,7 +252,7 @@ evidence does not model the real prompt:
 
 ## 7. Disposition
 
-- 49 consolidated findings → **26 actionable GitHub issues** (batch preserved in
+- 49 consolidated findings → **25 actionable GitHub issues** (batch preserved in
   `C:\Users\Administrator\YAAH\.scratch\findings-issues\`), each labeled
   `ready-for-agent`, each linking parent spec #160.
 - 0 findings dropped: every one of the 59 source findings maps to a SYN row,
