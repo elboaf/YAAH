@@ -103,6 +103,7 @@ import { AgentContextPerProvider } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
+import { tapeOffsetPx, quantizeUiScale } from './jitter'
 import { CodeBlock, AgentMarkdown } from './markdown'
 import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
@@ -818,7 +819,7 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
   useEffect(() => {
     const w = wrapRef.current?.clientWidth ?? 0
     const t = tapeRef.current?.scrollWidth ?? 0
-    setOffset(Math.min(0, w - t))
+    setOffset(tapeOffsetPx(w, t))
   }, [visibleTape])
   return (
     <div
@@ -1148,7 +1149,10 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
     const tape = previewRef.current
     const viewport = tape?.parentElement
     if (!tape || !viewport) return
-    const updateOffset = () => setPreviewOffset(Math.min(0, viewport.clientWidth - tape.scrollWidth))
+    // Issue #133: floor to a whole pixel — a fractional translateX puts the
+    // line at a subpixel position the rasterizer resolves differently between
+    // frames, reading as a ~1px dance of the whole client area.
+    const updateOffset = () => setPreviewOffset(tapeOffsetPx(viewport.clientWidth, tape.scrollWidth))
     updateOffset()
     if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(updateOffset)
@@ -5820,7 +5824,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               ),
             ),
           )
-          setUiScale(Number(c.ui_scale) || 1.0)
+          setUiScale(quantizeUiScale(Number(c.ui_scale) || 1.0))
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
           setCloudEndpoint(v?.cloud_endpoint ?? '')
@@ -6052,8 +6056,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       // Hot-swap the live registration in the Composer; it reports failure
       // (combo taken by another app) through the same reject toast system.
       window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
-      // Live-apply the interface scale (App's UiScale listens and re-zooms).
-      window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: uiScale } }))
+      // Quantized (issue #133): the applied zoom must never carry subpixel
+      // noise — App.tsx quantizes again on its side, this keeps the value
+      // the settings UI round-trips clean at the source.
+      window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: quantizeUiScale(uiScale) } }))
       // Provider/model changes can affect the defaults inherited by new chats;
       // refresh the sidebar's model and thought-level controls.
       useAgent.getState().refreshGlobals()
