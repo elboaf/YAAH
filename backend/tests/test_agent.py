@@ -722,10 +722,17 @@ async def test_powershell_tool(tmp_path):
 async def test_powershell_timeout(tmp_path):
     r = await execute_tool(
         "powershell",
-        {"command": "Start-Sleep -Seconds 30", "timeout_seconds": 2},
+        {
+            "command": "Write-Output progress-marker; Start-Sleep -Seconds 30",
+            "timeout_seconds": 2,
+        },
         str(tmp_path),
     )
     assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    # Pre-deadline output survives through the PowerShell entrypoint too (#180).
+    assert "progress-marker" in r["output"][:idx]
 
 
 # ---------------------------------------------------------------- images
