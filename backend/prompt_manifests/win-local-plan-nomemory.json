@@ -81,8 +81,8 @@
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1269,
-      "sha256": "36e1f0c143e0c54c62c59ab02bfd247765159bb1f6c5c5f0b44b88efb9f9dd47"
+      "bytes": 1247,
+      "sha256": "343499818bdedcebe9851082ffc3a9ec46992ac60e67500d32e92c06c90d8534"
     },
     {
       "name": "get_help",
@@ -96,8 +96,8 @@
     },
     {
       "name": "web_fetch",
-      "bytes": 557,
-      "sha256": "26b56c05ed4e94424958db1888c229ad357fc392bd81a5c44727744d70b8496e"
+      "bytes": 636,
+      "sha256": "0bb009f7c774b55d6b509f66314048d7f77f55906edbc67d8851c57cd5daba41"
     },
     {
       "name": "view_image",
@@ -151,8 +151,8 @@
     },
     {
       "name": "spawn_agent",
-      "bytes": 1301,
-      "sha256": "065b018fac874ab087582394667ea82631539df37bef78363abf21f6510a90f8"
+      "bytes": 1320,
+      "sha256": "004d6db02820d95b0d60e9b1f747600bfa6aa1034f417c38683d22baf1cceb98"
     },
     {
       "name": "load_skill",
@@ -236,8 +236,8 @@
     },
     {
       "name": "powershell",
-      "bytes": 1159,
-      "sha256": "a5a35e31c5dc313d8e9dd92b8ddd8c19e0a90f9b541cfe7f4e7fe6b7db0e88a4"
+      "bytes": 1165,
+      "sha256": "6fc02d9c1ef27d76905741d24b2c57788473ca13a003896ace430915dba5211d"
     },
     {
       "name": "exit_plan",
