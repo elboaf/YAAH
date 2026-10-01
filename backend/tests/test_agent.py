@@ -63,6 +63,50 @@ async def test_bash_stream_timeout_kills_tree(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bash_timeout_flushes_partial_utf8(tmp_path):
+    """#221 return trip: if the deadline lands mid-UTF-8-character, the
+    decoder's buffered bytes must still be flushed (with errors=replace),
+    not silently dropped by the timeout return path."""
+    # 200 'é' as UTF-8 = 400 bytes; a 4096-byte read can't split it, so
+    # instead emit a lone lead byte whose continuation never arrives.
+    # Octal escape: dash's printf on Linux does not support \xHH.
+    r = await asyncio.wait_for(
+        execute_tool(
+            "bash",
+            {
+                "command": "printf '\\303'; sleep 30",
+                "timeout_seconds": 2,
+            },
+            str(tmp_path),
+        ),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    # The lone \xc3 lead byte is flushed through errors="replace" as U+FFFD.
+    assert "\ufffd" in r["output"][:idx]
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_returns_partial_output(tmp_path):
+    """#180: output captured before the deadline must not be discarded —
+    it is returned ahead of the [timed out ...] marker."""
+    r = await asyncio.wait_for(
+        execute_tool(
+            "bash",
+            {"command": "echo progress-marker; sleep 30", "timeout_seconds": 2},
+            str(tmp_path),
+        ),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    assert "progress-marker" in r["output"][:idx]
+
+
+@pytest.mark.asyncio
 async def test_bash_on_chunk_errors_swallowed(tmp_path):
     """A throwing on_chunk (dead UI stream) must never fail the tool."""
     def bad(_chunk):
@@ -678,10 +722,17 @@ async def test_powershell_tool(tmp_path):
 async def test_powershell_timeout(tmp_path):
     r = await execute_tool(
         "powershell",
-        {"command": "Start-Sleep -Seconds 30", "timeout_seconds": 2},
+        {
+            "command": "Write-Output progress-marker; Start-Sleep -Seconds 30",
+            "timeout_seconds": 2,
+        },
         str(tmp_path),
     )
     assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    # Pre-deadline output survives through the PowerShell entrypoint too (#180).
+    assert "progress-marker" in r["output"][:idx]
 
 
 # ---------------------------------------------------------------- images
