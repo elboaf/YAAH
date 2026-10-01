@@ -143,6 +143,15 @@ def resolve_path(workspace: str, rel_path: str, for_write: bool = False) -> Path
 
 # ---------------------------------------------------------------- schemas
 
+# Shared never-shell-background warning - one canonical sentence (kill-tree
+# since _kill_tree: backgrounded children are killed at timeout, losing
+# their work, not wedged forever). Both shell schemas embed it.
+_BG_WARN = (
+    "Never shell-background a long-running process (trailing &, start /b): "
+    "backgrounded children are killed at timeout, losing their work. "
+    "Servers and watchers need a detached spawn "
+)
+
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -151,11 +160,9 @@ TOOLS_SCHEMA = [
             "description": (
                 "Execute a shell command in the workspace directory. Use for "
                 "builds, tests, git, file discovery (ls, grep, find), and text "
-                "processing. Long-running commands will time out. Never shell-"
-                "background a long-running process (trailing &, start /b): the "
-                "child outlives the tool call, keeps the output pipe open, and "
-                "wedges the session. Servers and watchers need a detached spawn "
-                "instead (e.g. Start-Process with redirect, or nohup with "
+                "processing. Long-running commands will time out. "
+                + _BG_WARN
+                + "instead (e.g. Start-Process with redirect, or nohup with "
                 "stdout/stderr redirected to a file). For a test suite longer "
                 "than the timeout cap, run it in chunks (per directory or "
                 "file) instead of one monolithic run. git must never open its "
@@ -194,10 +201,8 @@ POWERSHELL_SCHEMA = {
             "directory. Use for Windows-native tasks the shell can't do "
             "well: registry, services, WMI/CIM, ACLs, scheduled tasks, "
             "structured object pipelines. Long-running commands will "
-            "time out. Never shell-background a long-running process "
-            "(trailing &): the child outlives the tool call, keeps the "
-            "output pipe open, and wedges the session. Servers and watchers "
-            "need Start-Process (optionally -WindowStyle Hidden) instead. "
+            "time out. " + _BG_WARN +
+            "instead (Start-Process, optionally -WindowStyle Hidden). "
             "git must never open its editor: pass -m '<message>' to git "
             "commit and use GIT_EDITOR=true for git rebase --continue / "
             "commit --amend - an interactive editor blocks the tool "
@@ -231,7 +236,8 @@ INSTALL_GIT_SCHEMA = {
             "with YAAH (~minute-long setup, no windows). Offer this to "
             "the user via ask_user when a git command or tool fails "
             "because git is missing, and run it only after they agree. "
-            "Shells opened before the install need a restart to see git."
+            "PATH is picked up per call - if a git command still fails, "
+            "retry it once."
         ),
         "parameters": {"type": "object", "properties": {}},
     },
@@ -261,8 +267,9 @@ HELP_DOCS: dict = {
     "web_search": (
         "DuckDuckGo HTML endpoint - no API key, no JS. Snippets are "
         "short; treat them as pointers, not answers. For a specific "
-        "site, add site:example.com to the query. Rate-limited: on a "
-        "429 or empty result page, wait a few seconds rather than "
+        "site, add site:example.com to the query. Fails visibly: an "
+        "anomaly-modal challenge, an empty result page, or a 'search "
+        "request failed' error - rephrase or wait rather than "
         "hammering retries."
     ),
     "web_fetch": (
@@ -270,9 +277,11 @@ HELP_DOCS: dict = {
         "bot-guarded sites usually work, but it is slow (~seconds) - "
         "do not use it for plain static files (use bash/powershell "
         "curl or read_file for local paths). Returns readable text "
-        "plus an 'IMAGES ON PAGE' list for view_image. Blocked pages: "
-        "fall back to web_search snippets instead of retrying the "
-        "same URL. max_chars truncates from the top - fetch a "
+        "plus an 'IMAGES ON PAGE' list (first 5 image URLs) for "
+        "view_image. Blocked pages: fall back to web_search snippets - "
+        "don't hammer the same URL (the tool already tries three "
+        "routes; one delayed retry is reasonable, a loop is not). "
+        "max_chars truncates from the top - fetch a "
         "specific anchor or raise the cap for long pages."
     ),
     "view_image": (
@@ -432,8 +441,9 @@ TOOLS_SCHEMA += [
                 "stripped to plain text), via a real headless browser so "
                 "JS-heavy and bot-guarded sites usually work. Use after "
                 "web_search to read a result, or directly for a known URL. "
-                "If blocked, fall back to web_search snippets rather than "
-                "retrying the same URL."
+                "If blocked, fall back to web_search snippets - don't "
+                "hammer the same URL. web_fetch lists the page's first "
+                "5 image URLs under 'IMAGES ON PAGE' for view_image."
             ),
             "parameters": {
                 "type": "object",
@@ -660,7 +670,7 @@ TOOLS_SCHEMA += [
                 "result. The sub-agent sees ONLY the prompt you pass — "
                 "include file paths, error messages, and decisions it needs. "
                 "Launch several spawn_agent calls in the same turn to run "
-                "them in parallel (max 4 at once). Use for: isolated "
+                "them in parallel (max 4 at once; extra calls queue). Use for: isolated "
                 "research (explore), parallel independent subtasks, or work "
                 "whose intermediate steps would bloat this conversation. "
                 "Do NOT use for small tasks that need this conversation's "
@@ -755,7 +765,8 @@ TOOLS_SCHEMA += [
                         "type": "string",
                         "description": (
                             "One of: user | feedback | project | reference "
-                            "(default project)."
+                            "(default project; unknown values are coerced "
+                            "to project)."
                         ),
                     },
                     "content": {
