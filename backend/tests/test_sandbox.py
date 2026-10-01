@@ -6,7 +6,6 @@ override + fake spawn), so the suite is green on Linux CI too.
 """
 import asyncio
 import json
-import msvcrt
 import re
 import shutil
 import subprocess
@@ -1278,6 +1277,9 @@ def test_toolkit_wrapper_locks_manifest(tmp_path):
     (tk / "state.json").write_text(
         json.dumps({"tools": {"keep": {"version": "1"}}}), encoding="utf-8")
     lock = tk / "state.json.lock"
+    pytest.importorskip("msvcrt")
+    import msvcrt  # Windows-only module; suite stays importable on Linux
+
     with open(lock, "wb") as held:  # simulate another process holding it
         msvcrt.locking(held.fileno(), msvcrt.LK_LOCK, 1)
         try:
