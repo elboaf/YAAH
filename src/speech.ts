@@ -154,17 +154,22 @@ export function heuristicBriefing(md: string, maxChars = SAY_MAX_CHARS): string 
 
 /** The final TTS input for a turn: the model-emitted briefing when present,
  *  else the heuristic, else the old truncated verbatim prose. Mirrors
- *  speak.spoken_line â€” everything passes through proseForSpeech and the
- *  hard cap is enforced here. */
+ *  speak.spoken_line â€” everything passes through proseForSpeech, the hard
+ *  cap is enforced here, and (#206) the result passes the speech
+ *  normalizer (re-clamped after â€” spelled-out numbers are longer). */
 export function spokenLine(briefing: string | null | undefined, md: string): string {
+  const finish = (text: string): string => {
+    const out = normalizeForSpeech(text)
+    return out.length > SAY_MAX_CHARS ? clip(out) : out
+  }
   const prose = proseForSpeech(md, Number.MAX_SAFE_INTEGER)
   const source = (briefing ?? '').trim()
   if (source) {
     const line = proseForSpeech(source, Number.MAX_SAFE_INTEGER)
-    if (line.length <= SAY_MAX_CHARS) return line
-    return heuristicBriefing(line) || clip(line)
+    if (line.length <= SAY_MAX_CHARS) return finish(line)
+    return finish(heuristicBriefing(line) || clip(line))
   }
-  return heuristicBriefing(prose) || clip(prose)
+  return finish(heuristicBriefing(prose) || clip(prose))
 }
 
 const ABBREV = new Set([
@@ -642,3 +647,178 @@ export const useTts = create<TtsState>((set, get) => {
     },
   }
 })
+
+// ---------------------------------------------------------------- normalize
+// #206 — written-for-the-eye to written-for-the-ear, deterministically.
+// EXACT mirror of backend speak.py normalize_for_speech; keep the shared
+// parity cases identical (src/normalizeForSpeech.parity.test.ts vs
+// backend/tests/test_speak.py SHARED_CASES).
+
+const DIGITS: Record<string, string> = {
+  '0': 'oh', '1': 'one', '2': 'two', '3': 'three', '4': 'four',
+  '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine',
+}
+const ONES = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven',
+  'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen',
+  'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty',
+  'seventy', 'eighty', 'ninety']
+
+// A number token NOT glued to letters and not part of a longer decimal;
+// a trailing sentence period or comma is fine, "1999.5" / "2024s" are not.
+const NOT_FRAG = '(?!\\.?\\d)(?![A-Za-z])'
+
+// Versionish token: a dotted numeric group run (version or IP-like), with
+// an optional v/version head and an end-attached suffix (-rc.7, +build21).
+const VERSIONISH =
+  /(?<![\w.])(v(?:er(?:sion)?)?\s?)?(\d{1,3}(?:\.\d{1,3})+)((?:[-+][A-Za-z][\w]*(?:\.[\w]+)*)?)/g
+
+// Emotion markers / stage directions: only short all-word contents count,
+// so bracketed technical prose — the documented IPA escape hatch — survives.
+const EMOTION_WORDS = new Set([
+  'excited', 'sad', 'happy', 'angry', 'sarcastic', 'whispers', 'whisper',
+  'shouts', 'shouting', 'laughs', 'laughing', 'giggles', 'sighs', 'sigh',
+  'pause', 'pauses', 'breath', 'excitedly', 'calmly', 'seriously',
+  'dramatically', 'nervously', 'cheerful', 'cheerfully', 'tone', 'ironic',
+])
+const EMOTION_MARKER = /\[([^\[\]]+)\]/g
+
+// SSML fragments are stripped, never read as phonemes.
+const SSML_TAG =
+  /<\/?\s*(?:speak|break|prosody|say-?as|phoneme|sub|emphasis|voice|p|s|amazon:[\w-]+|google:[\w-]+)(?:\s[^>]*)?\/?>/gi
+
+const isEmotionMarker = (inner: string): boolean => {
+  const words = inner.split(/\s+/)
+  return words.length >= 1 && words.length <= 3 &&
+    words.every((w) => EMOTION_WORDS.has(w.toLowerCase().replace(/^['’-]+|['’-]+$/g, '')))
+}
+
+const underHundred = (n: number): string => {
+  if (n < 20) return ONES[n]
+  const t = Math.floor(n / 10)
+  const o = n % 10
+  return TENS[t] + (o ? '-' + ONES[o] : '')
+}
+
+/** 0-99 the way digits are said inside grouped runs. */
+const twoDigit = (n: number): string => (n < 10 ? DIGITS[String(n)] : underHundred(n))
+
+/** One dotted-group segment the way a human reads it: single digits as
+ *  digit words (the 'oh' of one-point-oh), 10-99 natural (sixteen), and
+ *  three-digit groups digit-by-digit (bytes in an address). */
+const groupWords = (group: string): string => {
+  const n = parseInt(group, 10)
+  if (group.length === 1 || (group.length === 2 && n < 10)) {
+    return DIGITS[group.replace(/^0+/, '') || '0']
+  }
+  if (group.length === 2) return underHundred(n)
+  return group.split('').map((d) => DIGITS[d]).join(' ')
+}
+
+/** A four-digit year the way a human says it (1999, 2016, 1800). */
+const yearWords = (d: string): string => {
+  const hi = parseInt(d.slice(0, 2), 10)
+  const lo = parseInt(d.slice(2), 10)
+  if (hi < 10) return underHundred(parseInt(d, 10))
+  if (hi === 10) return 'ten hundred'
+  const hundreds = underHundred(hi)
+  if (lo === 0) return `${hundreds} hundred`
+  if (lo < 10) return `${hundreds} oh ${DIGITS[String(lo)]}`
+  return `${hundreds} ${twoDigit(lo)}`
+}
+
+const digitRunWords = (run: string): string =>
+  run.split('').map((d) => DIGITS[d]).join(' ')
+
+/** Phone grouping with a spoken pause at group edges; hyphenated tokens
+ *  split at their hyphens, bare 10-digit runs group 3+3+rest. */
+const phoneWords = (token: string): string => {
+  let groups: string[]
+  if (token.includes('-')) {
+    groups = token.split('-').filter(Boolean)
+    if (groups[0] === '1' && groups.length > 3) groups = groups.slice(1)
+  } else {
+    const digits = token.replace(/\D/g, '')
+    if (digits.length >= 10) groups = [digits.slice(0, 3), digits.slice(3, 6), digits.slice(6)]
+    else groups = [digits]
+  }
+  return groups.map(digitRunWords).join(', ')
+}
+
+const isPhone = (token: string): boolean => {
+  const digits = token.replace(/\D/g, '')
+  if (token.includes('-')) return digits.length >= 7 && digits.length <= 11
+  return digits.length === 10 || digits.length === 11
+}
+
+const versionWords = (_m: string, head: string | undefined, dotted: string, suffix: string | undefined): string => {
+  const groups = dotted.split('.')
+  // A bare two-group decimal with a single-digit head (3.14, 1.3) is an
+  // ordinary number: the engines already read it correctly.
+  if (!head && groups.length === 2 && groups[0].length === 1) return (head ?? '') + dotted + (suffix ?? '')
+  const joiner = groups.length >= 4 ? ' dot ' : ' point '
+  let out = head ? 'version ' : ''
+  out += groups.map(groupWords).join(joiner)
+  if (suffix) {
+    const bits: string[] = []
+    for (const p of suffix.match(/\d+|[A-Za-z]+|\./g) ?? []) {
+      if (p === '.') bits.push('point')
+      else if (/\d/.test(p[0])) bits.push(p.length <= 2 ? twoDigit(parseInt(p, 10)) : digitRunWords(p))
+      else if (p.length === 1 || p.toLowerCase() === 'rc') bits.push(p.split('').join(' ').toUpperCase())
+      else bits.push(p) // beta, dev, rel — real words, keep them
+    }
+    out += ' ' + bits.join(' ')
+  }
+  return out
+}
+
+/** Curated acronyms to letter-spell; unlisted words (Kokoro, ONNX) are
+ *  left to the engine's lexicon. */
+const acronyms = (text: string): string => {
+  const known = new Set(['TLS', 'SSL', 'HTTP', 'HTTPS', 'API', 'CPU', 'GPU',
+    'RAM', 'URL', 'URI', 'SQL', 'JSON', 'XML', 'HTML', 'CSS', 'WAV', 'PDF',
+    'PNG', 'JWT', 'CLI', 'SDK', 'LLM', 'WSL', 'UI', 'UUID', 'SIP', 'SSH',
+    'TCP', 'UDP', 'DNS', 'IP', 'CI', 'CD'])
+  return text.split(' ').map((w) => (known.has(w) ? w.split('').join(' ') : w)).join(' ')
+}
+
+/** Deterministic written→spoken pass over TTS INPUT only (the chat
+ *  transcript is untouched). Mirrors speak.normalize_for_speech — keep the
+ *  two in sync via the shared parity cases. */
+export function normalizeForSpeech(text: string): string {
+  if (!text) return text
+
+  // 1. SSML tags and emotion markers cannot survive into synthesis.
+  let t = text.replace(SSML_TAG, ' ')
+  t = t.replace(EMOTION_MARKER, (m, inner: string) => (isEmotionMarker(inner) ? '' : m))
+  t = t.replace(/ {2,}/g, ' ').replace(/ ([,.!?;:])/g, '$1')
+
+  // 2. Years (1000-2999) before generic digit-run rules.
+  t = t.replace(new RegExp(`(?<![\\w.])([12]\\d{3})${NOT_FRAG}`, 'g'),
+    (_m, y: string) => yearWords(y))
+
+  // 3. Versionish dotted groups (v1.0.16-rc.7, 10.0.0.1).
+  t = t.replace(VERSIONISH, versionWords as never)
+
+  // 4. Long digit runs (and phones with hyphens): phones group, all else
+  //    reads digit-by-digit (ports, IDs).
+  t = t.replace(new RegExp(`(?<![\\w.])(\\d[\\d-]{3,})${NOT_FRAG}`, 'g'), (m, token: string) => {
+    if (isPhone(token)) return phoneWords(token)
+    return digitRunWords(token.replace(/\D/g, ''))
+  })
+
+  // 5. Remaining short numbers: two digits natural (sixteen), three digits
+  //    digit-by-digit (443 is a port far more often than a quantity here);
+  //    single digits stay.
+  t = t.replace(new RegExp(`(?<![\\w.])(\\d{2,3})${NOT_FRAG}`, 'g'),
+    (_m, n: string) => (n.length === 2 ? twoDigit(parseInt(n, 10)) : digitRunWords(n)))
+
+  // 6. Acronyms letter-spelled.
+  return acronyms(t).trim()
+}
+
+/** The composition TTS input receives: markdown → prose, then the #206
+ *  normalization pass. */
+export function normalizeProseForSpeech(md: string, maxChars = 4000): string {
+  return normalizeForSpeech(proseForSpeech(md, maxChars))
+}

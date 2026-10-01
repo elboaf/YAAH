@@ -2494,6 +2494,10 @@ async def api_tts_synthesize(body: TtsBody):
         return JSONResponse({"detail": "TTS model not downloaded"}, status_code=409)
     voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
     speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
+    # #206: defensive normalization at the choke point — live-stream chunks
+    # may carry un-normalized text from older sessions; whatever reaches a
+    # synthesis engine (local today, remote per #205) reads like a human.
+    text = speak.normalize_for_speech(text)
     # The utterance's generation comes from the frontend (body.epoch); a
     # hand-made request without one gets epoch 0, which any stop invalidates.
     epoch = body.epoch if body.epoch is not None else 0
