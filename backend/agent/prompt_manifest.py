@@ -447,7 +447,10 @@ def _split_combo(combo: str) -> dict:
             "kind": "subagents" if "subagents" in parts else "auxiliary",
             "plan": False,
             "skills": "noskills" not in parts,
-            "memory": False,
+            # #182: kind-subagents seeds a memory index so the manifest
+            # shows the chosen invariant (memory section iff the resolved
+            # schemas include a memory tool).
+            "memory": "subagents" in parts,
             "shot": True,
             "override": False,
             "compaction": False,
@@ -749,10 +752,13 @@ def _tool_schemas_summary(tools: list) -> list:
 def _def_to_manifest(defn) -> dict:
     """A built-in AgentDef through _sub_agent_system_prompt (the REAL
     builder). Tool list is the definition's static prose list, not
-    get_schemas -- matched by matching the production section names."""
+    get_schemas -- matched by matching the production section names.
+    Workspace is LOCAL_WS so the #182 memory-index injection (seeded by
+    _prep_flags for kind-subagents) renders when the resolved schemas
+    include a memory tool."""
     from backend.agent.subagents import _sub_agent_system_prompt
 
-    prompt = _sub_agent_system_prompt(defn, "")
+    prompt = _sub_agent_system_prompt(defn, LOCAL_WS)
     raw = prompt.encode("utf-8")
     return {
         "name": defn.name,
