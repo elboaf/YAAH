@@ -307,6 +307,13 @@ export interface AgentConfig {
     tts_enabled?: boolean
     tts_voice?: string
     tts_speed?: number
+    /** Narration engine (#205): local Kokoro or a remote
+     *  OpenAI-compatible /v1/audio/speech endpoint. */
+    tts_engine?: 'local' | 'remote'
+    tts_endpoint?: string
+    /** Arrives masked ("set" | ""); a fresh value replaces the stored key. */
+    tts_api_key?: string
+    tts_model?: string
     /** Notification chimes (#29): run-finished + question-pending sounds. */
     sounds_enabled?: boolean
   }
@@ -374,6 +381,10 @@ export const updateConfig = (
       tts_enabled?: boolean
       tts_voice?: string
       tts_speed?: number
+      tts_engine?: 'local' | 'remote'
+      tts_endpoint?: string
+      tts_api_key?: string
+      tts_model?: string
       sounds_enabled?: boolean
     }
     remote?: {
@@ -912,7 +923,13 @@ export async function transcribeAudio(wav: Blob): Promise<{ text: string; langua
 // ---------------------------------------------------------------- tts (read-aloud)
 
 export interface TtsStatus {
+  /** Active narration engine (#205): 'local' | 'remote'. */
+  engine: 'local' | 'remote'
+  /** Whether the ACTIVE engine can speak right now (remote = endpoint
+   *  configured; local = model present). */
   available: boolean
+  /** Local model presence, whatever the engine (drives the download UI). */
+  model_available: boolean
   model: string
   model_bytes: number
   voices: string[]
@@ -923,6 +940,36 @@ export interface TtsStatus {
   downloading: boolean
 }
 export const ttsStatus = () => api<TtsStatus>('/api/tts/status')
+
+/** Synthesize a one-line sample through the given engine (#205): the
+ *  Settings Test button. `engine` defaults to the saved choice server-side;
+ *  the UI passes its on-screen draft so Test reflects unsaved edits.
+ *  Rejects with the backend's detail — a remote engine surfaces the
+ *  server's own error message here (and `.status` drives result styling). */
+export async function ttsTest(
+  voice: string,
+  speed: number,
+  engine?: 'local' | 'remote',
+): Promise<{ ok: boolean }> {
+  let res: Response
+  try {
+    res = await fetch(url('/api/tts/test'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voice, speed, engine }),
+    })
+  } catch {
+    signalBackendDown()
+    throw new Error('Backend is unreachable (restarting)')
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    const err = new Error(body.detail || `test failed (${res.status})`) as Error & { status?: number }
+    err.status = res.status
+    throw err
+  }
+  return res.json()
+}
 
 /** Fire-and-forget stop handshake: raises the backend's supersede floor to
  *  `floor` (the frontend's current utterance generation), so any in-flight
@@ -969,12 +1016,15 @@ export async function ttsSynthesize(
     const err = new Error(body.detail || `synthesis failed (${res.status})`) as Error & {
       status?: number
       superseded?: boolean
+      code?: string
     }
     err.status = res.status
     // A superseded 409 is the queue's benign hand-off signal (an utterance
     // was floored away), not a missing-model error — tag it so the store's
-    // failure path stays silent instead of flipping `ready` off.
+    // failure path stays silent instead of flipping `ready` off. A remote
+    // not-configured 409 (#205) carries a machine-readable code instead.
     if (res.status === 409 && body.detail === 'superseded') err.superseded = true
+    if (res.status === 409 && body.code === 'not-configured') err.code = body.code
     throw err
   }
   return res.blob()

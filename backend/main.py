@@ -1951,6 +1951,10 @@ async def api_export_conversation(conversation_id: int):
 @app.get("/api/config")
 async def api_get_config():
     cfg = load_config()
+    # Voice settings; both API keys are masked like provider keys.
+    voice_view = {**(cfg.get("voice") or {})}
+    for key in ("cloud_api_key", "tts_api_key"):
+        voice_view[key] = "set" if voice_view.get(key) else ""
     # Only reveal whether a key is set — never any part of it
     masked = {
         name: {**p, "api_key": "set" if p.get("api_key") else ""}
@@ -1972,11 +1976,8 @@ async def api_get_config():
         "last_workspace": cfg.get("last_workspace") or "",
         # Interface scale (CSS zoom): 1.0 = the terminal-grade default ramp.
         "ui_scale": cfg.get("ui_scale", 1.0),
-        # Voice settings; the cloud key is masked like provider keys.
-        "voice": {
-            **(cfg.get("voice") or {}),
-            "cloud_api_key": "set" if (cfg.get("voice") or {}).get("cloud_api_key") else "",
-        },
+        # Voice settings (voice_view above; keys masked).
+        "voice": voice_view,
         # LAN hosting block. The passphrase is stored plaintext by design
         # (same posture as provider keys) and shown only in this app's UI.
         "remote": cfg.get("remote") or {},
@@ -2012,8 +2013,12 @@ async def api_set_config(body: ConfigUpdate):
         # Voice updates merge over the stored voice block: the GET view masks
         # the cloud key as "set", so a settings round-trip must never wipe it.
         existing = load_config().get("voice") or {}
-        if voice.get("cloud_api_key") in ("set", ""):
-            voice.pop("cloud_api_key", None)
+        # Masked keys (#205 added tts_api_key): the GET view shows "set"/"",
+        # so an echoed mask must never overwrite the stored key. A fresh
+        # non-empty value passes through and replaces it.
+        for key in ("cloud_api_key", "tts_api_key"):
+            if voice.get(key) in ("set", ""):
+                voice.pop(key, None)
         updates["voice"] = {**existing, **voice}
     # Remote block merges the same way: a Settings save that only touches
     # hosting_enabled must not wipe the passphrase.
@@ -2273,6 +2278,75 @@ class TtsStopBody(BaseModel):
     floor: int = 0
 
 
+class TtsTestBody(BaseModel):
+    """Settings Test button (#205): synthesize one short sample with these
+    voice/speed drafts through the given engine (default: the saved one;
+    the UI sends its on-screen draft so Test reflects unsaved edits)."""
+    voice: str | None = None
+    speed: float | None = None
+    engine: str | None = None
+
+
+def _remote_engine_args(voice_cfg: dict, voice: str, speed):
+    """The (endpoint, api_key, model, voice, speed) the remote engine
+    needs from a voice config + request drafts. Raises RemoteTTSError
+    ("not-configured") when no endpoint is set — the shared 409 gate for
+    both the narration and the Test-button paths."""
+    from backend.agent import speak
+
+    endpoint = (voice_cfg.get("tts_endpoint") or "").strip()
+    if not endpoint:
+        raise speak.RemoteTTSError(
+            "remote TTS selected but no endpoint configured (Settings → Voice)",
+            code="not-configured",
+        )
+    return (
+        endpoint,
+        voice_cfg.get("tts_api_key") or "",
+        voice_cfg.get("tts_model") or "kokoro",
+        voice,
+        None if speed is None else float(speed),
+    )
+
+
+@app.post("/api/tts/test")
+async def api_tts_test(body: TtsTestBody):
+    """One short sample through the active engine; the detail of any
+    failure comes back verbatim so Settings can show it. 200 = a WAV was
+    produced; 409 = nothing configured (no endpoint / no local model);
+    502 = remote synthesis failed; 503 = local engine failed. This
+    endpoint never streams audio — it is a lighthouse, not a narration
+    path. `engine` may override the saved choice so the button tests what
+    is on screen before the user hits Save."""
+    import asyncio
+
+    from backend.agent import speak
+    from fastapi.responses import JSONResponse
+
+    voice_cfg = load_config().get("voice") or {}
+    engine = body.engine or voice_cfg.get("tts_engine") or "local"
+    voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
+    speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
+    text = "Voice test. If you can hear this, narration is working."
+    try:
+        if engine == "remote":
+            await speak.synthesize_remote(
+                text, *_remote_engine_args(voice_cfg, voice, speed)
+            )
+        else:
+            if not speak.model_available():
+                return JSONResponse({"detail": "TTS model not downloaded"}, status_code=409)
+            await asyncio.to_thread(speak.synthesize, text, voice, float(speed), None)
+    except speak.RemoteTTSError as e:
+        status = 409 if e.code == "not-configured" else 502
+        return JSONResponse({"detail": str(e), "code": e.code}, status_code=status)
+    except RuntimeError as e:
+        return JSONResponse({"detail": str(e)}, status_code=503)
+    except Exception as e:  # noqa: BLE001 — the user is waiting on this answer
+        return JSONResponse({"detail": f"{type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True}
+
+
 @app.get("/api/tts/status")
 async def api_tts_status():
     """What the speaker toggle can use right now: model presence, the voice
@@ -2280,8 +2354,21 @@ async def api_tts_status():
     from backend.agent import speak
 
     voice = load_config().get("voice") or {}
+    engine = voice.get("tts_engine") or "local"
+    # available = the ACTIVE engine can speak right now. Remote mode never
+    # demands the local model (the download offer is meaningless there);
+    # local mode keeps today's model_available() gate. A bare engine value
+    # (a config written before #205) reads as local.
+    if engine == "remote":
+        available = bool((voice.get("tts_endpoint") or "").strip())
+    else:
+        available = speak.model_available()
     return {
-        "available": speak.model_available(),
+        "engine": engine,
+        "available": available,
+        # Local-model state, whatever the engine: remote mode keeps the
+        # download UI hidden (spec) but the field honest.
+        "model_available": speak.model_available(),
         "model": speak.MODEL_NAME,
         "model_bytes": speak.MODEL_BYTES,
         "voices": speak.ENGLISH_VOICES,
@@ -2366,14 +2453,45 @@ async def api_tts_synthesize(body: TtsBody):
     from backend.agent import speak
     from fastapi.responses import JSONResponse, Response
 
-    if not speak.model_available():
-        return JSONResponse({"detail": "TTS model not downloaded"}, status_code=409)
     text = (body.text or "").strip()
     if not text:
         return JSONResponse({"detail": "empty text"}, status_code=400)
     if len(text) > 5000:
         return JSONResponse({"detail": "text too long — split into sentences"}, status_code=413)
     voice_cfg = load_config().get("voice") or {}
+    engine = voice_cfg.get("tts_engine") or "local"
+
+    # Remote engine (#205): the chunk POSTs through the standard
+    # OpenAI-compatible client; voice/speed default from the tts_* settings
+    # (an explicit body override still wins, like local mode). The WAV
+    # contract to the frontend is unchanged — the remote payload is already
+    # WAV and is piped through byte-for-byte.
+    if engine == "remote":
+        voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
+        speed = body.speed if body.speed is not None else voice_cfg.get("tts_speed")
+        epoch = body.epoch if body.epoch is not None else 0
+        if speak.superseded(epoch):
+            return JSONResponse({"detail": "superseded"}, status_code=409)
+        try:
+            args = _remote_engine_args(voice_cfg, voice, speed)
+            # synthesize_remote is async (httpx.AsyncClient) — awaited
+            # directly; the thread offload is a local-engine concern only.
+            audio = await speak.synthesize_remote(text, *args)
+        except speak.SupersededError:
+            return JSONResponse({"detail": "superseded"}, status_code=409)
+        except speak.RemoteTTSError as e:
+            status = 409 if e.code == "not-configured" else 502
+            # 502 = upstream synthesis failed; the frontend skips the chunk
+            # and the text stays visible (Settings' Test button shows the
+            # same detail). 409 = nothing configured to narrate with.
+            return JSONResponse({"detail": str(e), "code": e.code}, status_code=status)
+        except Exception as e:  # noqa: BLE001 — surfaced as a spoken-output error
+            return JSONResponse({"detail": f"{type(e).__name__}: {e}"}, status_code=500)
+        return Response(content=audio, media_type="audio/wav")
+
+    # Local engine: unchanged path.
+    if not speak.model_available():
+        return JSONResponse({"detail": "TTS model not downloaded"}, status_code=409)
     voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
     speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
     # The utterance's generation comes from the frontend (body.epoch); a
