@@ -643,3 +643,201 @@ async def test_pausing_mid_run_cancels_and_clears_retry(fake_model, tmp_path, mo
     row = await get_agent(agent_row["id"])
     assert row["last_status"] == "ok"
     assert agent_row["id"] not in sched._retry_state
+
+
+# ---------------------------------------------- one-shot fires of paused agents
+
+
+def _fake_stream_model():
+    async def fake_chat(messages, tools=None, stream=True, model="", effort=""):
+        return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
+
+    loop.model_client.chat = fake_chat
+
+
+@pytest.mark.asyncio
+async def test_one_shot_fires_disabled_agent_and_parks_the_slot(fake_model, tmp_path):
+    """#199: a one-shot fire runs a paused agent exactly once; the parked
+    (possibly stale) next_fire_at is left untouched — no resurrection, the
+    agent stays paused, and only the real resume path rolls the slot."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv, enabled=0))
+    past = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
+    await update_agent(agent_row["id"], {"next_fire_at": past})
+    _fake_stream_model()
+
+    agent = await get_agent(agent_row["id"])
+    assert await sched.fire_agent(agent, one_shot=True) == "started"
+
+    # It really runs (the fire task is awaited by the drain below).
+    async def wait_for_settle():
+        while True:
+            row = await get_agent(agent_row["id"])
+            if row["last_status"] != "running":
+                return row
+            await asyncio.sleep(0.02)
+
+    row = await asyncio.wait_for(wait_for_settle(), timeout=10)
+    assert row["last_status"] == "ok"
+    assert row["enabled"] == 0, "one-shot must not re-enable a paused agent"
+    # The stale slot survives: no resurrection, no roll-forward.
+    assert datetime.fromisoformat(row["next_fire_at"]) <= datetime.now()
+    # And the tick still refuses to fire it on its own.
+    assert not sched._is_due(await get_agent(agent_row["id"]), datetime.now())
+    assert not loop.agent_is_running(conv)
+
+
+@pytest.mark.asyncio
+async def test_one_shot_still_postpones_when_busy(fake_model, tmp_path):
+    """The busy gate is load-bearing (per-conversation lock): a one-shot of
+    an agent whose chat is mid-turn postpones like any fire."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv))
+    hang = asyncio.Event()
+
+    async def hang_chat(messages, tools=None, stream=True, model="", effort=""):
+        await hang.wait()
+        return FakeStream([{"type": "finish"}])
+
+    loop.model_client.chat = hang_chat
+    assert await sched.fire_agent(agent_row) == "started"
+    while not loop.agent_is_running(conv):
+        await asyncio.sleep(0.05)
+
+    agent = await get_agent(agent_row["id"])
+    assert await sched.fire_agent(agent, one_shot=True) == "busy"
+    hang.set()
+
+    async def wait_settle():
+        while (await get_agent(agent_row["id"]))["last_status"] == "running":
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(wait_settle(), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_one_shot_failure_leaves_schedule_alone(tmp_path, monkeypatch):
+    """A failed one-shot of a paused agent records the error but never
+    writes a retry slot next_fire_at for a paused schedule."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv, enabled=0))
+    past = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
+    await update_agent(agent_row["id"], {"next_fire_at": past})
+
+    async def fail_run(cid, prompt, workspace, **kw):
+        raise RuntimeError("Model API error 429: too many requests")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(loop, "run_agent", fail_run)
+    assert await sched.fire_agent(agent_row, one_shot=True) == "started"
+
+    async def wait_settle():
+        while (await get_agent(agent_row["id"]))["last_status"] == "running":
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(wait_settle(), timeout=10)
+    row = await get_agent(agent_row["id"])
+    assert row["last_status"] == "error_quiet"
+    # The stale slot was not rewritten into a retry slot for a paused agent.
+    assert datetime.fromisoformat(row["next_fire_at"]) <= datetime.now()
+
+
+@pytest.mark.asyncio
+async def test_one_shot_api_runs_paused_agent(tmp_path, monkeypatch):
+    """#199: POST /run?one_shot=true fires a paused agent (200, not the
+    409 'disabled' a regular run-now returns) without touching the slot."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.main import app
+
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv, enabled=0))
+    past = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
+    await update_agent(agent_row["id"], {"next_fire_at": past})
+
+    async def fake_run(cid, prompt, workspace, **kw):
+        assert kw.get("user_meta") == {"agent_prompt": True}
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(loop, "run_agent", fake_run)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Regular run-now still refuses a paused agent...
+        r = await c.post(f"/api/agents/{agent_row['id']}/run")
+        assert r.status_code == 409
+        # ...while the one-shot form runs it.
+        r = await c.post(f"/api/agents/{agent_row['id']}/run?one_shot=true")
+        assert r.status_code == 200
+
+    async def wait_settle():
+        while (await get_agent(agent_row["id"]))["last_status"] == "running":
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(wait_settle(), timeout=10)
+    row = await get_agent(agent_row["id"])
+    assert row["enabled"] == 0
+    assert datetime.fromisoformat(row["next_fire_at"]) <= datetime.now()
+
+
+@pytest.mark.asyncio
+async def test_stop_then_play_resumes_schedule_without_firing(tmp_path, monkeypatch):
+    """#199: stop disables (slot untouched), play re-enables through the
+    same PATCH path the row and dialog use — the stale slot rolls forward
+    into the future and NOTHING fires immediately."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.main import app
+
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv))
+
+    fired = {"n": 0}
+
+    async def spy_run(cid, prompt, workspace, **kw):
+        fired["n"] += 1
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(loop, "run_agent", spy_run)
+
+    body = {
+        "workspace": str(tmp_path),
+        "name": agent_row["name"],
+        "prompt": agent_row["prompt"],
+        "schedule_type": agent_row["schedule_type"],
+        "schedule_spec": json.loads(agent_row["schedule_spec"]),
+        "approval_policy": agent_row["approval_policy"],
+        "model": agent_row["model"] or "",
+        "effort": agent_row["effort"] or "",
+        "memory_enabled": bool(agent_row["memory_enabled"]),
+        "allow_ask_user": bool(agent_row["allow_ask_user"]),
+        "retention": agent_row["retention"] or 0,
+        "notify_on_success": bool(agent_row["notify_on_success"]),
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Stop: disable the agent. The enable-PATCH path recomputes the slot
+        # from now (its documented "restart the clock, never immediate"
+        # rule); while paused the tick skips the row regardless.
+        r = await c.patch(f"/api/agents/{agent_row['id']}", json={**body, "enabled": False})
+        assert r.status_code == 200
+        stopped = await get_agent(agent_row["id"])
+        assert stopped["enabled"] == 0
+        assert not sched._is_due(stopped, datetime.now())
+
+        # Play: re-enable through the same path; the schedule resumes at a
+        # rolled-forward (never immediate) slot.
+        r = await c.patch(f"/api/agents/{agent_row['id']}", json={**body, "enabled": True})
+        assert r.status_code == 200
+
+    row = await get_agent(agent_row["id"])
+    assert row["enabled"] == 1
+    assert datetime.fromisoformat(row["next_fire_at"]) > datetime.now()
+    await drain_pending()
+    assert fired["n"] == 0, "play must not fire anything"

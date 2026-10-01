@@ -3282,29 +3282,55 @@ function ConversationList({
   // Issue #81: pause/resume the agent's schedule straight from the row menu —
   // same full-record PATCH (agentToBody + enabled flipped) the AgentsDialog's
   // pause/resume button uses, then refresh so the row label flips.
-  const toggleAgentEnable = (c: { id: number }) => {
-    const a = agentByConv.get(c.id)
-    if (!a) return
-    updateAgent(a.id, agentToBody(a, !a.enabled))
+  // #81/#199: one PATCH-and-refresh shape for every schedule enable/disable
+  // from the sidebar (row menu, stop button) — the same full-record PATCH
+  // (agentToBody + enabled) the AgentsDialog's pause/resume uses.
+  const patchAgentEnabled = (
+    a: ScheduledAgent,
+    enabled: boolean,
+    errorTitle: string,
+  ) => {
+    updateAgent(a.id, agentToBody(a, enabled))
       .then(() => refreshAgents())
       .catch((e) =>
         setNotice({
-          title: `Could not update "${a.name}"`,
+          title: errorTitle,
           message: String((e as { message?: string }).message ?? e),
         }),
       )
   }
-  const toggleAgentRun = (c: { id: number }) => {
+  const toggleAgentEnable = (c: { id: number }) => {
+    const a = agentByConv.get(c.id)
+    if (!a) return
+    patchAgentEnabled(a, !a.enabled, `Could not update "${a.name}"`)
+  }
+  // #199: the row's one-shot — runs the agent exactly once, immediately,
+  // regardless of enabled/paused state. Enabled agents get the dialog-
+  // identical "run now" (the schedule advances from this fire); paused
+  // agents get the ?one_shot=true fire, which leaves the parked slot alone
+  // and the agent paused.
+  const runAgentOnce = (c: { id: number }) => {
+    const a = agentByConv.get(c.id)
+    if (!a) return
+    runAgentNow(a.id, { oneShot: a.enabled === false })
+      .then(() => refreshAgents())
+      .catch((e) =>
+        setNotice({
+          title: `Could not run "${a.name}"`,
+          message: String((e as { message?: string }).message ?? e),
+        }),
+      )
+  }
+  // #199: stop — cancel any in-flight run AND disable (pause) the schedule.
+  // An idle agent just pauses; a running one gets the same immediate cancel
+  // as before (the backend settles it through the pause-mid-run path, which
+  // also drops pending retries), then the enable PATCH pauses the schedule.
+  const stopAgentAndPause = (c: { id: number }) => {
     const a = agentByConv.get(c.id)
     if (!a) return
     if (a.running) {
-      // Same cancel path as an in-chat Stop: the turn ends after its current
-      // step and the run settles normally.
       setStoppingConvs((prev) => new Set(prev).add(c.id))
       cancelAgent(c.id).catch(() => {})
-      // The backend settles in well under a second; poll tightly so the row
-      // flips to "run now" the moment it does (bounded, then the normal 5s
-      // poll takes over as fallback).
       const started = Date.now()
       const settle = async () => {
         await refreshAgents()
@@ -3315,16 +3341,9 @@ function ConversationList({
         else window.setTimeout(() => void settle(), 400)
       }
       window.setTimeout(() => void settle(), 400)
-    } else {
-      runAgentNow(a.id)
-        .then(() => refreshAgents())
-        .catch((e) =>
-          setNotice({
-            title: `Could not run "${a.name}"`,
-            message: String((e as { message?: string }).message ?? e),
-          }),
-        )
     }
+    if (!a.enabled) return
+    patchAgentEnabled(a, false, `Could not pause "${a.name}"`)
   }
   // Issue #25 sidebar signals: needs-you (any user-blocking gate) and the
   // finished-but-unacknowledged map (set by setStatus, cleared on open).
@@ -3553,7 +3572,8 @@ function ConversationList({
           ? undefined
           : () => setMoveTarget({ id: c.id, title: c.title, workspace: c.workspace ?? null })
       }
-      onToggleRun={isAgent ? () => toggleAgentRun(c) : undefined}
+      onRunOnce={isAgent ? () => runAgentOnce(c) : undefined}
+      onStopRun={isAgent ? () => stopAgentAndPause(c) : undefined}
       stopping={stoppingConvs.has(c.id)}
       onAgentSettings={
         isAgent
@@ -3856,7 +3876,8 @@ export function ConversationRow({
   onAgentSettings,
   onToggleEnable,
   agentEnabled,
-  onToggleRun,
+  onRunOnce,
+  onStopRun,
   stopping,
   menuOpen,
   setMenuOpen,
@@ -3886,9 +3907,13 @@ export function ConversationRow({
   onToggleEnable?: () => void
   /** Current enabled state, for the menu item's label (with onToggleEnable). */
   agentEnabled?: boolean
-  /** Start/stop the agent's run (agent chats only). Present = the row shows
-   *  the toggle; the icon follows the running state (■ stop / ▶ run now). */
-  onToggleRun?: () => void
+  /** #199: run the agent once, now — never touching the schedule. When the
+   *  agent is enabled this is the dialog-identical "run now"; when paused it
+   *  is a one-shot fire and the agent stays paused. */
+  onRunOnce?: () => void
+  /** #199: stop — cancels the in-flight run while it lasts; on an idle agent
+   *  it disables (pauses) the schedule. */
+  onStopRun?: () => void
   /** The user just clicked stop: dim the "working" signals until the
    *  backend settles, so the click visibly registered. */
   stopping?: boolean
@@ -3957,37 +3982,79 @@ export function ConversationRow({
         {isAgent && (
           <span
             aria-hidden="true"
-            className={`mr-1.5 shrink-0 ${active ? 'text-blue-200' : 'text-zinc-500'}`}
-            title="Scheduled agent — runs on a repeating schedule"
+            className={`mr-1.5 shrink-0 ${active ? 'text-blue-200' : 'text-zinc-500'} ${agentEnabled === false ? 'opacity-50' : ''}`}
+            title={
+              agentEnabled === false
+                ? 'Paused — the schedule is off; use ▶ to resume or ⚡ to run once'
+                : 'Scheduled agent — runs on a repeating schedule'
+            }
           >
             <PersonIcon />
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate">{liveTitle ?? conv.title}</span>
+        <span
+          className={`min-w-0 flex-1 truncate ${isAgent && agentEnabled === false ? 'italic text-zinc-500' : ''}`}
+        >
+          {liveTitle ?? conv.title}
+          {isAgent && agentEnabled === false && (
+            <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px font-mono text-[9px] not-italic text-zinc-400">
+              paused
+            </span>
+          )}
+        </span>
         <span
           className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
         >
           {relTime(conv.updated_at)}
         </span>
       </button>
-      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onToggleRun && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
-        {onToggleRun && (
+      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onRunOnce && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+        {onRunOnce && (
           <button
             className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-opacity ${
-              stopping
-                ? 'opacity-30'
-                : running
-                  ? 'text-zinc-300 hover:text-zinc-100'
-                  : 'text-zinc-600 hover:text-zinc-300'
+              stopping || running ? 'text-zinc-600 opacity-30' : 'text-zinc-600 hover:text-zinc-300'
             }`}
-            aria-label={running ? 'Stop this run' : 'Run now'}
-            title={running ? 'Stop this run' : 'Run now'}
+            aria-label="Run once now"
+            title={
+              agentEnabled === false
+                ? 'Run once now — the paused schedule is unchanged'
+                : 'Run now — the schedule advances from this fire'
+            }
+            disabled={running || stopping}
             onClick={(e) => {
               e.stopPropagation()
-              onToggleRun()
+              onRunOnce()
             }}
           >
-            {running ? <StopIcon /> : <PlayIcon />}
+            <BoltIcon />
+          </button>
+        )}
+        {onToggleEnable && !running && agentEnabled === false && (
+          <button
+            className="flex h-[18px] w-[18px] items-center justify-center rounded text-zinc-600 hover:text-zinc-300"
+            aria-label="Resume schedule"
+            title="Resume — the schedule continues from its saved slot (rolled forward if stale); nothing fires now"
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleEnable()
+            }}
+          >
+            <PlayIcon />
+          </button>
+        )}
+        {onStopRun && (
+          <button
+            className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-opacity ${
+              stopping ? 'opacity-30' : running ? 'text-zinc-300 hover:text-zinc-100' : 'text-zinc-600 hover:text-zinc-300'
+            }`}
+            aria-label="Stop run and pause schedule"
+            title={running ? 'Stop this run and pause the schedule' : 'Pause the schedule'}
+            onClick={(e) => {
+              e.stopPropagation()
+              onStopRun()
+            }}
+          >
+            <StopIcon />
           </button>
         )}
         <button
@@ -5056,6 +5123,16 @@ function StopIcon() {
   )
 }
 
+/** #199: one-shot fire — a lightning bolt, deliberately unlike play (which
+ *  now means only "resume the schedule"). */
+function BoltIcon() {
+  return (
+    <svg width="8" height="11" viewBox="0 0 8 11" fill="currentColor" aria-hidden="true">
+      <path d="M4.6 0.5 L0.8 6.2 H3.2 L2.6 10.5 L7.2 4.4 H4.4 Z" />
+    </svg>
+  )
+}
+
 const agentInputCls =
   'rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none'
 
@@ -5433,7 +5510,8 @@ function AgentForm({
       {!agent && (
         <p className="text-[10px] text-zinc-600">
           The first fire is never immediate — an interval agent runs one interval after save, a
-          daily/weekly agent at its next clock slot. Use "Run now" to test right away. Missed fires
+          daily/weekly agent at its next clock slot. Use "Run now" to test right away (a paused
+          agent runs once without resuming). Missed fires
           while YAAH is closed are skipped.
         </p>
       )}
@@ -5495,7 +5573,10 @@ function AgentsDialog({
   const runNow = async (a: ScheduledAgent) => {
     setBusy(true)
     try {
-      await runAgentNow(a.id)
+      // #199: same semantics as the sidebar's bolt — enabled agents get the
+      // schedule-advancing "run now"; paused agents get a one-shot fire that
+      // leaves the schedule parked.
+      await runAgentNow(a.id, { oneShot: a.enabled === false })
       await refreshAgents()
     } catch (e) {
       pushToast({ kind: 'error', title: `Could not run "${a.name}"`, body: String((e as { message?: string }).message ?? e) })
@@ -5592,6 +5673,11 @@ function AgentsDialog({
                     <button
                       className="rounded   px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                       disabled={busy || a.running}
+                      title={
+                        a.enabled
+                          ? 'Run now — the schedule advances from this fire'
+                          : 'Run once now — the paused schedule is unchanged'
+                      }
                       onClick={() => void runNow(a)}
                     >
                       run now

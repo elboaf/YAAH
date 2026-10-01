@@ -243,12 +243,20 @@ def _is_due(agent: dict, now: datetime) -> bool:
         return False
 
 
-async def fire_agent(agent: dict, is_retry: bool = False) -> str:
+async def fire_agent(
+    agent: dict, is_retry: bool = False, one_shot: bool = False
+) -> str:
     """Trigger one run of `agent` now. Returns 'started' | 'busy' | 'gone'.
 
     Schedule advance happens here, at fire time, from `now` — so "Run now"
     (API) and a due tick behave identically. A retry fire keeps the regular
-    slot already parked in _retry_state instead of pushing it out again."""
+    slot already parked in _retry_state instead of pushing it out again.
+
+    one_shot (#199): a deliberate single run that ignores the enabled gate —
+    a paused agent fires once and STAYS paused. Its parked next_fire_at is
+    left untouched (no resurrection, no roll-forward, no retry slot); only
+    the resume path (enable PATCH) rolls a stale slot. The busy postpone
+    still applies: the per-conversation lock is load-bearing either way."""
     from backend.agent import loop as loop_mod
 
     aid = agent["id"]
@@ -260,11 +268,12 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
                            last_finished_at=datetime.now().isoformat(timespec="seconds"))
         _retry_state.pop(aid, None)
         return "gone"
-    if not agent.get("enabled"):
+    if not agent.get("enabled") and not one_shot:
         # Defense in depth: the tick already skips disabled agents, but a
         # run-now on a paused agent must not start (or resurrect a past slot)
         # either. Any stale next_fire_at stays stale until the agent resumes.
         return "disabled"
+    parked = one_shot
     if loop_mod.agent_is_running(conv_id):
         # Postpone instead of losing the run to the per-conversation lock.
         await _patch(
@@ -282,14 +291,18 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
                      agent["schedule_type"], agent["schedule_spec"], now
                  ).isoformat(timespec="seconds")}
         _retry_state[aid] = state
-    await _patch(
-        aid,
-        last_fired_at=now.isoformat(timespec="seconds"),
-        last_status="running",
-        next_fire_at=state["scheduled_next"] if state else compute_next_fire(
-            agent["schedule_type"], agent["schedule_spec"], now
-        ).isoformat(timespec="seconds"),
-    )
+    fire_fields = {
+        "last_fired_at": now.isoformat(timespec="seconds"),
+        "last_status": "running",
+    }
+    if not parked:
+        # A one-shot never advances (or resurrects) the schedule slot.
+        fire_fields["next_fire_at"] = (
+            state["scheduled_next"] if state else compute_next_fire(
+                agent["schedule_type"], agent["schedule_spec"], now
+            ).isoformat(timespec="seconds")
+        )
+    await _patch(aid, **fire_fields)
 
     # Effective prompt (issue #41): the user's prompt verbatim + standing
     # instructions. No auto-prepended context, no template variables.
@@ -315,6 +328,7 @@ async def fire_agent(agent: dict, is_retry: bool = False) -> str:
             agent.get("effort") or "",
             agent.get("retention") or 0,
             bool(agent.get("allow_ask_user")),
+            one_shot=one_shot,
         )
     )
     _fire_tasks.add(task)
@@ -350,6 +364,7 @@ async def _run_and_settle(
     effort: str,
     retention: int,
     allow_ask_user: bool = False,
+    one_shot: bool = False,
 ):
     """Consume one fire's run to completion, then settle the outcome:
     status recording (the toast source), global retry scheduling, and the
@@ -392,6 +407,22 @@ async def _run_and_settle(
     finally:
         if conv_id in _tape_buffers:
             _tape_buffers[conv_id]["running"] = False
+
+    if one_shot:
+        # #199: a one-shot's outcome never touches the schedule — no retry
+        # slot, no roll-forward — the paused agent's parked next_fire_at
+        # stays exactly as it was. Only the run bookkeeping settles.
+        _retry_state.pop(aid, None)
+        status = "ok" if ok else ("error_quiet" if _is_rate_limit(error_text) else "error")
+        await _patch(
+            aid,
+            last_finished_at=datetime.now().isoformat(timespec="seconds"),
+            last_status=status,
+        )
+        if retention > 0:
+            with contextlib.suppress(Exception):
+                await trim_agent_transcript(conv_id, retention)
+        return
 
     if not ok:
         log.warning("scheduled agent %s fire failed: %s", aid, error_text)
