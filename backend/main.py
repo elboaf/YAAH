@@ -1653,13 +1653,18 @@ async def api_agents_remove(agent_id: str, delete_chat: bool = True):
 
 
 @app.post("/api/agents/{agent_id}/run")
-async def api_agents_run(agent_id: str):
+async def api_agents_run(agent_id: str, one_shot: bool = False):
     """Run an agent right now ("Run now" covers testing; the regular
-    schedule advances from this fire)."""
+    schedule advances from this fire).
+
+    one_shot=true (#199): a deliberate single run of a paused or enabled
+    agent that NEVER advances (or resurrects) next_fire_at — the schedule
+    is only moved by due ticks and by the resume path. A paused agent
+    stays paused."""
     agent = await db_get_agent(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="agent not found")
-    outcome = await scheduler_mod.fire_agent(agent)
+    outcome = await scheduler_mod.fire_agent(agent, one_shot=one_shot)
     if outcome == "gone":
         raise HTTPException(status_code=409, detail="agent chat was deleted")
     if outcome == "disabled":

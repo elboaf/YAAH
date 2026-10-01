@@ -867,8 +867,14 @@ export const deleteAgent = (id: string, deleteChat = true) =>
     { method: 'DELETE' },
   )
 
-export const runAgentNow = (id: string) =>
-  api<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/run`, { method: 'POST' })
+export const runAgentNow = (
+  id: string,
+  opts?: { oneShot?: boolean },
+) =>
+  api<{ ok: boolean }>(
+    `/api/agents/${encodeURIComponent(id)}/run${opts?.oneShot ? '?one_shot=true' : ''}`,
+    { method: 'POST' },
+  )
 
 // Standing instructions: typed messages in an agent chat become these; they
 // never trigger a run — they ride along with the prompt at every fire.
