@@ -3,10 +3,11 @@
 ZCode-style: one fact per file (a slug like ``user-prefers-dark-ui.md``
 with frontmatter: ``name``, ``description``, ``metadata.type``) plus a
 ``MEMORY.md`` index whose one-line entries are injected into the system
-prompt every turn. The model decides what is worth remembering (user
-preferences, feedback/corrections, project constraints, resource
-pointers) and maintains both the files and the index itself via the
-memory_save / memory_read / memory_delete tools.
+prompt every turn. The model decides what is worth remembering — by
+charter (ADR-0009), memory models the OWNER: user facts and working
+feedback only, never workflow/project state (the tracker and repo own
+those; see _WHEN_TO_SAVE) — and maintains both the files and the index
+itself via the memory_save / memory_read / memory_delete tools.
 
 Memory is scoped per workspace — a stable hash of the workspace path
 (remote-namespaced workspaces hash their raw ``remote:<host>:<path>``
@@ -203,20 +204,31 @@ def delete_memory(workspace: str | None, name: str) -> dict:
 
 _WHEN_TO_SAVE = """\
 ## When to save a memory
-Save proactively (don't wait to be asked) when you learn:
-- user: who the user is — role, expertise, stated preferences.
+Memory is a model of the owner, not a log of actions. Before saving, \
+apply the retention test: would a fresh session, handed only the repo \
+and the tracker, work differently for this user without it? If no, \
+do not save it.
+
+Save proactively (don't wait to be asked) when the test passes:
+- user: who the user is — role, expertise, environment quirks, stated \
+preferences.
 - feedback: guidance they give on how you should work — corrections and \
 confirmed approaches. Include **Why:** and **How to apply:** lines.
-- project: ongoing work, goals, or constraints NOT derivable from the \
-code or git history. Convert relative dates ("next week") to absolute.
-- reference: pointers to external resources (URLs, dashboards, tickets).
+- reference (rare): a durable pointer to an external resource the owner \
+returns to (URL, dashboard, ticket queue).
 
-Do NOT save: what the repo already records (code structure, CLAUDE.md/\
-AGENTS.md content, past fixes, git history) or details that only matter \
-to the current conversation. Before saving, reuse/update an existing \
-memory rather than creating a near-duplicate; delete memories that turn \
-out to be wrong. Keep index entries to one line (under ~200 chars); \
-the detail goes in the memory file.
+Never save — these have exactly one home, and memory is not it:
+- workflow state (issue filed, PR opened, review round, CI status, \
+merge, release): the issue tracker owns this.
+- project knowledge (architecture, bugs, fixes, plans, constraints): \
+the repo owns this (CONTEXT.md, docs/, ADRs).
+- anything the repo or tracker already records, or details that only \
+matter to the current conversation.
+
+Hygiene: reuse/update an existing memory instead of creating a \
+near-duplicate; delete memories that turn out to be wrong. Keep index \
+entries to one line (under ~200 chars); the detail goes in the memory \
+file.
 """
 
 

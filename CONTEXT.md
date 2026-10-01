@@ -58,6 +58,16 @@ _Avoid_: default prompt; system prompt (when the base is meant)
 A section of the prompt included only when its trigger condition holds at assembly time.
 _Avoid_: dynamic prompt, optional section
 
+### Memory
+
+**Memory**:
+The per-project store of durable facts about the owner — user facts and working feedback — injected into every session's prompt. It models the owner, never workflow or project state (ADR-0009).
+_Avoid_: project memory (implies project-state storage), audit trail
+
+**Retention test**:
+The gate for saving a memory: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save.
+_Avoid_: "might be useful later"
+
 **Injected content**:
 Model-context text authored outside the harness at runtime — project notes, the memory index, skill bodies — that the prompt surface carries but does not author.
 _Avoid_: dynamic content; attachments (those ride messages, not the prompt)
