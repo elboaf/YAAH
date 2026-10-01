@@ -8,11 +8,14 @@ parent gets; where the block is absent (no memories yet), the invariant
 is trivially satisfied by an empty index (memory.index_for_prompt returns
 "").
 """
+import hashlib
+import json
 import os
 
 import pytest
 
 from backend.agent import memory, subagents
+from backend.agent.prompt_manifest import LOCAL_WS, LOCAL_WS_TOKEN
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +70,32 @@ def test_index_iff_memory_tools(name, ws):
     assert ("# Persistent memory" in prompt) == has_tools
     if has_tools:
         assert "prefers-dark-ui" in prompt
+
+
+@pytest.mark.parametrize("name", ["general-purpose", "explore"])
+def test_manifest_subagent_text_has_no_host_local_paths(name, ws):
+    """Issue #182 return trip: the manifest harness renders sub-agent
+    prompts against LOCAL_WS (a host temp dir), so the committed fixture
+    must not embed that machine-specific absolute path. The rendered
+    output is canonicalized to a stable token before hashing, so any
+    machine regenerating the manifests produces identical bytes."""
+    from backend.agent.prompt_manifest import _def_to_manifest
+
+    memory.save_memory(
+        ws, "prefers-dark-ui", "Prefers dark UI",
+        "User prefers dark themes", "user",
+        "The user prefers dark UI themes.",
+    )
+    manifest = _def_to_manifest(subagents.get_agent_def(name))
+    text = manifest["text"]
+    assert LOCAL_WS not in text
+    # bytes/sha256 describe the canonicalized text, not the raw render:
+    assert manifest["bytes"] == len(text.encode("utf-8"))
+    assert manifest["sha256"] == hashlib.sha256(
+        text.encode("utf-8")
+    ).hexdigest()
+    for section in manifest["sections"]:
+        assert LOCAL_WS not in json.dumps(section)
 
 
 @pytest.mark.parametrize("name", ["general-purpose", "explore"])

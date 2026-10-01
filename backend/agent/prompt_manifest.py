@@ -301,6 +301,10 @@ FIXTURE_HOST_ID = "fixture-host"
 REMOTE_WS = f"remote:{FIXTURE_HOST_ID}:C:/fixture/project"
 OFFLINE_WS = "remote:offline-host:C:/fixture/project"
 LOCAL_WS = str(Path(tempfile.gettempdir()) / "yaah-manifest-local-ws")
+# Stable manifest token substituted for the host-specific LOCAL_WS path in
+# rendered sub-agent prompt output, so committed fixtures (and their
+# bytes/sha256 fields) are machine-independent (#182 return trip).
+LOCAL_WS_TOKEN = "<LOCAL_WS>"
 
 _FIXTURE_INFO = {
     "host_id": FIXTURE_HOST_ID,
@@ -759,6 +763,13 @@ def _def_to_manifest(defn) -> dict:
     from backend.agent.subagents import _sub_agent_system_prompt
 
     prompt = _sub_agent_system_prompt(defn, LOCAL_WS)
+    # Canonicalize the host-specific workspace path out of the rendered
+    # output before sizing/hashing/splitting, so committed manifests are
+    # reproducible on any machine (#182 return trip). Injections that
+    # resolve the workspace (project notes) emit the long real path, so
+    # both the LOCAL_WS spelling and its resolved form are replaced.
+    for variant in {LOCAL_WS, str(Path(LOCAL_WS).resolve())}:
+        prompt = prompt.replace(variant, LOCAL_WS_TOKEN)
     raw = prompt.encode("utf-8")
     return {
         "name": defn.name,
