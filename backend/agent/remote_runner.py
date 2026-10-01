@@ -84,9 +84,16 @@ async def _local_dispatch(name: str, arguments: dict, workspace: str) -> dict:
 
 
 def _schemas_for(workspace: str) -> list:
+    from backend.agent.loop import EXIT_PLAN_SCHEMA, current_access_mode
     from backend.agent.tools import get_schemas
 
     schemas = get_schemas(workspace=workspace)
+    # exit_plan exists only while plan mode is on, mirroring the local
+    # loop (issue #178 return trip #2): the plan note tells the model to
+    # present its plan with exit_plan, so the schema must be offered or
+    # the plan session can never leave plan mode.
+    if current_access_mode() == "plan":
+        schemas = schemas + [EXIT_PLAN_SCHEMA]
     return [
         schema for schema in schemas
         if schema["function"]["name"] not in _LOCAL_ONLY_TOOL_NAMES
@@ -94,7 +101,7 @@ def _schemas_for(workspace: str) -> list:
 
 
 def _system_prompt(workspace: str, host: remote_mod.RemoteSession | None) -> str:
-    from backend.agent.loop import _default_system_prompt
+    from backend.agent.loop import _default_system_prompt, _plan_mode_note, current_access_mode
 
     # The loop's prompt builder already resolves the runtime-environment
     # line and tool list from the workspace's owning device.
@@ -104,6 +111,12 @@ def _system_prompt(workspace: str, host: remote_mod.RemoteSession | None) -> str
             "\n\nNote: the workspace's owning device is offline right now; "
             "workspace tools will fail until it reconnects."
         )
+    # Plan mode framing must ride the remote-offline path exactly as the
+    # local one does (issue #178): the schemas still carry exit_plan, so
+    # without the note the model gets the tool with zero plan-mode
+    # guidance and only discovers the contract via a blocked-tool error.
+    if current_access_mode() == "plan":
+        prompt += f"\n\n---\n\n{_plan_mode_note()}"
     return prompt
 
 
@@ -396,14 +409,45 @@ async def _run_claimed(
                     args = None
                     result = {"error": f"Invalid JSON arguments: {e}"}
                 if args is not None:
-                    yield _ndjson({"type": "tool_start", "name": name,
-                                   "args": args, "call_id": tc.get("id", "")})
-                    try:
-                        result = await turn.dispatch_tool(
-                            name, args, _local_dispatch,
+                    # Plan-mode gate (issue #178 return trip): the local loop
+                    # routes every call through run_gate; the remote turn has
+                    # no approval machinery, so it enforces the plan-mode
+                    # half directly — read tools and full mode pass, anything
+                    # else gets the same _plan_block_result the local loop
+                    # returns. (Ask mode is deliberately not wired here:
+                    # approval awaits a local conversation_id a remote turn
+                    # never owns — flagged for a maintainer decision.)
+                    from backend.agent.loop import (
+                        _exit_plan, _plan_block_result, current_access_mode,
+                    )
+                    from backend.agent.tools import tool_risk
+
+                    if name == "exit_plan":
+                        # Route to the loop's handler BEFORE the risk gate
+                        # (issue #178 return trip #2): tool_risk("exit_plan")
+                        # is not "read", so without this the plan session can
+                        # never obtain approval or leave plan mode.
+                        # tool_start goes out first (return trip #3): the
+                        # frontend renders the plan-approval card only on
+                        # tool_start for exit_plan, and _exit_plan blocks
+                        # below until the user answers it.
+                        yield _ndjson({"type": "tool_start", "name": name,
+                                       "args": args, "call_id": tc.get("id", "")})
+                        result = await _exit_plan(
+                            conversation_id, tc.get("id", ""), args, cancel_event
                         )
-                    except RemoteTurnError as exc:
-                        result = {"error": str(exc)}
+                    elif (current_access_mode() == "plan"
+                            and tool_risk(name) != "read"):
+                        result = _plan_block_result(name)
+                    else:
+                        yield _ndjson({"type": "tool_start", "name": name,
+                                       "args": args, "call_id": tc.get("id", "")})
+                        try:
+                            result = await turn.dispatch_tool(
+                                name, args, _local_dispatch,
+                            )
+                        except RemoteTurnError as exc:
+                            result = {"error": str(exc)}
                     if name in remote_mod.REMOTE_TOOLS and isinstance(result, dict):
                         # Shell tools return no chunk stream remotely; emit
                         # the final result exactly like a completed local run.

@@ -239,7 +239,12 @@ def _memory_notes(workspace: str) -> str:
     a turn. Remote sessions keep their memories client-local: the tools
     resolve slugs against the CLIENT's memory root, so injection is the
     same block either way."""
-    from backend.agent import memory
+    from backend.agent import memory, tools
+
+    # Issue #169: persistent memory is opt-in (memory.enabled, default
+    # OFF) — when disabled the prompt block is suppressed entirely.
+    if not tools.memory_enabled():
+        return ""
 
     try:
         return memory.index_for_prompt(workspace)
@@ -725,16 +730,24 @@ def _plan_mode_note() -> str:
 def _sandbox_only_note() -> str:
     """System-prompt section injected for scheduled agents running with the
     sandbox-only approval policy (issue #41): no user is watching, so
-    approval-required tools never execute."""
+    approval-required tools never execute.
+
+    The wording mirrors the gate's actual rule (#177), which is enumerable
+    from tool_risk(): READ-ONLY tools run; every mutating or shell tool
+    (file edits, bash/powershell, and the mutating sandbox_* VM tools)
+    skips with the in-band "skipped: approval required" result.
+    """
     return (
         "# Scheduled agent: sandbox-only policy\n\n"
-        "This is an unattended scheduled run: every tool that normally "
-        "requires user approval (file edits, shell commands and anything "
-        "else mutating) is unavailable — calls come back as \"skipped: "
-        "approval required\". Do "
-        "not attempt them or retry after a skip. Work read-only: gather "
-        "information, check status, and report findings, keeping anything "
-        "disruptive as a recommendation for the user to run themselves."
+        "This is an unattended scheduled run with no user to approve "
+        "anything: read-only tools (search, status checks, observation) "
+        "still work, but every tool that writes or executes — file "
+        "edits, bash/powershell, and the sandbox VM tools that install or "
+        "change anything — comes back as \"skipped: approval "
+        "required\". Do not attempt them or retry after a skip. Work "
+        "read-only: gather information, check status, and report "
+        "findings, keeping anything disruptive as a recommendation for "
+        "the user to run themselves."
     )
 
 
@@ -1640,12 +1653,27 @@ async def _run_agent_claimed(
             tool_calls = state["tool_calls"]
             finish_reason = state["finish"]
 
-            # Persist assistant message (with tool calls if any)
+            # #207: the whole channel is gated on voice.say_emissions —
+            # off means no prompt section, no `say` event, no fallback.
+            # Tag-stripping above is NOT gated: stray tags never become
+            # transcript junk and never reach speech either way. Computed
+            # before the persist below so the briefing rides the row (#226).
+            _said = (
+                _speak.spoken_line(said, assistant_content)
+                if _say_emissions_enabled()
+                else ""
+            )
+
+            # Persist assistant message (with tool calls if any). #226: the
+            # briefing rides on the row (say column) so reloads and export
+            # can render what the voice said; load_history never replays it
+            # into model context.
             await add_message(
                 conversation_id,
                 "assistant",
                 assistant_content,
                 tool_calls=tool_calls,
+                say=_said,
             )
 
             # Briefing-first, per emission (#66): EVERY completed model
@@ -1655,15 +1683,6 @@ async def _run_agent_claimed(
             # clipped verbatim) when the emission carried no usable <say>
             # tag. Text-less emissions (a bare tool_calls message) say
             # nothing rather than emitting an empty briefing.
-            # #207: the whole channel is gated on voice.say_emissions —
-            # off means no prompt section, no `say` event, no fallback.
-            # Tag-stripping above is NOT gated: stray tags never become
-            # transcript junk and never reach speech either way.
-            _said = (
-                _speak.spoken_line(said, assistant_content)
-                if _say_emissions_enabled()
-                else ""
-            )
             if _said:
                 yield _ndjson({"type": "say", "text": _said})
 

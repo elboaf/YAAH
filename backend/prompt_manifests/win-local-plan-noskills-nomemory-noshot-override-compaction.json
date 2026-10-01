@@ -112,21 +112,6 @@
       "sha256": "f24564c9ad287f9729635966b715fcbd5f357222cf0a856b758639bf75613dcc"
     },
     {
-      "name": "memory_save",
-      "bytes": 1118,
-      "sha256": "51dd656fc6291455e43a69d93a8778ede7d0c67bf93258bca3a88bb6b8455bc2"
-    },
-    {
-      "name": "memory_read",
-      "bytes": 349,
-      "sha256": "b78825cc93de8377705ce77faa9753b7846ece0ae97aee4cdcf84f898a480efb"
-    },
-    {
-      "name": "memory_delete",
-      "bytes": 289,
-      "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
-    },
-    {
       "name": "read_ui_tree",
       "bytes": 856,
       "sha256": "732e8a3dacc3dbb222a489236a1a0b5822942619c163e35c7ad0de94383d7a63"

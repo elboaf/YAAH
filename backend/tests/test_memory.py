@@ -134,6 +134,45 @@ def test_index_for_prompt_never_raises_on_corrupt_index(tmp_path):
     assert isinstance(memory.index_for_prompt(WS), str)
 
 
+# ---- save-criteria charter (ADR-0009): memory models the owner ---------------
+
+def test_criteria_prompts_owner_model_retention_test():
+    """#228: the criteria must present the charter and the retention test."""
+    text = memory._WHEN_TO_SAVE
+    assert "model of the owner, not a log of actions" in text
+    assert "retention test" in text
+    assert "handed only the repo and the tracker, work differently" in text
+    # the criteria actually ship inside the injected block once a memory exists
+    memory.save_memory(WS, "pref-dark", "Dark", "prefers dark", "user", "c")
+    assert "retention test" in memory.index_for_prompt(WS)
+
+
+def test_criteria_no_longer_invite_project_state_saves():
+    """#228: the old 'project:' save invitation must be gone entirely."""
+    block = memory.index_for_prompt(WS)
+    assert "ongoing work, goals, or constraints NOT derivable" not in block
+    assert memory._WHEN_TO_SAVE.count("- project:") == 0
+    assert "issue tracker owns this" in memory._WHEN_TO_SAVE
+    assert "the repo owns this" in memory._WHEN_TO_SAVE
+
+
+def test_criteria_name_user_feedback_reference_types():
+    """#228: user and feedback stay; reference demoted to rare."""
+    text = memory._WHEN_TO_SAVE
+    assert "- user:" in text
+    assert "- feedback:" in text
+    assert "- reference (rare):" in text
+    assert "Why:" in text and "How to apply:" in text
+
+
+def test_criteria_hygiene_dedupe_and_delete():
+    """#228: dedupe-before-save and delete-when-wrong survive the rewrite."""
+    text = memory._WHEN_TO_SAVE
+    assert "near-duplicate" in text
+    assert "delete memories that turn out to be wrong" in text
+    assert "under ~200 chars" in text
+
+
 # ---- tool dispatch wiring ----------------------------------------------------
 
 @pytest.mark.asyncio
