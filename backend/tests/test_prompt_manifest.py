@@ -126,6 +126,20 @@ def test_no_unactionable_sandbox_guidance():
     for combo in REPRESENTATIVES + [f"{PFX}-local-plan"]:
         manifest = pm.render_combo(combo)
         names = {t["name"] for t in manifest["tool_schemas"]}
+        # Sub-agent kind combos render a general-purpose sub-agent's
+        # prompt; its prose derives from the sub-agent's own tool
+        # resolution (#181), not the combo-level schema list (which is
+        # empty for these combos).
+        if combo.startswith("kind-subagents"):
+            from backend.agent import subagents
+
+            defn = subagents.get_agent_def("general-purpose")
+            names = {
+                s["function"]["name"]
+                for s in subagents._resolve_tools(
+                    defn, windows=combo.startswith("kind-subagents-win")
+                )
+            }
         # Remote combos carry the remote runner's own hand-maintained
         # prose tool list (remote_runner.py), whose drift is issue #181's
         # scope — #179 covers the loop's guidelines block.
