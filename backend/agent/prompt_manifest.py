@@ -301,6 +301,10 @@ FIXTURE_HOST_ID = "fixture-host"
 REMOTE_WS = f"remote:{FIXTURE_HOST_ID}:C:/fixture/project"
 OFFLINE_WS = "remote:offline-host:C:/fixture/project"
 LOCAL_WS = str(Path(tempfile.gettempdir()) / "yaah-manifest-local-ws")
+# Stable manifest token substituted for the host-specific LOCAL_WS path in
+# rendered sub-agent prompt output, so committed fixtures (and their
+# bytes/sha256 fields) are machine-independent (#182 return trip).
+LOCAL_WS_TOKEN = "<LOCAL_WS>"
 
 _FIXTURE_INFO = {
     "host_id": FIXTURE_HOST_ID,
@@ -447,7 +451,10 @@ def _split_combo(combo: str) -> dict:
             "kind": "subagents" if "subagents" in parts else "auxiliary",
             "plan": False,
             "skills": "noskills" not in parts,
-            "memory": False,
+            # #182: kind-subagents seeds a memory index so the manifest
+            # shows the chosen invariant (memory section iff the resolved
+            # schemas include a memory tool).
+            "memory": "subagents" in parts,
             "shot": True,
             "override": False,
             "compaction": False,
@@ -749,10 +756,20 @@ def _tool_schemas_summary(tools: list) -> list:
 def _def_to_manifest(defn) -> dict:
     """A built-in AgentDef through _sub_agent_system_prompt (the REAL
     builder). Tool list is the definition's static prose list, not
-    get_schemas -- matched by matching the production section names."""
+    get_schemas -- matched by matching the production section names.
+    Workspace is LOCAL_WS so the #182 memory-index injection (seeded by
+    _prep_flags for kind-subagents) renders when the resolved schemas
+    include a memory tool."""
     from backend.agent.subagents import _sub_agent_system_prompt
 
-    prompt = _sub_agent_system_prompt(defn, "")
+    prompt = _sub_agent_system_prompt(defn, LOCAL_WS)
+    # Canonicalize the host-specific workspace path out of the rendered
+    # output before sizing/hashing/splitting, so committed manifests are
+    # reproducible on any machine (#182 return trip). Injections that
+    # resolve the workspace (project notes) emit the long real path, so
+    # both the LOCAL_WS spelling and its resolved form are replaced.
+    for variant in {LOCAL_WS, str(Path(LOCAL_WS).resolve())}:
+        prompt = prompt.replace(variant, LOCAL_WS_TOKEN)
     raw = prompt.encode("utf-8")
     return {
         "name": defn.name,
