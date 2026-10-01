@@ -387,22 +387,6 @@ Guidelines:
   authentication; if gh is unavailable, say so instead of scraping the web UI.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
-- Choose the test environment by side effects. Run automated tests and
-  validation on the host by default—including full suites, builds, Python
-  scripts, smoke tests, typechecks and lint—when they won't open a new
-  window or reasonably interfere with or interrupt the host user. Use the
-  sandbox when project execution opens/listens on a network port, when a GUI
-  window must be opened for visual inspection, or when a test could otherwise
-  disrupt the host. Boot with sandbox_test and run commands via sandbox_run.
-  Size timeouts to the work; chunk long suites when needed. The VM is a clean
-  image: install missing tools into the toolkit (installs persist across
-  sandboxes).
-- Sandbox work stays IN the sandbox: every dependency the app under test
-  needs (runtimes, browsers, portable tools) is installed into the VM's
-  toolkit — never launch a host equivalent (e.g. the host browser) to
-  exercise the app, and never drive the app's GUI with the host
-  mouse/keyboard tools; the windows-mcp MCP server (auto-started in
-  the sandbox) is the GUI layer for that.
 - If a full-suite verification fails, separate YOUR change from the
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists
@@ -418,6 +402,28 @@ Guidelines:
 - Shell calls start in the selected workspace; no setup `cd` is needed.
 - Each shell call is a fresh process. `cd` does not persist; use workspace-relative
   paths unless the task specifically requires the main checkout.
+"""
+
+    if windows and host is None:
+        # Issue #179: the sandbox bullets name sandbox_test/sandbox_run and the
+        # windows-mcp server — tools that exist only for a local Windows
+        # session. Never name a tool the schema set does not carry.
+        prompt += """- Choose the test environment by side effects. Run automated tests and
+  validation on the host by default—including full suites, builds, Python
+  scripts, smoke tests, typechecks and lint—when they won't open a new
+  window or reasonably interfere with or interrupt the host user. Use the
+  sandbox when project execution opens/listens on a network port, when a GUI
+  window must be opened for visual inspection, or when a test could otherwise
+  disrupt the host. Boot with sandbox_test and run commands via sandbox_run.
+  Size timeouts to the work; chunk long suites when needed. The VM is a clean
+  image: install missing tools into the toolkit (installs persist across
+  sandboxes).
+- Sandbox work stays IN the sandbox: every dependency the app under test
+  needs (runtimes, browsers, portable tools) is installed into the VM's
+  toolkit — never launch a host equivalent (e.g. the host browser) to
+  exercise the app, and never drive the app's GUI with the host
+  mouse/keyboard tools; the windows-mcp MCP server (auto-started in
+  the sandbox) is the GUI layer for that.
 """
 
     # #207: the spoken-briefing section is only ever generated when the
