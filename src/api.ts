@@ -989,6 +989,27 @@ export async function ttsTest(
   return res.json()
 }
 
+/** Voice discovery (#231): the names a remote server offers via its
+ *  non-standard GET /voices (the reference Kokoro server does; OpenAI
+ *  does not). The backend probe NEVER errors — an unreachable or
+ *  list-less server resolves to [] and the UI falls back to free-text.
+ *  Drafts ride in the body so discovery works before the first Save. */
+export async function ttsVoices(endpoint?: string, apiKey?: string): Promise<string[]> {
+  let res: Response
+  try {
+    res = await fetch(url('/api/tts/voices'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint, api_key: apiKey }),
+    })
+  } catch {
+    return [] // backend down: free-text fallback, no error noise
+  }
+  if (!res.ok) return [] // 409 not-configured included: absence of a list is normal
+  const body = (await res.json().catch(() => ({}))) as { voices?: unknown }
+  return Array.isArray(body.voices) ? body.voices.filter((v): v is string => typeof v === 'string') : []
+}
+
 /** Fire-and-forget stop handshake: raises the backend's supersede floor to
  *  `floor` (the frontend's current utterance generation), so any in-flight
  *  chunk belonging to an older-or-equal generation aborts at its next
