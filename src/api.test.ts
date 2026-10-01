@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, streamRemoteTurn } from './api'
+import { api, streamRemoteTurn, ttsTest } from './api'
 
 const fetchMock = vi.fn()
 
@@ -59,5 +59,36 @@ describe('remote turn stream bridging (#110)', () => {
     vi.stubGlobal('fetch', fetchMock)
     await expect(streamRemoteTurn('host-a', '7', 'go', 'remote:host-a:/repo', () => {}))
       .rejects.toThrow(/409.*already running/s)
+  })
+})
+
+// ------------------------------------------------------------------ #205 remote TTS
+
+describe('#205 ttsTest (Settings Test button)', () => {
+  it('POSTs the sample to /api/tts/test and reports ok', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const r = await ttsTest('af_heart', 1.0)
+    expect(r.ok).toBe(true)
+    const [u, init] = fetchMock.mock.calls[0]
+    expect(u).toBe('/api/tts/test')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({ voice: 'af_heart', speed: 1.0, engine: undefined })
+  })
+
+  it('carries the on-screen engine draft so Test reflects unsaved edits', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await ttsTest('af_heart', 1.0, 'remote')
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ voice: 'af_heart', speed: 1.0, engine: 'remote' })
+  })
+
+  it('surfaces the backend detail on failure (502 remote error, 400 validation)', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ detail: 'HTTP 401: Incorrect API key' }), { status: 502 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(ttsTest('af_heart', 1.0)).rejects.toThrow('Incorrect API key')
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ detail: 'text must not be empty' }), { status: 400 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(ttsTest('af_heart', 1.0)).rejects.toThrow('text must not be empty')
   })
 })

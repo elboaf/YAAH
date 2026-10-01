@@ -228,7 +228,7 @@ type Phase = { speaking: boolean; msgId: string | null }
 /** Error shape from ttsSynthesize: `superseded` marks the benign 409 a
  *  replacement utterance causes (drop silently); `status` 409 otherwise
  *  means the model went missing. */
-type SynthError = Error & { superseded?: boolean; status?: number }
+type SynthError = Error & { superseded?: boolean; status?: number; code?: string }
 
 /** Safety cap on the process queue (#83): briefings are <=400 chars so the
  *  lane stays short, but a pathological run must not build unbounded speech
@@ -573,14 +573,17 @@ export const useTts = create<TtsState>((set, get) => {
     set({ speaking, speakingMsgId: msgId })
   })
   /** Shared playback-failure path: a superseded 409 is benign (a newer
-   *  utterance replaced this one â€” stay silent, no error UI); any other 409
-   *  means the model went missing â€” flip ready so the UI offers the
-   *  download again. */
+   *  utterance replaced this one — stay silent, no error UI). Any other
+   *  409 means the active engine has nothing to synthesize with: local
+   *  mode = the model went missing (flip `ready` so the UI offers the
+   *  download); remote mode (#205) = the endpoint field is empty — its
+   *  code/`detail` says so, shown verbatim. */
   const fail = (e: SynthError, status?: number) => {
     if (e.superseded) return
+    const notConfigured = status === 409 && e.code === 'not-configured'
     set({
-      error: status === 409 ? 'voice model missing â€” enable it in Settings' : e.message,
-      ...(status === 409 ? { ready: false } : {}),
+      error: status === 409 && !notConfigured ? 'voice model missing — enable it in Settings' : e.message,
+      ...(status === 409 && !notConfigured ? { ready: false } : {}),
     })
     setTimeout(() => set({ error: null }), 8000)
   }
