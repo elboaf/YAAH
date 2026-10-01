@@ -161,6 +161,40 @@ def test_offline_note_only_for_offline_remote():
     assert "the workspace's owning device is offline" not in online["rendered_text"]
 
 
+def test_remote_offline_plan_note_rendered_and_differs_from_normal():
+    """Issue #178: the remote-offline wrapper must apply the plan-mode
+    note exactly as the local path does, so plan-vs-normal offline
+    combos differ in the plan-note section instead of being
+    byte-identical while both carrying exit_plan."""
+    plan = pm.render_combo(f"{PFX}-remote-offline-plan")
+    normal = pm.render_combo(f"{PFX}-remote-offline-normal")
+    assert "# Access mode: PLAN" in plan["rendered_text"]
+    assert "# Access mode: PLAN" not in normal["rendered_text"]
+    assert plan["rendered_sha256"] != normal["rendered_sha256"]
+
+
+def test_plan_combos_differ_only_by_plan_note():
+    """Issue #178 acceptance: combos differing only in `plan` differ in
+    exactly the plan-note section (same tool schema names; the
+    rendered system text differs by the note, not by anything else
+    the plan flag was silently meant to control)."""
+    pairs = [
+        (f"{PFX}-remote-offline-normal", f"{PFX}-remote-offline-plan"),
+        (f"{PFX}-local", f"{PFX}-local-plan"),
+    ]
+    for normal_id, plan_id in pairs:
+        normal = pm.render_combo(normal_id)
+        plan = pm.render_combo(plan_id)
+        plan_names = [s["name"] for s in plan["tool_schemas"]]
+        normal_names = [s["name"] for s in normal["tool_schemas"]]
+        # The ONLY schema delta plan mode makes is appending exit_plan
+        # (loop.py appends it when plan is active).
+        assert plan_names == normal_names + ["exit_plan"], normal_id
+        assert plan["rendered_text"].startswith(
+            normal["rendered_text"]
+        ) or plan["rendered_text"].endswith(normal["rendered_text"]), normal_id
+
+
 def test_subagent_kind_covers_builtins():
     manifest = pm.render_combo(f"kind-subagents-{PFX}-skills")
     prompts = manifest["subagent_prompts"]
