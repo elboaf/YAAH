@@ -6043,6 +6043,38 @@ export function SaySettingsCard({
   )
 }
 
+/** #171 — Interface-scale card: a live 100–200% slider replaces the old
+ *  preset buttons. Every change reports immediately (preview-while-dragging
+ *  via the ui-scale-changed event); persistence stays on Save/Cancel as
+ *  before. Values are quantized through quantizeUiScale (issue #133) so the
+ *  zoom never carries subpixel noise into device-pixel rounding. Exported
+ *  for isolation (SaySettingsCard precedent). */
+export function InterfaceScaleCard({ scale, onChange }: { scale: number; onChange: (scale: number) => void }) {
+  // Quantize (#133), then clamp to the shipped slider range — the quantizer's
+  // own [0.5, 3] envelope is wider than the UI offers end-to-end (#171).
+  const value = Math.min(2, Math.max(1, quantizeUiScale(scale)))
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-[10px] text-zinc-600">
+        Zoom for the whole app — scales live while you drag; Save keeps it
+      </p>
+      <div className="flex shrink-0 items-center gap-2">
+        <input
+          type="range"
+          min={1}
+          max={2}
+          step={0.01}
+          value={value}
+          aria-label="Interface scale"
+          className="w-40 accent-blue-600"
+          onChange={(e) => onChange(quantizeUiScale(Number(e.target.value)))}
+        />
+        <span className="w-10 font-mono text-xs text-zinc-300">{Math.round(value * 100)}%</span>
+      </div>
+    </div>
+  )
+}
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
@@ -6074,7 +6106,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const COMPACTION_DEFAULT_K = 300
   /** Default per-provider max steps (0 = unlimited). */
   const MAX_STEPS_DEFAULT = 200
-  // Interface scale draft (1.0 / 1.1 / 1.25 / 1.5) — applied live on save.
+  // Interface scale draft (100–200% slider, #171) — applied live on drag,
+  // persisted on save.
   const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   const [saving, setSaving] = useState(false)
@@ -6144,6 +6177,23 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, removeTarget])
+
+  // #171: the slider previews live, so closing without Save (Cancel, Esc,
+  // backdrop) must restore the persisted zoom — re-emit the value the
+  // backend holds when the modal unmounts. A StrictMode dev double-mount
+  // fires this once extra, which is harmless: it re-applies the persisted
+  // value that was already on screen.
+  useEffect(() => {
+    return () => {
+      getConfig()
+        .then((c) => {
+          window.dispatchEvent(
+            new CustomEvent('ui-scale-changed', { detail: { scale: quantizeUiScale(Number(c.ui_scale) || 1.0) } }),
+          )
+        })
+        .catch(() => {})
+    }
+  }, [])
 
   useEffect(() => {
     // Retry the config load: the backend can be momentarily busy (or still
@@ -7117,29 +7167,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             </SettingsCard>
 
             <SettingsCard title="Interface" className="col-span-4">
-              <div className="flex items-center justify-between gap-3" role="radiogroup" aria-label="Interface scale">
-                <p className="text-[10px] text-zinc-600">
-                  Zoom for the whole app — larger text at the same layout, applied live
-                </p>
-                <div className="flex shrink-0 gap-1.5">
-                  {([1.0, 1.1, 1.25, 1.5] as const).map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      role="radio"
-                      aria-checked={uiScale === s}
-                      className={`rounded   px-2.5 py-1 font-mono text-xs ${
-                        uiScale === s
-                          ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
-                          : ' text-zinc-400 hover:bg-zinc-800'
-                      }`}
-                      onClick={() => setUiScale(s)}
-                    >
-                      {s === 1.0 ? '100%' : s === 1.1 ? '110%' : s === 1.25 ? '125%' : '150%'}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {/* #171: live slider — each move previews immediately via the
+                  ui-scale-changed event; Save persists (see save()). */}
+              <InterfaceScaleCard
+                scale={uiScale}
+                onChange={(s) => {
+                  setUiScale(s)
+                  // Preview-while-dragging: App.tsx applies the quantized
+                  // zoom on this event without waiting for Save.
+                  window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: s } }))
+                }}
+              />
             </SettingsCard>
 
             <SettingsCard title="Scheduled agents" className="col-span-4">

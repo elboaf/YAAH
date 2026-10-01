@@ -2046,10 +2046,10 @@ async def api_set_config(body: ConfigUpdate):
         if "allow_screenshot" in merged_cu:
             merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
         updates["computer_use"] = merged_cu
-    # Interface scale is clamped to the shipped range (Settings offers
-    # 100/110/125/150%; anything wilder would break the compact layout).
+    # Interface scale is clamped to the shipped range (Settings offers a
+    # 100–200% slider since #171; anything wilder would break the layout).
     if "ui_scale" in updates:
-        updates["ui_scale"] = min(1.5, max(1.0, float(updates["ui_scale"] or 1.0)))
+        updates["ui_scale"] = min(2.0, max(1.0, float(updates["ui_scale"] or 1.0)))
     # Context-window overrides: when the key is present it is the
     # authoritative full map (Settings sends everything it shows, so removals
     # persist); when absent the stored map is untouched.
