@@ -1926,6 +1926,10 @@ async def api_export_conversation(conversation_id: int):
             lines += [f"**🔧 tool: {name}**", "", "```json", r["content"], "```", ""]
         elif role == "assistant":
             lines += [f"**🤖 assistant**", "", r["content"] or "", ""]
+            # #226: the briefing the voice spoke for this emission, when one
+            # was captured (say toggle off ⇒ column empty ⇒ no line here).
+            if r.get("say"):
+                lines += [f"*Briefing:* {r['say']}", ""]
             for tc in r.get("tool_calls") or []:
                 if isinstance(tc, dict) and tc.get("id") and not tc.get("name"):
                     fn = tc.get("function") or {}
