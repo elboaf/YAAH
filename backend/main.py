@@ -983,6 +983,9 @@ class ConfigUpdate(BaseModel):
     # Computer-use settings block (issue #140): Settings toggles only
     # `allow_screenshot`; the rest of the block merges through untouched.
     computer_use: dict | None = None
+    # Persistent-memory block (issue #169): Settings toggles only
+    # `enabled`; the rest of the block merges through untouched.
+    memory: dict | None = None
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
     model_context: dict[str, dict[str, int | None]] | None = None
@@ -1985,6 +1988,8 @@ async def api_get_config():
         "sandbox": cfg.get("sandbox") or {},
         # Computer-use block (Settings toggles allow_screenshot, #140).
         "computer_use": cfg.get("computer_use") or {},
+        # Persistent-memory block (Settings toggles memory.enabled, #169).
+        "memory": cfg.get("memory") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
         # Per-model context windows (the per-model Settings editor).
@@ -2046,6 +2051,15 @@ async def api_set_config(body: ConfigUpdate):
         if "allow_screenshot" in merged_cu:
             merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
         updates["computer_use"] = merged_cu
+    # Persistent-memory block merges the same way (#169): a Settings save
+    # that only touches enabled keeps any future sibling keys intact.
+    mem = updates.get("memory")
+    if isinstance(mem, dict):
+        existing = load_config().get("memory") or {}
+        merged_mem = {**existing, **mem}
+        if "enabled" in merged_mem:
+            merged_mem["enabled"] = bool(merged_mem["enabled"])
+        updates["memory"] = merged_mem
     # Interface scale is clamped to the shipped range (Settings offers
     # 100/110/125/150%; anything wilder would break the compact layout).
     if "ui_scale" in updates:

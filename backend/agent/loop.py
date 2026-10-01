@@ -239,7 +239,12 @@ def _memory_notes(workspace: str) -> str:
     a turn. Remote sessions keep their memories client-local: the tools
     resolve slugs against the CLIENT's memory root, so injection is the
     same block either way."""
-    from backend.agent import memory
+    from backend.agent import memory, tools
+
+    # Issue #169: persistent memory is opt-in (memory.enabled, default
+    # OFF) — when disabled the prompt block is suppressed entirely.
+    if not tools.memory_enabled():
+        return ""
 
     try:
         return memory.index_for_prompt(workspace)

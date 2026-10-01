@@ -5902,6 +5902,47 @@ function ScreenshotToolToggle() {
   )
 }
 
+/** Settings card: the GLOBAL persistent-memory toggle (issue #169). Memory
+ *  is opt-in (default OFF): enabling exposes memory_save/read/delete and the
+ *  prompt block. Disabling preserves the on-disk store under ~/.yaah/memory/. */
+function MemoryToggle() {
+  const [enabled, setEnabled] = useState(false)
+
+  useEffect(() => {
+    getConfig()
+      .then((c) => setEnabled(c.memory?.enabled === true))
+      .catch(() => {})
+  }, [])
+
+  const toggle = async (next: boolean) => {
+    setEnabled(next)
+    try {
+      await updateConfig({ memory: { enabled: next } })
+    } catch {
+      setEnabled(!next)
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-xs text-zinc-300">
+        <input
+          type="checkbox"
+          className="accent-blue-600"
+          checked={enabled}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        Enable persistent memory
+      </label>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        Lets the agent save and recall per-project facts. Memories live in ~/.yaah/memory/;
+        disabling removes the tools from new turns but preserves everything on disk. Applies
+        to new turns and sessions.
+      </p>
+    </div>
+  )
+}
+
 /** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
 function AgentsSettingsSection() {
   const [rc, setRc] = useState('2')
@@ -7078,6 +7119,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
                 <SettingsCard title="Screenshot tool" className="col-span-2">
                   <ScreenshotToolToggle />
+                </SettingsCard>
+
+                <SettingsCard title="Memory" className="col-span-2">
+                  <MemoryToggle />
                 </SettingsCard>
 
                 <SettingsCard title="Remote hosting" className="col-span-2">
