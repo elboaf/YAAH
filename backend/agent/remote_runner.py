@@ -94,7 +94,7 @@ def _schemas_for(workspace: str) -> list:
 
 
 def _system_prompt(workspace: str, host: remote_mod.RemoteSession | None) -> str:
-    from backend.agent.loop import _default_system_prompt, _plan_mode_note, current_access_mode
+    from backend.agent.loop import _default_system_prompt, current_access_mode
 
     # The loop's prompt builder already resolves the runtime-environment
     # line and tool list from the workspace's owning device.
@@ -104,12 +104,20 @@ def _system_prompt(workspace: str, host: remote_mod.RemoteSession | None) -> str
             "\n\nNote: the workspace's owning device is offline right now; "
             "workspace tools will fail until it reconnects."
         )
-    # Plan mode framing must ride the remote-offline path exactly as the
-    # local one does (issue #178): the schemas still carry exit_plan, so
-    # without the note the model gets the tool with zero plan-mode
-    # guidance and only discovers the contract via a blocked-tool error.
+    # Plan mode framing: the remote turn never receives the exit_plan
+    # schema (the local loop appends EXIT_PLAN_SCHEMA separately), so the
+    # local note — which orders the model to call exit_plan — would set a
+    # guidance loop against a blocked-tool error for a tool it does not
+    # have (#179 return trip). Remote turns get a matching note that
+    # directs the model to present the plan as text instead.
     if current_access_mode() == "plan":
-        prompt += f"\n\n---\n\n{_plan_mode_note()}"
+        prompt += (
+            "\n\n---\n\n# Access mode: PLAN\n\n"
+            "Plan mode is ON: file edits and shell commands are blocked. "
+            "Explore with read-only tools, then present your plan as text "
+            "and stop. Remote turns cannot request plan approval; the user "
+            "switches out of plan mode themselves."
+        )
     return prompt
 
 

@@ -12,7 +12,12 @@ import json
 import pytest
 
 from backend.agent import remote as remote_mod
+from backend.agent import remote_runner as runner_mod
 from backend.agent.remote_runner import run_remote_turn
+
+# Captured at import time, before the autouse _patch_prompt fixture
+# replaces runner_mod._system_prompt with a stub.
+_REAL_SYSTEM_PROMPT = runner_mod._system_prompt
 
 
 class FakeResponse:
@@ -582,3 +587,28 @@ async def test_full_mode_passes_mutating_tools_on_remote_dispatch():
     assert host_ws.exec_calls  # executed, not blocked
     result = next(e for e in _events(stream) if e["type"] == "tool_result")
     assert result["result"] == {"host": "host-ws", "ok": True}
+
+
+# ------------------------------------------- remote plan-mode guidance (#179)
+
+
+def test_remote_plan_note_matches_remote_capabilities(_plan_mode):
+    """Issue #179 CodeRabbit return trip: the remote turn never gets the
+    exit_plan schema (the local loop appends EXIT_PLAN_SCHEMA separately),
+    so the injected plan-mode note must not tell the model to call it.
+    The remote note directs the model to present the plan as text."""
+    prompt = _REAL_SYSTEM_PROMPT("C:/repo", host=None)
+    assert "Access mode: PLAN" in prompt
+    assert "exit_plan" not in prompt
+    assert "as text" in prompt
+
+
+@pytest.mark.asyncio
+async def test_plan_block_result_remote_does_not_reference_exit_plan(_plan_mode):
+    """The plan-block error a remote turn returns must not send the model
+    after the exit_plan tool it does not have."""
+    from backend.agent.loop import _plan_block_result
+
+    text = json.dumps(_plan_block_result("write_file"))
+    assert "exit_plan" not in text
+    assert "plan mode" in text

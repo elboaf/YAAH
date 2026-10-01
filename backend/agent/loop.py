@@ -784,10 +784,15 @@ def _policy_skip_result(name: str) -> dict:
 
 
 def _plan_block_result(name: str) -> dict:
+    # Capability-neutral wording: the local loop exposes exit_plan, but the
+    # remote turn reuses this same block result and has no exit_plan tool
+    # (#179 return trip) — so the error may not name a tool the caller
+    # cannot call. The prompt-level note carries the surface-specific
+    # instruction instead.
     return {
         "error": (
             f"plan mode is on: {name} was not executed. Present your plan "
-            "with the exit_plan tool and wait for approval."
+            "as text before continuing with read-only work."
         )
     }
 
