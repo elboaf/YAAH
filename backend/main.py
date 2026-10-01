@@ -1006,6 +1006,17 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
         raise HTTPException(status_code=409, detail="conversation already running")
     if request.headers.get("x-yaah-remote"):
         raise HTTPException(status_code=409, detail={"code": "remote_turns_not_enabled", "message": "Remote turns are not enabled until Phase 6."})
+    # Inline-cap gate (#183): attachments ride into model context verbatim
+    # via re-inlining, so a record with more than INLINE_LIMIT_BYTES of
+    # content is rejected here the way /api/attachments rejects oversize
+    # staging — a direct API call must not smuggle multi-MB content into
+    # the loop or the DB.
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    for record in body.attachments:
+        content = record.get("content") if isinstance(record, dict) else None
+        if isinstance(content, str) and len(content.encode("utf-8")) > INLINE_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="attachment content exceeds the 100 KB inline limit")
     # Working directory for this turn (issue #8): the conversation row's
     # workspace — the same column the sidebar groups by, so a moved chat's
     # next message runs inside the workspace it was moved TO, and a stale
@@ -1138,6 +1149,14 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
     text = body.message.strip()
     if not text and not body.images and not body.attachments:
         raise HTTPException(status_code=400, detail="message must not be empty")
+    # Same inline-cap gate as /api/agent (#183): queued records persist on
+    # the user row and re-inline at the next step boundary.
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    for record in body.attachments or []:
+        content = record.get("content") if isinstance(record, dict) else None
+        if isinstance(content, str) and len(content.encode("utf-8")) > INLINE_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="attachment content exceeds the 100 KB inline limit")
     from backend.agent.imagedata import save_data_url
 
     image_paths = []
