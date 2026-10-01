@@ -85,6 +85,31 @@ def test_setting_persists(cfg):
     assert cfg.load_config()["memory"]["enabled"] is True
 
 
+def test_settings_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
+    """CodeRabbit return trip: memory.enabled must be validated as a boolean
+    before saving. bool("false") is True in Python, so coercion silently
+    turns {"enabled": "false"} into enabled=true; the API must 422 instead."""
+    from fastapi.testclient import TestClient
+
+    from backend.agent import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    import backend.main as mainmod
+
+    monkeypatch.setattr(mainmod, "load_config", cfgmod.load_config)
+    monkeypatch.setattr(mainmod, "save_config", cfgmod.save_config)
+    from backend.main import app
+
+    with TestClient(app) as client:
+        for bad in ("false", "", 1, [True], {"enabled": True}):
+            r = client.put("/api/config", json={"memory": {"enabled": bad}})
+            assert r.status_code == 422, (bad, r.status_code)
+        # Sibling-key merge behavior is unchanged: a valid save still merges.
+        r = client.put("/api/config", json={"memory": {"enabled": True}})
+        assert r.status_code == 200
+        assert cfgmod.load_config()["memory"]["enabled"] is True
+
+
 def test_settings_api_roundtrip(tmp_path, monkeypatch):
     """PUT /api/config merges the memory block: a save that only touches
     enabled must not wipe sibling keys of the stored block."""

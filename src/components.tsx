@@ -5907,19 +5907,31 @@ function ScreenshotToolToggle() {
  *  prompt block. Disabling preserves the on-disk store under ~/.yaah/memory/. */
 function MemoryToggle() {
   const [enabled, setEnabled] = useState(false)
+  // Not-loaded-yet and in-flight-save guard (CodeRabbit return trip): a slow
+  // initial GET must not overwrite a just-saved value, and overlapping PUTs
+  // could leave the saved value different from the displayed one.
+  const [loaded, setLoaded] = useState(false)
+  const [pending, setPending] = useState(false)
 
   useEffect(() => {
     getConfig()
-      .then((c) => setEnabled(c.memory?.enabled === true))
-      .catch(() => {})
+      .then((c) => {
+        setEnabled(c.memory?.enabled === true)
+        setLoaded(true)
+      })
+      .catch(() => setLoaded(true))
   }, [])
 
   const toggle = async (next: boolean) => {
+    if (pending) return
+    setPending(true)
     setEnabled(next)
     try {
       await updateConfig({ memory: { enabled: next } })
     } catch {
       setEnabled(!next)
+    } finally {
+      setPending(false)
     }
   }
 
@@ -5930,6 +5942,7 @@ function MemoryToggle() {
           type="checkbox"
           className="accent-blue-600"
           checked={enabled}
+          disabled={!loaded || pending}
           onChange={(e) => void toggle(e.target.checked)}
         />
         Enable persistent memory

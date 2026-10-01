@@ -2053,8 +2053,15 @@ async def api_set_config(body: ConfigUpdate):
         updates["computer_use"] = merged_cu
     # Persistent-memory block merges the same way (#169): a Settings save
     # that only touches enabled keeps any future sibling keys intact.
+    # enabled must be a real boolean (CodeRabbit return trip): bool("false")
+    # is True in Python, so a string "false" must be rejected, not coerced.
     mem = updates.get("memory")
     if isinstance(mem, dict):
+        if "enabled" in mem and not isinstance(mem["enabled"], bool):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_memory_enabled", "message": "memory.enabled must be a boolean"},
+            )
         existing = load_config().get("memory") or {}
         merged_mem = {**existing, **mem}
         if "enabled" in merged_mem:
