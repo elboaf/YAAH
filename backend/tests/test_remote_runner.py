@@ -665,3 +665,50 @@ async def test_plan_mode_routes_exit_plan_to_loop_handler(_plan_mode):
     # The gated mutating tool would have returned a plan-mode block; the
     # exit_plan route must not.
     assert "plan mode is on" not in decision
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_emits_tool_start_before_exit_plan_wait(_plan_mode):
+    """Return trip #3: the exit_plan branch must emit a tool_start event
+    before awaiting _exit_plan. The frontend renders the plan-approval
+    card only on tool_start for exit_plan; without the event the remote
+    user never sees the request while the turn blocks on the answer."""
+    from backend.agent import loop
+
+    session = FakeSession("host-owner")
+    _register(session)
+    host_ws = FakeSession("host-ws")
+    _register(host_ws)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "exit_plan",
+                         "arguments": json.dumps({"plan": "do the thing"})},
+        }]},
+        {"type": "content", "text": "waiting"},
+        {"type": "finish", "reason": "stop"},
+    )
+
+    async def _answer_later():
+        for _ in range(400):
+            key = next((k for k in loop._pending_answers
+                        if k.startswith("731:")), None)
+            if key is not None:
+                loop._pending_answers[key].set_result("approve")
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("exit_plan never registered a pending answer")
+
+    answer_task = asyncio.create_task(_answer_later())
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "present plan", "remote:host-ws:C:/repo"))
+    await answer_task
+
+    events = _events(stream)
+    starts = [i for i, e in enumerate(events)
+              if e["type"] == "tool_start" and e["name"] == "exit_plan"]
+    assert starts, ("no tool_start emitted for exit_plan; the frontend "
+                   "would never show the approval card")
+    ends = [i for i, e in enumerate(events)
+            if e["type"] == "tool_result" and e["name"] == "exit_plan"]
+    assert starts[0] < ends[0]

@@ -427,6 +427,12 @@ async def _run_claimed(
                         # (issue #178 return trip #2): tool_risk("exit_plan")
                         # is not "read", so without this the plan session can
                         # never obtain approval or leave plan mode.
+                        # tool_start goes out first (return trip #3): the
+                        # frontend renders the plan-approval card only on
+                        # tool_start for exit_plan, and _exit_plan blocks
+                        # below until the user answers it.
+                        yield _ndjson({"type": "tool_start", "name": name,
+                                       "args": args, "call_id": tc.get("id", "")})
                         result = await _exit_plan(
                             conversation_id, tc.get("id", ""), args, cancel_event
                         )
