@@ -1573,9 +1573,8 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   const chatText = msg.content || msg.say || ''
   // #207: the captured briefing as a reading aid — only on messages that
   // also carry chat text (a say-only emission's briefing IS the body; the
-  // fallback above must not be duplicated). Live-stream only: briefings
-  // are stripped server-side before persistence, so reloaded rows carry
-  // no msg.say to show.
+  // fallback above must not be duplicated). #226: briefings persist on the
+  // row, so reloaded turns render their say-line too.
   const showSayLine = useAgent((s) => s.sayInChat) && !!msg.content && !!msg.say
   const body = (
     <>
@@ -2838,9 +2837,13 @@ export function RemoteTranscriptDialog({
     useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
     setComposerText('')
     const ac = new AbortController()
-    const applyEvent = (ev: { type: string; text?: string; name?: string; result?: unknown; args?: unknown }) => {
+    const applyEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
       if (ev.type === 'text' && ev.text) {
         useAgent.getState().appendTextDelta(remoteKey, asstId, ev.text)
+      } else if (ev.type === 'say') {
+        // #226: the briefing rides the same wire shape as local turns;
+        // captured on the message so MessageView's say-line can render.
+        useAgent.getState().setSay(remoteKey, asstId, ev.text ?? ev.say ?? '')
       } else if (ev.type === 'thinking') {
         useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
       } else if (ev.type === 'tool_start') {
@@ -5902,6 +5905,91 @@ function ScreenshotToolToggle() {
   )
 }
 
+/** Settings card: the GLOBAL persistent-memory toggle (issue #169). Memory
+ *  is opt-in (default OFF): enabling exposes memory_save/read/delete and the
+ *  prompt block. Disabling preserves the on-disk store under ~/.yaah/memory/. */
+export function MemoryToggle() {
+  const [enabled, setEnabled] = useState(false)
+  // Not-loaded-yet and in-flight-save guard (CodeRabbit return trip): a slow
+  // initial GET must not overwrite a just-saved value, and overlapping PUTs
+  // could leave the saved value different from the displayed one.
+  const [loaded, setLoaded] = useState(false)
+  const [pending, setPending] = useState(false)
+  // Return trip #2: if the initial load fails we must NOT show OFF as if it
+  // were the persisted state — keep the checkbox disabled and surface why.
+  const [loadError, setLoadError] = useState(false)
+
+  useEffect(() => {
+    getConfig()
+      .then((c) => {
+        setEnabled(c.memory?.enabled === true)
+        setLoaded(true)
+        setLoadError(false)
+      })
+      .catch(() => {
+        // Deliberately leave `loaded` false: an unchecked box here would
+        // falsely read as "memory disabled" while the backend still
+        // exposes memory tools.
+        setLoadError(true)
+      })
+  }, [])
+
+  const toggle = async (next: boolean) => {
+    if (pending) return
+    setPending(true)
+    setEnabled(next)
+    try {
+      await updateConfig({ memory: { enabled: next } })
+    } catch {
+      // The PUT may have landed even though its response was lost; reconcile
+      // against the persisted value instead of assuming failure.
+      try {
+        const c = await getConfig()
+        setEnabled(c.memory?.enabled === true)
+      } catch {
+        setEnabled(!next)
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
+  if (loadError) {
+    return (
+      <div className="space-y-1.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-300">
+          <input type="checkbox" className="accent-blue-600" checked={false} disabled />
+          Enable persistent memory
+        </label>
+        <p className="text-[10px] leading-relaxed text-red-400" role="alert">
+          Could not load the saved memory setting; the toggle is disabled so it cannot
+          misrepresent the persisted state. Reopen Settings to retry.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-xs text-zinc-300">
+        <input
+          type="checkbox"
+          className="accent-blue-600"
+          checked={enabled}
+          disabled={!loaded || pending}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        Enable persistent memory
+      </label>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        Lets the agent save and recall per-project facts. Memories live in ~/.yaah/memory/;
+        disabling removes the tools from new turns but preserves everything on disk. Applies
+        to new turns and sessions.
+      </p>
+    </div>
+  )
+}
+
 /** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
 function AgentsSettingsSection() {
   const [rc, setRc] = useState('2')
@@ -7078,6 +7166,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
                 <SettingsCard title="Screenshot tool" className="col-span-2">
                   <ScreenshotToolToggle />
+                </SettingsCard>
+
+                <SettingsCard title="Memory" className="col-span-2">
+                  <MemoryToggle />
                 </SettingsCard>
 
                 <SettingsCard title="Remote hosting" className="col-span-2">
@@ -8517,7 +8609,8 @@ const attachmentText = (a: Attachment): string => {
   return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
 }
 
-function Composer() {
+/** Exported for the say wire-contract test (#226); App composes it here. */
+export function Composer() {
   const {
     conversationId,
     workspace,
@@ -9332,9 +9425,13 @@ function Composer() {
       }
     } else if (ev.type === 'say') {
       // Spoken briefing (#66): captured on its message for read-aloud,
-      // never rendered.
+      // never rendered. #226: the wire field is `text` (loop.py ships
+      // {"type":"say","text":...}); `ev.say` never existed, so briefings
+      // were captured as '' and the voice always fell back to the
+      // heuristic first/last-sentence read. Read `text` first; keep a
+      // defensive `say` fallback in case the shape ever grows one.
       startPostSteerEmission()
-      setSay(bufKey, curId, ev.say ?? '')
+      setSay(bufKey, curId, ev.text ?? ev.say ?? '')
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).

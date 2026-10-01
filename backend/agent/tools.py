@@ -248,7 +248,8 @@ HELP_DOCS: dict = {
         "The result reports the real exit code and combined stdout/stderr; "
         "output is truncated at a cap, so tail or filter large output "
         "in the command itself. On timeout the whole process tree is "
-        "killed - partial output is still returned."
+        "killed - output captured before the deadline is returned, "
+        "followed by a [timed out after Ns] marker."
     ),
     "powershell": (
         "Prefer PowerShell for structured Windows data: Get-ChildItem, "
@@ -402,6 +403,10 @@ async def get_help(workspace: str = "", tool_name: str = "") -> dict:
 
 
 TOOLS_SCHEMA += [GET_HELP_SCHEMA]
+
+# Issue #169: the persistent-memory tool names, used by the Settings toggle
+# (memory.enabled, default OFF) to filter the schema and gate execution.
+_MEMORY_TOOL_NAMES = {"memory_save", "memory_read", "memory_delete"}
 
 TOOLS_SCHEMA += [
     {
@@ -907,7 +912,13 @@ async def _run_capturing(
         # The read was cancelled mid-stream; read() again is unsupported and
         # can hang forever. wait() only needs the exit.
         await _reap(proc)
-        return f"[timed out after {timeout}s]", True
+        # #180: output captured before the deadline is real; return it ahead
+        # of the marker instead of discarding it. Flush the decoder first so
+        # bytes buffered mid-UTF-8-character get the errors="replace"
+        # treatment (CodeRabbit return trip on PR #221) instead of being
+        # silently dropped.
+        tail = decoder.decode(b"", final=True)
+        return "".join(pieces) + tail + f"\n[timed out after {timeout}s]", True
     except asyncio.CancelledError:
         # Run stopped mid-tool (#82): without this, nobody kills or reaps
         # the proc — its transport is later GC'd after the loop closed and
@@ -1456,6 +1467,16 @@ async def execute_tool(
                 "remain available."
             )
         }
+    if name in _MEMORY_TOOL_NAMES and not memory_enabled():
+        # Persistent memory is opt-in (#169): degrade gracefully if the
+        # toggle flipped after the schemas were sent.
+        return {
+            "info": (
+                "Persistent memory is currently disabled in Settings "
+                "(General -> 'Enable persistent memory'). Re-enable it there "
+                "if saving or reading project memories is needed."
+            )
+        }
     if name == "search_conversation_history":
         arguments = {**arguments, "conversation_id": conversation_id}
     try:
@@ -1482,6 +1503,18 @@ def screenshot_allowed() -> bool:
         ))
     except Exception:  # noqa: BLE001 — fail open, never break a turn
         return True
+
+
+def memory_enabled() -> bool:
+    """Issue #169: is persistent memory enabled? Global setting
+    (memory.enabled), read live so a toggle applies to new turns without a
+    restart. Any read failure keeps the safe default (OFF)."""
+    try:
+        from backend.agent.config import load_config
+
+        return bool((load_config().get("memory") or {}).get("enabled", False))
+    except Exception:  # noqa: BLE001 — fail closed, memory is opt-in
+        return False
 
 
 def get_schemas(workspace: str | None = None) -> list:
@@ -1548,4 +1581,11 @@ def get_schemas(workspace: str | None = None) -> list:
     # tools stay (read_ui_tree / list_windows are the cheap alternatives).
     if not screenshot_allowed():
         schemas = [s for s in schemas if s["function"]["name"] != "screenshot"]
+    # Issue #169: persistent memory is opt-in; until enabled the memory
+    # tools never appear in the schema.
+    if not memory_enabled():
+        schemas = [
+            s for s in schemas
+            if s["function"]["name"] not in _MEMORY_TOOL_NAMES
+        ]
     return schemas
