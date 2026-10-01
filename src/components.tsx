@@ -6054,8 +6054,8 @@ export function InterfaceScaleCard({ scale, onChange }: { scale: number; onChang
   // own [0.5, 3] envelope is wider than the UI offers end-to-end (#171).
   const value = Math.min(2, Math.max(1, quantizeUiScale(scale)))
   return (
-    <div className="flex items-center justify-between gap-3">
-      <p className="text-[10px] text-zinc-600">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <p className="min-w-0 text-[10px] text-zinc-600">
         Zoom for the whole app — scales live while you drag; Save keeps it
       </p>
       <div className="flex shrink-0 items-center gap-2">
@@ -6075,7 +6075,7 @@ export function InterfaceScaleCard({ scale, onChange }: { scale: number; onChang
   )
 }
 
-function SettingsModal({ onClose }: { onClose: () => void }) {
+export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
   const [active, setActive] = useState('')
@@ -6179,19 +6179,22 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   }, [onClose, removeTarget])
 
   // #171: the slider previews live, so closing without Save (Cancel, Esc,
-  // backdrop) must restore the persisted zoom — re-emit the value the
-  // backend holds when the modal unmounts. A StrictMode dev double-mount
-  // fires this once extra, which is harmless: it re-applies the persisted
-  // value that was already on screen.
+  // backdrop) must restore the persisted zoom. The persisted value is stored
+  // at load time and updated when Save succeeds, so unmount can re-emit it
+  // synchronously — no async re-fetch on the way out: a rejected fetch can't
+  // strand the preview zoom, and a late response from a closed modal can't
+  // overwrite a newer modal's preview. A StrictMode dev double-mount fires
+  // this once extra, which is harmless: it re-applies the persisted value
+  // that was already on screen.
+  const scaleSavedRef = useRef(1.0)
+  const scaleDirtyRef = useRef(false)
   useEffect(() => {
     return () => {
-      getConfig()
-        .then((c) => {
-          window.dispatchEvent(
-            new CustomEvent('ui-scale-changed', { detail: { scale: quantizeUiScale(Number(c.ui_scale) || 1.0) } }),
-          )
-        })
-        .catch(() => {})
+      if (scaleDirtyRef.current) {
+        window.dispatchEvent(
+          new CustomEvent('ui-scale-changed', { detail: { scale: scaleSavedRef.current } }),
+        )
+      }
     }
   }, [])
 
@@ -6224,6 +6227,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             ),
           )
           setUiScale(quantizeUiScale(Number(c.ui_scale) || 1.0))
+          scaleSavedRef.current = quantizeUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
           setCloudEndpoint(v?.cloud_endpoint ?? '')
@@ -6476,6 +6480,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       // noise — App.tsx quantizes again on its side, this keeps the value
       // the settings UI round-trips clean at the source.
       window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: quantizeUiScale(uiScale) } }))
+      // Save landed: the live zoom IS the persisted zoom now — a following
+      // close must not "restore" the stale saved value (#171 return trip).
+      scaleSavedRef.current = quantizeUiScale(uiScale)
+      scaleDirtyRef.current = false
       // Provider/model changes can affect the defaults inherited by new chats;
       // refresh the sidebar's model and thought-level controls.
       useAgent.getState().refreshGlobals()
@@ -7173,6 +7181,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 scale={uiScale}
                 onChange={(s) => {
                   setUiScale(s)
+                // preview dirties the live zoom; unmount restores the
+                // last-saved value unless a Save lands first (#171)
+                scaleDirtyRef.current = true
                   // Preview-while-dragging: App.tsx applies the quantized
                   // zoom on this event without waiting for Save.
                   window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: s } }))
