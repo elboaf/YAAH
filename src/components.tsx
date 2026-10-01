@@ -61,6 +61,7 @@ import {
   ttsStatus,
   ttsDownload,
   ttsTest,
+  ttsVoices,
   imageUrl,
   listWorkspaces,
   reorderWorkspaces,
@@ -5992,6 +5993,59 @@ function SettingsCard({
 const settingsInputCls =
   'rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none'
 
+/** #231: the remote narration voice picker, isolated for component tests
+ *  (the SaySettingsCard precedent). With a server list: a select mirroring
+ *  local mode, keeping the saved voice selectable even when the server
+ *  doesn't offer it. Without one: the original free-text input — OpenAI
+ *  has no voices endpoint, so an empty list is normal, not an error. */
+export function RemoteVoiceField({
+  voiceDraft,
+  voices,
+  probing,
+  onChange,
+}: {
+  voiceDraft: string
+  voices: string[]
+  probing: boolean
+  onChange: (v: string) => void
+}) {
+  if (voices.length === 0) {
+    return (
+      <input
+        className={`${settingsInputCls} w-full`}
+        value={voiceDraft}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={probing ? 'probing voices…' : 'voice (server-validated, e.g. af_heart)'}
+        aria-label="Read-aloud voice"
+      />
+    )
+  }
+  return (
+    <select
+      className={`${settingsInputCls} w-full`}
+      value={
+        voices.includes(voiceDraft)
+          ? voiceDraft
+          : voiceDraft.trim() === ''
+            ? voices[0]
+            : voiceDraft
+      }
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Read-aloud voice"
+      title="Voices from the server's /voices endpoint"
+    >
+      {!voices.includes(voiceDraft) && voiceDraft.trim() !== '' && (
+        <option value={voiceDraft}>{voiceDraft} (saved)</option>
+      )}
+      {voices.map((v) => (
+        <option key={v} value={v}>
+          {v}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 /** #207: the spoken-briefing toggles as an isolated card (the Settings
  *  modal's Voice tab embeds it; the card is exported for component tests,
  *  same precedent as SandboxSettingsCard). */
@@ -6116,6 +6170,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [ttsTestState, setTtsTestState] = useState<'idle' | 'busy'>('idle')
   const [ttsTestResult, setTtsTestResult] = useState<string | null>(null)
   const [ttsTestOk, setTtsTestOk] = useState(false)
+  // Voice discovery (#231): the names the remote server offers, probed on
+  // endpoint/key changes. Empty list = free-text fallback (OpenAI has no
+  // voices endpoint; absence of a list is normal, never an error).
+  const [remoteVoiceList, setRemoteVoiceList] = useState<string[]>([])
+  const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
   const [ttsModelReady, setTtsModelReady] = useState(false)
@@ -6238,6 +6297,38 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       })
       .catch(() => {})
   }, [])
+
+  // Voice discovery (#231): re-probe (debounced) when the remote drafts
+  // change while the remote engine is selected — including first paint,
+  // where the drafts are the saved settings. The key draft participates so
+  // a first-time setup can discover before its first Save. Per-endpoint
+  // cache keeps re-renders from re-probing; failures leave the cache
+  // untouched (a stale list beats no list).
+  useEffect(() => {
+    if (ttsEngine !== 'remote') return
+    const endpoint = ttsEndpoint.trim()
+    if (!endpoint) {
+      setRemoteVoiceList([])
+      return
+    }
+    let cancelled = false
+    setRemoteProbing(true)
+    const t = setTimeout(() => {
+      ttsVoices(endpoint, ttsKey)
+        .then((voices) => {
+          if (!cancelled) setRemoteVoiceList(voices)
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setRemoteProbing(false)
+        })
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsEngine, ttsEndpoint, ttsKey])
 
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
@@ -6988,12 +7079,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                     </select>
                     ) : null}
                     {ttsEngine === 'remote' && (
-                      <input
-                        className={`${settingsInputCls} w-full`}
-                        value={ttsVoiceDraft}
-                        onChange={(e) => setTtsVoiceDraft(e.target.value)}
-                        placeholder="voice (server-validated, e.g. af_heart)"
-                        aria-label="Read-aloud voice"
+                      <RemoteVoiceField
+                        voiceDraft={ttsVoiceDraft}
+                        voices={remoteVoiceList}
+                        probing={remoteProbing}
+                        onChange={setTtsVoiceDraft}
                       />
                     )}
                     <button

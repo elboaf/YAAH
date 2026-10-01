@@ -2351,6 +2351,42 @@ async def api_tts_test(body: TtsTestBody):
     return {"ok": True}
 
 
+class TtsVoicesBody(BaseModel):
+    """Voice discovery (#231): the endpoint/key drafts Settings is showing.
+    Optional fields fall back to the stored voice config — the probe works
+    before the user touches the fields and with no body at all."""
+    endpoint: str | None = None
+    api_key: str | None = None
+
+
+@app.post("/api/tts/voices")
+async def api_tts_voices(body: TtsVoicesBody | None = None):
+    """The voice names a remote server offers, via the non-standard
+    ``GET {base}/voices`` the reference Kokoro server exposes (OpenAI's own
+    API has none — a list-less server is normal, never an error). Always
+    200 with {"voices": []} on any probe failure; the UI falls back to
+    free-text. 409 not-configured only when no endpoint can be resolved at
+    all. A typed-but-unsaved key draft wins over the stored key so
+    discovery works before the first Save; the key goes ONLY to the probed
+    endpoint and is never echoed back."""
+    from backend.agent import speak
+    from fastapi.responses import JSONResponse
+
+    voice_cfg = load_config().get("voice") or {}
+    endpoint = (body.endpoint if body else None) or (voice_cfg.get("tts_endpoint") or "")
+    if not endpoint.strip():
+        return JSONResponse(
+            {"detail": "no endpoint configured (Settings → Voice)", "code": "not-configured"},
+            status_code=409,
+        )
+    api_key = (body.api_key if body else None) or (voice_cfg.get("tts_api_key") or "")
+    try:
+        voices = await speak.probe_remote_voices(endpoint, api_key=api_key)
+    except speak.RemoteTTSError as e:  # a malformed endpoint, same gate as Test
+        return JSONResponse({"detail": str(e), "code": e.code}, status_code=409)
+    return {"voices": voices}
+
+
 @app.get("/api/tts/status")
 async def api_tts_status():
     """What the speaker toggle can use right now: model presence, the voice
