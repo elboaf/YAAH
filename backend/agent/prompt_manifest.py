@@ -702,6 +702,12 @@ def render_local_family(combo: str, flags: dict) -> dict:
         allowed = _schema_names_for(
             False, flags["kind"] != "local", flags["kind"] != "local"
         )
+        if flags["plan"]:
+            # loop.py appends EXIT_PLAN_SCHEMA when plan mode is on (after
+            # the captured turn); the platform-shape filter must not strip
+            # it or plan-vs-normal combos collapse to identical tool sets
+            # on posix renders (issue #178 CI failure).
+            allowed = allowed | {"exit_plan"}
         captured["tools"] = [
             s
             for s in captured["tools"]

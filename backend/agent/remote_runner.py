@@ -402,14 +402,31 @@ async def _run_claimed(
                     args = None
                     result = {"error": f"Invalid JSON arguments: {e}"}
                 if args is not None:
-                    yield _ndjson({"type": "tool_start", "name": name,
-                                   "args": args, "call_id": tc.get("id", "")})
-                    try:
-                        result = await turn.dispatch_tool(
-                            name, args, _local_dispatch,
-                        )
-                    except RemoteTurnError as exc:
-                        result = {"error": str(exc)}
+                    # Plan-mode gate (issue #178 return trip): the local loop
+                    # routes every call through run_gate; the remote turn has
+                    # no approval machinery, so it enforces the plan-mode
+                    # half directly — read tools and full mode pass, anything
+                    # else gets the same _plan_block_result the local loop
+                    # returns. (Ask mode is deliberately not wired here:
+                    # approval awaits a local conversation_id a remote turn
+                    # never owns — flagged for a maintainer decision.)
+                    from backend.agent.loop import (
+                        _plan_block_result, current_access_mode,
+                    )
+                    from backend.agent.tools import tool_risk
+
+                    if (current_access_mode() == "plan"
+                            and tool_risk(name) != "read"):
+                        result = _plan_block_result(name)
+                    else:
+                        yield _ndjson({"type": "tool_start", "name": name,
+                                       "args": args, "call_id": tc.get("id", "")})
+                        try:
+                            result = await turn.dispatch_tool(
+                                name, args, _local_dispatch,
+                            )
+                        except RemoteTurnError as exc:
+                            result = {"error": str(exc)}
                     if name in remote_mod.REMOTE_TOOLS and isinstance(result, dict):
                         # Shell tools return no chunk stream remotely; emit
                         # the final result exactly like a completed local run.

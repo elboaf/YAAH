@@ -487,3 +487,98 @@ async def test_commit_payload_matches_remote_commit_request_shape(_isolate_db):
     # lease/revision identity comes from the acquired owner lease.
     assert parsed.lease_token == "lease-host-owner"
     assert parsed.revision == "r:4"
+
+
+# ------------------------------------------------------- plan-mode gate (#178)
+
+
+@pytest.fixture()
+def _plan_mode(monkeypatch, tmp_path):
+    """Plan mode ON via the real config path (current_access_mode reads
+    load_config() fresh at every gate)."""
+    from backend.agent import config as cfgmod
+    from backend.agent import loop
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    cfgmod.save_config({"access_mode": "plan"})
+    monkeypatch.setattr(loop, "load_config", cfgmod.load_config)
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_blocks_mutating_tool_on_remote_dispatch(_plan_mode):
+    """Issue #178 return trip: the remote turn dispatches tools with no
+    access-mode gate, so in plan mode a mutating tool the model names
+    EXECUTES on the owning device instead of getting the plan-block
+    result the local loop returns. The gate belongs before dispatch."""
+    session = FakeSession("host-owner")
+    _register(session)
+    host_ws = FakeSession("host-ws")
+    _register(host_ws)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "write_file",
+                         "arguments": json.dumps({"path": "a.txt", "content": "x"})},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    )
+    _script_events(
+        {"type": "content", "text": "plan: I will write a.txt"},
+        {"type": "finish", "reason": "stop"},
+    )
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "go", "remote:host-ws:C:/repo"))
+    # The mutating tool must never reach the owning device.
+    assert all(name != "write_file" for name, _, _ in host_ws.exec_calls)
+    result = next(e for e in _events(stream) if e["type"] == "tool_result")
+    assert "plan mode" in json.dumps(result["result"])
+    # The turn continues to its final answer after the block.
+    assert _types(stream)[-1] == "done"
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_passes_read_tools_on_remote_dispatch(_plan_mode):
+    """Read tools stay free in plan mode on the remote path, mirroring
+    the local gate."""
+    session = FakeSession("host-owner")
+    _register(session)
+    host_ws = FakeSession("host-ws")
+    _register(host_ws)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file",
+                         "arguments": json.dumps({"path": "a.py"})},
+        }]},
+        {"type": "content", "text": "answer"},
+        {"type": "finish", "reason": "stop"},
+    )
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "go", "remote:host-ws:C:/repo"))
+    assert ("read_file", {"path": "a.py"}, "remote:host-ws:C:/repo") \
+        in host_ws.exec_calls
+    result = next(e for e in _events(stream) if e["type"] == "tool_result")
+    assert result["result"] == {"host": "host-ws", "ok": True}
+
+
+@pytest.mark.asyncio
+async def test_full_mode_passes_mutating_tools_on_remote_dispatch():
+    """Full mode is unchanged: mutating tools execute exactly as before."""
+    session = FakeSession("host-owner")
+    _register(session)
+    host_ws = FakeSession("host-ws")
+    _register(host_ws)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "write_file",
+                         "arguments": json.dumps({"path": "a.txt", "content": "x"})},
+        }]},
+        {"type": "content", "text": "answer"},
+        {"type": "finish", "reason": "stop"},
+    )
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "go", "remote:host-ws:C:/repo"))
+    assert host_ws.exec_calls  # executed, not blocked
+    result = next(e for e in _events(stream) if e["type"] == "tool_result")
+    assert result["result"] == {"host": "host-ws", "ok": True}
