@@ -84,9 +84,16 @@ async def _local_dispatch(name: str, arguments: dict, workspace: str) -> dict:
 
 
 def _schemas_for(workspace: str) -> list:
+    from backend.agent.loop import EXIT_PLAN_SCHEMA, current_access_mode
     from backend.agent.tools import get_schemas
 
     schemas = get_schemas(workspace=workspace)
+    # exit_plan exists only while plan mode is on, mirroring the local
+    # loop (issue #178 return trip #2): the plan note tells the model to
+    # present its plan with exit_plan, so the schema must be offered or
+    # the plan session can never leave plan mode.
+    if current_access_mode() == "plan":
+        schemas = schemas + [EXIT_PLAN_SCHEMA]
     return [
         schema for schema in schemas
         if schema["function"]["name"] not in _LOCAL_ONLY_TOOL_NAMES
@@ -411,11 +418,19 @@ async def _run_claimed(
                     # approval awaits a local conversation_id a remote turn
                     # never owns — flagged for a maintainer decision.)
                     from backend.agent.loop import (
-                        _plan_block_result, current_access_mode,
+                        _exit_plan, _plan_block_result, current_access_mode,
                     )
                     from backend.agent.tools import tool_risk
 
-                    if (current_access_mode() == "plan"
+                    if name == "exit_plan":
+                        # Route to the loop's handler BEFORE the risk gate
+                        # (issue #178 return trip #2): tool_risk("exit_plan")
+                        # is not "read", so without this the plan session can
+                        # never obtain approval or leave plan mode.
+                        result = await _exit_plan(
+                            conversation_id, tc.get("id", ""), args, cancel_event
+                        )
+                    elif (current_access_mode() == "plan"
                             and tool_risk(name) != "read"):
                         result = _plan_block_result(name)
                     else:

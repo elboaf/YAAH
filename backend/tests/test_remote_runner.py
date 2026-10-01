@@ -582,3 +582,86 @@ async def test_full_mode_passes_mutating_tools_on_remote_dispatch():
     assert host_ws.exec_calls  # executed, not blocked
     result = next(e for e in _events(stream) if e["type"] == "tool_result")
     assert result["result"] == {"host": "host-ws", "ok": True}
+
+
+# --------------------------------------------- exit_plan in remote plan mode (#178 rt2)
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_schemas_include_exit_plan(_plan_mode):
+    """Return trip #2: in plan mode the remote tool list must carry
+    exit_plan, mirroring the local loop (loop.py appends EXIT_PLAN_SCHEMA
+    while plan mode is on). Without it the model is told to present a plan
+    with a tool that never appears in its schema list."""
+    from backend.agent import remote_runner as runner_mod
+
+    schemas = runner_mod._schemas_for("remote:host-ws:C:/repo")
+    assert "exit_plan" in [s["function"]["name"] for s in schemas]
+
+
+@pytest.fixture()
+def _full_mode(monkeypatch, tmp_path):
+    """Full mode via the real config path (the mirror of _plan_mode)."""
+    from backend.agent import config as cfgmod
+    from backend.agent import loop
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    cfgmod.save_config({"access_mode": "full"})
+    monkeypatch.setattr(loop, "load_config", cfgmod.load_config)
+
+
+@pytest.mark.asyncio
+async def test_full_mode_schemas_exclude_exit_plan(_full_mode):
+    """Outside plan mode the schema stays absent, exactly like the local
+    loop."""
+    from backend.agent import remote_runner as runner_mod
+
+    schemas = runner_mod._schemas_for("remote:host-ws:C:/repo")
+    assert "exit_plan" not in [s["function"]["name"] for s in schemas]
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_routes_exit_plan_to_loop_handler(_plan_mode):
+    """Return trip #2: a remote plan session told to call exit_plan must
+    reach the loop's _exit_plan handler instead of being blocked by the
+    risk gate (tool_risk('exit_plan') is not 'read'). The handler blocks
+    on an approval future; we answer it to keep the test hermetic."""
+    from backend.agent import loop
+
+    session = FakeSession("host-owner")
+    _register(session)
+    host_ws = FakeSession("host-ws")
+    _register(host_ws)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "exit_plan",
+                         "arguments": json.dumps({"plan": "do the thing"})},
+        }]},
+        {"type": "content", "text": "waiting"},
+        {"type": "finish", "reason": "stop"},
+    )
+
+    # Answer the approval card from "the user's side" once it appears.
+    async def _answer_later():
+        for _ in range(400):
+            key = next((k for k in loop._pending_answers
+                        if k.startswith("731:")), None)
+            if key is not None:
+                loop._pending_answers[key].set_result("approve")
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("exit_plan never registered a pending answer")
+
+    answer_task = asyncio.create_task(_answer_later())
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "present plan", "remote:host-ws:C:/repo"))
+    await answer_task
+
+    result = next(e for e in _events(stream) if e["type"] == "tool_result"
+                  and e["name"] == "exit_plan")
+    decision = json.dumps(result["result"])
+    assert "approved" in decision
+    # The gated mutating tool would have returned a plan-mode block; the
+    # exit_plan route must not.
+    assert "plan mode is on" not in decision
