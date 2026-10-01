@@ -2377,6 +2377,10 @@ async def api_tts_status():
         "tts_voice": voice.get("tts_voice") or speak.DEFAULT_VOICE,
         "tts_speed": voice.get("tts_speed", 1.0),
         "downloading": speak.download_in_progress(),
+        # #207: the say-emission toggles ride along so the frontend can
+        # hydrate both flags from the status probe it already makes.
+        "say_emissions": voice.get("say_emissions") is not False,
+        "say_in_chat": bool(voice.get("say_in_chat")),
     }
 
 

@@ -57,6 +57,16 @@ DEFAULTS = {
         # System-wide push-to-talk hotkey (hold = record, release = send).
         # "" disables. Tauri accelerator syntax, e.g. "Ctrl+Space".
         "ptt_hotkey": "Ctrl+Space",
+        # #207: spoken-briefing (<say>) GENERATION toggle. False omits the
+        # briefing section from the system prompt (the token saving IS the
+        # feature) and suppresses the `say` stream event entirely — a
+        # deliberate, opt-in hole in #66's never-silent guarantee. Playback
+        # (tts_enabled) stays orthogonal: this is about generation.
+        "say_emissions": True,
+        # #207: render the captured briefing on its assistant message in
+        # the chat tape (a reading aid; briefings are live-stream only —
+        # they are stripped server-side before persistence).
+        "say_in_chat": False,
         # Read-aloud narration engine (#205): local Kokoro via sherpa-onnx,
         # or remote = a standard OpenAI /v1/audio/speech endpoint (the
         # owner-run Kokoro server at herp.local is a faithful subset;

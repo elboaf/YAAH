@@ -307,6 +307,10 @@ export interface AgentConfig {
     tts_enabled?: boolean
     tts_voice?: string
     tts_speed?: number
+    /** #207: spoken-briefing (<say>) generation on/off (default on). */
+    say_emissions?: boolean
+    /** #207: show captured briefings on their messages in chat. */
+    say_in_chat?: boolean
     /** Narration engine (#205): local Kokoro or a remote
      *  OpenAI-compatible /v1/audio/speech endpoint. */
     tts_engine?: 'local' | 'remote'
@@ -381,6 +385,10 @@ export const updateConfig = (
       tts_enabled?: boolean
       tts_voice?: string
       tts_speed?: number
+      /** #207: spoken-briefing (<say>) generation on/off (default on). */
+      say_emissions?: boolean
+      /** #207: show captured briefings on their messages in chat. */
+      say_in_chat?: boolean
       tts_engine?: 'local' | 'remote'
       tts_endpoint?: string
       tts_api_key?: string

@@ -259,6 +259,12 @@ interface AgentState {
   accessMode: AccessMode
   setAccessMode: (m: AccessMode) => void
 
+  /** #207: render captured <say> briefings on their messages in the chat
+   *  tape (Voice-tab toggle; hydrated at startup + on providers-changed,
+   *  mirroring the access-mode pattern). */
+  sayInChat: boolean
+  setSayInChat: (on: boolean) => void
+
   /**
    * Per-conversation context-size readout: exact usage.prompt_tokens of the
    * latest model call, plus the resolved context window it fills. Written
@@ -632,6 +638,9 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({ pendingPlanApprovals: applyPending(s.pendingPlanApprovals, p) })),
   accessMode: 'ask',
   setAccessMode: (m) => set({ accessMode: m }),
+
+  sayInChat: false,
+  setSayInChat: (on) => set({ sayInChat: on }),
 
   contextByConv: {},
   setContext: (convId, tokens, window, model) =>

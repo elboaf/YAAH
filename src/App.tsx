@@ -181,6 +181,28 @@ function AccessMode() {
 }
 
 /**
+ * #207: hydrate the "show <say> emissions in chat" flag from the saved
+ * voice config at startup, and follow live changes (Settings saved in this
+ * or another window) via the providers-changed event — the same shape as
+ * AccessMode above.
+ */
+function SayInChatSync() {
+  useEffect(() => {
+    const apply = () => {
+      getConfig()
+        .then((c) => {
+          useAgent.getState().setSayInChat(c.voice?.say_in_chat === true)
+        })
+        .catch(() => {})
+    }
+    apply()
+    window.addEventListener('providers-changed', apply)
+    return () => window.removeEventListener('providers-changed', apply)
+  }, [])
+  return null
+}
+
+/**
  * Session restore: the recovery banner reloads the whole app when the backend
  * comes back, and a plain F5 does too. Without this, a reload silently lands
  * on a fresh "draft" — the next send then creates a brand-new conversation,
@@ -213,6 +235,7 @@ export default function App() {
     <div className="relative flex h-full w-full bg-zinc-900 text-zinc-100">
       <UiScale />
       <AccessMode />
+      <SayInChatSync />
       <BackendRecoveryBanner />
       <RestoreSession />
       <NotificationSounds />

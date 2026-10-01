@@ -470,3 +470,36 @@ async def test_tts_synthesize_normalizes_text(tts_env, monkeypatch):
         res = await client.post("/api/tts/synthesize", json={"text": "on port 443"})
     assert res.status_code == 200
     assert seen["text"] == "on port four four three"
+
+
+@pytest.mark.asyncio
+async def test_tts_status_exposes_say_toggles(tts_env):
+    """#207: the flags ship on /api/tts/status (and ride /api/config's
+    voice view) so the frontend can hydrate without a new endpoint."""
+    from backend.agent.config import load_config, save_config
+
+    # conftest's config.json persists across tests, and load_config hands
+    # out the SHARED DEFAULTS voice dict (shallow copy) — build fresh
+    # dicts and restore the file, or this test poisons the process.
+    voice = {**(load_config().get("voice") or {}),
+             "say_emissions": True, "say_in_chat": False}
+    cfg = {**load_config(), "voice": voice}
+    with open(os.environ["YAAH_CONFIG_PATH"], "rb") as f:
+        saved = f.read()
+    try:
+        save_config(cfg)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            body = (await client.get("/api/tts/status")).json()
+        assert body["say_emissions"] is True
+        assert body["say_in_chat"] is False
+
+        voice2 = {**(load_config().get("voice") or {}),
+                  "say_emissions": False, "say_in_chat": True}
+        save_config({**load_config(), "voice": voice2})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            body = (await client.get("/api/tts/status")).json()
+        assert body["say_emissions"] is False
+        assert body["say_in_chat"] is True
+    finally:
+        with open(os.environ["YAAH_CONFIG_PATH"], "wb") as f:
+            f.write(saved)
