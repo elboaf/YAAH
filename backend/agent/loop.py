@@ -239,7 +239,12 @@ def _memory_notes(workspace: str) -> str:
     a turn. Remote sessions keep their memories client-local: the tools
     resolve slugs against the CLIENT's memory root, so injection is the
     same block either way."""
-    from backend.agent import memory
+    from backend.agent import memory, tools
+
+    # Issue #169: persistent memory is opt-in (memory.enabled, default
+    # OFF) — when disabled the prompt block is suppressed entirely.
+    if not tools.memory_enabled():
+        return ""
 
     try:
         return memory.index_for_prompt(workspace)
@@ -725,16 +730,24 @@ def _plan_mode_note() -> str:
 def _sandbox_only_note() -> str:
     """System-prompt section injected for scheduled agents running with the
     sandbox-only approval policy (issue #41): no user is watching, so
-    approval-required tools never execute."""
+    approval-required tools never execute.
+
+    The wording mirrors the gate's actual rule (#177), which is enumerable
+    from tool_risk(): READ-ONLY tools run; every mutating or shell tool
+    (file edits, bash/powershell, and the mutating sandbox_* VM tools)
+    skips with the in-band "skipped: approval required" result.
+    """
     return (
         "# Scheduled agent: sandbox-only policy\n\n"
-        "This is an unattended scheduled run: every tool that normally "
-        "requires user approval (file edits, shell commands and anything "
-        "else mutating) is unavailable — calls come back as \"skipped: "
-        "approval required\". Do "
-        "not attempt them or retry after a skip. Work read-only: gather "
-        "information, check status, and report findings, keeping anything "
-        "disruptive as a recommendation for the user to run themselves."
+        "This is an unattended scheduled run with no user to approve "
+        "anything: read-only tools (search, status checks, observation) "
+        "still work, but every tool that writes or executes — file "
+        "edits, bash/powershell, and the sandbox VM tools that install or "
+        "change anything — comes back as \"skipped: approval "
+        "required\". Do not attempt them or retry after a skip. Work "
+        "read-only: gather information, check status, and report "
+        "findings, keeping anything disruptive as a recommendation for "
+        "the user to run themselves."
     )
 
 

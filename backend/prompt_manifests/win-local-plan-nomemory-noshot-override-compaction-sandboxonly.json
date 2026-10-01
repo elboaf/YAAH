@@ -22,20 +22,20 @@
     },
     {
       "name": "sandbox-only",
-      "bytes": 442,
-      "sha256": "de72f6484ff85bc72883fef5b9b7b16b45583a9a0645e978979bd28350f0dc89",
-      "text": "# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+      "bytes": 545,
+      "sha256": "a94cbcb4cc8a6424a42ad2a837d4ec254a1673efe1312c0b0c9a2e07589e9a51",
+      "text": "# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run with no user to approve anything: read-only tools (search, status checks, observation) still work, but every tool that writes or executes — file edits, bash/powershell, and the sandbox VM tools that install or change anything — comes back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
     }
   ],
   "system_messages": [
     {
       "role": "system",
-      "bytes": 1270,
-      "sha256": "7444b2f195b0fad94a76587af798563abebb8bd67c1f24c4c38803a999afb601"
+      "bytes": 1373,
+      "sha256": "7c1d718eac5eb9094281988ce124fe6c8a040d91d7c106a1409f6533b4de2eff"
     }
   ],
-  "total_bytes": 1270,
-  "rendered_sha256": "7444b2f195b0fad94a76587af798563abebb8bd67c1f24c4c38803a999afb601",
+  "total_bytes": 1373,
+  "rendered_sha256": "7c1d718eac5eb9094281988ce124fe6c8a040d91d7c106a1409f6533b4de2eff",
   "tool_schemas": [
     {
       "name": "bash",
@@ -116,21 +116,6 @@
       "name": "load_skill",
       "bytes": 493,
       "sha256": "f24564c9ad287f9729635966b715fcbd5f357222cf0a856b758639bf75613dcc"
-    },
-    {
-      "name": "memory_save",
-      "bytes": 1079,
-      "sha256": "91837d49891003c76a503d00dd9469cfe91d4953f6a2bc4b5a9aceb9c78ca0fb"
-    },
-    {
-      "name": "memory_read",
-      "bytes": 349,
-      "sha256": "b78825cc93de8377705ce77faa9753b7846ece0ae97aee4cdcf84f898a480efb"
-    },
-    {
-      "name": "memory_delete",
-      "bytes": 289,
-      "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
     },
     {
       "name": "read_ui_tree",
@@ -215,5 +200,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run with no user to approve anything: read-only tools (search, status checks, observation) still work, but every tool that writes or executes — file edits, bash/powershell, and the sandbox VM tools that install or change anything — comes back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
 }

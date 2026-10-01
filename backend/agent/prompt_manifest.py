@@ -581,6 +581,12 @@ def _prep_flags(flags: dict, tmp: Path) -> None:
 
     from backend.agent import memory as memory_mod
 
+    # Issue #169: the prompt gate now also consults memory.enabled, so the
+    # fixture flips the config flag in lockstep with the index fixture.
+    from backend.agent import config as config_mod
+
+    config_mod.save_config({"memory": {"enabled": bool(flags["memory"])}})
+
     workspace = (
         REMOTE_WS if flags["kind"] == "remote" else LOCAL_WS
     )

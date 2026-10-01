@@ -5905,6 +5905,91 @@ function ScreenshotToolToggle() {
   )
 }
 
+/** Settings card: the GLOBAL persistent-memory toggle (issue #169). Memory
+ *  is opt-in (default OFF): enabling exposes memory_save/read/delete and the
+ *  prompt block. Disabling preserves the on-disk store under ~/.yaah/memory/. */
+export function MemoryToggle() {
+  const [enabled, setEnabled] = useState(false)
+  // Not-loaded-yet and in-flight-save guard (CodeRabbit return trip): a slow
+  // initial GET must not overwrite a just-saved value, and overlapping PUTs
+  // could leave the saved value different from the displayed one.
+  const [loaded, setLoaded] = useState(false)
+  const [pending, setPending] = useState(false)
+  // Return trip #2: if the initial load fails we must NOT show OFF as if it
+  // were the persisted state — keep the checkbox disabled and surface why.
+  const [loadError, setLoadError] = useState(false)
+
+  useEffect(() => {
+    getConfig()
+      .then((c) => {
+        setEnabled(c.memory?.enabled === true)
+        setLoaded(true)
+        setLoadError(false)
+      })
+      .catch(() => {
+        // Deliberately leave `loaded` false: an unchecked box here would
+        // falsely read as "memory disabled" while the backend still
+        // exposes memory tools.
+        setLoadError(true)
+      })
+  }, [])
+
+  const toggle = async (next: boolean) => {
+    if (pending) return
+    setPending(true)
+    setEnabled(next)
+    try {
+      await updateConfig({ memory: { enabled: next } })
+    } catch {
+      // The PUT may have landed even though its response was lost; reconcile
+      // against the persisted value instead of assuming failure.
+      try {
+        const c = await getConfig()
+        setEnabled(c.memory?.enabled === true)
+      } catch {
+        setEnabled(!next)
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
+  if (loadError) {
+    return (
+      <div className="space-y-1.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-300">
+          <input type="checkbox" className="accent-blue-600" checked={false} disabled />
+          Enable persistent memory
+        </label>
+        <p className="text-[10px] leading-relaxed text-red-400" role="alert">
+          Could not load the saved memory setting; the toggle is disabled so it cannot
+          misrepresent the persisted state. Reopen Settings to retry.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-xs text-zinc-300">
+        <input
+          type="checkbox"
+          className="accent-blue-600"
+          checked={enabled}
+          disabled={!loaded || pending}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        Enable persistent memory
+      </label>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        Lets the agent save and recall per-project facts. Memories live in ~/.yaah/memory/;
+        disabling removes the tools from new turns but preserves everything on disk. Applies
+        to new turns and sessions.
+      </p>
+    </div>
+  )
+}
+
 /** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
 function AgentsSettingsSection() {
   const [rc, setRc] = useState('2')
@@ -7081,6 +7166,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
                 <SettingsCard title="Screenshot tool" className="col-span-2">
                   <ScreenshotToolToggle />
+                </SettingsCard>
+
+                <SettingsCard title="Memory" className="col-span-2">
+                  <MemoryToggle />
                 </SettingsCard>
 
                 <SettingsCard title="Remote hosting" className="col-span-2">

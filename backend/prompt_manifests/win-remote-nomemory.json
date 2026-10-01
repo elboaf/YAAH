@@ -136,21 +136,6 @@
       "sha256": "f24564c9ad287f9729635966b715fcbd5f357222cf0a856b758639bf75613dcc"
     },
     {
-      "name": "memory_save",
-      "bytes": 1079,
-      "sha256": "91837d49891003c76a503d00dd9469cfe91d4953f6a2bc4b5a9aceb9c78ca0fb"
-    },
-    {
-      "name": "memory_read",
-      "bytes": 349,
-      "sha256": "b78825cc93de8377705ce77faa9753b7846ece0ae97aee4cdcf84f898a480efb"
-    },
-    {
-      "name": "memory_delete",
-      "bytes": 289,
-      "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
-    },
-    {
       "name": "powershell",
       "bytes": 1159,
       "sha256": "a5a35e31c5dc313d8e9dd92b8ddd8c19e0a90f9b541cfe7f4e7fe6b7db0e88a4"
