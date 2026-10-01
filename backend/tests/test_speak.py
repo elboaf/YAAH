@@ -402,3 +402,71 @@ def test_spoken_line_caps_overlong_briefing():
 
 def test_spoken_line_never_silent():
     assert speak.spoken_line(None, "Hello.") == "Hello."
+
+# ---- Speech normalization (#206) ------------------------------------------------
+# Kokoro reads literal text; these cases pin the deterministic pass that turns
+# written-for-the-eye text into written-for-the-ear text. SHARED_CASES is kept
+# in sync with src/speech.test.ts — both engines must normalize identically.
+
+SHARED_CASES = [
+    # Ports / technical digit runs go digit-by-digit.
+    ("Shipped on port 443 today.", "Shipped on port four four three today."),
+    ("Bind the server to localhost:8080.", "Bind the server to localhost:eight oh eight oh."),
+    # Years read as years, not cardinals.
+    ("It has worked since 1999.", "It has worked since nineteen ninety-nine."),
+    ("Since 2016 the tool runs locally.", "Since twenty sixteen the tool runs locally."),
+    # Version strings: version word, digit groups, suffix letters spelled.
+    ("Now running v1.0.16-rc.7.", "Now running version one point oh point sixteen R C point seven."),
+    # Dotted quads (IPs, version triples) group the way a human says them.
+    ("Server lives at 10.0.0.1.", "Server lives at ten dot oh dot oh dot one."),
+    # Two-group decimals are left for the engine (it reads them correctly).
+    ("Pi is about 3.14 already.", "Pi is about 3.14 already."),
+    # Known acronyms are spelled out.
+    ("TLS 1.3 is enabled.", "T L S 1.3 is enabled."),
+    ("The API gateway failed.", "The A P I gateway failed."),
+    # Phone numbers group with a pause.
+    ("Call 555-0100 for access.", "Call five five five, oh one oh oh for access."),
+    # Emotion markers are stripped, not read.
+    ("Great news! [excited] It works.", "Great news! It works."),
+    ("[whispers] Quietly done.", "Quietly done."),
+    # SSML fragments are stripped, not mangled into phonemes.
+    ('Say it <break time="500ms"/> slowly.', "Say it slowly."),
+    # IPA in brackets survives (the documented escape hatch for names).
+    ("The name is [dʒeɪson].", "The name is [dʒeɪson]."),
+]
+
+
+@pytest.mark.parametrize("source, expected", SHARED_CASES)
+def test_normalize_for_speech_shared_cases(source, expected):
+    assert speak.normalize_for_speech(source) == expected
+
+
+def test_normalize_for_speech_is_idempotent():
+    once = speak.normalize_for_speech("Backported to v2.10.3 in 2024, see port 8443.")
+    assert speak.normalize_for_speech(once) == once
+
+
+def test_normalize_for_speech_strips_unlisted_emotion_markers():
+    assert speak.normalize_for_speech("Done [sighs] at last.") == "Done at last."
+    # Non-speech brackets that are not emotion markers survive.
+    assert speak.normalize_for_speech("The name is [dʒeɪson].") == "The name is [dʒeɪson]."
+
+
+def test_spoken_line_normalizes_output():
+    out = speak.spoken_line("Shipped on port 443 today.", "chat body")
+    assert out == "Shipped on port four four three today."
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_normalizes_text(tts_env, monkeypatch):
+    seen = {}
+
+    def fake_synth(text, voice="af_heart", speed=1.0, epoch=None):
+        seen["text"] = text
+        return b"\x00\x01" * 2400, 24000
+
+    monkeypatch.setattr(speak, "synthesize", fake_synth)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/tts/synthesize", json={"text": "on port 443"})
+    assert res.status_code == 200
+    assert seen["text"] == "on port four four three"

@@ -465,14 +465,21 @@ def spoken_line(briefing: str | None, md: str, max_chars: int = _BRIEFING_MAX) -
     fallback is today's behavior, never silence). Everything passes through
     prose_for_speech so no markdown junk reaches the synthesizer, and the
     hard cap is enforced here — in one place."""
+    def _finish(text: str) -> str:
+        # #206: the speech-normalization pass is the last thing a briefing
+        # receives before the synthesizer. The cap is re-enforced after it:
+        # spelled-out numbers ("four four three") are longer than digits.
+        out = normalize_for_speech(text)
+        return _clip(out, max_chars) if len(out) > max_chars else out
+
     prose = prose_for_speech(md, max_chars=10**9)
     source = (briefing or "").strip()
     if source:
         line = prose_for_speech(source, max_chars=10**9)
         if len(line) <= max_chars:
-            return line
-        return heuristic_briefing(line, max_chars) or _clip(line, max_chars)
-    return heuristic_briefing(prose, max_chars) or _clip(prose, max_chars)
+            return _finish(line)
+        return _finish(heuristic_briefing(line, max_chars) or _clip(line, max_chars))
+    return _finish(heuristic_briefing(prose, max_chars) or _clip(prose, max_chars))
 
 
 def _clip(text: str, max_chars: int) -> str:
@@ -632,3 +639,217 @@ def prose_for_speech(md: str, max_chars: int = 4000) -> str:
     if m and m.end() > max_chars // 2:
         cut = cut[: m.end()]
     return cut.strip()
+
+
+# ---- Speech normalization (#206) -----------------------------------------------
+# Kokoro reads for the ear; the agent writes for the eye. This pass turns
+# written forms into speakable forms deterministically (no model call): digit
+# runs by context, years in year-form, dotted version/IP groups, phone groups,
+# emotion markers and SSML stripped, curated acronyms spelled out. Mirrored in
+# src/speech.ts (normalizeForSpeech) — keep the shared test cases identical
+# on both sides (backend/tests/test_speak.py SHARED_CASES).
+
+_DIGITS = {"0": "oh", "1": "one", "2": "two", "3": "three", "4": "four",
+           "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+_ONES = ["", "one", "two", "three", "four", "five", "six", "seven", "eight",
+         "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+         "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+         "eighty", "ninety"]
+
+# A number token NOT glued to letters and not part of a longer decimal:
+# a trailing sentence period or comma is fine, "1999.5" / "2024s" are not
+# this token.
+_NOT_FRAG = r"(?!\.?\d)(?![A-Za-z])"
+
+# Versionish token: a dotted numeric group run (version or IP-like), with an
+# optional v/version head and an end-attached suffix (-rc.7, +build21).
+_VERSIONISH = re.compile(
+    r"(?<![\w.])(v(?:er(?:sion)?)?\s?)?(\d{1,3}(?:\.\d{1,3})+)"
+    r"((?:[-+][A-Za-z][\w]*(?:\.[\w]+)*)?)"
+)
+
+# Emotion markers / stage directions: [excited], [sighs], [pause]. Only
+# short all-word contents count, so bracketed technical prose — the
+# documented IPA escape hatch ([dʒeɪson]) — never matches.
+_EMOTION_WORDS = (
+    "excited", "sad", "happy", "angry", "sarcastic", "whispers", "whisper",
+    "shouts", "shouting", "laughs", "laughing", "giggles", "sighs", "sigh",
+    "pause", "pauses", "breath", "excitedly", "calmly", "seriously",
+    "dramatically", "nervously", "cheerful", "cheerfully", "tone", "ironic",
+)
+_EMOTION_MARKER = re.compile(r"\[([^\[\]]+)\]")
+
+# SSML fragments are stripped, never read as phonemes.
+_SSML_TAG = re.compile(
+    r"</?\s*(?:speak|break|prosody|say-?as|phoneme|sub|emphasis|voice|"
+    r"p|s|amazon:[\w-]+|google:[\w-]+)(?:\s[^>]*)?/?>",
+    re.I,
+)
+
+
+def _is_emotion_marker(inner: str) -> bool:
+    words = inner.split()
+    return 1 <= len(words) <= 3 and all(
+        w.lower().strip("'’-") in _EMOTION_WORDS for w in words
+    )
+
+
+def _under_hundred(n: int) -> str:
+    if n < 20:
+        return _ONES[n]
+    t, o = divmod(n, 10)
+    return _TENS[t] + ("-" + _ONES[o] if o else "")
+
+
+def _two_digit(n: int) -> str:
+    """0-99 the way digits are said inside grouped runs."""
+    return _DIGITS[str(n)] if n < 10 else _under_hundred(n)
+
+
+def _group_words(group: str) -> str:
+    """One dotted-group segment the way a human reads it: single digits as
+    digit words (the 'oh' of one-point-oh), 10-99 natural (sixteen), and
+    three-digit groups digit-by-digit (bytes in an address)."""
+    n = int(group)
+    if len(group) == 1 or (len(group) == 2 and n < 10):
+        return _DIGITS[group.lstrip("0") or "0"]
+    if len(group) == 2:
+        return _under_hundred(n)
+    return " ".join(_DIGITS[d] for d in group)
+
+
+def _year_words(d: str) -> str:
+    """A four-digit year the way a human says it (1999, 2016, 1800)."""
+    hi, lo = int(d[:2]), int(d[2:])
+    if hi < 10:
+        return _under_hundred(int(d))
+    if hi == 10:
+        return "ten hundred"
+    hundreds = _under_hundred(hi)
+    if lo == 0:
+        return f"{hundreds} hundred"
+    if lo < 10:
+        return f"{hundreds} oh {_DIGITS[str(lo)]}"
+    return f"{hundreds} {_two_digit(lo)}"
+
+
+def _digit_run_words(run: str) -> str:
+    return " ".join(_DIGITS[d] for d in run)
+
+
+def _phone_words(token: str) -> str:
+    """Phone grouping with a spoken pause at group edges. Hyphenated tokens
+    split at their hyphens (555-0100, 1-800-555-0199); bare 10-digit runs
+    group North-American style 3+3+rest."""
+    if "-" in token:
+        groups = [g for g in token.split("-") if g]
+        if groups[0] == "1" and len(groups) > 3:
+            groups = groups[1:]  # country code absorbed silently
+    else:
+        digits = re.sub(r"\D", "", token)
+        if len(digits) >= 10:
+            groups = [digits[:3], digits[3:6], digits[6:]]
+        else:
+            groups = [digits]
+    return ", ".join(_digit_run_words(g) for g in groups)
+
+
+def _is_phone(token: str) -> bool:
+    digits = re.sub(r"\D", "", token)
+    if "-" in token:
+        return 7 <= len(digits) <= 11
+    return len(digits) in (10, 11)
+
+
+def _version_words(m: "re.Match") -> str:
+    head, dotted, suffix = m.group(1) or "", m.group(2), m.group(3) or ""
+    groups = dotted.split(".")
+    # A bare two-group decimal with a single-digit head (3.14, 1.3, 0.5) is
+    # an ordinary number: the engines already read it correctly. Versions
+    # carry a head; IPs carry four groups.
+    if not head and len(groups) == 2 and len(groups[0]) == 1:
+        return m.group(0)
+    joiner = " dot " if len(groups) >= 4 else " point "
+    out = "version " if head else ""
+    out += joiner.join(_group_words(g) for g in groups)
+    if suffix:
+        bits: list[str] = []
+        for p in re.findall(r"\d+|[A-Za-z]+|\.", suffix):
+            if p == ".":
+                bits.append("point")
+            elif p[0].isdigit():
+                bits.append(_two_digit(int(p)) if len(p) <= 2
+                            else _digit_run_words(p))
+            elif len(p) == 1 or p.lower() == "rc":
+                bits.append(" ".join(c.upper() for c in p))
+            else:
+                bits.append(p)  # beta, dev, rel — real words, keep them
+        out += " " + " ".join(bits)
+    return out
+
+
+def _acronyms(text: str) -> str:
+    """Curated acronyms to letter-spell; unlisted words (Kokoro, ONNX) are
+    left to the engine's lexicon."""
+    known = {"TLS", "SSL", "HTTP", "HTTPS", "API", "CPU", "GPU", "RAM",
+             "URL", "URI", "SQL", "JSON", "XML", "HTML", "CSS", "WAV",
+             "PDF", "PNG", "JWT", "CLI", "SDK", "LLM", "WSL", "UI",
+             "UUID", "SIP", "SSH", "TCP", "UDP", "DNS", "IP", "CI", "CD"}
+    return " ".join(
+        " ".join(w) if w in known else w for w in text.split(" ")
+    )
+
+
+def normalize_for_speech(text: str) -> str:
+    """Deterministic written→spoken pass over TTS INPUT only (the chat
+    transcript is untouched). Order matters: markers/SSML first so their
+    digits never feed the number rules, then years before bare runs, then
+    versionish dotted groups, then long digit runs by context (phones
+    group, everything else digit-by-digit), then short numbers, then
+    acronyms."""
+    if not text:
+        return text
+
+    # 1. SSML tags and emotion markers cannot survive into synthesis.
+    t = _SSML_TAG.sub(" ", text)
+    t = _EMOTION_MARKER.sub(
+        lambda m: "" if _is_emotion_marker(m.group(1)) else m.group(0), t,
+    )
+    t = re.sub(r"  +", " ", t)
+    t = re.sub(r" ([,.!?;:])", r"\1", t)
+
+    # 2. Years (1000-2999) before generic digit-run rules.
+    t = re.sub(r"(?<![\w.])([12]\d{3})" + _NOT_FRAG,
+               lambda m: _year_words(m.group(1)), t)
+
+    # 3. Versionish dotted groups (v1.0.16-rc.7, 10.0.0.1).
+    t = _VERSIONISH.sub(_version_words, t)
+
+    # 4. Long digit runs (and phones with hyphens): phones group, all else
+    #    reads digit-by-digit (ports, IDs).
+    def _run(m: "re.Match") -> str:
+        token = m.group(1)
+        if _is_phone(token):
+            return _phone_words(token)
+        return _digit_run_words(re.sub(r"\D", "", token))
+
+    t = re.sub(r"(?<![\w.])(\d[\d-]{3,})" + _NOT_FRAG, _run, t)
+
+    # 5. Remaining short numbers: two digits natural (sixteen), three
+    #    digits digit-by-digit (443 is a port far more often than a
+    #    quantity in this domain); single digits stay.
+    def _short(m: "re.Match") -> str:
+        n = m.group(1)
+        return _two_digit(int(n)) if len(n) == 2 else _digit_run_words(n)
+
+    t = re.sub(r"(?<![\w.])(\d{2,3})" + _NOT_FRAG, _short, t)
+
+    # 6. Acronyms letter-spelled.
+    return _acronyms(t).strip()
+
+
+def normalize_prose_for_speech(md: str, max_chars: int = 4000) -> str:
+    """The composition TTS input receives: markdown → prose, then the
+    #206 normalization pass."""
+    return normalize_for_speech(prose_for_speech(md, max_chars=max_chars))
