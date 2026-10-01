@@ -137,15 +137,27 @@ export function heuristicBriefing(md: string, maxChars = SAY_MAX_CHARS): string 
   if (!paras.length) return ''
   const first = paras[0]
   const openEnd = first.match(/^[^]*?([.!?]+["')\]]?)(\s+|$)/)
-  const opening = (openEnd && openEnd.index !== undefined ? first.slice(0, openEnd.index + openEnd[1].length) : first).trim()
+  // Opening = first sentence: the whole match ([0]) is content + punctuation
+  // (+ trailing space); slicing by [1] alone collapsed it to punctuation.
+  const opening = (
+    openEnd && openEnd.index !== undefined ? first.slice(0, openEnd.index + openEnd[0].length) : first
+  ).trim()
   const tail = paras[paras.length - 1]
+  // Walk sentence boundaries; the LAST sentence starts where the previous
+  // one's match ended. (Slicing from the last punctuation index alone
+  // collapses the closing to bare punctuation like ".".)
+  let closeStart = 0
   let closeEnd = -1
-  let closeLen = 0
+  let prevEnd = 0
   for (const m of tail.matchAll(/([.!?]+["')\]]?)(\s+|$)/g)) {
-    closeEnd = m.index
-    closeLen = m[1].length
+    closeStart = prevEnd
+    closeEnd = m.index + m[1].length
+    prevEnd = m.index + m[0].length
   }
-  const closing = (closeEnd >= 0 ? tail.slice(0, closeEnd + closeLen) : tail).trim()
+  // Closing = the LAST sentence only. Slicing tail.slice(0, …) (from the
+  // paragraph's START up to the last sentence end) spoke the whole
+  // multi-sentence paragraph back — the read-aloud repeated the message.
+  const closing = (closeEnd >= 0 ? tail.slice(closeStart, closeEnd) : tail).trim()
   if (closing && closing !== opening && opening.length + closing.length + 1 <= maxChars) {
     return `${opening} ${closing}`
   }

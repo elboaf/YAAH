@@ -545,10 +545,22 @@ def heuristic_briefing(md: str, max_chars: int = _BRIEFING_MAX) -> str:
     m = _SENT_END_ANY.search(first)
     opening = first[: m.end(1)].strip() if m else first
     tail = paras[-1]
-    m = None
+    # Walk sentence boundaries; the LAST sentence starts where the previous
+    # match ended. (Slicing from the last punctuation index alone would
+    # collapse the closing to bare punctuation like ".".)
+    prev = None
+    last = None
     for m in _SENT_END_ANY.finditer(tail):
-        pass
-    closing = tail[: m.end(1)].strip() if m else tail
+        prev = last
+        last = m
+    if last is None:
+        closing = tail
+    else:
+        # Closing = the LAST sentence only. Slicing tail[: last.end(1)]
+        # (from the paragraph's START to the last sentence end) spoke the
+        # whole multi-sentence paragraph back — the read-aloud repeated
+        # the message nearly verbatim.
+        closing = tail[prev.end() if prev is not None else 0 : last.end(1)].strip()
     if closing and closing != opening and len(opening) + len(closing) + 1 <= max_chars:
         return f"{opening} {closing}".strip()
     # One of the two alone, clipped at a sentence boundary under the cap.

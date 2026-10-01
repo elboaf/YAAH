@@ -8364,9 +8364,18 @@ export function ChatPanel() {
       // sentences play through and the new voice starts right after.
       const prev = n
       if (prev) {
+        // Close the previous emission's stream utterance OUT: end() is what
+        // lets startUtterance's stream wait finish and drain the process
+        // queue. Without it the first emission spins forever and every
+        // later emission queues behind it, never starting — the voice goes
+        // silent after the first emission of a turn.
         const prevMsg = messages.find((m) => m.id === prev.msgId)
         const chunks = splitSentences(liveProse(prevMsg?.content ?? ''))
+        // Nothing was appended while holding (see the hold path below), so
+        // the flush hands over ALL held chunks: an emission without a
+        // usable <say> tag still speaks, verbatim.
         for (let i = prev.spoken; i < chunks.length; i++) prev.feed.append(chunks[i])
+        prev.feed.end()
       }
       const feed = beginNarration(lastAssistantId)
       if (!feed) return
@@ -8383,10 +8392,11 @@ export function ChatPanel() {
       n.feed.append(spokenLine(msgSay, lastAssistantContent))
       return
     }
-    // No tag yet: hold. Only the COUNT tracks here - chunks stay unappended
-    // so they can be discarded wholesale when the briefing lands.
-    const chunks = splitSentences(liveProse(lastAssistantContent))
-    n.spoken = chunks.length
+    // No tag yet: hold. Nothing is appended while the emission streams —
+    // the held sentences are discarded wholesale when the briefing lands
+    // (said path above), or handed over whole at the swap / run-end flush.
+    // `spoken` therefore stays 0 until a flush runs, which is exactly what
+    // makes those flushes append everything.
   }, [streaming, lastAssistantId, lastAssistantContent, messages, ttsEnabled, ttsReady, beginNarration])
   // Run finished → close the live narration; fall back to the classic
   // end-of-run read ONLY when nothing was narrated live (e.g. TTS was
