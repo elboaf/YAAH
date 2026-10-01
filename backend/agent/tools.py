@@ -909,8 +909,12 @@ async def _run_capturing(
         # can hang forever. wait() only needs the exit.
         await _reap(proc)
         # #180: output captured before the deadline is real; return it ahead
-        # of the marker instead of discarding it.
-        return "".join(pieces) + f"\n[timed out after {timeout}s]", True
+        # of the marker instead of discarding it. Flush the decoder first so
+        # bytes buffered mid-UTF-8-character get the errors="replace"
+        # treatment (CodeRabbit return trip on PR #221) instead of being
+        # silently dropped.
+        tail = decoder.decode(b"", final=True)
+        return "".join(pieces) + tail + f"\n[timed out after {timeout}s]", True
     except asyncio.CancelledError:
         # Run stopped mid-tool (#82): without this, nobody kills or reaps
         # the proc — its transport is later GC'd after the loop closed and

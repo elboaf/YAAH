@@ -63,6 +63,31 @@ async def test_bash_stream_timeout_kills_tree(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bash_timeout_flushes_partial_utf8(tmp_path):
+    """#221 return trip: if the deadline lands mid-UTF-8-character, the
+    decoder's buffered bytes must still be flushed (with errors=replace),
+    not silently dropped by the timeout return path."""
+    # 200 'é' as UTF-8 = 400 bytes; a 4096-byte read can't split it, so
+    # instead emit a lone lead byte whose continuation never arrives.
+    r = await asyncio.wait_for(
+        execute_tool(
+            "bash",
+            {
+                "command": "printf '\\xc3'; sleep 30",
+                "timeout_seconds": 2,
+            },
+            str(tmp_path),
+        ),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    # The lone \xc3 lead byte is flushed through errors="replace" as U+FFFD.
+    assert "\ufffd" in r["output"][:idx]
+
+
+@pytest.mark.asyncio
 async def test_bash_timeout_returns_partial_output(tmp_path):
     """#180: output captured before the deadline must not be discarded —
     it is returned ahead of the [timed out ...] marker."""
