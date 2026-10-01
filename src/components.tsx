@@ -1349,6 +1349,40 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
  *  gone. */
 const EXPAND_MAX_HEIGHT_CLASS = 'max-h-64'
 
+// #198: a scheduled fire's persisted effective prompt renders as a collapsed
+// chip instead of a full-text bubble; clicking expands the verbatim per-run
+// prompt inline, clicking again collapses. Collapsed by default every run.
+const AGENT_PROMPT_PREVIEW_CAP = 60
+
+function AgentPromptChip({ prompt }: { prompt: string }) {
+  const [expanded, setExpanded] = useState(false)
+  // Preview = the prompt's first line, capped — never the whole body, so the
+  // collapsed chip doesn't leak the appended standing-instructions block.
+  const firstLine = prompt.trim().split('\n', 1)[0].slice(0, AGENT_PROMPT_PREVIEW_CAP)
+  return (
+    <div className="flex justify-end">
+      <div className="flex max-w-[85%] flex-col items-end">
+        <button
+          type="button"
+          title="The exact prompt this scheduled run fired with (click to expand)"
+          onClick={() => setExpanded((v) => !v)}
+          className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300 hover:bg-zinc-700"
+        >
+          🤖 Agent prompt{firstLine ? ` · ${firstLine}` : ''}
+        </button>
+        {expanded ? (
+          <pre
+            data-agent-prompt-expand
+            className={`mt-0.5 w-full overflow-y-auto whitespace-pre-wrap break-words rounded bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-300 ${EXPAND_MAX_HEIGHT_CLASS}`}
+          >
+            {prompt}
+          </pre>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function ExpandableAttachmentChip({
   a,
 }: {
@@ -1482,6 +1516,13 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   }
 
   const isUser = msg.role === 'user'
+  // #198: a scheduled fire's persisted effective prompt arrives tagged;
+  // collapse it to a chip instead of the full-text bubble. The tag is the
+  // source of truth (not chat type): only the scheduler's fire path ever
+  // sets it, so hand-typed messages render unchanged in any chat.
+  if (isUser && msg.meta?.agent_prompt) {
+    return <AgentPromptChip prompt={msg.content} />
+  }
   if (isUser) {
     return (
       <div className="flex justify-end">

@@ -368,6 +368,9 @@ async def _run_and_settle(
             model_override=model,
             effort_override=effort,
             allow_ask_user=allow_ask_user,
+            # #198: tag the persisted effective-prompt row so the UI can
+            # collapse it to a chip; content stays the model input verbatim.
+            user_meta={"agent_prompt": True},
         ):
             # The loop persists the transcript itself; here we only relay
             # the events into the per-conversation tape buffer so the open

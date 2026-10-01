@@ -87,6 +87,10 @@ export interface ChatMessage {
   /** The approved plan this message implements (set at the exit_plan
    *  approval boundary; rendered as a header above the execution). */
   implementsPlan?: string
+  /** #198: structural tag from the persisted row — a scheduled fire's
+   *  effective prompt carries {"agent_prompt": true} and renders as a
+   *  collapsed chip instead of a full-text bubble. */
+  meta?: { agent_prompt?: boolean } | null
 }
 
 export type AgentStatus = 'idle' | 'thinking' | 'running-tool' | 'error'
@@ -1486,6 +1490,8 @@ export function buildMessages(
       images: r.images ?? undefined,
       // Structured attachments (#142): chips render from the row's own data.
       attachments: (r as { attachments?: ChatMessage['attachments'] }).attachments ?? undefined,
+      // #198: structural tag (scheduled fire's effective-prompt row).
+      meta: (r as { meta?: ChatMessage['meta'] }).meta ?? undefined,
     })
   }
   return out

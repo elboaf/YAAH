@@ -168,7 +168,8 @@ async def test_fire_pipeline_prompt_memory_and_overrides(monkeypatch):
     captured = {}
 
     async def fake_run(cid, prompt, workspace, *, policy, include_history,
-                       model_override, effort_override, allow_ask_user=False):
+                       model_override, effort_override, allow_ask_user=False,
+                       **_):
         captured.update(
             cid=cid, prompt=prompt, policy=policy, include_history=include_history,
             model=model_override, effort=effort_override,
@@ -195,6 +196,54 @@ async def test_fire_pipeline_prompt_memory_and_overrides(monkeypatch):
     assert agent["last_status"] == "ok"
     # Regular schedule advanced from fire time, never immediate.
     assert datetime.fromisoformat(agent["next_fire_at"]) > datetime.now()
+
+
+@pytest.mark.asyncio
+async def test_fired_run_tags_user_row_as_agent_prompt(fake_model, tmp_path):
+    """Issue #198: a fired run persists its user row tagged
+    {"agent_prompt": true} so the UI can collapse it into a chip, with the
+    content still the exact effective prompt (standing instructions
+    included). Hand-typed rows stay untagged; the model context is
+    unchanged (load_history replays content, never meta)."""
+    conv = await create_conversation("agent chat", chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(tmp_path), conversation_id=conv,
+        prompt="summarize commits",
+    ))
+    await add_instruction(agent_row["id"], "keep it under 10 lines")
+
+    fake_model.append([{"type": "content", "text": "ok"}, {"type": "finish"}])
+    agent = await get_agent(agent_row["id"])
+    assert await sched.fire_agent(agent) == "started"
+    await drain_pending()
+
+    rows = await get_messages(conv)
+    user_rows = [r for r in rows if r["role"] == "user"]
+    assert len(user_rows) == 1
+    fired_row = user_rows[0]
+    assert fired_row["meta"] == {"agent_prompt": True}
+    # Per-run copy (CONTEXT.md: avoid "snapshot" for prompt text): the
+    # verbatim effective prompt, standing instructions appended at fire time.
+    assert fired_row["content"].startswith("summarize commits")
+    assert "# Standing instructions" in fired_row["content"]
+    assert "- keep it under 10 lines" in fired_row["content"]
+
+    # A hand-typed message row carries no tag.
+    await add_message(conv, "user", "hello")
+
+    # Editing the agent afterwards must not rewrite the already-persisted
+    # row: expanding an old run shows the prompt as it was at that fire.
+    await update_agent(agent_row["id"], {"prompt": "edited away"})
+    rows_after = await get_messages(conv)
+    fired_after = [r for r in rows_after if r["role"] == "user" and r["meta"]]
+    assert len(fired_after) == 1
+    assert fired_after[0]["content"] == fired_row["content"]
+    assert fired_after[0]["meta"] == {"agent_prompt": True}
+
+    rows = await get_messages(conv)
+    typed = [r for r in rows if r["role"] == "user" and r["content"] == "hello"]
+    assert len(typed) == 1
+    assert typed[0]["meta"] is None
 
 
 @pytest.mark.asyncio
@@ -292,7 +341,7 @@ async def test_fire_threads_allow_ask_user(monkeypatch):
     captured = {}
 
     async def fake_run(cid, prompt, workspace, *, policy, include_history,
-                       model_override, effort_override, allow_ask_user):
+                       model_override, effort_override, allow_ask_user, **_):
         captured.update(policy=policy, allow_ask_user=allow_ask_user)
         return
         yield  # pragma: no cover

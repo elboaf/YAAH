@@ -74,6 +74,9 @@ CREATE TABLE IF NOT EXISTS messages (
     attachments TEXT,         -- JSON array of structured text attachments (#142)
     sub_agent_transcript TEXT, -- JSON snapshot of a sub-agent run (spawn_agent results)
     say TEXT,                 -- #226: spoken briefing that accompanied this assistant emission
+    meta TEXT,                -- #198: JSON object tagging structured rows, e.g.
+                              -- {"agent_prompt": true} on a scheduled run's
+                              -- persisted effective-prompt user row
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -209,6 +212,11 @@ async def get_db() -> aiosqlite.Connection:
         # #226: the spoken briefing that accompanied an assistant emission,
         # persisted so reloads and Markdown export can render what was said.
         await db.execute("ALTER TABLE messages ADD COLUMN say TEXT")
+    if "meta" not in cols:
+        # #198: JSON object tagging structured rows so the UI can render
+        # them differently — a scheduled fire's user row carries
+        # {"agent_prompt": true} (collapse-to-chip in agent chats).
+        await db.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
     cur = await db.execute("PRAGMA table_info(conversations)")
     conv_cols = {r[1] for r in await cur.fetchall()}
     if "context_tokens" not in conv_cols:
@@ -939,6 +947,7 @@ async def add_message(
     attachments: list | None = None,
     sub_agent_transcript: dict | None = None,
     say: str | None = None,
+    meta: dict | None = None,
 ):
     db = await get_db()
     try:
@@ -946,8 +955,8 @@ async def add_message(
         await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, tool_calls,"
-            " tool_call_id, images, attachments, sub_agent_transcript, say)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_call_id, images, attachments, sub_agent_transcript, say, meta)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
@@ -958,6 +967,7 @@ async def add_message(
                 json.dumps(attachments) if attachments else None,
                 json.dumps(sub_agent_transcript) if sub_agent_transcript else None,
                 say,
+                json.dumps(meta) if meta else None,
             ),
         )
         await db.execute(
@@ -1456,6 +1466,9 @@ async def get_messages(conversation_id: int):
                 if r.get("sub_agent_transcript")
                 else None
             )
+            # #198: structural tag parsed for the UI (e.g. a scheduled
+            # fire's user row -> {"agent_prompt": true}); None when absent.
+            r["meta"] = json.loads(r["meta"]) if r.get("meta") else None
         return rows
     finally:
         await db.close()
