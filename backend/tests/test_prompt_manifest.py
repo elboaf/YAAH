@@ -6,6 +6,7 @@ and flip-simulated on Windows for local review. The committed directory
 carries the full matrix; each host byte-verifies only what it
 canonically renders.
 """
+import json
 from pathlib import Path
 
 import pytest
@@ -159,6 +160,34 @@ def test_offline_note_only_for_offline_remote():
     online = pm.render_combo(f"{PFX}-remote-plan-skills-memory-compaction-sandboxonly")
     assert "the workspace's owning device is offline" in offline["rendered_text"]
     assert "the workspace's owning device is offline" not in online["rendered_text"]
+
+
+def test_compaction_manifests_contain_summary_section():
+    """#184: every combo that names compaction must actually render the
+    compaction-summary section -- the fixture watermark must be live
+    (relative to the fixture conversation), never consumed by the
+    warm-up turn."""
+    for combo in pm.iter_combos():
+        if "compaction" not in pm._split_combo(combo) or not pm._split_combo(
+            combo
+        )["compaction"]:
+            continue
+        if combo == "kind-auxiliary-prompts":
+            continue
+        manifest = pm.render_combo(combo)
+        names = [s["name"] for s in manifest["sections"]]
+        assert "compaction-summary" in names, (
+            f"{combo}: -compaction combo rendered without the "
+            "compaction-summary section (stale fixture watermark?)"
+        )
+
+
+def test_compaction_summary_text_present_in_rendered_bytes():
+    """#184: the summary text the fixture persists must reach the model
+    bytes for a representative local compaction render."""
+    manifest = pm.render_combo(f"{PFX}-local-plan-compaction")
+    text = json.dumps(manifest)
+    assert "Fixture summary of the earlier conversation." in text
 
 
 def test_subagent_kind_covers_builtins():

@@ -25,6 +25,12 @@
       "bytes": 442,
       "sha256": "de72f6484ff85bc72883fef5b9b7b16b45583a9a0645e978979bd28350f0dc89",
       "text": "# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+    },
+    {
+      "name": "compaction-summary",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa",
+      "text": "Earlier conversation summary (for context only):\nFixture summary of the earlier conversation."
     }
   ],
   "system_messages": [
@@ -32,10 +38,15 @@
       "role": "system",
       "bytes": 1270,
       "sha256": "7444b2f195b0fad94a76587af798563abebb8bd67c1f24c4c38803a999afb601"
+    },
+    {
+      "role": "system",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa"
     }
   ],
-  "total_bytes": 1270,
-  "rendered_sha256": "7444b2f195b0fad94a76587af798563abebb8bd67c1f24c4c38803a999afb601",
+  "total_bytes": 1371,
+  "rendered_sha256": "d44e9f49a8da78a7db77ee220bd3de59555711d05b2e45160ebe66a593c2c583",
   "tool_schemas": [
     {
       "name": "bash",
@@ -215,5 +226,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves.\n\n====\n\nEarlier conversation summary (for context only):\nFixture summary of the earlier conversation."
 }

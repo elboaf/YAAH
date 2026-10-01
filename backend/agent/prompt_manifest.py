@@ -658,10 +658,17 @@ def _drive_turn(flags: dict) -> dict:
                 # Persist a summary through the REAL compaction persistence
                 # (compact_conversation) -- exactly what _maybe_compact leaves
                 # behind; run_agent_turn reads it via get_prompt_summary.
+                # The watermark must be THIS conversation's message id, not a
+                # literal: #184 -- a stale literal is rejected by
+                # compact_conversation's monotonic-watermark guard and the
+                # summary silently never persists.
+                through_id = await add_message(
+                    cid, "assistant", "fixture prior assistant reply"
+                )
                 await compact_conversation(
                     cid,
                     "Fixture summary of the earlier conversation.",
-                    1,
+                    through_id,
                 )
             policy = "sandbox-only" if flags["policy"] else None
             async for _event in loop._run_agent_claimed(
@@ -715,7 +722,14 @@ def render_local_family(combo: str, flags: dict) -> dict:
     return {
         "combo": combo,
         "kind": flags["kind"],
-        "sections": _split_sections(str(system_messages[0].get("content") or "")),
+        # Sections across ALL system messages: the compaction summary is
+        # injected as its own system message (loop.py), so slicing only
+        # the first one hid it from every manifest (#184).
+        "sections": [
+            section
+            for m in system_messages
+            for section in _split_sections(str(m.get("content") or ""))
+        ],
         "system_messages": [
             {
                 "role": "system",

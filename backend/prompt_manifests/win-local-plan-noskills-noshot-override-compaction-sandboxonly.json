@@ -31,6 +31,12 @@
       "bytes": 442,
       "sha256": "de72f6484ff85bc72883fef5b9b7b16b45583a9a0645e978979bd28350f0dc89",
       "text": "# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+    },
+    {
+      "name": "compaction-summary",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa",
+      "text": "Earlier conversation summary (for context only):\nFixture summary of the earlier conversation."
     }
   ],
   "system_messages": [
@@ -38,10 +44,15 @@
       "role": "system",
       "bytes": 2519,
       "sha256": "62e59839fde10e940760e8146f338e7ae75441608a6fa0bfee80a2d37709fa5f"
+    },
+    {
+      "role": "system",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa"
     }
   ],
-  "total_bytes": 2519,
-  "rendered_sha256": "62e59839fde10e940760e8146f338e7ae75441608a6fa0bfee80a2d37709fa5f",
+  "total_bytes": 2620,
+  "rendered_sha256": "2685820d31d9db4a9c2d47ace23d025f4d4607d100c35be3d64af3dd19c757f4",
   "tool_schemas": [
     {
       "name": "bash",
@@ -221,5 +232,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nSave proactively (don't wait to be asked) when you learn:\n- user: who the user is — role, expertise, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- project: ongoing work, goals, or constraints NOT derivable from the code or git history. Convert relative dates (\"next week\") to absolute.\n- reference: pointers to external resources (URLs, dashboards, tickets).\n\nDo NOT save: what the repo already records (code structure, CLAUDE.md/AGENTS.md content, past fixes, git history) or details that only matter to the current conversation. Before saving, reuse/update an existing memory rather than creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nSave proactively (don't wait to be asked) when you learn:\n- user: who the user is — role, expertise, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- project: ongoing work, goals, or constraints NOT derivable from the code or git history. Convert relative dates (\"next week\") to absolute.\n- reference: pointers to external resources (URLs, dashboards, tickets).\n\nDo NOT save: what the repo already records (code structure, CLAUDE.md/AGENTS.md content, past fixes, git history) or details that only matter to the current conversation. Before saving, reuse/update an existing memory rather than creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run: every tool that normally requires user approval (file edits, shell commands and anything else mutating) is unavailable — calls come back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves.\n\n====\n\nEarlier conversation summary (for context only):\nFixture summary of the earlier conversation."
 }
