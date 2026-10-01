@@ -23,6 +23,8 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
+
 # ---- Voice table -----------------------------------------------------------
 # Authoritative sid -> name order for the sherpa-onnx kokoro multi-lang v1.0
 # voices.bin (scripts/kokoro/v1.0/generate_voices_bin.py in sherpa-onnx; the
@@ -363,6 +365,109 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
     if epoch is not None and superseded(epoch):
         raise SupersededError("superseded after synthesis")
     return pcm.tobytes(), audio.sample_rate
+
+
+# ---- Remote engine (OpenAI-compatible /v1/audio/speech, #205) ----------------
+# A STANDARD OpenAI speech client: POST {base}/v1/audio/speech with
+# model/input/voice (+ speed only when the user set one) and
+# response_format=wav; raw audio bytes come back on 200. The owner-run
+# Kokoro server (herp.local) is a faithful compatible subset of this
+# contract, and api.openai.com works with tts-1 / gpt-4o-mini-tts — never
+# send the newer surface (instructions, stream_format/sse, custom voices).
+
+REMOTE_TIMEOUT = 10.0  # seconds; a LAN GPU box answers well inside this
+REMOTE_ATTEMPTS = 2  # one retry, then the chunk is skipped (the frontend
+# degrades to the visible text — narration must never stall the chat)
+
+
+class RemoteTTSError(RuntimeError):
+    """A remote synthesis request failed. The message is user-facing:
+    the synthesize endpoint and Settings' Test button surface it."""
+
+    def __init__(self, message: str, code: str = "remote-failed"):
+        super().__init__(message)
+        # Machine-readable cause for UI branching: "not-configured" (no
+        # endpoint set), "remote-failed" (server refused / unreachable).
+        self.code = code
+
+
+def _remote_url(base: str) -> str:
+    """/v1/audio/speech appended exactly once — accept a bare host:port
+    base, one ending in /v1, or the full suffix path."""
+    trimmed = (base or "").strip().rstrip("/")
+    if not trimmed:
+        raise RemoteTTSError(
+            "remote TTS selected but no endpoint configured (Settings → Voice)",
+            code="not-configured",
+        )
+    if trimmed.endswith("/v1/audio/speech"):
+        return trimmed
+    if trimmed.endswith("/v1"):
+        return trimmed + "/audio/speech"
+    return trimmed + "/v1/audio/speech"
+
+
+def _remote_error_detail(res: httpx.Response) -> str:
+    """Pull the server's message out of an error response, tolerantly:
+    OpenAI answers {"error": {"message": ...}}, FastAPI-based servers
+    (herp.local) answer {"detail": ...}, anything else is shown raw."""
+    status = f"HTTP {res.status_code}"
+    try:
+        body = res.json()
+    except ValueError:
+        text = (res.text or "").strip()
+        return f"{status}: {text[:200]}" if text else status
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return f"{status}: {err['message']}"
+        if isinstance(err, str) and err:
+            return f"{status}: {err}"
+        if body.get("detail"):
+            return f"{status}: {body['detail']}"
+    return f"{status}: {res.text[:200]}".rstrip()
+
+
+async def synthesize_remote(
+    text: str,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    voice: str,
+    speed: float | None,
+) -> bytes:
+    """One chunk through the remote engine; returns the server's WAV bytes
+    (the endpoint pipes them to the frontend untouched, Web Audio decodes).
+
+    Error posture (the spec's contract): a 4xx is the server's final
+    answer — one request, no retry. Timeouts and 5xx get one retry, then
+    RemoteTTSError carries the server's message. An empty 200 body is a
+    broken server, not silence. The endpoint maps failures to 502; the
+    frontend skips the chunk and keeps the text visible.
+    """
+    url = _remote_url(endpoint)
+    body: dict = {"model": model, "input": text, "voice": voice, "response_format": "wav"}
+    if speed is not None:
+        body["speed"] = speed
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    last_err: str | None = None
+    for _ in range(REMOTE_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=REMOTE_TIMEOUT) as client:
+                res = await client.post(url, json=body, headers=headers)
+            if res.status_code == 200:
+                audio = res.content
+                if not audio:
+                    raise RemoteTTSError("remote TTS returned an empty response")
+                return audio
+            last_err = _remote_error_detail(res)
+            if res.status_code < 500:
+                break  # 4xx: retrying the same request cannot help
+        except RemoteTTSError:
+            raise
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            last_err = f"connection failed: {e}"
+    raise RemoteTTSError(last_err or "remote TTS failed")
 
 
 # ---- Spoken briefing (two-channel split, #66) ---------------------------------

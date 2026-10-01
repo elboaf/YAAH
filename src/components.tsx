@@ -60,6 +60,7 @@ import {
   transcribeAudio,
   ttsStatus,
   ttsDownload,
+  ttsTest,
   imageUrl,
   listWorkspaces,
   reorderWorkspaces,
@@ -6102,6 +6103,16 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   // enabled — no migration); in-chat display defaults hidden.
   const [sayEmissions, setSayEmissions] = useState(true)
   const [sayInChatUi, setSayInChatUi] = useState(false)
+  // Narration engine (#205): local Kokoro or a remote OpenAI-compatible
+  // /v1/audio/speech endpoint; drafts for its credentials + Test probe.
+  const [ttsEngine, setTtsEngine] = useState<'local' | 'remote'>('local')
+  const [ttsEndpoint, setTtsEndpoint] = useState('')
+  const [ttsKey, setTtsKey] = useState('')
+  const [ttsKeySaved, setTtsKeySaved] = useState(false)
+  const [ttsModel, setTtsModel] = useState('kokoro')
+  const [ttsTestState, setTtsTestState] = useState<'idle' | 'busy'>('idle')
+  const [ttsTestResult, setTtsTestResult] = useState<string | null>(null)
+  const [ttsTestOk, setTtsTestOk] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
   const [ttsModelReady, setTtsModelReady] = useState(false)
@@ -6173,6 +6184,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setTtsSpeedDraft(v?.tts_speed ?? 1.0)
           setSayEmissions(v?.say_emissions !== false)
           setSayInChatUi(v?.say_in_chat === true)
+          setTtsEngine(v?.tts_engine === 'remote' ? 'remote' : 'local')
+          setTtsEndpoint(v?.tts_endpoint ?? '')
+          setTtsKeySaved(v?.tts_api_key === 'set')
+          setTtsKey('')
+          setTtsModel(v?.tts_model || 'kokoro')
           setSoundsUi(v?.sounds_enabled !== false)
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
@@ -6211,9 +6227,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       .catch(() => {})
     ttsStatus()
       .then((s) => {
-        setTtsModelReady(s.available)
+        // The download block tracks the LOCAL model; whether the ACTIVE
+        // (possibly remote) engine can speak is the status endpoint's job.
+        setTtsModelReady(s.model_available)
         setTtsDownloading(s.downloading)
-        if (s.available) setTtsVoiceDraft(s.tts_voice || s.default_voice)
+        if (s.tts_voice) setTtsVoiceDraft(s.tts_voice)
       })
       .catch(() => {})
   }, [])
@@ -6387,6 +6405,12 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           tts_speed: ttsSpeedDraft,
           say_emissions: sayEmissions,
           say_in_chat: sayInChatUi,
+          tts_engine: ttsEngine,
+          tts_endpoint: ttsEndpoint,
+          // Typed key replaces; empty/kept field is dropped server-side so
+          // the saved key survives (same masking dance as the dictation key).
+          ...(ttsKey ? { tts_api_key: ttsKey } : {}),
+          tts_model: ttsModel,
           sounds_enabled: soundsEnabled,
         },
         remote: {
@@ -6825,7 +6849,58 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             />
 
             <SettingsCard title="Read aloud" className="col-span-2">
-              {!ttsModelReady ? (
+              <div className="mb-2.5 flex gap-1.5" role="radiogroup" aria-label="Narration engine">
+                {(['local', 'remote'] as const).map((engine) => (
+                  <button
+                    key={engine}
+                    type="button"
+                    role="radio"
+                    aria-checked={ttsEngine === engine}
+                    className={`flex-1 rounded   px-2 py-1.5 font-mono text-xs ${
+                      ttsEngine === engine
+                        ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
+                        : ' text-zinc-400 hover:bg-zinc-800'
+                    }`}
+                    onClick={() => setTtsEngine(engine)}
+                  >
+                    {engine === 'local' ? 'local (on-device)' : 'remote (OpenAI-compatible)'}
+                  </button>
+                ))}
+              </div>
+              {ttsEngine === 'remote' && (
+                <div className="mb-2.5 space-y-1.5">
+                  <input
+                    className={`${settingsInputCls} w-full`}
+                    value={ttsEndpoint}
+                    onChange={(e) => setTtsEndpoint(e.target.value)}
+                    placeholder="http://herp.local:8081  or  https://api.openai.com"
+                    aria-label="Remote narration endpoint"
+                  />
+                  <div className="flex gap-1.5">
+                    <input
+                      type="password"
+                      className={`${settingsInputCls} min-w-0 flex-1`}
+                      value={ttsKey}
+                      onChange={(e) => setTtsKey(e.target.value)}
+                      placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
+                      aria-label="Remote narration API key"
+                    />
+                    <input
+                      className={`${settingsInputCls} w-28 shrink-0`}
+                      value={ttsModel}
+                      onChange={(e) => setTtsModel(e.target.value)}
+                      placeholder="model"
+                      aria-label="Remote narration model"
+                    />
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-zinc-600">
+                    Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the
+                    path is appended). Sentence chunks are sent to that server; the key goes there
+                    and nowhere else.
+                  </p>
+                </div>
+              )}
+              {!ttsModelReady && ttsEngine === 'local' ? (
                 <div>
                   <p className="mb-1.5 text-[10px] leading-relaxed text-zinc-600">
                     The agent can read its responses aloud with an on-device voice (Kokoro —
@@ -6880,6 +6955,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               ) : (
                 <div className="space-y-1.5">
                   <div className="flex gap-1.5">
+                    {ttsEngine === 'local' ? (
                     <select
                       className={`${settingsInputCls} w-full`}
                       value={ttsVoiceDraft}
@@ -6907,6 +6983,16 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                         ))}
                       </optgroup>
                     </select>
+                    ) : null}
+                    {ttsEngine === 'remote' && (
+                      <input
+                        className={`${settingsInputCls} w-full`}
+                        value={ttsVoiceDraft}
+                        onChange={(e) => setTtsVoiceDraft(e.target.value)}
+                        placeholder="voice (server-validated, e.g. af_heart)"
+                        aria-label="Read-aloud voice"
+                      />
+                    )}
                     <button
                       type="button"
                       className="shrink-0 rounded   px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
@@ -6933,10 +7019,47 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                       {ttsSpeedDraft.toFixed(2)}×
                     </span>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="shrink-0 rounded   px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                      disabled={ttsTestState === 'busy'}
+                      onClick={async () => {
+                        setTtsTestState('busy')
+                        setTtsTestResult(null)
+                        setTtsTestOk(false)
+                        try {
+                          await ttsTest(ttsVoiceDraft, ttsSpeedDraft, ttsEngine)
+                          setTtsTestResult('ok — synthesis worked')
+                          setTtsTestOk(true)
+                        } catch (e) {
+                          const err = e as Error & { status?: number }
+                          setTtsTestResult(err.message ?? String(err))
+                          setTtsTestOk(err.status === undefined)
+                        } finally {
+                          setTtsTestState('idle')
+                        }
+                      }}
+                      aria-label="Test narration"
+                    >
+                      {ttsTestState === 'busy' ? 'testing…' : 'Test'}
+                    </button>
+                    {ttsTestResult && (
+                      <span
+                        className={`min-w-0 flex-1 break-words font-mono text-[10px] ${
+                          ttsTestOk ? 'text-emerald-400' : 'text-red-400'
+                        }`}
+                      >
+                        {ttsTestResult}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-[10px] leading-relaxed text-zinc-600">
                     Reads each finished response aloud (prose only — code is skipped). Toggle
-                    anytime with the speaker button under the chat. The voice model stays on this
-                    machine.
+                    anytime with the speaker button under the chat.{' '}
+                    {ttsEngine === 'local'
+                      ? 'The voice model stays on this machine.'
+                      : 'A failed chunk is skipped — the text stays visible.'}
                   </p>
                 </div>
               )}

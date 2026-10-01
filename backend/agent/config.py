@@ -67,6 +67,22 @@ DEFAULTS = {
         # the chat tape (a reading aid; briefings are live-stream only —
         # they are stripped server-side before persistence).
         "say_in_chat": False,
+        # Read-aloud narration engine (#205): local Kokoro via sherpa-onnx,
+        # or remote = a standard OpenAI /v1/audio/speech endpoint (the
+        # owner-run Kokoro server at herp.local is a faithful subset;
+        # api.openai.com works with tts-1 / gpt-4o-mini-tts).
+        "tts_engine": "local",
+        # Base URL; /v1/audio/speech is appended unless already present.
+        "tts_endpoint": "",
+        # Optional; sent as Bearer. Masked to "set" in the config GET.
+        "tts_api_key": "",
+        "tts_model": "kokoro",
+        # One voice per stream (the chunking contract both servers state);
+        # server-validated free text.
+        "tts_voice": "af_heart",
+        # Omitted from requests unless the user sets one (OpenAI 0.25-4.0,
+        # Kokoro 0.5-2.0 - let the server validate its own range).
+        "tts_speed": None,
     },
     # Saved remote device metadata. Passphrases are intentionally never
     # persisted here; users re-enter them after a backend restart.
