@@ -274,19 +274,21 @@ def index_for_prompt() -> str:
     for d in list_agents():
         desc = " ".join(d["description"].split())
         lines.append(f"- {d['name']}: {desc}")
+    from backend.agent.tools import DELEGATION_POLICY
     lines.append(
         "Delegate proactively: when a chunk of work is self-contained — "
         "a sweep over many files, independent research threads, broad "
         "exploration that would eat this conversation's context — prefer "
-        "spawning a sub-agent over doing it inline. Launch several "
-        "spawn_agent calls in the SAME turn to run them in parallel "
-        "instead of one long sequential investigation. Announce each "
-        "delegation in one line before the calls, and summarize what "
-        "came back when the results arrive. Write each sub-agent prompt "
-        "fully self-contained (it sees nothing else from this "
-        "conversation — include paths, constraints, and exactly what to "
-        "report back). Do not delegate what needs back-and-forth with "
-        "the user, and don't fragment one small edit into delegation."
+        "spawning a sub-agent over doing it inline. "
+        # #181: the policy core is the single DELEGATION_POLICY constant,
+        # shared with the spawn_agent schema and help docs.
+        + DELEGATION_POLICY
+        + " Announce each delegation in one line before the calls, and "
+        "summarize what came back when the results arrive. Write each "
+        "sub-agent prompt fully self-contained (it sees nothing else "
+        "from this conversation — include paths, constraints, and "
+        "exactly what to report back), and don't fragment one small "
+        "edit into delegation."
     )
     return "\n".join(lines)
 
@@ -327,19 +329,21 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
     else:
         windows = os.name == "nt"
         env = _local_env_line()
-    tools = ["bash (shell commands)"]
+    # #181: derive the prose from the SAME computation as _resolve_tools,
+    # so the prompt can never name (or omit) a tool the schemas disagree
+    # with. The only prose-only names are the shell line's annotations.
+    from backend.agent.tools import tool_prose_list
+
+    resolved = _resolve_tools(defn, windows=windows)
+    tools_ann = {"bash": "shell commands"}
     if windows:
-        tools.append("powershell (Windows PowerShell)")
-    tools += [
-        "web_search", "web_fetch", "view_image", "read_file", "write_file",
-        "create_file", "edit_file", "delete_file", "move_file",
-        "search_files",
-    ]
+        tools_ann["powershell"] = "Windows PowerShell"
+    tools_line = tool_prose_list(resolved, tools_ann)
     prompt = (
         f"You are a sub-agent (agent_type: {defn.name}) spawned by a "
         f"parent agent. {defn.body}\n\n"
         f"{env}\n\n"
-        f"You have tools: {', '.join(tools)}.\n\n"
+        f"{tools_line}\n\n"
         "Guidelines:\n"
         "- You cannot ask the user questions: decide for yourself, act on "
         "the most reasonable interpretation, and report the assumption in "
