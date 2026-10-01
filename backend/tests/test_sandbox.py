@@ -1326,6 +1326,43 @@ def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch, tmp_
     assert "| newtool | 9 | zip |" in index
 
 
+def test_seed_index_headers_match_wrapper_output(isolated, monkeypatch, tmp_path):
+    """CodeRabbit return trip 1: _regen_index headers must render exactly
+    like the wrapper's Update-Index (single Markdown backticks) so the
+    seeded INDEX.md never diverges from wrapper-generated output."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "t": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {}}),
+                                   encoding="utf-8")
+    (tk / "INDEX.md").write_text("# stale\n", encoding="utf-8")
+
+    sb.ensure_toolkit_seed()
+
+    seeded = (tk / "INDEX.md").read_text(encoding="utf-8")
+    wrapper = (tmp_path / "wrapper")
+    wrapper.mkdir()
+    assert _run_toolkit("index", tk=wrapper).returncode == 0
+    expected = (wrapper / "INDEX.md").read_text(encoding="utf-8")
+    for line in expected.splitlines():
+        if line.startswith(("Generated from", "Paths are")):
+            assert line in seeded, line
+
+
+def test_bundled_readme_single_backslash_in_wrapper_path():
+    """CodeRabbit return trip 2: every `bin\\toolkit.ps1` mention in the
+    bundle README uses ONE backslash inside code spans (double renders
+    literally)."""
+    readme = (sb.bundled_toolkit_source() / "README.md").read_text(
+        encoding="utf-8")
+    assert "\\\\toolkit.ps1" not in readme
+    assert "bin\\toolkit.ps1" in readme
+
+
 def test_bundled_toolkit_ships_wrapper_and_index():
     """The shipped payload includes the wrapper and a generated INDEX.md
     consistent with the bundled state.json."""

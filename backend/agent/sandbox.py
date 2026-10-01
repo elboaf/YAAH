@@ -152,9 +152,9 @@ def ensure_toolkit_seed() -> list[str]:
         lines = [
             "# Toolkit index",
             "",
-            "Generated from ``state.json`` by ``toolkit install`` - do not edit by hand.",
+            "Generated from `state.json` by `toolkit install` - do not edit by hand.",
             "Paths are relative to the toolkit root (on PATH inside the VM:",
-            "``toolkit``, ``toolkit\\bin``, ``toolkit\\Scripts``, ``toolkit\\node_modules\\.bin``).",
+            "`toolkit`, `toolkit\\bin`, `toolkit\\Scripts`, `toolkit\\node_modules\\.bin`).",
             "",
             "| name | version | kind | path | invocation | check | note |",
             "|---|---|---|---|---|---|---|",

@@ -80,5 +80,5 @@ toolkit\node_modules\.bin; <system>`.
 "note": "<gotcha>", "installed_at": "<iso8601>"}}}` — all metadata optional
 except the name. yaah merges (never overwrites) the file when seeding a
 fresh toolkit, so user-added entries survive app updates. Do not hand-edit:
-record changes with `bin\\toolkit.ps1` (`toolkit install|remove|index`), which
+record changes with `bin\toolkit.ps1` (`toolkit install|remove|index`), which
 also regenerates `INDEX.md`.
