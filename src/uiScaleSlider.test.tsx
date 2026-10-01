@@ -33,4 +33,19 @@ describe('interface-scale slider (#171)', () => {
     render(<InterfaceScaleCard scale={9.9} onChange={() => {}} />)
     expect(screen.getByText('200%')).toBeTruthy()
   })
+
+  // CodeRabbit return trip #2: before getConfig() resolves, the card shows
+  // scale 1.0 — if it were interactive, an early drag + close would restore
+  // the wrong "saved" scale. Slider must be inert until loaded.
+  it('is disabled until the persisted scale has loaded', () => {
+    render(<InterfaceScaleCard scale={1} onChange={() => {}} disabled />)
+    const slider = screen.getByRole('slider', { name: /interface scale/i }) as HTMLInputElement
+    expect(slider.disabled).toBe(true)
+  })
+
+  it('stays interactive once loaded (default)', () => {
+    render(<InterfaceScaleCard scale={1} onChange={() => {}} />)
+    const slider = screen.getByRole('slider', { name: /interface scale/i }) as HTMLInputElement
+    expect(slider.disabled).toBe(false)
+  })
 })

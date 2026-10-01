@@ -6049,7 +6049,17 @@ export function SaySettingsCard({
  *  before. Values are quantized through quantizeUiScale (issue #133) so the
  *  zoom never carries subpixel noise into device-pixel rounding. Exported
  *  for isolation (SaySettingsCard precedent). */
-export function InterfaceScaleCard({ scale, onChange }: { scale: number; onChange: (scale: number) => void }) {
+export function InterfaceScaleCard({
+  scale,
+  onChange,
+  disabled = false,
+}: {
+  scale: number
+  onChange: (scale: number) => void
+  /** Until getConfig() resolves, `scale` is the 1.0 default — keep the slider
+   *  inert so a pre-load drag can't strand the wrong "saved" value (#171). */
+  disabled?: boolean
+}) {
   // Quantize (#133), then clamp to the shipped slider range — the quantizer's
   // own [0.5, 3] envelope is wider than the UI offers end-to-end (#171).
   const value = Math.min(2, Math.max(1, quantizeUiScale(scale)))
@@ -6066,6 +6076,7 @@ export function InterfaceScaleCard({ scale, onChange }: { scale: number; onChang
           step={0.01}
           value={value}
           aria-label="Interface scale"
+          disabled={disabled}
           className="w-40 accent-blue-600"
           onChange={(e) => onChange(quantizeUiScale(Number(e.target.value)))}
         />
@@ -7179,6 +7190,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   ui-scale-changed event; Save persists (see save()). */}
               <InterfaceScaleCard
                 scale={uiScale}
+                disabled={!loaded}
                 onChange={(s) => {
                   setUiScale(s)
                 // preview dirties the live zoom; unmount restores the
