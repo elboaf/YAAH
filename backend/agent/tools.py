@@ -248,7 +248,8 @@ HELP_DOCS: dict = {
         "The result reports the real exit code and combined stdout/stderr; "
         "output is truncated at a cap, so tail or filter large output "
         "in the command itself. On timeout the whole process tree is "
-        "killed - partial output is still returned."
+        "killed - output captured before the deadline is returned, "
+        "followed by a [timed out after Ns] marker."
     ),
     "powershell": (
         "Prefer PowerShell for structured Windows data: Get-ChildItem, "
@@ -907,7 +908,9 @@ async def _run_capturing(
         # The read was cancelled mid-stream; read() again is unsupported and
         # can hang forever. wait() only needs the exit.
         await _reap(proc)
-        return f"[timed out after {timeout}s]", True
+        # #180: output captured before the deadline is real; return it ahead
+        # of the marker instead of discarding it.
+        return "".join(pieces) + f"\n[timed out after {timeout}s]", True
     except asyncio.CancelledError:
         # Run stopped mid-tool (#82): without this, nobody kills or reaps
         # the proc — its transport is later GC'd after the loop closed and

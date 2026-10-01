@@ -63,6 +63,24 @@ async def test_bash_stream_timeout_kills_tree(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bash_timeout_returns_partial_output(tmp_path):
+    """#180: output captured before the deadline must not be discarded —
+    it is returned ahead of the [timed out ...] marker."""
+    r = await asyncio.wait_for(
+        execute_tool(
+            "bash",
+            {"command": "echo progress-marker; sleep 30", "timeout_seconds": 2},
+            str(tmp_path),
+        ),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    assert "progress-marker" in r["output"][:idx]
+
+
+@pytest.mark.asyncio
 async def test_bash_on_chunk_errors_swallowed(tmp_path):
     """A throwing on_chunk (dead UI stream) must never fail the tool."""
     def bad(_chunk):
