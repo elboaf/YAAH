@@ -4,7 +4,7 @@
 // there. Pins the capture: a {"type":"say","text":...} event from the
 // remote stream reaches the transcript message.
 //
-// Run: npx vitest run src/sayWire.test.tsx -t remote
+// Run: npx vitest run src/remoteSay.test.tsx
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { cleanup, render, fireEvent, screen } from '@testing-library/react'
 import { RemoteTranscriptDialog } from './components'

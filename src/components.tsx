@@ -2837,13 +2837,13 @@ export function RemoteTranscriptDialog({
     useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
     setComposerText('')
     const ac = new AbortController()
-    const applyEvent = (ev: { type: string; text?: string; name?: string; result?: unknown; args?: unknown }) => {
+    const applyEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
       if (ev.type === 'text' && ev.text) {
         useAgent.getState().appendTextDelta(remoteKey, asstId, ev.text)
       } else if (ev.type === 'say') {
         // #226: the briefing rides the same wire shape as local turns;
         // captured on the message so MessageView's say-line can render.
-        useAgent.getState().setSay(remoteKey, asstId, ev.text ?? '')
+        useAgent.getState().setSay(remoteKey, asstId, ev.text ?? ev.say ?? '')
       } else if (ev.type === 'thinking') {
         useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
       } else if (ev.type === 'tool_start') {
