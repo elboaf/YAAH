@@ -307,6 +307,10 @@ export interface AgentConfig {
     tts_enabled?: boolean
     tts_voice?: string
     tts_speed?: number
+    /** #207: spoken-briefing (<say>) generation on/off (default on). */
+    say_emissions?: boolean
+    /** #207: show captured briefings on their messages in chat. */
+    say_in_chat?: boolean
     /** Notification chimes (#29): run-finished + question-pending sounds. */
     sounds_enabled?: boolean
   }
@@ -374,6 +378,10 @@ export const updateConfig = (
       tts_enabled?: boolean
       tts_voice?: string
       tts_speed?: number
+      /** #207: spoken-briefing (<say>) generation on/off (default on). */
+      say_emissions?: boolean
+      /** #207: show captured briefings on their messages in chat. */
+      say_in_chat?: boolean
       sounds_enabled?: boolean
     }
     remote?: {

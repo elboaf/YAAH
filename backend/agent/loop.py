@@ -299,6 +299,13 @@ Computer use (desktop tools):
 - {computer_mod.panic_notice()}"""
 
 
+def _say_emissions_enabled() -> bool:
+    """#207: voice.say_emissions gates spoken-briefing GENERATION (prompt
+    section + `say` events). Absent key reads enabled — no migration."""
+    voice = load_config().get("voice") or {}
+    return voice.get("say_emissions") is not False
+
+
 def _default_system_prompt(workspace: str = "") -> str:
     """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
     and the runtime-environment line must match what execute_tool can
@@ -411,7 +418,13 @@ Guidelines:
 - Shell calls start in the selected workspace; no setup `cd` is needed.
 - Each shell call is a fresh process. `cd` does not persist; use workspace-relative
   paths unless the task specifically requires the main checkout.
+"""
 
+    # #207: the spoken-briefing section is only ever generated when the
+    # voice.say_emissions toggle is on — with it off, these bytes would sit
+    # in every turn's context asking the model for briefings nobody hears.
+    if _say_emissions_enabled():
+        prompt += """
 Spoken briefing (voice read-aloud):
 - If the user has read-aloud enabled, your words are SPOKEN, not read
   verbatim. End EVERY text emission with a <say> tag containing a 1-3
@@ -430,7 +443,9 @@ Spoken briefing (voice read-aloud):
   SSML or emotion markers like [excited] — the voice reads those
   literally; punctuation is your prosody: commas pace a line, one
   exclamation mark at most, a blank line marks a beat.
+"""
 
+    prompt += """
 Interview the user (ask_user tool):
 - Ask before consequential choices the user has not authorized and that
   cannot be safely inferred. Do not ask again for decisions already stated
@@ -1640,7 +1655,15 @@ async def _run_agent_claimed(
             # clipped verbatim) when the emission carried no usable <say>
             # tag. Text-less emissions (a bare tool_calls message) say
             # nothing rather than emitting an empty briefing.
-            _said = _speak.spoken_line(said, assistant_content)
+            # #207: the whole channel is gated on voice.say_emissions —
+            # off means no prompt section, no `say` event, no fallback.
+            # Tag-stripping above is NOT gated: stray tags never become
+            # transcript junk and never reach speech either way.
+            _said = (
+                _speak.spoken_line(said, assistant_content)
+                if _say_emissions_enabled()
+                else ""
+            )
             if _said:
                 yield _ndjson({"type": "say", "text": _said})
 

@@ -1570,12 +1570,23 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   // prose; show it as the chat body rather than a blank line. Speech still
   // reads the same line (msg.say is unchanged).
   const chatText = msg.content || msg.say || ''
+  // #207: the captured briefing as a reading aid — only on messages that
+  // also carry chat text (a say-only emission's briefing IS the body; the
+  // fallback above must not be duplicated). Live-stream only: briefings
+  // are stripped server-side before persistence, so reloaded rows carry
+  // no msg.say to show.
+  const showSayLine = useAgent((s) => s.sayInChat) && !!msg.content && !!msg.say
   const body = (
     <>
       {chatText ? (
         <div className="text-sm leading-relaxed text-zinc-200">
           <MessageBody content={chatText} />
         </div>
+      ) : null}
+      {showSayLine ? (
+        <em className="say-line mt-1.5 block text-xs italic text-zinc-500">
+          {msg.say}
+        </em>
       ) : null}
       {!inlineSubAgents.length && live ? (
         <ToolTicker calls={msg.toolCalls ?? []} />
@@ -5977,6 +5988,60 @@ function SettingsCard({
 const settingsInputCls =
   'rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none'
 
+/** #207: the spoken-briefing toggles as an isolated card (the Settings
+ *  modal's Voice tab embeds it; the card is exported for component tests,
+ *  same precedent as SandboxSettingsCard). */
+export function SaySettingsCard({
+  sayEmissions,
+  sayInChat,
+  onSayEmissions,
+  onSayInChat,
+}: {
+  sayEmissions: boolean
+  sayInChat: boolean
+  onSayEmissions: (on: boolean) => void
+  onSayInChat: (on: boolean) => void
+}) {
+  return (
+    <SettingsCard title="Spoken briefings" className="col-span-2">
+      <div className="space-y-1.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-300">
+          <input
+            type="checkbox"
+            className="accent-blue-600"
+            checked={!sayEmissions}
+            onChange={(e) => {
+              const off = e.target.checked
+              onSayEmissions(!off)
+              if (off) onSayInChat(false)
+            }}
+          />
+          Disable &lt;say&gt; emissions
+        </label>
+        <label
+          className={`flex items-center gap-2 text-xs text-zinc-300 ${sayEmissions ? '' : 'opacity-50'}`}
+        >
+          <input
+            type="checkbox"
+            className="accent-blue-600"
+            checked={sayInChat}
+            disabled={!sayEmissions}
+            onChange={(e) => onSayInChat(e.target.checked)}
+          />
+          Show &lt;say&gt; emissions in chat
+        </label>
+      </div>
+      <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-600">
+        Disabling emissions drops the spoken-briefing instruction from the system
+        prompt (saves output tokens on every turn) and stops narration briefings —
+        playback mute is separate, under Read aloud. The in-chat option renders the
+        spoken line under its message as a reading aid; briefings are not stored,
+        so only live-streamed ones show.
+      </p>
+    </SettingsCard>
+  )
+}
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
@@ -6033,6 +6098,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   // Read-aloud (TTS): voice + speed drafts; model download state.
   const [ttsVoiceDraft, setTtsVoiceDraft] = useState('af_heart')
   const [ttsSpeedDraft, setTtsSpeedDraft] = useState(1.0)
+  // #207: spoken-briefing drafts. Emissions default ON (absent key reads
+  // enabled — no migration); in-chat display defaults hidden.
+  const [sayEmissions, setSayEmissions] = useState(true)
+  const [sayInChatUi, setSayInChatUi] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
   const [ttsModelReady, setTtsModelReady] = useState(false)
@@ -6102,6 +6171,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           setPttHotkeyDraft(v?.ptt_hotkey ?? '')
           setTtsVoiceDraft(v?.tts_voice || 'af_heart')
           setTtsSpeedDraft(v?.tts_speed ?? 1.0)
+          setSayEmissions(v?.say_emissions !== false)
+          setSayInChatUi(v?.say_in_chat === true)
           setSoundsUi(v?.sounds_enabled !== false)
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
@@ -6314,6 +6385,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           ptt_hotkey: pttHotkeyDraft,
           tts_voice: ttsVoiceDraft,
           tts_speed: ttsSpeedDraft,
+          say_emissions: sayEmissions,
+          say_in_chat: sayInChatUi,
           sounds_enabled: soundsEnabled,
         },
         remote: {
@@ -6743,6 +6816,13 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                 focused, the card itself is the signal.
               </p>
             </SettingsCard>
+
+            <SaySettingsCard
+              sayEmissions={sayEmissions}
+              sayInChat={sayInChatUi}
+              onSayEmissions={setSayEmissions}
+              onSayInChat={setSayInChatUi}
+            />
 
             <SettingsCard title="Read aloud" className="col-span-2">
               {!ttsModelReady ? (

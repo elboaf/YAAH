@@ -1303,3 +1303,86 @@ async def test_scheduled_exit_plan_never_waits_without_opt_in(fake_model, tmp_pa
     assert events[-1]["type"] == "done"
 
 
+
+
+# ---- say-emission toggles (#207) -----------------------------------------------
+
+import os
+from contextlib import contextmanager
+
+
+@contextmanager
+def _restored_config():
+    """conftest writes config.json once per session; a test that flips
+    config MUST restore it or the mutation poisons every later test (and
+    the prompt-manifest drift guard)."""
+    path = os.environ["YAAH_CONFIG_PATH"]
+    with open(path, "rb") as f:
+        saved = f.read()
+    try:
+        yield
+    finally:
+        with open(path, "wb") as f:
+            f.write(saved)
+
+
+def _config_with_voice(**overrides):
+    """A config dict with voice overrides, built WITHOUT mutating the
+    shared DEFAULTS: load_config returns a shallow copy, so
+    cfg["voice"]["say_emissions"] = ... would flip the module-level dict
+    for every later test in the process (PR #150's cfg-fixture lesson)."""
+    from backend.agent.config import load_config
+
+    voice = {**(load_config().get("voice") or {}), **overrides}
+    return {**load_config(), "voice": voice}
+
+
+@pytest.mark.asyncio
+async def test_say_disabled_suppresses_say_event_but_strips_tags(fake_model, tmp_path, monkeypatch):
+    """Feature A: with voice.say_emissions=False the model is not asked for
+    briefings and no `say` event ships (fallback included) — but any stray
+    tag the model emits anyway is still stripped from the transcript."""
+    from backend.agent.config import save_config
+    from backend.db.database import create_conversation, get_messages
+
+    with _restored_config():
+        save_config(_config_with_voice(say_emissions=False))
+        fake_model.append([
+            {"type": "content", "text": "Visible answer. <say>stray briefing</say>"},
+            {"type": "finish"},
+        ])
+        cid = await create_conversation("say-off")
+        events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    types = [e["type"] for e in events]
+    assert "say" not in types
+    assert types[-1] == "done"
+    # Defensive stripping stays on: no tag junk, no briefing text leaked.
+    msgs = await get_messages(cid)
+    assert msgs[-1]["content"] == "Visible answer."
+
+
+@pytest.mark.asyncio
+async def test_say_disabled_suppresses_heuristic_fallback(fake_model, tmp_path, monkeypatch):
+    """No tag in the emission either: today's heuristic briefing must NOT
+    ship as a `say` event when emissions are off (the deliberate hole in
+    #66's never-silent guarantee, opt-in only)."""
+    from backend.agent.config import save_config
+    from backend.db.database import create_conversation
+
+    with _restored_config():
+        save_config(_config_with_voice(say_emissions=False))
+        fake_model.append([{"type": "content", "text": "Plain answer."}, {"type": "finish"}])
+        cid = await create_conversation("say-off-fallback")
+        events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    assert [e["type"] for e in events] == ["text", "done"]
+
+
+def test_default_prompt_omits_spoken_briefing_when_disabled(monkeypatch):
+    """Feature A's token saving IS the feature: with emissions off, the
+    spoken-briefing section never enters the system prompt."""
+    from backend.agent.config import save_config
+
+    assert "Spoken briefing" in loop._default_system_prompt("")
+    with _restored_config():
+        save_config(_config_with_voice(say_emissions=False))
+        assert "Spoken briefing" not in loop._default_system_prompt("")
