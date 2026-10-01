@@ -73,3 +73,13 @@ _Avoid_: nested prompt
 **Render matrix**:
 The complete set of prompts the harness can assemble, enumerated across every fragment's trigger conditions; produced by the manifest harness for review and drift checks.
 _Avoid_: prompt snapshots (implies byte-goldens)
+
+### Memory
+
+**Memory**:
+The per-project store of durable facts about the owner — user facts and working feedback — injected into every session's prompt. It models the owner, never workflow or project state (ADR-0009).
+_Avoid_: project memory (implies project-state storage), audit trail
+
+**Retention test**:
+The gate for saving a memory: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save.
+_Avoid_: "might be useful later"

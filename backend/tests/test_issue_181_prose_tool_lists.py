@@ -2,6 +2,28 @@
 hand-maintained copies that drift."""
 from backend.agent import loop, subagents, tools
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _memory_on(tmp_path, monkeypatch):
+    """Issue #169 (merged after #181 was written) made persistent memory
+    opt-in with default OFF. The prose-drift guards assert memory tools
+    appear in schemas and prose, which only holds once memory is enabled
+    — mirror the #169 suite's config-isolation dance and turn it on."""
+    monkeypatch.setenv("YAAH_CONFIG_PATH", str(tmp_path / "config.json"))
+    import importlib
+
+    from backend.agent import config
+
+    saved = dict(vars(config))
+    importlib.reload(config)
+    config.save_config({"memory": {"enabled": True}})
+    yield
+    monkeypatch.delenv("YAAH_CONFIG_PATH")
+    for key, value in saved.items():
+        setattr(config, key, value)
+
 
 # ------------------------------------------------------- shared helper
 

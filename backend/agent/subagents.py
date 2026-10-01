@@ -364,6 +364,25 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
     skill_index = skill_registry.index_for_prompt()
     if skill_index:
         prompt += f"\n\n---\n\n{skill_index}"
+    # #182: sub-agents resolving the memory tools get the same
+    # persistent-memory block the parent gets, so the tool description's
+    # claim ("the index of saved memories is in your system prompt every
+    # turn") is true in every context where the tool is offered. The
+    # index is project-keyed to the workspace the sub-agent is spawned
+    # into and empty for a fresh project (matching the parent).
+    from backend.agent import memory as memory_mod
+
+    memory_names = {"memory_save", "memory_read", "memory_delete"}
+    resolved_names = {
+        s["function"]["name"] for s in _resolve_tools(defn, windows=windows)
+    }
+    if memory_names & resolved_names:
+        try:
+            memory_block = memory_mod.index_for_prompt(workspace)
+        except Exception:  # noqa: BLE001 — optional context never breaks a turn
+            memory_block = ""
+        if memory_block:
+            prompt += f"\n\n---\n\n{memory_block}"
     return prompt
 
 

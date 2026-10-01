@@ -128,3 +128,51 @@ async def test_legacy_rows_without_attachments_replay_unchanged(db):
     await add_message(conv, "user", "plain text")
     history = await loop_load_history(conv)
     assert history[0]["content"] == "plain text"
+
+
+async def test_oversize_inline_content_rejected_with_413(db):
+    """#183: direct API calls with >100 KB content are rejected like the
+    staging endpoint rejects oversize files — they must not reach the loop
+    or the DB."""
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    conv = await _conversation()
+    records = [
+        {"name": "notes.md", "size": 8, "content": "# hello\n"},
+        {
+            "name": "huge.txt",
+            "size": INLINE_LIMIT_BYTES + 1,
+            "content": "x" * (INLINE_LIMIT_BYTES + 1),
+        },
+    ]
+    async with await _client() as client:
+        res = await client.post(
+            f"/api/agent/{conv}",
+            json={"message": "hi", "workspace": ".", "attachments": records},
+        )
+    assert res.status_code == 413
+    from backend.db.database import get_messages
+
+    assert await get_messages(conv) == [] or all(
+        r["role"] != "user" for r in await get_messages(conv)
+    )
+
+
+async def test_queue_rejects_oversize_content_with_413(db):
+    """#183: the queue endpoint applies the same inline-cap gate."""
+    import backend.agent.loop as loop
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    conv = await _conversation()
+    loop._running_convs.add(conv)
+    try:
+        records = [{"name": "huge.txt", "size": INLINE_LIMIT_BYTES + 1,
+                    "content": "x" * (INLINE_LIMIT_BYTES + 1)}]
+        async with await _client() as client:
+            res = await client.post(
+                f"/api/agent/{conv}/queue",
+                json={"message": "hi", "attachments": records},
+            )
+        assert res.status_code == 413
+    finally:
+        loop._running_convs.discard(conv)

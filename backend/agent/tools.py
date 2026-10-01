@@ -143,6 +143,15 @@ def resolve_path(workspace: str, rel_path: str, for_write: bool = False) -> Path
 
 # ---------------------------------------------------------------- schemas
 
+# Shared never-shell-background warning - one canonical sentence (kill-tree
+# since _kill_tree: backgrounded children are killed at timeout, losing
+# their work, not wedged forever). Both shell schemas embed it.
+_BG_WARN = (
+    "Never shell-background a long-running process (trailing &, start /b): "
+    "backgrounded children are killed at timeout, losing their work. "
+    "Servers and watchers need a detached spawn "
+)
+
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -151,11 +160,9 @@ TOOLS_SCHEMA = [
             "description": (
                 "Execute a shell command in the workspace directory. Use for "
                 "builds, tests, git, file discovery (ls, grep, find), and text "
-                "processing. Long-running commands will time out. Never shell-"
-                "background a long-running process (trailing &, start /b): the "
-                "child outlives the tool call, keeps the output pipe open, and "
-                "wedges the session. Servers and watchers need a detached spawn "
-                "instead (e.g. Start-Process with redirect, or nohup with "
+                "processing. Long-running commands will time out. "
+                + _BG_WARN
+                + "instead (e.g. Start-Process with redirect, or nohup with "
                 "stdout/stderr redirected to a file). For a test suite longer "
                 "than the timeout cap, run it in chunks (per directory or "
                 "file) instead of one monolithic run. git must never open its "
@@ -194,10 +201,8 @@ POWERSHELL_SCHEMA = {
             "directory. Use for Windows-native tasks the shell can't do "
             "well: registry, services, WMI/CIM, ACLs, scheduled tasks, "
             "structured object pipelines. Long-running commands will "
-            "time out. Never shell-background a long-running process "
-            "(trailing &): the child outlives the tool call, keeps the "
-            "output pipe open, and wedges the session. Servers and watchers "
-            "need Start-Process (optionally -WindowStyle Hidden) instead. "
+            "time out. " + _BG_WARN +
+            "instead (Start-Process, optionally -WindowStyle Hidden). "
             "git must never open its editor: pass -m '<message>' to git "
             "commit and use GIT_EDITOR=true for git rebase --continue / "
             "commit --amend - an interactive editor blocks the tool "
@@ -231,7 +236,8 @@ INSTALL_GIT_SCHEMA = {
             "with YAAH (~minute-long setup, no windows). Offer this to "
             "the user via ask_user when a git command or tool fails "
             "because git is missing, and run it only after they agree. "
-            "Shells opened before the install need a restart to see git."
+            "PATH is picked up per call - if a git command still fails, "
+            "retry it once."
         ),
         "parameters": {"type": "object", "properties": {}},
     },
@@ -281,7 +287,8 @@ HELP_DOCS: dict = {
         "The result reports the real exit code and combined stdout/stderr; "
         "output is truncated at a cap, so tail or filter large output "
         "in the command itself. On timeout the whole process tree is "
-        "killed - partial output is still returned."
+        "killed - output captured before the deadline is returned, "
+        "followed by a [timed out after Ns] marker."
     ),
     "powershell": (
         "Prefer PowerShell for structured Windows data: Get-ChildItem, "
@@ -294,8 +301,9 @@ HELP_DOCS: dict = {
     "web_search": (
         "DuckDuckGo HTML endpoint - no API key, no JS. Snippets are "
         "short; treat them as pointers, not answers. For a specific "
-        "site, add site:example.com to the query. Rate-limited: on a "
-        "429 or empty result page, wait a few seconds rather than "
+        "site, add site:example.com to the query. Fails visibly: an "
+        "anomaly-modal challenge, an empty result page, or a 'search "
+        "request failed' error - rephrase or wait rather than "
         "hammering retries."
     ),
     "web_fetch": (
@@ -303,9 +311,11 @@ HELP_DOCS: dict = {
         "bot-guarded sites usually work, but it is slow (~seconds) - "
         "do not use it for plain static files (use bash/powershell "
         "curl or read_file for local paths). Returns readable text "
-        "plus an 'IMAGES ON PAGE' list for view_image. Blocked pages: "
-        "fall back to web_search snippets instead of retrying the "
-        "same URL. max_chars truncates from the top - fetch a "
+        "plus an 'IMAGES ON PAGE' list (first 5 image URLs) for "
+        "view_image. Blocked pages: fall back to web_search snippets - "
+        "don't hammer the same URL (the tool already tries three "
+        "routes; one delayed retry is reasonable, a loop is not). "
+        "max_chars truncates from the top - fetch a "
         "specific anchor or raise the cap for long pages."
     ),
     "view_image": (
@@ -432,6 +442,10 @@ async def get_help(workspace: str = "", tool_name: str = "") -> dict:
 
 TOOLS_SCHEMA += [GET_HELP_SCHEMA]
 
+# Issue #169: the persistent-memory tool names, used by the Settings toggle
+# (memory.enabled, default OFF) to filter the schema and gate execution.
+_MEMORY_TOOL_NAMES = {"memory_save", "memory_read", "memory_delete"}
+
 TOOLS_SCHEMA += [
     {
         "type": "function",
@@ -461,8 +475,9 @@ TOOLS_SCHEMA += [
                 "stripped to plain text), via a real headless browser so "
                 "JS-heavy and bot-guarded sites usually work. Use after "
                 "web_search to read a result, or directly for a known URL. "
-                "If blocked, fall back to web_search snippets rather than "
-                "retrying the same URL."
+                "If blocked, fall back to web_search snippets - don't "
+                "hammer the same URL. web_fetch lists the page's first "
+                "5 image URLs under 'IMAGES ON PAGE' for view_image."
             ),
             "parameters": {
                 "type": "object",
@@ -778,7 +793,8 @@ TOOLS_SCHEMA += [
                         "type": "string",
                         "description": (
                             "One of: user | feedback | project | reference "
-                            "(default project)."
+                            "(default project; unknown values are coerced "
+                            "to project)."
                         ),
                     },
                     "content": {
@@ -930,7 +946,13 @@ async def _run_capturing(
         # The read was cancelled mid-stream; read() again is unsupported and
         # can hang forever. wait() only needs the exit.
         await _reap(proc)
-        return f"[timed out after {timeout}s]", True
+        # #180: output captured before the deadline is real; return it ahead
+        # of the marker instead of discarding it. Flush the decoder first so
+        # bytes buffered mid-UTF-8-character get the errors="replace"
+        # treatment (CodeRabbit return trip on PR #221) instead of being
+        # silently dropped.
+        tail = decoder.decode(b"", final=True)
+        return "".join(pieces) + tail + f"\n[timed out after {timeout}s]", True
     except asyncio.CancelledError:
         # Run stopped mid-tool (#82): without this, nobody kills or reaps
         # the proc — its transport is later GC'd after the loop closed and
@@ -1479,6 +1501,16 @@ async def execute_tool(
                 "remain available."
             )
         }
+    if name in _MEMORY_TOOL_NAMES and not memory_enabled():
+        # Persistent memory is opt-in (#169): degrade gracefully if the
+        # toggle flipped after the schemas were sent.
+        return {
+            "info": (
+                "Persistent memory is currently disabled in Settings "
+                "(General -> 'Enable persistent memory'). Re-enable it there "
+                "if saving or reading project memories is needed."
+            )
+        }
     if name == "search_conversation_history":
         arguments = {**arguments, "conversation_id": conversation_id}
     try:
@@ -1505,6 +1537,18 @@ def screenshot_allowed() -> bool:
         ))
     except Exception:  # noqa: BLE001 — fail open, never break a turn
         return True
+
+
+def memory_enabled() -> bool:
+    """Issue #169: is persistent memory enabled? Global setting
+    (memory.enabled), read live so a toggle applies to new turns without a
+    restart. Any read failure keeps the safe default (OFF)."""
+    try:
+        from backend.agent.config import load_config
+
+        return bool((load_config().get("memory") or {}).get("enabled", False))
+    except Exception:  # noqa: BLE001 — fail closed, memory is opt-in
+        return False
 
 
 def get_schemas(workspace: str | None = None) -> list:
@@ -1571,4 +1615,11 @@ def get_schemas(workspace: str | None = None) -> list:
     # tools stay (read_ui_tree / list_windows are the cheap alternatives).
     if not screenshot_allowed():
         schemas = [s for s in schemas if s["function"]["name"] != "screenshot"]
+    # Issue #169: persistent memory is opt-in; until enabled the memory
+    # tools never appear in the schema.
+    if not memory_enabled():
+        schemas = [
+            s for s in schemas
+            if s["function"]["name"] not in _MEMORY_TOOL_NAMES
+        ]
     return schemas

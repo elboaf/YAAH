@@ -983,6 +983,9 @@ class ConfigUpdate(BaseModel):
     # Computer-use settings block (issue #140): Settings toggles only
     # `allow_screenshot`; the rest of the block merges through untouched.
     computer_use: dict | None = None
+    # Persistent-memory block (issue #169): Settings toggles only
+    # `enabled`; the rest of the block merges through untouched.
+    memory: dict | None = None
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
     model_context: dict[str, dict[str, int | None]] | None = None
@@ -1006,6 +1009,17 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
         raise HTTPException(status_code=409, detail="conversation already running")
     if request.headers.get("x-yaah-remote"):
         raise HTTPException(status_code=409, detail={"code": "remote_turns_not_enabled", "message": "Remote turns are not enabled until Phase 6."})
+    # Inline-cap gate (#183): attachments ride into model context verbatim
+    # via re-inlining, so a record with more than INLINE_LIMIT_BYTES of
+    # content is rejected here the way /api/attachments rejects oversize
+    # staging — a direct API call must not smuggle multi-MB content into
+    # the loop or the DB.
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    for record in body.attachments:
+        content = record.get("content") if isinstance(record, dict) else None
+        if isinstance(content, str) and len(content.encode("utf-8")) > INLINE_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="attachment content exceeds the 100 KB inline limit")
     # Working directory for this turn (issue #8): the conversation row's
     # workspace — the same column the sidebar groups by, so a moved chat's
     # next message runs inside the workspace it was moved TO, and a stale
@@ -1138,6 +1152,14 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
     text = body.message.strip()
     if not text and not body.images and not body.attachments:
         raise HTTPException(status_code=400, detail="message must not be empty")
+    # Same inline-cap gate as /api/agent (#183): queued records persist on
+    # the user row and re-inline at the next step boundary.
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    for record in body.attachments or []:
+        content = record.get("content") if isinstance(record, dict) else None
+        if isinstance(content, str) and len(content.encode("utf-8")) > INLINE_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="attachment content exceeds the 100 KB inline limit")
     from backend.agent.imagedata import save_data_url
 
     image_paths = []
@@ -1926,6 +1948,10 @@ async def api_export_conversation(conversation_id: int):
             lines += [f"**🔧 tool: {name}**", "", "```json", r["content"], "```", ""]
         elif role == "assistant":
             lines += [f"**🤖 assistant**", "", r["content"] or "", ""]
+            # #226: the briefing the voice spoke for this emission, when one
+            # was captured (say toggle off ⇒ column empty ⇒ no line here).
+            if r.get("say"):
+                lines += [f"*Briefing:* {r['say']}", ""]
             for tc in r.get("tool_calls") or []:
                 if isinstance(tc, dict) and tc.get("id") and not tc.get("name"):
                     fn = tc.get("function") or {}
@@ -1985,6 +2011,8 @@ async def api_get_config():
         "sandbox": cfg.get("sandbox") or {},
         # Computer-use block (Settings toggles allow_screenshot, #140).
         "computer_use": cfg.get("computer_use") or {},
+        # Persistent-memory block (Settings toggles memory.enabled, #169).
+        "memory": cfg.get("memory") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
         # Per-model context windows (the per-model Settings editor).
@@ -2046,6 +2074,22 @@ async def api_set_config(body: ConfigUpdate):
         if "allow_screenshot" in merged_cu:
             merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
         updates["computer_use"] = merged_cu
+    # Persistent-memory block merges the same way (#169): a Settings save
+    # that only touches enabled keeps any future sibling keys intact.
+    # enabled must be a real boolean (CodeRabbit return trip): bool("false")
+    # is True in Python, so a string "false" must be rejected, not coerced.
+    mem = updates.get("memory")
+    if isinstance(mem, dict):
+        if "enabled" in mem and not isinstance(mem["enabled"], bool):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_memory_enabled", "message": "memory.enabled must be a boolean"},
+            )
+        existing = load_config().get("memory") or {}
+        merged_mem = {**existing, **mem}
+        if "enabled" in merged_mem:
+            merged_mem["enabled"] = bool(merged_mem["enabled"])
+        updates["memory"] = merged_mem
     # Interface scale is clamped to the shipped range (Settings offers
     # 100/110/125/150%; anything wilder would break the compact layout).
     if "ui_scale" in updates:
