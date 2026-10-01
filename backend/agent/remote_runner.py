@@ -94,7 +94,7 @@ def _schemas_for(workspace: str) -> list:
 
 
 def _system_prompt(workspace: str, host: remote_mod.RemoteSession | None) -> str:
-    from backend.agent.loop import _default_system_prompt
+    from backend.agent.loop import _default_system_prompt, _plan_mode_note, current_access_mode
 
     # The loop's prompt builder already resolves the runtime-environment
     # line and tool list from the workspace's owning device.
@@ -104,6 +104,12 @@ def _system_prompt(workspace: str, host: remote_mod.RemoteSession | None) -> str
             "\n\nNote: the workspace's owning device is offline right now; "
             "workspace tools will fail until it reconnects."
         )
+    # Plan mode framing must ride the remote-offline path exactly as the
+    # local one does (issue #178): the schemas still carry exit_plan, so
+    # without the note the model gets the tool with zero plan-mode
+    # guidance and only discovers the contract via a blocked-tool error.
+    if current_access_mode() == "plan":
+        prompt += f"\n\n---\n\n{_plan_mode_note()}"
     return prompt
 
 
