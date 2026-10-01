@@ -69,11 +69,12 @@ async def test_bash_timeout_flushes_partial_utf8(tmp_path):
     not silently dropped by the timeout return path."""
     # 200 'é' as UTF-8 = 400 bytes; a 4096-byte read can't split it, so
     # instead emit a lone lead byte whose continuation never arrives.
+    # Octal escape: dash's printf on Linux does not support \xHH.
     r = await asyncio.wait_for(
         execute_tool(
             "bash",
             {
-                "command": "printf '\\xc3'; sleep 30",
+                "command": "printf '\\303'; sleep 30",
                 "timeout_seconds": 2,
             },
             str(tmp_path),
