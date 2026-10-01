@@ -1219,6 +1219,7 @@ async def run_agent(
     include_history: bool = True,
     model_override: str = "",
     effort_override: str | None = None,
+    user_meta: dict | None = None,
 ) -> AsyncIterator[str]:
     """Claim a conversation and always release it when its stream ends."""
     try:
@@ -1256,6 +1257,7 @@ async def run_agent(
             include_history=include_history,
             model_override=model_override,
             effort_override=effort_override,
+            user_meta=user_meta,
         ):
             yield event
     finally:
@@ -1277,6 +1279,7 @@ async def _run_agent_claimed(
     include_history: bool = True,
     model_override: str = "",
     effort_override: str | None = None,
+    user_meta: dict | None = None,
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
@@ -1286,6 +1289,10 @@ async def _run_agent_claimed(
     are injected into the system prompt for this turn only.
     persist_user: False when resuming an interrupted turn — the user
     message is already stored and must not be duplicated.
+    user_meta: #198 — JSON-object tag persisted on the user message row
+    (stored in the messages.meta column). Only the scheduler's fire path
+    sets it ({"agent_prompt": true}) so the UI can collapse the per-run
+    effective prompt into a chip; hand-typed messages stay untagged.
     policy: per-run approval policy for scheduled agents (issue #41),
     "sandbox-only" (gated tools skip with a note) or "autonomous"
     (everything auto-approved); None = normal chat turn driven by the
@@ -1323,7 +1330,7 @@ async def _run_agent_claimed(
     if persist_user:
         await add_message(
             conversation_id, "user", user_text, images=image_paths or None,
-            attachments=attachments or None,
+            attachments=attachments or None, meta=user_meta,
         )
 
     # Per-conversation system prompt override (Q17) wins over the global one

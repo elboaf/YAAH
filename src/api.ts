@@ -222,6 +222,9 @@ export interface StoredMessage {
   content: string
   /** #226: the spoken briefing that accompanied an assistant emission. */
   say?: string | null
+  /** #198: structural tag on the row, e.g. {"agent_prompt": true} for a
+   *  scheduled fire's persisted effective prompt (rendered as a chip). */
+  meta?: { agent_prompt?: boolean } | null
   images?: string[] | null
   /** Structured text attachments (#142), parsed from the messages column. */
   attachments?: Array<{ name: string; size: number; content?: string; path?: string }> | null
