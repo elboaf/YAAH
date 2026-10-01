@@ -1640,12 +1640,27 @@ async def _run_agent_claimed(
             tool_calls = state["tool_calls"]
             finish_reason = state["finish"]
 
-            # Persist assistant message (with tool calls if any)
+            # #207: the whole channel is gated on voice.say_emissions —
+            # off means no prompt section, no `say` event, no fallback.
+            # Tag-stripping above is NOT gated: stray tags never become
+            # transcript junk and never reach speech either way. Computed
+            # before the persist below so the briefing rides the row (#226).
+            _said = (
+                _speak.spoken_line(said, assistant_content)
+                if _say_emissions_enabled()
+                else ""
+            )
+
+            # Persist assistant message (with tool calls if any). #226: the
+            # briefing rides on the row (say column) so reloads and export
+            # can render what the voice said; load_history never replays it
+            # into model context.
             await add_message(
                 conversation_id,
                 "assistant",
                 assistant_content,
                 tool_calls=tool_calls,
+                say=_said,
             )
 
             # Briefing-first, per emission (#66): EVERY completed model
@@ -1655,15 +1670,6 @@ async def _run_agent_claimed(
             # clipped verbatim) when the emission carried no usable <say>
             # tag. Text-less emissions (a bare tool_calls message) say
             # nothing rather than emitting an empty briefing.
-            # #207: the whole channel is gated on voice.say_emissions —
-            # off means no prompt section, no `say` event, no fallback.
-            # Tag-stripping above is NOT gated: stray tags never become
-            # transcript junk and never reach speech either way.
-            _said = (
-                _speak.spoken_line(said, assistant_content)
-                if _say_emissions_enabled()
-                else ""
-            )
             if _said:
                 yield _ndjson({"type": "say", "text": _said})
 

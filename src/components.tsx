@@ -1573,9 +1573,8 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   const chatText = msg.content || msg.say || ''
   // #207: the captured briefing as a reading aid — only on messages that
   // also carry chat text (a say-only emission's briefing IS the body; the
-  // fallback above must not be duplicated). Live-stream only: briefings
-  // are stripped server-side before persistence, so reloaded rows carry
-  // no msg.say to show.
+  // fallback above must not be duplicated). #226: briefings persist on the
+  // row, so reloaded turns render their say-line too.
   const showSayLine = useAgent((s) => s.sayInChat) && !!msg.content && !!msg.say
   const body = (
     <>
@@ -2838,9 +2837,13 @@ export function RemoteTranscriptDialog({
     useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
     setComposerText('')
     const ac = new AbortController()
-    const applyEvent = (ev: { type: string; text?: string; name?: string; result?: unknown; args?: unknown }) => {
+    const applyEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
       if (ev.type === 'text' && ev.text) {
         useAgent.getState().appendTextDelta(remoteKey, asstId, ev.text)
+      } else if (ev.type === 'say') {
+        // #226: the briefing rides the same wire shape as local turns;
+        // captured on the message so MessageView's say-line can render.
+        useAgent.getState().setSay(remoteKey, asstId, ev.text ?? ev.say ?? '')
       } else if (ev.type === 'thinking') {
         useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
       } else if (ev.type === 'tool_start') {
@@ -8517,7 +8520,8 @@ const attachmentText = (a: Attachment): string => {
   return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
 }
 
-function Composer() {
+/** Exported for the say wire-contract test (#226); App composes it here. */
+export function Composer() {
   const {
     conversationId,
     workspace,
@@ -9332,9 +9336,13 @@ function Composer() {
       }
     } else if (ev.type === 'say') {
       // Spoken briefing (#66): captured on its message for read-aloud,
-      // never rendered.
+      // never rendered. #226: the wire field is `text` (loop.py ships
+      // {"type":"say","text":...}); `ev.say` never existed, so briefings
+      // were captured as '' and the voice always fell back to the
+      // heuristic first/last-sentence read. Read `text` first; keep a
+      // defensive `say` fallback in case the shape ever grows one.
       startPostSteerEmission()
-      setSay(bufKey, curId, ev.say ?? '')
+      setSay(bufKey, curId, ev.text ?? ev.say ?? '')
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).

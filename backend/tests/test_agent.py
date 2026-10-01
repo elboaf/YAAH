@@ -1386,3 +1386,45 @@ def test_default_prompt_omits_spoken_briefing_when_disabled(monkeypatch):
     with _restored_config():
         save_config(_config_with_voice(say_emissions=False))
         assert "Spoken briefing" not in loop._default_system_prompt("")
+
+
+# ---- #226: briefings persist on the row -----------------------------------------
+
+@pytest.mark.asyncio
+async def test_say_briefing_persists_on_row(fake_model, tmp_path):
+    """#226 slice B: the emitted briefing is stored on the assistant row's
+    `say` column (tag-free chat content unchanged), so reloads and export
+    can render what the voice heard."""
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("say-persist")
+    fake_model.append([
+        {"type": "content", "text": "Visible answer. <say>Wired the fix; tests green.</say>"},
+        {"type": "finish"},
+    ])
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    said = [e for e in events if e["type"] == "say"]
+    assert said and said[0]["text"] == "Wired the fix; tests green."
+
+    msgs = await get_messages(cid)
+    assert msgs[-1]["content"] == "Visible answer."
+    assert msgs[-1]["say"] == "Wired the fix; tests green."
+
+
+@pytest.mark.asyncio
+async def test_say_heuristic_fallback_persists_too(fake_model, tmp_path):
+    """#226 slice B: tag-less emissions speak the heuristic briefing; that
+    same line must persist, or reloaded turns lose what was spoken."""
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("say-persist-fallback")
+    fake_model.append([
+        {"type": "content", "text": "Just the visible answer."},
+        {"type": "finish"},
+    ])
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    said = [e for e in events if e["type"] == "say"]
+    assert said and said[0]["text"]
+
+    msgs = await get_messages(cid)
+    assert msgs[-1]["say"] == said[0]["text"]
