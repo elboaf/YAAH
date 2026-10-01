@@ -3,14 +3,14 @@
   "kind": "subagents",
   "sections": [],
   "system_messages": [],
-  "total_bytes": 3617,
-  "rendered_sha256": "31dfde44819a9604b051aca48d02728a4c78401e6e3140a3583fd84864a1f066",
+  "total_bytes": 3633,
+  "rendered_sha256": "864d8c1731595f08abf16eb008c38ece0583ef7c3c262aabc0d0d55446d1891c",
   "tool_schemas": [],
   "subagent_prompts": {
     "general-purpose": {
       "name": "general-purpose",
-      "bytes": 1840,
-      "sha256": "cf71714e84d6891cf5be2daa47a79639cd914e211f2250e860c818a95bc2dd28",
+      "bytes": 1960,
+      "sha256": "b57891e9c163deda447f5693aec329a78afdc913c3625fdd7d8ba2350029d9ef",
       "sections": [
         {
           "name": "subagent-base",
@@ -20,9 +20,9 @@
         },
         {
           "name": "tools",
-          "bytes": 193,
-          "sha256": "0a553bc9f073420c8eb35c1bd2ad2c902474907558599e6ae3e98c7e66e2d2f7",
-          "text": "You have tools: bash (shell commands), powershell (Windows PowerShell), web_search, web_fetch, view_image, read_file, write_file, create_file, edit_file, delete_file, move_file, search_files.\n\n"
+          "bytes": 313,
+          "sha256": "5ad1bfca8cc917bf5553c46f1fdc6ca4c5fe6bcae0c571462eac51b9003f0712",
+          "text": "You have tools: bash (shell commands), get_help, web_search, web_fetch, view_image, read_file, write_file, edit_file, create_file, delete_file, move_file, search_files, load_skill, memory_save, memory_read, memory_delete, sandbox_test, sandbox_run, sandbox_status, sandbox_stop, powershell (Windows PowerShell).\n\n"
         },
         {
           "name": "guidelines",
@@ -38,12 +38,12 @@
         }
       ],
       "tools_allowlist": null,
-      "text": "You are a sub-agent (agent_type: general-purpose) spawned by a parent agent. You are a focused sub-agent working inside a larger task. Complete the delegated work independently: explore what you need, make the changes, verify them, and report a concise final summary. Your final message is the ONLY thing the parent agent receives — make it self-contained: what you did, what you changed (paths), what you verified, and any assumptions or follow-ups.\n\nRuntime environment: Windows 10 (AMD64). The bash tool runs commands through Git Bash; POSIX shell syntax and utilities.; use commands and paths valid for THIS operating system.\n\nYou have tools: bash (shell commands), powershell (Windows PowerShell), web_search, web_fetch, view_image, read_file, write_file, create_file, edit_file, delete_file, move_file, search_files.\n\nGuidelines:\n- You cannot ask the user questions: decide for yourself, act on the most reasonable interpretation, and report the assumption in your final message.\n- You cannot spawn sub-agents of your own.\n- Your final message is the only thing the parent receives. Make it self-contained: what you did, what you changed (paths), what you verified, and any follow-ups.\n- The user sees your streamed text live in the parent's transcript. Lead with a one-line summary of what you're doing, then work.\n- Paths are relative to the workspace root.\n- Git work goes through the bash tool (git is on PATH); never open git's interactive editor - pass -m to commit.\n\n\n---\n\nSkills available (load with the load_skill tool when relevant):\n- code-review: manifest fixture skill code-review for the render matrix.\n- tdd: manifest fixture skill tdd for the render matrix.\nCall load_skill with a skill's name to load its full instructions into this conversation before acting on a matching task. Do not guess at a skill's contents."
+      "text": "You are a sub-agent (agent_type: general-purpose) spawned by a parent agent. You are a focused sub-agent working inside a larger task. Complete the delegated work independently: explore what you need, make the changes, verify them, and report a concise final summary. Your final message is the ONLY thing the parent agent receives — make it self-contained: what you did, what you changed (paths), what you verified, and any assumptions or follow-ups.\n\nRuntime environment: Windows 10 (AMD64). The bash tool runs commands through Git Bash; POSIX shell syntax and utilities.; use commands and paths valid for THIS operating system.\n\nYou have tools: bash (shell commands), get_help, web_search, web_fetch, view_image, read_file, write_file, edit_file, create_file, delete_file, move_file, search_files, load_skill, memory_save, memory_read, memory_delete, sandbox_test, sandbox_run, sandbox_status, sandbox_stop, powershell (Windows PowerShell).\n\nGuidelines:\n- You cannot ask the user questions: decide for yourself, act on the most reasonable interpretation, and report the assumption in your final message.\n- You cannot spawn sub-agents of your own.\n- Your final message is the only thing the parent receives. Make it self-contained: what you did, what you changed (paths), what you verified, and any follow-ups.\n- The user sees your streamed text live in the parent's transcript. Lead with a one-line summary of what you're doing, then work.\n- Paths are relative to the workspace root.\n- Git work goes through the bash tool (git is on PATH); never open git's interactive editor - pass -m to commit.\n\n\n---\n\nSkills available (load with the load_skill tool when relevant):\n- code-review: manifest fixture skill code-review for the render matrix.\n- tdd: manifest fixture skill tdd for the render matrix.\nCall load_skill with a skill's name to load its full instructions into this conversation before acting on a matching task. Do not guess at a skill's contents."
     },
     "explore": {
       "name": "explore",
-      "bytes": 1777,
-      "sha256": "525031c8583a0438c7c8d5c04f0fe65f88548d4ef269f179110c6e9633af9ebe",
+      "bytes": 1673,
+      "sha256": "53d841be28e66eb67aeaf5bd335bb9bc5a2f66264edf8e31d5afb1599397729d",
       "sections": [
         {
           "name": "subagent-base",
@@ -53,9 +53,9 @@
         },
         {
           "name": "tools",
-          "bytes": 193,
-          "sha256": "0a553bc9f073420c8eb35c1bd2ad2c902474907558599e6ae3e98c7e66e2d2f7",
-          "text": "You have tools: bash (shell commands), powershell (Windows PowerShell), web_search, web_fetch, view_image, read_file, write_file, create_file, edit_file, delete_file, move_file, search_files.\n\n"
+          "bytes": 89,
+          "sha256": "4b4efe0bfb14c391cf41e822766c59dc40d0f496faf96ab122c73d2ea9af629a",
+          "text": "You have tools: web_search, web_fetch, view_image, read_file, search_files, load_skill.\n\n"
         },
         {
           "name": "guidelines",
@@ -78,9 +78,9 @@
         "web_fetch",
         "web_search"
       ],
-      "text": "You are a sub-agent (agent_type: explore) spawned by a parent agent. You are a read-only research sub-agent. Investigate the codebase or web thoroughly and report findings with file paths and line references as evidence. You cannot and must not modify anything. Your final message is the ONLY thing the parent agent receives — make it a complete, self-contained report of what you found.\n\nRuntime environment: Windows 10 (AMD64). The bash tool runs commands through Git Bash; POSIX shell syntax and utilities.; use commands and paths valid for THIS operating system.\n\nYou have tools: bash (shell commands), powershell (Windows PowerShell), web_search, web_fetch, view_image, read_file, write_file, create_file, edit_file, delete_file, move_file, search_files.\n\nGuidelines:\n- You cannot ask the user questions: decide for yourself, act on the most reasonable interpretation, and report the assumption in your final message.\n- You cannot spawn sub-agents of your own.\n- Your final message is the only thing the parent receives. Make it self-contained: what you did, what you changed (paths), what you verified, and any follow-ups.\n- The user sees your streamed text live in the parent's transcript. Lead with a one-line summary of what you're doing, then work.\n- Paths are relative to the workspace root.\n- Git work goes through the bash tool (git is on PATH); never open git's interactive editor - pass -m to commit.\n\n\n---\n\nSkills available (load with the load_skill tool when relevant):\n- code-review: manifest fixture skill code-review for the render matrix.\n- tdd: manifest fixture skill tdd for the render matrix.\nCall load_skill with a skill's name to load its full instructions into this conversation before acting on a matching task. Do not guess at a skill's contents."
+      "text": "You are a sub-agent (agent_type: explore) spawned by a parent agent. You are a read-only research sub-agent. Investigate the codebase or web thoroughly and report findings with file paths and line references as evidence. You cannot and must not modify anything. Your final message is the ONLY thing the parent agent receives — make it a complete, self-contained report of what you found.\n\nRuntime environment: Windows 10 (AMD64). The bash tool runs commands through Git Bash; POSIX shell syntax and utilities.; use commands and paths valid for THIS operating system.\n\nYou have tools: web_search, web_fetch, view_image, read_file, search_files, load_skill.\n\nGuidelines:\n- You cannot ask the user questions: decide for yourself, act on the most reasonable interpretation, and report the assumption in your final message.\n- You cannot spawn sub-agents of your own.\n- Your final message is the only thing the parent receives. Make it self-contained: what you did, what you changed (paths), what you verified, and any follow-ups.\n- The user sees your streamed text live in the parent's transcript. Lead with a one-line summary of what you're doing, then work.\n- Paths are relative to the workspace root.\n- Git work goes through the bash tool (git is on PATH); never open git's interactive editor - pass -m to commit.\n\n\n---\n\nSkills available (load with the load_skill tool when relevant):\n- code-review: manifest fixture skill code-review for the render matrix.\n- tdd: manifest fixture skill tdd for the render matrix.\nCall load_skill with a skill's name to load its full instructions into this conversation before acting on a matching task. Do not guess at a skill's contents."
     }
   },
   "auxiliary_prompts": {},
-  "rendered_text": "You are a sub-agent (agent_type: general-purpose) spawned by a parent agent. You are a focused sub-agent working inside a larger task. Complete the delegated work independently: explore what you need, make the changes, verify them, and report a concise final summary. Your final message is the ONLY thing the parent agent receives — make it self-contained: what you did, what you changed (paths), what you verified, and any assumptions or follow-ups.\n\nRuntime environment: Windows 10 (AMD64). The bash tool runs commands through Git Bash; POSIX shell syntax and utilities.; use commands and paths valid for THIS operating system.\n\nYou have tools: bash (shell commands), powershell (Windows PowerShell), web_search, web_fetch, view_image, read_file, write_file, create_file, edit_file, delete_file, move_file, search_files.\n\nGuidelines:\n- You cannot ask the user questions: decide for yourself, act on the most reasonable interpretation, and report the assumption in your final message.\n- You cannot spawn sub-agents of your own.\n- Your final message is the only thing the parent receives. Make it self-contained: what you did, what you changed (paths), what you verified, and any follow-ups.\n- The user sees your streamed text live in the parent's transcript. Lead with a one-line summary of what you're doing, then work.\n- Paths are relative to the workspace root.\n- Git work goes through the bash tool (git is on PATH); never open git's interactive editor - pass -m to commit.\n\n\n---\n\nSkills available (load with the load_skill tool when relevant):\n- code-review: manifest fixture skill code-review for the render matrix.\n- tdd: manifest fixture skill tdd for the render matrix.\nCall load_skill with a skill's name to load its full instructions into this conversation before acting on a matching task. Do not guess at a skill's contents."
+  "rendered_text": "You are a sub-agent (agent_type: general-purpose) spawned by a parent agent. You are a focused sub-agent working inside a larger task. Complete the delegated work independently: explore what you need, make the changes, verify them, and report a concise final summary. Your final message is the ONLY thing the parent agent receives — make it self-contained: what you did, what you changed (paths), what you verified, and any assumptions or follow-ups.\n\nRuntime environment: Windows 10 (AMD64). The bash tool runs commands through Git Bash; POSIX shell syntax and utilities.; use commands and paths valid for THIS operating system.\n\nYou have tools: bash (shell commands), get_help, web_search, web_fetch, view_image, read_file, write_file, edit_file, create_file, delete_file, move_file, search_files, load_skill, memory_save, memory_read, memory_delete, sandbox_test, sandbox_run, sandbox_status, sandbox_stop, powershell (Windows PowerShell).\n\nGuidelines:\n- You cannot ask the user questions: decide for yourself, act on the most reasonable interpretation, and report the assumption in your final message.\n- You cannot spawn sub-agents of your own.\n- Your final message is the only thing the parent receives. Make it self-contained: what you did, what you changed (paths), what you verified, and any follow-ups.\n- The user sees your streamed text live in the parent's transcript. Lead with a one-line summary of what you're doing, then work.\n- Paths are relative to the workspace root.\n- Git work goes through the bash tool (git is on PATH); never open git's interactive editor - pass -m to commit.\n\n\n---\n\nSkills available (load with the load_skill tool when relevant):\n- code-review: manifest fixture skill code-review for the render matrix.\n- tdd: manifest fixture skill tdd for the render matrix.\nCall load_skill with a skill's name to load its full instructions into this conversation before acting on a matching task. Do not guess at a skill's contents."
 }

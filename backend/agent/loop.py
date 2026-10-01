@@ -365,6 +365,9 @@ def _default_system_prompt(workspace: str = "") -> str:
                 "sandbox_status", "sandbox_stop",
             ]
             sandbox_section = sandbox_mod.prompt_section()
+    # #181: the prose line must cover the whole schema set. The tail tools
+    # below previously existed only as schemas (search_conversation_history
+    # was never mentioned anywhere); annotations keep the useful pointers.
     tools += [
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
@@ -372,6 +375,10 @@ def _default_system_prompt(workspace: str = "") -> str:
         "get_help (full docs for any tool; call with no argument to list them)",
         "spawn_agent (delegate self-contained work to a sub-agent; see the "
         "sub-agents index below)",
+        "ask_user",
+        "load_skill",
+        "memory_save", "memory_read", "memory_delete",
+        "search_conversation_history",
     ]
     prompt = f"""You are an expert AI coding agent working inside a user's project workspace.
 

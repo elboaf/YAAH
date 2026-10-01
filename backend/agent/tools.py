@@ -237,6 +237,39 @@ INSTALL_GIT_SCHEMA = {
     },
 }
 
+# ---- shared prompt-surface constants (#181) -------------------------------
+# Single-source texts interpolated wherever the same guidance was previously
+# hand-maintained in several places that could (and did) drift apart.
+
+# Delegation policy: one phrasing, interpolated into the spawn_agent schema
+# description, HELP_DOCS['spawn_agent'], and the sub-agents index block.
+DELEGATION_POLICY = (
+    "Sub-agents see ONLY the prompt you pass \u2014 include file paths, "
+    "error messages, and decisions they need; they cannot ask the user "
+    "questions. Launch several in the same turn to run them in parallel "
+    "(max 4 at once; extra calls queue). Do not delegate work that needs "
+    "this conversation's context or a user decision mid-task."
+)
+
+
+def tool_prose_list(names, annotations: dict | None = None) -> str:
+    """Render the 'You have tools: ...' sentence from the REAL tool set.
+
+    `names` is an iterable of tool-name strings or schema dicts (anything
+    with ['function']['name']); `annotations` maps bare tool names to a
+    short parenthetical. Callers pass the same list they hand to the
+    model (loop.py) or the resolution of _resolve_tools (subagents.py),
+    so the prose can never drift from the schemas. #181
+    """
+    annotations = annotations or {}
+    parts = []
+    for item in names:
+        name = item["function"]["name"] if isinstance(item, dict) else item
+        note = annotations.get(name)
+        parts.append(f"{name} ({note})" if note else name)
+    return f"You have tools: {', '.join(parts)}."
+
+
 # Extended, lazy-loaded documentation. The schemas above stay short; what
 # lives here only reaches the model when it calls get_help("tool_name").
 HELP_DOCS: dict = {
@@ -340,13 +373,9 @@ HELP_DOCS: dict = {
         "tool, or immediately after any tool errors."
     ),
     "spawn_agent": (
-        "Sub-agents see ONLY the prompt you pass - include file "
-        "paths, error messages, and every decision they need; they "
-        "cannot ask the user questions. Launch several in one turn "
-        "for parallel independent work (max 4 at once; extra calls "
-        "queue). Announce each delegation to the user in one line. "
-        "Do not delegate work that needs this conversation's "
-        "context or a user decision mid-task."
+        # #181: same single DELEGATION_POLICY constant as the schema.
+        DELEGATION_POLICY
+        + " Announce each delegation to the user in one line."
     ),
 }
 
@@ -654,21 +683,15 @@ TOOLS_SCHEMA += [
         "function": {
             "name": "spawn_agent",
             "description": (
-                "Delegate a self-contained piece of work to a sub-agent: a "
-                "nested agent with its own fresh context that runs the task "
-                "independently and returns its final message as this tool's "
-                "result. The sub-agent sees ONLY the prompt you pass — "
-                "include file paths, error messages, and decisions it needs. "
-                "Launch several spawn_agent calls in the same turn to run "
-                "them in parallel (max 4 at once). Use for: isolated "
-                "research (explore), parallel independent subtasks, or work "
-                "whose intermediate steps would bloat this conversation. "
-                "Do NOT use for small tasks that need this conversation's "
-                "context, or anything requiring a user decision mid-task — "
-                "sub-agents cannot ask the user questions. Say one line "
-                "about what you're delegating and why BEFORE the call — "
-                "the user is watching and an unannounced spawn reads as a "
-                "hang."
+                # #181: policy text is the single DELEGATION_POLICY
+                # constant, also interpolated into HELP_DOCS and the
+                # sub-agents index.
+                DELEGATION_POLICY
+                + " Use for: isolated research (explore), parallel "
+                "independent subtasks, or work whose intermediate steps "
+                "would bloat this conversation. Say one line about what "
+                "you're delegating and why BEFORE the call — the user "
+                "is watching and an unannounced spawn reads as a hang."
             ),
             "parameters": {
                 "type": "object",

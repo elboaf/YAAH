@@ -109,8 +109,8 @@
     },
     {
       "name": "spawn_agent",
-      "bytes": 1301,
-      "sha256": "065b018fac874ab087582394667ea82631539df37bef78363abf21f6510a90f8"
+      "bytes": 1078,
+      "sha256": "80ec81e6852904cd5177df2d3a13277998c8bf4970b7dbf8dafa66c6e12dea86"
     },
     {
       "name": "load_skill",
