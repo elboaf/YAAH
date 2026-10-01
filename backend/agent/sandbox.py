@@ -145,6 +145,31 @@ def ensure_toolkit_seed() -> list[str]:
         return written
     tk = toolkit_dir()
 
+    def _regen_index(tk_dir: Path, tools: dict) -> None:
+        """Rewrite INDEX.md from the merged manifest (same table the
+        wrapper's Update-Index emits) so an upgrade merge that added
+        bundled entries can't leave a stale table of contents behind."""
+        lines = [
+            "# Toolkit index",
+            "",
+            "Generated from ``state.json`` by ``toolkit install`` - do not edit by hand.",
+            "Paths are relative to the toolkit root (on PATH inside the VM:",
+            "``toolkit``, ``toolkit\\bin``, ``toolkit\\Scripts``, ``toolkit\\node_modules\\.bin``).",
+            "",
+            "| name | version | kind | path | invocation | check | note |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for name in sorted(tools):
+            t = tools[name] or {}
+            cells = [name] + [str(t.get(k, "") or "") for k in
+                              ("version", "kind", "path", "invocation",
+                               "check", "note")]
+            cells = [c.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+                     for c in cells]
+            lines.append("| " + " | ".join(cells) + " |")
+        (tk_dir / "INDEX.md").write_text("\n".join(lines) + "\n",
+                                         encoding="utf-8")
+
     def _copy(rel: str) -> None:
         s, t = src / rel, tk / rel
         if t.exists():
@@ -178,6 +203,9 @@ def ensure_toolkit_seed() -> list[str]:
             current["tools"] = tools
             state.write_text(
                 json.dumps(current, indent=2) + "\n", encoding="utf-8")
+            # The bundled INDEX.md is copy-once, so an upgrade merge that
+            # added entries would leave a stale index behind: regenerate it.
+            _regen_index(tk, tools)
             if "state.json" not in written:
                 written.append("state.json")
     except (OSError, ValueError):
@@ -1403,7 +1431,7 @@ SANDBOX_TOOLS_SCHEMA = [
                 "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules"
                 "\\.bin; shim zipped tools' exe from toolkit\\bin\\<name>"
                 ".cmd). Record installs with `toolkit install <name> ...` "
-                "(wrapper at toolkit\bin\toolkit.ps1 — it writes "
+                "(wrapper at toolkit\\bin\\toolkit.ps1 — it writes "
                 "state.json AND regenerates INDEX.md; never hand-edit the "
                 "JSON). For GUI automation in the VM use the windows-mcp MCP "
                 "server (auto-started at boot; connection info in the "

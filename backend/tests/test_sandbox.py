@@ -6,6 +6,7 @@ override + fake spawn), so the suite is green on Linux CI too.
 """
 import asyncio
 import json
+import msvcrt
 import re
 import shutil
 import subprocess
@@ -1228,6 +1229,99 @@ def test_toolkit_wrapper_survives_malformed_state(isolated, tmp_path):
     r = _run_toolkit("install", "t", "-Version", "1", tk=tk)
     assert r.returncode != 0
     assert (tk / "state.json").read_text(encoding="utf-8") == "{not json"
+
+
+def test_toolkit_wrapper_reinstall_preserves_metadata(isolated, tmp_path):
+    """CodeRabbit finding 2: reinstalling with only some fields supplied
+    must keep the existing entry's other metadata, not wipe it."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    assert _run_toolkit(
+        "install", "t", "-Version", "1", "-Kind", "zip",
+        "-Path", "t/bin/t.exe", "-Check", "Test-Path 'x'",
+        "-Note", "gotcha", tk=tk).returncode == 0
+    assert _run_toolkit("install", "t", "-Version", "2", tk=tk).returncode == 0
+    e = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]["t"]
+    assert e["version"] == "2"
+    assert e["kind"] == "zip"
+    assert e["path"] == "t/bin/t.exe"
+    assert e["check"] == "Test-Path 'x'"
+    assert e["note"] == "gotcha"
+    assert e["installed_at"]
+
+
+def test_toolkit_wrapper_escapes_index_cells(isolated, tmp_path):
+    """CodeRabbit finding 3: metadata containing pipes/newlines must not
+    break the INDEX.md table (state.json keeps the verbatim value)."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1",
+                     "-Check", "Get-Command x | Select-Object Source",
+                     tk=tk)
+    assert r.returncode == 0, r.stderr
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if ln.startswith("| t |"))
+    assert row.count(" | ") == 6  # 7 columns intact
+    assert "Get-Command x \\| Select-Object Source" in row
+    verbatim = json.loads((tk / "state.json").read_text("utf-8"))
+    assert verbatim["tools"]["t"]["check"] == \
+        "Get-Command x | Select-Object Source"
+
+
+def test_toolkit_wrapper_locks_manifest(tmp_path):
+    """CodeRabbit finding 1 (major): the wrapper serializes manifest
+    mutations with a cross-process lock — while the lock is held by
+    another process it fails loudly instead of last-write-winning, and
+    it leaves no shared temp file behind."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    (tk / "state.json").write_text(
+        json.dumps({"tools": {"keep": {"version": "1"}}}), encoding="utf-8")
+    lock = tk / "state.json.lock"
+    with open(lock, "wb") as held:  # simulate another process holding it
+        msvcrt.locking(held.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            r = _run_toolkit("install", "t", "-Version", "1", tk=tk)
+            assert r.returncode != 0
+            # manifest untouched by the blocked writer
+            tools = json.loads(
+                (tk / "state.json").read_text(encoding="utf-8"))["tools"]
+            assert "t" not in tools
+        finally:
+            msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 1)
+    # after release the same install succeeds, and no *.tmp litter remains
+    assert _run_toolkit("install", "t", "-Version", "1", tk=tk).returncode == 0
+    assert list(tk.glob("*.tmp")) == []
+
+
+def test_sandbox_tool_description_has_no_escaped_backslash_artifacts(isolated):
+    """CodeRabbit finding 4: the sandbox_run description renders the
+    wrapper path literally — no \\b (backspace) or \\t (tab) artifacts."""
+    desc = next(t for t in sb.SANDBOX_TOOLS_SCHEMA
+                if t["function"]["name"] == "sandbox_run")["function"]["description"]
+    assert "\b" not in desc and "\t" not in desc
+    assert "toolkit\\bin\\toolkit.ps1" in desc
+
+
+def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch, tmp_path):
+    """CodeRabbit finding 5: after an upgrade merge adds bundled entries to
+    an existing manifest, INDEX.md is regenerated to match (was stale)."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newtool": {"version": "9", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(
+        json.dumps({"tools": {}}), encoding="utf-8")
+    (tk / "INDEX.md").write_text("# stale index without newtool\n",
+                                 encoding="utf-8")
+
+    sb.ensure_toolkit_seed()
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "| newtool | 9 | zip |" in index
 
 
 def test_bundled_toolkit_ships_wrapper_and_index():
