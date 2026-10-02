@@ -82,8 +82,6 @@ describe('draft destination branch chip (#253)', () => {
 })
 
 function useAgentState() {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { useAgent } = require('./store') as typeof import('./store')
   useAgent.setState({
     conversationId: null,
     workspace: 'C:/repos/project',
