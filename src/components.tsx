@@ -117,6 +117,8 @@ import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
+import { transcriptSelection, googleSearchUrl } from './selectionSearch'
+import { openExternal } from './openExternal'
 
 // ---------------------------------------------------------------- code views
 
@@ -8527,6 +8529,15 @@ export function ChatPanel() {
     [messages],
   )
   const streaming = status === 'thinking' || status === 'running-tool'
+  // #201: right-click on an active transcript selection -> "Search on Google".
+  // Menu state is just the selected query text (null = closed); the item only
+  // appears when the right-click lands with a real selection inside the
+  // transcript (transcriptSelection enforces that), and activating it goes
+  // through the proven openExternal -> open_external default-browser path.
+  const [searchSelection, setSearchSelection] = useState<string | null>(null)
+  const onTranscriptContextMenu = useCallback(() => {
+    setSearchSelection(transcriptSelection(transcriptRef.current))
+  }, [])
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
   // show on the newest message while the run is going.
@@ -8738,8 +8749,32 @@ export function ChatPanel() {
       <div
         ref={transcriptRef}
         onScroll={onTranscriptScroll}
+        onContextMenu={onTranscriptContextMenu}
         className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4"
       >
+        {/* #201: selection search menu (FilesPanel pattern) — item renders
+            only when the contextmenu carried an active transcript selection. */}
+        {searchSelection !== null && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setSearchSelection(null)} onContextMenu={(e) => { e.preventDefault(); setSearchSelection(null) }} />
+            <div
+              className="fixed z-50 w-44 rounded bg-zinc-900 py-1 text-xs shadow-xl"
+              role="menu"
+              aria-label="Search selection"
+            >
+              <button
+                className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
+                role="menuitem"
+                onClick={(e) => {
+                  openExternal(googleSearchUrl(searchSelection), e)
+                  setSearchSelection(null)
+                }}
+              >
+                Search on Google
+              </button>
+            </div>
+          </>
+        )}
         {conversationId === null && (
           <DraftDestinationCard />
         )}
