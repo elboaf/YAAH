@@ -651,6 +651,10 @@ def _drive_turn(flags: dict) -> dict:
         return _stream()
 
     async def _run() -> dict:
+        # Restore the real chat after the scripted turn: a leaked fake_chat
+        # silently re-scripted every later model call in the process (tests
+        # running after a render test saw no model traffic at all).
+        orig_chat = loop.model_client.chat
         loop.model_client.chat = fake_chat
         ws_dir = Path(LOCAL_WS)
         ws_dir.mkdir(parents=True, exist_ok=True)
@@ -683,6 +687,7 @@ def _drive_turn(flags: dict) -> dict:
             ):
                 pass
         finally:
+            loop.model_client.chat = orig_chat
             await delete_conversation(cid)
         return captured
 
