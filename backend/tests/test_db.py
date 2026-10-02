@@ -126,3 +126,70 @@ async def test_conversation_update_system_prompt():
         assert r.json()["ok"] is True
     conv = await get_conversation(cid)
     assert conv["system_prompt_override"] == "be terse"
+
+
+@pytest.mark.asyncio
+async def test_export_markdown_includes_say_briefing():
+    """#226 slice B: a persisted briefing renders as a *Briefing:* line in
+    the Markdown export, directly under its assistant block."""
+    import httpx
+    from backend.db.database import add_message, create_conversation
+    from backend.main import app
+
+    cid = await create_conversation("Export Say")
+    await add_message(cid, "user", "hello")
+    await add_message(
+        cid, "assistant", "doing thing", say="Wired the fix; tests green.",
+        tool_calls=[{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+    )
+    await add_message(cid, "tool", '{"ok": 1}', tool_call_id="c1")
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.get(f"/api/conversations/{cid}/export")
+        assert r.status_code == 200
+        assert "*Briefing:* Wired the fix; tests green." in r.text
+
+
+@pytest.mark.asyncio
+async def test_messages_say_column_migration_on_legacy_db(monkeypatch, tmp_path):
+    """#226 slice B: a pre-#226 database (messages table without `say`)
+    upgrades in place — the column appears and the old rows survive."""
+    import aiosqlite
+
+    import backend.db.database as database
+
+    old_db = tmp_path / "legacy.db"
+    async with aiosqlite.connect(old_db) as db:
+        await db.execute(
+            """CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                tool_calls TEXT,
+                tool_call_id TEXT,
+                images TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        await db.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (1, 'assistant', 'old row')"
+        )
+        await db.commit()
+
+    # Point the module at the legacy file for this test only (get_db and
+    # init_db read DB_PATH at call time); no module reload, no pollution.
+    monkeypatch.setattr(database, "DB_PATH", old_db)
+    await database.init_db()
+    db = await database.get_db()
+    try:
+        cur = await db.execute("PRAGMA table_info(messages)")
+        cols = {r[1] for r in await cur.fetchall()}
+        assert "say" in cols
+        cur = await db.execute("SELECT content, say FROM messages")
+        row = await cur.fetchone()
+        assert row["content"] == "old row"
+        assert row["say"] is None
+    finally:
+        await db.close()

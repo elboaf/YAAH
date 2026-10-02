@@ -87,6 +87,14 @@ _EXPLORE_TOOLS = {
 }
 
 
+def _exclusion_clause() -> str:
+    """The index description is generated from the SAME sets the
+    runtime enforces (#189/SYN-23), so prose and enforcement cannot
+    drift apart again."""
+    excluded = sorted(_ALWAYS_EXCLUDED | _COMPUTER_TOOLS)
+    return "all tools except: " + ", ".join(excluded)
+
+
 def _builtin_general_purpose() -> AgentDef:
     return AgentDef(
         name="general-purpose",
@@ -94,16 +102,13 @@ def _builtin_general_purpose() -> AgentDef:
             "The default sub-agent for broad tasks: implement a small "
             "feature, fix a clear issue, run verification commands, or "
             "carry a self-contained piece of work forward in isolation. "
-            "Has access to all tools except ask_user and spawn_agent."
+            "Has access to " + _exclusion_clause() + "."
         ),
         body=(
             "You are a focused sub-agent working inside a larger task. "
             "Complete the delegated work independently: explore what you "
             "need, make the changes, verify them, and report a concise "
-            "final summary. Your final message is the ONLY thing the "
-            "parent agent receives — make it self-contained: what you "
-            "did, what you changed (paths), what you verified, and any "
-            "assumptions or follow-ups."
+            "final summary."
         ),
         builtin=True,
     )
@@ -123,9 +128,7 @@ def _builtin_explore() -> AgentDef:
             "You are a read-only research sub-agent. Investigate the "
             "codebase or web thoroughly and report findings with file "
             "paths and line references as evidence. You cannot and must "
-            "not modify anything. Your final message is the ONLY thing "
-            "the parent agent receives — make it a complete, "
-            "self-contained report of what you found."
+            "not modify anything."
         ),
         tools=sorted(_EXPLORE_TOOLS),
         builtin=True,
@@ -274,19 +277,21 @@ def index_for_prompt() -> str:
     for d in list_agents():
         desc = " ".join(d["description"].split())
         lines.append(f"- {d['name']}: {desc}")
+    from backend.agent.tools import DELEGATION_POLICY
     lines.append(
         "Delegate proactively: when a chunk of work is self-contained — "
         "a sweep over many files, independent research threads, broad "
         "exploration that would eat this conversation's context — prefer "
-        "spawning a sub-agent over doing it inline. Launch several "
-        "spawn_agent calls in the SAME turn to run them in parallel "
-        "instead of one long sequential investigation. Announce each "
-        "delegation in one line before the calls, and summarize what "
-        "came back when the results arrive. Write each sub-agent prompt "
-        "fully self-contained (it sees nothing else from this "
-        "conversation — include paths, constraints, and exactly what to "
-        "report back). Do not delegate what needs back-and-forth with "
-        "the user, and don't fragment one small edit into delegation."
+        "spawning a sub-agent over doing it inline. "
+        # #181: the policy core is the single DELEGATION_POLICY constant,
+        # shared with the spawn_agent schema and help docs.
+        + DELEGATION_POLICY
+        + " Announce each delegation in one line before the calls, and "
+        "summarize what came back when the results arrive. Write each "
+        "sub-agent prompt fully self-contained (it sees nothing else "
+        "from this conversation — include paths, constraints, and "
+        "exactly what to report back), and don't fragment one small "
+        "edit into delegation."
     )
     return "\n".join(lines)
 
@@ -294,10 +299,16 @@ def index_for_prompt() -> str:
 # ------------------------------------------------------------------ runner
 
 
-def _resolve_tools(defn: AgentDef, windows: bool) -> list[dict]:
+def _resolve_tools(defn: AgentDef, workspace: str | None = None) -> list[dict]:
     """Tool schemas for a sub-agent: built-ins minus always-excluded and
-    computer-use, then the definition's allow/deny lists applied."""
-    schemas = get_schemas()
+    computer-use, then the definition's allow/deny lists applied.
+
+    #188: the workspace is threaded through so schemas resolve on the
+    workspace's OWN host (remote namespaced -> that host; otherwise the
+    legacy active host / local machine) — the same resolution execute_tool
+    uses, so the schemas and the prompt's env line can never describe two
+    different hosts."""
+    schemas = get_schemas(workspace=workspace)
     allowed: dict[str, dict] = {}
     for s in schemas:
         n = s["function"]["name"]
@@ -318,28 +329,38 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
     from backend.agent import remote as remote_mod
     from backend.agent.loop import _local_env_line, _agents_notes
 
-    host = remote_mod.get_remote()
+    # #188: ONE host resolution for the whole prompt — the env line, the
+    # prose tool list, and (via run_sub_agent) the schemas all derive from
+    # the workspace's owning host, never from the legacy active host or
+    # the client's os.name.
+    host = remote_mod.remote_for_workspace(workspace)
+    if host is None and remote_mod.parse_ns(workspace) is None:
+        # Local workspace: keep the legacy fallback to the active host
+        # (its tools execute there when connected).
+        host = remote_mod.get_remote()
     if host is not None:
         # Tools forward to the host, so the sub-agent needs the HOST's
         # environment grounding (OS/shell/workspace), not this machine's.
-        windows = host.windows
         env = host.env_line(workspace)
     else:
-        windows = os.name == "nt"
         env = _local_env_line()
-    tools = ["bash (shell commands)"]
-    if windows:
-        tools.append("powershell (Windows PowerShell)")
-    tools += [
-        "web_search", "web_fetch", "view_image", "read_file", "write_file",
-        "create_file", "edit_file", "delete_file", "move_file",
-        "search_files",
-    ]
+    # #181: derive the prose from the SAME computation as _resolve_tools,
+    # so the prompt can never name (or omit) a tool the schemas disagree
+    # with. The only prose-only names are the shell line's annotations.
+    from backend.agent.tools import tool_prose_list
+
+    resolved = _resolve_tools(defn, workspace=workspace)
+    tools_ann = {"bash": "shell commands"}
+    if host is not None and host.windows:
+        tools_ann["powershell"] = "Windows PowerShell"
+    elif host is None and os.name == "nt":
+        tools_ann["powershell"] = "Windows PowerShell"
+    tools_line = tool_prose_list(resolved, tools_ann)
     prompt = (
         f"You are a sub-agent (agent_type: {defn.name}) spawned by a "
         f"parent agent. {defn.body}\n\n"
         f"{env}\n\n"
-        f"You have tools: {', '.join(tools)}.\n\n"
+        f"{tools_line}\n\n"
         "Guidelines:\n"
         "- You cannot ask the user questions: decide for yourself, act on "
         "the most reasonable interpretation, and report the assumption in "
@@ -347,7 +368,7 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
         "- You cannot spawn sub-agents of your own.\n"
         "- Your final message is the only thing the parent receives. Make "
         "it self-contained: what you did, what you changed (paths), what "
-        "you verified, and any follow-ups.\n"
+        "you verified, and any assumptions or follow-ups.\n"
         "- The user sees your streamed text live in the parent's transcript. "
         "Lead with a one-line summary of what you're doing, then work.\n"
         "- Paths are relative to the workspace root.\n"
@@ -360,6 +381,23 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
     skill_index = skill_registry.index_for_prompt()
     if skill_index:
         prompt += f"\n\n---\n\n{skill_index}"
+    # #182: sub-agents resolving the memory tools get the same
+    # persistent-memory block the parent gets, so the tool description's
+    # claim ("the index of saved memories is in your system prompt every
+    # turn") is true in every context where the tool is offered. The
+    # index is project-keyed to the workspace the sub-agent is spawned
+    # into and empty for a fresh project (matching the parent).
+    from backend.agent import memory as memory_mod
+
+    memory_names = {"memory_save", "memory_read", "memory_delete"}
+    resolved_names = {s["function"]["name"] for s in resolved}
+    if memory_names & resolved_names:
+        try:
+            memory_block = memory_mod.index_for_prompt(workspace)
+        except Exception:  # noqa: BLE001 — optional context never breaks a turn
+            memory_block = ""
+        if memory_block:
+            prompt += f"\n\n---\n\n{memory_block}"
     return prompt
 
 
@@ -402,7 +440,7 @@ async def run_sub_agent(
         {"role": "system", "content": _sub_agent_system_prompt(defn, workspace)},
         {"role": "user", "content": prompt},
     ]
-    tools = _resolve_tools(defn, windows=os.name == "nt")
+    tools = _resolve_tools(defn, workspace=run_workspace)
     loaded_skills: list[str] = []
     transcript: list[dict] = []
 
@@ -562,7 +600,21 @@ async def run_sub_agent(
                             args, loaded_skills, messages
                         )
                     else:
-                        if gate is not None:
+                        # #188 belt-and-braces: the allowlist is enforced
+                        # at execution time too, not only when the schemas
+                        # were listed — a future regression that leaks a
+                        # schema hits this structured error, not a write.
+                        allowed_names = {
+                            s["function"]["name"] for s in tools
+                        }
+                        if name not in allowed_names:
+                            result = {
+                                "error": (
+                                    f"Tool '{name}' is not in agent "
+                                    f"'{defn.name}'s allowed tool set."
+                                )
+                            }
+                        elif gate is not None:
                             # Access mode applies to sub-agents too: the
                             # parent's gate decides before anything runs.
                             # None = approved (execute below); a dict is the
@@ -681,7 +733,21 @@ async def run_sub_agent(
                                     args, loaded_skills, messages
                                 )
                             else:
-                                if gate is not None:
+                                # #188 belt-and-braces: the grace-turn
+                                # loop enforces the allowlist too — a
+                                # budget-exhausted turn gets no wider
+                                # tool access than a normal one.
+                                allowed_names = {
+                                    s["function"]["name"] for s in tools
+                                }
+                                if name not in allowed_names:
+                                    result = {
+                                        "error": (
+                                            f"Tool '{name}' is not in agent "
+                                            f"'{defn.name}'s allowed tool set."
+                                        )
+                                    }
+                                elif gate is not None:
                                     result = await gate(name, args, tc.get("id", ""))
                                 else:
                                     result = None

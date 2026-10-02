@@ -220,6 +220,11 @@ export interface StoredMessage {
   id: number
   role: string
   content: string
+  /** #226: the spoken briefing that accompanied an assistant emission. */
+  say?: string | null
+  /** #198: structural tag on the row, e.g. {"agent_prompt": true} for a
+   *  scheduled fire's persisted effective prompt (rendered as a chip). */
+  meta?: { agent_prompt?: boolean } | null
   images?: string[] | null
   /** Structured text attachments (#142), parsed from the messages column. */
   attachments?: Array<{ name: string; size: number; content?: string; path?: string }> | null
@@ -344,6 +349,11 @@ export interface AgentConfig {
     observe_default?: boolean
     panic_hotkey?: string
   }
+  /** Persistent-memory block (#169); Settings toggles only `enabled`.
+   *  Default OFF (opt-in): no memory tools, no prompt block. */
+  memory?: {
+    enabled: boolean
+  }
 }
 
 export const getConfig = () => api<AgentConfig>('/api/config')
@@ -405,6 +415,9 @@ export const updateConfig = (
     }
     computer_use?: {
       allow_screenshot?: boolean
+    }
+    memory?: {
+      enabled?: boolean
     }
   }>,
 ) =>
@@ -854,8 +867,14 @@ export const deleteAgent = (id: string, deleteChat = true) =>
     { method: 'DELETE' },
   )
 
-export const runAgentNow = (id: string) =>
-  api<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}/run`, { method: 'POST' })
+export const runAgentNow = (
+  id: string,
+  opts?: { oneShot?: boolean },
+) =>
+  api<{ ok: boolean }>(
+    `/api/agents/${encodeURIComponent(id)}/run${opts?.oneShot ? '?one_shot=true' : ''}`,
+    { method: 'POST' },
+  )
 
 // Standing instructions: typed messages in an agent chat become these; they
 // never trigger a run — they ride along with the prompt at every fire.
@@ -977,6 +996,27 @@ export async function ttsTest(
     throw err
   }
   return res.json()
+}
+
+/** Voice discovery (#231): the names a remote server offers via its
+ *  non-standard GET /voices (the reference Kokoro server does; OpenAI
+ *  does not). The backend probe NEVER errors — an unreachable or
+ *  list-less server resolves to [] and the UI falls back to free-text.
+ *  Drafts ride in the body so discovery works before the first Save. */
+export async function ttsVoices(endpoint?: string, apiKey?: string): Promise<string[]> {
+  let res: Response
+  try {
+    res = await fetch(url('/api/tts/voices'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint, api_key: apiKey }),
+    })
+  } catch {
+    return [] // backend down: free-text fallback, no error noise
+  }
+  if (!res.ok) return [] // 409 not-configured included: absence of a list is normal
+  const body = (await res.json().catch(() => ({}))) as { voices?: unknown }
+  return Array.isArray(body.voices) ? body.voices.filter((v): v is string => typeof v === 'string') : []
 }
 
 /** Fire-and-forget stop handshake: raises the backend's supersede floor to

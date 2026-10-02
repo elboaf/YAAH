@@ -375,6 +375,29 @@ def test_heuristic_briefing_first_and_last_sentence():
     assert len(out) <= speak.SAY_MAX_CHARS
 
 
+def test_heuristic_briefing_closing_is_last_sentence_not_whole_paragraph():
+    # Regression (voice symptom 2, "doubling"): the closing was sliced as
+    # tail[:last_sentence_end] — i.e. from the START of the final paragraph —
+    # so a multi-sentence tail spoke the WHOLE paragraph back after the
+    # opening line, repeating the message nearly verbatim.
+    md = (
+        "The migration ran clean and the API tests are green. "
+        + "Mid-report detail about retry budgets that nobody needs read aloud. " * 6
+        + "\n\nDeploy is set for Friday morning."
+    )
+    out = speak.heuristic_briefing(md)
+    assert out.startswith("The migration ran clean and the API tests are green.")
+    assert out.endswith("Deploy is set for Friday morning.")
+    assert "retry budgets" not in out
+    assert len(out) <= speak.SAY_MAX_CHARS
+
+
+def test_heuristic_briefing_multisentence_tail_keeps_only_final_sentence():
+    md = "Intro sentence one. Intro sentence two.\n\nWrap one. Wrap two. Final word here."
+    out = speak.heuristic_briefing(md)
+    assert out == "Intro sentence one. Final word here."
+
+
 def test_heuristic_briefing_respects_cap():
     md = ("word " * 500).strip() + "."
     out = speak.heuristic_briefing(md)

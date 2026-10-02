@@ -16,9 +16,9 @@
     },
     {
       "name": "persistent-memory",
-      "bytes": 1242,
-      "sha256": "e9830a10ec7d80bd84ba3ca27f7b8a1ea015ed05b100b14f02bb772e4c644bb0",
-      "text": "# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nSave proactively (don't wait to be asked) when you learn:\n- user: who the user is — role, expertise, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- project: ongoing work, goals, or constraints NOT derivable from the code or git history. Convert relative dates (\"next week\") to absolute.\n- reference: pointers to external resources (URLs, dashboards, tickets).\n\nDo NOT save: what the repo already records (code structure, CLAUDE.md/AGENTS.md content, past fixes, git history) or details that only matter to the current conversation. Before saving, reuse/update an existing memory rather than creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n"
+      "bytes": 1614,
+      "sha256": "8d98286263075e8f696a6ac829f736fdbc4b488761534476c25257588b2a6d91",
+      "text": "# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nMemory is a model of the owner, not a log of actions. Before saving, apply the retention test: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save it.\n\nSave proactively (don't wait to be asked) when the test passes:\n- user: who the user is — role, expertise, environment quirks, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- reference (rare): a durable pointer to an external resource the owner returns to (URL, dashboard, ticket queue).\n\nNever save — these have exactly one home, and memory is not it:\n- workflow state (issue filed, PR opened, review round, CI status, merge, release): the issue tracker owns this.\n- project knowledge (architecture, bugs, fixes, plans, constraints): the repo owns this (CONTEXT.md, docs/, ADRs).\n- anything the repo or tracker already records, or details that only matter to the current conversation.\n\nHygiene: reuse/update an existing memory instead of creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n"
     },
     {
       "name": "plan-mode",
@@ -30,17 +30,17 @@
   "system_messages": [
     {
       "role": "system",
-      "bytes": 2070,
-      "sha256": "2025ae323bebd815da334fc4055463462b385ea2c309a3ffc4189268ad407703"
+      "bytes": 2442,
+      "sha256": "10ea688d29e9a0d2868708f2622b50e6d7689040b62e85d2d6b3aa456e647003"
     }
   ],
-  "total_bytes": 2070,
-  "rendered_sha256": "2025ae323bebd815da334fc4055463462b385ea2c309a3ffc4189268ad407703",
+  "total_bytes": 2442,
+  "rendered_sha256": "10ea688d29e9a0d2868708f2622b50e6d7689040b62e85d2d6b3aa456e647003",
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1269,
-      "sha256": "36e1f0c143e0c54c62c59ab02bfd247765159bb1f6c5c5f0b44b88efb9f9dd47"
+      "bytes": 1247,
+      "sha256": "343499818bdedcebe9851082ffc3a9ec46992ac60e67500d32e92c06c90d8534"
     },
     {
       "name": "get_help",
@@ -54,8 +54,8 @@
     },
     {
       "name": "web_fetch",
-      "bytes": 557,
-      "sha256": "26b56c05ed4e94424958db1888c229ad357fc392bd81a5c44727744d70b8496e"
+      "bytes": 636,
+      "sha256": "0bb009f7c774b55d6b509f66314048d7f77f55906edbc67d8851c57cd5daba41"
     },
     {
       "name": "view_image",
@@ -109,8 +109,8 @@
     },
     {
       "name": "spawn_agent",
-      "bytes": 1301,
-      "sha256": "065b018fac874ab087582394667ea82631539df37bef78363abf21f6510a90f8"
+      "bytes": 1078,
+      "sha256": "80ec81e6852904cd5177df2d3a13277998c8bf4970b7dbf8dafa66c6e12dea86"
     },
     {
       "name": "load_skill",
@@ -119,8 +119,8 @@
     },
     {
       "name": "memory_save",
-      "bytes": 1079,
-      "sha256": "91837d49891003c76a503d00dd9469cfe91d4953f6a2bc4b5a9aceb9c78ca0fb"
+      "bytes": 1118,
+      "sha256": "51dd656fc6291455e43a69d93a8778ede7d0c67bf93258bca3a88bb6b8455bc2"
     },
     {
       "name": "memory_read",
@@ -204,8 +204,8 @@
     },
     {
       "name": "powershell",
-      "bytes": 1159,
-      "sha256": "a5a35e31c5dc313d8e9dd92b8ddd8c19e0a90f9b541cfe7f4e7fe6b7db0e88a4"
+      "bytes": 1165,
+      "sha256": "6fc02d9c1ef27d76905741d24b2c57788473ca13a003896ace430915dba5211d"
     },
     {
       "name": "exit_plan",
@@ -215,5 +215,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nSave proactively (don't wait to be asked) when you learn:\n- user: who the user is — role, expertise, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- project: ongoing work, goals, or constraints NOT derivable from the code or git history. Convert relative dates (\"next week\") to absolute.\n- reference: pointers to external resources (URLs, dashboards, tickets).\n\nDo NOT save: what the repo already records (code structure, CLAUDE.md/AGENTS.md content, past fixes, git history) or details that only matter to the current conversation. Before saving, reuse/update an existing memory rather than creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nMemory is a model of the owner, not a log of actions. Before saving, apply the retention test: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save it.\n\nSave proactively (don't wait to be asked) when the test passes:\n- user: who the user is — role, expertise, environment quirks, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- reference (rare): a durable pointer to an external resource the owner returns to (URL, dashboard, ticket queue).\n\nNever save — these have exactly one home, and memory is not it:\n- workflow state (issue filed, PR opened, review round, CI status, merge, release): the issue tracker owns this.\n- project knowledge (architecture, bugs, fixes, plans, constraints): the repo owns this (CONTEXT.md, docs/, ADRs).\n- anything the repo or tracker already records, or details that only matter to the current conversation.\n\nHygiene: reuse/update an existing memory instead of creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it."
 }

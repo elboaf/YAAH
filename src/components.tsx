@@ -61,6 +61,7 @@ import {
   ttsStatus,
   ttsDownload,
   ttsTest,
+  ttsVoices,
   imageUrl,
   listWorkspaces,
   reorderWorkspaces,
@@ -1348,6 +1349,40 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
  *  gone. */
 const EXPAND_MAX_HEIGHT_CLASS = 'max-h-64'
 
+// #198: a scheduled fire's persisted effective prompt renders as a collapsed
+// chip instead of a full-text bubble; clicking expands the verbatim per-run
+// prompt inline, clicking again collapses. Collapsed by default every run.
+const AGENT_PROMPT_PREVIEW_CAP = 60
+
+function AgentPromptChip({ prompt }: { prompt: string }) {
+  const [expanded, setExpanded] = useState(false)
+  // Preview = the prompt's first line, capped — never the whole body, so the
+  // collapsed chip doesn't leak the appended standing-instructions block.
+  const firstLine = prompt.trim().split('\n', 1)[0].slice(0, AGENT_PROMPT_PREVIEW_CAP)
+  return (
+    <div className="flex justify-end">
+      <div className="flex max-w-[85%] flex-col items-end">
+        <button
+          type="button"
+          title="The exact prompt this scheduled run fired with (click to expand)"
+          onClick={() => setExpanded((v) => !v)}
+          className="rounded bg-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-300 hover:bg-zinc-700"
+        >
+          🤖 Agent prompt{firstLine ? ` · ${firstLine}` : ''}
+        </button>
+        {expanded ? (
+          <pre
+            data-agent-prompt-expand
+            className={`mt-0.5 w-full overflow-y-auto whitespace-pre-wrap break-words rounded bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-300 ${EXPAND_MAX_HEIGHT_CLASS}`}
+          >
+            {prompt}
+          </pre>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function ExpandableAttachmentChip({
   a,
 }: {
@@ -1481,6 +1516,13 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   }
 
   const isUser = msg.role === 'user'
+  // #198: a scheduled fire's persisted effective prompt arrives tagged;
+  // collapse it to a chip instead of the full-text bubble. The tag is the
+  // source of truth (not chat type): only the scheduler's fire path ever
+  // sets it, so hand-typed messages render unchanged in any chat.
+  if (isUser && msg.meta?.agent_prompt) {
+    return <AgentPromptChip prompt={msg.content} />
+  }
   if (isUser) {
     return (
       <div className="flex justify-end">
@@ -1573,9 +1615,8 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   const chatText = msg.content || msg.say || ''
   // #207: the captured briefing as a reading aid — only on messages that
   // also carry chat text (a say-only emission's briefing IS the body; the
-  // fallback above must not be duplicated). Live-stream only: briefings
-  // are stripped server-side before persistence, so reloaded rows carry
-  // no msg.say to show.
+  // fallback above must not be duplicated). #226: briefings persist on the
+  // row, so reloaded turns render their say-line too.
   const showSayLine = useAgent((s) => s.sayInChat) && !!msg.content && !!msg.say
   const body = (
     <>
@@ -2838,9 +2879,13 @@ export function RemoteTranscriptDialog({
     useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
     setComposerText('')
     const ac = new AbortController()
-    const applyEvent = (ev: { type: string; text?: string; name?: string; result?: unknown; args?: unknown }) => {
+    const applyEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
       if (ev.type === 'text' && ev.text) {
         useAgent.getState().appendTextDelta(remoteKey, asstId, ev.text)
+      } else if (ev.type === 'say') {
+        // #226: the briefing rides the same wire shape as local turns;
+        // captured on the message so MessageView's say-line can render.
+        useAgent.getState().setSay(remoteKey, asstId, ev.text ?? ev.say ?? '')
       } else if (ev.type === 'thinking') {
         useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
       } else if (ev.type === 'tool_start') {
@@ -3237,29 +3282,55 @@ function ConversationList({
   // Issue #81: pause/resume the agent's schedule straight from the row menu —
   // same full-record PATCH (agentToBody + enabled flipped) the AgentsDialog's
   // pause/resume button uses, then refresh so the row label flips.
-  const toggleAgentEnable = (c: { id: number }) => {
-    const a = agentByConv.get(c.id)
-    if (!a) return
-    updateAgent(a.id, agentToBody(a, !a.enabled))
+  // #81/#199: one PATCH-and-refresh shape for every schedule enable/disable
+  // from the sidebar (row menu, stop button) — the same full-record PATCH
+  // (agentToBody + enabled) the AgentsDialog's pause/resume uses.
+  const patchAgentEnabled = (
+    a: ScheduledAgent,
+    enabled: boolean,
+    errorTitle: string,
+  ) => {
+    updateAgent(a.id, agentToBody(a, enabled))
       .then(() => refreshAgents())
       .catch((e) =>
         setNotice({
-          title: `Could not update "${a.name}"`,
+          title: errorTitle,
           message: String((e as { message?: string }).message ?? e),
         }),
       )
   }
-  const toggleAgentRun = (c: { id: number }) => {
+  const toggleAgentEnable = (c: { id: number }) => {
+    const a = agentByConv.get(c.id)
+    if (!a) return
+    patchAgentEnabled(a, !a.enabled, `Could not update "${a.name}"`)
+  }
+  // #199: the row's one-shot — runs the agent exactly once, immediately,
+  // regardless of enabled/paused state. Enabled agents get the dialog-
+  // identical "run now" (the schedule advances from this fire); paused
+  // agents get the ?one_shot=true fire, which leaves the parked slot alone
+  // and the agent paused.
+  const runAgentOnce = (c: { id: number }) => {
+    const a = agentByConv.get(c.id)
+    if (!a) return
+    runAgentNow(a.id, { oneShot: a.enabled === false })
+      .then(() => refreshAgents())
+      .catch((e) =>
+        setNotice({
+          title: `Could not run "${a.name}"`,
+          message: String((e as { message?: string }).message ?? e),
+        }),
+      )
+  }
+  // #199: stop — cancel any in-flight run AND disable (pause) the schedule.
+  // An idle agent just pauses; a running one gets the same immediate cancel
+  // as before (the backend settles it through the pause-mid-run path, which
+  // also drops pending retries), then the enable PATCH pauses the schedule.
+  const stopAgentAndPause = (c: { id: number }) => {
     const a = agentByConv.get(c.id)
     if (!a) return
     if (a.running) {
-      // Same cancel path as an in-chat Stop: the turn ends after its current
-      // step and the run settles normally.
       setStoppingConvs((prev) => new Set(prev).add(c.id))
       cancelAgent(c.id).catch(() => {})
-      // The backend settles in well under a second; poll tightly so the row
-      // flips to "run now" the moment it does (bounded, then the normal 5s
-      // poll takes over as fallback).
       const started = Date.now()
       const settle = async () => {
         await refreshAgents()
@@ -3270,16 +3341,9 @@ function ConversationList({
         else window.setTimeout(() => void settle(), 400)
       }
       window.setTimeout(() => void settle(), 400)
-    } else {
-      runAgentNow(a.id)
-        .then(() => refreshAgents())
-        .catch((e) =>
-          setNotice({
-            title: `Could not run "${a.name}"`,
-            message: String((e as { message?: string }).message ?? e),
-          }),
-        )
     }
+    if (!a.enabled) return
+    patchAgentEnabled(a, false, `Could not pause "${a.name}"`)
   }
   // Issue #25 sidebar signals: needs-you (any user-blocking gate) and the
   // finished-but-unacknowledged map (set by setStatus, cleared on open).
@@ -3508,7 +3572,8 @@ function ConversationList({
           ? undefined
           : () => setMoveTarget({ id: c.id, title: c.title, workspace: c.workspace ?? null })
       }
-      onToggleRun={isAgent ? () => toggleAgentRun(c) : undefined}
+      onRunOnce={isAgent ? () => runAgentOnce(c) : undefined}
+      onStopRun={isAgent ? () => stopAgentAndPause(c) : undefined}
       stopping={stoppingConvs.has(c.id)}
       onAgentSettings={
         isAgent
@@ -3811,7 +3876,8 @@ export function ConversationRow({
   onAgentSettings,
   onToggleEnable,
   agentEnabled,
-  onToggleRun,
+  onRunOnce,
+  onStopRun,
   stopping,
   menuOpen,
   setMenuOpen,
@@ -3841,9 +3907,13 @@ export function ConversationRow({
   onToggleEnable?: () => void
   /** Current enabled state, for the menu item's label (with onToggleEnable). */
   agentEnabled?: boolean
-  /** Start/stop the agent's run (agent chats only). Present = the row shows
-   *  the toggle; the icon follows the running state (■ stop / ▶ run now). */
-  onToggleRun?: () => void
+  /** #199: run the agent once, now — never touching the schedule. When the
+   *  agent is enabled this is the dialog-identical "run now"; when paused it
+   *  is a one-shot fire and the agent stays paused. */
+  onRunOnce?: () => void
+  /** #199: stop — cancels the in-flight run while it lasts; on an idle agent
+   *  it disables (pauses) the schedule. */
+  onStopRun?: () => void
   /** The user just clicked stop: dim the "working" signals until the
    *  backend settles, so the click visibly registered. */
   stopping?: boolean
@@ -3912,37 +3982,79 @@ export function ConversationRow({
         {isAgent && (
           <span
             aria-hidden="true"
-            className={`mr-1.5 shrink-0 ${active ? 'text-blue-200' : 'text-zinc-500'}`}
-            title="Scheduled agent — runs on a repeating schedule"
+            className={`mr-1.5 shrink-0 ${active ? 'text-blue-200' : 'text-zinc-500'} ${agentEnabled === false ? 'opacity-50' : ''}`}
+            title={
+              agentEnabled === false
+                ? 'Paused — the schedule is off; use ▶ to resume or ⚡ to run once'
+                : 'Scheduled agent — runs on a repeating schedule'
+            }
           >
             <PersonIcon />
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate">{liveTitle ?? conv.title}</span>
+        <span
+          className={`min-w-0 flex-1 truncate ${isAgent && agentEnabled === false ? 'italic text-zinc-500' : ''}`}
+        >
+          {liveTitle ?? conv.title}
+          {isAgent && agentEnabled === false && (
+            <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px font-mono text-[9px] not-italic text-zinc-400">
+              paused
+            </span>
+          )}
+        </span>
         <span
           className={`ml-1.5 shrink-0 font-mono text-[9px] ${active ? 'text-blue-200' : 'text-zinc-600'}`}
         >
           {relTime(conv.updated_at)}
         </span>
       </button>
-      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onToggleRun && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
-        {onToggleRun && (
+      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onRunOnce && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+        {onRunOnce && (
           <button
             className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-opacity ${
-              stopping
-                ? 'opacity-30'
-                : running
-                  ? 'text-zinc-300 hover:text-zinc-100'
-                  : 'text-zinc-600 hover:text-zinc-300'
+              stopping || running ? 'text-zinc-600 opacity-30' : 'text-zinc-600 hover:text-zinc-300'
             }`}
-            aria-label={running ? 'Stop this run' : 'Run now'}
-            title={running ? 'Stop this run' : 'Run now'}
+            aria-label="Run once now"
+            title={
+              agentEnabled === false
+                ? 'Run once now — the paused schedule is unchanged'
+                : 'Run now — the schedule advances from this fire'
+            }
+            disabled={running || stopping}
             onClick={(e) => {
               e.stopPropagation()
-              onToggleRun()
+              onRunOnce()
             }}
           >
-            {running ? <StopIcon /> : <PlayIcon />}
+            <BoltIcon />
+          </button>
+        )}
+        {onToggleEnable && !running && agentEnabled === false && (
+          <button
+            className="flex h-[18px] w-[18px] items-center justify-center rounded text-zinc-600 hover:text-zinc-300"
+            aria-label="Resume schedule"
+            title="Resume — the schedule continues from its saved slot (rolled forward if stale); nothing fires now"
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleEnable()
+            }}
+          >
+            <PlayIcon />
+          </button>
+        )}
+        {onStopRun && (
+          <button
+            className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-opacity ${
+              stopping ? 'opacity-30' : running ? 'text-zinc-300 hover:text-zinc-100' : 'text-zinc-600 hover:text-zinc-300'
+            }`}
+            aria-label="Stop run and pause schedule"
+            title={running ? 'Stop this run and pause the schedule' : 'Pause the schedule'}
+            onClick={(e) => {
+              e.stopPropagation()
+              onStopRun()
+            }}
+          >
+            <StopIcon />
           </button>
         )}
         <button
@@ -5011,6 +5123,16 @@ function StopIcon() {
   )
 }
 
+/** #199: one-shot fire — a lightning bolt, deliberately unlike play (which
+ *  now means only "resume the schedule"). */
+function BoltIcon() {
+  return (
+    <svg width="8" height="11" viewBox="0 0 8 11" fill="currentColor" aria-hidden="true">
+      <path d="M4.6 0.5 L0.8 6.2 H3.2 L2.6 10.5 L7.2 4.4 H4.4 Z" />
+    </svg>
+  )
+}
+
 const agentInputCls =
   'rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none'
 
@@ -5388,7 +5510,8 @@ function AgentForm({
       {!agent && (
         <p className="text-[10px] text-zinc-600">
           The first fire is never immediate — an interval agent runs one interval after save, a
-          daily/weekly agent at its next clock slot. Use "Run now" to test right away. Missed fires
+          daily/weekly agent at its next clock slot. Use "Run now" to test right away (a paused
+          agent runs once without resuming). Missed fires
           while YAAH is closed are skipped.
         </p>
       )}
@@ -5450,7 +5573,10 @@ function AgentsDialog({
   const runNow = async (a: ScheduledAgent) => {
     setBusy(true)
     try {
-      await runAgentNow(a.id)
+      // #199: same semantics as the sidebar's bolt — enabled agents get the
+      // schedule-advancing "run now"; paused agents get a one-shot fire that
+      // leaves the schedule parked.
+      await runAgentNow(a.id, { oneShot: a.enabled === false })
       await refreshAgents()
     } catch (e) {
       pushToast({ kind: 'error', title: `Could not run "${a.name}"`, body: String((e as { message?: string }).message ?? e) })
@@ -5547,6 +5673,11 @@ function AgentsDialog({
                     <button
                       className="rounded   px-1.5 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                       disabled={busy || a.running}
+                      title={
+                        a.enabled
+                          ? 'Run now — the schedule advances from this fire'
+                          : 'Run once now — the paused schedule is unchanged'
+                      }
                       onClick={() => void runNow(a)}
                     >
                       run now
@@ -5902,6 +6033,91 @@ function ScreenshotToolToggle() {
   )
 }
 
+/** Settings card: the GLOBAL persistent-memory toggle (issue #169). Memory
+ *  is opt-in (default OFF): enabling exposes memory_save/read/delete and the
+ *  prompt block. Disabling preserves the on-disk store under ~/.yaah/memory/. */
+export function MemoryToggle() {
+  const [enabled, setEnabled] = useState(false)
+  // Not-loaded-yet and in-flight-save guard (CodeRabbit return trip): a slow
+  // initial GET must not overwrite a just-saved value, and overlapping PUTs
+  // could leave the saved value different from the displayed one.
+  const [loaded, setLoaded] = useState(false)
+  const [pending, setPending] = useState(false)
+  // Return trip #2: if the initial load fails we must NOT show OFF as if it
+  // were the persisted state — keep the checkbox disabled and surface why.
+  const [loadError, setLoadError] = useState(false)
+
+  useEffect(() => {
+    getConfig()
+      .then((c) => {
+        setEnabled(c.memory?.enabled === true)
+        setLoaded(true)
+        setLoadError(false)
+      })
+      .catch(() => {
+        // Deliberately leave `loaded` false: an unchecked box here would
+        // falsely read as "memory disabled" while the backend still
+        // exposes memory tools.
+        setLoadError(true)
+      })
+  }, [])
+
+  const toggle = async (next: boolean) => {
+    if (pending) return
+    setPending(true)
+    setEnabled(next)
+    try {
+      await updateConfig({ memory: { enabled: next } })
+    } catch {
+      // The PUT may have landed even though its response was lost; reconcile
+      // against the persisted value instead of assuming failure.
+      try {
+        const c = await getConfig()
+        setEnabled(c.memory?.enabled === true)
+      } catch {
+        setEnabled(!next)
+      }
+    } finally {
+      setPending(false)
+    }
+  }
+
+  if (loadError) {
+    return (
+      <div className="space-y-1.5">
+        <label className="flex items-center gap-2 text-xs text-zinc-300">
+          <input type="checkbox" className="accent-blue-600" checked={false} disabled />
+          Enable persistent memory
+        </label>
+        <p className="text-[10px] leading-relaxed text-red-400" role="alert">
+          Could not load the saved memory setting; the toggle is disabled so it cannot
+          misrepresent the persisted state. Reopen Settings to retry.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-xs text-zinc-300">
+        <input
+          type="checkbox"
+          className="accent-blue-600"
+          checked={enabled}
+          disabled={!loaded || pending}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        Enable persistent memory
+      </label>
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        Lets the agent save and recall per-project facts. Memories live in ~/.yaah/memory/;
+        disabling removes the tools from new turns but preserves everything on disk. Applies
+        to new turns and sessions.
+      </p>
+    </div>
+  )
+}
+
 /** Settings card: the GLOBAL scheduled-run retry preference (issue #41). */
 function AgentsSettingsSection() {
   const [rc, setRc] = useState('2')
@@ -5988,6 +6204,59 @@ function SettingsCard({
  *  Width is set per-use (w-full / flex-1 / fixed). */
 const settingsInputCls =
   'rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none'
+
+/** #231: the remote narration voice picker, isolated for component tests
+ *  (the SaySettingsCard precedent). With a server list: a select mirroring
+ *  local mode, keeping the saved voice selectable even when the server
+ *  doesn't offer it. Without one: the original free-text input — OpenAI
+ *  has no voices endpoint, so an empty list is normal, not an error. */
+export function RemoteVoiceField({
+  voiceDraft,
+  voices,
+  probing,
+  onChange,
+}: {
+  voiceDraft: string
+  voices: string[]
+  probing: boolean
+  onChange: (v: string) => void
+}) {
+  if (voices.length === 0) {
+    return (
+      <input
+        className={`${settingsInputCls} w-full`}
+        value={voiceDraft}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={probing ? 'probing voices…' : 'voice (server-validated, e.g. af_heart)'}
+        aria-label="Read-aloud voice"
+      />
+    )
+  }
+  return (
+    <select
+      className={`${settingsInputCls} w-full`}
+      value={
+        voices.includes(voiceDraft)
+          ? voiceDraft
+          : voiceDraft.trim() === ''
+            ? voices[0]
+            : voiceDraft
+      }
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Read-aloud voice"
+      title="Voices from the server's /voices endpoint"
+    >
+      {!voices.includes(voiceDraft) && voiceDraft.trim() !== '' && (
+        <option value={voiceDraft}>{voiceDraft} (saved)</option>
+      )}
+      {voices.map((v) => (
+        <option key={v} value={v}>
+          {v}
+        </option>
+      ))}
+    </select>
+  )
+}
 
 /** #207: the spoken-briefing toggles as an isolated card (the Settings
  *  modal's Voice tab embeds it; the card is exported for component tests,
@@ -6157,6 +6426,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [ttsTestState, setTtsTestState] = useState<'idle' | 'busy'>('idle')
   const [ttsTestResult, setTtsTestResult] = useState<string | null>(null)
   const [ttsTestOk, setTtsTestOk] = useState(false)
+  // Voice discovery (#231): the names the remote server offers, probed on
+  // endpoint/key changes. Empty list = free-text fallback (OpenAI has no
+  // voices endpoint; absence of a list is normal, never an error).
+  const [remoteVoiceList, setRemoteVoiceList] = useState<string[]>([])
+  const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
   const [ttsModelReady, setTtsModelReady] = useState(false)
@@ -6300,6 +6574,38 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       })
       .catch(() => {})
   }, [])
+
+  // Voice discovery (#231): re-probe (debounced) when the remote drafts
+  // change while the remote engine is selected — including first paint,
+  // where the drafts are the saved settings. The key draft participates so
+  // a first-time setup can discover before its first Save. Per-endpoint
+  // cache keeps re-renders from re-probing; failures leave the cache
+  // untouched (a stale list beats no list).
+  useEffect(() => {
+    if (ttsEngine !== 'remote') return
+    const endpoint = ttsEndpoint.trim()
+    if (!endpoint) {
+      setRemoteVoiceList([])
+      return
+    }
+    let cancelled = false
+    setRemoteProbing(true)
+    const t = setTimeout(() => {
+      ttsVoices(endpoint, ttsKey)
+        .then((voices) => {
+          if (!cancelled) setRemoteVoiceList(voices)
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setRemoteProbing(false)
+        })
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsEngine, ttsEndpoint, ttsKey])
 
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
@@ -7054,12 +7360,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     </select>
                     ) : null}
                     {ttsEngine === 'remote' && (
-                      <input
-                        className={`${settingsInputCls} w-full`}
-                        value={ttsVoiceDraft}
-                        onChange={(e) => setTtsVoiceDraft(e.target.value)}
-                        placeholder="voice (server-validated, e.g. af_heart)"
-                        aria-label="Read-aloud voice"
+                      <RemoteVoiceField
+                        voiceDraft={ttsVoiceDraft}
+                        voices={remoteVoiceList}
+                        probing={remoteProbing}
+                        onChange={setTtsVoiceDraft}
                       />
                     )}
                     <button
@@ -7147,6 +7452,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
 
                 <SettingsCard title="Screenshot tool" className="col-span-2">
                   <ScreenshotToolToggle />
+                </SettingsCard>
+
+                <SettingsCard title="Memory" className="col-span-2">
+                  <MemoryToggle />
                 </SettingsCard>
 
                 <SettingsCard title="Remote hosting" className="col-span-2">
@@ -8336,9 +8645,18 @@ export function ChatPanel() {
       // sentences play through and the new voice starts right after.
       const prev = n
       if (prev) {
+        // Close the previous emission's stream utterance OUT: end() is what
+        // lets startUtterance's stream wait finish and drain the process
+        // queue. Without it the first emission spins forever and every
+        // later emission queues behind it, never starting — the voice goes
+        // silent after the first emission of a turn.
         const prevMsg = messages.find((m) => m.id === prev.msgId)
         const chunks = splitSentences(liveProse(prevMsg?.content ?? ''))
+        // Nothing was appended while holding (see the hold path below), so
+        // the flush hands over ALL held chunks: an emission without a
+        // usable <say> tag still speaks, verbatim.
         for (let i = prev.spoken; i < chunks.length; i++) prev.feed.append(chunks[i])
+        prev.feed.end()
       }
       const feed = beginNarration(lastAssistantId)
       if (!feed) return
@@ -8355,10 +8673,11 @@ export function ChatPanel() {
       n.feed.append(spokenLine(msgSay, lastAssistantContent))
       return
     }
-    // No tag yet: hold. Only the COUNT tracks here - chunks stay unappended
-    // so they can be discarded wholesale when the briefing lands.
-    const chunks = splitSentences(liveProse(lastAssistantContent))
-    n.spoken = chunks.length
+    // No tag yet: hold. Nothing is appended while the emission streams —
+    // the held sentences are discarded wholesale when the briefing lands
+    // (said path above), or handed over whole at the swap / run-end flush.
+    // `spoken` therefore stays 0 until a flush runs, which is exactly what
+    // makes those flushes append everything.
   }, [streaming, lastAssistantId, lastAssistantContent, messages, ttsEnabled, ttsReady, beginNarration])
   // Run finished → close the live narration; fall back to the classic
   // end-of-run read ONLY when nothing was narrated live (e.g. TTS was
@@ -8581,7 +8900,8 @@ const attachmentText = (a: Attachment): string => {
   return `\n\n--- attached file: ${a.name} (${kb} KB) ---\nSaved to ${a.savedPath} in the workspace. Read it with read_file (use offset/limit for large files).`
 }
 
-function Composer() {
+/** Exported for the say wire-contract test (#226); App composes it here. */
+export function Composer() {
   const {
     conversationId,
     workspace,
@@ -9396,9 +9716,13 @@ function Composer() {
       }
     } else if (ev.type === 'say') {
       // Spoken briefing (#66): captured on its message for read-aloud,
-      // never rendered.
+      // never rendered. #226: the wire field is `text` (loop.py ships
+      // {"type":"say","text":...}); `ev.say` never existed, so briefings
+      // were captured as '' and the voice always fell back to the
+      // heuristic first/last-sentence read. Read `text` first; keep a
+      // defensive `say` fallback in case the shape ever grows one.
       startPostSteerEmission()
-      setSay(bufKey, curId, ev.say ?? '')
+      setSay(bufKey, curId, ev.text ?? ev.say ?? '')
     } else if (ev.type === 'thinking') {
       setStatus(bufKey, 'thinking')
       // Model reasoning flows onto the tape (UI-only; never stored).

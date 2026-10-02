@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,15 @@ async def _run_git(workspace: str, *args: str) -> tuple[int, bytes]:
     # Portable Git discovery (gitproc), shared across the codebase.
     from backend.agent.gitproc import git_exe
 
+    # Subprocess flags must follow the REAL host, not a (possibly flipped)
+    # os.name: the prompt-manifest harness flips os.name to render foreign-
+    # platform combos (#184), and Linux subprocess rejects creationflags.
+    # sys.platform is not touched by the flip and carries the same info.
+    flags = (
+        {"creationflags": 0x08000000}
+        if sys.platform == "win32"
+        else {"start_new_session": True}
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             git_exe(),
@@ -29,11 +39,7 @@ async def _run_git(workspace: str, *args: str) -> tuple[int, bytes]:
             cwd=workspace,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            **(
-                {"creationflags": 0x08000000}
-                if os.name == "nt"
-                else {"start_new_session": True}
-            ),
+            **flags,
         )
     except OSError:
         return 127, b""

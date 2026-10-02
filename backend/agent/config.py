@@ -84,6 +84,13 @@ DEFAULTS = {
         # Kokoro 0.5-2.0 - let the server validate its own range).
         "tts_speed": None,
     },
+    # Persistent memory (issue #169): Settings toggle, opt-in with default
+    # OFF. When disabled the memory tools are filtered from the schema, the
+    # prompt block is suppressed, and stray calls are refused gracefully.
+    # The on-disk store under ~/.yaah/memory/ is never touched by the
+    # toggle. (NOT a bare flag: `memory_enabled` is taken by the
+    # scheduled-agent history flag, #41.)
+    "memory": {"enabled": False},
     # Saved remote device metadata. Passphrases are intentionally never
     # persisted here; users re-enter them after a backend restart.
     "remote_devices": [],

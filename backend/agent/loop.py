@@ -239,7 +239,12 @@ def _memory_notes(workspace: str) -> str:
     a turn. Remote sessions keep their memories client-local: the tools
     resolve slugs against the CLIENT's memory root, so injection is the
     same block either way."""
-    from backend.agent import memory
+    from backend.agent import memory, tools
+
+    # Issue #169: persistent memory is opt-in (memory.enabled, default
+    # OFF) — when disabled the prompt block is suppressed entirely.
+    if not tools.memory_enabled():
+        return ""
 
     try:
         return memory.index_for_prompt(workspace)
@@ -365,6 +370,9 @@ def _default_system_prompt(workspace: str = "") -> str:
                 "sandbox_status", "sandbox_stop",
             ]
             sandbox_section = sandbox_mod.prompt_section()
+    # #181: the prose line must cover the whole schema set. The tail tools
+    # below previously existed only as schemas (search_conversation_history
+    # was never mentioned anywhere); annotations keep the useful pointers.
     tools += [
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
@@ -372,6 +380,10 @@ def _default_system_prompt(workspace: str = "") -> str:
         "get_help (full docs for any tool; call with no argument to list them)",
         "spawn_agent (delegate self-contained work to a sub-agent; see the "
         "sub-agents index below)",
+        "ask_user",
+        "load_skill",
+        "memory_save", "memory_read", "memory_delete",
+        "search_conversation_history",
     ]
     prompt = f"""You are an expert AI coding agent working inside a user's project workspace.
 
@@ -387,22 +399,6 @@ Guidelines:
   authentication; if gh is unavailable, say so instead of scraping the web UI.
 - Prefer edit_file for targeted changes; write_file only for new files or full rewrites.
 - read_file returns line ranges: page through large files with start_line/end_line.
-- Choose the test environment by side effects. Run automated tests and
-  validation on the host by default—including full suites, builds, Python
-  scripts, smoke tests, typechecks and lint—when they won't open a new
-  window or reasonably interfere with or interrupt the host user. Use the
-  sandbox when project execution opens/listens on a network port, when a GUI
-  window must be opened for visual inspection, or when a test could otherwise
-  disrupt the host. Boot with sandbox_test and run commands via sandbox_run.
-  Size timeouts to the work; chunk long suites when needed. The VM is a clean
-  image: install missing tools into the toolkit (installs persist across
-  sandboxes).
-- Sandbox work stays IN the sandbox: every dependency the app under test
-  needs (runtimes, browsers, portable tools) is installed into the VM's
-  toolkit — never launch a host equivalent (e.g. the host browser) to
-  exercise the app, and never drive the app's GUI with the host
-  mouse/keyboard tools; the windows-mcp MCP server (auto-started in
-  the sandbox) is the GUI layer for that.
 - If a full-suite verification fails, separate YOUR change from the
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists
@@ -418,6 +414,28 @@ Guidelines:
 - Shell calls start in the selected workspace; no setup `cd` is needed.
 - Each shell call is a fresh process. `cd` does not persist; use workspace-relative
   paths unless the task specifically requires the main checkout.
+"""
+
+    if windows and host is None:
+        # Issue #179: the sandbox bullets name sandbox_test/sandbox_run and the
+        # windows-mcp server — tools that exist only for a local Windows
+        # session. Never name a tool the schema set does not carry.
+        prompt += """- Choose the test environment by side effects. Run automated tests and
+  validation on the host by default—including full suites, builds, Python
+  scripts, smoke tests, typechecks and lint—when they won't open a new
+  window or reasonably interfere with or interrupt the host user. Use the
+  sandbox when project execution opens/listens on a network port, when a GUI
+  window must be opened for visual inspection, or when a test could otherwise
+  disrupt the host. Boot with sandbox_test and run commands via sandbox_run.
+  Size timeouts to the work; chunk long suites when needed. The VM is a clean
+  image: install missing tools into the toolkit (installs persist across
+  sandboxes).
+- Sandbox work stays IN the sandbox: every dependency the app under test
+  needs (runtimes, browsers, portable tools) is installed into the VM's
+  toolkit — never launch a host equivalent (e.g. the host browser) to
+  exercise the app, and never drive the app's GUI with the host
+  mouse/keyboard tools; the windows-mcp MCP server (auto-started in
+  the sandbox) is the GUI layer for that.
 """
 
     # #207: the spoken-briefing section is only ever generated when the
@@ -725,16 +743,24 @@ def _plan_mode_note() -> str:
 def _sandbox_only_note() -> str:
     """System-prompt section injected for scheduled agents running with the
     sandbox-only approval policy (issue #41): no user is watching, so
-    approval-required tools never execute."""
+    approval-required tools never execute.
+
+    The wording mirrors the gate's actual rule (#177), which is enumerable
+    from tool_risk(): READ-ONLY tools run; every mutating or shell tool
+    (file edits, bash/powershell, and the mutating sandbox_* VM tools)
+    skips with the in-band "skipped: approval required" result.
+    """
     return (
         "# Scheduled agent: sandbox-only policy\n\n"
-        "This is an unattended scheduled run: every tool that normally "
-        "requires user approval (file edits, shell commands and anything "
-        "else mutating) is unavailable — calls come back as \"skipped: "
-        "approval required\". Do "
-        "not attempt them or retry after a skip. Work read-only: gather "
-        "information, check status, and report findings, keeping anything "
-        "disruptive as a recommendation for the user to run themselves."
+        "This is an unattended scheduled run with no user to approve "
+        "anything: read-only tools (search, status checks, observation) "
+        "still work, but every tool that writes or executes — file "
+        "edits, bash/powershell, and the sandbox VM tools that install or "
+        "change anything — comes back as \"skipped: approval "
+        "required\". Do not attempt them or retry after a skip. Work "
+        "read-only: gather information, check status, and report "
+        "findings, keeping anything disruptive as a recommendation for "
+        "the user to run themselves."
     )
 
 
@@ -778,10 +804,15 @@ def _policy_skip_result(name: str) -> dict:
 
 
 def _plan_block_result(name: str) -> dict:
+    # Capability-neutral wording: the local loop exposes exit_plan, but the
+    # remote turn reuses this same block result and has no exit_plan tool
+    # (#179 return trip) — so the error may not name a tool the caller
+    # cannot call. The prompt-level note carries the surface-specific
+    # instruction instead.
     return {
         "error": (
             f"plan mode is on: {name} was not executed. Present your plan "
-            "with the exit_plan tool and wait for approval."
+            "as text before continuing with read-only work."
         )
     }
 
@@ -1188,6 +1219,7 @@ async def run_agent(
     include_history: bool = True,
     model_override: str = "",
     effort_override: str | None = None,
+    user_meta: dict | None = None,
 ) -> AsyncIterator[str]:
     """Claim a conversation and always release it when its stream ends."""
     try:
@@ -1225,6 +1257,7 @@ async def run_agent(
             include_history=include_history,
             model_override=model_override,
             effort_override=effort_override,
+            user_meta=user_meta,
         ):
             yield event
     finally:
@@ -1246,6 +1279,7 @@ async def _run_agent_claimed(
     include_history: bool = True,
     model_override: str = "",
     effort_override: str | None = None,
+    user_meta: dict | None = None,
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
@@ -1255,6 +1289,10 @@ async def _run_agent_claimed(
     are injected into the system prompt for this turn only.
     persist_user: False when resuming an interrupted turn — the user
     message is already stored and must not be duplicated.
+    user_meta: #198 — JSON-object tag persisted on the user message row
+    (stored in the messages.meta column). Only the scheduler's fire path
+    sets it ({"agent_prompt": true}) so the UI can collapse the per-run
+    effective prompt into a chip; hand-typed messages stay untagged.
     policy: per-run approval policy for scheduled agents (issue #41),
     "sandbox-only" (gated tools skip with a note) or "autonomous"
     (everything auto-approved); None = normal chat turn driven by the
@@ -1292,7 +1330,7 @@ async def _run_agent_claimed(
     if persist_user:
         await add_message(
             conversation_id, "user", user_text, images=image_paths or None,
-            attachments=attachments or None,
+            attachments=attachments or None, meta=user_meta,
         )
 
     # Per-conversation system prompt override (Q17) wins over the global one
@@ -1640,12 +1678,27 @@ async def _run_agent_claimed(
             tool_calls = state["tool_calls"]
             finish_reason = state["finish"]
 
-            # Persist assistant message (with tool calls if any)
+            # #207: the whole channel is gated on voice.say_emissions —
+            # off means no prompt section, no `say` event, no fallback.
+            # Tag-stripping above is NOT gated: stray tags never become
+            # transcript junk and never reach speech either way. Computed
+            # before the persist below so the briefing rides the row (#226).
+            _said = (
+                _speak.spoken_line(said, assistant_content)
+                if _say_emissions_enabled()
+                else ""
+            )
+
+            # Persist assistant message (with tool calls if any). #226: the
+            # briefing rides on the row (say column) so reloads and export
+            # can render what the voice said; load_history never replays it
+            # into model context.
             await add_message(
                 conversation_id,
                 "assistant",
                 assistant_content,
                 tool_calls=tool_calls,
+                say=_said,
             )
 
             # Briefing-first, per emission (#66): EVERY completed model
@@ -1655,15 +1708,6 @@ async def _run_agent_claimed(
             # clipped verbatim) when the emission carried no usable <say>
             # tag. Text-less emissions (a bare tool_calls message) say
             # nothing rather than emitting an empty briefing.
-            # #207: the whole channel is gated on voice.say_emissions —
-            # off means no prompt section, no `say` event, no fallback.
-            # Tag-stripping above is NOT gated: stray tags never become
-            # transcript junk and never reach speech either way.
-            _said = (
-                _speak.spoken_line(said, assistant_content)
-                if _say_emissions_enabled()
-                else ""
-            )
             if _said:
                 yield _ndjson({"type": "say", "text": _said})
 

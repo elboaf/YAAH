@@ -84,8 +84,9 @@ COMPUTER_HELP_DOCS = {
         "the user's other work."
     ),
     "mouse_drag": (
-        "For sliders, drag-and-drop, and text selection. A slow duration "
-        "(up to 3s) helps apps that need real drag momentum."
+        "A slow duration (up to 3s) helps apps that need real drag "
+        "momentum - start there when a quick drag misses a slider or "
+        "drag-and-drop target."
     ),
 }
 

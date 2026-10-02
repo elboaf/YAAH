@@ -470,6 +470,82 @@ async def synthesize_remote(
     raise RemoteTTSError(last_err or "remote TTS failed")
 
 
+# ---- Voice discovery (#231): best-effort, non-standard GET /voices --------
+
+
+VOICES_TIMEOUT = 4.0  # discovery is best-effort; a slow answer is a no-list
+
+
+def _voices_url(base: str) -> str:
+    """/voices on the server ROOT — verified on the reference Kokoro server,
+    where /v1/voices is 404 even though speech lives under /v1. Accepts the
+    same bases as _remote_url (bare host:port, a /v1-suffixed base) plus a
+    user who typed the voices path itself."""
+    trimmed = (base or "").strip().rstrip("/")
+    if not trimmed:
+        raise RemoteTTSError(
+            "remote TTS selected but no endpoint configured (Settings → Voice)",
+            code="not-configured",
+        )
+    for suffix in ("/voices", "/v1/audio/voices", "/v1/voices"):
+        if trimmed.endswith(suffix):
+            return trimmed[: len(trimmed) - len(suffix)] + "/voices"
+    if trimmed.endswith("/v1"):
+        return trimmed[:-3] + "/voices"
+    return trimmed + "/voices"
+
+
+def _normalize_voices(body) -> list[str]:
+    """Best-effort extraction of voice names from whatever shape a server
+    answers with: a bare array (the reference server), {"voices": [...]},
+    {"data": [{"id": ...}]} (OpenAI list style), or a name-keyed map of
+    descriptors. Drops junk, collapses duplicates, preserves server order.
+    A dict counts as a name-keyed map only when every value is a
+    descriptor (dict/list) — {"ok": true} is not a voice list."""
+    if isinstance(body, list):
+        candidates: list = [
+            v.get("id") if isinstance(v, dict) else v for v in body
+        ]
+    elif isinstance(body, dict):
+        if isinstance(body.get("voices"), list):
+            candidates = list(body["voices"])
+        elif isinstance(body.get("data"), list):
+            candidates = [
+                v.get("id") if isinstance(v, dict) else v for v in body["data"]
+            ]
+        elif body and all(isinstance(v, (dict, list)) for v in body.values()):
+            candidates = list(body.keys())
+        else:
+            return []
+    else:
+        return []
+    names = [c.strip() for c in candidates if isinstance(c, str) and c.strip()]
+    return list(dict.fromkeys(names))
+
+
+async def probe_remote_voices(endpoint: str, api_key: str = "") -> list[str]:
+    """The voice list a server offers, or [] when it offers none. ANY
+    failure — 404, 5xx, timeout, unreachable, unparseable body — reads as
+    "no list": OpenAI's own API has no voices endpoint, so a list-less
+    server is normal, not broken (#205: discovery is a nicety, never a
+    requirement). Only a missing endpoint raises (not-configured, the
+    same gate as speech)."""
+    url = _voices_url(endpoint)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=VOICES_TIMEOUT) as client:
+            res = await client.get(url, headers=headers)
+    except (httpx.TimeoutException, httpx.TransportError):
+        return []
+    if res.status_code != 200:
+        return []
+    try:
+        body = res.json()
+    except ValueError:
+        return []
+    return _normalize_voices(body)
+
+
 # ---- Spoken briefing (two-channel split, #66) ---------------------------------
 # The chat transcript and the TTS input are deliberately DIFFERENT texts. The
 # agent emits a condensed spoken line as a <say> tag at the end of its final
@@ -545,10 +621,22 @@ def heuristic_briefing(md: str, max_chars: int = _BRIEFING_MAX) -> str:
     m = _SENT_END_ANY.search(first)
     opening = first[: m.end(1)].strip() if m else first
     tail = paras[-1]
-    m = None
+    # Walk sentence boundaries; the LAST sentence starts where the previous
+    # match ended. (Slicing from the last punctuation index alone would
+    # collapse the closing to bare punctuation like ".".)
+    prev = None
+    last = None
     for m in _SENT_END_ANY.finditer(tail):
-        pass
-    closing = tail[: m.end(1)].strip() if m else tail
+        prev = last
+        last = m
+    if last is None:
+        closing = tail
+    else:
+        # Closing = the LAST sentence only. Slicing tail[: last.end(1)]
+        # (from the paragraph's START to the last sentence end) spoke the
+        # whole multi-sentence paragraph back — the read-aloud repeated
+        # the message nearly verbatim.
+        closing = tail[prev.end() if prev is not None else 0 : last.end(1)].strip()
     if closing and closing != opening and len(opening) + len(closing) + 1 <= max_chars:
         return f"{opening} {closing}".strip()
     # One of the two alone, clipped at a sentence boundary under the cap.

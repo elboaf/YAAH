@@ -63,6 +63,50 @@ async def test_bash_stream_timeout_kills_tree(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bash_timeout_flushes_partial_utf8(tmp_path):
+    """#221 return trip: if the deadline lands mid-UTF-8-character, the
+    decoder's buffered bytes must still be flushed (with errors=replace),
+    not silently dropped by the timeout return path."""
+    # 200 'é' as UTF-8 = 400 bytes; a 4096-byte read can't split it, so
+    # instead emit a lone lead byte whose continuation never arrives.
+    # Octal escape: dash's printf on Linux does not support \xHH.
+    r = await asyncio.wait_for(
+        execute_tool(
+            "bash",
+            {
+                "command": "printf '\\303'; sleep 30",
+                "timeout_seconds": 2,
+            },
+            str(tmp_path),
+        ),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    # The lone \xc3 lead byte is flushed through errors="replace" as U+FFFD.
+    assert "\ufffd" in r["output"][:idx]
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_returns_partial_output(tmp_path):
+    """#180: output captured before the deadline must not be discarded —
+    it is returned ahead of the [timed out ...] marker."""
+    r = await asyncio.wait_for(
+        execute_tool(
+            "bash",
+            {"command": "echo progress-marker; sleep 30", "timeout_seconds": 2},
+            str(tmp_path),
+        ),
+        timeout=15,
+    )
+    assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    assert "progress-marker" in r["output"][:idx]
+
+
+@pytest.mark.asyncio
 async def test_bash_on_chunk_errors_swallowed(tmp_path):
     """A throwing on_chunk (dead UI stream) must never fail the tool."""
     def bad(_chunk):
@@ -678,10 +722,17 @@ async def test_powershell_tool(tmp_path):
 async def test_powershell_timeout(tmp_path):
     r = await execute_tool(
         "powershell",
-        {"command": "Start-Sleep -Seconds 30", "timeout_seconds": 2},
+        {
+            "command": "Write-Output progress-marker; Start-Sleep -Seconds 30",
+            "timeout_seconds": 2,
+        },
         str(tmp_path),
     )
     assert r["timed_out"] is True
+    idx = r["output"].find("[timed out after")
+    assert idx != -1
+    # Pre-deadline output survives through the PowerShell entrypoint too (#180).
+    assert "progress-marker" in r["output"][:idx]
 
 
 # ---------------------------------------------------------------- images
@@ -1386,3 +1437,45 @@ def test_default_prompt_omits_spoken_briefing_when_disabled(monkeypatch):
     with _restored_config():
         save_config(_config_with_voice(say_emissions=False))
         assert "Spoken briefing" not in loop._default_system_prompt("")
+
+
+# ---- #226: briefings persist on the row -----------------------------------------
+
+@pytest.mark.asyncio
+async def test_say_briefing_persists_on_row(fake_model, tmp_path):
+    """#226 slice B: the emitted briefing is stored on the assistant row's
+    `say` column (tag-free chat content unchanged), so reloads and export
+    can render what the voice heard."""
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("say-persist")
+    fake_model.append([
+        {"type": "content", "text": "Visible answer. <say>Wired the fix; tests green.</say>"},
+        {"type": "finish"},
+    ])
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    said = [e for e in events if e["type"] == "say"]
+    assert said and said[0]["text"] == "Wired the fix; tests green."
+
+    msgs = await get_messages(cid)
+    assert msgs[-1]["content"] == "Visible answer."
+    assert msgs[-1]["say"] == "Wired the fix; tests green."
+
+
+@pytest.mark.asyncio
+async def test_say_heuristic_fallback_persists_too(fake_model, tmp_path):
+    """#226 slice B: tag-less emissions speak the heuristic briefing; that
+    same line must persist, or reloaded turns lose what was spoken."""
+    from backend.db.database import create_conversation, get_messages
+
+    cid = await create_conversation("say-persist-fallback")
+    fake_model.append([
+        {"type": "content", "text": "Just the visible answer."},
+        {"type": "finish"},
+    ])
+    events = await collect(loop.run_agent(cid, "hi", str(tmp_path)))
+    said = [e for e in events if e["type"] == "say"]
+    assert said and said[0]["text"]
+
+    msgs = await get_messages(cid)
+    assert msgs[-1]["say"] == said[0]["text"]

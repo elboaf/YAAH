@@ -301,6 +301,10 @@ FIXTURE_HOST_ID = "fixture-host"
 REMOTE_WS = f"remote:{FIXTURE_HOST_ID}:C:/fixture/project"
 OFFLINE_WS = "remote:offline-host:C:/fixture/project"
 LOCAL_WS = str(Path(tempfile.gettempdir()) / "yaah-manifest-local-ws")
+# Stable manifest token substituted for the host-specific LOCAL_WS path in
+# rendered sub-agent prompt output, so committed fixtures (and their
+# bytes/sha256 fields) are machine-independent (#182 return trip).
+LOCAL_WS_TOKEN = "<LOCAL_WS>"
 
 _FIXTURE_INFO = {
     "host_id": FIXTURE_HOST_ID,
@@ -447,7 +451,10 @@ def _split_combo(combo: str) -> dict:
             "kind": "subagents" if "subagents" in parts else "auxiliary",
             "plan": False,
             "skills": "noskills" not in parts,
-            "memory": False,
+            # #182: kind-subagents seeds a memory index so the manifest
+            # shows the chosen invariant (memory section iff the resolved
+            # schemas include a memory tool).
+            "memory": "subagents" in parts,
             "shot": True,
             "override": False,
             "compaction": False,
@@ -493,7 +500,11 @@ def _platform_os_name(windows: bool):
     On a Windows host rendering posix, pathlib.Path dispatches on
     os.name at call time, so the flip also rebinds backend modules'
     Path names to a WindowsPath subclass (subclasses skip pathlib's
-    os guard) and restores them on exit.
+    os guard) and restores them on exit. The mirror case (posix host
+    rendering windows) needs the same rebinding: os.name flips to
+    'nt', so a plain pathlib.Path() call under the flip would try to
+    instantiate a real WindowsPath and raise
+    'cannot instantiate WindowsPath on your system' (#184 Linux CI).
     """
     import os as _os
     import sys as _sys
@@ -502,30 +513,34 @@ def _platform_os_name(windows: bool):
     if target_windows == HOST_WINDOWS:
         yield
         return
-    if HOST_WINDOWS:
-        import pathlib as _pathlib
+    import pathlib as _pathlib
 
-        class _AlwaysWinPath(_pathlib.WindowsPath):
-            pass
+    # pathlib's host guard ("cannot instantiate WindowsPath on your
+    # system") is DEFINED INSIDE the concrete WindowsPath class when
+    # os.name != 'nt' at class-creation time -- so on a posix host, a
+    # WindowsPath SUBCLASS inherits the raising __new__ and still raises
+    # under the flip (#184 Linux CI, merge heads 3897049/1e18cd2). The
+    # guard is asymmetric: on a Windows host WindowsPath carries no
+    # guard, which is why this only ever failed on Linux. Shed the
+    # inherited guard with a trivial __new__ that calls object.__new__
+    # (WindowsPath.__init__/__slots__ do the rest); the class keeps the
+    # full concrete API (mkdir/write_text/iterdir/resolve).
+    class _AlwaysWinPath(_pathlib.WindowsPath):
+        def __new__(cls, *args, **kwargs):
+            return object.__new__(cls)
 
-        swapped = []
-        for mod_name, mod in list(_sys.modules.items()):
-            if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
-                mod.Path = _AlwaysWinPath
-                swapped.append((mod, _pathlib.Path))
-        _os.name = "posix"
-        try:
-            yield
-        finally:
-            _os.name = "nt"
-            for mod, orig in swapped:
-                mod.Path = orig
-    else:
-        _os.name = "nt"
-        try:
-            yield
-        finally:
-            _os.name = "posix"
+    swapped = []
+    for mod_name, mod in list(_sys.modules.items()):
+        if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
+            mod.Path = _AlwaysWinPath
+            swapped.append((mod, _pathlib.Path))
+    _os.name = "nt" if target_windows else "posix"
+    try:
+        yield
+    finally:
+        _os.name = "nt" if HOST_WINDOWS else "posix"
+        for mod, orig in swapped:
+            mod.Path = orig
 
 
 def _isolated_roots() -> dict:
@@ -573,6 +588,12 @@ def _prep_flags(flags: dict, tmp: Path) -> None:
     skill_registry.scan_skills()
 
     from backend.agent import memory as memory_mod
+
+    # Issue #169: the prompt gate now also consults memory.enabled, so the
+    # fixture flips the config flag in lockstep with the index fixture.
+    from backend.agent import config as config_mod
+
+    config_mod.save_config({"memory": {"enabled": bool(flags["memory"])}})
 
     workspace = (
         REMOTE_WS if flags["kind"] == "remote" else LOCAL_WS
@@ -658,10 +679,17 @@ def _drive_turn(flags: dict) -> dict:
                 # Persist a summary through the REAL compaction persistence
                 # (compact_conversation) -- exactly what _maybe_compact leaves
                 # behind; run_agent_turn reads it via get_prompt_summary.
+                # The watermark must be THIS conversation's message id, not a
+                # literal: #184 -- a stale literal is rejected by
+                # compact_conversation's monotonic-watermark guard and the
+                # summary silently never persists.
+                through_id = await add_message(
+                    cid, "assistant", "fixture prior assistant reply"
+                )
                 await compact_conversation(
                     cid,
                     "Fixture summary of the earlier conversation.",
-                    1,
+                    through_id,
                 )
             policy = "sandbox-only" if flags["policy"] else None
             async for _event in loop._run_agent_claimed(
@@ -702,6 +730,12 @@ def render_local_family(combo: str, flags: dict) -> dict:
         allowed = _schema_names_for(
             False, flags["kind"] != "local", flags["kind"] != "local"
         )
+        if flags["plan"]:
+            # loop.py appends EXIT_PLAN_SCHEMA when plan mode is on (after
+            # the captured turn); the platform-shape filter must not strip
+            # it or plan-vs-normal combos collapse to identical tool sets
+            # on posix renders (issue #178 CI failure).
+            allowed = allowed | {"exit_plan"}
         captured["tools"] = [
             s
             for s in captured["tools"]
@@ -715,7 +749,14 @@ def render_local_family(combo: str, flags: dict) -> dict:
     return {
         "combo": combo,
         "kind": flags["kind"],
-        "sections": _split_sections(str(system_messages[0].get("content") or "")),
+        # Sections across ALL system messages: the compaction summary is
+        # injected as its own system message (loop.py), so slicing only
+        # the first one hid it from every manifest (#184).
+        "sections": [
+            section
+            for m in system_messages
+            for section in _split_sections(str(m.get("content") or ""))
+        ],
         "system_messages": [
             {
                 "role": "system",
@@ -749,10 +790,20 @@ def _tool_schemas_summary(tools: list) -> list:
 def _def_to_manifest(defn) -> dict:
     """A built-in AgentDef through _sub_agent_system_prompt (the REAL
     builder). Tool list is the definition's static prose list, not
-    get_schemas -- matched by matching the production section names."""
+    get_schemas -- matched by matching the production section names.
+    Workspace is LOCAL_WS so the #182 memory-index injection (seeded by
+    _prep_flags for kind-subagents) renders when the resolved schemas
+    include a memory tool."""
     from backend.agent.subagents import _sub_agent_system_prompt
 
-    prompt = _sub_agent_system_prompt(defn, "")
+    prompt = _sub_agent_system_prompt(defn, LOCAL_WS)
+    # Canonicalize the host-specific workspace path out of the rendered
+    # output before sizing/hashing/splitting, so committed manifests are
+    # reproducible on any machine (#182 return trip). Injections that
+    # resolve the workspace (project notes) emit the long real path, so
+    # both the LOCAL_WS spelling and its resolved form are replaced.
+    for variant in {LOCAL_WS, str(Path(LOCAL_WS).resolve())}:
+        prompt = prompt.replace(variant, LOCAL_WS_TOKEN)
     raw = prompt.encode("utf-8")
     return {
         "name": defn.name,

@@ -83,3 +83,42 @@ def test_records_json_roundtrip():
     """The DB stores a JSON string; reinline must accept the parsed shape."""
     records = json.loads(json.dumps([r for r, _ in FIXTURE]))
     assert reinline_attachments("t", records) == "t" + FIXTURE[0][1] + FIXTURE[1][1]
+
+
+# ---- Issue #183: the inline cap is enforced at re-inline time ----
+
+def _oversize_record():
+    content = "x" * (INLINE_LIMIT_BYTES + 1)
+    return {"name": "huge.txt", "size": len(content), "content": content}
+
+
+def test_overlimit_content_is_not_inlined_in_full():
+    """A persisted row with >100 KB content must never ride into model
+    context in full: the injection degrades it (truncation marker)."""
+    record = _oversize_record()
+    out = inline_attachment_text(record)
+    assert record["content"] not in out
+    assert len(out) < INLINE_LIMIT_BYTES + 500
+    assert "…[truncated]" in out
+
+
+def test_overlimit_content_truncates_at_the_limit():
+    record = _oversize_record()
+    out = inline_attachment_text(record)
+    # The visible head of the content survives, at most the limit.
+    assert "x" * INLINE_LIMIT_BYTES in out
+    assert "x" * (INLINE_LIMIT_BYTES + 1) not in out
+
+
+def test_reinline_applies_the_cap_too():
+    out = reinline_attachments("hi", [_oversize_record()])
+    assert "x" * (INLINE_LIMIT_BYTES + 1) not in out
+    assert "…[truncated]" in out
+
+
+def test_at_limit_content_inlines_in_full():
+    """Exactly-at-limit rides inline: the comment says 'at or under'."""
+    content = "y" * INLINE_LIMIT_BYTES
+    out = inline_attachment_text({"name": "edge.txt", "size": len(content), "content": content})
+    assert content in out
+    assert "…[truncated]" not in out
