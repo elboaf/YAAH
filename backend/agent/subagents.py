@@ -87,6 +87,14 @@ _EXPLORE_TOOLS = {
 }
 
 
+def _exclusion_clause() -> str:
+    """The index description is generated from the SAME sets the
+    runtime enforces (#189/SYN-23), so prose and enforcement cannot
+    drift apart again."""
+    excluded = sorted(_ALWAYS_EXCLUDED | _COMPUTER_TOOLS)
+    return "all tools except: " + ", ".join(excluded)
+
+
 def _builtin_general_purpose() -> AgentDef:
     return AgentDef(
         name="general-purpose",
@@ -94,16 +102,13 @@ def _builtin_general_purpose() -> AgentDef:
             "The default sub-agent for broad tasks: implement a small "
             "feature, fix a clear issue, run verification commands, or "
             "carry a self-contained piece of work forward in isolation. "
-            "Has access to all tools except ask_user and spawn_agent."
+            "Has access to " + _exclusion_clause() + "."
         ),
         body=(
             "You are a focused sub-agent working inside a larger task. "
             "Complete the delegated work independently: explore what you "
             "need, make the changes, verify them, and report a concise "
-            "final summary. Your final message is the ONLY thing the "
-            "parent agent receives — make it self-contained: what you "
-            "did, what you changed (paths), what you verified, and any "
-            "assumptions or follow-ups."
+            "final summary."
         ),
         builtin=True,
     )
@@ -123,9 +128,7 @@ def _builtin_explore() -> AgentDef:
             "You are a read-only research sub-agent. Investigate the "
             "codebase or web thoroughly and report findings with file "
             "paths and line references as evidence. You cannot and must "
-            "not modify anything. Your final message is the ONLY thing "
-            "the parent agent receives — make it a complete, "
-            "self-contained report of what you found."
+            "not modify anything."
         ),
         tools=sorted(_EXPLORE_TOOLS),
         builtin=True,
@@ -351,7 +354,7 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
         "- You cannot spawn sub-agents of your own.\n"
         "- Your final message is the only thing the parent receives. Make "
         "it self-contained: what you did, what you changed (paths), what "
-        "you verified, and any follow-ups.\n"
+        "you verified, and any assumptions or follow-ups.\n"
         "- The user sees your streamed text live in the parent's transcript. "
         "Lead with a one-line summary of what you're doing, then work.\n"
         "- Paths are relative to the workspace root.\n"
