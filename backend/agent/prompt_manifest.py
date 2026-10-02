@@ -160,8 +160,7 @@ SECTION_OPENINGS = [
 SEPARATOR = "\n\n---\n\n"
 BASE_JOIN = "\n\n\n\n"
 COMPACT_SUMMARY_PREFIX = (
-    "Earlier conversation summary (decisions and state to continue from; "
-    "the full transcript is preserved separately):"
+    "Earlier conversation summary (decisions and state to continue from):"
 )
 
 

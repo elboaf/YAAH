@@ -463,6 +463,10 @@ def test_summary_injection_label_describes_job():
     label = loop_mod.COMPACT_SUMMARY_PREFIX
     assert "for context only" not in label
     assert "continue" in label
+    # CodeRabbit return trip: legacy summaries replace the transcript via the
+    # history watermark, so an unconditional "preserved separately" claim is
+    # false -- the label must not make it.
+    assert "preserved separately" not in label
 
 
 def test_prompt_manifest_section_naming_tracks_label():
