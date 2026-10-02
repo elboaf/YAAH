@@ -763,12 +763,12 @@ EXIT_PLAN_SCHEMA = {
     "type": "function",
     "function": {
         "name": "exit_plan",
+        # SYN-45 (issue #186): one-line summary — the full approval flow
+        # (approval ends plan mode and the run continues; feedback comes
+        # back for re-presentation) lives only in the plan-mode note.
         "description": (
-            "Present your plan for approval while in plan mode. Blocks until "
-            "the user responds: approval ends plan mode and the SAME run "
-            "continues straight into execution; anything else comes back as "
-            "feedback for you to incorporate and re-present. Call this "
-            "instead of writing the plan as plain text."
+            "Present your plan for approval while in plan mode. Call "
+            "this instead of writing the plan as plain text."
         ),
         "parameters": {
             "type": "object",

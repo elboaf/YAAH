@@ -242,8 +242,8 @@
     },
     {
       "name": "exit_plan",
-      "bytes": 516,
-      "sha256": "62c6b65dffd90d030a2bf1774d95b5db68bc4a51e4de2dd21c3444a2713df11b"
+      "bytes": 332,
+      "sha256": "ca9d3c5350d5bfa0bd4f7e610a135d48753a366607c0d26284b954f865b43b8c"
     }
   ],
   "subagent_prompts": {},
