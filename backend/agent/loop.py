@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
+from backend.agent.prompt_manifest import COMPACT_SUMMARY_PREFIX
 from backend.agent import file_changes
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
@@ -43,7 +44,8 @@ from backend.db.database import (
 )
 
 
-AUTO_TITLE_MAX_CHARS = 60
+AUTO_TITLE_MAX_CHARS = 60  # hard clamp the consumer enforces; word count
+# in the prompt below is best-effort guidance, not a validated contract
 
 
 async def _emit_file_changes(
@@ -105,7 +107,9 @@ async def _generate_conversation_title(
             "role": "system",
             "content": (
                 "Generate a concise title for this conversation. Reply with only "
-                "the title: 3-6 words, no quotes or period, in the user's language."
+                f"the title: a few words (aim for 3-6; titles longer than "
+                f"{AUTO_TITLE_MAX_CHARS} characters are clipped), no quotes or "
+                "period, in the user's language."
             ),
         },
         {"role": "user", "content": first_user_text[:2000]},
@@ -1421,7 +1425,7 @@ async def _run_agent_claimed(
     if include_history and prompt_state.get("summary"):
         messages.append({
             "role": "system",
-            "content": "Earlier conversation summary (for context only):\n"
+            "content": COMPACT_SUMMARY_PREFIX + "\n"
             + prompt_state["summary"],
         })
     messages.extend(history)

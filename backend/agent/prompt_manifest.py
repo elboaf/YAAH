@@ -145,7 +145,7 @@ SECTION_OPENINGS = [
     ("windows-sandbox", "# Windows Sandbox (for tests that need isolation)"),
     ("skills-index", "Skills available (load with the load_skill tool"),
     ("subagent-index", "Sub-agents available"),
-    ("compaction-summary", "Earlier conversation summary (for context only):"),
+    ("compaction-summary", "Earlier conversation summary ("),
     ("identity", "You are an expert AI coding agent"),
     ("subagent-base", "You are a sub-agent (agent_type:"),
     ("tools", "You have tools: "),
@@ -159,7 +159,10 @@ SECTION_OPENINGS = [
 
 SEPARATOR = "\n\n---\n\n"
 BASE_JOIN = "\n\n\n\n"
-COMPACT_SUMMARY_PREFIX = "Earlier conversation summary (for context only):"
+COMPACT_SUMMARY_PREFIX = (
+    "Earlier conversation summary (decisions and state to continue from; "
+    "the full transcript is preserved separately):"
+)
 
 
 def _name_section(text: str) -> str:

@@ -16,9 +16,9 @@
     },
     {
       "name": "compaction-summary",
-      "bytes": 93,
-      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa",
-      "text": "Earlier conversation summary (for context only):\nFixture summary of the earlier conversation."
+      "bytes": 158,
+      "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397",
+      "text": "Earlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
     }
   ],
   "system_messages": [
@@ -29,12 +29,12 @@
     },
     {
       "role": "system",
-      "bytes": 93,
-      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa"
+      "bytes": 158,
+      "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397"
     }
   ],
-  "total_bytes": 472,
-  "rendered_sha256": "0c29365a2af98fa5c3ed9842e774f18bb90b4d89b611c798a4439178d78150fd",
+  "total_bytes": 537,
+  "rendered_sha256": "9966f23b2f5c254559d87fcb9daf42ff0b5aa38c35be3ab787774c3c9209211e",
   "tool_schemas": [
     {
       "name": "bash",
@@ -194,5 +194,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n====\n\nEarlier conversation summary (for context only):\nFixture summary of the earlier conversation."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n====\n\nEarlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
 }

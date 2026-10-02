@@ -444,3 +444,33 @@ async def test_disabled_via_config(monkeypatch):
     cid = await db.create_conversation("disabled")
     await db.set_conversation_usage(cid, 10_000_000, "m")
     assert await comp.compact_history_for_context(cid) is None
+
+
+# ---------------------------------------------- #191 prompt/consumer contract
+
+def test_summarizer_prompt_states_real_clamp():
+    """#191: the prompt the summarizer model reads must state the clamp
+    the consumer actually enforces, not just the advisory word budget."""
+    assert "12,000" in comp._SUMMARIZER_PROMPT
+    assert "400 words" in comp._SUMMARIZER_PROMPT
+
+
+def test_summary_injection_label_describes_job():
+    """#191: the injected summary is labeled as actionable continuity
+    state, not 'for context only'."""
+    from backend.agent import loop as loop_mod
+
+    label = loop_mod.COMPACT_SUMMARY_PREFIX
+    assert "for context only" not in label
+    assert "continue" in label
+
+
+def test_prompt_manifest_section_naming_tracks_label():
+    """#191: the manifest section-opening table must still recognize the
+    injected compaction-summary section after the label change."""
+    from backend.agent import prompt_manifest as pm
+
+    from backend.agent import loop as loop_mod
+
+    text = loop_mod.COMPACT_SUMMARY_PREFIX + "\nbody"
+    assert pm._name_section(text) == "compaction-summary"
