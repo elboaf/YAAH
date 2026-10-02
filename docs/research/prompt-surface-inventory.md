@@ -57,7 +57,7 @@ system first (loop.py:1381).
 | Computer-use + sandbox names in tool prose list | loop.py:339–368; `screenshot` omitted when the Settings toggle is off (issue #140; `screenshot_allowed()` tools.py:1473–1484) | local-Windows | ~25 lines |
 | Skills index | `backend/agent/skills.py:242–260` (`index_for_prompt`) | ≥1 skill without `disable-model-invocation` in `~/.yaah/skills` (34 bundled skills ship; 12+ manual-only) | ~4–5 KB |
 | Sub-agent index + delegation policy | `backend/agent/subagents.py:267–291` (`index_for_prompt`) | always (2 built-ins guarantee content) | ~26 lines / ~1.7 KB |
-| AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1333–1335 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:183) | wrapper ~6 lines + content |
+| AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1333–1335 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:241) | wrapper ~6 lines + content |
 | Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235–247 / 1339–1341 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
 | Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:263–277` (`bodies_for_prompt`) wrapped at loop.py:1306–1331 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
 | Mid-turn loaded skills (`load_skill`) | `backend/agent/skills.py:280–315` (`load_skill_into_messages`); queued-message variant loop.py:669–691 (`_apply_injected_skills`) | model calls `load_skill`, or queued message carries skill chips; mutates `messages[0]` in place | header ~10 lines + body |
@@ -106,7 +106,7 @@ plus dynamic MCP ones). Supporting description-like text:
 | Prompt | File:lines | Purpose / trigger |
 |---|---|---|
 | Compaction summarizer | `_SUMMARIZER_PROMPT` (backend/agent/compaction.py:260–272), called by `summarize_messages` (275–299) | fires when measured prompt_tokens crosses trigger fraction (ADR 0004); JSON-envelope 400-word summary |
-| Conversation title | `_generate_conversation_title` (loop.py:79–124) | after first successful turn, only while title is still the auto-slice; 3–6 words |
+| Conversation title | `_generate_conversation_title` (loop.py:106–185) | after first successful turn, only while title is still the auto-slice; 3–6 words |
 | Sub-agent system prompt builder | `_sub_agent_system_prompt` (backend/agent/subagents.py:314–363) | every `spawn_agent`; composes definition body + env line + its own tool prose list + guidelines + AGENTS.md notes + skills index |
 | Built-in sub-agent definitions | backend/agent/subagents.py:90–132: `general-purpose` (93–107), `explore` (115–131) | bodies + descriptions feed both the sub-agent prompt and the parent index |
 | Sub-agent budget nudges | subagents.py:423–454 (grace turn at 423–432) | appended as system messages when max_turns nears ("Start converging now…") |
