@@ -145,6 +145,20 @@ def ensure_toolkit_seed() -> list[str]:
         return written
     tk = toolkit_dir()
 
+    # Hold the same cross-process mutex as `toolkit install` across the
+    # file copy, the state.json read-merge-write and the INDEX.md
+    # regeneration — a seed racing a live VM's install must not clobber it.
+    lock = _acquire_toolkit_manifest_lock()
+    try:
+        _seed_locked(src, tk, written)
+    finally:
+        _release_toolkit_manifest_lock(lock)
+    return written
+
+
+def _seed_locked(src: Path, tk: Path, written: list[str]) -> None:
+    """Seeding body of ensure_toolkit_seed(); the manifest mutex is held."""
+
     def _copy(rel: str) -> None:
         s, t = src / rel, tk / rel
         if t.exists():
@@ -161,7 +175,7 @@ def ensure_toolkit_seed() -> list[str]:
             if p.is_file():
                 _copy(p.relative_to(src).as_posix())
     except OSError:
-        return written
+        return
 
     # Merge the bundled state.json entries into an existing toolkit manifest
     # (copy-once above skips it when present, but user tools must survive).
@@ -180,9 +194,88 @@ def ensure_toolkit_seed() -> list[str]:
                 json.dumps(current, indent=2) + "\n", encoding="utf-8")
             if "state.json" not in written:
                 written.append("state.json")
+        # Whenever the manifest was written this run (fresh copy OR merge),
+        # a previously present INDEX.md may be stale (copy-once never
+        # refreshes it); regenerate it best-effort, mirroring the wrapper's
+        # renderer.
+        if "state.json" in written:
+            try:
+                mtools = json.loads(
+                    state.read_text(encoding="utf-8")).get("tools") or {}
+
+                def _cell(v: object) -> str:
+                    """Escape one value for the INDEX.md table: flatten
+                    CR/LF like the wrapper's Format-Cell and pipe-escape,
+                    so a multiline note can't break the Markdown table."""
+                    text = "" if v is None else str(v)
+                    # Flatten CR/LF like the wrapper's Format-Cell so a
+                    # multiline note can't break the Markdown table.
+                    text = text.replace("\r", " ").replace("\n", " ")
+                    return text.replace("|", "\\|").strip()
+
+                ilines = [
+                    "# Toolkit index",
+                    "",
+                    "Generated from ``state.json`` by ``toolkit install`` - do not edit by hand.",
+                    "Paths are relative to the toolkit root (on PATH inside the VM:",
+                    "``toolkit``, ``toolkit\\bin``, ``toolkit\\Scripts``, ``toolkit\\node_modules\\.bin``).",
+                    "",
+                    "| name | version | kind | path | invocation | check | note |",
+                    "|---|---|---|---|---|---|---|",
+                ]
+                for n in sorted(mtools):
+                    t = mtools[n] or {}
+                    ilines.append("| {} | {} | {} | {} | {} | {} | {} |".format(
+                        _cell(n), _cell(t.get("version")), _cell(t.get("kind")),
+                        _cell(t.get("path")), _cell(t.get("invocation")),
+                        _cell(t.get("check")), _cell(t.get("note"))))
+                (tk / "INDEX.md").write_text(
+                    "\n".join(ilines) + "\n", encoding="utf-8")
+                if "INDEX.md" not in written:
+                    written.append("INDEX.md")
+            except (OSError, ValueError):
+                pass  # best-effort, same as the rest of seeding
     except (OSError, ValueError):
         pass
-    return written
+
+
+# Same named mutex `toolkit install` holds (see bin/toolkit.ps1): a seed
+# read that races a live VM's install must not write its older merged
+# snapshot afterward and drop the freshly installed entry.
+_TOOLKIT_MUTEX_NAME = "Global\\yaah-toolkit-manifest"
+
+
+def _acquire_toolkit_manifest_lock() -> object | None:
+    """Take the cross-process manifest mutex (Windows); a platform-safe
+    no-op elsewhere. Returns an opaque handle, or None when the lock is
+    unavailable (seeding stays best-effort, same as the rest)."""
+    ctypes = getattr(sys.modules.get("ctypes"), "windll", None)
+    if ctypes is None:  # non-Windows or ctypes missing
+        return None
+    import ctypes as _ct
+
+    handle = _ct.windll.kernel32.CreateMutexW(None, False,
+                                              _TOOLKIT_MUTEX_NAME)
+    if not handle:
+        return None
+    # WAIT_OBJECT_0 (0) or WAIT_ABANDONED (0x80) both mean we own it.
+    got = _ct.windll.kernel32.WaitForSingleObject(handle, 30000)
+    if got not in (0, 0x80):
+        _ct.windll.kernel32.CloseHandle(handle)
+        return None
+    return handle
+
+
+def _release_toolkit_manifest_lock(handle: object | None) -> None:
+    """Release and close a mutex handle from
+    `_acquire_toolkit_manifest_lock`; a None handle (lock was unavailable)
+    is a no-op."""
+    if handle is None:
+        return
+    import ctypes as _ct
+
+    _ct.windll.kernel32.ReleaseMutex(handle)
+    _ct.windll.kernel32.CloseHandle(handle)
 
 
 def _base_dir() -> Path:
@@ -1215,6 +1308,8 @@ async def sandbox_stop(workspace: str) -> dict:
 # ---------------------------------------------------------------- prompt
 
 def prompt_section() -> str:
+    """Render the sandbox guidance injected into the agent's system prompt
+    (test-environment choice, seeding, sandbox_run/GUI rules)."""
     return (
         "# Windows Sandbox (for tests that need isolation)\n\n"
         "- Choose the test environment by side effects. Run automated tests "
@@ -1247,11 +1342,15 @@ def prompt_section() -> str:
         "- The VM is a CLEAN WINDOWS IMAGE: git, python, node and other "
         "dev tools are NOT preinstalled — expect 'is not recognized as "
         "the name of a cmdlet' on first use. BEFORE downloading anything, "
-        "read toolkit\\state.json (one round-trip): it lists what the "
+        "read toolkit\\INDEX.md (a generated table of contents of the "
+        "toolkit) or toolkit\\state.json — one round-trip lists what the "
         "toolkit already contains and how to check each tool. Install what "
         "you need into the toolkit (see above) rather than concluding the "
-        "task cannot be verified, and add what you installed to "
-        "state.json so future sessions skip the re-download.\n"
+        "task cannot be verified, then record it via the wrapper: "
+        "`toolkit install <name> -Version <v> -Kind <kind> -Path <relpath> "
+        "-Check \"<Test-Path probe>\" -Invocation \"<how to run>\" "
+        "[-Note \"<gotcha>\"]` — it writes state.json AND regenerates "
+        "INDEX.md; never hand-edit the JSON.\n"
         "- Something look wedged (a command produced nothing / timed out "
         "with no output)? The VM can screenshot ITSELF: run "
         "toolkit\\bin\\vm-capture.ps1 via sandbox_run and view_image the "
@@ -1385,11 +1484,13 @@ SANDBOX_TOOLS_SCHEMA = [
                 "cwd) and the persistent dev toolkit at ...\\Desktop\\"
                 "toolkit (on PATH; installs there persist to the host and "
                 "every future sandbox). The VM is a CLEAN WINDOWS IMAGE: "
-                "check toolkit\\state.json FIRST — it lists the tools "
-                "already present; the sandbox prompt section carries the "
-                "install rules, the windows-mcp GUI playbook (connection "
-                "info in the mapped logs dir as mcp.json), and the "
-                "file-polling cost note (batch commands)."
+                "read toolkit\\INDEX.md or state.json FIRST — it lists "
+                "the tools already present; the sandbox prompt section "
+                "carries the install rules (record installs with "
+                "`toolkit install <name> ...`, wrapper at "
+                "toolkit\\bin\\toolkit.ps1), the windows-mcp GUI playbook "
+                "(connection info in the mapped logs dir as mcp.json), "
+                "and the file-polling cost note (batch commands)."
             ),
             "parameters": {
                 "type": "object",

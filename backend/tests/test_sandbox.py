@@ -5,10 +5,12 @@ risk classes and the run protocol are exercised through fakes (YAAH_SANDBOX_EXE
 override + fake spawn), so the suite is green on Linux CI too.
 """
 import asyncio
-import threading
-import time
 import json
 import re
+import shutil
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -32,7 +34,7 @@ def isolated(tmp_path, monkeypatch):
     # A real WindowsSandbox.exe may be live on the dev host (issue #27's
     # crash tests ran one); the adoption branch would hijack these tests,
     # so default to "no VMs running". Tests exercising adoption override.
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
     return tmp_path
 
 
@@ -376,11 +378,16 @@ class _FakeProc:
 
 
 def test_run_round_trip_and_sequence(isolated, monkeypatch):
+    """One start → run → done cycle against a fake spawn: the sequence
+    numbers advance, the result carries exit code/output, and stopping
+    the session reports stopped."""
     monkeypatch.setattr(sb.config_mod, "load_config",
                         lambda: {"sandbox": {}})
     logs = isolated / "sb" / "ws-abc" / "logs"
 
     def fake_spawn(exe, wsb, logs_path):
+        """Fake VM boot: drop the ready marker so start sees "running"
+        immediately instead of waiting on a real sandbox."""
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
                                             encoding="utf-8")
         return _FakeProc()
@@ -389,7 +396,7 @@ def test_run_round_trip_and_sequence(isolated, monkeypatch):
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
     monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
 
     start = sb.start_sync("C:\\proj")
     assert start["status"] == "running"
@@ -419,6 +426,8 @@ def test_run_reports_foreign_exit_codes_and_truncation(isolated, monkeypatch):
     logs = isolated / "sb" / "ws-abc" / "logs"
 
     def fake_spawn(exe, wsb, logs_path):
+        """Ready-marker fake boot returning a stub process, for the
+        restart/session-reuse path under test."""
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
                                             encoding="utf-8")
         return _FakeProc()
@@ -516,7 +525,6 @@ def _ack_on_cmd_write(logs: Path, ack_nonce):
         if name.startswith("cmd.") and name.endswith(".ps1") \
                 and self.parent == logs:
             ack_nonce(self)
-        return None
 
     return fake
 
@@ -853,6 +861,7 @@ def _session_up(isolated, monkeypatch, cfg=None):
                         lambda: {"sandbox": cfg or {}})
 
     def fake_spawn(exe, wsb, logs_path):
+        """Shared fake boot: immediate ready marker + stub process."""
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
                                             encoding="utf-8")
         return _FakeProc()
@@ -861,8 +870,8 @@ def _session_up(isolated, monkeypatch, cfg=None):
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
     monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
-    start = sb.start_sync("C:\proj")
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
+    start = sb.start_sync(r"C:\proj")
     assert start["status"] == "running"
     return isolated / "sb" / "ws-abc" / "logs"
 
@@ -927,6 +936,8 @@ def test_start_sync_while_booting_reports_busy(isolated, monkeypatch):
     spawned = []
 
     def slow_spawn(exe, wsb, logs_path):
+        """Simulate a slow VM boot: record the spawn, delay, then signal
+        ready so the busy-wait path is actually exercised."""
         spawned.append(wsb)
         time.sleep(0.3)  # boot in progress
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
@@ -936,14 +947,14 @@ def test_start_sync_while_booting_reports_busy(isolated, monkeypatch):
     monkeypatch.setattr(sb, "_spawn", slow_spawn)
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
-    monkeypatch.setattr(sb, "_sandbox_pids", lambda: [])
+    monkeypatch.setattr(sb, "_sandbox_pids", list)
     monkeypatch.setattr(sb, "POLL_INTERVAL", 0.01)
 
     holder = threading.Thread(target=sb.start_sync, args=(r"C:proj",))
     holder.start()
     time.sleep(0.1)  # let the holder take the mutex
     try:
-        second = sb.start_sync("C:\proj")
+        second = sb.start_sync(r"C:\proj")
         assert second.get("busy") is True
     finally:
         holder.join()
@@ -974,7 +985,8 @@ def test_ensure_toolkit_seed_copies_bundled_baseline(isolated, monkeypatch):
                 "README.md", "state.json"):
         assert (tk / rel).is_file(), rel
     assert sorted(written) == sorted(["bin/vm-capture.ps1", "bin/git.cmd",
-                                      "gitconfig", "README.md", "state.json"])
+                                      "gitconfig", "README.md", "state.json",
+                                      "INDEX.md"])
 
 
 def test_ensure_toolkit_seed_never_overwrites_user_files(isolated, monkeypatch):
@@ -1079,6 +1091,8 @@ def _start_for_timing(isolated, monkeypatch):
 
 
 def test_bootstrap_logs_per_segment_timestamps():
+    """The generated VM bootstrap logs each phase (start, join, ready)
+    with its own timestamp, so a stuck boot is attributable."""
     script = sb._bootstrap_script()
     # Every segment gets a timestamped line, not just the final ready signal.
     assert "sandbox-vm-start" in script
@@ -1090,8 +1104,10 @@ def test_bootstrap_logs_per_segment_timestamps():
 
 
 def test_start_returns_boot_breakdown(isolated, monkeypatch):
+    """start's timing payload splits boot into a cold flag, a total
+    spawn-to-ready figure, and per-phase host_spawn/guest_boot values."""
     logs = _start_for_timing(isolated, monkeypatch)
-    result = sb.start_sync("C:\proj")
+    result = sb.start_sync(r"C:\proj")
     boot = result["boot"]
     assert boot["cold"] is True
     assert isinstance(boot["spawn_to_ready_ms"], int)
@@ -1101,8 +1117,10 @@ def test_start_returns_boot_breakdown(isolated, monkeypatch):
 
 
 def test_run_reports_elapsed_and_pickup(isolated, monkeypatch):
+    """When the VM-side result file carries pickup_ms/run_ms, run_sync
+    surfaces them alongside its own elapsed_ms."""
     logs = _start_for_timing(isolated, monkeypatch)
-    sb.start_sync("C:\proj")
+    sb.start_sync(r"C:\proj")
     n = sb._next_seq(logs)
     # VM-side ack carries its own clock; simulate a pickup measured by the VM.
     (logs / f"res.{n}.json").write_text(json.dumps({
@@ -1117,8 +1135,10 @@ def test_run_reports_elapsed_and_pickup(isolated, monkeypatch):
 
 
 def test_run_metrics_tolerate_missing_vm_side_data(isolated, monkeypatch):
+    """An old-style result file without timing fields yields None metrics
+    instead of a KeyError — timing data is optional."""
     logs = _start_for_timing(isolated, monkeypatch)
-    sb.start_sync("C:\proj")
+    sb.start_sync(r"C:\proj")
     n = sb._next_seq(logs)
     _write_done(logs, n, output="ok")  # old-style res file, no timings
     result = sb.run_sync("Get-Date", 10)
@@ -1137,6 +1157,8 @@ def test_start_clears_stale_init_log_before_spawn(isolated, monkeypatch):
     spawn_calls = []
 
     def fake_spawn(exe, wsb, logs_path):
+        """Record the spawn and refuse to boot while a stale ready
+        marker exists; then boot with the timestamped marker."""
         spawn_calls.append(1)
         assert not (logs_path / "init.log").exists()
         (logs_path / "init.log").write_text(
@@ -1147,5 +1169,373 @@ def test_start_clears_stale_init_log_before_spawn(isolated, monkeypatch):
     monkeypatch.setattr(sb, "session_dir",
                         lambda ws: isolated / "sb" / "ws-abc")
 
-    sb.start_sync("C:\proj")
+    sb.start_sync(r"C:\proj")
     assert spawn_calls  # the fake asserted the log was cleared pre-spawn
+
+
+# --------------------------------------------------- #118: toolkit wrapper (state.json + INDEX.md)
+
+_TOOLKIT_PS1 = Path(sb.__file__).parent.parent / "bundled_toolkit" / "bin" / "toolkit.ps1"
+
+
+def _pwsh() -> str | None:
+    """Best available PowerShell binary (Windows PowerShell or PowerShell
+    Core), so the wrapper tests run on Linux CI with pwsh and skip cleanly
+    where neither exists."""
+    for name in ("pwsh", "powershell"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _run_toolkit(*args: str, tk: Path) -> subprocess.CompletedProcess:
+    """Invoke the bundled toolkit wrapper against `tk` with the given
+    arguments; skips the test when no PowerShell exists (Linux CI)."""
+    exe = _pwsh()
+    if exe is None:
+        pytest.skip("no powershell/pwsh available on this platform")
+    return subprocess.run(
+        [exe, "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", str(_TOOLKIT_PS1), *args, "-ToolkitDir", str(tk)],
+        capture_output=True, text=True, timeout=60, check=False)
+
+
+def test_toolkit_wrapper_install_records_state_and_index(isolated, tmp_path):
+    """`toolkit install` merges the entry into state.json (installed_at
+    stamped, empty fields dropped) and regenerates INDEX.md."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    (tk / "state.json").write_text(json.dumps({"tools": {
+        "existing": {"version": "1.0", "kind": "zip"}}}), encoding="utf-8")
+
+    r = _run_toolkit("install", "mytool", "-Version", "2.1",
+                     "-Kind", "zip", "-Path", "mytool/bin/tool.exe",
+                     "-Check", r"Test-Path '<toolkit>\mytool\bin\tool.exe'",
+                     "-Invocation", r"mytool\bin\tool.exe --help",
+                     tk=tk)
+    assert r.returncode == 0, r.stderr
+
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert tools["existing"]["version"] == "1.0"          # untouched
+    assert tools["mytool"]["version"] == "2.1"
+    assert tools["mytool"]["path"] == "mytool/bin/tool.exe"
+    assert tools["mytool"]["installed_at"]                # stamped
+    assert "note" not in tools["mytool"]                  # empty fields dropped
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "| mytool | 2.1 | zip |" in index
+    assert "| existing |" in index
+
+
+def test_toolkit_wrapper_install_fresh_state(isolated, tmp_path):
+    """No state.json at all: the wrapper creates tools + the entry."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1", tk=tk)
+    assert r.returncode == 0, r.stderr
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert tools["t"]["version"] == "1"
+    assert (tk / "INDEX.md").is_file()
+
+
+def test_toolkit_wrapper_remove_prints_confirmation(isolated, tmp_path):
+    """A successful `toolkit remove` must SAY so on stdout — the caller
+    (agent or human) has no other way to tell removal from no-op."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    assert _run_toolkit("install", "t", "-Version", "1", tk=tk).returncode == 0
+    r = _run_toolkit("remove", "t", tk=tk)
+    assert r.returncode == 0, r.stderr
+    assert "removed" in r.stdout and "t" in r.stdout, r.stdout
+    # ...and the no-op path stays distinguishable
+    r2 = _run_toolkit("remove", "t", tk=tk)
+    assert r2.returncode == 0
+    assert "not in state.json" in r2.stdout, r2.stdout
+
+
+def test_toolkit_wrapper_remove_and_idempotent_rerun(isolated, tmp_path):
+    """`toolkit remove` drops the entry, drops its INDEX.md row, and a
+    second remove of the same name is a no-op success, not an error."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    assert _run_toolkit("install", "t", "-Version", "1", tk=tk).returncode == 0
+    assert _run_toolkit("remove", "t", tk=tk).returncode == 0
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert "t" not in tools
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "| t " not in index
+    # removing again is a no-op, not an error
+    r = _run_toolkit("remove", "t", tk=tk)
+    assert r.returncode == 0
+
+
+def test_toolkit_wrapper_survives_malformed_state(isolated, tmp_path):
+    """A hand-mangled state.json must fail loudly, not be silently
+    overwritten (the manifest is the record of every install)."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    (tk / "state.json").write_text("{not json", encoding="utf-8")
+    r = _run_toolkit("install", "t", "-Version", "1", tk=tk)
+    assert r.returncode != 0
+    assert (tk / "state.json").read_text(encoding="utf-8") == "{not json"
+
+
+def test_bundled_toolkit_ships_wrapper_and_index():
+    """The shipped payload includes the wrapper and a generated INDEX.md
+    consistent with the bundled state.json."""
+    src = sb.bundled_toolkit_source()
+    assert (src / "bin" / "toolkit.ps1").is_file()
+    assert (src / "bin" / "toolkit.cmd").is_file()
+    index = (src / "INDEX.md").read_text(encoding="utf-8")
+    tools = json.loads((src / "state.json").read_text(encoding="utf-8"))["tools"]
+    for name in tools:
+        assert f"| {name} " in index, name
+
+
+def test_ensure_toolkit_seed_copies_wrapper_and_index(isolated, monkeypatch, tmp_path):
+    """The wrapper + INDEX.md are part of the seeded baseline (copy-once,
+    like every other bundled file)."""
+    src = tmp_path / "bundled"
+    (src / "bin").mkdir(parents=True)
+    (src / "bin" / "toolkit.ps1").write_text("# wrapper", encoding="utf-8")
+    (src / "bin" / "toolkit.cmd").write_text("@echo off", encoding="utf-8")
+    (src / "INDEX.md").write_text("# Toolkit index", encoding="utf-8")
+    (src / "state.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    sb.ensure_toolkit_seed()
+
+    tk = sb.toolkit_dir()
+    assert (tk / "bin" / "toolkit.ps1").is_file()
+    assert (tk / "INDEX.md").is_file()
+
+
+# --- CodeRabbit findings on the closed PR #159 (issue #118 re-land) ---------
+
+def test_toolkit_wrapper_install_is_serialized(isolated, tmp_path):
+    """Finding 1 (major): concurrent installs must not lose an entry.
+    The wrapper takes a cross-process lock through the whole
+    read-mutate-write and uses a per-process temp file."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    procs = []
+    exe = _pwsh()
+    if exe is None:
+        pytest.skip("no powershell/pwsh available on this platform")
+    for i in range(6):
+        procs.append(subprocess.Popen(
+            [exe, "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(_TOOLKIT_PS1), "install", f"tool{i}",
+             "-Version", str(i), "-ToolkitDir", str(tk)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
+    errs = [p.communicate()[1].decode(errors="replace") for p in procs]
+    rcs = [p.returncode for p in procs]
+    assert all(rc == 0 for rc in rcs), list(zip(rcs, errs))
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert sorted(t for t in tools if t.startswith("tool")) == \
+        [f"tool{i}" for i in range(6)]
+    assert not list(tk.glob("state.json.tmp*")), "temp file must be unique/cleaned"
+
+
+def test_toolkit_wrapper_reinstall_preserves_metadata(isolated, tmp_path):
+    """Finding 2: reinstalling with fewer fields must not wipe existing
+    metadata; supplied values override, others survive."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    assert _run_toolkit(
+        "install", "t", "-Version", "1", "-Kind", "zip",
+        "-Path", "t/tool.exe", "-Note", "gotcha", tk=tk).returncode == 0
+    assert _run_toolkit("install", "t", "-Version", "2", tk=tk).returncode == 0
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    entry = tools["t"]
+    assert entry["version"] == "2"          # supplied value overrides
+    assert entry["kind"] == "zip"           # pre-existing fields survive
+    assert entry["path"] == "t/tool.exe"
+    assert entry["note"] == "gotcha"
+
+
+def test_toolkit_wrapper_index_multiline_note_stays_one_line(isolated, tmp_path):
+    """A multiline `note` must not break the INDEX.md table (CodeRabbit
+    return trip on #248): cells normalize CR/LF to spaces."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1",
+                     "-Note", "line one\nline two", tk=tk)
+    assert r.returncode == 0, r.stderr
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if ln.startswith("| t |"))
+    assert "line one line two" in row        # flattened
+    assert "\n" not in row and "\r" not in row
+
+
+def test_toolkit_wrapper_index_escapes_cells(isolated, tmp_path):
+    """Finding 3: pipe/newline in metadata renders escaped in INDEX.md
+    (table not broken); state.json keeps the value verbatim."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1",
+                     "-Check", r"Get-Command x | Select-Object Source",
+                     tk=tk)
+    assert r.returncode == 0, r.stderr
+    state = (tk / "state.json").read_text(encoding="utf-8")
+    assert "Get-Command x | Select-Object Source" in state   # verbatim
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if ln.startswith("| t |"))
+    assert "Get-Command x \\| Select-Object Source" in row
+
+
+def test_sandbox_schema_wrapper_path_has_no_escape_sequences():
+    """Finding 4: the tool description must not contain \\b or \\t control
+    characters from unescaped backslashes in the path."""
+    text = "".join(
+        (p.get("function", {}).get("description") or "")
+        for p in sb.SANDBOX_TOOLS_SCHEMA)
+    assert "\b" not in text and "\t" not in text
+    assert "toolkit\\bin\\toolkit.ps1" in text
+
+
+def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch,
+                                                     tmp_path):
+    """Finding 5: after a bundled-entries merge into an existing toolkit,
+    a stale INDEX.md is regenerated from the merged manifest."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newbundled": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    (src / "INDEX.md").write_text("# Toolkit index", encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "INDEX.md").write_text("# stale index without the new entry",
+                                 encoding="utf-8")
+
+    sb.ensure_toolkit_seed()
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "newbundled" in index, "INDEX.md regenerated after merge"
+
+
+def test_ensure_toolkit_seed_index_flattens_multiline_cells(isolated,
+                                                            monkeypatch,
+                                                            tmp_path):
+    """CodeRabbit return trip on #248: a multiline note in an existing
+    toolkit entry must render on one line in the regenerated INDEX.md."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newbundled": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {
+        "multi": {"version": "2", "kind": "zip",
+                  "note": "line one\nline two"}}}), encoding="utf-8")
+
+    sb.ensure_toolkit_seed()
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if ln.startswith("| multi |"))
+    assert "line one line two" in row
+
+
+def test_ensure_toolkit_seed_holds_manifest_lock(isolated, monkeypatch, tmp_path):
+    """CodeRabbit return trip on #248: a live VM's `toolkit install` holds
+    Global\\yaah-toolkit-manifest across its read-mutate-write; if the seed
+    doesn't take the same lock, its older merged snapshot can clobber the
+    freshly installed entry. A helper process grabs the lock first and
+    writes its entry late (while holding it): the seeded bundled entry and
+    the helper's entry must BOTH survive. Without the seed-side lock the
+    seed's early write is overwritten and the bundled entry is lost.
+
+    runner, so the seeded bundled entry and the helper's entry must BOTH
+    survive. Without the seed-side lock the seed's early write is
+    overwritten and the bundled entry is lost.
+
+    Synchronization is signal-based, not sleep-based (CodeRabbit return
+    trip 2 on #248): the helper prints LOCKED once it holds the mutex and
+    parks on stdin; the parent only sends GO after it has observed (via a
+    spy on _acquire_toolkit_manifest_lock) that the seeder reached the
+    lock attempt — so a locking seed is parked on the mutex while the
+    helper writes, and a lock-less seed has already raced and lost the
+    bundled entry. The parent then reads WROTE, joins the seeder thread
+    and reaps the helper before asserting; no fixed sleeps to flake on a
+    slow CI runner."""
+    import ctypes
+    import sys
+    import threading
+    if not hasattr(ctypes, "windll"):
+        pytest.skip("named-mutex test requires Windows")
+
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newbundled": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+    helper = (
+        "import ctypes, json, sys\n"
+        "h = ctypes.windll.kernel32.CreateMutexW(None, False,\n"
+        "                                        r'Global\\yaah-toolkit-manifest')\n"
+        "assert ctypes.windll.kernel32.WaitForSingleObject(h, 30000) == 0\n"
+        "print('LOCKED', flush=True)\n"   # signal: the mutex is held now
+        f"p = {str(tk / 'state.json')!r}\n"
+        "sys.stdin.readline()\n"          # park until the seeder is at the lock
+        "json.dump({'tools': {'marker': {'version': '9'}}}, open(p, 'w'))\n"
+        "print('WROTE', flush=True)\n"    # write finished, mutex still held
+        "ctypes.windll.kernel32.ReleaseMutex(h)\n")
+    proc = subprocess.Popen([sys.executable, "-c", helper],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            text=True)
+    try:
+        assert proc.stdout.readline().strip() == "LOCKED", (
+            "helper never acquired the manifest mutex")
+        attempted = threading.Event()
+        real_acquire = sb._acquire_toolkit_manifest_lock
+
+        def spy():
+            attempted.set()          # the seeder has reached the lock attempt
+            return real_acquire()
+
+        monkeypatch.setattr(sb, "_acquire_toolkit_manifest_lock", spy)
+        out: dict = {}
+        seeder = threading.Thread(
+            target=lambda: out.update(written=sb.ensure_toolkit_seed()))
+        seeder.start()
+        assert attempted.wait(30), (
+            "ensure_toolkit_seed() never attempted the manifest lock")
+        proc.stdin.write("GO\n")
+        proc.stdin.flush()
+        assert proc.stdout.readline().strip() == "WROTE"
+        seeder.join(30)
+        assert not seeder.is_alive(), "ensure_toolkit_seed() hung on the lock"
+        assert proc.wait(timeout=30) == 0
+        tools = json.loads(
+            (tk / "state.json").read_text(encoding="utf-8")).get("tools") or {}
+        assert "newbundled" in tools, (
+            "seed's bundled entry lost — ensure_toolkit_seed() must hold "
+            "Global\\yaah-toolkit-manifest across its read-merge-write")
+        assert "marker" in tools
+    finally:
+        proc.wait(timeout=30)
+
+
+def test_readme_atomicity_wording_is_accurate(isolated):
+    """Finding 6: the README must not claim INDEX.md updates are atomic —
+    state.json is temp+move, INDEX.md is regenerated after it."""
+    readme = (sb.bundled_toolkit_source() / "README.md").read_text(
+        encoding="utf-8")
+    assert "atomically" not in readme.lower()
+    assert "regenerates" in readme
+    # copy-once: the FIRST seed writes the baseline into the isolated
+    # toolkit, the SECOND must be a no-op (running against the host's real
+    # toolkit would see the newly bundled files as "new" on the first CI
+    # run after an upgrade).
+    assert sb.ensure_toolkit_seed()  # baseline seeded into the temp toolkit
+    assert sb.ensure_toolkit_seed() == []
