@@ -1359,8 +1359,11 @@ def test_bundled_readme_single_backslash_in_wrapper_path():
     literally)."""
     readme = (sb.bundled_toolkit_source() / "README.md").read_text(
         encoding="utf-8")
-    assert "\\\\toolkit.ps1" not in readme
-    assert "bin\\toolkit.ps1" in readme
+    total = readme.count("toolkit.ps1")
+    assert total >= 1
+    # Every mention must be the exact styled path bin\toolkit.ps1 -
+    # so the exact form appears exactly as often as the name appears.
+    assert readme.count("bin\\toolkit.ps1") == total
 
 
 def test_bundled_toolkit_ships_wrapper_and_index():
