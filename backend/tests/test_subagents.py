@@ -156,7 +156,10 @@ def fake_model(monkeypatch):
     scripts = Scripted()
 
     async def fake_chat(messages, tools=None, stream=True):
-        scripts.messages.append(messages)
+        # Snapshot per call (shallow copy) so each recorded message list is
+        # independent — a live alias would make every "per-call" assertion
+        # inspect only the final state of the last call.
+        scripts.messages.append(list(messages))
         events = scripts.pop(0) if scripts else [{"type": "finish"}]
         return FakeStream(events)
 
@@ -822,26 +825,39 @@ async def test_convergence_nudges_collapse_to_one(fake_model, tmp_path):
     ])
     result = await subagents.run_sub_agent(defn, "loop", str(tmp_path))
     assert result["status"] == "max_turns"
-    # Count nudge notes the LAST model call actually saw: nudges that were
-    # collapsed must appear at most once. (Snapshots share one list object,
-    # so every call shows exactly the current, single nudge.)
-    last_call = fake_model.messages[-1]
-    nudge_texts = [
-        m["content"] for m in last_call
-        if m["role"] == "system" and "converge" in m.get("content", "").lower()
-    ]
-    assert len(nudge_texts) <= 1, nudge_texts
-    # The last budgeted turn's nudge is present, in its honest wording.
-    assert any("wrap-up" in m.get("content", "") for m in last_call
-               if m["role"] == "system")
-    # Across the whole run, each model call saw at most ONE nudge.
-    for messages in fake_model.messages:
-        nudges = [
-            m for m in messages
+
+    # Per-call snapshots are real copies now, so each call can be asserted
+    # against the state it actually saw.
+    def nudges(messages):
+        return [
+            m["content"] for m in messages
             if m["role"] == "system"
-            and "converge" in m.get("content", "").lower()
+            and ("converging now" in m["content"] or "wrap-up" in m["content"])
         ]
-        assert len(nudges) <= 1, nudges
+
+    snapshots = fake_model.messages
+    assert len(snapshots) == 7  # 6 budgeted turns + 1 grace call
+    # First nudge lands on turn 4 for max_turns=6: the condition is
+    # remaining < max(3, max_turns // 5), so turns 4/5/6 are closing turns
+    # and turn 3 (3 remaining) gets nothing.
+    assert nudges(snapshots[0]) == []
+    assert nudges(snapshots[1]) == []
+    assert nudges(snapshots[2]) == []
+    assert len(nudges(snapshots[3])) == 1
+    # Across every call, at most ONE nudge is present (collapse, not
+    # accumulate) — meaningful only because the snapshots are copies.
+    for messages in snapshots:
+        assert len(nudges(messages)) <= 1, nudges(messages)
+    # The last budgeted turn's nudge is the honest wrap-up wording.
+    assert "wrap-up" in nudges(snapshots[5])[0]
+    # The grace call keeps the wrap-up nudge PLUS the for-else's
+    # "Turn budget exhausted." note appended on top.
+    grace_msgs = snapshots[6]
+    assert any(
+        "Turn budget exhausted" in m["content"]
+        for m in grace_msgs if m["role"] == "system"
+    )
+    assert "wrap-up" in nudges(grace_msgs)[0]
 
 
 # ------------------------------------------------- turn budget (issue #15B)
