@@ -37,9 +37,8 @@ def _symbol_spans(path: Path) -> list[tuple[int, int]]:
     spans = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef, ast.If, ast.Try)):
-            spans.append((node.lineno, node.end_lineno))
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                             ast.ClassDef, ast.If, ast.Try,
+                             ast.Assign, ast.AnnAssign)):
             spans.append((node.lineno, node.end_lineno))
     return spans
 
@@ -124,9 +123,13 @@ def test_inventory_paired_name_refs_point_at_named_symbols() -> None:
             continue
         paired += 1
         # positional pairing: names[0]↔a, names[1]↔b (the original text had
-        # these reversed, which is exactly what this test must catch)
+        # these reversed, which is exactly what this test must catch).
+        # Second CodeRabbit return trip: a ref that merely lands INSIDE a
+        # function body still passes the span check, so `run_agent` cited
+        # with `_run_agent_claimed`'s def line slipped through. A paired
+        # name/line ref must cite the symbol's def line exactly.
         for num, name in ((a, n1), (b, n2)):
-            if num not in range(spans[name][0], spans[name][1] + 1):
+            if num != spans[name][0]:
                 mismatches.append(f"{name} cited as loop.py:{num} "
                                   f"(real span {spans[name][0]}\u2013{spans[name][1]})")
     assert paired > 0, (
