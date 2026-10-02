@@ -6,6 +6,7 @@ and flip-simulated on Windows for local review. The committed directory
 carries the full matrix; each host byte-verifies only what it
 canonically renders.
 """
+import json
 from pathlib import Path
 
 import pytest
@@ -168,11 +169,14 @@ def test_no_unactionable_sandbox_guidance():
         if combo.startswith("kind-subagents"):
             from backend.agent import subagents
 
+            # #188: the resolution no longer takes a client-side windows
+            # flag — host shape comes from the workspace (LOCAL_WS for
+            # kind combos, no remote connected in the manifest harness).
             defn = subagents.get_agent_def("general-purpose")
             names = {
                 s["function"]["name"]
                 for s in subagents._resolve_tools(
-                    defn, windows=combo.startswith("kind-subagents-win")
+                    defn, workspace=pm.LOCAL_WS
                 )
             }
         # Remote combos carry the remote runner's own hand-maintained
@@ -244,6 +248,89 @@ def test_offline_note_only_for_offline_remote():
     online = pm.render_combo(f"{PFX}-remote-plan-skills-memory-compaction-sandboxonly")
     assert "the workspace's owning device is offline" in offline["rendered_text"]
     assert "the workspace's owning device is offline" not in online["rendered_text"]
+
+
+@pytest.mark.skipif(HOST_WIN, reason="posix-host branch of the os.name flip")
+def test_windows_flip_on_posix_does_not_instantiate_windowspath(
+    monkeypatch, tmp_path
+):
+    """#184 CI follow-up: on a posix host, _platform_os_name(True) flips
+    os.name to 'nt' without rebinding Path. Any pathlib.Path() call made
+    under the flip (here, a probe module) instantiates a real WindowsPath
+    and raises 'cannot instantiate WindowsPath on your system' -- the exact
+    Linux-CI failure in test_compaction_manifests_contain_summary_section.
+    The flip must rebind Path to a WindowsPath subclass on posix hosts too,
+    mirroring the Windows-host branch."""
+    assert not HOST_WIN
+
+    import sys as _sys
+    import types
+    probe = types.SimpleNamespace(Path=Path)
+    # Register through monkeypatch so the probe module is removed from
+    # sys.modules at teardown -- a bare assignment here leaked it into the
+    # rest of the session (CodeRabbit return trip #1 on PR #225).
+    monkeypatch.setitem(_sys.modules, "backend._pm_probe_mod", probe)
+
+    with pm._platform_os_name(True):
+        # Instantiate THE REBOUND NAME, not the imported Path: the whole
+        # point is that backend modules' Path attr must be directly
+        # instantiable under the flip. (A subclass inherits WindowsPath's
+        # raising __new__ on posix hosts, because the guard is defined
+        # inside WindowsPath itself when os.name != 'nt' -- so the
+        # subclass must override __new__ to shed the inherited guard.)
+        probe.Path("whatever")  # must not raise
+
+    assert probe.Path is Path
+
+
+@pytest.mark.skipif(
+    not HOST_WIN,
+    reason="exercises the posix-target flip via a real posix-* render",
+)
+def test_posix_target_flip_render_keeps_full_path_api():
+    """#184 regression (merged-code follow-up): an intermediate 'fix'
+    rebound backend Path names to a PureWindowsPath mix-in during the
+    flip. PureWindowsPath has NO filesystem methods, so any real render
+    (mkdir/write_text/iterdir in the turn drivers) died with
+    AttributeError -- on every host. The rebinding must subclass the
+    CONCRETE WindowsPath: subclasses defined in user code do not inherit
+    pathlib's host guard, so they instantiate under the flip on either
+    host AND keep the full concrete API. A pure-path probe cannot catch
+    this (it never touches the filesystem); a real render can."""
+    manifest = pm.render_combo(
+        f"{'posix' if HOST_WIN else 'win'}-local-plan-compaction"
+    )
+    names = [s["name"] for s in manifest["sections"]]
+    assert "compaction-summary" in names
+    assert manifest["total_bytes"] > 0
+
+
+def test_compaction_manifests_contain_summary_section():
+    """#184: every combo that names compaction must actually render the
+    compaction-summary section -- the fixture watermark must be live
+    (relative to the fixture conversation), never consumed by the
+    warm-up turn."""
+    for combo in pm.iter_combos():
+        if "compaction" not in pm._split_combo(combo) or not pm._split_combo(
+            combo
+        )["compaction"]:
+            continue
+        if combo == "kind-auxiliary-prompts":
+            continue
+        manifest = pm.render_combo(combo)
+        names = [s["name"] for s in manifest["sections"]]
+        assert "compaction-summary" in names, (
+            f"{combo}: -compaction combo rendered without the "
+            "compaction-summary section (stale fixture watermark?)"
+        )
+
+
+def test_compaction_summary_text_present_in_rendered_bytes():
+    """#184: the summary text the fixture persists must reach the model
+    bytes for a representative local compaction render."""
+    manifest = pm.render_combo(f"{PFX}-local-plan-compaction")
+    text = json.dumps(manifest)
+    assert "Fixture summary of the earlier conversation." in text
 
 
 def test_remote_offline_plan_note_rendered_and_differs_from_normal():
