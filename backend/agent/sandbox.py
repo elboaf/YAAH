@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -205,8 +206,21 @@ def ensure_toolkit_seed() -> list[str]:
             cells = [c.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
                      for c in cells]
             lines.append("| " + " | ".join(cells) + " |")
-        (tk_dir / "INDEX.md").write_text("\n".join(lines) + "\n",
-                                         encoding="utf-8")
+        # Atomic write: unique temp file then os.replace, matching the
+        # wrapper's Save-State/Update-Index contract, so a failure
+        # mid-write leaves the existing INDEX.md intact.
+        index_path = tk_dir / "INDEX.md"
+        tmp = index_path.with_name(
+            f"{index_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.replace(tmp, index_path)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     def _copy(rel: str) -> None:
         s, t = src / rel, tk / rel

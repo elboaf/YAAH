@@ -91,7 +91,16 @@ function Update-Index($state) {
             ForEach-Object { ("$_" -replace '\|', '\|') -replace "(`r?`n|`r)", " " }
         $lines += ("| {0} |" -f ($cells -join " | "))
     }
-    [System.IO.File]::WriteAllLines($indexPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
+    # Atomic write: unique temp file then move, same contract as
+    # Save-State, so an I/O failure mid-write leaves the existing
+    # INDEX.md intact instead of empty or partial.
+    $tmp = "$indexPath.$PID.$([System.IO.Path]::GetRandomFileName()).tmp"
+    try {
+        [System.IO.File]::WriteAllLines($tmp, $lines, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -Force -LiteralPath $tmp -Destination $indexPath
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -Force -LiteralPath $tmp }
+    }
 }
 
 switch ($Action) {

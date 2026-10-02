@@ -6,6 +6,7 @@ override + fake spawn), so the suite is green on Linux CI too.
 """
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1324,6 +1325,66 @@ def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch, tmp_
 
     index = (tk / "INDEX.md").read_text(encoding="utf-8")
     assert "| newtool | 9 | zip |" in index
+
+
+def test_ensure_toolkit_seed_index_write_atomic(isolated, monkeypatch, tmp_path):
+    """CodeRabbit return trip #3: _regen_index writes INDEX.md via a unique
+    temp file + os.replace, so an I/O failure mid-write leaves the existing
+    index intact instead of truncated, and no temp litter is left behind."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newtool": {"version": "9", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {}}),
+                                   encoding="utf-8")
+    good = "# existing good index\n"
+    (tk / "INDEX.md").write_text(good, encoding="utf-8")
+
+    real_replace = os.replace
+    calls = []
+
+    def flaky_replace(a, b, *args, **kwargs):
+        calls.append(Path(a).name)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sb.os, "replace", flaky_replace)
+    sb.ensure_toolkit_seed()  # seed failures are swallowed by design
+
+    # The existing index survived the failed write untouched...
+    assert (tk / "INDEX.md").read_text(encoding="utf-8") == good
+    # ...the write went through a .tmp side file, not the index itself...
+    assert calls and calls[0].startswith("INDEX.md") and calls[0].endswith(".tmp")
+    # ...and the temp file was cleaned up.
+    assert not list(tk.glob("INDEX.md*.tmp"))
+
+    # Happy path: os.replace takes effect and no temp litter remains.
+    monkeypatch.setattr(sb.os, "replace", real_replace)
+    sb.ensure_toolkit_seed()
+    assert "| newtool | 9 | zip |" in (tk / "INDEX.md").read_text(
+        encoding="utf-8")
+    assert not list(tk.glob("INDEX.md*.tmp"))
+
+
+def test_toolkit_wrapper_index_write_is_temp_then_move(isolated, tmp_path):
+    """CodeRabbit return trip #3: the wrapper's Update-Index must not
+    truncate INDEX.md in place — it stages a temp file and moves it, so an
+    I/O failure mid-write preserves the existing index."""
+    src = _TOOLKIT_PS1.read_text(encoding="utf-8")
+    assert "WriteAllLines($indexPath" not in src
+    # Same staged-write pattern Save-State already uses for state.json.
+    assert "WriteAllLines($tmp" in src
+    assert 'Move-Item -Force -LiteralPath $tmp -Destination $indexPath' in src
+
+    # Behavior: the happy path still produces a correct index end to end.
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1", tk=tk)
+    assert r.returncode == 0, r.stderr
+    assert "| t | 1 |" in (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert not list(tk.glob("INDEX.md*.tmp"))
 
 
 def test_ensure_toolkit_seed_locks_manifest(isolated, monkeypatch, tmp_path):
