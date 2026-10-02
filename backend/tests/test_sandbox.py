@@ -1411,6 +1411,74 @@ def test_bundled_toolkit_ships_wrapper_and_index():
         assert f"| {name} " in index, name
 
 
+def test_manifest_lock_byte_aligns_with_wrapper_and_fails_fast(isolated, tmp_path):
+    """CodeRabbit return trip 2 (human decision 2026-10-02): the Python
+    lock must (a) byte-align with the wrapper's $fs.Lock(0,1) — seek(0)
+    before locking, even when the lock file already has content — and
+    (b) fail fast (LK_NBLCK, raises OSError) instead of blocking ~10 s
+    when the wrapper holds the lock."""
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    pytest.importorskip("msvcrt")
+    import msvcrt  # Windows-only module; suite stays importable on Linux
+    import threading
+
+    lock = tk / "state.json.lock"
+    lock.write_bytes(b"leftover bytes from a previous run")
+    with open(lock, "r+b") as holder:  # the wrapper side
+        holder.seek(0)
+        msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)  # lock byte 0
+        try:
+            result: list = []
+
+            def _try():
+                try:
+                    with sb._manifest_lock(tk):
+                        result.append("acquired")
+                except OSError as e:
+                    result.append(e)
+
+            t = threading.Thread(target=_try)
+            t.start()
+            t.join(timeout=3)  # LK_LOCK would block ~10 s; NBLCK raises now
+            assert not t.is_alive(), "_manifest_lock blocked instead of failing fast"
+            assert result and not isinstance(result[0], str), \
+                "_manifest_lock acquired despite the wrapper holding byte 0 " \
+                "(not byte-aligned)"
+        finally:
+            holder.seek(0)
+            msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 1)
+    # after release the lock acquires normally
+    with sb._manifest_lock(tk):
+        pass
+
+
+def test_seed_regenerates_stale_index_even_without_tool_changes(isolated, monkeypatch, tmp_path):
+    """CodeRabbit return trip 2 (human decision 2026-10-02): INDEX.md is
+    regenerated after the merge even when no tools were added (e.g. a
+    hand-deleted INDEX.md, or an index written by an older version) —
+    the state.json write stays gated on the change check."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "t": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    manifest = json.dumps({"tools": {"t": {"version": "1", "kind": "zip"}}},
+                          indent=2) + "\n"
+    (tk / "state.json").write_text(manifest, encoding="utf-8")
+    (tk / "INDEX.md").write_text("# stale index without t\n",
+                                 encoding="utf-8")
+
+    written = sb.ensure_toolkit_seed()
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "| t | 1 | zip |" in index  # regenerated despite no tool change
+    assert "state.json" not in written  # manifest write stayed gated
+    assert (tk / "state.json").read_text(encoding="utf-8") == manifest
+
+
 def test_ensure_toolkit_seed_copies_wrapper_and_index(isolated, monkeypatch, tmp_path):
     """The wrapper + INDEX.md are part of the seeded baseline (copy-once,
     like every other bundled file)."""

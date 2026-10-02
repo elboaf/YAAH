@@ -153,10 +153,17 @@ def _manifest_lock(tk: Path):
             yield  # no byte-range locking available; nothing to serialize
             return
         with open(lock_path, "a+b") as f:
-            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            # Byte-align with the wrapper's Enter-ManifestLock ($fs.Lock(0,1)):
+            # seek(0) so byte 0 is locked even when the lock file already has
+            # content, and LK_NBLCK so a contended lock fails fast (the
+            # OSError is swallowed by ensure_toolkit_seed and retried next
+            # startup) instead of blocking ~10 s on a live VM's toolkit call.
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
             try:
                 yield
             finally:
+                f.seek(0)
                 msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
     return _locked()
@@ -239,11 +246,13 @@ def ensure_toolkit_seed() -> list[str]:
                 current["tools"] = tools
                 state.write_text(
                     json.dumps(current, indent=2) + "\n", encoding="utf-8")
-                # The bundled INDEX.md is copy-once, so an upgrade merge that
-                # added entries would leave a stale index behind: regenerate.
-                _regen_index(tk, tools)
                 if "state.json" not in written:
                     written.append("state.json")
+            # The bundled INDEX.md is copy-once, so it can go stale even
+            # when the merge added nothing (older version wrote it, or it
+            # was deleted): regenerate from the merged manifest on every
+            # seeded startup, inside the lock.
+            _regen_index(tk, tools)
     except (OSError, ValueError):
         pass
     return written
