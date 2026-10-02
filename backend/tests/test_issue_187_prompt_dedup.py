@@ -38,12 +38,18 @@ def _local_combo():
 
 
 def _win_local_combo():
-    """The WINDOWS local render, from any host (posix hosts flip-simulate).
+    """The WINDOWS local render id.
 
-    The sandbox-section facts under test here (windows-mcp playbook,
-    clean-image rules) exist only in win-* renders, so asserting against
-    the host-local combo broke on the Linux CI runner."""
+    NOTE: win-* combos only render on a Windows host (combos_for_host
+    filters them out elsewhere; the flip machinery simulates only
+    Windows->posix). The sandbox-section facts under test here exist only
+    in win-* renders, so tests that need them must skip on posix hosts."""
     return "win-local"
+
+
+def _requires_windows_host():
+    if not HOST_WIN:
+        pytest.skip("win-render facts render only on a Windows host")
 
 
 # ------------------------------------------------- SYN-13: git-editor rule
@@ -64,6 +70,7 @@ def test_git_editor_recipe_appears_once_per_render():
     """GIT_EDITOR=true (the -m recipe) renders exactly once: in the bash
     schema. The sandbox section keeps only the VM-specific GIT_EDITOR
     preset delta."""
+    _requires_windows_host()
     text = _render(_win_local_combo())
     # the recipe lives in the bash schema (not embedded in the prompt
     # body), so at most one occurrence; the VM preset delta survives
@@ -105,6 +112,7 @@ def test_mcp_playbook_lives_only_in_sandbox_section():
     """The raw-HTTP connect recipe and key-tool mechanics render exactly
     once (the sandbox section); sandbox_run's description keeps only a
     pointer."""
+    _requires_windows_host()
     text = _render(_win_local_combo())
     for fact in ("mcp-session-id", "windows-mcp-serve.ps1",
                  "notifications/initialized", "launch_executable"):
@@ -123,6 +131,7 @@ def test_clean_image_install_rules_lives_only_in_section():
     """The clean-image story (state.json, toolkit PATH, shim recipe,
     silent-install flags) renders once, in the sandbox section;
     sandbox_run's description keeps only the state.json pointer."""
+    _requires_windows_host()
     text = _render(_win_local_combo())
     assert text.count("CLEAN WINDOWS IMAGE") == 1
     assert text.count("node_modules") <= 2  # PATH enumeration, not x2 playbook
@@ -136,6 +145,7 @@ def test_clean_image_install_rules_lives_only_in_section():
 def test_round_trip_cost_has_one_home():
     """The ~1-3s file-polling cost is stated once in the rendered prompt
     (the sandbox section), not repeated in the sandbox_run schema."""
+    _requires_windows_host()
     text = _render(_win_local_combo())
     assert text.count("~1-3s") <= 1
     assert "~1-3s" not in _desc("sandbox_run")
