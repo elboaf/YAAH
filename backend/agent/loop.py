@@ -99,7 +99,9 @@ def _clean_title(title: str) -> str:
         if " " in cut:
             title = cut[: cut.rfind(" ")].strip()
         else:
-            title = cut.strip()
+            # No word boundary within the cap: truncating would slice
+            # mid-word, which the title contract forbids — reject instead.
+            return ""
     return title
 
 
@@ -151,6 +153,7 @@ async def _generate_conversation_title(
     ]
 
     def _extract(data):
+        """Pull the assistant message content out of a chat payload."""
         return (
             ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
             or ""

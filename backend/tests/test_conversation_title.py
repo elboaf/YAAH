@@ -14,14 +14,17 @@ from backend.agent import loop
 
 
 def _chat_factory(responses):
+    """Build a fake model_client.chat returning queued responses; returns (chat, calls)."""
     calls = []
 
     def fake_chat(messages, tools=None, stream=False, **kwargs):
+        """Record the call and return the next queued response as a chat payload."""
         calls.append([dict(m) for m in messages])
         idx = min(len(calls) - 1, len(responses) - 1)
         content = responses[idx]
 
         async def _once():
+            """Return the canned response in the chat-payload shape."""
             return {"choices": [{"message": {"content": content}}]}
 
         return _once()
@@ -30,17 +33,21 @@ def _chat_factory(responses):
 
 
 def _setup_conversation(monkeypatch, title="New chat"):
+    """Stub conversation/message DB helpers; returns the list of stored titles."""
     from backend.db import database as db  # noqa: F401 — import exercised for parity
 
     async def fake_get_conversation(cid):
+        """Return a non-agent chat with the given current title."""
         return {"chat_type": "chat", "title": title}
 
     async def fake_get_messages(cid):
+        """Return a single imperative first user message."""
         return [{"role": "user", "content": "open a new gh issue in elboaf/YAAH"}]
 
     updates = []
 
     async def fake_update_conversation(cid, title=None, **kw):
+        """Capture the title the loop tries to persist."""
         updates.append(title)
 
     monkeypatch.setattr(loop, "get_conversation", fake_get_conversation)
@@ -89,6 +96,7 @@ def test_conversational_reply_retries_then_rejects(monkeypatch):
 
 
 def test_conversational_reply_retry_can_succeed(monkeypatch):
+    """A conversational first reply is retried; the retry's title is accepted."""
     fake_chat, _ = _chat_factory(
         ["I can't open GitHub issues directly", "Open GitHub Issue"]
     )
@@ -101,6 +109,7 @@ def test_conversational_reply_retry_can_succeed(monkeypatch):
 
 
 def test_markdown_emphasis_stripped(monkeypatch):
+    """Markdown emphasis in the reply is stripped from the stored title."""
     fake_chat, _ = _chat_factory(["**Reading handoff file**"])
     monkeypatch.setattr(loop.model_client, "chat", fake_chat)
     _setup_conversation(monkeypatch)
@@ -111,6 +120,7 @@ def test_markdown_emphasis_stripped(monkeypatch):
 
 
 def test_truncation_at_word_boundary(monkeypatch):
+    """Over-cap titles truncate at whitespace, never mid-word."""
     long_title = (
         "one two three four five six seven eight nine ten eleven twelve "
         "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"
@@ -125,6 +135,20 @@ def test_truncation_at_word_boundary(monkeypatch):
     source = " ".join(long_title.split())
     assert source.startswith(title)
     assert source[len(title):len(title) + 1] in ("", " ")
+
+
+def test_truncation_no_word_boundary_rejects_title(monkeypatch):
+    """A single token over the cap is rejected, not sliced mid-word."""
+    # A single token longer than AUTO_TITLE_MAX_CHARS cannot be truncated at
+    # a word boundary; the title must be rejected (None), never sliced
+    # mid-word.
+    blob = "x" * (loop.AUTO_TITLE_MAX_CHARS + 10)
+    fake_chat, _ = _chat_factory([blob])
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    _setup_conversation(monkeypatch)
+
+    title = asyncio.run(loop._generate_conversation_title(1, "x"))
+    assert title is None
 
 
 @pytest.mark.parametrize(
