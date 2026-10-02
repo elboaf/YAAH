@@ -64,6 +64,32 @@ RESTART_BACKOFF = 5.0
 MAX_RESTARTS = 8
 BACKOFF_CAP = 30.0
 _ENV_RE = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+# Server-name rules (issue #194): a name must be non-empty, not just "_",
+# and must never start with "mcp_" — a server called "mcp_x" would mint
+# tool names that the mcp_ dispatch branch in tools.py routes before
+# built-in lookup, letting a config entry forge the built-in namespace.
+_MAX_DESC_CHARS = 512  # clamp server-provided tool descriptions
+
+
+def validate_server_name(name) -> str | None:
+    """Return an error message for an invalid server name, or None if OK.
+    Charset is kept permissive (underscores allowed) so existing configs
+    keep working; routing safety comes from exact advertised-name lookup,
+    not from the charset."""
+    if not isinstance(name, str) or not name.strip():
+        return "name must not be empty"
+    if name == "_":
+        return "name must not be bare '_'"
+    if name.startswith("mcp_") or name == "mcp":
+        return "name must not start with 'mcp_' (reserved prefix)"
+    return None
+
+
+def clamp_description(text: str) -> str:
+    """Cap a server-provided description so a hostile/buggy server cannot
+    inflate every-turn prompt bytes without bound (issue #194c)."""
+    text = text or ""
+    return text[:_MAX_DESC_CHARS] + ("…[clamped]" if len(text) > _MAX_DESC_CHARS else "")
 
 
 def interpolate_env(value, getter=os.environ.get):
@@ -130,6 +156,10 @@ class McpManager:
                 self._stop(name)
         for name, spec in cfg.items():
             if not isinstance(spec, dict) or not (spec.get("command") or spec.get("url")):
+                continue
+            invalid = validate_server_name(name)
+            if invalid:
+                log.warning("MCP server %r skipped: %s", name, invalid)
                 continue
             existing = self.servers.get(name)
             if (
@@ -280,7 +310,7 @@ class McpManager:
                     "type": "function",
                     "function": {
                         "name": state.prefix(t.name),
-                        "description": (
+                        "description": clamp_description(
                             getattr(t, "description", None)
                             or f"MCP tool from server '{state.name}'"
                         ),
@@ -304,12 +334,25 @@ class McpManager:
 
     def find(self, prefixed: str) -> tuple[McpServerState | None, str]:
         """Split mcp_<server>_<tool> back into (state, tool). Server names
-        may contain underscores, so match against known servers."""
+        may contain underscores, so every parse candidate is considered:
+        the longest (most specific) prefix wins, EXCEPT when a shorter
+        parse is the one whose server actually advertised the tool —
+        advertised names always route to the server that advertised them
+        (issue #194). Unadvertised names fall back to the legacy
+        longest-prefix parse (tests call tools with faked sessions)."""
+        best: tuple[McpServerState, str] | None = None  # fallback (legacy parse)
+        owner: tuple[McpServerState, str] | None = None  # advertised owner
         for state in self.servers.values():
             p = f"mcp_{state.name}_"
-            if prefixed.startswith(p):
-                return state, prefixed[len(p):]
-        return None, ""
+            if not prefixed.startswith(p):
+                continue
+            tool = prefixed[len(p):]
+            if any(t["function"]["name"] == prefixed for t in state.tools):
+                if owner is None or len(state.name) > len(owner[0].name):
+                    owner = (state, tool)
+            elif best is None or len(state.name) > len(best[0].name):
+                best = (state, tool)
+        return owner if owner else (best if best else (None, ""))
 
     async def call(self, prefixed: str, arguments: dict) -> dict:
         state, tool = self.find(prefixed)
