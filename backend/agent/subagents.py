@@ -730,7 +730,21 @@ async def run_sub_agent(
                                     args, loaded_skills, messages
                                 )
                             else:
-                                if gate is not None:
+                                # #188 belt-and-braces: the grace-turn
+                                # loop enforces the allowlist too — a
+                                # budget-exhausted turn gets no wider
+                                # tool access than a normal one.
+                                allowed_names = {
+                                    s["function"]["name"] for s in tools
+                                }
+                                if name not in allowed_names:
+                                    result = {
+                                        "error": (
+                                            f"Tool '{name}' is not in agent "
+                                            f"'{defn.name}'s allowed tool set."
+                                        )
+                                    }
+                                elif gate is not None:
                                     result = await gate(name, args, tc.get("id", ""))
                                 else:
                                     result = None

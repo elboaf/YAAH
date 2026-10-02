@@ -819,6 +819,38 @@ async def test_grace_turn_executes_tool_and_stops(fake_model, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_grace_turn_enforces_allowlist(fake_model, tmp_path):
+    """#188 return trip: the grace-turn loop enforces the tool allowlist
+    like the normal loop — a disallowed tool call gets the structured
+    error result and never executes."""
+    defn = AgentDef(name="t", description="", body="b", tools=["read_file"],
+                    max_turns=1)
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c2", "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps({
+                "path": "out.txt", "content": "should never land",
+            })},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    result = await subagents.run_sub_agent(defn, "write it", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 2
+    # The write was blocked: no file, structured error in the transcript.
+    assert not (tmp_path / "out.txt").exists()
+    tool_entry = result["transcript"][4]
+    assert "allowed tool set" in json.loads(tool_entry["content"])["error"]
+
+
+@pytest.mark.asyncio
 async def test_grace_turn_text_becomes_output(fake_model, tmp_path):
     """Grace turn ends with text: that text is the output, status max_turns."""
     defn = AgentDef(name="t", description="", body="b", max_turns=1)
