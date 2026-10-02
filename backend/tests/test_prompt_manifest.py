@@ -178,7 +178,10 @@ def test_windows_flip_on_posix_does_not_instantiate_windowspath(
     import sys as _sys
     import types
     probe = types.SimpleNamespace(Path=Path)
-    _sys.modules["backend._pm_probe_mod"] = probe
+    # Register through monkeypatch so the probe module is removed from
+    # sys.modules at teardown -- a bare assignment here leaked it into the
+    # rest of the session (CodeRabbit return trip #1 on PR #225).
+    monkeypatch.setitem(_sys.modules, "backend._pm_probe_mod", probe)
 
     with pm._platform_os_name(True):
         probe.Path("whatever")  # must not raise
