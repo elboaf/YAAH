@@ -10,7 +10,11 @@ Emits JSON-line events for the frontend:
   {'type': 'tool_progress', 'call_id', 'chunk'} - live shell output while a tool runs
   {'type': 'tool_result', 'name', 'result'} - tool output
   {'type': 'done'}                          - final answer complete
-  {'type': 'error', 'message'}              - fatal error
+  {'type': 'error', 'message', 'fatal', 'kind'} - error event; `fatal`
+                                                 marks turn-terminal hard
+                                                 failures (default true),
+                                                 `kind` names the soft path
+                                                 (e.g. "claim_refused")
 """
 
 import asyncio
@@ -1231,6 +1235,11 @@ async def run_agent(
             {
                 "type": "error",
                 "message": "a remote edit lease is active in this conversation",
+                # #243: the turn never started — the run "completed" by not
+                # running. Not a failed fire; the scheduler logs it and
+                # settles 'ok' instead of toasting a false "run failed".
+                "fatal": False,
+                "kind": "claim_refused",
             }
         )
         return
@@ -1239,6 +1248,8 @@ async def run_agent(
             {
                 "type": "error",
                 "message": "a turn is already running in this conversation",
+                "fatal": False,
+                "kind": "busy",
             }
         )
         return
