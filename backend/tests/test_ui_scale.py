@@ -20,8 +20,8 @@ def test_ui_scale_persists(tmp_path, monkeypatch):
 
 
 def test_api_clamps_out_of_range_scale(tmp_path, monkeypatch):
-    """PUT /api/config clamps ui_scale into [1.0, 1.5] — a wilder value
-    would break the compact layout."""
+    """PUT /api/config clamps ui_scale into [1.0, 2.0] — a wilder value
+    would break the compact layout (ceiling raised to 2.0 for the slider, #171)."""
     from backend.agent import config as cfgmod
 
     monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
@@ -33,9 +33,13 @@ def test_api_clamps_out_of_range_scale(tmp_path, monkeypatch):
     from backend.main import app
 
     with TestClient(app) as client:
+        # The slider's new ceiling (issue #171) must be accepted as-is.
+        r = client.put("/api/config", json={"ui_scale": 2.0})
+        assert r.status_code == 200
+        assert load_config()["ui_scale"] == 2.0
         r = client.put("/api/config", json={"ui_scale": 9.9})
         assert r.status_code == 200
-        assert load_config()["ui_scale"] == 1.5
+        assert load_config()["ui_scale"] == 2.0
         r = client.put("/api/config", json={"ui_scale": 0.2})
         assert r.status_code == 200
         assert load_config()["ui_scale"] == 1.0

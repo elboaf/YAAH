@@ -64,7 +64,7 @@ def test_memory_tools_present_in_schemas():
     defn = subagents.get_agent_def("general-purpose")
     tools = {
         s["function"]["name"]
-        for s in subagents._resolve_tools(defn, windows=True)
+        for s in subagents._resolve_tools(defn, workspace=None)
     }
     assert {"memory_save", "memory_read", "memory_delete"} <= tools
 
@@ -83,7 +83,7 @@ def test_index_iff_memory_tools(name, ws):
     defn = subagents.get_agent_def(name)
     tools = {
         s["function"]["name"]
-        for s in subagents._resolve_tools(defn, windows=True)
+        for s in subagents._resolve_tools(defn, workspace=None)
     }
     has_tools = bool(tools & {"memory_save", "memory_read", "memory_delete"})
     prompt = _prompt(name, ws)

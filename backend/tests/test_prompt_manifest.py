@@ -134,11 +134,14 @@ def test_no_unactionable_sandbox_guidance():
         if combo.startswith("kind-subagents"):
             from backend.agent import subagents
 
+            # #188: the resolution no longer takes a client-side windows
+            # flag — host shape comes from the workspace (LOCAL_WS for
+            # kind combos, no remote connected in the manifest harness).
             defn = subagents.get_agent_def("general-purpose")
             names = {
                 s["function"]["name"]
                 for s in subagents._resolve_tools(
-                    defn, windows=combo.startswith("kind-subagents-win")
+                    defn, workspace=pm.LOCAL_WS
                 )
             }
         # Remote combos carry the remote runner's own hand-maintained
