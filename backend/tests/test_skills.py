@@ -256,3 +256,34 @@ def test_resolve_path_allows_skill_reads_but_not_writes(tmp_path, monkeypatch):
     ).resolve()
     with pytest.raises(ValueError):
         resolve_path(str(workspace), str(skills_root / "review" / "SKILL.md"), for_write=True)
+
+
+# ---- issue #192: injection cap consistency ----------------------------------
+
+def test_oversized_body_truncation_marked_in_parse_and_result(skills_dir):
+    big = "z" * (skill_registry.MAX_SKILL_BODY_CHARS + 1000)
+    make_skill(skills_dir, "big-skill", big)
+    skill = skill_registry.scan_skills()["big-skill"]
+    assert skill.body.endswith("…[truncated]")
+    assert len(skill.body) <= skill_registry.MAX_SKILL_BODY_CHARS + len(
+        "…[truncated]"
+    )
+    loaded = []
+    messages = [{"role": "system", "content": "sys"}]
+    result = skill_registry.load_skill_into_messages(
+        {"name": "big-skill"}, loaded, messages
+    )
+    assert result.get("truncated") is True
+    assert "…[truncated]" in messages[0]["content"]
+
+
+def test_body_under_cap_not_marked(skills_dir):
+    skill = skill_registry.scan_skills()["review"]
+    assert not skill.body.endswith("…[truncated]")
+
+
+def test_pathological_description_clamped_in_index(skills_dir):
+    make_skill(skills_dir, "loud", "Body.", description="D" * 5000)
+    idx = skill_registry.index_for_prompt()
+    line = next(ln for ln in idx.splitlines() if ln.startswith("- loud:"))
+    assert len(line) <= 300

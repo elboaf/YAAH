@@ -198,3 +198,77 @@ def test_schemas_registered_platform_neutral():
 
     for n in ("memory_save", "memory_read", "memory_delete"):
         assert n in SCHEMAS
+
+
+# ---- issue #192: injection cap consistency ----------------------------------
+
+def _write_index(workspace, text):
+    d = memory.ensure_dir(workspace)
+    (d / "MEMORY.md").write_text(text, encoding="utf-8")
+
+
+def test_rendered_block_has_heading_exactly_once():
+    # A user edit that reintroduces the template heading must not produce
+    # a duplicate "# Persistent memory" heading in the rendered block.
+    _write_index(WS, "# Persistent memory\n\n- [Fact](fact.md) — a fact\n")
+    block = memory.index_for_prompt(WS)
+    assert block.count("# Persistent memory") == 1
+
+
+def test_index_prioritizes_user_and_feedback_over_project():
+    # Type-prioritized index (#228 fold-in): user/feedback pinned at the
+    # top; over budget the oldest project entries drop off first.
+    for i in range(3):
+        memory.save_memory(WS, f"proj-{i}", f"P{i}", "p", "project", "c")
+    memory.save_memory(WS, "user-fact", "U", "u", "user", "c")
+    memory.save_memory(WS, "fb-fact", "F", "f", "feedback", "c")
+    block = memory.index_for_prompt(WS)
+    assert block.index("user-fact.md") < block.index("proj-0.md")
+    assert block.index("fb-fact.md") < block.index("proj-0.md")
+
+
+def test_index_drop_oldest_project_first_when_over_budget(monkeypatch):
+    lines = []
+    for i in range(60):
+        slug = f"proj-{i:03d}"
+        lines.append(f"- [P{i}]({slug}.md) — {'x' * 200}")
+        d = memory.ensure_dir(WS)
+        (d / f"{slug}.md").write_text(
+            f"---\nname: {slug}\ndescription: \"p\"\nmetadata:\n  type: project\n---\n\n# P{i}\n",
+            encoding="utf-8",
+        )
+    for slug, label in (("user-1", "U"), ("fb-1", "F")):
+        lines.append(f"- [{label}]({slug}.md) — {'x' * 200}")
+        t = "user" if slug.startswith("user") else "feedback"
+        (memory.ensure_dir(WS) / f"{slug}.md").write_text(
+            f"---\nname: {slug}\ndescription: \"{t}\"\nmetadata:\n  type: {t}\n---\n\n# {label}\n",
+            encoding="utf-8",
+        )
+    _write_index(WS, "\n".join(lines))
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 3000)
+    block = memory.index_for_prompt(WS)
+    assert "…[truncated]" in block
+    assert "proj-000.md" not in block      # oldest project dropped first
+    assert "proj-059.md" in block          # newest project kept
+    assert "user-1.md" in block and "fb-1.md" in block  # pinned types kept
+
+
+def test_save_memory_caps_body_and_reports_truncation():
+    long_body = "x" * (memory.MAX_MEMORY_BODY_CHARS + 5000)
+    r = memory.save_memory(WS, "big", "Big", "d", "project", long_body)
+    assert "error" not in r
+    assert r.get("truncated") is True
+    saved = (memory.memory_dir(WS) / "big.md").read_text(encoding="utf-8")
+    assert len(saved) <= memory.MAX_MEMORY_BODY_CHARS + 2048
+    short = memory.save_memory(WS, "small", "S", "d", "project", "tiny")
+    assert "truncated" not in short
+
+
+def test_read_memory_body_not_eaten_by_frontmatter_slack():
+    # A long title eats into the +2048 slack under the old save path; the
+    # body must survive intact up to MAX_MEMORY_BODY_CHARS on read.
+    long_title = "T" * 1500
+    body = "y" * (memory.MAX_MEMORY_BODY_CHARS - 2000)
+    memory.save_memory(WS, "slack", long_title, "d", "project", body)
+    r = memory.read_memory(WS, "slack")
+    assert body in r["content"]
