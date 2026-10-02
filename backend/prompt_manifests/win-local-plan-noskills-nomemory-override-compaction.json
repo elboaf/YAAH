@@ -44,8 +44,8 @@
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1269,
-      "sha256": "36e1f0c143e0c54c62c59ab02bfd247765159bb1f6c5c5f0b44b88efb9f9dd47"
+      "bytes": 1247,
+      "sha256": "343499818bdedcebe9851082ffc3a9ec46992ac60e67500d32e92c06c90d8534"
     },
     {
       "name": "get_help",
@@ -59,8 +59,8 @@
     },
     {
       "name": "web_fetch",
-      "bytes": 557,
-      "sha256": "26b56c05ed4e94424958db1888c229ad357fc392bd81a5c44727744d70b8496e"
+      "bytes": 636,
+      "sha256": "0bb009f7c774b55d6b509f66314048d7f77f55906edbc67d8851c57cd5daba41"
     },
     {
       "name": "view_image",
@@ -114,28 +114,13 @@
     },
     {
       "name": "spawn_agent",
-      "bytes": 1301,
-      "sha256": "065b018fac874ab087582394667ea82631539df37bef78363abf21f6510a90f8"
+      "bytes": 1078,
+      "sha256": "80ec81e6852904cd5177df2d3a13277998c8bf4970b7dbf8dafa66c6e12dea86"
     },
     {
       "name": "load_skill",
       "bytes": 493,
       "sha256": "f24564c9ad287f9729635966b715fcbd5f357222cf0a856b758639bf75613dcc"
-    },
-    {
-      "name": "memory_save",
-      "bytes": 1079,
-      "sha256": "91837d49891003c76a503d00dd9469cfe91d4953f6a2bc4b5a9aceb9c78ca0fb"
-    },
-    {
-      "name": "memory_read",
-      "bytes": 349,
-      "sha256": "b78825cc93de8377705ce77faa9753b7846ece0ae97aee4cdcf84f898a480efb"
-    },
-    {
-      "name": "memory_delete",
-      "bytes": 289,
-      "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
     },
     {
       "name": "read_ui_tree",
@@ -214,8 +199,8 @@
     },
     {
       "name": "powershell",
-      "bytes": 1159,
-      "sha256": "a5a35e31c5dc313d8e9dd92b8ddd8c19e0a90f9b541cfe7f4e7fe6b7db0e88a4"
+      "bytes": 1165,
+      "sha256": "6fc02d9c1ef27d76905741d24b2c57788473ca13a003896ace430915dba5211d"
     },
     {
       "name": "exit_plan",

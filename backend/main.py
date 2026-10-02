@@ -983,6 +983,9 @@ class ConfigUpdate(BaseModel):
     # Computer-use settings block (issue #140): Settings toggles only
     # `allow_screenshot`; the rest of the block merges through untouched.
     computer_use: dict | None = None
+    # Persistent-memory block (issue #169): Settings toggles only
+    # `enabled`; the rest of the block merges through untouched.
+    memory: dict | None = None
     ui_scale: float | None = None
     context_window_overrides: dict[str, int | None] | None = None
     model_context: dict[str, dict[str, int | None]] | None = None
@@ -1006,6 +1009,17 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
         raise HTTPException(status_code=409, detail="conversation already running")
     if request.headers.get("x-yaah-remote"):
         raise HTTPException(status_code=409, detail={"code": "remote_turns_not_enabled", "message": "Remote turns are not enabled until Phase 6."})
+    # Inline-cap gate (#183): attachments ride into model context verbatim
+    # via re-inlining, so a record with more than INLINE_LIMIT_BYTES of
+    # content is rejected here the way /api/attachments rejects oversize
+    # staging — a direct API call must not smuggle multi-MB content into
+    # the loop or the DB.
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    for record in body.attachments:
+        content = record.get("content") if isinstance(record, dict) else None
+        if isinstance(content, str) and len(content.encode("utf-8")) > INLINE_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="attachment content exceeds the 100 KB inline limit")
     # Working directory for this turn (issue #8): the conversation row's
     # workspace — the same column the sidebar groups by, so a moved chat's
     # next message runs inside the workspace it was moved TO, and a stale
@@ -1138,6 +1152,14 @@ async def api_agent_queue(conversation_id: int, body: QueueBody):
     text = body.message.strip()
     if not text and not body.images and not body.attachments:
         raise HTTPException(status_code=400, detail="message must not be empty")
+    # Same inline-cap gate as /api/agent (#183): queued records persist on
+    # the user row and re-inline at the next step boundary.
+    from backend.agent.attachments import INLINE_LIMIT_BYTES
+
+    for record in body.attachments or []:
+        content = record.get("content") if isinstance(record, dict) else None
+        if isinstance(content, str) and len(content.encode("utf-8")) > INLINE_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="attachment content exceeds the 100 KB inline limit")
     from backend.agent.imagedata import save_data_url
 
     image_paths = []
@@ -1631,13 +1653,18 @@ async def api_agents_remove(agent_id: str, delete_chat: bool = True):
 
 
 @app.post("/api/agents/{agent_id}/run")
-async def api_agents_run(agent_id: str):
+async def api_agents_run(agent_id: str, one_shot: bool = False):
     """Run an agent right now ("Run now" covers testing; the regular
-    schedule advances from this fire)."""
+    schedule advances from this fire).
+
+    one_shot=true (#199): a deliberate single run of a paused or enabled
+    agent that NEVER advances (or resurrects) next_fire_at — the schedule
+    is only moved by due ticks and by the resume path. A paused agent
+    stays paused."""
     agent = await db_get_agent(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="agent not found")
-    outcome = await scheduler_mod.fire_agent(agent)
+    outcome = await scheduler_mod.fire_agent(agent, one_shot=one_shot)
     if outcome == "gone":
         raise HTTPException(status_code=409, detail="agent chat was deleted")
     if outcome == "disabled":
@@ -1926,6 +1953,10 @@ async def api_export_conversation(conversation_id: int):
             lines += [f"**🔧 tool: {name}**", "", "```json", r["content"], "```", ""]
         elif role == "assistant":
             lines += [f"**🤖 assistant**", "", r["content"] or "", ""]
+            # #226: the briefing the voice spoke for this emission, when one
+            # was captured (say toggle off ⇒ column empty ⇒ no line here).
+            if r.get("say"):
+                lines += [f"*Briefing:* {r['say']}", ""]
             for tc in r.get("tool_calls") or []:
                 if isinstance(tc, dict) and tc.get("id") and not tc.get("name"):
                     fn = tc.get("function") or {}
@@ -1985,6 +2016,8 @@ async def api_get_config():
         "sandbox": cfg.get("sandbox") or {},
         # Computer-use block (Settings toggles allow_screenshot, #140).
         "computer_use": cfg.get("computer_use") or {},
+        # Persistent-memory block (Settings toggles memory.enabled, #169).
+        "memory": cfg.get("memory") or {},
         # Per-model context-window overrides (Settings edits these).
         "context_window_overrides": cfg.get("context_window_overrides") or {},
         # Per-model context windows (the per-model Settings editor).
@@ -2046,6 +2079,22 @@ async def api_set_config(body: ConfigUpdate):
         if "allow_screenshot" in merged_cu:
             merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
         updates["computer_use"] = merged_cu
+    # Persistent-memory block merges the same way (#169): a Settings save
+    # that only touches enabled keeps any future sibling keys intact.
+    # enabled must be a real boolean (CodeRabbit return trip): bool("false")
+    # is True in Python, so a string "false" must be rejected, not coerced.
+    mem = updates.get("memory")
+    if isinstance(mem, dict):
+        if "enabled" in mem and not isinstance(mem["enabled"], bool):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_memory_enabled", "message": "memory.enabled must be a boolean"},
+            )
+        existing = load_config().get("memory") or {}
+        merged_mem = {**existing, **mem}
+        if "enabled" in merged_mem:
+            merged_mem["enabled"] = bool(merged_mem["enabled"])
+        updates["memory"] = merged_mem
     # Interface scale is clamped to the shipped range (Settings offers
     # 100/110/125/150%; anything wilder would break the compact layout).
     if "ui_scale" in updates:
@@ -2345,6 +2394,42 @@ async def api_tts_test(body: TtsTestBody):
     except Exception as e:  # noqa: BLE001 — the user is waiting on this answer
         return JSONResponse({"detail": f"{type(e).__name__}: {e}"}, status_code=500)
     return {"ok": True}
+
+
+class TtsVoicesBody(BaseModel):
+    """Voice discovery (#231): the endpoint/key drafts Settings is showing.
+    Optional fields fall back to the stored voice config — the probe works
+    before the user touches the fields and with no body at all."""
+    endpoint: str | None = None
+    api_key: str | None = None
+
+
+@app.post("/api/tts/voices")
+async def api_tts_voices(body: TtsVoicesBody | None = None):
+    """The voice names a remote server offers, via the non-standard
+    ``GET {base}/voices`` the reference Kokoro server exposes (OpenAI's own
+    API has none — a list-less server is normal, never an error). Always
+    200 with {"voices": []} on any probe failure; the UI falls back to
+    free-text. 409 not-configured only when no endpoint can be resolved at
+    all. A typed-but-unsaved key draft wins over the stored key so
+    discovery works before the first Save; the key goes ONLY to the probed
+    endpoint and is never echoed back."""
+    from backend.agent import speak
+    from fastapi.responses import JSONResponse
+
+    voice_cfg = load_config().get("voice") or {}
+    endpoint = (body.endpoint if body else None) or (voice_cfg.get("tts_endpoint") or "")
+    if not endpoint.strip():
+        return JSONResponse(
+            {"detail": "no endpoint configured (Settings → Voice)", "code": "not-configured"},
+            status_code=409,
+        )
+    api_key = (body.api_key if body else None) or (voice_cfg.get("tts_api_key") or "")
+    try:
+        voices = await speak.probe_remote_voices(endpoint, api_key=api_key)
+    except speak.RemoteTTSError as e:  # a malformed endpoint, same gate as Test
+        return JSONResponse({"detail": str(e), "code": e.code}, status_code=409)
+    return {"voices": voices}
 
 
 @app.get("/api/tts/status")

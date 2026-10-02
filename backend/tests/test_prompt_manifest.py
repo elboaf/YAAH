@@ -116,6 +116,56 @@ def test_sandbox_fragment_uses_standard_separator():
     assert pm.SEPARATOR + "# Windows Sandbox" in text
 
 
+def test_no_unactionable_sandbox_guidance():
+    """Issue #179: no rendered combo may instruct the model to use
+    sandbox tooling that its schema set does not carry. Sandbox tools
+    exist only for a local Windows session (host is None and windows),
+    so the sandbox bullets must render there and nowhere else —
+    asserted per name against the rendered tool-schema list."""
+    GUIDANCE_ONLY = ("sandbox_test", "sandbox_run", "sandbox_status",
+                     "sandbox_stop")
+    for combo in REPRESENTATIVES + [f"{PFX}-local-plan"]:
+        manifest = pm.render_combo(combo)
+        names = {t["name"] for t in manifest["tool_schemas"]}
+        # Sub-agent kind combos render a general-purpose sub-agent's
+        # prompt; its prose derives from the sub-agent's own tool
+        # resolution (#181), not the combo-level schema list (which is
+        # empty for these combos).
+        if combo.startswith("kind-subagents"):
+            from backend.agent import subagents
+
+            defn = subagents.get_agent_def("general-purpose")
+            names = {
+                s["function"]["name"]
+                for s in subagents._resolve_tools(
+                    defn, windows=combo.startswith("kind-subagents-win")
+                )
+            }
+        # Remote combos carry the remote runner's own hand-maintained
+        # prose tool list (remote_runner.py), whose drift is issue #181's
+        # scope — #179 covers the loop's guidelines block.
+        if "remote" in combo:
+            continue
+        for tool in GUIDANCE_ONLY:
+            if tool not in names:
+                assert tool not in manifest["rendered_text"], (
+                    f"{combo}: prompt names '{tool}' but no schema carries it"
+                )
+        # windows-mcp is a server, not a schema tool: it is only actionable
+        # when the sandbox integration it belongs to is present.
+        if "sandbox_run" not in names:
+            assert "windows-mcp" not in manifest["rendered_text"], combo
+
+
+@pytest.mark.skipif(
+    not HOST_WIN, reason="win-local render facts are canonical on Windows"
+)
+def test_win_local_keeps_sandbox_guidance():
+    """Issue #179 acceptance: Windows local renders are unchanged."""
+    text = pm.render_combo("win-local")["rendered_text"]
+    assert "Boot with sandbox_test and run commands via sandbox_run" in text
+
+
 def test_skills_axis_flips_skills_index_section():
     with_skills = pm.render_combo(f"{PFX}-local-compaction")
     without = pm.render_combo(f"{PFX}-local-noskills-compaction")
@@ -215,6 +265,40 @@ def test_compaction_summary_text_present_in_rendered_bytes():
     manifest = pm.render_combo(f"{PFX}-local-plan-compaction")
     text = json.dumps(manifest)
     assert "Fixture summary of the earlier conversation." in text
+
+
+def test_remote_offline_plan_note_rendered_and_differs_from_normal():
+    """Issue #178: the remote-offline wrapper must apply the plan-mode
+    note exactly as the local path does, so plan-vs-normal offline
+    combos differ in the plan-note section instead of being
+    byte-identical while both carrying exit_plan."""
+    plan = pm.render_combo(f"{PFX}-remote-offline-plan")
+    normal = pm.render_combo(f"{PFX}-remote-offline-normal")
+    assert "# Access mode: PLAN" in plan["rendered_text"]
+    assert "# Access mode: PLAN" not in normal["rendered_text"]
+    assert plan["rendered_sha256"] != normal["rendered_sha256"]
+
+
+def test_plan_combos_differ_only_by_plan_note():
+    """Issue #178 acceptance: combos differing only in `plan` differ in
+    exactly the plan-note section (same tool schema names; the
+    rendered system text differs by the note, not by anything else
+    the plan flag was silently meant to control)."""
+    pairs = [
+        (f"{PFX}-remote-offline-normal", f"{PFX}-remote-offline-plan"),
+        (f"{PFX}-local", f"{PFX}-local-plan"),
+    ]
+    for normal_id, plan_id in pairs:
+        normal = pm.render_combo(normal_id)
+        plan = pm.render_combo(plan_id)
+        plan_names = [s["name"] for s in plan["tool_schemas"]]
+        normal_names = [s["name"] for s in normal["tool_schemas"]]
+        # The ONLY schema delta plan mode makes is appending exit_plan
+        # (loop.py appends it when plan is active).
+        assert plan_names == normal_names + ["exit_plan"], normal_id
+        assert plan["rendered_text"].startswith(
+            normal["rendered_text"]
+        ) or plan["rendered_text"].endswith(normal["rendered_text"]), normal_id
 
 
 def test_subagent_kind_covers_builtins():

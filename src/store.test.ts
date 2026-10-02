@@ -635,3 +635,34 @@ describe('steering transcript order', () => {
     expect(messages[3].content).toBe('after steering')
   })
 })
+
+// #226: persisted briefings ride the row's `say` column; hydration must
+// carry them onto the ChatMessage so reloads still render the say-line and
+// reloaded turns still speak their briefing.
+describe('buildMessages say hydration (#226)', () => {
+  it('carries a persisted briefing onto its message', () => {
+    const msgs = buildMessages([
+      row(1, 'user', 'hello'),
+      row(2, 'assistant', 'Visible answer.', { say: 'Wired the fix; tests green.' }),
+    ])
+    expect(msgs[1].say).toBe('Wired the fix; tests green.')
+  })
+
+  it('keeps the LAST emission briefing when rows coalesce into one block', () => {
+    const msgs = buildMessages([
+      row(1, 'assistant', 'First emission.', {
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'bash', arguments: '{}' } }],
+      }),
+      row(2, 'tool', '{"exit_code":0}', { tool_call_id: 'c1' }),
+      row(3, 'assistant', 'Second emission.', { say: 'final briefing' }),
+    ])
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].content).toBe('First emission.\nSecond emission.')
+    expect(msgs[0].say).toBe('final briefing')
+  })
+
+  it('leaves say undefined on rows without a briefing', () => {
+    const msgs = buildMessages([row(1, 'assistant', 'plain row', {})])
+    expect(msgs[0].say).toBeUndefined()
+  })
+})
