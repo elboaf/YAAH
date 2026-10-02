@@ -515,18 +515,19 @@ def _platform_os_name(windows: bool):
         return
     import pathlib as _pathlib
 
-    # pathlib's host guard lives in PosixPath/WindowsPath.__new__, defined
-    # only INSIDE those concrete classes (guarded by `if os.name ...` at
-    # class-creation time). A WindowsPath SUBCLASS defined in user code
-    # does not inherit it, so instantiating the subclass works under an
-    # os.name flip on either host -- and it keeps the full concrete API
-    # (mkdir, write_text, iterdir, resolve), which a PureWindowsPath mix-in
-    # does not (no filesystem methods at all). Note: merely subclassing
-    # does NOT keep the guard from firing when the code instantiates the
-    # CONCRETE WindowsPath directly -- that is the exact Linux-CI failure
-    # this rebinding prevents (#184).
+    # pathlib's host guard ("cannot instantiate WindowsPath on your
+    # system") is DEFINED INSIDE the concrete WindowsPath class when
+    # os.name != 'nt' at class-creation time -- so on a posix host, a
+    # WindowsPath SUBCLASS inherits the raising __new__ and still raises
+    # under the flip (#184 Linux CI, merge heads 3897049/1e18cd2). The
+    # guard is asymmetric: on a Windows host WindowsPath carries no
+    # guard, which is why this only ever failed on Linux. Shed the
+    # inherited guard with a trivial __new__ that calls object.__new__
+    # (WindowsPath.__init__/__slots__ do the rest); the class keeps the
+    # full concrete API (mkdir/write_text/iterdir/resolve).
     class _AlwaysWinPath(_pathlib.WindowsPath):
-        pass
+        def __new__(cls, *args, **kwargs):
+            return object.__new__(cls)
 
     swapped = []
     for mod_name, mod in list(_sys.modules.items()):

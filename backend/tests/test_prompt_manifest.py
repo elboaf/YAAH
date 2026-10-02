@@ -234,6 +234,12 @@ def test_windows_flip_on_posix_does_not_instantiate_windowspath(
     monkeypatch.setitem(_sys.modules, "backend._pm_probe_mod", probe)
 
     with pm._platform_os_name(True):
+        # Instantiate THE REBOUND NAME, not the imported Path: the whole
+        # point is that backend modules' Path attr must be directly
+        # instantiable under the flip. (A subclass inherits WindowsPath's
+        # raising __new__ on posix hosts, because the guard is defined
+        # inside WindowsPath itself when os.name != 'nt' -- so the
+        # subclass must override __new__ to shed the inherited guard.)
         probe.Path("whatever")  # must not raise
 
     assert probe.Path is Path
