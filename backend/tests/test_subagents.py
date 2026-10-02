@@ -758,6 +758,92 @@ async def test_spawn_agent_costs_parent_one_step(fake_model_single, tmp_path):
     assert any(e.get("text") == "sub result" for e in progress)
 
 
+# ------------------------------------- budget nudge honesty/pruning (#190)
+
+
+@pytest.mark.asyncio
+async def test_final_budget_turn_message_is_honest_about_grace(fake_model, tmp_path):
+    """#190: the last budgeted turn must never be called "final" — a grace
+    wrap-up turn follows when it ends on tool calls. The message must say
+    the budget ends after this turn, and must not claim this is the last
+    chance to act."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=2)
+    for _ in range(2):
+        fake_model.append([
+            {"type": "tool_calls", "tool_calls": [{
+                "id": "c", "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }]},
+            {"type": "finish", "reason": "tool_calls"},
+        ])
+    # Grace turn ends on tool calls too.
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    result = await subagents.run_sub_agent(defn, "loop", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 3  # 2 budgeted + 1 grace
+    all_notes = [
+        m["content"]
+        for messages in fake_model.messages for m in messages
+        if m["role"] == "system" and m.get("content")
+    ]
+    final_note = all_notes[-2]  # grace-turn note is appended last
+    assert "final budgeted turn" not in final_note
+    # It must not claim THIS turn is the last chance to act...
+    assert "this is the final" not in final_note.lower()
+    # ...while still saying the budget ends after this turn...
+    assert "budget" in final_note.lower()
+    # ...and it still asks for a final answer.
+    assert "final answer" in final_note.lower()
+
+
+@pytest.mark.asyncio
+async def test_convergence_nudges_collapse_to_one(fake_model, tmp_path):
+    """#190: closing turns carry at most ONE convergence nudge — each new
+    nudge replaces the previous one instead of accumulating."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=6)
+    for i in range(6):
+        fake_model.append([
+            {"type": "tool_calls", "tool_calls": [{
+                "id": f"c{i}", "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }]},
+            {"type": "finish", "reason": "tool_calls"},
+        ])
+    # Grace turn produces the final answer.
+    fake_model.append([
+        {"type": "content", "text": "done"},
+        {"type": "finish"},
+    ])
+    result = await subagents.run_sub_agent(defn, "loop", str(tmp_path))
+    assert result["status"] == "max_turns"
+    # Count nudge notes the LAST model call actually saw: nudges that were
+    # collapsed must appear at most once. (Snapshots share one list object,
+    # so every call shows exactly the current, single nudge.)
+    last_call = fake_model.messages[-1]
+    nudge_texts = [
+        m["content"] for m in last_call
+        if m["role"] == "system" and "converge" in m.get("content", "").lower()
+    ]
+    assert len(nudge_texts) <= 1, nudge_texts
+    # The last budgeted turn's nudge is present, in its honest wording.
+    assert any("wrap-up" in m.get("content", "") for m in last_call
+               if m["role"] == "system")
+    # Across the whole run, each model call saw at most ONE nudge.
+    for messages in fake_model.messages:
+        nudges = [
+            m for m in messages
+            if m["role"] == "system"
+            and "converge" in m.get("content", "").lower()
+        ]
+        assert len(nudges) <= 1, nudges
+
+
 # ------------------------------------------------- turn budget (issue #15B)
 
 
