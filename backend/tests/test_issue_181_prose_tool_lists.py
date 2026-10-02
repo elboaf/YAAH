@@ -77,7 +77,7 @@ def test_subagent_tool_sentence_matches_resolved_schemas():
         prompt = subagents._sub_agent_system_prompt(defn, "")
         resolved = {
             s["function"]["name"]
-            for s in subagents._resolve_tools(defn, windows=True)
+            for s in subagents._resolve_tools(defn, workspace=None)
         }
         assert _prose_names(prompt) == resolved, agent_name
 
@@ -89,7 +89,7 @@ def test_explore_prompt_does_not_name_stripped_tools():
     prompt = subagents._sub_agent_system_prompt(defn, "")
     resolved = {
         s["function"]["name"]
-        for s in subagents._resolve_tools(defn, windows=True)
+        for s in subagents._resolve_tools(defn, workspace=None)
     }
     for tool in ("write_file", "edit_file", "create_file",
                  "delete_file", "move_file"):
@@ -110,7 +110,7 @@ def test_general_purpose_prompt_mentions_every_resolved_tool():
     prompt = subagents._sub_agent_system_prompt(defn, "")
     resolved = {
         s["function"]["name"]
-        for s in subagents._resolve_tools(defn, windows=True)
+        for s in subagents._resolve_tools(defn, workspace=None)
     }
     prose = _prose_names(prompt)
     # search_conversation_history is ALWAYS_EXCLUDED for sub-agents (it
