@@ -152,13 +152,11 @@ switch ($Action) {
                 $state.tools.PSObject.Properties.Remove($Name)
                 Save-State $state
                 Update-Index $state
+                Write-Output "removed '$Name' from state.json and regenerated INDEX.md"
             } else {
                 Write-Output "'$Name' not in state.json (nothing to remove)"
             }
         } finally { Release-Lock }
-        if ($state.tools -and $state.tools.PSObject.Properties[$Name]) {
-            Write-Output "removed '$Name' from state.json and regenerated INDEX.md"
-        }
     }
     "list" {
         (Read-State).tools | ConvertTo-Json -Depth 10

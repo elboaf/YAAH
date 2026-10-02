@@ -145,6 +145,20 @@ def ensure_toolkit_seed() -> list[str]:
         return written
     tk = toolkit_dir()
 
+    # Hold the same cross-process mutex as `toolkit install` across the
+    # file copy, the state.json read-merge-write and the INDEX.md
+    # regeneration — a seed racing a live VM's install must not clobber it.
+    lock = _acquire_toolkit_manifest_lock()
+    try:
+        _seed_locked(src, tk, written)
+    finally:
+        _release_toolkit_manifest_lock(lock)
+    return written
+
+
+def _seed_locked(src: Path, tk: Path, written: list[str]) -> None:
+    """Seeding body of ensure_toolkit_seed(); the manifest mutex is held."""
+
     def _copy(rel: str) -> None:
         s, t = src / rel, tk / rel
         if t.exists():
@@ -161,7 +175,7 @@ def ensure_toolkit_seed() -> list[str]:
             if p.is_file():
                 _copy(p.relative_to(src).as_posix())
     except OSError:
-        return written
+        return
 
     # Merge the bundled state.json entries into an existing toolkit manifest
     # (copy-once above skips it when present, but user tools must survive).
@@ -191,6 +205,9 @@ def ensure_toolkit_seed() -> list[str]:
 
                 def _cell(v: object) -> str:
                     text = "" if v is None else str(v)
+                    # Flatten CR/LF like the wrapper's Format-Cell so a
+                    # multiline note can't break the Markdown table.
+                    text = text.replace("\r", " ").replace("\n", " ")
                     return text.replace("|", "\\|").strip()
 
                 ilines = [
@@ -217,7 +234,42 @@ def ensure_toolkit_seed() -> list[str]:
                 pass  # best-effort, same as the rest of seeding
     except (OSError, ValueError):
         pass
-    return written
+
+
+# Same named mutex `toolkit install` holds (see bin/toolkit.ps1): a seed
+# read that races a live VM's install must not write its older merged
+# snapshot afterward and drop the freshly installed entry.
+_TOOLKIT_MUTEX_NAME = "Global\\yaah-toolkit-manifest"
+
+
+def _acquire_toolkit_manifest_lock() -> object | None:
+    """Take the cross-process manifest mutex (Windows); a platform-safe
+    no-op elsewhere. Returns an opaque handle, or None when the lock is
+    unavailable (seeding stays best-effort, same as the rest)."""
+    ctypes = getattr(sys.modules.get("ctypes"), "windll", None)
+    if ctypes is None:  # non-Windows or ctypes missing
+        return None
+    import ctypes as _ct
+
+    handle = _ct.windll.kernel32.CreateMutexW(None, False,
+                                              _TOOLKIT_MUTEX_NAME)
+    if not handle:
+        return None
+    # WAIT_OBJECT_0 (0) or WAIT_ABANDONED (0x80) both mean we own it.
+    got = _ct.windll.kernel32.WaitForSingleObject(handle, 30000)
+    if got not in (0, 0x80):
+        _ct.windll.kernel32.CloseHandle(handle)
+        return None
+    return handle
+
+
+def _release_toolkit_manifest_lock(handle: object | None) -> None:
+    if handle is None:
+        return
+    import ctypes as _ct
+
+    _ct.windll.kernel32.ReleaseMutex(handle)
+    _ct.windll.kernel32.CloseHandle(handle)
 
 
 def _base_dir() -> Path:

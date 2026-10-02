@@ -1206,6 +1206,21 @@ def test_toolkit_wrapper_install_fresh_state(isolated, tmp_path):
     assert (tk / "INDEX.md").is_file()
 
 
+def test_toolkit_wrapper_remove_prints_confirmation(isolated, tmp_path):
+    """A successful `toolkit remove` must SAY so on stdout — the caller
+    (agent or human) has no other way to tell removal from no-op."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    assert _run_toolkit("install", "t", "-Version", "1", tk=tk).returncode == 0
+    r = _run_toolkit("remove", "t", tk=tk)
+    assert r.returncode == 0, r.stderr
+    assert "removed" in r.stdout and "t" in r.stdout, r.stdout
+    # ...and the no-op path stays distinguishable
+    r2 = _run_toolkit("remove", "t", tk=tk)
+    assert r2.returncode == 0
+    assert "not in state.json" in r2.stdout, r2.stdout
+
+
 def test_toolkit_wrapper_remove_and_idempotent_rerun(isolated, tmp_path):
     tk = tmp_path / "toolkit"
     tk.mkdir()
@@ -1305,6 +1320,20 @@ def test_toolkit_wrapper_reinstall_preserves_metadata(isolated, tmp_path):
     assert entry["note"] == "gotcha"
 
 
+def test_toolkit_wrapper_index_multiline_note_stays_one_line(isolated, tmp_path):
+    """A multiline `note` must not break the INDEX.md table (CodeRabbit
+    return trip on #248): cells normalize CR/LF to spaces."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1",
+                     "-Note", "line one\nline two", tk=tk)
+    assert r.returncode == 0, r.stderr
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if ln.startswith("| t |"))
+    assert "line one line two" in row        # flattened
+    assert "\n" not in row and "\r" not in row
+
+
 def test_toolkit_wrapper_index_escapes_cells(isolated, tmp_path):
     """Finding 3: pipe/newline in metadata renders escaped in INDEX.md
     (table not broken); state.json keeps the value verbatim."""
@@ -1351,6 +1380,77 @@ def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch,
 
     index = (tk / "INDEX.md").read_text(encoding="utf-8")
     assert "newbundled" in index, "INDEX.md regenerated after merge"
+
+
+def test_ensure_toolkit_seed_index_flattens_multiline_cells(isolated,
+                                                            monkeypatch,
+                                                            tmp_path):
+    """CodeRabbit return trip on #248: a multiline note in an existing
+    toolkit entry must render on one line in the regenerated INDEX.md."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newbundled": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {
+        "multi": {"version": "2", "kind": "zip",
+                  "note": "line one\nline two"}}}), encoding="utf-8")
+
+    sb.ensure_toolkit_seed()
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if ln.startswith("| multi |"))
+    assert "line one line two" in row
+
+
+def test_ensure_toolkit_seed_holds_manifest_lock(isolated, monkeypatch, tmp_path):
+    """CodeRabbit return trip on #248: a live VM's `toolkit install` holds
+    Global\\yaah-toolkit-manifest across its read-mutate-write; if the seed
+    doesn't take the same lock, its older merged snapshot can clobber the
+    freshly installed entry. A helper process grabs the lock first and
+    writes its entry late (while holding it): the seeded bundled entry and
+    the helper's entry must BOTH survive. Without the seed-side lock the
+    seed's early write is overwritten and the bundled entry is lost."""
+    import ctypes
+    import sys
+    if not hasattr(ctypes, "windll"):
+        pytest.skip("named-mutex test requires Windows")
+
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newbundled": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+    helper = (
+        "import ctypes, json, time\n"
+        "h = ctypes.windll.kernel32.CreateMutexW(None, False,\n"
+        "                                        r'Global\\yaah-toolkit-manifest')\n"
+        "assert ctypes.windll.kernel32.WaitForSingleObject(h, 30000) == 0\n"
+        f"p = {str(tk / 'state.json')!r}\n"
+        "time.sleep(1.5)\n"          # hold the lock past the seeder's start
+        "json.dump({'tools': {'marker': {'version': '9'}}}, open(p, 'w'))\n"
+        "ctypes.windll.kernel32.ReleaseMutex(h)\n")
+    proc = subprocess.Popen([sys.executable, "-c", helper])
+    try:
+        time.sleep(0.4)              # the helper now holds the lock
+        sb.ensure_toolkit_seed()
+        time.sleep(3)                # let the helper finish its write
+        tools = json.loads(
+            (tk / "state.json").read_text(encoding="utf-8")).get("tools") or {}
+        assert "newbundled" in tools, (
+            "seed's bundled entry lost — ensure_toolkit_seed() must hold "
+            "Global\\yaah-toolkit-manifest across its read-merge-write")
+        assert "marker" in tools
+    finally:
+        proc.wait(timeout=30)
 
 
 def test_readme_atomicity_wording_is_accurate(isolated):
