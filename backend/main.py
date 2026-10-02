@@ -1328,8 +1328,14 @@ async def api_mcp_add_server(body: McpServerBody):
     trust: the command runs locally with user permissions / the URL is
     contacted with the given headers."""
     name = body.name.strip()
+    # Charset check first (same rule the UI has always shown), then the
+    # reserved-prefix rules shared with config-side registration (#194):
+    # mcp_* names would mint tool names that shadow the built-in namespace.
     if not _re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
         raise HTTPException(status_code=400, detail="name: letters/digits/-/_ only")
+    invalid = _mcp.validate_server_name(name)
+    if invalid:
+        raise HTTPException(status_code=400, detail=invalid)
     command, url = body.command.strip(), body.url.strip()
     if bool(command) == bool(url):
         raise HTTPException(
