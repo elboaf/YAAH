@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1178 / 1236+) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1269 / 1236+) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,7 +45,7 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1178 / 1236) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1269 / 1236) →
 `_default_system_prompt` → fragments appended 1303–1357 → `messages` with
 system first (loop.py:1381).
 
@@ -63,7 +63,7 @@ system first (loop.py:1381).
 | Mid-turn loaded skills (`load_skill`) | `backend/agent/skills.py:280–315` (`load_skill_into_messages`); queued-message variant loop.py:669–691 (`_apply_injected_skills`) | model calls `load_skill`, or queued message carries skill chips; mutates `messages[0]` in place | header ~10 lines + body |
 | Plan-mode note | `_plan_mode_note` (loop.py:711–722), appended at loop.py:1346–1347 | `current_access_mode() == "plan"` | ~11 lines |
 | Sandbox-only (scheduled agent) note | `_sandbox_only_note` (loop.py:725–738), appended at loop.py:1350–1353 | scheduled agent with `policy == "sandbox-only"` | ~13 lines |
-| Offline-remote note | `remote_runner.py:96–107` (`_system_prompt` wraps the base builder) | remote turn whose owning device is offline | 3 lines |
+| Offline-remote note | `remote_runner.py:103–128` (`_system_prompt` wraps the base builder) | remote turn whose owning device is offline | 3 lines |
 | Compaction summary injection | loop.py:1383–1387 — `"Earlier conversation summary (for context only):\n" + summary` | compaction has fired (`prompt_state["summary"]` non-empty) | 1 line + summary (≤ `_SUMMARY_MAX_CHARS`) |
 | Standing instructions (scheduler) | backend/agent/scheduler.py:293–301 | scheduled agent has saved instructions | header + 1 line each |
 | Attachment re-inlining | `backend/agent/attachments.py:15–27` (`inline_attachment_text`) | message has structured attachments (#142); exact format pinned by the byte-identical backend/TS golden fixture (test_attachment_inline.py + src/attachmentFixture.ts) | ~10 lines/attachment |
