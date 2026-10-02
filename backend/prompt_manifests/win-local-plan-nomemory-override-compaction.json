@@ -19,6 +19,12 @@
       "bytes": 443,
       "sha256": "4a03a6b0702f56de2ae739b2574f6f73bd0ceadba3539ca97626a7356aa2f150",
       "text": "# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it."
+    },
+    {
+      "name": "compaction-summary",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa",
+      "text": "Earlier conversation summary (for context only):\nFixture summary of the earlier conversation."
     }
   ],
   "system_messages": [
@@ -26,10 +32,15 @@
       "role": "system",
       "bytes": 821,
       "sha256": "da49874b895e83cd3ae6fc8351e920bfaeea24f47dd15850fc8620e866ea55e3"
+    },
+    {
+      "role": "system",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa"
     }
   ],
-  "total_bytes": 821,
-  "rendered_sha256": "da49874b895e83cd3ae6fc8351e920bfaeea24f47dd15850fc8620e866ea55e3",
+  "total_bytes": 922,
+  "rendered_sha256": "f38aa82ae86f8e14e55ee98544ce58342ab7c8da388aeb3d64b21278e198bf94",
   "tool_schemas": [
     {
       "name": "bash",
@@ -173,8 +184,8 @@
     },
     {
       "name": "sandbox_run",
-      "bytes": 1394,
-      "sha256": "75eb31dc5b8c0db90ea6470bfd84c77b44d72e6594abeddc4bcd8d6475e0fb28"
+      "bytes": 1574,
+      "sha256": "b971a9be3d45d285b8a0d9edbb53c1a613d45a392fe98f0d5c1085d9afce1ede"
     },
     {
       "name": "sandbox_status",
@@ -199,5 +210,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n====\n\nEarlier conversation summary (for context only):\nFixture summary of the earlier conversation."
 }

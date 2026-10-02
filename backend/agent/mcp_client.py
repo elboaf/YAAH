@@ -8,13 +8,19 @@ tool menu under prefixed names (mcp_<server>_<tool>) so they can never
 collide with built-ins or each other.
 
 Trust model (user decision): REGISTRATION IS TRUST. A registered server
-runs arbitrary code on this machine; once registered, its tools are
-always available with no per-call confirmation. Config lives in
-config.json "mcpServers" (same shape as Claude Desktop/Cursor configs,
-so ecosystem configs are copy-paste compatible):
+runs arbitrary code on this machine (or is contacted with your headers);
+once registered, its tools are always available with no per-call
+confirmation. Config lives in config.json "mcpServers" — command-style
+entries keep Claude Desktop/Cursor configs copy-paste compatible, url
+entries reach remote servers over streamable HTTP (legacy SSE opt-in via
+"transport": "sse"). ${env:VAR} anywhere in a spec is substituted from
+the environment at connect time, so tokens never sit resolved in the
+config file:
 
     "mcpServers": {
-        "browser": {"command": "npx", "args": ["-y", "@browser/mcp"]}
+        "browser": {"command": "npx", "args": ["-y", "@browser/mcp"]},
+        "remote":  {"url": "https://mcp.example.com/mcp",
+                    "headers": {"Authorization": "Bearer ${env:MCP_TOKEN}"}}
     }
 
 The mcp SDK's stdio_client is an async context manager, so each session
@@ -23,6 +29,8 @@ the FastAPI app's, started from main.lifespan.
 """
 import asyncio
 import logging
+import os
+import re
 
 # Imported at module level (not lazily) so PyInstaller's static analysis
 # sees them — bundling must not rely on --collect-all mcp, which pulls in
@@ -30,11 +38,76 @@ import logging
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+# HTTP transports (issue #128): streamable HTTP is the modern standard
+# (2025-03-26+); sse_client is the legacy fallback for pre-streamable
+# servers. Both are context managers like stdio_client. The SDK manages
+# its own httpx client lifecycle inside these context managers — we must
+# never hand it an externally-created one (it wouldn't be closed, and
+# the transport's background tasks hang process exit).
+try:
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.client.sse import sse_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
+except ImportError:  # pragma: no cover - older SDKs
+    streamable_http_client = None
+    sse_client = None
+    create_mcp_http_client = None
+
 log = logging.getLogger(__name__)
 
 CALL_TIMEOUT = 60.0
 SPAWN_TIMEOUT = 30.0
 RESTART_BACKOFF = 5.0
+# Exponential backoff (issue #128): failures that never converge must not
+# retry blindly every 5s forever. After MAX_RESTARTS consecutive failures
+# the server goes terminal ("failed (won't retry)") until the user retries.
+MAX_RESTARTS = 8
+BACKOFF_CAP = 30.0
+_ENV_RE = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+# Server-name rules (issue #194): a name must be non-empty, not just "_",
+# and must never start with "mcp_" — a server called "mcp_x" would mint
+# tool names that the mcp_ dispatch branch in tools.py routes before
+# built-in lookup, letting a config entry forge the built-in namespace.
+_MAX_DESC_CHARS = 512  # clamp server-provided tool descriptions
+
+
+def validate_server_name(name) -> str | None:
+    """Return an error message for an invalid server name, or None if OK.
+    Charset is kept permissive (underscores allowed) so existing configs
+    keep working; routing safety comes from exact advertised-name lookup,
+    not from the charset."""
+    if not isinstance(name, str) or not name.strip():
+        return "name must not be empty"
+    if name == "_":
+        return "name must not be bare '_'"
+    if name.startswith("mcp_") or name == "mcp":
+        return "name must not start with 'mcp_' (reserved prefix)"
+    return None
+
+
+def clamp_description(text: str) -> str:
+    """Cap a server-provided description so a hostile/buggy server cannot
+    inflate every-turn prompt bytes without bound (issue #194c)."""
+    text = text or ""
+    return text[:_MAX_DESC_CHARS] + ("…[clamped]" if len(text) > _MAX_DESC_CHARS else "")
+
+
+def interpolate_env(value, getter=os.environ.get):
+    """Recursively substitute ${env:VAR} in a spec's strings. Unknown vars
+    become empty (shell-like), so a missing token fails loudly at the
+    server instead of leaking the literal into a request."""
+    if isinstance(value, str):
+        return _ENV_RE.sub(lambda m: getter(m.group(1), "") or "", value)
+    if isinstance(value, dict):
+        return {k: interpolate_env(v, getter) for k, v in value.items()}
+    if isinstance(value, list):
+        return [interpolate_env(v, getter) for v in value]
+    return value
+
+
+def next_backoff(failures: int) -> float:
+    """Exponential backoff with a cap: 5s, 10s, 20s, then 30s forever."""
+    return min(RESTART_BACKOFF * (2 ** failures), BACKOFF_CAP)
 
 
 class McpServerState:
@@ -44,12 +117,23 @@ class McpServerState:
         self.status = "starting"  # starting | connected | failed | stopped
         self.error = ""
         self.tools: list[dict] = []  # OpenAI-format schemas, prefixed
+        self.protocol_version = ""  # negotiated MCP spec revision, surfaced in status
+        self.failures = 0  # consecutive failed connection attempts
         self._session = None
         self._task: asyncio.Task | None = None
         self._generation = 0  # invalidates stale sessions after restarts
 
     def prefix(self, tool: str) -> str:
         return f"mcp_{self.name}_{tool}"
+
+    def will_stop_retrying(self) -> bool:
+        return self.failures >= MAX_RESTARTS
+
+    def api_status(self) -> str:
+        """Status label shown in the UI; terminal failures say so."""
+        if self.status == "failed" and self.will_stop_retrying():
+            return "failed (won't retry)"
+        return self.status
 
 
 class McpManager:
@@ -71,16 +155,32 @@ class McpManager:
             if name not in cfg:
                 self._stop(name)
         for name, spec in cfg.items():
-            if not isinstance(spec, dict) or not spec.get("command"):
+            if not isinstance(spec, dict) or not (spec.get("command") or spec.get("url")):
                 continue
-            if name in self.servers and self.servers[name].spec == spec:
-                continue  # unchanged; keep the running session
+            invalid = validate_server_name(name)
+            if invalid:
+                log.warning("MCP server %r skipped: %s", name, invalid)
+                continue
+            existing = self.servers.get(name)
+            if (
+                existing is not None
+                and existing.spec == spec
+                and existing.status in ("connected", "starting")
+            ):
+                continue  # unchanged and alive; keep the running session
+            # A failed server with an unchanged spec restarts here too:
+            # /api/mcp/reload is the user-facing "retry now" (fresh state,
+            # failure budget reset). Stopped/terminal states relaunch.
             self._stop(name)
-            state = McpServerState(name, spec)
+            state = McpServerState(name, interpolate_env(spec))
             self.servers[name] = state
-            state._task = asyncio.create_task(
-                self._session_loop(state), name=f"mcp-{name}"
-            )
+            self._launch(state)
+
+    def _launch(self, state: McpServerState):
+        """Create the session task for a prepared state (seam for tests)."""
+        state._task = asyncio.create_task(
+            self._session_loop(state), name=f"mcp-{state.name}"
+        )
 
     def _stop(self, name: str):
         state = self.servers.pop(name, None)
@@ -90,27 +190,40 @@ class McpManager:
                 state._task.cancel()
 
     async def shutdown(self):
+        """Stop every server, then await the cancelled session tasks so
+        transports unroll (their context managers flush the httpx client
+        and DELETE the remote session) before the loop closes."""
+        tasks = [s._task for s in self.servers.values() if s._task]
         for name in list(self.servers):
             self._stop(name)
+        for t in tasks:
+            try:
+                await asyncio.wait_for(asyncio.shield(t), 5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
 
     async def _session_loop(self, state: McpServerState):
-        """Owns the stdio_client + ClientSession context pair for this
-        server; reconnects with backoff until stopped (task cancelled)."""
+        """Owns the transport + ClientSession context pair for this
+        server; reconnects with exponential backoff until stopped (task
+        cancelled) or the failure budget runs out."""
         while True:
             state._generation += 1
             gen = state._generation
             superseded = False
+            give_up = False
             try:
                 try:
-                    params = StdioServerParameters(
-                        command=state.spec["command"],
-                        args=[str(a) for a in (state.spec.get("args") or [])],
-                        env=state.spec.get("env") or None,
-                    )
-                    async with stdio_client(params) as (read, write):
+                    async with self._open_transport(state) as (read, write):
                         async with ClientSession(read, write) as session:
                             await asyncio.wait_for(session.initialize(), SPAWN_TIMEOUT)
                             state._session = session
+                            state.protocol_version = (
+                                getattr(session, "protocol_version", "")
+                                or getattr(getattr(session, "initialize_result", None),
+                                           "protocol_version", "")
+                                or ""
+                            )
+                            state.failures = 0
                             await self._discover(state, session)
                             state.status = "connected"
                             state.error = ""
@@ -136,13 +249,54 @@ class McpManager:
                         state.status = "failed"
                         state.error = "; ".join(leaves) or "unknown error"
                         state._session = None
-                        log.warning("MCP server %r failed: %s — retrying in %ss",
-                                    state.name, state.error, RESTART_BACKOFF)
-                        await asyncio.sleep(RESTART_BACKOFF)
+                        state.failures += 1
+                        give_up = state.will_stop_retrying()
+                if give_up:
+                    log.warning(
+                        "MCP server %r failed %d times, giving up: %s",
+                        state.name, state.failures, state.error)
+                    return  # terminal; user retries via /api/mcp/reload
+                if not superseded:
+                    delay = next_backoff(state.failures - 1)
+                    log.warning("MCP server %r failed: %s — retrying in %ss",
+                                state.name, state.error, delay)
+                    await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 return
             if superseded:
                 return
+
+    def _open_transport(self, state: McpServerState):
+        """Context manager pair for the configured transport. stdio spawns
+        a subprocess; streamable HTTP speaks to a URL (with legacy SSE
+        fallback when the entry says so or the endpoint is .sse-style)."""
+        spec = state.spec
+        if spec.get("url"):
+            url = spec["url"]
+            headers = spec.get("headers") or None
+            if spec.get("transport") == "sse":
+                if sse_client is None:
+                    raise RuntimeError("legacy SSE transport unavailable in this mcp SDK")
+                return sse_client(url, headers=headers)
+            if streamable_http_client is None:
+                raise RuntimeError("streamable HTTP transport unavailable in this mcp SDK")
+            # Headers via the SDK factory so the client stays SDK-owned
+            # (see module comment): create_mcp_http_client applies
+            # headers/timeouts and the context manager closes it.
+            return streamable_http_client(
+                url,
+                http_client=create_mcp_http_client(
+                    headers=headers or {},
+                    timeout=float(spec.get("timeout", CALL_TIMEOUT)),
+                ),
+            )
+        return stdio_client(
+            StdioServerParameters(
+                command=spec["command"],
+                args=[str(a) for a in (spec.get("args") or [])],
+                env=spec.get("env") or None,
+            )
+        )
 
     async def _discover(self, state: McpServerState, session):
         resp = await asyncio.wait_for(session.list_tools(), SPAWN_TIMEOUT)
@@ -156,7 +310,7 @@ class McpManager:
                     "type": "function",
                     "function": {
                         "name": state.prefix(t.name),
-                        "description": (
+                        "description": clamp_description(
                             getattr(t, "description", None)
                             or f"MCP tool from server '{state.name}'"
                         ),
@@ -180,12 +334,25 @@ class McpManager:
 
     def find(self, prefixed: str) -> tuple[McpServerState | None, str]:
         """Split mcp_<server>_<tool> back into (state, tool). Server names
-        may contain underscores, so match against known servers."""
+        may contain underscores, so every parse candidate is considered:
+        the longest (most specific) prefix wins, EXCEPT when a shorter
+        parse is the one whose server actually advertised the tool —
+        advertised names always route to the server that advertised them
+        (issue #194). Unadvertised names fall back to the legacy
+        longest-prefix parse (tests call tools with faked sessions)."""
+        best: tuple[McpServerState, str] | None = None  # fallback (legacy parse)
+        owner: tuple[McpServerState, str] | None = None  # advertised owner
         for state in self.servers.values():
             p = f"mcp_{state.name}_"
-            if prefixed.startswith(p):
-                return state, prefixed[len(p):]
-        return None, ""
+            if not prefixed.startswith(p):
+                continue
+            tool = prefixed[len(p):]
+            if any(t["function"]["name"] == prefixed for t in state.tools):
+                if owner is None or len(state.name) > len(owner[0].name):
+                    owner = (state, tool)
+            elif best is None or len(state.name) > len(best[0].name):
+                best = (state, tool)
+        return owner if owner else (best if best else (None, ""))
 
     async def call(self, prefixed: str, arguments: dict) -> dict:
         state, tool = self.find(prefixed)
