@@ -152,14 +152,19 @@ _BG_WARN = (
     "Servers and watchers need a detached spawn "
 )
 
-# Issue #187 (SYN-13): the git-editor rule has exactly one wording, shared
-# by the bash and powershell schemas (the sandbox prompt section keeps only
-# the VM-specific GIT_EDITOR-preset delta).
+# Issue #187 (SYN-13): the git-editor rule has exactly one rendered home —
+# the bash schema description. Other tool schemas carry only a short
+# pointer (the sandbox prompt section keeps only the VM-specific
+# GIT_EDITOR-preset delta).
 _GIT_EDITOR_NOTE = (
     "git must never open its editor: pass -m '<message>' to git commit "
     "and use GIT_EDITOR=true for git rebase --continue / tag -a / "
     "commit --amend - an interactive editor blocks the tool until it "
     "times out."
+)
+_GIT_EDITOR_POINTER = (
+    "git must never open its editor - see the bash tool note for the "
+    "exact recipe."
 )
 
 TOOLS_SCHEMA = [
@@ -209,9 +214,9 @@ POWERSHELL_SCHEMA = {
             "structured object pipelines. Long-running commands will "
             "time out. " + _BG_WARN +
             "instead (Start-Process, optionally -WindowStyle Hidden). "
-            # Issue #187 (SYN-13): same shared constant as bash — one
-            # canonical copy, no drift.
-            + _GIT_EDITOR_NOTE
+            # Issue #187 (SYN-13): pointer copy — the full recipe lives in
+            # the bash schema description only.
+            + _GIT_EDITOR_POINTER
         ),
         "parameters": {
             "type": "object",

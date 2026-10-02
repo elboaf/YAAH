@@ -181,13 +181,17 @@ def test_prompt_and_schemas_warn_against_git_editor(isolated, monkeypatch):
     assert "no-op" in section  # the preset delta survives
     assert "GIT_EDITOR=true" not in section  # recipe renders once, in bash
 
-    from backend.agent.tools import POWERSHELL_SCHEMA, TOOLS_SCHEMA, _GIT_EDITOR_NOTE
+    from backend.agent.tools import (
+        POWERSHELL_SCHEMA, TOOLS_SCHEMA, _GIT_EDITOR_NOTE, _GIT_EDITOR_POINTER,
+    )
 
     bash = next(s for s in TOOLS_SCHEMA
                 if s["function"]["name"] == "bash")
-    for desc in (bash["function"]["description"],
-                 POWERSHELL_SCHEMA["function"]["description"]):
-        assert _GIT_EDITOR_NOTE in desc
+    # Full recipe renders once, in the bash schema; powershell carries
+    # only the contract-preserving pointer.
+    assert _GIT_EDITOR_NOTE in bash["function"]["description"]
+    assert _GIT_EDITOR_NOTE not in POWERSHELL_SCHEMA["function"]["description"]
+    assert _GIT_EDITOR_POINTER in POWERSHELL_SCHEMA["function"]["description"]
 
 
 # ---------------------------------------------------------------- config

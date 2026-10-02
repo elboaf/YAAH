@@ -231,8 +231,8 @@
     },
     {
       "name": "powershell",
-      "bytes": 1003,
-      "sha256": "f4cb026f9fde3aabedfeda2a5f6fb7a5ce55b2611546e0ef38131f2d43743cf7"
+      "bytes": 879,
+      "sha256": "504ede17f08a90e99600f42e1d8e04a35e375c450d45b53ead1a18a88bc5e811"
     },
     {
       "name": "exit_plan",

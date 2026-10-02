@@ -656,15 +656,16 @@ def _drive_turn(flags: dict) -> dict:
         # running after a render test saw no model traffic at all).
         orig_chat = loop.model_client.chat
         loop.model_client.chat = fake_chat
-        ws_dir = Path(LOCAL_WS)
-        ws_dir.mkdir(parents=True, exist_ok=True)
-        workspace = str(ws_dir)
-        if flags["kind"] == "remote":
-            workspace = REMOTE_WS
-        elif flags["kind"] == "remote-offline":
-            workspace = OFFLINE_WS
-        cid = await create_conversation("manifest")
+        cid = None
         try:
+            ws_dir = Path(LOCAL_WS)
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            workspace = str(ws_dir)
+            if flags["kind"] == "remote":
+                workspace = REMOTE_WS
+            elif flags["kind"] == "remote-offline":
+                workspace = OFFLINE_WS
+            cid = await create_conversation("manifest")
             if flags["override"]:
                 await update_conversation(
                     cid,
@@ -688,7 +689,8 @@ def _drive_turn(flags: dict) -> dict:
                 pass
         finally:
             loop.model_client.chat = orig_chat
-            await delete_conversation(cid)
+            if cid is not None:
+                await delete_conversation(cid)
         return captured
 
     return asyncio.run(_run())

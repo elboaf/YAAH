@@ -55,15 +55,16 @@ def _requires_windows_host():
 # ------------------------------------------------- SYN-13: git-editor rule
 
 def test_git_editor_rule_is_one_shared_constant():
-    """The git-editor rule is canonical in the bash schema via a shared
-    constant; the powershell schema carries the identical constant instead
-    of a drifted second copy."""
+    """The git-editor rule is canonical in the bash schema; the powershell
+    schema carries only a short pointer to it (no rendered duplicate)."""
     from backend.agent import tools as tools_mod
     note = tools_mod._GIT_EDITOR_NOTE
+    pointer = tools_mod._GIT_EDITOR_POINTER
     assert "git must never open its editor" in note
     assert "GIT_EDITOR=true" in note
     assert note in _desc("bash")
-    assert note in _desc("powershell")
+    assert note not in _desc("powershell")
+    assert pointer in _desc("powershell")
 
 
 def test_git_editor_recipe_appears_once_per_render():
