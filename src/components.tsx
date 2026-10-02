@@ -117,6 +117,15 @@ import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
+import { stripProviderMarkup } from './providerMarkup'
+
+// Issue #255: true when a stored title still carries provider-injected
+// `<system_*>` control text (captured by the title slice before the
+// sanitize fix landed). The sidebar renders the dedicated warning triangle
+// for these rows instead of letting the raw text occupy the title slot.
+export function hasProviderMarkup(title: string): boolean {
+  return /^<system_\w+>/.test(title)
+}
 
 // ---------------------------------------------------------------- code views
 
@@ -3979,6 +3988,21 @@ export function ConversationRow({
             <i />
           </span>
         ) : null}
+        {/* Issue #255: the title still carries provider-injected `<system_*>`
+            control text (the low-context warning captured by the title
+            slice before the sanitize fix). Amber triangle in the #25 status
+            slot, color-matched to the run-dots; the provider text itself
+            stays out of the sidebar — the tooltip carries it plus the
+            actionable /handoff suggestion. */}
+        {hasProviderMarkup(liveTitle ?? conv.title) && (
+          <span
+            aria-hidden="true"
+            className="mr-1.5 shrink-0 text-amber-400"
+            title="Provider signalled low context. Run /handoff to write a handoff file, then start a new chat."
+          >
+            ⚠
+          </span>
+        )}
         {isAgent && (
           <span
             aria-hidden="true"
@@ -3995,7 +4019,9 @@ export function ConversationRow({
         <span
           className={`min-w-0 flex-1 truncate ${isAgent && agentEnabled === false ? 'italic text-zinc-500' : ''}`}
         >
-          {liveTitle ?? conv.title}
+          {/* #255: provider `<system_*>` control text never occupies the
+              title slot — the triangle's tooltip carries it instead. */}
+          {stripProviderMarkup(liveTitle ?? conv.title) || 'New chat'}
           {isAgent && agentEnabled === false && (
             <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px font-mono text-[9px] not-italic text-zinc-400">
               paused
@@ -10106,7 +10132,10 @@ export function Composer() {
         // resolves through the conversation (the header values ARE what
         // runs). Falls back to the current defaults when untouched.
         const ds = useAgent.getState().draftScope
-        const created = await createConversation(displayText.slice(0, 40) || 'New chat', dest, {
+        // Issue #255: provider-injected `<system_*>` control text (the
+        // low-context warning) must never become the chat's name — strip it
+        // before the mechanical slice.
+        const created = await createConversation(stripProviderMarkup(displayText).slice(0, 40) || 'New chat', dest, {
           model: ds?.model ?? useAgent.getState().globalModel,
           effort: ds?.effort ?? useAgent.getState().globalEffort,
         })
