@@ -8238,12 +8238,12 @@ function DraftDestinationCard() {
             <button
               type="button"
               aria-label={`Branch ${gitBranch}`}
-              title="This switches the branch for every chat sharing this workspace"
+              title={`⎇ ${gitBranch} — this switches the branch for every chat sharing this workspace`}
               disabled={gitBusy}
               onClick={() => gitMenuOpen ? setGitMenuOpen(false) : void openGitBranches()}
               className="rounded   px-2 py-1 font-mono text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
             >
-              ⎇ {gitBranch}
+              ⎇ <span className="min-w-0 max-w-[10rem] truncate">{gitBranch}</span>
             </button>
             {gitMenuOpen && (
               <div role="menu" aria-label="Git branches" className="absolute right-0 top-full z-30 mt-1 max-h-48 min-w-36 overflow-auto rounded   bg-zinc-900 p-1 shadow-xl">
