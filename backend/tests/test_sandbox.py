@@ -1437,9 +1437,24 @@ def test_ensure_toolkit_seed_holds_manifest_lock(isolated, monkeypatch, tmp_path
     freshly installed entry. A helper process grabs the lock first and
     writes its entry late (while holding it): the seeded bundled entry and
     the helper's entry must BOTH survive. Without the seed-side lock the
-    seed's early write is overwritten and the bundled entry is lost."""
+    seed's early write is overwritten and the bundled entry is lost.
+
+    runner, so the seeded bundled entry and the helper's entry must BOTH
+    survive. Without the seed-side lock the seed's early write is
+    overwritten and the bundled entry is lost.
+
+    Synchronization is signal-based, not sleep-based (CodeRabbit return
+    trip 2 on #248): the helper prints LOCKED once it holds the mutex and
+    parks on stdin; the parent only sends GO after it has observed (via a
+    spy on _acquire_toolkit_manifest_lock) that the seeder reached the
+    lock attempt — so a locking seed is parked on the mutex while the
+    helper writes, and a lock-less seed has already raced and lost the
+    bundled entry. The parent then reads WROTE, joins the seeder thread
+    and reaps the helper before asserting; no fixed sleeps to flake on a
+    slow CI runner."""
     import ctypes
     import sys
+    import threading
     if not hasattr(ctypes, "windll"):
         pytest.skip("named-mutex test requires Windows")
 
@@ -1454,19 +1469,42 @@ def test_ensure_toolkit_seed_holds_manifest_lock(isolated, monkeypatch, tmp_path
     (tk / "state.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
 
     helper = (
-        "import ctypes, json, time\n"
+        "import ctypes, json, sys\n"
         "h = ctypes.windll.kernel32.CreateMutexW(None, False,\n"
         "                                        r'Global\\yaah-toolkit-manifest')\n"
         "assert ctypes.windll.kernel32.WaitForSingleObject(h, 30000) == 0\n"
+        "print('LOCKED', flush=True)\n"   # signal: the mutex is held now
         f"p = {str(tk / 'state.json')!r}\n"
-        "time.sleep(1.5)\n"          # hold the lock past the seeder's start
+        "sys.stdin.readline()\n"          # park until the seeder is at the lock
         "json.dump({'tools': {'marker': {'version': '9'}}}, open(p, 'w'))\n"
+        "print('WROTE', flush=True)\n"    # write finished, mutex still held
         "ctypes.windll.kernel32.ReleaseMutex(h)\n")
-    proc = subprocess.Popen([sys.executable, "-c", helper])
+    proc = subprocess.Popen([sys.executable, "-c", helper],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            text=True)
     try:
-        time.sleep(0.4)              # the helper now holds the lock
-        sb.ensure_toolkit_seed()
-        time.sleep(3)                # let the helper finish its write
+        assert proc.stdout.readline().strip() == "LOCKED", (
+            "helper never acquired the manifest mutex")
+        attempted = threading.Event()
+        real_acquire = sb._acquire_toolkit_manifest_lock
+
+        def spy():
+            attempted.set()          # the seeder has reached the lock attempt
+            return real_acquire()
+
+        monkeypatch.setattr(sb, "_acquire_toolkit_manifest_lock", spy)
+        out: dict = {}
+        seeder = threading.Thread(
+            target=lambda: out.update(written=sb.ensure_toolkit_seed()))
+        seeder.start()
+        assert attempted.wait(30), (
+            "ensure_toolkit_seed() never attempted the manifest lock")
+        proc.stdin.write("GO\n")
+        proc.stdin.flush()
+        assert proc.stdout.readline().strip() == "WROTE"
+        seeder.join(30)
+        assert not seeder.is_alive(), "ensure_toolkit_seed() hung on the lock"
+        assert proc.wait(timeout=30) == 0
         tools = json.loads(
             (tk / "state.json").read_text(encoding="utf-8")).get("tools") or {}
         assert "newbundled" in tools, (
