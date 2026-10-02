@@ -162,6 +162,30 @@ def test_offline_note_only_for_offline_remote():
     assert "the workspace's owning device is offline" not in online["rendered_text"]
 
 
+@pytest.mark.skipif(HOST_WIN, reason="posix-host branch of the os.name flip")
+def test_windows_flip_on_posix_does_not_instantiate_windowspath(
+    monkeypatch, tmp_path
+):
+    """#184 CI follow-up: on a posix host, _platform_os_name(True) flips
+    os.name to 'nt' without rebinding Path. Any pathlib.Path() call made
+    under the flip (here, a probe module) instantiates a real WindowsPath
+    and raises 'cannot instantiate WindowsPath on your system' -- the exact
+    Linux-CI failure in test_compaction_manifests_contain_summary_section.
+    The flip must rebind Path to a WindowsPath subclass on posix hosts too,
+    mirroring the Windows-host branch."""
+    assert not HOST_WIN
+
+    import sys as _sys
+    import types
+    probe = types.SimpleNamespace(Path=Path)
+    _sys.modules["backend._pm_probe_mod"] = probe
+
+    with pm._platform_os_name(True):
+        probe.Path("whatever")  # must not raise
+
+    assert probe.Path is Path
+
+
 def test_compaction_manifests_contain_summary_section():
     """#184: every combo that names compaction must actually render the
     compaction-summary section -- the fixture watermark must be live

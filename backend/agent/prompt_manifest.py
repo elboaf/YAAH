@@ -493,7 +493,11 @@ def _platform_os_name(windows: bool):
     On a Windows host rendering posix, pathlib.Path dispatches on
     os.name at call time, so the flip also rebinds backend modules'
     Path names to a WindowsPath subclass (subclasses skip pathlib's
-    os guard) and restores them on exit.
+    os guard) and restores them on exit. The mirror case (posix host
+    rendering windows) needs the same rebinding: os.name flips to
+    'nt', so a plain pathlib.Path() call under the flip would try to
+    instantiate a real WindowsPath and raise
+    'cannot instantiate WindowsPath on your system' (#184 Linux CI).
     """
     import os as _os
     import sys as _sys
@@ -502,30 +506,23 @@ def _platform_os_name(windows: bool):
     if target_windows == HOST_WINDOWS:
         yield
         return
-    if HOST_WINDOWS:
-        import pathlib as _pathlib
+    import pathlib as _pathlib
 
-        class _AlwaysWinPath(_pathlib.WindowsPath):
-            pass
+    class _AlwaysWinPath(_pathlib.WindowsPath):
+        pass
 
-        swapped = []
-        for mod_name, mod in list(_sys.modules.items()):
-            if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
-                mod.Path = _AlwaysWinPath
-                swapped.append((mod, _pathlib.Path))
-        _os.name = "posix"
-        try:
-            yield
-        finally:
-            _os.name = "nt"
-            for mod, orig in swapped:
-                mod.Path = orig
-    else:
-        _os.name = "nt"
-        try:
-            yield
-        finally:
-            _os.name = "posix"
+    swapped = []
+    for mod_name, mod in list(_sys.modules.items()):
+        if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
+            mod.Path = _AlwaysWinPath
+            swapped.append((mod, _pathlib.Path))
+    _os.name = "nt" if target_windows else "posix"
+    try:
+        yield
+    finally:
+        _os.name = "nt" if HOST_WINDOWS else "posix"
+        for mod, orig in swapped:
+            mod.Path = orig
 
 
 def _isolated_roots() -> dict:
