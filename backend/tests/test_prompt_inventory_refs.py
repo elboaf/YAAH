@@ -103,10 +103,9 @@ def test_inventory_paired_name_refs_point_at_named_symbols() -> None:
     # after a symbol name, e.g. `run_agent` / `_run_agent_claimed`
     # (loop.py:1269 / 1236). The name-agnostic span check above cannot tell
     # which number belongs to which name, so a swapped pairing passes it.
-    # This test pins the order: for each `name` (loop.py:A / B) pattern, A
-    # must fall inside the named symbol's span when the ref precedes the
-    # name in the pair, and B when it follows — the pairing must have one
-    # number per name, each inside its own symbol's span.
+    # This test pins the order: positional pairing, names[0]↔a and
+    # names[1]↔b — each number must fall inside its own name's span, so a
+    # swapped pairing (or a stale ref) fails.
     text = INV.read_text(encoding="utf-8")
     spans = {name: (lo, hi) for lo, hi, name in _named_symbol_spans(
         AGENT_DIR / "loop.py", ("run_agent", "_run_agent_claimed"))}
@@ -117,17 +116,22 @@ def test_inventory_paired_name_refs_point_at_named_symbols() -> None:
         r"\(loop\.py:(?P<a>\d+)(?:\+)?\s*/\s*(?P<b>\d+)"
     )
     mismatches: list[str] = []
+    paired = 0
     for m in pair_re.finditer(text):
         n1, n2, a, b = (m.group("names"), m.group("names2"),
                         int(m.group("a")), int(m.group("b")))
         if n1 == n2:
             continue
+        paired += 1
         # positional pairing: names[0]↔a, names[1]↔b (the original text had
         # these reversed, which is exactly what this test must catch)
         for num, name in ((a, n1), (b, n2)):
             if num not in range(spans[name][0], spans[name][1] + 1):
                 mismatches.append(f"{name} cited as loop.py:{num} "
                                   f"(real span {spans[name][0]}\u2013{spans[name][1]})")
+    assert paired > 0, (
+        "no paired name refs found — regex or inventory format rot "
+        "(the pairing check ran against nothing)")
     assert not mismatches, (
         "paired name refs swapped or stale in prompt-surface-inventory.md: "
         + "; ".join(mismatches)
