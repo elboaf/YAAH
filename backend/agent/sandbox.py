@@ -131,6 +131,37 @@ def bundled_toolkit_source() -> Path | None:
     return None
 
 
+def _manifest_lock(tk: Path):
+    """Cross-process exclusive lock on the toolkit manifest, mirroring the
+    wrapper's `state.json.lock` mechanism (an exclusive byte-range lock on
+    the first byte). Ensures the seed merge in ensure_toolkit_seed cannot
+    last-write-win over a concurrent wrapper `install`/`remove` running
+    inside a live VM. Fails loudly (raises OSError) when held elsewhere —
+    seeding is best-effort and retried on the next startup.
+
+    Used as a context manager; also a no-op context manager when the OS
+    has no byte-range locking (non-Windows hosts, where the wrapper tests
+    skip for the same reason)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _locked():
+        lock_path = tk / "state.json.lock"
+        try:
+            import msvcrt
+        except ImportError:
+            yield  # no byte-range locking available; nothing to serialize
+            return
+        with open(lock_path, "a+b") as f:
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+    return _locked()
+
+
 def ensure_toolkit_seed() -> list[str]:
     """Seed the toolkit with yaah's shipped baseline (helper scripts,
     gitconfig, README, state manifest) so a FRESH INSTALL works out of the
@@ -190,24 +221,29 @@ def ensure_toolkit_seed() -> list[str]:
 
     # Merge the bundled state.json entries into an existing toolkit manifest
     # (copy-once above skips it when present, but user tools must survive).
+    # Serialized with the wrapper's cross-process lock so a concurrent
+    # `toolkit install` inside a live VM can't be overwritten by a stale
+    # snapshot; when the lock is held we skip — retried next startup.
     state = tk / "state.json"
     try:
-        bundled = json.loads((src / "state.json").read_text(encoding="utf-8"))
-        current = (json.loads(state.read_text(encoding="utf-8"))
-                   if state.exists() else {})
-        tools = dict(current.get("tools") or {})
-        for name, meta in (bundled.get("tools") or {}).items():
-            if name not in tools:
-                tools[name] = meta
-        if tools != (current.get("tools") or {}):
-            current["tools"] = tools
-            state.write_text(
-                json.dumps(current, indent=2) + "\n", encoding="utf-8")
-            # The bundled INDEX.md is copy-once, so an upgrade merge that
-            # added entries would leave a stale index behind: regenerate it.
-            _regen_index(tk, tools)
-            if "state.json" not in written:
-                written.append("state.json")
+        with _manifest_lock(tk):
+            bundled = json.loads(
+                (src / "state.json").read_text(encoding="utf-8"))
+            current = (json.loads(state.read_text(encoding="utf-8"))
+                       if state.exists() else {})
+            tools = dict(current.get("tools") or {})
+            for name, meta in (bundled.get("tools") or {}).items():
+                if name not in tools:
+                    tools[name] = meta
+            if tools != (current.get("tools") or {}):
+                current["tools"] = tools
+                state.write_text(
+                    json.dumps(current, indent=2) + "\n", encoding="utf-8")
+                # The bundled INDEX.md is copy-once, so an upgrade merge that
+                # added entries would leave a stale index behind: regenerate.
+                _regen_index(tk, tools)
+                if "state.json" not in written:
+                    written.append("state.json")
     except (OSError, ValueError):
         pass
     return written

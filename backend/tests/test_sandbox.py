@@ -1326,6 +1326,39 @@ def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch, tmp_
     assert "| newtool | 9 | zip |" in index
 
 
+def test_ensure_toolkit_seed_locks_manifest(isolated, monkeypatch, tmp_path):
+    """CodeRabbit finding (major, 2026-10-02): ensure_toolkit_seed's
+    state.json merge is serialized with the wrapper's cross-process lock
+    — while the lock is held by a concurrent `toolkit install`, the seed
+    merge is skipped (retried next startup) instead of last-write-winning
+    over the wrapper's change with a stale snapshot."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newtool": {"version": "9", "kind": "zip"}}}), encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "state.json").write_text(json.dumps({"tools": {}}),
+                                   encoding="utf-8")
+    pytest.importorskip("msvcrt")
+    import msvcrt  # Windows-only module; suite stays importable on Linux
+
+    with open(tk / "state.json.lock", "wb") as held:  # wrapper holds it
+        msvcrt.locking(held.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            sb.ensure_toolkit_seed()
+            tools = json.loads(
+                (tk / "state.json").read_text(encoding="utf-8"))["tools"]
+            assert "newtool" not in tools  # merge skipped, not lost
+        finally:
+            msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 1)
+    # after release the same startup merge lands
+    sb.ensure_toolkit_seed()
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert tools["newtool"]["version"] == "9"
+
+
 def test_seed_index_headers_match_wrapper_output(isolated, monkeypatch, tmp_path):
     """CodeRabbit return trip 1: _regen_index headers must render exactly
     like the wrapper's Update-Index (single Markdown backticks) so the
