@@ -96,7 +96,7 @@ plus dynamic MCP ones). Supporting description-like text:
   timeout-clamp note (`_clamp_note`, tools.py:860–871), get_help error nudge
   (tools.py:1401–1411), screenshot-disallowed info (tools.py:1449–1459),
   plan-block result (`_plan_block_result`, loop.py:780–786), sandbox-only skip
-  result (`_policy_skip_result`, loop.py:768–778), sandbox hints
+  result (`_policy_skip_result`, loop.py:801–810), sandbox hints
   (`_missing_command_hint` / `_mcp_hint` / `_dialog_stall_hint`,
   sandbox.py:1103–1175),
   `IMAGES ON PAGE` note (webtools.py:274).

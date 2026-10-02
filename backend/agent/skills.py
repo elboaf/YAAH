@@ -260,14 +260,26 @@ def index_for_prompt() -> str:
     return "\n".join(lines)
 
 
+def split_known_unknown(names: list[str]) -> tuple[list[str], list[str]]:
+    """Partition requested skill names into (known, unknown). #193: the two
+    consumers need the same split so unknown names are reported as events and
+    kept OUT of the authoritative injected block."""
+    known: list[str] = []
+    unknown: list[str] = []
+    for name in names:
+        (known if get_skill(name) is not None else unknown).append(name)
+    return known, unknown
+
+
 def bodies_for_prompt(names: list[str]) -> str:
     """Formatted instruction bodies for explicitly invoked skills (/s or
-    chips). Unknown names are reported so the user sees the typo."""
+    chips). Unknown names are skipped here — split_known_unknown() reports
+    them so they land in a user-visible event, never inside the
+    "authoritative: follow them" wrapper (#193)."""
     parts: list[str] = []
     for name in names:
         s = get_skill(name)
         if s is None:
-            parts.append(f"# Skill not found: {name}")
             continue
         parts.append(
             f"# Skill: {s.name}\n\n"
