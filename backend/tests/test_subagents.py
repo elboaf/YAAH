@@ -16,7 +16,7 @@ def test_builtins_present():
     assert "explore" in names
 def test_explore_is_read_only():
     ex = subagents.get_agent_def("explore")
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(ex, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(ex, workspace=None)}
     for forbidden in ("bash", "write_file", "edit_file", "create_file",
                       "delete_file", "move_file", "powershell"):
         assert forbidden not in tools, forbidden
@@ -26,7 +26,7 @@ def test_explore_is_read_only():
 
 def test_general_purpose_excludes_ask_user_and_spawn():
     gp = subagents.get_agent_def("general-purpose")
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, workspace=None)}
     assert "ask_user" not in tools
     assert "spawn_agent" not in tools
     assert "bash" in tools
@@ -66,7 +66,7 @@ def test_explore_allowlist_names_are_executable():
     so the allowlist can never re-acquire phantom tools silently."""
     ex = subagents.get_agent_def("explore")
     executable = {
-        s["function"]["name"] for s in subagents._resolve_tools(ex, windows=True)
+        s["function"]["name"] for s in subagents._resolve_tools(ex, workspace=None)
     }
     for name in subagents._EXPLORE_TOOLS:
         assert name in executable, name
@@ -74,7 +74,7 @@ def test_explore_allowlist_names_are_executable():
 
 def test_computer_tools_never_reach_subagents():
     gp = subagents.get_agent_def("general-purpose")
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, workspace=None)}
     for forbidden in ("screenshot", "mouse_click", "type_text", "read_ui_tree"):
         assert forbidden not in tools, forbidden
 
@@ -95,7 +95,7 @@ def test_custom_agent_definition(tmp_path, monkeypatch):
     d = subagents.get_agent_def("code-reviewer")
     assert d is not None
     assert d.max_turns == 12
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(d, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(d, workspace=None)}
     assert tools == {"read_file", "search_files"}
 
 
@@ -816,6 +816,38 @@ async def test_grace_turn_executes_tool_and_stops(fake_model, tmp_path):
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "deliverable"
     roles = [e["role"] for e in result["transcript"]]
     assert roles == ["user", "assistant", "tool", "assistant", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_grace_turn_enforces_allowlist(fake_model, tmp_path):
+    """#188 return trip: the grace-turn loop enforces the tool allowlist
+    like the normal loop — a disallowed tool call gets the structured
+    error result and never executes."""
+    defn = AgentDef(name="t", description="", body="b", tools=["read_file"],
+                    max_turns=1)
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c2", "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps({
+                "path": "out.txt", "content": "should never land",
+            })},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    result = await subagents.run_sub_agent(defn, "write it", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 2
+    # The write was blocked: no file, structured error in the transcript.
+    assert not (tmp_path / "out.txt").exists()
+    tool_entry = result["transcript"][4]
+    assert "allowed tool set" in json.loads(tool_entry["content"])["error"]
 
 
 @pytest.mark.asyncio

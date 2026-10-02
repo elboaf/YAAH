@@ -299,10 +299,16 @@ def index_for_prompt() -> str:
 # ------------------------------------------------------------------ runner
 
 
-def _resolve_tools(defn: AgentDef, windows: bool) -> list[dict]:
+def _resolve_tools(defn: AgentDef, workspace: str | None = None) -> list[dict]:
     """Tool schemas for a sub-agent: built-ins minus always-excluded and
-    computer-use, then the definition's allow/deny lists applied."""
-    schemas = get_schemas()
+    computer-use, then the definition's allow/deny lists applied.
+
+    #188: the workspace is threaded through so schemas resolve on the
+    workspace's OWN host (remote namespaced -> that host; otherwise the
+    legacy active host / local machine) — the same resolution execute_tool
+    uses, so the schemas and the prompt's env line can never describe two
+    different hosts."""
+    schemas = get_schemas(workspace=workspace)
     allowed: dict[str, dict] = {}
     for s in schemas:
         n = s["function"]["name"]
@@ -323,23 +329,31 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
     from backend.agent import remote as remote_mod
     from backend.agent.loop import _local_env_line, _agents_notes
 
-    host = remote_mod.get_remote()
+    # #188: ONE host resolution for the whole prompt — the env line, the
+    # prose tool list, and (via run_sub_agent) the schemas all derive from
+    # the workspace's owning host, never from the legacy active host or
+    # the client's os.name.
+    host = remote_mod.remote_for_workspace(workspace)
+    if host is None and remote_mod.parse_ns(workspace) is None:
+        # Local workspace: keep the legacy fallback to the active host
+        # (its tools execute there when connected).
+        host = remote_mod.get_remote()
     if host is not None:
         # Tools forward to the host, so the sub-agent needs the HOST's
         # environment grounding (OS/shell/workspace), not this machine's.
-        windows = host.windows
         env = host.env_line(workspace)
     else:
-        windows = os.name == "nt"
         env = _local_env_line()
     # #181: derive the prose from the SAME computation as _resolve_tools,
     # so the prompt can never name (or omit) a tool the schemas disagree
     # with. The only prose-only names are the shell line's annotations.
     from backend.agent.tools import tool_prose_list
 
-    resolved = _resolve_tools(defn, windows=windows)
+    resolved = _resolve_tools(defn, workspace=workspace)
     tools_ann = {"bash": "shell commands"}
-    if windows:
+    if host is not None and host.windows:
+        tools_ann["powershell"] = "Windows PowerShell"
+    elif host is None and os.name == "nt":
         tools_ann["powershell"] = "Windows PowerShell"
     tools_line = tool_prose_list(resolved, tools_ann)
     prompt = (
@@ -376,9 +390,7 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
     from backend.agent import memory as memory_mod
 
     memory_names = {"memory_save", "memory_read", "memory_delete"}
-    resolved_names = {
-        s["function"]["name"] for s in _resolve_tools(defn, windows=windows)
-    }
+    resolved_names = {s["function"]["name"] for s in resolved}
     if memory_names & resolved_names:
         try:
             memory_block = memory_mod.index_for_prompt(workspace)
@@ -428,7 +440,7 @@ async def run_sub_agent(
         {"role": "system", "content": _sub_agent_system_prompt(defn, workspace)},
         {"role": "user", "content": prompt},
     ]
-    tools = _resolve_tools(defn, windows=os.name == "nt")
+    tools = _resolve_tools(defn, workspace=run_workspace)
     loaded_skills: list[str] = []
     transcript: list[dict] = []
 
@@ -588,7 +600,21 @@ async def run_sub_agent(
                             args, loaded_skills, messages
                         )
                     else:
-                        if gate is not None:
+                        # #188 belt-and-braces: the allowlist is enforced
+                        # at execution time too, not only when the schemas
+                        # were listed — a future regression that leaks a
+                        # schema hits this structured error, not a write.
+                        allowed_names = {
+                            s["function"]["name"] for s in tools
+                        }
+                        if name not in allowed_names:
+                            result = {
+                                "error": (
+                                    f"Tool '{name}' is not in agent "
+                                    f"'{defn.name}'s allowed tool set."
+                                )
+                            }
+                        elif gate is not None:
                             # Access mode applies to sub-agents too: the
                             # parent's gate decides before anything runs.
                             # None = approved (execute below); a dict is the
@@ -707,7 +733,21 @@ async def run_sub_agent(
                                     args, loaded_skills, messages
                                 )
                             else:
-                                if gate is not None:
+                                # #188 belt-and-braces: the grace-turn
+                                # loop enforces the allowlist too — a
+                                # budget-exhausted turn gets no wider
+                                # tool access than a normal one.
+                                allowed_names = {
+                                    s["function"]["name"] for s in tools
+                                }
+                                if name not in allowed_names:
+                                    result = {
+                                        "error": (
+                                            f"Tool '{name}' is not in agent "
+                                            f"'{defn.name}'s allowed tool set."
+                                        )
+                                    }
+                                elif gate is not None:
                                     result = await gate(name, args, tc.get("id", ""))
                                 else:
                                     result = None
