@@ -27,8 +27,8 @@
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1247,
-      "sha256": "343499818bdedcebe9851082ffc3a9ec46992ac60e67500d32e92c06c90d8534"
+      "bytes": 1076,
+      "sha256": "95c2c6e65cdab82ccb33ea14189fd4327b050f15bfc02cc217560b3b71838bb2"
     },
     {
       "name": "get_help",
@@ -122,33 +122,33 @@
     },
     {
       "name": "mouse_move",
-      "bytes": 1174,
-      "sha256": "6e93ed436f8e7a91b08feb57ff06352e4fb5b5d450284b0c8520973848f08411"
+      "bytes": 1166,
+      "sha256": "7ac7a3e4cd782d98988c9bd4faab0c8f3a8a7a3fa9d5201951e3b3d7cea6da55"
     },
     {
       "name": "mouse_click",
-      "bytes": 1509,
-      "sha256": "319cd625269347fa0e4a445e3c1aea4f0a6b2be40eb17fc2542f1972c32c2cd4"
+      "bytes": 1501,
+      "sha256": "9f7b162cf4115e8546d102d13204c47960769cc54ef062f5424064e30fc2d171"
     },
     {
       "name": "mouse_drag",
-      "bytes": 1537,
-      "sha256": "46d60132d5e0cd9f0babb4b3d2756f173a880a14160475d4339f424fd94997ce"
+      "bytes": 1529,
+      "sha256": "90568aeea9a98db7dd8eaee8e75e87aff718c03eb25b40ac3b7ef1c3f11844c1"
     },
     {
       "name": "mouse_scroll",
-      "bytes": 1117,
-      "sha256": "d92be11aa06b729e11d01b5e8f5f30178b8d560071256516241a3e73651989a6"
+      "bytes": 1109,
+      "sha256": "8b55d6899b4c142e22be4c53e39573b3e83da0b85994836d518efa14a5e58f92"
     },
     {
       "name": "type_text",
-      "bytes": 740,
-      "sha256": "0888eaca49727651c532ef1892c528bf720ba44f142d4b3d4cae0816f309bb62"
+      "bytes": 732,
+      "sha256": "0cffa3ff9cba02e764003bfcb904a37f3e8741056dfe40772c29d5fe9519d111"
     },
     {
       "name": "press_key",
-      "bytes": 831,
-      "sha256": "11a66cd28404236b9e0312d2e3af8453af759a3dab95b6ee9b4b426b49752b2a"
+      "bytes": 823,
+      "sha256": "a73f4c4823ab95aa8a368ea2efd60a24c4b7e7a1ee6aca46221c013cbb1e26c7"
     },
     {
       "name": "wait",
@@ -157,13 +157,13 @@
     },
     {
       "name": "sandbox_test",
-      "bytes": 818,
-      "sha256": "20b8d7a11ca0ff00124be9abbb734a99da5021a719eb12ce914dcffa2b83e087"
+      "bytes": 817,
+      "sha256": "f19cb2597d3659949da951b83fa0c993ea9024369bbc07540afb56c54034b9b1"
     },
     {
       "name": "sandbox_run",
-      "bytes": 1394,
-      "sha256": "75eb31dc5b8c0db90ea6470bfd84c77b44d72e6594abeddc4bcd8d6475e0fb28"
+      "bytes": 856,
+      "sha256": "00680473b2dc3d5120846e9e70ecca70219d58f0df829c240b3402e2081d2077"
     },
     {
       "name": "sandbox_status",
@@ -177,8 +177,8 @@
     },
     {
       "name": "powershell",
-      "bytes": 1165,
-      "sha256": "6fc02d9c1ef27d76905741d24b2c57788473ca13a003896ace430915dba5211d"
+      "bytes": 1003,
+      "sha256": "f4cb026f9fde3aabedfeda2a5f6fb7a5ce55b2611546e0ef38131f2d43743cf7"
     }
   ],
   "subagent_prompts": {},

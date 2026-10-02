@@ -172,18 +172,22 @@ def test_bootstrap_neuters_interactive_git_editor(isolated, monkeypatch):
 
 def test_prompt_and_schemas_warn_against_git_editor(isolated, monkeypatch):
     """The nudge must live in the tool text the model actually sees: the
-    sandbox prompt section and the bash/powershell schema descriptions."""
+    bash/powershell schema descriptions (shared constant). Issue #187
+    (SYN-13): the sandbox section keeps only the VM-specific GIT_EDITOR
+    preset delta instead of a third copy of the recipe."""
     monkeypatch.setattr(sb.config_mod, "load_config", lambda: {"sandbox": {}})
-    assert "git must never open its interactive editor" in sb.prompt_section()
+    section = sb.prompt_section()
+    assert "GIT_EDITOR" in section
+    assert "no-op" in section  # the preset delta survives
+    assert "GIT_EDITOR=true" not in section  # recipe renders once, in bash
 
-    from backend.agent.tools import POWERSHELL_SCHEMA, TOOLS_SCHEMA
+    from backend.agent.tools import POWERSHELL_SCHEMA, TOOLS_SCHEMA, _GIT_EDITOR_NOTE
 
     bash = next(s for s in TOOLS_SCHEMA
                 if s["function"]["name"] == "bash")
     for desc in (bash["function"]["description"],
                  POWERSHELL_SCHEMA["function"]["description"]):
-        assert "git must never open its editor" in desc
-        assert "GIT_EDITOR=true" in desc
+        assert _GIT_EDITOR_NOTE in desc
 
 
 # ---------------------------------------------------------------- config
@@ -546,14 +550,17 @@ def test_prompt_section_carries_clean_image_knowledge(isolated):
 
 def test_tool_schema_carries_clean_image_knowledge(isolated):
     """Same constraint for the tool definitions: sandbox_run's description
-    must survive without source access."""
+    must survive without source access. Issue #187 (SYN-16): it keeps its
+    own contract (mounts, state.json pointer, mcp.json pointer) while the
+    full install rules live once in the prompt section."""
     desc = next(
         t["function"]["description"]
         for t in sb.SANDBOX_TOOLS_SCHEMA
         if t["function"]["name"] == "sandbox_run")
     assert "CLEAN WINDOWS IMAGE" in desc
-    assert "toolkit\\bin" in desc
+    assert "state.json" in desc
     assert "windows-mcp" in desc
+    assert "mcp.json" in desc
 
 
 def test_prompt_section_carries_windows_mcp_playbook(isolated):

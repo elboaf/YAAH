@@ -69,8 +69,8 @@
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1247,
-      "sha256": "343499818bdedcebe9851082ffc3a9ec46992ac60e67500d32e92c06c90d8534"
+      "bytes": 1076,
+      "sha256": "95c2c6e65cdab82ccb33ea14189fd4327b050f15bfc02cc217560b3b71838bb2"
     },
     {
       "name": "get_help",
@@ -164,8 +164,8 @@
     },
     {
       "name": "powershell",
-      "bytes": 1165,
-      "sha256": "6fc02d9c1ef27d76905741d24b2c57788473ca13a003896ace430915dba5211d"
+      "bytes": 1003,
+      "sha256": "f4cb026f9fde3aabedfeda2a5f6fb7a5ce55b2611546e0ef38131f2d43743cf7"
     }
   ],
   "subagent_prompts": {},

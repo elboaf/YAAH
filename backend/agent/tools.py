@@ -152,6 +152,16 @@ _BG_WARN = (
     "Servers and watchers need a detached spawn "
 )
 
+# Issue #187 (SYN-13): the git-editor rule has exactly one wording, shared
+# by the bash and powershell schemas (the sandbox prompt section keeps only
+# the VM-specific GIT_EDITOR-preset delta).
+_GIT_EDITOR_NOTE = (
+    "git must never open its editor: pass -m '<message>' to git commit "
+    "and use GIT_EDITOR=true for git rebase --continue / tag -a / "
+    "commit --amend - an interactive editor blocks the tool until it "
+    "times out."
+)
+
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -165,14 +175,10 @@ TOOLS_SCHEMA = [
                 + "instead (e.g. Start-Process with redirect, or nohup with "
                 "stdout/stderr redirected to a file). For a test suite longer "
                 "than the timeout cap, run it in chunks (per directory or "
-                "file) instead of one monolithic run. git must never open its "
-                "editor: pass -m '<message>' to git commit and use "
-                "GIT_EDITOR=true for git rebase --continue / tag -a / "
-                "commit --amend - an interactive editor blocks the tool "
-                "until it times out. For GitHub operations (PRs, issues, "
-                "releases, CI checks), prefer the gh CLI over web_fetch "
-                "scraping - check availability with 'gh --version' before "
-                "assuming it's missing."
+                "file) instead of one monolithic run. "
+                # Issue #187 (SYN-13): the git-editor rule is canonical here,
+                # shared verbatim with the powershell schema.
+                + _GIT_EDITOR_NOTE
             ),
             "parameters": {
                 "type": "object",
@@ -203,13 +209,9 @@ POWERSHELL_SCHEMA = {
             "structured object pipelines. Long-running commands will "
             "time out. " + _BG_WARN +
             "instead (Start-Process, optionally -WindowStyle Hidden). "
-            "git must never open its editor: pass -m '<message>' to git "
-            "commit and use GIT_EDITOR=true for git rebase --continue / "
-            "commit --amend - an interactive editor blocks the tool "
-            "until it times out. For GitHub operations (PRs, issues, "
-            "releases, CI checks), prefer the gh CLI over web_fetch "
-            "scraping - check availability with 'gh --version' before "
-            "assuming it's missing."
+            # Issue #187 (SYN-13): same shared constant as bash — one
+            # canonical copy, no drift.
+            + _GIT_EDITOR_NOTE
         ),
         "parameters": {
             "type": "object",
