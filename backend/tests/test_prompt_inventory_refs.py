@@ -44,6 +44,17 @@ def _symbol_spans(path: Path) -> list[tuple[int, int]]:
     return spans
 
 
+def _named_symbol_spans(path: Path,
+                        names: tuple[str, ...]) -> list[tuple[int, int, str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out = []
+    for node in tree.body:
+        name = getattr(node, "name", None)
+        if name in names and hasattr(node, "end_lineno"):
+            out.append((node.lineno, node.end_lineno, name))
+    return out
+
+
 def _overlap(cited: tuple[int, int], real: tuple[int, int]) -> float:
     lo = max(cited[0], real[0])
     hi = min(cited[1], real[1])
@@ -84,6 +95,42 @@ def test_inventory_line_refs_point_at_real_code() -> None:
     assert not stale, (
         f"{len(stale)} stale line refs in prompt-surface-inventory.md "
         f"(point at no top-level symbol in the target module): {stale}"
+    )
+
+
+def test_inventory_paired_name_refs_point_at_named_symbols() -> None:
+    # Return trip on PR #239 review: the inventory cites PAIRED line refs
+    # after a symbol name, e.g. `run_agent` / `_run_agent_claimed`
+    # (loop.py:1269 / 1236). The name-agnostic span check above cannot tell
+    # which number belongs to which name, so a swapped pairing passes it.
+    # This test pins the order: for each `name` (loop.py:A / B) pattern, A
+    # must fall inside the named symbol's span when the ref precedes the
+    # name in the pair, and B when it follows — the pairing must have one
+    # number per name, each inside its own symbol's span.
+    text = INV.read_text(encoding="utf-8")
+    spans = {name: (lo, hi) for lo, hi, name in _named_symbol_spans(
+        AGENT_DIR / "loop.py", ("run_agent", "_run_agent_claimed"))}
+    assert spans, "expected run_agent/_run_agent_claimed in loop.py"
+    pair_re = re.compile(
+        r"`(?P<names>run_agent|_run_agent_claimed)`\s*/\s*"
+        r"`(?P<names2>run_agent|_run_agent_claimed)`\s*"
+        r"\(loop\.py:(?P<a>\d+)(?:\+)?\s*/\s*(?P<b>\d+)"
+    )
+    mismatches: list[str] = []
+    for m in pair_re.finditer(text):
+        n1, n2, a, b = (m.group("names"), m.group("names2"),
+                        int(m.group("a")), int(m.group("b")))
+        if n1 == n2:
+            continue
+        # positional pairing: names[0]↔a, names[1]↔b (the original text had
+        # these reversed, which is exactly what this test must catch)
+        for num, name in ((a, n1), (b, n2)):
+            if num not in range(spans[name][0], spans[name][1] + 1):
+                mismatches.append(f"{name} cited as loop.py:{num} "
+                                  f"(real span {spans[name][0]}\u2013{spans[name][1]})")
+    assert not mismatches, (
+        "paired name refs swapped or stale in prompt-surface-inventory.md: "
+        + "; ".join(mismatches)
     )
 
 

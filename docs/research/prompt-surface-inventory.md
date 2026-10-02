@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1269 / 1236+) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1236+ / 1269) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,7 +45,7 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1269 / 1236) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1236 / 1269) →
 `_default_system_prompt` → fragments appended 1303–1357 → `messages` with
 system first (loop.py:1381).
 
