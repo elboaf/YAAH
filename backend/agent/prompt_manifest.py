@@ -500,7 +500,11 @@ def _platform_os_name(windows: bool):
     On a Windows host rendering posix, pathlib.Path dispatches on
     os.name at call time, so the flip also rebinds backend modules'
     Path names to a WindowsPath subclass (subclasses skip pathlib's
-    os guard) and restores them on exit.
+    os guard) and restores them on exit. The mirror case (posix host
+    rendering windows) needs the same rebinding: os.name flips to
+    'nt', so a plain pathlib.Path() call under the flip would try to
+    instantiate a real WindowsPath and raise
+    'cannot instantiate WindowsPath on your system' (#184 Linux CI).
     """
     import os as _os
     import sys as _sys
@@ -509,30 +513,34 @@ def _platform_os_name(windows: bool):
     if target_windows == HOST_WINDOWS:
         yield
         return
-    if HOST_WINDOWS:
-        import pathlib as _pathlib
+    import pathlib as _pathlib
 
-        class _AlwaysWinPath(_pathlib.WindowsPath):
-            pass
+    # pathlib's host guard ("cannot instantiate WindowsPath on your
+    # system") is DEFINED INSIDE the concrete WindowsPath class when
+    # os.name != 'nt' at class-creation time -- so on a posix host, a
+    # WindowsPath SUBCLASS inherits the raising __new__ and still raises
+    # under the flip (#184 Linux CI, merge heads 3897049/1e18cd2). The
+    # guard is asymmetric: on a Windows host WindowsPath carries no
+    # guard, which is why this only ever failed on Linux. Shed the
+    # inherited guard with a trivial __new__ that calls object.__new__
+    # (WindowsPath.__init__/__slots__ do the rest); the class keeps the
+    # full concrete API (mkdir/write_text/iterdir/resolve).
+    class _AlwaysWinPath(_pathlib.WindowsPath):
+        def __new__(cls, *args, **kwargs):
+            return object.__new__(cls)
 
-        swapped = []
-        for mod_name, mod in list(_sys.modules.items()):
-            if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
-                mod.Path = _AlwaysWinPath
-                swapped.append((mod, _pathlib.Path))
-        _os.name = "posix"
-        try:
-            yield
-        finally:
-            _os.name = "nt"
-            for mod, orig in swapped:
-                mod.Path = orig
-    else:
-        _os.name = "nt"
-        try:
-            yield
-        finally:
-            _os.name = "posix"
+    swapped = []
+    for mod_name, mod in list(_sys.modules.items()):
+        if mod_name.startswith("backend") and getattr(mod, "Path", None) is _pathlib.Path:
+            mod.Path = _AlwaysWinPath
+            swapped.append((mod, _pathlib.Path))
+    _os.name = "nt" if target_windows else "posix"
+    try:
+        yield
+    finally:
+        _os.name = "nt" if HOST_WINDOWS else "posix"
+        for mod, orig in swapped:
+            mod.Path = orig
 
 
 def _isolated_roots() -> dict:
@@ -671,10 +679,17 @@ def _drive_turn(flags: dict) -> dict:
                 # Persist a summary through the REAL compaction persistence
                 # (compact_conversation) -- exactly what _maybe_compact leaves
                 # behind; run_agent_turn reads it via get_prompt_summary.
+                # The watermark must be THIS conversation's message id, not a
+                # literal: #184 -- a stale literal is rejected by
+                # compact_conversation's monotonic-watermark guard and the
+                # summary silently never persists.
+                through_id = await add_message(
+                    cid, "assistant", "fixture prior assistant reply"
+                )
                 await compact_conversation(
                     cid,
                     "Fixture summary of the earlier conversation.",
-                    1,
+                    through_id,
                 )
             policy = "sandbox-only" if flags["policy"] else None
             async for _event in loop._run_agent_claimed(
@@ -734,7 +749,14 @@ def render_local_family(combo: str, flags: dict) -> dict:
     return {
         "combo": combo,
         "kind": flags["kind"],
-        "sections": _split_sections(str(system_messages[0].get("content") or "")),
+        # Sections across ALL system messages: the compaction summary is
+        # injected as its own system message (loop.py), so slicing only
+        # the first one hid it from every manifest (#184).
+        "sections": [
+            section
+            for m in system_messages
+            for section in _split_sections(str(m.get("content") or ""))
+        ],
         "system_messages": [
             {
                 "role": "system",

@@ -19,6 +19,12 @@
       "bytes": 1614,
       "sha256": "8d98286263075e8f696a6ac829f736fdbc4b488761534476c25257588b2a6d91",
       "text": "# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nMemory is a model of the owner, not a log of actions. Before saving, apply the retention test: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save it.\n\nSave proactively (don't wait to be asked) when the test passes:\n- user: who the user is — role, expertise, environment quirks, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- reference (rare): a durable pointer to an external resource the owner returns to (URL, dashboard, ticket queue).\n\nNever save — these have exactly one home, and memory is not it:\n- workflow state (issue filed, PR opened, review round, CI status, merge, release): the issue tracker owns this.\n- project knowledge (architecture, bugs, fixes, plans, constraints): the repo owns this (CONTEXT.md, docs/, ADRs).\n- anything the repo or tracker already records, or details that only matter to the current conversation.\n\nHygiene: reuse/update an existing memory instead of creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n"
+    },
+    {
+      "name": "compaction-summary",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa",
+      "text": "Earlier conversation summary (for context only):\nFixture summary of the earlier conversation."
     }
   ],
   "system_messages": [
@@ -26,10 +32,15 @@
       "role": "system",
       "bytes": 1992,
       "sha256": "735900ca135c4aadba510229fb502de82a919364b01eebeb089c575f38faf50a"
+    },
+    {
+      "role": "system",
+      "bytes": 93,
+      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa"
     }
   ],
-  "total_bytes": 1992,
-  "rendered_sha256": "735900ca135c4aadba510229fb502de82a919364b01eebeb089c575f38faf50a",
+  "total_bytes": 2093,
+  "rendered_sha256": "6e5e237ee7c35d42dba3c10b3a56d257caa76f8f01c2b30cd6f36a58774afa51",
   "tool_schemas": [
     {
       "name": "bash",
@@ -204,5 +215,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nMemory is a model of the owner, not a log of actions. Before saving, apply the retention test: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save it.\n\nSave proactively (don't wait to be asked) when the test passes:\n- user: who the user is — role, expertise, environment quirks, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- reference (rare): a durable pointer to an external resource the owner returns to (URL, dashboard, ticket queue).\n\nNever save — these have exactly one home, and memory is not it:\n- workflow state (issue filed, PR opened, review round, CI status, merge, release): the issue tracker owns this.\n- project knowledge (architecture, bugs, fixes, plans, constraints): the repo owns this (CONTEXT.md, docs/, ADRs).\n- anything the repo or tracker already records, or details that only matter to the current conversation.\n\nHygiene: reuse/update an existing memory instead of creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n"
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Persistent memory (yours — for THIS project)\n\nDurable facts you have saved about this user and project; each line links a file you can read with the memory_read tool:\n\n# Persistent memory\n\n- [fixture-memory](fixture-memory.md): render-matrix fixture memory entry.\n\nMaintain this memory with the memory_save, memory_read and memory_delete tools.\n\n## When to save a memory\nMemory is a model of the owner, not a log of actions. Before saving, apply the retention test: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save it.\n\nSave proactively (don't wait to be asked) when the test passes:\n- user: who the user is — role, expertise, environment quirks, stated preferences.\n- feedback: guidance they give on how you should work — corrections and confirmed approaches. Include **Why:** and **How to apply:** lines.\n- reference (rare): a durable pointer to an external resource the owner returns to (URL, dashboard, ticket queue).\n\nNever save — these have exactly one home, and memory is not it:\n- workflow state (issue filed, PR opened, review round, CI status, merge, release): the issue tracker owns this.\n- project knowledge (architecture, bugs, fixes, plans, constraints): the repo owns this (CONTEXT.md, docs/, ADRs).\n- anything the repo or tracker already records, or details that only matter to the current conversation.\n\nHygiene: reuse/update an existing memory instead of creating a near-duplicate; delete memories that turn out to be wrong. Keep index entries to one line (under ~200 chars); the detail goes in the memory file.\n\n\n====\n\nEarlier conversation summary (for context only):\nFixture summary of the earlier conversation."
 }
