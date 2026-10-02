@@ -204,6 +204,9 @@ def _seed_locked(src: Path, tk: Path, written: list[str]) -> None:
                     state.read_text(encoding="utf-8")).get("tools") or {}
 
                 def _cell(v: object) -> str:
+                    """Escape one value for the INDEX.md table: flatten
+                    CR/LF like the wrapper's Format-Cell and pipe-escape,
+                    so a multiline note can't break the Markdown table."""
                     text = "" if v is None else str(v)
                     # Flatten CR/LF like the wrapper's Format-Cell so a
                     # multiline note can't break the Markdown table.
@@ -264,6 +267,9 @@ def _acquire_toolkit_manifest_lock() -> object | None:
 
 
 def _release_toolkit_manifest_lock(handle: object | None) -> None:
+    """Release and close a mutex handle from
+    `_acquire_toolkit_manifest_lock`; a None handle (lock was unavailable)
+    is a no-op."""
     if handle is None:
         return
     import ctypes as _ct
@@ -1302,6 +1308,8 @@ async def sandbox_stop(workspace: str) -> dict:
 # ---------------------------------------------------------------- prompt
 
 def prompt_section() -> str:
+    """Render the sandbox guidance injected into the agent's system prompt
+    (test-environment choice, seeding, sandbox_run/GUI rules)."""
     return (
         "# Windows Sandbox (for tests that need isolation)\n\n"
         "- Choose the test environment by side effects. Run automated tests "

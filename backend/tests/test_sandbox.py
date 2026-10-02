@@ -370,11 +370,16 @@ class _FakeProc:
 
 
 def test_run_round_trip_and_sequence(isolated, monkeypatch):
+    """One start → run → done cycle against a fake spawn: the sequence
+    numbers advance, the result carries exit code/output, and stopping
+    the session reports stopped."""
     monkeypatch.setattr(sb.config_mod, "load_config",
                         lambda: {"sandbox": {}})
     logs = isolated / "sb" / "ws-abc" / "logs"
 
     def fake_spawn(exe, wsb, logs_path):
+        """Fake VM boot: drop the ready marker so start sees "running"
+        immediately instead of waiting on a real sandbox."""
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
                                             encoding="utf-8")
         return _FakeProc()
@@ -413,6 +418,8 @@ def test_run_reports_foreign_exit_codes_and_truncation(isolated, monkeypatch):
     logs = isolated / "sb" / "ws-abc" / "logs"
 
     def fake_spawn(exe, wsb, logs_path):
+        """Ready-marker fake boot returning a stub process, for the
+        restart/session-reuse path under test."""
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
                                             encoding="utf-8")
         return _FakeProc()
@@ -843,6 +850,7 @@ def _session_up(isolated, monkeypatch, cfg=None):
                         lambda: {"sandbox": cfg or {}})
 
     def fake_spawn(exe, wsb, logs_path):
+        """Shared fake boot: immediate ready marker + stub process."""
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
                                             encoding="utf-8")
         return _FakeProc()
@@ -917,6 +925,8 @@ def test_start_sync_while_booting_reports_busy(isolated, monkeypatch):
     spawned = []
 
     def slow_spawn(exe, wsb, logs_path):
+        """Simulate a slow VM boot: record the spawn, delay, then signal
+        ready so the busy-wait path is actually exercised."""
         spawned.append(wsb)
         time.sleep(0.3)  # boot in progress
         (logs_path / "init.log").write_text("yaah-sandbox-ready",
@@ -1070,6 +1080,8 @@ def _start_for_timing(isolated, monkeypatch):
 
 
 def test_bootstrap_logs_per_segment_timestamps():
+    """The generated VM bootstrap logs each phase (start, join, ready)
+    with its own timestamp, so a stuck boot is attributable."""
     script = sb._bootstrap_script()
     # Every segment gets a timestamped line, not just the final ready signal.
     assert "sandbox-vm-start" in script
@@ -1081,6 +1093,8 @@ def test_bootstrap_logs_per_segment_timestamps():
 
 
 def test_start_returns_boot_breakdown(isolated, monkeypatch):
+    """start's timing payload splits boot into a cold flag, a total
+    spawn-to-ready figure, and per-phase host_spawn/guest_boot values."""
     logs = _start_for_timing(isolated, monkeypatch)
     result = sb.start_sync(r"C:\proj")
     boot = result["boot"]
@@ -1092,6 +1106,8 @@ def test_start_returns_boot_breakdown(isolated, monkeypatch):
 
 
 def test_run_reports_elapsed_and_pickup(isolated, monkeypatch):
+    """When the VM-side result file carries pickup_ms/run_ms, run_sync
+    surfaces them alongside its own elapsed_ms."""
     logs = _start_for_timing(isolated, monkeypatch)
     sb.start_sync(r"C:\proj")
     n = sb._next_seq(logs)
@@ -1108,6 +1124,8 @@ def test_run_reports_elapsed_and_pickup(isolated, monkeypatch):
 
 
 def test_run_metrics_tolerate_missing_vm_side_data(isolated, monkeypatch):
+    """An old-style result file without timing fields yields None metrics
+    instead of a KeyError — timing data is optional."""
     logs = _start_for_timing(isolated, monkeypatch)
     sb.start_sync(r"C:\proj")
     n = sb._next_seq(logs)
@@ -1128,6 +1146,8 @@ def test_start_clears_stale_init_log_before_spawn(isolated, monkeypatch):
     spawn_calls = []
 
     def fake_spawn(exe, wsb, logs_path):
+        """Record the spawn and refuse to boot while a stale ready
+        marker exists; then boot with the timestamped marker."""
         spawn_calls.append(1)
         assert not (logs_path / "init.log").exists()
         (logs_path / "init.log").write_text(
@@ -1159,6 +1179,8 @@ def _pwsh() -> str | None:
 
 
 def _run_toolkit(*args: str, tk: Path) -> subprocess.CompletedProcess:
+    """Invoke the bundled toolkit wrapper against `tk` with the given
+    arguments; skips the test when no PowerShell exists (Linux CI)."""
     exe = _pwsh()
     if exe is None:
         pytest.skip("no powershell/pwsh available on this platform")
@@ -1222,6 +1244,8 @@ def test_toolkit_wrapper_remove_prints_confirmation(isolated, tmp_path):
 
 
 def test_toolkit_wrapper_remove_and_idempotent_rerun(isolated, tmp_path):
+    """`toolkit remove` drops the entry, drops its INDEX.md row, and a
+    second remove of the same name is a no-op success, not an error."""
     tk = tmp_path / "toolkit"
     tk.mkdir()
     assert _run_toolkit("install", "t", "-Version", "1", tk=tk).returncode == 0
