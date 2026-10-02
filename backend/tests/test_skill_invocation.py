@@ -150,3 +150,53 @@ async def test_queued_unknown_skill_emits_skill_not_found_event(
     ev = next((e for e in events if e["type"] == "skill_not_found"), None)
     assert ev is not None, "queued-path unknown skill must emit skill_not_found"
     assert ev["skills"] == ["nope-matt"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_name_reported_per_message_even_when_repeated(
+    fake_model, skills_dir, tmp_path, monkeypatch
+):
+    """CodeRabbit return trip on PR #252: the unknown-name dedupe set
+    (loaded_skills) must only carry KNOWN names. If the turn already invoked
+    `nope-matt` (event #1) and a queued message selects `nope-matt` again,
+    the queued message still gets its own skill_not_found event (#2) —
+    every message selecting an unknown skill reports it."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("skill-queue-404-repeat")
+
+    scripts = fake_model
+    scripts.append(
+        [
+            {
+                "type": "tool_calls",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "web_fetch", "arguments": json.dumps({"url": "about:blank"})},
+                    }
+                ],
+            },
+            {"type": "finish"},
+        ]
+    )
+    scripts.append([{"type": "content", "text": "b"}, {"type": "finish"}])
+
+    real_fake_chat = loop.model_client.chat
+
+    async def fake_chat(messages, tools=None, stream=True):
+        if not getattr(fake_chat, "queued", False):
+            fake_chat.queued = True
+            loop.enqueue_message(cid, "follow up", skills=["nope-matt"])
+        return await real_fake_chat(messages, tools=tools, stream=stream)
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+
+    events = await collect(loop.run_agent(cid, "go", str(tmp_path), skill_names=["nope-matt"]))
+    found = [e for e in events if e["type"] == "skill_not_found"]
+    assert len(found) == 2, (
+        f"expected one skill_not_found per selecting message (turn + queued), got {len(found)}: "
+        + repr([e.get("skills") for e in found])
+    )
+    assert all(e["skills"] == ["nope-matt"] for e in found)

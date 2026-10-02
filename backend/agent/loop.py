@@ -1463,8 +1463,12 @@ async def _run_agent_claimed(
 
     # Skills the model has loaded mid-turn via load_skill (deduped, order
     # preserved). Their bodies are appended to the system prompt so every
-    # subsequent model call in this turn sees them.
-    loaded_skills: list[str] = list(invoked)
+    # subsequent model call in this turn sees them. Seeded with the KNOWN
+    # invoked names only (PR #252 return trip): unknown invoked names must
+    # stay out of the dedupe set, so a queued message repeating them still
+    # reports its own skill_not_found event.
+    _, _invoked_unknown = skill_registry.split_known_unknown(invoked)
+    loaded_skills: list[str] = [n for n in invoked if n not in _invoked_unknown]
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
