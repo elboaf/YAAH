@@ -38,14 +38,31 @@ inherited by every future sandbox** — it is the persistence mechanism.
   (tools, versions, install/check commands). Check it BEFORE re-downloading
   anything: `Get-Content $env:...\toolkit\state.json` is one round-trip that
   can save a 200 MB reinstall.
+- `INDEX.md` — human/agent-readable table of contents GENERATED from
+  `state.json`. Read this one first. Never edit it by hand; it is
+  regenerated on every manifest change.
+- `bin\toolkit.ps1` (+ `bin\toolkit.cmd` shim) — the recording wrapper.
+  Record every install through it instead of hand-editing state.json:
+
+      toolkit install <name> -Version <v> -Kind zip -Path <rel\path> `
+          -Check "Test-Path '<toolkit>\<rel\path>'" `
+          -Invocation "<how to run it>" [-Note "<gotcha>"]
+
+  Also `toolkit remove <name>` and `toolkit index` (regenerate INDEX.md).
+  It writes state.json via temp-file-then-move and then regenerates
+  INDEX.md. `toolkit install` records
+  the manifest entry only — the actual download/extract/shim work is still
+  yours, and `-Check` is how the next session verifies it without
+  rediscovery.
 
 ## What yaah does NOT ship
 
 git/python/node/AutoHotkey/browsers are NOT bundled (download size). The VM is
 a clean Windows image each boot; only this folder persists. Install what you
 need INTO the toolkit (zip/portable distributions preferred — never run
-interactive installers unattended), then add a line to `state.json` so the
-next session (and every future sandbox) knows it's there.
+interactive installers unattended), then record it with
+`bin\toolkit.ps1 install <name> ...` so the next session (and every future
+sandbox) knows it's there. Do not edit `state.json` by hand.
 
 ## Layout conventions (already on PATH inside the VM)
 
@@ -58,6 +75,10 @@ PATH order inside the VM: `toolkit; toolkit\bin; toolkit\Scripts;
 toolkit\node_modules\.bin; <system>`.
 
 `state.json` schema: `{"tools": {"<name>": {"version": "...", "kind":
-"zip|dir|script", "check": "<one-line PowerShell test>", "installed_at":
-"<iso8601>"}}}` — yaah merges (never overwrites) the file when seeding a
-fresh toolkit, so user-added entries survive app updates.
+"zip|dir|script|pip|installer|vendored", "path": "<rel path>",
+"check": "<one-line PowerShell test>", "invocation": "<how to run>",
+"note": "<gotcha>", "installed_at": "<iso8601>"}}}` — all metadata optional
+except the name. yaah merges (never overwrites) the file when seeding a
+fresh toolkit, so user-added entries survive app updates. Do not hand-edit:
+record changes with `bin\\toolkit.ps1` (`toolkit install|remove|index`), which
+also regenerates `INDEX.md`.

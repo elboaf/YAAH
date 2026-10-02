@@ -1,9 +1,11 @@
 name: Test Build
 
-# Builds the Tauri desktop app without creating a release. Run it manually
-# from the Actions tab ("Run workflow") and pick the platform: windows,
-# linux, or all. Pull requests touching the app get a cheap
-# Linux-only smoke build. Installers are attached as workflow artifacts.
+# Builds the Tauri desktop app without creating a release. Manual only
+# ("Run workflow" in the Actions tab, pick the platform: windows, linux,
+# or all) — PRs no longer auto-trigger it: a full Tauri build per push
+# chewed the self-hosted runners with no payoff. CI (ci.yml) already
+# covers typecheck/tests on every push. Installers are attached as
+# workflow artifacts.
 
 on:
   workflow_dispatch:
@@ -16,12 +18,6 @@ on:
           - windows
           - linux
           - all
-  pull_request:
-    paths:
-      - "src-tauri/**"
-      - "src/**"
-      - "backend/**"
-      - ".github/workflows/test-build.yml"
 
 jobs:
   test-build:
