@@ -7190,7 +7190,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   ui-scale-changed event; Save persists (see save()). */}
               <InterfaceScaleCard
                 scale={uiScale}
-                disabled={!loaded}
+                // `saving` too (return trip #2): save() captures the scale at
+                // click time — a mid-save drag would preview a value the
+                // save-completion then overwrites, silently losing it.
+                disabled={!loaded || saving}
                 onChange={(s) => {
                   setUiScale(s)
                 // preview dirties the live zoom; unmount restores the
