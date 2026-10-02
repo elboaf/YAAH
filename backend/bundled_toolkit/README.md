@@ -49,7 +49,8 @@ inherited by every future sandbox** — it is the persistence mechanism.
           -Invocation "<how to run it>" [-Note "<gotcha>"]
 
   Also `toolkit remove <name>` and `toolkit index` (regenerate INDEX.md).
-  It updates state.json AND INDEX.md atomically. `toolkit install` records
+  It writes state.json via temp-file-then-move and then regenerates
+  INDEX.md. `toolkit install` records
   the manifest entry only — the actual download/extract/shim work is still
   yours, and `-Check` is how the next session verifies it without
   rediscovery.

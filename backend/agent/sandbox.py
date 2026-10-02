@@ -180,6 +180,41 @@ def ensure_toolkit_seed() -> list[str]:
                 json.dumps(current, indent=2) + "\n", encoding="utf-8")
             if "state.json" not in written:
                 written.append("state.json")
+        # Whenever the manifest was written this run (fresh copy OR merge),
+        # a previously present INDEX.md may be stale (copy-once never
+        # refreshes it); regenerate it best-effort, mirroring the wrapper's
+        # renderer.
+        if "state.json" in written:
+            try:
+                mtools = json.loads(
+                    state.read_text(encoding="utf-8")).get("tools") or {}
+
+                def _cell(v: object) -> str:
+                    text = "" if v is None else str(v)
+                    return text.replace("|", "\\|").strip()
+
+                ilines = [
+                    "# Toolkit index",
+                    "",
+                    "Generated from ``state.json`` by ``toolkit install`` - do not edit by hand.",
+                    "Paths are relative to the toolkit root (on PATH inside the VM:",
+                    "``toolkit``, ``toolkit\\bin``, ``toolkit\\Scripts``, ``toolkit\\node_modules\\.bin``).",
+                    "",
+                    "| name | version | kind | path | invocation | check | note |",
+                    "|---|---|---|---|---|---|---|",
+                ]
+                for n in sorted(mtools):
+                    t = mtools[n] or {}
+                    ilines.append("| {} | {} | {} | {} | {} | {} | {} |".format(
+                        _cell(n), _cell(t.get("version")), _cell(t.get("kind")),
+                        _cell(t.get("path")), _cell(t.get("invocation")),
+                        _cell(t.get("check")), _cell(t.get("note"))))
+                (tk / "INDEX.md").write_text(
+                    "\n".join(ilines) + "\n", encoding="utf-8")
+                if "INDEX.md" not in written:
+                    written.append("INDEX.md")
+            except (OSError, ValueError):
+                pass  # best-effort, same as the rest of seeding
     except (OSError, ValueError):
         pass
     return written
@@ -1403,7 +1438,7 @@ SANDBOX_TOOLS_SCHEMA = [
                 "toolkit\\bin, toolkit\\Scripts, toolkit\\node_modules"
                 "\\.bin; shim zipped tools' exe from toolkit\\bin\\<name>"
                 ".cmd). Record installs with `toolkit install <name> ...` "
-                "(wrapper at toolkit\bin\toolkit.ps1 — it writes "
+                "(wrapper at toolkit\\bin\\toolkit.ps1 — it writes "
                 "state.json AND regenerates INDEX.md; never hand-edit the "
                 "JSON). For GUI automation in the VM use the windows-mcp MCP "
                 "server (auto-started at boot; connection info in the "

@@ -58,8 +58,11 @@ All optional except name; the wrapper stores exactly what it is given.
 - `toolkit\bin\toolkit.ps1` (+ `toolkit.cmd` shim, already on PATH in the
   VM) implements `install|remove|list|index`. The wrapper's `-ToolkitDir`
   parameter overrides the toolkit root (the tests pass it explicitly).
-- `ensure_toolkit_seed` behavior is unchanged (merge, copy-once), so bundled
-  entries and user records keep surviving app upgrades. INDEX.md is treated
-  like any seeded file: never overwritten once present.
+- `ensure_toolkit_seed` behavior: merge and copy-once are unchanged, so
+  bundled entries and user records keep surviving app upgrades. But when a
+  merge adds entries to an existing manifest, INDEX.md is regenerated from
+  the merged manifest (an upgrade can otherwise leave a stale index).
+  INDEX.md is copy-once only when nothing was merged; the wrapper and the
+  seed's regeneration are the only writers after that.
 - Existing manual edits to state.json remain valid; the wrapper merely makes
   the correct path the easy path.

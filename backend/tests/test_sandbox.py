@@ -964,7 +964,8 @@ def test_ensure_toolkit_seed_copies_bundled_baseline(isolated, monkeypatch):
                 "README.md", "state.json"):
         assert (tk / rel).is_file(), rel
     assert sorted(written) == sorted(["bin/vm-capture.ps1", "bin/git.cmd",
-                                      "gitconfig", "README.md", "state.json"])
+                                      "gitconfig", "README.md", "state.json",
+                                      "INDEX.md"])
 
 
 def test_ensure_toolkit_seed_never_overwrites_user_files(isolated, monkeypatch):
@@ -1258,5 +1259,106 @@ def test_ensure_toolkit_seed_copies_wrapper_and_index(isolated, monkeypatch, tmp
     tk = sb.toolkit_dir()
     assert (tk / "bin" / "toolkit.ps1").is_file()
     assert (tk / "INDEX.md").is_file()
+
+
+# --- CodeRabbit findings on the closed PR #159 (issue #118 re-land) ---------
+
+def test_toolkit_wrapper_install_is_serialized(isolated, tmp_path):
+    """Finding 1 (major): concurrent installs must not lose an entry.
+    The wrapper takes a cross-process lock through the whole
+    read-mutate-write and uses a per-process temp file."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    procs = []
+    exe = _pwsh()
+    if exe is None:
+        pytest.skip("no powershell/pwsh available on this platform")
+    for i in range(6):
+        procs.append(subprocess.Popen(
+            [exe, "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(_TOOLKIT_PS1), "install", f"tool{i}",
+             "-Version", str(i), "-ToolkitDir", str(tk)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
+    errs = [p.communicate()[1].decode(errors="replace") for p in procs]
+    rcs = [p.returncode for p in procs]
+    assert all(rc == 0 for rc in rcs), list(zip(rcs, errs))
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    assert sorted(t for t in tools if t.startswith("tool")) == \
+        [f"tool{i}" for i in range(6)]
+    assert not list(tk.glob("state.json.tmp*")), "temp file must be unique/cleaned"
+
+
+def test_toolkit_wrapper_reinstall_preserves_metadata(isolated, tmp_path):
+    """Finding 2: reinstalling with fewer fields must not wipe existing
+    metadata; supplied values override, others survive."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    assert _run_toolkit(
+        "install", "t", "-Version", "1", "-Kind", "zip",
+        "-Path", "t/tool.exe", "-Note", "gotcha", tk=tk).returncode == 0
+    assert _run_toolkit("install", "t", "-Version", "2", tk=tk).returncode == 0
+    tools = json.loads((tk / "state.json").read_text(encoding="utf-8"))["tools"]
+    entry = tools["t"]
+    assert entry["version"] == "2"          # supplied value overrides
+    assert entry["kind"] == "zip"           # pre-existing fields survive
+    assert entry["path"] == "t/tool.exe"
+    assert entry["note"] == "gotcha"
+
+
+def test_toolkit_wrapper_index_escapes_cells(isolated, tmp_path):
+    """Finding 3: pipe/newline in metadata renders escaped in INDEX.md
+    (table not broken); state.json keeps the value verbatim."""
+    tk = tmp_path / "toolkit"
+    tk.mkdir()
+    r = _run_toolkit("install", "t", "-Version", "1",
+                     "-Check", r"Get-Command x | Select-Object Source",
+                     tk=tk)
+    assert r.returncode == 0, r.stderr
+    state = (tk / "state.json").read_text(encoding="utf-8")
+    assert "Get-Command x | Select-Object Source" in state   # verbatim
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    row = next(ln for ln in index.splitlines() if ln.startswith("| t |"))
+    assert "Get-Command x \\| Select-Object Source" in row
+
+
+def test_sandbox_schema_wrapper_path_has_no_escape_sequences():
+    """Finding 4: the tool description must not contain \\b or \\t control
+    characters from unescaped backslashes in the path."""
+    text = "".join(
+        (p.get("function", {}).get("description") or "")
+        for p in sb.SANDBOX_TOOLS_SCHEMA)
+    assert "\b" not in text and "\t" not in text
+    assert "toolkit\\bin\\toolkit.ps1" in text
+
+
+def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch,
+                                                     tmp_path):
+    """Finding 5: after a bundled-entries merge into an existing toolkit,
+    a stale INDEX.md is regenerated from the merged manifest."""
+    src = tmp_path / "bundled"
+    src.mkdir()
+    (src / "state.json").write_text(json.dumps({"tools": {
+        "newbundled": {"version": "1", "kind": "zip"}}}), encoding="utf-8")
+    (src / "INDEX.md").write_text("# Toolkit index", encoding="utf-8")
+    monkeypatch.setattr(sb, "bundled_toolkit_source", lambda: src)
+
+    tk = sb.toolkit_dir()
+    tk.mkdir(parents=True, exist_ok=True)
+    (tk / "INDEX.md").write_text("# stale index without the new entry",
+                                 encoding="utf-8")
+
+    sb.ensure_toolkit_seed()
+
+    index = (tk / "INDEX.md").read_text(encoding="utf-8")
+    assert "newbundled" in index, "INDEX.md regenerated after merge"
+
+
+def test_readme_atomicity_wording_is_accurate():
+    """Finding 6: the README must not claim INDEX.md updates are atomic —
+    state.json is temp+move, INDEX.md is regenerated after it."""
+    readme = (sb.bundled_toolkit_source() / "README.md").read_text(
+        encoding="utf-8")
+    assert "atomically" not in readme.lower()
+    assert "regenerates" in readme
     # re-run: copy-once, nothing new
     assert sb.ensure_toolkit_seed() == []

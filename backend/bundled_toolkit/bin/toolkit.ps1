@@ -45,13 +45,48 @@ function Read-State {
 
 function Save-State($state) {
     $json = $state | ConvertTo-Json -Depth 10
-    # Atomic-ish write: temp file then move, so a killed process can't truncate.
-    $tmp = "$statePath.tmp"
+    # Atomic-ish write: per-process temp file then move, so a killed process
+    # can't truncate and concurrent runs never collide on the temp name.
+    # Move can transiently fail when AV/indexers hold the target; retry briefly.
+    $tmp = "$statePath.$PID.$([System.IO.Path]::GetRandomFileName()).tmp"
     [System.IO.File]::WriteAllText($tmp, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
-    Move-Item -Force -LiteralPath $tmp -Destination $statePath
+    $moved = $false
+    for ($i = 0; $i -lt 20 -and -not $moved; $i++) {
+        try { Move-Item -Force -LiteralPath $tmp -Destination $statePath; $moved = $true }
+        catch { Start-Sleep -Milliseconds 50 }
+    }
+    if (-not $moved) {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -Force -LiteralPath $tmp }
+        Write-Error "could not replace $statePath"
+        exit 2
+    }
+}
+
+# Cross-process mutex so only one wrapper process mutates the manifest at a
+# time (last-write-wins would drop entries; the lock is held through the
+# read-mutate-write and index regeneration).
+function Acquire-Lock {
+    $script:mutex = New-Object System.Threading.Mutex($false, "Global\yaah-toolkit-manifest")
+    $got = $false
+    try { $got = $script:mutex.WaitOne(30000) } catch { $got = $script:mutex.WaitOne(30000) }
+    if (-not $got) { Write-Error "timed out waiting for the toolkit manifest lock"; exit 2 }
+}
+
+function Release-Lock {
+    if ($script:mutex) {
+        try { $script:mutex.ReleaseMutex() } catch { }
+        $script:mutex.Dispose()
+        $script:mutex = $null
+    }
 }
 
 function Update-Index($state) {
+    # Escape pipes/newlines so metadata can't break the table; state.json
+    # keeps the raw values verbatim.
+    function Format-Cell($v) {
+        if (-not $v) { return "" }
+        return (($v -replace "\|", "\|") -replace "(\r?\n)+", " ").Trim()
+    }
     $lines = @(
         "# Toolkit index",
         "",
@@ -68,7 +103,9 @@ function Update-Index($state) {
     foreach ($n in $names) {
         $t = $tools.$n
         $lines += ("| {0} | {1} | {2} | {3} | {4} | {5} | {6} |" -f `
-            $n, $t.version, $t.kind, $t.path, $t.invocation, $t.check, $t.note)
+            (Format-Cell $n), (Format-Cell $t.version), (Format-Cell $t.kind),
+            (Format-Cell $t.path), (Format-Cell $t.invocation),
+            (Format-Cell $t.check), (Format-Cell $t.note))
     }
     [System.IO.File]::WriteAllLines($indexPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -76,43 +113,59 @@ function Update-Index($state) {
 switch ($Action) {
     "install" {
         if (-not $Name) { Write-Error "usage: toolkit install <name> [-Version ...] [-Kind ...] [-Path ...] [-Check ...] [-Invocation ...] [-Note ...]"; exit 2 }
-        $state = Read-State
-        if ($state.tools -eq $null) {
-            $state | Add-Member -MemberType NoteProperty -Name tools -Value ([pscustomobject]@{})
-        }
-        $entry = [ordered]@{}
-        foreach ($pair in @(@("version", $Version), @("kind", $Kind), @("path", $Path),
-                            @("check", $Check), @("invocation", $Invocation), @("note", $Note))) {
-            if ($pair[1]) { $entry[$pair[0]] = $pair[1] }
-        }
-        $entry["installed_at"] = (Get-Date).ToString("yyyy-MM-dd")
-        $newEntry = [pscustomobject]$entry
-        if ($state.tools.PSObject.Properties[$Name]) {
-            $state.tools.$Name = $newEntry
-        } else {
-            $state.tools | Add-Member -MemberType NoteProperty -Name $Name -Value $newEntry
-        }
-        Save-State $state
-        Update-Index $state
+        Acquire-Lock
+        try {
+            $state = Read-State
+            if ($state.tools -eq $null) {
+                $state | Add-Member -MemberType NoteProperty -Name tools -Value ([pscustomobject]@{})
+            }
+            # Seed from the existing entry so a reinstall with fewer fields
+            # preserves metadata; supplied values override below.
+            $entry = [ordered]@{}
+            if ($state.tools.PSObject.Properties[$Name]) {
+                foreach ($p in $state.tools.$Name.PSObject.Properties) {
+                    if ($p.Name -ne "installed_at" -and $p.Value) { $entry[$p.Name] = $p.Value }
+                }
+            }
+            foreach ($pair in @(@("version", $Version), @("kind", $Kind), @("path", $Path),
+                                @("check", $Check), @("invocation", $Invocation), @("note", $Note))) {
+                if ($pair[1]) { $entry[$pair[0]] = $pair[1] }
+            }
+            $entry["installed_at"] = (Get-Date).ToString("yyyy-MM-dd")
+            $newEntry = [pscustomobject]$entry
+            if ($state.tools.PSObject.Properties[$Name]) {
+                $state.tools.$Name = $newEntry
+            } else {
+                $state.tools | Add-Member -MemberType NoteProperty -Name $Name -Value $newEntry
+            }
+            Save-State $state
+            Update-Index $state
+        } finally { Release-Lock }
         Write-Output "recorded '$Name' in state.json and regenerated INDEX.md"
     }
     "remove" {
         if (-not $Name) { Write-Error "usage: toolkit remove <name>"; exit 2 }
-        $state = Read-State
+        Acquire-Lock
+        try {
+            $state = Read-State
+            if ($state.tools -and $state.tools.PSObject.Properties[$Name]) {
+                $state.tools.PSObject.Properties.Remove($Name)
+                Save-State $state
+                Update-Index $state
+            } else {
+                Write-Output "'$Name' not in state.json (nothing to remove)"
+            }
+        } finally { Release-Lock }
         if ($state.tools -and $state.tools.PSObject.Properties[$Name]) {
-            $state.tools.PSObject.Properties.Remove($Name)
-            Save-State $state
-            Update-Index $state
             Write-Output "removed '$Name' from state.json and regenerated INDEX.md"
-        } else {
-            Write-Output "'$Name' not in state.json (nothing to remove)"
         }
     }
     "list" {
         (Read-State).tools | ConvertTo-Json -Depth 10
     }
     "index" {
-        Update-Index (Read-State)
+        Acquire-Lock
+        try { Update-Index (Read-State) } finally { Release-Lock }
         Write-Output "regenerated $indexPath"
     }
 }
