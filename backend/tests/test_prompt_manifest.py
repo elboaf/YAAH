@@ -239,6 +239,28 @@ def test_windows_flip_on_posix_does_not_instantiate_windowspath(
     assert probe.Path is Path
 
 
+@pytest.mark.skipif(
+    not HOST_WIN,
+    reason="exercises the posix-target flip via a real posix-* render",
+)
+def test_posix_target_flip_render_keeps_full_path_api():
+    """#184 regression (merged-code follow-up): an intermediate 'fix'
+    rebound backend Path names to a PureWindowsPath mix-in during the
+    flip. PureWindowsPath has NO filesystem methods, so any real render
+    (mkdir/write_text/iterdir in the turn drivers) died with
+    AttributeError -- on every host. The rebinding must subclass the
+    CONCRETE WindowsPath: subclasses defined in user code do not inherit
+    pathlib's host guard, so they instantiate under the flip on either
+    host AND keep the full concrete API. A pure-path probe cannot catch
+    this (it never touches the filesystem); a real render can."""
+    manifest = pm.render_combo(
+        f"{'posix' if HOST_WIN else 'win'}-local-plan-compaction"
+    )
+    names = [s["name"] for s in manifest["sections"]]
+    assert "compaction-summary" in names
+    assert manifest["total_bytes"] > 0
+
+
 def test_compaction_manifests_contain_summary_section():
     """#184: every combo that names compaction must actually render the
     compaction-summary section -- the fixture watermark must be live

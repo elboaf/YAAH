@@ -515,6 +515,16 @@ def _platform_os_name(windows: bool):
         return
     import pathlib as _pathlib
 
+    # pathlib's host guard lives in PosixPath/WindowsPath.__new__, defined
+    # only INSIDE those concrete classes (guarded by `if os.name ...` at
+    # class-creation time). A WindowsPath SUBCLASS defined in user code
+    # does not inherit it, so instantiating the subclass works under an
+    # os.name flip on either host -- and it keeps the full concrete API
+    # (mkdir, write_text, iterdir, resolve), which a PureWindowsPath mix-in
+    # does not (no filesystem methods at all). Note: merely subclassing
+    # does NOT keep the guard from firing when the code instantiates the
+    # CONCRETE WindowsPath directly -- that is the exact Linux-CI failure
+    # this rebinding prevents (#184).
     class _AlwaysWinPath(_pathlib.WindowsPath):
         pass
 
