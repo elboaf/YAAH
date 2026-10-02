@@ -109,8 +109,13 @@ def test_inventory_paired_name_refs_point_at_named_symbols() -> None:
     spans = {name: (lo, hi) for lo, hi, name in _named_symbol_spans(
         AGENT_DIR / "loop.py", ("run_agent", "_run_agent_claimed"))}
     assert spans, "expected run_agent/_run_agent_claimed in loop.py"
+    # The inventory pairs the two names with either "/" or an arrow
+    # ("run_agent / _run_agent_claimed" and the assembly-flow
+    # "run_agent → _run_agent_claimed"), so accept both separators —
+    # otherwise a stale citation in the arrow form passes undetected.
+    sep = r"\s*(?:/|→)\s*"
     pair_re = re.compile(
-        r"`(?P<names>run_agent|_run_agent_claimed)`\s*/\s*"
+        r"`(?P<names>run_agent|_run_agent_claimed)`" + sep +
         r"`(?P<names2>run_agent|_run_agent_claimed)`\s*"
         r"\(loop\.py:(?P<a>\d+)(?:\+)?\s*/\s*(?P<b>\d+)"
     )
