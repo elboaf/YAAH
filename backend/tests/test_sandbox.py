@@ -1353,12 +1353,16 @@ def test_ensure_toolkit_seed_regenerates_stale_index(isolated, monkeypatch,
     assert "newbundled" in index, "INDEX.md regenerated after merge"
 
 
-def test_readme_atomicity_wording_is_accurate():
+def test_readme_atomicity_wording_is_accurate(isolated):
     """Finding 6: the README must not claim INDEX.md updates are atomic —
     state.json is temp+move, INDEX.md is regenerated after it."""
     readme = (sb.bundled_toolkit_source() / "README.md").read_text(
         encoding="utf-8")
     assert "atomically" not in readme.lower()
     assert "regenerates" in readme
-    # re-run: copy-once, nothing new
+    # copy-once: the FIRST seed writes the baseline into the isolated
+    # toolkit, the SECOND must be a no-op (running against the host's real
+    # toolkit would see the newly bundled files as "new" on the first CI
+    # run after an upgrade).
+    assert sb.ensure_toolkit_seed()  # baseline seeded into the temp toolkit
     assert sb.ensure_toolkit_seed() == []
