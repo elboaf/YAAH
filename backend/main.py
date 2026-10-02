@@ -1874,6 +1874,32 @@ async def api_file_preview(body: PreviewRequest):
     return result
 
 
+@app.get("/api/files/exists")
+async def api_file_exists(workspace: str, path: str):
+    """Containment-checked existence probe for chat path linkification (#258).
+
+    True only for an existing FILE whose resolved location stays inside the
+    workspace — a path escaping the workspace must never become a link (the
+    probe deliberately answers False rather than 400 so a malicious message
+    can't distinguish outside paths from missing ones)."""
+    host = _workspace_host(workspace)
+    if host is not None:
+        res = await host.proxy(
+            "GET",
+            "/api/files/exists",
+            params={"workspace": _host_ws(host, workspace), "path": path},
+        )
+        return _proxy_result(res)
+
+    root = workspace_root(workspace)
+    if not root.exists():
+        return {"exists": False}
+    target = (root / path).resolve()
+    if target != root and root not in target.parents:
+        return {"exists": False}
+    return {"exists": target.is_file()}
+
+
 @app.delete("/api/files")
 async def api_delete_file(workspace: str, path: str):
     """Delete a file from the workspace (file-tree context menu)."""

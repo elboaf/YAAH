@@ -11,6 +11,8 @@ import remarkBreaks from 'remark-breaks'
 import { highlightLine } from './codeview'
 import { openExternal } from './openExternal'
 import { stripSay } from './speech'
+import { useAgent } from './store'
+import { usePathTokens, renderTextWithPaths } from './pathLinks'
 
 // ---------------------------------------------------------------- code views
 
@@ -89,7 +91,17 @@ function textOf(node: ReactNode): string {
 
 // ---------------------------------------------------------------- agent markdown
 
-const components = {
+const components = (confirmed: ReadonlySet<string>, onOpenPath: PathOpener) => ({
+  // Plain text containers linkify confirmed workspace paths (#258). `p`
+  // covers ordinary prose; `li` covers tight list items (their text is NOT
+  // wrapped in a paragraph when remark-gfm's list is tight). Styling stays
+  // the react-markdown defaults — chat rendering must not change visually.
+  p: ({ children }: { children?: ReactNode }) => (
+    <p>{pathAware(children, confirmed, onOpenPath)}</p>
+  ),
+  li: ({ children }: { children?: ReactNode }) => (
+    <li>{pathAware(children, confirmed, onOpenPath)}</li>
+  ),
   a: ({ href, children }: { href?: string; children?: ReactNode }) => {
     const safe = safeHref(href)
     return safe ? (
@@ -136,18 +148,58 @@ const components = {
   ),
   td: ({ node: _n, children }: { node?: unknown; children?: ReactNode }) => (
     <td className="border-b border-zinc-800 px-2 py-1 align-top text-zinc-300">
-      {children}
+      {pathAware(children, confirmed, onOpenPath)}
     </td>
   ),
+})
+
+/** Type of the click handler that opens a linked path in the preview. */
+type PathOpener = (path: string, line: number | null) => void
+
+/**
+ * Plain-text node(s) with #258 linkification applied. Renders ordinary
+ * markdown text nodes through renderTextWithPaths; non-text children
+ * (emphasis, nested links, chips...) are passed through untouched — the
+ * scanner only ever sees top-level plain runs, so formatting survives and
+ * a markdown link's label/target can never be rewritten.
+ */
+function pathAware(
+  children: ReactNode,
+  confirmed: ReadonlySet<string>,
+  onOpenPath: PathOpener,
+): ReactNode {
+  return toArray(children).map((child) =>
+    typeof child === 'string' ? renderTextWithPaths(child, confirmed, onOpenPath) : child,
+  )
 }
 
-/** Full markdown rendering for agent messages. remark-breaks renders a
- *  single \n as a line break (chat semantics) — the #17 emission separator
- *  the stream writes is a bare \n and must stay visible. */
+/** Flatten a React children value (incl. multi-line plain text) to an array. */
+function toArray(children: ReactNode): ReactNode[] {
+  return Array.isArray(children) ? children.flat() : [children]
+}
+
+/**
+ * Full markdown rendering for agent messages. remark-breaks renders a
+ * single \n as a line break (chat semantics) — the #17 emission separator
+ * the stream writes is a bare \n and must stay visible.
+ *
+ * Plain text inside paragraphs, list items and table cells is additionally
+ * linkified (#258): workspace-relative, existence-checked file paths (with
+ * tolerated `:42` / `#L42` suffixes) open in the file preview on click.
+ * Code spans and fenced blocks never reach the text renderer, so they stay
+ * untouched; markdown link targets are never seen here either.
+ */
 export function AgentMarkdown({ content }: { content: string }) {
+  const workspace = useAgent((s) => s.workspace)
+  const setPreviewPath = useAgent((s) => s.setPreviewPath)
+  const confirmed = usePathTokens(stripSay(content), workspace || null)
+  const onOpenPath: PathOpener = (path) => setPreviewPath(path)
   return (
     <div className="space-y-1 break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={components(confirmed, onOpenPath)}
+      >
         {stripSay(content)}
       </ReactMarkdown>
     </div>
