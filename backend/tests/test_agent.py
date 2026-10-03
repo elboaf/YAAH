@@ -1479,3 +1479,19 @@ async def test_say_heuristic_fallback_persists_too(fake_model, tmp_path):
 
     msgs = await get_messages(cid)
     assert msgs[-1]["say"] == said[0]["text"]
+
+
+# ------------------------------------------------ #191 title prompt contract
+
+def test_title_prompt_matches_enforced_contract():
+    """#191: title-prompt wording must state what the consumer enforces —
+    a best-effort guideline, clamped at AUTO_TITLE_MAX_CHARS — not an
+    unenforced 3-6 word rule."""
+    import inspect
+
+    from backend.agent import loop as loop_mod
+
+    src = inspect.getsource(loop_mod._generate_conversation_title)
+    assert "3-6 words" not in src
+    # the enforced clamp is interpolated into the prompt text
+    assert "{AUTO_TITLE_MAX_CHARS}" in src

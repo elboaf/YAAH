@@ -198,3 +198,141 @@ def test_schemas_registered_platform_neutral():
 
     for n in ("memory_save", "memory_read", "memory_delete"):
         assert n in SCHEMAS
+
+
+# ---- issue #192: injection cap consistency ----------------------------------
+
+def _write_index(workspace, text):
+    d = memory.ensure_dir(workspace)
+    (d / "MEMORY.md").write_text(text, encoding="utf-8")
+
+
+def test_rendered_block_has_heading_exactly_once():
+    # A user edit that reintroduces the template heading must not produce
+    # a duplicate "# Persistent memory" heading in the rendered block.
+    _write_index(WS, "# Persistent memory\n\n- [Fact](fact.md) — a fact\n")
+    block = memory.index_for_prompt(WS)
+    assert block.count("# Persistent memory") == 1
+
+
+def test_index_prioritizes_user_and_feedback_over_project():
+    # Type-prioritized index (#228 fold-in): user/feedback pinned at the
+    # top; over budget the oldest project entries drop off first.
+    for i in range(3):
+        memory.save_memory(WS, f"proj-{i}", f"P{i}", "p", "project", "c")
+    memory.save_memory(WS, "user-fact", "U", "u", "user", "c")
+    memory.save_memory(WS, "fb-fact", "F", "f", "feedback", "c")
+    block = memory.index_for_prompt(WS)
+    assert block.index("user-fact.md") < block.index("proj-0.md")
+    assert block.index("fb-fact.md") < block.index("proj-0.md")
+
+
+def test_index_drop_oldest_project_first_when_over_budget(monkeypatch):
+    lines = []
+    for i in range(60):
+        slug = f"proj-{i:03d}"
+        lines.append(f"- [P{i}]({slug}.md) — {'x' * 200}")
+        d = memory.ensure_dir(WS)
+        (d / f"{slug}.md").write_text(
+            f"---\nname: {slug}\ndescription: \"p\"\nmetadata:\n  type: project\n---\n\n# P{i}\n",
+            encoding="utf-8",
+        )
+    for slug, label in (("user-1", "U"), ("fb-1", "F")):
+        lines.append(f"- [{label}]({slug}.md) — {'x' * 200}")
+        t = "user" if slug.startswith("user") else "feedback"
+        (memory.ensure_dir(WS) / f"{slug}.md").write_text(
+            f"---\nname: {slug}\ndescription: \"{t}\"\nmetadata:\n  type: {t}\n---\n\n# {label}\n",
+            encoding="utf-8",
+        )
+    _write_index(WS, "\n".join(lines))
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 3000)
+    block = memory.index_for_prompt(WS)
+    assert "…[truncated]" in block
+    assert "proj-000.md" not in block      # oldest project dropped first
+    assert "proj-059.md" in block          # newest project kept
+    assert "user-1.md" in block and "fb-1.md" in block  # pinned types kept
+
+
+def test_entry_type_ignores_non_type_keys(monkeypatch):
+    # CodeRabbit return trip #1 on PR #251: `default_type: user` (or any
+    # other frontmatter key ending in "type") must NOT classify the entry
+    # as pinned — only an exact `type:` key does.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        f = memory.ensure_dir(td) / "entry.md"
+        f.write_text(
+            "---\nname: e\ndescription: \"d\"\n"
+            "type: user\n"          # top-level key must NOT classify...
+            "metadata:\n"
+            "  type: project\n      # ...the metadata type is authoritative\n---\n\n# e\n",
+            encoding="utf-8",
+        )
+        assert memory._entry_type(f.parent, "- [E](entry.md) — d") == "project"
+
+
+def test_index_partition_by_index_not_content(monkeypatch):
+    # CodeRabbit return trip #1 on PR #251: an unpinned line whose text is
+    # byte-identical to a pinned line must still render — partitioning is
+    # by position, not content membership.
+    _write_index(
+        WS,
+        "- [U](user-1.md) — user line\n"
+        "- [U](user-1.md) — user line\n"
+        "- [P](p1.md) — project line\n",
+    )
+    d = memory.ensure_dir(WS)
+    (d / "user-1.md").write_text(
+        "---\nname: user-1\ndescription: \"u\"\nmetadata:\n  type: user\n---\n",
+        encoding="utf-8",
+    )
+    (d / "p1.md").write_text(
+        "---\nname: p1\ndescription: \"p\"\nmetadata:\n  type: project\n---\n",
+        encoding="utf-8",
+    )
+    block = memory.index_for_prompt(WS)
+    assert block.count("user line") == 2  # duplicate unpinned copy survives
+    assert "project line" in block
+
+
+def test_index_pinned_alone_over_budget_still_caps(monkeypatch):
+    # CodeRabbit return trip #1 on PR #251: when pinned (user/feedback)
+    # entries alone exceed MAX_INDEX_CHARS, the cap must hold — oldest
+    # pinned entries drop before the body exceeds the budget.
+    lines = []
+    for i in range(40):
+        slug = f"user-{i:03d}"
+        lines.append(f"- [U{i}]({slug}.md) — {'x' * 200}")
+        (memory.ensure_dir(WS) / f"{slug}.md").write_text(
+            f"---\nname: {slug}\ndescription: \"u\"\nmetadata:\n"
+            f"  type: user\n---\n",
+            encoding="utf-8",
+        )
+    _write_index(WS, "\n".join(lines))
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 3000)
+    block = memory.index_for_prompt(WS)
+    entry_lines = [ln for ln in block.splitlines() if ".md)" in ln]
+    assert sum(len(ln) + 1 for ln in entry_lines) <= 3000  # cap holds, pinned-only
+    assert "user-000.md" not in block  # oldest pinned dropped first
+    assert "user-039.md" in block      # newest pinned kept
+
+
+def test_save_memory_caps_body_and_reports_truncation():
+    long_body = "x" * (memory.MAX_MEMORY_BODY_CHARS + 5000)
+    r = memory.save_memory(WS, "big", "Big", "d", "project", long_body)
+    assert "error" not in r
+    assert r.get("truncated") is True
+    saved = (memory.memory_dir(WS) / "big.md").read_text(encoding="utf-8")
+    assert len(saved) <= memory.MAX_MEMORY_BODY_CHARS + 2048
+    short = memory.save_memory(WS, "small", "S", "d", "project", "tiny")
+    assert "truncated" not in short
+
+
+def test_read_memory_body_not_eaten_by_frontmatter_slack():
+    # A long title eats into the +2048 slack under the old save path; the
+    # body must survive intact up to MAX_MEMORY_BODY_CHARS on read.
+    long_title = "T" * 1500
+    body = "y" * (memory.MAX_MEMORY_BODY_CHARS - 2000)
+    memory.save_memory(WS, "slack", long_title, "d", "project", body)
+    r = memory.read_memory(WS, "slack")
+    assert body in r["content"]

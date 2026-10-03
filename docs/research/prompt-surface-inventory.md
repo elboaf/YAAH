@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1269 / fragment appends from 1357+) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1258+ / 1325) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -28,12 +28,12 @@ in the repo is the ops-level scheduled-agent prompt.
 
 Trigger: always, unless the conversation has a `system_prompt_override`
 (DB column `conversations.system_prompt_override`, backend/db/database.py:58; wins
-wholesale — it *replaces*, not composes: loop.py:1300).
+wholesale — it *replaces*, not composes: loop.py:1338).
 
 Major sections (in output order):
 
 1. Identity line — `"You are an expert AI coding agent working inside a user's project workspace."` (loop.py:376)
-2. Runtime-environment line — dynamic, from `_local_env_line()` (loop.py:199–207) or `RemoteSession.env_line()` (remote.py:138–161); includes the shell phrase from `_shell_phrase()` (loop.py:186–196), which composes `windows_bash_note()` (shell.py:67–70) and `CMD_TOOLS_NOTE` (remote.py:111–114)
+2. Runtime-environment line — dynamic, from `_local_env_line()` (loop.py:205–212) or `RemoteSession.env_line()` (remote.py:138–161); includes the shell phrase from `_shell_phrase()` (loop.py:186–196), which composes `windows_bash_note()` (shell.py:67–70) and `CMD_TOOLS_NOTE` (remote.py:111–114)
 3. `"You have tools: …"` — a hand-maintained **prose list** of tool names (loop.py: `You have tools` block); Windows adds powershell + 11 computer-use + 4 sandbox tool names (conditional, see §3)
 4. Guidelines (loop.py:382–425) — explore-first, gh-CLI-over-scraping, edit-vs-write, test-environment-by-side-effects, sandbox containment, clean-tree failure triage, web research, commit policy, narration, shell cwd/cd lifetime
 5. Spoken briefing (`<say>`) contract (loop.py:427–446), ≤400 chars
@@ -45,9 +45,9 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1269 / 1357) →
-`_default_system_prompt` → fragments appended 1303–1357 → `messages` with
-system first (loop.py:1381).
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1258 / 1325) →
+`_default_system_prompt` → fragments appended 1341–1390 → `messages` with
+system first (loop.py:1420).
 
 | Fragment | File:lines | Trigger | Approx size |
 |---|---|---|---|
@@ -59,7 +59,11 @@ system first (loop.py:1381).
 | Sub-agent index + delegation policy | `backend/agent/subagents.py:267–291` (`index_for_prompt`) | always (2 built-ins guarantee content) | ~26 lines / ~1.7 KB |
 | AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1333–1335 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:183) | wrapper ~6 lines + content |
 | Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235–247 / 1339–1341 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
-| Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:263–277` (`bodies_for_prompt`) wrapped at loop.py:1306–1331 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
+| Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:270–284` (`bodies_for_prompt`) wrapped via `invoked_skills_wrapper` (loop.py:716–729), called at loop.py:1409 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
+| Mid-turn loaded skills (`load_skill`) | `backend/agent/skills.py:289–336` (`load_skill_into_messages`); queued-message variant loop.py:669–691 (`_apply_injected_skills`) | model calls `load_skill`, or queued message carries skill chips; mutates `messages[0]` in place; result carries a `truncated` flag when the parse-time body cap fired | header ~10 lines + body |
+| AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1371–1373 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:183) | wrapper ~6 lines + content |
+| Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235 / 1377–1381 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
+| Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:263–277` (`bodies_for_prompt`) wrapped at loop.py:1341–1367 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
 | Mid-turn loaded skills (`load_skill`) | `backend/agent/skills.py:280–315` (`load_skill_into_messages`); queued-message variant loop.py:669–691 (`_apply_injected_skills`) | model calls `load_skill`, or queued message carries skill chips; mutates `messages[0]` in place | header ~10 lines + body |
 | Plan-mode note | `_plan_mode_note` (loop.py:711–722), appended at loop.py:1346–1347 | `current_access_mode() == "plan"` | ~11 lines |
 | Sandbox-only (scheduled agent) note | `_sandbox_only_note` (loop.py:725–738), appended at loop.py:1350–1353 | scheduled agent with `policy == "sandbox-only"` | ~13 lines |
@@ -95,8 +99,8 @@ plus dynamic MCP ones). Supporting description-like text:
 - **In-band model-directed strings** (not schemas but the model reads them):
   timeout-clamp note (`_clamp_note`, tools.py:860–871), get_help error nudge
   (tools.py:1401–1411), screenshot-disallowed info (tools.py:1449–1459),
-  plan-block result (`_plan_block_result`, loop.py:780–786), sandbox-only skip
-  result (`_policy_skip_result`, loop.py:801–810), sandbox hints
+  plan-block result (`_plan_block_result`, loop.py:862–873), sandbox-only skip
+  result (`_policy_skip_result`, loop.py:850–861), sandbox hints
   (`_missing_command_hint` / `_mcp_hint` / `_dialog_stall_hint`,
   sandbox.py:1103–1175),
   `IMAGES ON PAGE` note (webtools.py:274).
@@ -141,8 +145,9 @@ assertions (de-facto content guards) plus one true golden fixture:
   descriptions, and again in sandbox prompt_section (sandbox.py:1283–1289).
 3. **gh-CLI preference** duplicated: bash description (tools.py:165–168),
   powershell description (tools.py:204–207), base prompt guideline (loop.py:384–385).
-4. **"Invoked skills" wrapper text duplicated with drift**: loop.py:1316–1331 vs
-  loop.py:669–691 (`_apply_injected_skills`) — same contract, slightly different wording.
+4. **"Invoked skills" wrapper — duplication resolved by #260**: both injection
+  paths now share one helper, `invoked_skills_wrapper` (loop.py:721–729), called
+  from the base-injection site and the turn-time site (loop.py:757 / 1414).
 5. **`SAY_MAX_CHARS = 400` mirrored** in backend/agent/speak.py:498 and src/speech.ts:118 (documented mirror; drift would break transcript stripping).
 6. **windows-mcp playbook tripled**: sandbox prompt_section (sandbox.py:~1283–1320), `sandbox_run` description (sandbox.py:1384–1413), and `_HOST_INPUT_NOTE` on every input tool (computer.py:31–35).
 7. **Orphan/legacy**: `_BRIEFING_MAX`, `CMD_TOOLS_NOTE` sharing is deliberate. The `git_*` names were removed with #174 (2026-09-30): they never had a schema or executor anywhere — the host's `/api/remote/exec` dispatches through the same `EXECUTORS` map, so the remote-forward path was a dead end too; `REMOTE_TOOLS` now lists only executable tools.

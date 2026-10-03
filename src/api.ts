@@ -511,6 +511,16 @@ export const getFileChildren = (workspace: string, path: string) =>
     `/api/files/children?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,
   )
 
+/**
+ * Containment-checked existence probe for chat path linkification (#258).
+ * The backend answers `{ exists: bool }` — False for missing files AND for
+ * anything escaping the workspace, so a probe never becomes an oracle.
+ */
+export const checkFileExists = (workspace: string, path: string) =>
+  api<{ exists: boolean }>(
+    `/api/files/exists?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`,
+  ).then((r) => r.exists)
+
 export const previewFile = (
   workspace: string,
   path: string,

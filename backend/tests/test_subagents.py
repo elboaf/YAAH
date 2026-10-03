@@ -16,7 +16,7 @@ def test_builtins_present():
     assert "explore" in names
 def test_explore_is_read_only():
     ex = subagents.get_agent_def("explore")
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(ex, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(ex, workspace=None)}
     for forbidden in ("bash", "write_file", "edit_file", "create_file",
                       "delete_file", "move_file", "powershell"):
         assert forbidden not in tools, forbidden
@@ -26,7 +26,7 @@ def test_explore_is_read_only():
 
 def test_general_purpose_excludes_ask_user_and_spawn():
     gp = subagents.get_agent_def("general-purpose")
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, workspace=None)}
     assert "ask_user" not in tools
     assert "spawn_agent" not in tools
     assert "bash" in tools
@@ -66,7 +66,7 @@ def test_explore_allowlist_names_are_executable():
     so the allowlist can never re-acquire phantom tools silently."""
     ex = subagents.get_agent_def("explore")
     executable = {
-        s["function"]["name"] for s in subagents._resolve_tools(ex, windows=True)
+        s["function"]["name"] for s in subagents._resolve_tools(ex, workspace=None)
     }
     for name in subagents._EXPLORE_TOOLS:
         assert name in executable, name
@@ -74,7 +74,7 @@ def test_explore_allowlist_names_are_executable():
 
 def test_computer_tools_never_reach_subagents():
     gp = subagents.get_agent_def("general-purpose")
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, workspace=None)}
     for forbidden in ("screenshot", "mouse_click", "type_text", "read_ui_tree"):
         assert forbidden not in tools, forbidden
 
@@ -95,7 +95,7 @@ def test_custom_agent_definition(tmp_path, monkeypatch):
     d = subagents.get_agent_def("code-reviewer")
     assert d is not None
     assert d.max_turns == 12
-    tools = {s["function"]["name"] for s in subagents._resolve_tools(d, windows=True)}
+    tools = {s["function"]["name"] for s in subagents._resolve_tools(d, workspace=None)}
     assert tools == {"read_file", "search_files"}
 
 
@@ -156,7 +156,10 @@ def fake_model(monkeypatch):
     scripts = Scripted()
 
     async def fake_chat(messages, tools=None, stream=True):
-        scripts.messages.append(messages)
+        # Snapshot per call (shallow copy) so each recorded message list is
+        # independent — a live alias would make every "per-call" assertion
+        # inspect only the final state of the last call.
+        scripts.messages.append(list(messages))
         events = scripts.pop(0) if scripts else [{"type": "finish"}]
         return FakeStream(events)
 
@@ -758,6 +761,105 @@ async def test_spawn_agent_costs_parent_one_step(fake_model_single, tmp_path):
     assert any(e.get("text") == "sub result" for e in progress)
 
 
+# ------------------------------------- budget nudge honesty/pruning (#190)
+
+
+@pytest.mark.asyncio
+async def test_final_budget_turn_message_is_honest_about_grace(fake_model, tmp_path):
+    """#190: the last budgeted turn must never be called "final" — a grace
+    wrap-up turn follows when it ends on tool calls. The message must say
+    the budget ends after this turn, and must not claim this is the last
+    chance to act."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=2)
+    for _ in range(2):
+        fake_model.append([
+            {"type": "tool_calls", "tool_calls": [{
+                "id": "c", "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }]},
+            {"type": "finish", "reason": "tool_calls"},
+        ])
+    # Grace turn ends on tool calls too.
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    result = await subagents.run_sub_agent(defn, "loop", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 3  # 2 budgeted + 1 grace
+    all_notes = [
+        m["content"]
+        for messages in fake_model.messages for m in messages
+        if m["role"] == "system" and m.get("content")
+    ]
+    final_note = all_notes[-2]  # grace-turn note is appended last
+    assert "final budgeted turn" not in final_note
+    # It must not claim THIS turn is the last chance to act...
+    assert "this is the final" not in final_note.lower()
+    # ...while still saying the budget ends after this turn...
+    assert "budget" in final_note.lower()
+    # ...and it still asks for a final answer.
+    assert "final answer" in final_note.lower()
+
+
+@pytest.mark.asyncio
+async def test_convergence_nudges_collapse_to_one(fake_model, tmp_path):
+    """#190: closing turns carry at most ONE convergence nudge — each new
+    nudge replaces the previous one instead of accumulating."""
+    defn = AgentDef(name="t", description="", body="b", max_turns=6)
+    for i in range(6):
+        fake_model.append([
+            {"type": "tool_calls", "tool_calls": [{
+                "id": f"c{i}", "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }]},
+            {"type": "finish", "reason": "tool_calls"},
+        ])
+    # Grace turn produces the final answer.
+    fake_model.append([
+        {"type": "content", "text": "done"},
+        {"type": "finish"},
+    ])
+    result = await subagents.run_sub_agent(defn, "loop", str(tmp_path))
+    assert result["status"] == "max_turns"
+
+    # Per-call snapshots are real copies now, so each call can be asserted
+    # against the state it actually saw.
+    def nudges(messages):
+        return [
+            m["content"] for m in messages
+            if m["role"] == "system"
+            and ("converging now" in m["content"] or "wrap-up" in m["content"])
+        ]
+
+    snapshots = fake_model.messages
+    assert len(snapshots) == 7  # 6 budgeted turns + 1 grace call
+    # First nudge lands on turn 4 for max_turns=6: the condition is
+    # remaining < max(3, max_turns // 5), so turns 4/5/6 are closing turns
+    # and turn 3 (3 remaining) gets nothing.
+    assert nudges(snapshots[0]) == []
+    assert nudges(snapshots[1]) == []
+    assert nudges(snapshots[2]) == []
+    assert len(nudges(snapshots[3])) == 1
+    # Across every call, at most ONE nudge is present (collapse, not
+    # accumulate) — meaningful only because the snapshots are copies.
+    for messages in snapshots:
+        assert len(nudges(messages)) <= 1, nudges(messages)
+    # The last budgeted turn's nudge is the honest wrap-up wording.
+    assert "wrap-up" in nudges(snapshots[5])[0]
+    # The grace call keeps the wrap-up nudge PLUS the for-else's
+    # "Turn budget exhausted." note appended on top.
+    grace_msgs = snapshots[6]
+    assert any(
+        "Turn budget exhausted" in m["content"]
+        for m in grace_msgs if m["role"] == "system"
+    )
+    assert "wrap-up" in nudges(grace_msgs)[0]
+
+
 # ------------------------------------------------- turn budget (issue #15B)
 
 
@@ -816,6 +918,38 @@ async def test_grace_turn_executes_tool_and_stops(fake_model, tmp_path):
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "deliverable"
     roles = [e["role"] for e in result["transcript"]]
     assert roles == ["user", "assistant", "tool", "assistant", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_grace_turn_enforces_allowlist(fake_model, tmp_path):
+    """#188 return trip: the grace-turn loop enforces the tool allowlist
+    like the normal loop — a disallowed tool call gets the structured
+    error result and never executes."""
+    defn = AgentDef(name="t", description="", body="b", tools=["read_file"],
+                    max_turns=1)
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c2", "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps({
+                "path": "out.txt", "content": "should never land",
+            })},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    result = await subagents.run_sub_agent(defn, "write it", str(tmp_path))
+    assert result["status"] == "max_turns"
+    assert result["turns"] == 2
+    # The write was blocked: no file, structured error in the transcript.
+    assert not (tmp_path / "out.txt").exists()
+    tool_entry = result["transcript"][4]
+    assert "allowed tool set" in json.loads(tool_entry["content"])["error"]
 
 
 @pytest.mark.asyncio
