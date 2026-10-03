@@ -8601,13 +8601,36 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   // the pointer coordinates (null = closed); activating Search goes through
   // the proven openExternal -> open_external default-browser path, Copy via
   // the clipboard API.
-  const [searchMenu, setSearchMenu] = useState<{ query: string; x: number; y: number } | null>(null)
+  // Review: the menu keeps the RAW selected text (Copy must preserve line
+  // breaks / indentation) alongside the normalized search query.
+  const [searchMenu, setSearchMenu] = useState<{ query: string; text: string; x: number; y: number } | null>(null)
   const onTranscriptContextMenu = useCallback((e: React.MouseEvent) => {
     const query = transcriptSelection(transcriptRef.current)
     if (query === null) return
     e.preventDefault()
-    setSearchMenu({ query, x: e.clientX, y: e.clientY })
+    // Review: keep the raw selection for Copy; the query stays normalized.
+    const text = window.getSelection()?.toString() ?? query
+    setSearchMenu({ query, text, x: e.clientX, y: e.clientY })
   }, [])
+  // Review: the menu does not take focus when it opens, so an Escape hit
+  // anywhere must close it (a global keydown listener, removed on close).
+  useEffect(() => {
+    if (searchMenu === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSearchMenu(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [searchMenu !== null])
+  // Review: keep the at-cursor menu inside the viewport when opened near an
+  // edge — clamp against the fixed menu size (w-44 = 11rem = 176px) and a
+  // small measured height.
+  const MENU_MAX_W = 176
+  const MENU_MAX_H = 96
+  const searchMenuPos = searchMenu === null ? null : {
+    left: Math.min(searchMenu.x, Math.max(0, window.innerWidth - MENU_MAX_W)),
+    top: Math.min(searchMenu.y, Math.max(0, window.innerHeight - MENU_MAX_H)),
+  }
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
   // show on the newest message while the run is going.
@@ -8874,14 +8897,23 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
               className="fixed z-50 w-44 rounded bg-zinc-900 py-1 text-xs shadow-xl"
               role="menu"
               aria-label="Search selection"
-              style={{ left: searchMenu.x, top: searchMenu.y }}
+              style={searchMenuPos === null ? undefined : { left: searchMenuPos.left, top: searchMenuPos.top }}
               onKeyDown={(e) => { if (e.key === 'Escape') setSearchMenu(null) }}
             >
               <button
                 className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
                 role="menuitem"
                 onClick={(e) => {
-                  navigator.clipboard.writeText(searchMenu.query).catch(() => {})
+                  // Review: Copy writes the RAW selection (formatting kept);
+                  // failure surfaces on the shared error-toast path.
+                  navigator.clipboard.writeText(searchMenu.text).catch((error) => {
+                    const detail = error instanceof Error ? error.message : String(error)
+                    useAgent.getState().pushToast({
+                      kind: 'error',
+                      title: 'Could not copy selection',
+                      body: detail,
+                    })
+                  })
                   setSearchMenu(null)
                 }}
               >

@@ -183,6 +183,81 @@ describe('ChatPanel search-selection context menu', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull()
   })
 
+  // Review: Copy must write the RAW selection text (newlines, indentation
+  // preserved) — only the search query is whitespace-normalized.
+  it('Copy preserves the raw selection text, not the normalized query', async () => {
+    const raw = 'selectable transcript\n   text here'
+    const writeText = vi.fn(async () => {})
+    Object.assign(navigator, { clipboard: { writeText } })
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    // jsdom's toString() is fixed; stub it so the raw text differs from the
+    // whitespace-normalized query the menu stores.
+    const origToString = sel.toString.bind(sel)
+    sel.toString = () => raw
+    fireEvent.contextMenu(para)
+    fireEvent.click(await findByRole('menuitem', { name: /^copy$/i }))
+    sel.toString = origToString
+    expect(writeText).toHaveBeenCalledWith(raw)
+  })
+
+  // Review: Escape must close the menu even when focus never moved into it —
+  // a global Escape listener, not only the menu's own onKeyDown.
+  it('closes on Escape dispatched outside the menu', async () => {
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para)
+    expect(await findByRole('menu', { name: /search selection/i })).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+  })
+
+  // Review: a copy failure must surface via the shared error-toast path.
+  it('pushes an error toast when copying fails', async () => {
+    const writeText = vi.fn(async () => { throw new Error('clipboard blocked') })
+    Object.assign(navigator, { clipboard: { writeText } })
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para)
+    fireEvent.click(await findByRole('menuitem', { name: /^copy$/i }))
+    await Promise.resolve()
+    const state = useAgent.getState()
+    expect(state.toasts.some((t: { kind: string; title: string }) => t.kind === 'error' && /copy/i.test(t.title))).toBe(true)
+  })
+
+  // Review: the menu must stay inside the viewport when opened near an edge.
+  it('clamps the menu inside the viewport at the right/bottom edge', async () => {
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para, { clientX: window.innerWidth - 2, clientY: window.innerHeight - 2 })
+    const menu = (await findByRole('menu', { name: /search selection/i })) as HTMLElement
+    // w-44 = 11rem = 176px; jsdom has no layout, so assert on the fixed width.
+    const MENU_W = 176
+    const MENU_H = 8 // two items + padding, any small positive estimate works
+    expect(parseFloat(menu.style.left) + MENU_W).toBeLessThanOrEqual(window.innerWidth)
+    expect(parseFloat(menu.style.top) + MENU_H).toBeLessThanOrEqual(window.innerHeight)
+  })
+
   // #276: with NO selection the transcript must not suppress the native
   // menu (preventDefault is only called for the custom at-cursor menu).
   it('does not preventDefault the contextmenu when there is no selection', () => {
