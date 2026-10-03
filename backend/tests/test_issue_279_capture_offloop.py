@@ -20,6 +20,11 @@ import pytest
 
 from backend.agent import computer as computer_mod
 
+# The capture seam imports mss/PIL lazily; CI runs the backend suite on
+# Linux where those are win32-marked deps and absent.
+pytest.importorskip("mss")
+pytest.importorskip("PIL")
+
 
 # ---------------------------------------------------------------- fakes
 
