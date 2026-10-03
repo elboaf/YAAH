@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1265+ / 1332) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1325+ / 1392) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,7 +45,7 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1265 / 1332) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1325 / 1392) →
 `_default_system_prompt` → fragments appended 1341–1390 → `messages` with
 system first (loop.py:1420).
 
@@ -146,8 +146,8 @@ assertions (de-facto content guards) plus one true golden fixture:
 3. **gh-CLI preference** duplicated: bash description (tools.py:165–168),
   powershell description (tools.py:204–207), base prompt guideline (loop.py:384–385).
 4. **"Invoked skills" wrapper — duplication resolved by #260**: both injection
-  paths now share one helper, `invoked_skills_wrapper` (loop.py:721–729), called
-  from the base-injection site and the turn-time site (loop.py:757 / 1414).
+  paths now share one helper, `invoked_skills_wrapper` (loop.py:780–788), called
+  from the base-injection site and the turn-time site (loop.py:822 / 1480).
 5. **`SAY_MAX_CHARS = 400` mirrored** in backend/agent/speak.py:498 and src/speech.ts:118 (documented mirror; drift would break transcript stripping).
 6. **windows-mcp playbook tripled**: sandbox prompt_section (sandbox.py:~1283–1320), `sandbox_run` description (sandbox.py:1384–1413), and `_HOST_INPUT_NOTE` on every input tool (computer.py:31–35).
 7. **Orphan/legacy**: `_BRIEFING_MAX`, `CMD_TOOLS_NOTE` sharing is deliberate. The `git_*` names were removed with #174 (2026-09-30): they never had a schema or executor anywhere — the host's `/api/remote/exec` dispatches through the same `EXECUTORS` map, so the remote-forward path was a dead end too; `REMOTE_TOOLS` now lists only executable tools.
