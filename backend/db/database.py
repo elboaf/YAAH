@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS conversations (
     system_prompt_override TEXT,
     model TEXT NOT NULL DEFAULT '',
     effort TEXT NOT NULL DEFAULT '',
+    selected_branch TEXT,     -- #286: the chat's branch selector (ADR-0010) --
+                              -- user-intended branch, NULL = follow the
+                              -- workspace's checked-out branch
     remote_revision_counter INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -261,6 +264,15 @@ async def get_db() -> aiosqlite.Connection:
         # before the remote-edit protocol existed.
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN remote_revision_counter INTEGER NOT NULL DEFAULT 1"
+        )
+    if "selected_branch" not in conv_cols:
+        # #286 (ADR-0010 slice 1): the branch selector is a per-chat stored
+        # value — the chat's user-intended branch. NULL = no explicit pick:
+        # readers fall back to the workspace's checked-out branch. No worktree
+        # exists yet in this slice, so a write only records intent and touches
+        # nothing physical.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN selected_branch TEXT"
         )
     cur = await db.execute("PRAGMA table_info(agents)")
     agent_cols = {r[1] for r in await cur.fetchall()}
@@ -772,9 +784,17 @@ async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
 
 async def update_conversation(conversation_id: int, **fields):
     """Update allowed conversation fields (title, workspace,
-    system_prompt_override, model, effort). #132: a bare model write is
-    qualified with the active provider — '' stays '' (deliberate Default)."""
-    allowed = {"title", "workspace", "system_prompt_override", "model", "effort"}
+    system_prompt_override, model, effort, selected_branch). #132: a bare
+    model write is qualified with the active provider — '' stays ''
+    (deliberate Default)."""
+    allowed = {
+        "title",
+        "workspace",
+        "system_prompt_override",
+        "model",
+        "effort",
+        "selected_branch",  # #286: per-chat branch selector (ADR-0010)
+    }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False

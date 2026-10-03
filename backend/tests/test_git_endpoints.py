@@ -194,7 +194,9 @@ def test_workspace_git_checkout_rejects_empty_and_option_like_branch(client, tmp
     assert _git(repo, "branch", "--show-current") == "master"
 
 
-def test_git_command_checkout_switches_branch(client, tmp_path):
+def test_git_command_checkout_writes_selector_not_tree(client, tmp_path):
+    """#286: the UI checkout action records the chat's intended branch; the
+    shared workspace tree stays put (no other chat may be standing on it)."""
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
     conv_id = _conversation(client, repo)
@@ -204,8 +206,18 @@ def test_git_command_checkout_switches_branch(client, tmp_path):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True
+
+    # The tree did not move.
+    invalidate_git_caches(repo)
     info = client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]
-    assert info["branch"] == "feature"
+    assert info["branch"] == "master"
+
+    # The chat's stored selection did.
+    assert client.get(f"/api/conversations/{conv_id}").json()["selected_branch"] == "feature"
+
+    # The action still lands as a trace row (existing contract).
+    msgs = client.get(f"/api/conversations/{conv_id}/messages").json()
+    assert msgs[-1]["tool_call_id"].startswith("ui-git-checkout-")
 
 
 def test_git_command_commit_stages_all_and_posts_trace_row(client, tmp_path):
@@ -294,3 +306,165 @@ def test_git_command_non_repo_workspace(client, tmp_path):
     body = r.json()
     assert body["ok"] is False
     assert "not a git repository" in body["error"]
+
+
+# ---- #286: the branch selector becomes a per-chat stored branch value ----
+
+
+def test_branch_select_updates_stored_value_without_tree_move(client, tmp_path):
+    """The core slice: flipping the selector runs no git checkout — the
+    shared tree stays where it is, and the pick is stored on the chat row."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+    conv_id = _conversation(client, repo)
+
+    r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": "feature"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "selected_branch": "feature"}
+
+    # The stored value updated…
+    assert client.get(f"/api/conversations/{conv_id}").json()["selected_branch"] == "feature"
+
+    # …and the physical tree did not move.
+    invalidate_git_caches(repo)
+    info = client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]
+    assert info["branch"] == "master"
+    assert info["dirty"] is False
+
+
+def test_branch_select_flips_are_private_per_chat(client, tmp_path):
+    """Two chats on one workspace flip selectors independently; neither
+    moves the shared tree the other chat reads."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+    conv_a = _conversation(client, repo)
+    conv_b = _conversation(client, repo)
+
+    assert client.post(
+        f"/api/conversations/{conv_a}/branch-select", json={"branch": "feature"}
+    ).json()["ok"] is True
+    assert client.post(
+        f"/api/conversations/{conv_b}/branch-select", json={"branch": "master"}
+    ).json()["ok"] is True
+
+    # Each chat reads its own pick…
+    assert client.get(f"/api/conversations/{conv_a}/git-branch").json() == {"branch": "feature"}
+    assert client.get(f"/api/conversations/{conv_b}/git-branch").json() == {"branch": "master"}
+
+    # …and the single physical tree is untouched throughout.
+    invalidate_git_caches(repo)
+    assert _git(repo, "branch", "--show-current") == "master"
+
+
+def test_branch_select_validates_like_checkout(client, tmp_path):
+    """Empty, option-like, and non-local names are refused; unknown
+    conversations 404."""
+    repo = _repo_with_commit(tmp_path)
+    conv_id = _conversation(client, repo)
+
+    for branch in ("", "--detach"):
+        r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": branch})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body.get("error")
+
+    r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": "no-such-branch"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": False, "error": "not a local branch: no-such-branch"}
+
+    assert client.post(
+        f"/api/conversations/{conv_id}/branch-select", json={"branch": None}
+    ).status_code == 422  # branch is required
+
+    assert client.post(
+        "/api/conversations/999999/branch-select", json={"branch": "master"}
+    ).status_code == 404
+
+    # Nothing was written.
+    assert client.get(f"/api/conversations/{conv_id}").json()["selected_branch"] is None
+
+
+def test_git_branch_reads_fall_back_to_workspace_until_set(client, tmp_path):
+    """NULL selected_branch (every pre-existing row, and new chats that never
+    flipped) falls back to the workspace's checked-out branch — and once a
+    selection exists, it wins even though the tree says otherwise."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+    conv_id = _conversation(client, repo)
+
+    # Unset: the fallback serves the workspace's branch.
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {"branch": "master"}
+
+    # The human checks out feature in the shared tree (their tool); the
+    # still-unset chat follows along.
+    _git(repo, "checkout", "feature")
+    invalidate_git_caches(repo)
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {"branch": "feature"}
+
+    # The chat flips: its stored pick now wins over the tree…
+    assert client.post(
+        f"/api/conversations/{conv_id}/branch-select", json={"branch": "master"}
+    ).json()["ok"] is True
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {"branch": "master"}
+
+    # …while git-info keeps reporting the physical tree.
+    invalidate_git_caches(repo)
+    assert client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]["branch"] == "feature"
+
+
+def test_workspace_git_checkout_still_moves_the_primary_tree(client, tmp_path):
+    """#286 leaves the draft-card endpoints alone: the human's primary-worktree
+    checkout must keep being a real checkout."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+    conv_id = _conversation(client, repo)
+    assert client.post(
+        f"/api/conversations/{conv_id}/branch-select", json={"branch": "feature"}
+    ).json()["ok"] is True
+
+    r = client.post(
+        "/api/workspaces/git-checkout", json={"workspace": str(repo), "branch": "feature"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert _git(repo, "branch", "--show-current") == "feature"  # the tree moved
+
+
+async def test_selected_branch_migration_on_legacy_db(monkeypatch, tmp_path):
+    """A pre-#286 database (conversations without selected_branch) upgrades
+    in place; existing rows read NULL and fall back to the workspace branch."""
+    import aiosqlite
+
+    import backend.db.database as database
+
+    old_db = tmp_path / "legacy286.db"
+    async with aiosqlite.connect(old_db) as db:
+        await db.execute(
+            """CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT 'New Task',
+                workspace TEXT,
+                system_prompt_override TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        await db.execute(
+            "INSERT INTO conversations (title, workspace) VALUES ('old', '/somewhere')"
+        )
+        await db.commit()
+
+    monkeypatch.setattr(database, "DB_PATH", old_db)
+    await database.init_db()
+    db = await database.get_db()
+    try:
+        cur = await db.execute("PRAGMA table_info(conversations)")
+        cols = {r[1] for r in await cur.fetchall()}
+        assert "selected_branch" in cols
+        cur = await db.execute("SELECT title, selected_branch FROM conversations")
+        row = await cur.fetchone()
+        assert row["title"] == "old"
+        assert row["selected_branch"] is None
+    finally:
+        await db.close()

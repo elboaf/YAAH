@@ -194,6 +194,20 @@ export const runGitCommand = (id: number, action: GitAction, opts?: { message?: 
     body: JSON.stringify({ action, message: opts?.message, branch: opts?.branch }),
   })
 
+/** #286: flip the chat's branch selector (stored per-chat value — runs no
+ *  git checkout; other chats' trees never move). */
+export interface BranchSelectResult {
+  ok: boolean
+  selected_branch?: string
+  error?: string
+}
+
+export const selectConversationBranch = (id: number, branch: string) =>
+  api<BranchSelectResult>(`/api/conversations/${id}/branch-select`, {
+    method: 'POST',
+    body: JSON.stringify({ branch }),
+  })
+
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
 
