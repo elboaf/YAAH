@@ -574,6 +574,10 @@ export const useAgent = create<AgentState>((set, get) => ({
   setStatus: (key, status) =>
     set((s) => {
       const prev = s.statusByConv[key]
+      // Issue #279: same-value writes are the per-delta hot path (every text
+      // chunk sets 'thinking' again) — a no-op keeps the store silent so
+      // subscribers don't re-render on identical state.
+      if (prev === status) return s
       // Issue #25: a turn that ends (running -> idle/error) while its chat is
       // NOT on screen leaves a sidebar signal (green bar / red pill). A run
       // watched in its own chat doesn't signal - the transcript IS the

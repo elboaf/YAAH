@@ -127,7 +127,11 @@ def _run_hook_thread(activity, hook_id, struct_ty, injected_mask,
 
 def _measure_hooks(activities, seconds: float) -> dict:
     """Inject mouse and keyboard traffic and return each hook's latency
-    summary (None when a hook recorded no samples)."""
+    summary (None when a hook recorded no samples).
+
+    NOTE: this MOVES THE REAL CURSOR / PRESSES REAL KEYS for `seconds` —
+    run it when that is tolerable, or inside a disposable VM, or use
+    --passive (which never injects)."""
     injectors = [
         ("mouse", lambda i: _inject_move((i % 3) - 1, (i % 5) - 2)),
         ("keyboard", lambda i: (
@@ -140,6 +144,18 @@ def _measure_hooks(activities, seconds: float) -> dict:
             inject(i)
         i += 1
         time.sleep(0.002)
+    return {name: act.latency_summary_ms()
+            for name, act in activities.items()}
+
+
+def _measure_passive(activities, seconds: float) -> dict:
+    """Collect hook-callback latency from REAL user input only — nothing
+    is injected and the cursor is never touched. Useful on a machine
+    someone is actively using; needs at least a few real mouse/keyboard
+    events during the window to produce samples."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        time.sleep(0.1)
     return {name: act.latency_summary_ms()
             for name, act in activities.items()}
 
@@ -162,9 +178,10 @@ def _judge(summaries: dict, budget_ms: float):
     return 0, []
 
 
-def _run_measurement(seconds: float, budget_ms: float):
+def _run_measurement(seconds: float, budget_ms: float, passive: bool = False):
     """Install both hooks, measure, judge. Returns (exit_code, summaries);
-    prints the human-readable report."""
+    prints the human-readable report. passive=True never injects input:
+    samples come from whatever the user really does during the window."""
     act_by_name = {name: computer_mod._Activity() for name in _EXPECTED_HOOKS}
     # LL hooks must install AND pump messages on the same thread, so each
     # hook gets a daemon thread that reports its install outcome back.
@@ -194,12 +211,34 @@ def _run_measurement(seconds: float, budget_ms: float):
         print(f"FAIL: hooks failed to install: {', '.join(missing)}")
         return 1, None
 
-    summaries = _measure_hooks(act_by_name, seconds)
+    if passive:
+        print(f"PASSIVE measurement for {seconds:.0f}s: move your mouse / type "
+              f"normally — nothing will be injected.")
+        summaries = _measure_passive(act_by_name, seconds)
+    else:
+        print(f"WARNING: injecting synthetic mouse moves + key presses for "
+              f"{seconds:.0f}s — the REAL cursor will move. Abort now if "
+              f"that is not okay (Ctrl+C).")
+        time.sleep(1.0)
+        summaries = _measure_hooks(act_by_name, seconds)
     for name in _EXPECTED_HOOKS:
+        s = summaries.get(name)
         print(f"{name} samples: {len(act_by_name[name]._latencies)}")
-        print(f"{name} hook dispatch latency ms: {summaries[name]}")
+        print(f"{name} hook dispatch latency ms: {s}")
+    if passive and all(summaries.get(n) is None for n in _EXPECTED_HOOKS):
+        print("FAIL: no real input observed in the window — move the mouse "
+              "or type during a passive run")
+        return 1, None
     rc, failures = _judge(summaries, budget_ms)
     if rc:
+        # Passive runs judge only what real input exercised; a hook with no
+        # real events is 'not measured', not 'failed'.
+        if passive:
+            failures = [f for f in failures if "no latency samples" not in f]
+            if not failures:
+                print("PASS: sampled hooks within budget (input-starved "
+                      "hooks not measured)")
+                return 0, summaries
         for f in failures:
             print(f"FAIL: {f}")
         return rc, failures
@@ -211,13 +250,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=5.0)
     ap.add_argument("--budget-ms", type=float, default=5.0)
+    ap.add_argument("--passive", action="store_true",
+                    help="never inject input; sample real user activity only")
     args = ap.parse_args()
 
     if not computer_mod.WINDOWS:
         print("windows-only measurement")
         return 2
 
-    rc, _ = _run_measurement(args.seconds, args.budget_ms)
+    rc, _ = _run_measurement(args.seconds, args.budget_ms, passive=args.passive)
     return rc
 
 

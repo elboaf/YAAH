@@ -86,7 +86,7 @@ at tools.py:1293–1334, filtering in `get_schemas()` tools.py:1487–1551).
 | `backend/agent/tools.py` | 19: bash (146–183), get_help (353–374), web_search, web_fetch, view_image, ask_user, read_file, write_file, edit_file, create_file, delete_file, move_file, search_files, search_conversation_history, spawn_agent, load_skill, memory_save, memory_read, memory_delete (406–805) | `bash` is the longest (~18 lines); `spawn_agent` ~16 lines |
 | `backend/agent/tools.py:188–221` | 1: powershell (`POWERSHELL_SCHEMA`, Windows-only append, tools.py get_schemas:1495) | |
 | `backend/agent/tools.py:225–238` | 1: install_git (Windows + git missing + bundled installer, tools.py get_schemas:1518–1524) | |
-| `backend/agent/computer.py:92–361` | 11: read_ui_tree, screenshot, list_windows, focus_window, mouse_move, mouse_click, mouse_drag, mouse_scroll, type_text, press_key, wait (`COMPUTER_TOOLS_SCHEMA`, merged tools.py:1318–321) | 7 input tools embed shared `_HOST_INPUT_NOTE` (computer.py:31–35); `_MONITOR_PARAM`/`_OBSERVE` param descriptions shared |
+| `backend/agent/computer.py:92–361` | 11: read_ui_tree, screenshot, list_windows, focus_window, mouse_move, mouse_click, mouse_drag, mouse_scroll, type_text, press_key, wait (`COMPUTER_TOOLS_SCHEMA`, merged tools.py:1318–321) | 7 input tools embed shared `_HOST_INPUT_NOTE` (computer.py:33–37); `_MONITOR_PARAM`/`_OBSERVE` param descriptions shared |
 | `backend/agent/sandbox.py:1348–1448` | 4: sandbox_test/run/status/stop (`SANDBOX_TOOLS_SCHEMA`, merged tools.py:1330–1333; stripped for remote sessions, tools.py get_schemas:1526–1532) | `sandbox_run` description is a mini-playbook (~23 lines) |
 | `backend/agent/loop.py:743–765` | 1: exit_plan (plan mode only) | |
 
@@ -149,5 +149,5 @@ assertions (de-facto content guards) plus one true golden fixture:
   paths now share one helper, `invoked_skills_wrapper` (loop.py:780–788), called
   from the base-injection site and the turn-time site (loop.py:822 / 1480).
 5. **`SAY_MAX_CHARS = 400` mirrored** in backend/agent/speak.py:498 and src/speech.ts:118 (documented mirror; drift would break transcript stripping).
-6. **windows-mcp playbook tripled**: sandbox prompt_section (sandbox.py:~1283–1320), `sandbox_run` description (sandbox.py:1384–1413), and `_HOST_INPUT_NOTE` on every input tool (computer.py:31–35).
+6. **windows-mcp playbook tripled**: sandbox prompt_section (sandbox.py:~1283–1320), `sandbox_run` description (sandbox.py:1384–1413), and `_HOST_INPUT_NOTE` on every input tool (computer.py:33–37).
 7. **Orphan/legacy**: `_BRIEFING_MAX`, `CMD_TOOLS_NOTE` sharing is deliberate. The `git_*` names were removed with #174 (2026-09-30): they never had a schema or executor anywhere — the host's `/api/remote/exec` dispatches through the same `EXECUTORS` map, so the remote-forward path was a dead end too; `REMOTE_TOOLS` now lists only executable tools.

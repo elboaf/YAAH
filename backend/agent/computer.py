@@ -13,8 +13,10 @@ Seams, so tests can fake everything:
 Everything imports its library lazily inside the function, so importing
 this module (as tools.py does on Windows) never loads pynput/mss.
 """
+import asyncio
 import ctypes
 import ctypes.wintypes
+import io
 import logging
 import sys
 import threading
@@ -369,10 +371,19 @@ COMPUTER_EXECUTORS: dict = {}  # filled below
 # ---------------------------------------------------------------- screenshots
 
 def _capture_screen(monitor: int = 1) -> tuple[bytes, int, int]:
-    """PNG bytes + size of one monitor (1-based). Imports mss lazily."""
-    import mss
-    import mss.tools
+    """RAW RGB bytes + size of one monitor (1-based). Imports mss lazily.
 
+    Issue #279: no encode here at all — the raw rows travel to _store_png,
+    which does the ONE PNG encode of the pipeline (after resize/annotate).
+    The old path encoded to PNG here AND again in _store_png (two
+    full-screen encodes per capture, ~130ms of the ~180ms total); this
+    runs on a worker thread off the event loop, but the encode itself is
+    still the single biggest cost — doing it once is the point.
+    """
+    import mss
+
+    # mss.mss() factory: available across mss versions (the MSS class is
+    # 10.2+; requirements.txt permits older on Windows).
     with mss.mss() as sct:
         # sct.monitors[0] is the virtual-all bounding box; 1.. are real monitors.
         idx = max(1, int(monitor))
@@ -381,8 +392,8 @@ def _capture_screen(monitor: int = 1) -> tuple[bytes, int, int]:
                 f"monitor {monitor} not found; {len(sct.monitors) - 1} monitor(s) present"
             )
         shot = sct.grab(sct.monitors[idx])
-        png = mss.tools.to_png(shot.rgb, shot.size)
-        return png, shot.width, shot.height
+        # shot.rgb is RGB-ordered whole-frame bytes (see mss.base.ScreenShot.rgb).
+        return shot.rgb, shot.width, shot.height
 
 
 def _monitors() -> list[dict]:
@@ -481,12 +492,13 @@ OBSERVE_CROP = 400
 
 
 def _capture_clip(clip: dict) -> tuple[bytes, int, int]:
+    """RAW RGB bytes of one region — no encode here; the single PNG encode
+    happens in _store_png (see _capture_screen)."""
     import mss
-    import mss.tools
 
     with mss.mss() as sct:
         shot = sct.grab(clip)
-        return mss.tools.to_png(shot.rgb, shot.size), shot.width, shot.height
+        return shot.rgb, shot.width, shot.height
 
 
 def _clip_around(ax: int, ay: int, size: int = OBSERVE_CROP) -> dict:
@@ -569,7 +581,14 @@ def _annotate_img(img, orig_w: int, orig_h: int, label_offset: list[int], scale:
     return img
 
 
-def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **extra) -> dict:
+def _store_png(raw: bytes, w: int, h: int, monitor: int, origin: list[int], **extra) -> dict:
+    """Store one capture as the pipeline's ONLY PNG encode.
+
+    Issue #279: `raw` is uncompressed whole-frame RGB bytes (from
+    _capture_screen/_capture_clip), not a PNG — no decode step at all.
+    A PNG `raw` input would fail Image.frombytes and fall through to the
+    except path, so callers must pass what the capture seams return.
+    """
     from backend.agent.imagedata import save_bytes
 
     # label_offset maps image pixels to monitor-local coordinates: a full
@@ -577,13 +596,14 @@ def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **ex
     # crop_origin - monitor_origin inside the monitor.
     mon_origin = _monitor_rect(monitor)[:2]
     label_offset = [origin[0] - mon_origin[0], origin[1] - mon_origin[1]]
+    png = raw
     try:
         import io
 
         from PIL import Image
 
         scale = 1.0
-        img = Image.open(io.BytesIO(png)).convert("RGB")
+        img = Image.frombytes("RGB", (w, h), raw)
         if max(img.size) > MAX_CAPTURE_EDGE:
             scale = MAX_CAPTURE_EDGE / max(img.size)
             img = img.resize(
@@ -595,8 +615,17 @@ def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **ex
         img.save(out, "PNG")
         png = out.getvalue()
         w, h = img.size
-    except Exception:  # noqa: BLE001 — store the raw capture un-annotated
-        pass
+    except Exception:  # noqa: BLE001 — best-effort minimal encode
+        # No resize, no annotate. If even the plain encode fails the capture
+        # is unusable — propagate (callers surface it as observe_error /
+        # error) rather than store a corrupt file.
+        import io
+
+        from PIL import Image
+
+        out = io.BytesIO()
+        Image.frombytes("RGB", (w, h), raw).save(out, "PNG")
+        png = out.getvalue()
     rel = save_bytes(png, "png", "screenshots")
     out = {"image": rel, "monitor": monitor, "size": [w, h], "origin": origin}
     out.update(extra)
@@ -618,6 +647,36 @@ def _observe_crop_result(ax: int, ay: int) -> dict:
     return _store_png(
         png, w, h, m, [clip["left"], clip["top"]], crop_center=[ax, ay]
     )
+
+
+# ---------------------------------------------------------------- off-loop captures
+# Issue #279: these executors run on the event-loop thread of the process
+# that hosts the WH_MOUSE_LL / WH_KEYBOARD_LL hooks. A capture is an
+# ~20ms (crop) to ~180ms (full monitor) CPU burst — encode/decode/resize —
+# and that burst ON the hook-hosting thread is exactly the run-correlated
+# cursor stutter. Every await of capture work goes through _capture_task,
+# so the burst lands on a worker thread and the loop (and the hook
+# callbacks it services) keeps pumping. Verified by measurement
+# (backend/scripts/measure_observe_cost.py): the p99 difference between the
+# two placements is the number that justifies this seam.
+
+async def _capture_task(fn, /, *args, **kwargs) -> dict:
+    """Run one synchronous capture helper on a worker thread."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+async def _screenshot_result_async(monitor: int = 1) -> dict:
+    return await _capture_task(_screenshot_result, monitor)
+
+
+async def _observe_crop_result_async(ax: int, ay: int) -> dict:
+    return await _capture_task(_observe_crop_result, ax, ay)
+
+
+async def _store_png_async(png: bytes, w: int, h: int, monitor: int,
+                           origin: list[int], **extra) -> dict:
+    return await _capture_task(
+        _store_png, png, w, h, monitor, origin, **extra)
 
 
 def _som_overlay(
@@ -687,26 +746,30 @@ async def screenshot(
     try:
         if w > 0 and h > 0:
             clip = _clip_region(int(x), int(y), int(w), int(h))
-            png, cw, ch = _capture_clip(clip)
+            png, cw, ch = await _capture_task(_capture_clip, clip)
             mon = _monitor_for_point(
                 clip["left"] + clip["width"] // 2, clip["top"] + clip["height"] // 2
             )
-            return _store_png(png, cw, ch, mon, [clip["left"], clip["top"]],
-                              region=[x, y, w, h])
+            return await _store_png_async(png, cw, ch, mon,
+                                          [clip["left"], clip["top"]],
+                                          region=[x, y, w, h])
         if hwnd:
             mon = _monitor_for_window(int(hwnd))
-            result = _screenshot_result(mon)
+            result = await _screenshot_result_async(mon)
             result["hwnd"] = int(hwnd)
             if elements:
                 try:
                     result.update(
-                        _som_overlay(result["image"], result["size"][0],
-                                     result["size"][1], mon, int(hwnd))
+                        # UIA walk + overlay re-encode: COM burst + PIL, off
+                        # the loop with the rest of the capture work.
+                        await _capture_task(
+                            _som_overlay, result["image"], result["size"][0],
+                            result["size"][1], mon, int(hwnd))
                     )
                 except Exception as e:  # noqa: BLE001
                     result["elements_error"] = f"{type(e).__name__}: {e}"
             return result
-        return _screenshot_result(monitor)
+        return await _screenshot_result_async(monitor)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -803,7 +866,7 @@ async def focus_window(workspace: str = "", hwnd: int = 0, observe: bool = False
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
     if observe:
-        result.update(_screenshot_result(_monitor_for_window(hwnd)))
+        result.update(await _screenshot_result_async(_monitor_for_window(hwnd)))
     return result
 
 
@@ -1172,7 +1235,7 @@ def _keyboard():
     return keyboard.Controller()
 
 
-def _finish(result: dict, observe: bool, monitor: int | None = None) -> dict:
+async def _finish(result: dict, observe: bool, monitor: int | None = None) -> dict:
     """Attach the post-action screenshot when observe is set. The capture
     MUST be the monitor the action happened on — the primary-monitor shot
     made a dogfood session conclude correct clicks had 'landed on the
@@ -1181,13 +1244,13 @@ def _finish(result: dict, observe: bool, monitor: int | None = None) -> dict:
     if observe and "error" not in result:
         try:
             mon = monitor if monitor is not None else _monitor_of_foreground()
-            result.update(_screenshot_result(mon))
+            result.update(await _screenshot_result_async(mon))
         except Exception as e:  # noqa: BLE001
             result["observe_error"] = f"{type(e).__name__}: {e}"
     return result
 
 
-def _cursor_feedback(result: dict, ax: int, ay: int, observe: bool) -> dict:
+async def _cursor_feedback(result: dict, ax: int, ay: int, observe: bool) -> dict:
     """The move→verify→click checkpoint: every position action reports the
     REAL cursor position (GetCursorPos) and which monitor it landed on, so
     a coordinate mistake is visible before the click does damage. observe
@@ -1199,7 +1262,7 @@ def _cursor_feedback(result: dict, ax: int, ay: int, observe: bool) -> dict:
     result["on_target"] = abs(cx - ax) <= 2 and abs(cy - ay) <= 2
     if observe and "error" not in result:
         try:
-            result.update(_observe_crop_result(cx, cy))
+            result.update(await _observe_crop_result_async(cx, cy))
         except Exception as e:  # noqa: BLE001
             result["observe_error"] = f"{type(e).__name__}: {e}"
     return result
@@ -1243,7 +1306,7 @@ async def mouse_move(
         _send_move_abs(ax, ay)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _cursor_feedback(
+    return await _cursor_feedback(
         {"moved": [int(x), int(y)], "monitor": int(monitor), "ok": True},
         ax, ay, _resolve_observe(observe),
     )
@@ -1278,7 +1341,7 @@ async def mouse_click(
             m.click(pmouse.Button[button], 2 if double else 1)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _cursor_feedback(
+    return await _cursor_feedback(
         {
             "clicked": [int(x), int(y)], "monitor": int(monitor),
             "button": button, "double": double, "ok": True,
@@ -1325,7 +1388,7 @@ async def mouse_drag(
         m.release(pmouse.Button[button])
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _cursor_feedback(
+    return await _cursor_feedback(
         {
             "dragged": [[int(start_x), int(start_y)], [int(x), int(y)]],
             "monitor": int(monitor), "button": button, "ok": True,
@@ -1347,7 +1410,7 @@ async def mouse_scroll(
         _mouse().scroll(0, int(amount))
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _cursor_feedback(
+    return await _cursor_feedback(
         {"scrolled": int(amount), "at": [int(x), int(y)], "monitor": int(monitor), "ok": True},
         ax, ay, _resolve_observe(observe),
     )
@@ -1361,7 +1424,7 @@ async def type_text(workspace: str = "", text: str = "", observe: bool = False) 
         _keyboard().type(text)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish({"typed": len(text), "ok": True}, observe)
+    return await _finish({"typed": len(text), "ok": True}, observe)
 
 
 async def press_key(
@@ -1385,7 +1448,7 @@ async def press_key(
                 kb.tap(last)
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
-    return _finish({"pressed": key, "repeat": repeat, "ok": True}, observe)
+    return await _finish({"pressed": key, "repeat": repeat, "ok": True}, observe)
 
 
 def _parse_key(name: str, pkb):

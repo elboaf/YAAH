@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   listConversations,
   createConversation,
@@ -99,6 +99,7 @@ import {
   getSandboxStatus,
   type SandboxStatus,
 } from './api'
+import { createDeltaBuffer } from './deltaBuffer'
 import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
@@ -1453,7 +1454,13 @@ function ExpandableAttachmentChip({
   )
 }
 
-export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
+/** Issue #279: memoized — a streaming delta only ever mutates ONE message
+ *  object in the store (appendTextDelta clones just the touched message), so
+ *  untouched rows keep reference identity and memo skips their re-render.
+ *  Without this every delta re-rendered (and re-parsed markdown for) the
+ *  whole transcript, compounding with stream rate. `live` stays in the
+ *  compare: it flips independently of msg identity. */
+const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean }) {
   // Persisted failure markers (backend writes role='system' when a turn
   // dies): a slim machine line, not a fake agent message.
     if (msg.role === 'system') {
@@ -1792,7 +1799,10 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       )}
     </div>
   )
-}
+})
+
+// Tests import MessageView by name; the memo wrapper keeps the identity.
+export { MessageView }
 
 /** Collapsed planning emission: everything the model said/did before its
  *  exit_plan call was approved, behind one sky header. Expandable for the
@@ -9979,6 +9989,11 @@ export function Composer() {
    *  captured at send time — a stream never writes to "what's on screen".
    *  curId advances past an approved exit_plan (splitAtPlanApproval), so
    *  the execution half of the turn streams into its own message. */
+  // Issue #279: per-conversation registry of the rAF text-buffer flushers,
+  // so the terminal paths (done/stopped/abort) can drain a pending buffer
+  // before writing final status — buffered text must never land after
+  // 'idle'/'error', and a Stop must not orphan a scheduled rAF.
+  const streamBufferFlushers = new Map<string, () => void>()
   const handleStreamEvent = (bufKey: string, asstId: string) => {
     let curId = asstId
     let awaitingPostSteerEmission = false
@@ -9986,8 +10001,16 @@ export function Composer() {
     // stream starts mid-emission (first emission of a fresh message), and a
     // tool event closes the emission — the next text opens a new one (#17).
     let textSinceTool = true
+    // Issue #279: coalesce text deltas behind requestAnimationFrame (see
+    // src/deltaBuffer.ts) — identical painted output, store-write rate
+    // collapsed to at most one per frame.
+    const textDeltas = createDeltaBuffer((msgId, text) =>
+      useAgent.getState().appendTextDelta(bufKey, msgId, text),
+    )
+    streamBufferFlushers.set(bufKey, textDeltas.flush)
     const startPostSteerEmission = (firstText?: string) => {
       if (!awaitingPostSteerEmission) return false
+      textDeltas.flush()
       const nextId = useAgent.getState().startAssistantEmissionAfterUser(bufKey, firstText)
       if (nextId) curId = nextId
       awaitingPostSteerEmission = false
@@ -10010,8 +10033,8 @@ export function Composer() {
       setStatus(bufKey, 'thinking')
       if (ev.text) {
         const text = textSinceTool ? ev.text : '\n' + ev.text
-        if (!startPostSteerEmission(text)) appendTextDelta(bufKey, curId, text)
         textSinceTool = true
+        if (!startPostSteerEmission(text)) textDeltas.push(curId, text)
       }
     } else if (ev.type === 'say') {
       // Spoken briefing (#66): captured on its message for read-aloud,
@@ -10031,6 +10054,10 @@ export function Composer() {
       startPostSteerEmission()
       setStatus(bufKey, 'running-tool')
       textSinceTool = false
+      // Buffered text must land BEFORE the call exists: emission-segment
+      // content offsets are computed from message content, and a segment
+      // boundary computed over un-flushed text would be wrong (#279).
+      textDeltas.flush()
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       // Telemetry tape: every tool event of the turn flows into one
@@ -10116,6 +10143,8 @@ export function Composer() {
       setPendingApproval((a) => (a && a.callId === ev.call_id ? null : a))
     } else if (ev.type === 'sub_agent_spawned') {
       setStatus(bufKey, 'running-tool')
+      // Same offset rule as tool_start: flush before the call exists (#279).
+      textDeltas.flush()
       startSubAgent(
         bufKey,
         curId,
@@ -10170,6 +10199,7 @@ export function Composer() {
       )
       pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
     } else if (ev.type === 'error') {
+      textDeltas.flush()
       setStatus(bufKey, 'error')
       setError(bufKey, ev.message ?? 'Unknown agent error')
       setTurnError(bufKey, ev.message ?? 'Unknown agent error')
@@ -10178,6 +10208,7 @@ export function Composer() {
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
     } else if (ev.type === 'stopped') {
+      textDeltas.flush()
       setStatus(bufKey, 'idle')
       setSteerFlag(bufKey, false)
       appendTextDelta(bufKey, curId, '\n[stopped]')
@@ -10189,6 +10220,7 @@ export function Composer() {
       // transcript marked queued until the user sends or discards them.
       // No count state - the pill renders from queueEchoByConv.
     } else if (ev.type === 'done') {
+      textDeltas.flush()
       setStatus(bufKey, 'idle')
       setSteerFlag(bufKey, false)
       // A completed turn must leave no block pulsing: settle anything the
@@ -10269,6 +10301,12 @@ export function Composer() {
       }
     }
     }
+  }
+
+  /** Flush a conversation's coalesced text buffer if one is pending. Safe
+   *  to call when no stream is active (no-op). */
+  const flushTextBufferSafe = (bufKey: string) => {
+    streamBufferFlushers.get(bufKey)?.()
   }
 
   const send = async (
@@ -10439,10 +10477,14 @@ export function Composer() {
         (mc) => setModelCall(bufKey, mc),
         attachmentRecords,
       )
+      // Stream done: a scheduled rAF may still hold buffered text — flush
+      // before the terminal status write so nothing lands after 'idle'.
+      flushTextBufferSafe(bufKey)
       if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
+        flushTextBufferSafe(bufKey)
         setStatus(bufKey, 'idle')
         const tailId = lastAssistantId(bufKey) ?? asstId
         appendTextDelta(bufKey, tailId, '\n[stopped]')
@@ -10461,6 +10503,10 @@ export function Composer() {
           setAttachments(draft.attachments)
           setImages(draft.images)
         }
+        // Drain a pending rAF buffer before the terminal status write (#279):
+        // nothing may land after 'error' — though on this path the rollback
+        // above already removed the message the buffer targets.
+        flushTextBufferSafe(bufKey)
         setStatus(bufKey, 'error')
         setSendError(
           `Message not sent — the agent could not be reached. Your draft was restored.`,
@@ -10515,10 +10561,12 @@ export function Composer() {
         true,
         (mc) => setModelCall(bufKey, mc),
       )
+      flushTextBufferSafe(bufKey)
       if (useAgent.getState().statusByConv[bufKey] !== 'error') setStatus(bufKey, 'idle')
     } catch (e) {
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       if ((e as Error).name === 'AbortError') {
+        flushTextBufferSafe(bufKey)
         setStatus(bufKey, 'idle')
         const tailId = lastAssistantId(bufKey) ?? asstId
         appendTextDelta(bufKey, tailId, '\n[stopped]')
