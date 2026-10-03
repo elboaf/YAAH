@@ -371,19 +371,20 @@ COMPUTER_EXECUTORS: dict = {}  # filled below
 # ---------------------------------------------------------------- screenshots
 
 def _capture_screen(monitor: int = 1) -> tuple[bytes, int, int]:
-    """PNG bytes + size of one monitor (1-based). Imports mss lazily.
+    """RAW RGB bytes + size of one monitor (1-based). Imports mss lazily.
 
-    Issue #279: grab and encode in ONE step — the raw BGRA rows go straight
-    into a PIL image (zero-copy buffer wrap) and the single PNG encode is
-    the final annotated/resized one. The old path encoded to PNG here AND
-    again in _store_png (two full-screen encodes per capture, ~130ms of the
-    ~180ms total); this runs on the event-loop thread of the process that
-    hosts the low-level input hooks, so that burst WAS the cursor stutter.
+    Issue #279: no encode here at all — the raw rows travel to _store_png,
+    which does the ONE PNG encode of the pipeline (after resize/annotate).
+    The old path encoded to PNG here AND again in _store_png (two
+    full-screen encodes per capture, ~130ms of the ~180ms total); this
+    runs on a worker thread off the event loop, but the encode itself is
+    still the single biggest cost — doing it once is the point.
     """
     import mss
-    from PIL import Image
 
-    with mss.MSS() as sct:
+    # mss.mss() factory: available across mss versions (the MSS class is
+    # 10.2+; requirements.txt permits older on Windows).
+    with mss.mss() as sct:
         # sct.monitors[0] is the virtual-all bounding box; 1.. are real monitors.
         idx = max(1, int(monitor))
         if idx >= len(sct.monitors):
@@ -391,12 +392,8 @@ def _capture_screen(monitor: int = 1) -> tuple[bytes, int, int]:
                 f"monitor {monitor} not found; {len(sct.monitors) - 1} monitor(s) present"
             )
         shot = sct.grab(sct.monitors[idx])
-        # BGRA byte rows -> RGBA view -> PIL. frombytes copies once; the
-        # encode below is the only compress of the capture.
-        img = Image.frombytes("RGB", shot.size, bytes(shot.rgb))
-        out = io.BytesIO()
-        img.save(out, "PNG")
-        return out.getvalue(), shot.width, shot.height
+        # shot.rgb is RGB-ordered whole-frame bytes (see mss.base.ScreenShot.rgb).
+        return shot.rgb, shot.width, shot.height
 
 
 def _monitors() -> list[dict]:
@@ -495,17 +492,13 @@ OBSERVE_CROP = 400
 
 
 def _capture_clip(clip: dict) -> tuple[bytes, int, int]:
-    """PNG bytes of one region — grab and encode in one step (see
-    _capture_screen: one compress instead of two was the point)."""
+    """RAW RGB bytes of one region — no encode here; the single PNG encode
+    happens in _store_png (see _capture_screen)."""
     import mss
-    from PIL import Image
 
-    with mss.MSS() as sct:
+    with mss.mss() as sct:
         shot = sct.grab(clip)
-        img = Image.frombytes("RGB", shot.size, bytes(shot.rgb))
-        out = io.BytesIO()
-        img.save(out, "PNG")
-        return out.getvalue(), shot.width, shot.height
+        return shot.rgb, shot.width, shot.height
 
 
 def _clip_around(ax: int, ay: int, size: int = OBSERVE_CROP) -> dict:
@@ -588,7 +581,14 @@ def _annotate_img(img, orig_w: int, orig_h: int, label_offset: list[int], scale:
     return img
 
 
-def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **extra) -> dict:
+def _store_png(raw: bytes, w: int, h: int, monitor: int, origin: list[int], **extra) -> dict:
+    """Store one capture as the pipeline's ONLY PNG encode.
+
+    Issue #279: `raw` is uncompressed whole-frame RGB bytes (from
+    _capture_screen/_capture_clip), not a PNG — no decode step at all.
+    A PNG `raw` input would fail Image.frombytes and fall through to the
+    except path, so callers must pass what the capture seams return.
+    """
     from backend.agent.imagedata import save_bytes
 
     # label_offset maps image pixels to monitor-local coordinates: a full
@@ -596,13 +596,14 @@ def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **ex
     # crop_origin - monitor_origin inside the monitor.
     mon_origin = _monitor_rect(monitor)[:2]
     label_offset = [origin[0] - mon_origin[0], origin[1] - mon_origin[1]]
+    png = raw
     try:
         import io
 
         from PIL import Image
 
         scale = 1.0
-        img = Image.open(io.BytesIO(png)).convert("RGB")
+        img = Image.frombytes("RGB", (w, h), raw)
         if max(img.size) > MAX_CAPTURE_EDGE:
             scale = MAX_CAPTURE_EDGE / max(img.size)
             img = img.resize(
@@ -614,8 +615,17 @@ def _store_png(png: bytes, w: int, h: int, monitor: int, origin: list[int], **ex
         img.save(out, "PNG")
         png = out.getvalue()
         w, h = img.size
-    except Exception:  # noqa: BLE001 — store the raw capture un-annotated
-        pass
+    except Exception:  # noqa: BLE001 — best-effort minimal encode
+        # No resize, no annotate. If even the plain encode fails the capture
+        # is unusable — propagate (callers surface it as observe_error /
+        # error) rather than store a corrupt file.
+        import io
+
+        from PIL import Image
+
+        out = io.BytesIO()
+        Image.frombytes("RGB", (w, h), raw).save(out, "PNG")
+        png = out.getvalue()
     rel = save_bytes(png, "png", "screenshots")
     out = {"image": rel, "monitor": monitor, "size": [w, h], "origin": origin}
     out.update(extra)

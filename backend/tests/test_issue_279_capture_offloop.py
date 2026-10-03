@@ -63,7 +63,9 @@ class _FakeMSS:
 def fake_mss(monkeypatch):
     import mss
 
-    monkeypatch.setattr(mss, "MSS", _FakeMSS)
+    # The helpers call the mss.mss() FACTORY (works across mss versions,
+    # unlike the MSS class); patch it for the same reason.
+    monkeypatch.setattr(mss, "mss", lambda *a, **k: _FakeMSS(*a, **k))
     _FakeMSS.instances = 0
     return _FakeMSS
 
@@ -167,30 +169,45 @@ def test_som_overlay_runs_off_loop_thread(fake_mss, monkeypatch):
 
 # ---------------------------------------------------------------- single encode
 
-def test_capture_screen_encodes_once_and_colors_survive(fake_mss):
-    """One compress per capture (the old path encoded twice, ~70% of the
-    cost), and the BGRA->RGB handoff keeps channels in the right order."""
-    # A solid RED frame: if the R and B channels were swapped anywhere in
-    # the handoff, the decoded pixel comes back blue.
-    _FakeMSS.shots = [_FakeShot(64, 32, _rgb_solid(64, 32, 255, 0, 0))]
-    png, w, h = computer_mod._capture_screen(1)
+def test_capture_helpers_return_raw_rgb_no_encode(fake_mss):
+    """The capture seams return UNCOMPRESSED RGB rows (the single PNG
+    encode belongs to _store_png), with size attached."""
+    red = _rgb_solid(64, 32, 255, 0, 0)
+    _FakeMSS.shots = [_FakeShot(64, 32, red)]
+    raw, w, h = computer_mod._capture_screen(1)
     assert (w, h) == (64, 32)
+    assert raw == red  # untouched rows, zero encodes on this path
 
-    from PIL import Image
-
-    img = Image.open(io.BytesIO(png)).convert("RGB")
-    assert img.size == (64, 32)
-    assert img.getpixel((10, 10)) == (255, 0, 0)
-
-
-def test_capture_clip_encodes_once(fake_mss):
     _FakeMSS.shots = [_FakeShot(100, 80, _rgb_solid(100, 80, 5, 6, 7))]
-    png, w, h = computer_mod._capture_clip(
+    raw, w, h = computer_mod._capture_clip(
         {"left": 0, "top": 0, "width": 100, "height": 80})
     assert (w, h) == (100, 80)
+    assert raw == _rgb_solid(100, 80, 5, 6, 7)
+
+
+def test_store_png_encodes_raw_rgb_with_correct_channels(fake_mss):
+    """The pipeline's ONE encode lives in _store_png; channel order must
+    survive raw-rows -> frombytes (a swap turns a red frame blue)."""
+    from backend.agent import imagedata
+
+    stores: list[bytes] = []
+
+    def fake_save(raw, ext, subdir=""):
+        stores.append(raw)
+        return f"{subdir}/fake.png"
+
+    import unittest.mock as mock
+
+    with mock.patch.object(imagedata, "save_bytes", fake_save):
+        res = computer_mod._store_png(
+            _rgb_solid(64, 32, 255, 0, 0), 64, 32, 1, [0, 0])
+    assert res["size"] == [64, 32]
+    assert len(stores) == 1
+
     from PIL import Image
 
-    assert Image.open(io.BytesIO(png)).size == (100, 80)
+    img = Image.open(io.BytesIO(stores[0])).convert("RGB")
+    assert img.getpixel((10, 10)) == (255, 0, 0)
 
 
 # ---------------------------------------------------------------- failure surface
@@ -200,11 +217,22 @@ def test_screenshot_failure_is_error_dict_not_raise(monkeypatch):
     capture still returns {"error": ...}."""
     import mss
 
-    class _Boom(_FakeMSS):
+    class _Boom:
+        monitors = [{}, {"left": 0, "top": 0, "width": 400, "height": 400}]
+
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
         def grab(self, monitor):
             raise OSError("display gone")
 
-    monkeypatch.setattr(mss, "MSS", _Boom)
+    monkeypatch.setattr(mss, "mss", lambda *a, **k: _Boom())
     res = asyncio.run(computer_mod.screenshot(monitor=1))
     assert "error" in res
     assert "display gone" in res["error"]

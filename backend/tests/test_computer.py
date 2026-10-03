@@ -337,7 +337,8 @@ def test_screenshot_region_captures_clip(fake_capture, monkeypatch):
         lambda x, y, w, h: {"left": x, "top": y, "width": w, "height": h})
     monkeypatch.setattr(
         computer_mod, "_capture_clip",
-        lambda clip: (b"PNG", clip["width"], clip["height"]))
+        lambda clip: (b"\x00" * (clip["width"] * clip["height"] * 3),
+                      clip["width"], clip["height"]))
     monkeypatch.setattr(computer_mod, "_monitor_for_point", lambda x, y: 6)
     # _store_png derives ruler label offsets from the monitor rect, which
     # needs user32 on the real OS — fake one monitor at (0,0).
@@ -582,9 +583,9 @@ def test_store_png_downscales_large_captures(monkeypatch, tmp_path):
 
     monkeypatch.setattr(computer_mod, "_monitor_rect", lambda m: [0, 0, 2560, 1440])
     monkeypatch.setattr(imagedata, "save_bytes", lambda raw, ext, sub: "screenshots/ds.png")
-    buf = io.BytesIO()
-    Image.new("RGB", (2560, 1440), (40, 40, 40)).save(buf, "PNG")
-    res = computer_mod._store_png(buf.getvalue(), 2560, 1440, 1, [0, 0])
+    # _store_png consumes raw RGB rows (issue #279 single-encode pipeline);
+    # PNG bytes would fail frombytes and fall to the un-annotated path.
+    res = computer_mod._store_png(bytes(2560 * 1440 * 3), 2560, 1440, 1, [0, 0])
     assert res["size"] == [1568, 882]  # long edge capped
     assert res["origin"] == [0, 0]
 

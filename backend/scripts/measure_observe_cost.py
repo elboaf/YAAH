@@ -176,6 +176,7 @@ def _run_mode(mode_fn, seconds: float, budget_ms: float) -> tuple[int, dict]:
         print("  WARNING: injecting REAL mouse moves + key presses for "
               f"{seconds:.0f}s — do not run this on a machine someone is "
               "using.")
+        time.sleep(1.0)  # abort window (Ctrl+C) before anything is injected
         mhl._measure_hooks(act_by_name, seconds)
         stop.set()
 
@@ -241,8 +242,16 @@ def main() -> int:
     if p99_on is None or p99_off is None:
         print("FAIL: missing hook summaries")
         return 1
-    print(f"PASS: p99 onloop {p99_on}ms vs offtask {p99_off}ms "
-          f"(budget {args.budget_ms}ms)")
+    better = p99_off < p99_on
+    print(f"{'PASS' if better else 'FAIL'}: p99 onloop {p99_on}ms vs offtask "
+          f"{p99_off}ms (budget {args.budget_ms}ms)")
+    if not better:
+        # The seam exists BECAUSE worker threads keep hook dispatch healthier
+        # under capture load; if measurement stops showing that, the seam
+        # needs re-justifying, not silent keeping.
+        print("FAIL: offtask p99 does not beat onloop p99 — the off-thread "
+              "seam is not justified by this run")
+        return 1
     return 0
 
 

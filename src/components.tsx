@@ -10054,6 +10054,10 @@ export function Composer() {
       startPostSteerEmission()
       setStatus(bufKey, 'running-tool')
       textSinceTool = false
+      // Buffered text must land BEFORE the call exists: emission-segment
+      // content offsets are computed from message content, and a segment
+      // boundary computed over un-flushed text would be wrong (#279).
+      textDeltas.flush()
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       // Telemetry tape: every tool event of the turn flows into one
@@ -10139,6 +10143,8 @@ export function Composer() {
       setPendingApproval((a) => (a && a.callId === ev.call_id ? null : a))
     } else if (ev.type === 'sub_agent_spawned') {
       setStatus(bufKey, 'running-tool')
+      // Same offset rule as tool_start: flush before the call exists (#279).
+      textDeltas.flush()
       startSubAgent(
         bufKey,
         curId,
@@ -10497,6 +10503,10 @@ export function Composer() {
           setAttachments(draft.attachments)
           setImages(draft.images)
         }
+        // Drain a pending rAF buffer before the terminal status write (#279):
+        // nothing may land after 'error' — though on this path the rollback
+        // above already removed the message the buffer targets.
+        flushTextBufferSafe(bufKey)
         setStatus(bufKey, 'error')
         setSendError(
           `Message not sent — the agent could not be reached. Your draft was restored.`,
