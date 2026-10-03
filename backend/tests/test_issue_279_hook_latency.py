@@ -75,11 +75,15 @@ def test_hook_callback_measures_dispatch(monkeypatch):
     """The real callback path wraps its work in the timing wrapper."""
     act = _fresh_activity()
 
-    class FakeUser32:
-        calls = []
+    # Deterministic clock: CallNextHookEx advances it by 5 ms, so the
+    # recorded sample must include the hook-chain time (not just our own
+    # bookkeeping around it).
+    clock = [100.0]
+    monkeypatch.setattr(computer_mod.time, "perf_counter", lambda: clock[0])
 
+    class FakeUser32:
         def CallNextHookEx(self, *a):
-            FakeUser32.calls.append(time.perf_counter())
+            clock[0] += 0.005
             return 0
 
     user32 = FakeUser32()
@@ -102,7 +106,8 @@ def test_hook_callback_measures_dispatch(monkeypatch):
     import ctypes.wintypes
     ctypes.memmove(buf, ctypes.byref(struct), ctypes.sizeof(struct))
     cb(0, 0x0100, ctypes.addressof(buf))
-    assert len(called) == 1 and called[0] is not None, called
+    assert len(called) == 1, called
+    assert called[0] == pytest.approx(5.0), called
 
 
 # ---------------------------------------------------------------- gitinfo locks
