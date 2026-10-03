@@ -267,7 +267,8 @@ _SUMMARIZER_PROMPT = (
     "why; concrete anchors — file paths, branch names, commands, "
     "function/variable names, error messages; what was attempted and what "
     "failed; the current state and obvious next steps.\n"
-    "Write at most 400 words, plain prose or terse bullets. Reply with JSON "
+    "Write at most 400 words, plain prose or terse bullets (the platform "
+    "may keep up to 12,000 characters). Reply with JSON "
     "only, no fences: {\"summary\": \"...\"}"
 )
 

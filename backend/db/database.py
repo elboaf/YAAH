@@ -1505,11 +1505,12 @@ async def get_prompt_summary(conversation_id: int) -> dict:
         )
         conv = await cur.fetchone()
         if conv is None:
-            return {"summary": "", "through_message_id": 0}
+            return {"summary": "", "through_message_id": 0, "source": ""}
         if conv["prompt_summary"]:
             return {
                 "summary": conv["prompt_summary"],
                 "through_message_id": conv["prompt_summary_through_message_id"] or 0,
+                "source": "prompt",
             }
         cur = await db.execute(
             "SELECT id, role, content FROM messages WHERE conversation_id = ?"
@@ -1530,8 +1531,12 @@ async def get_prompt_summary(conversation_id: int) -> dict:
                 (conversation_id, legacy["id"]),
             )
             if await cur.fetchone():
-                return {"summary": legacy["content"], "through_message_id": legacy["id"]}
-        return {"summary": "", "through_message_id": 0}
+                return {
+                    "summary": legacy["content"],
+                    "through_message_id": legacy["id"],
+                    "source": "legacy",
+                }
+        return {"summary": "", "through_message_id": 0, "source": ""}
     finally:
         await db.close()
 
