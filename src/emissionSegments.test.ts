@@ -2,9 +2,10 @@
 // mid-stream boundary insertions. The old renderer keyed segments by the
 // running cursor offset, so a new anchor arriving mid-stream shifted every
 // later key; React replaced those DOM nodes and the browser's selection (a
-// DOM range) was destroyed. The fixed segmentation keys each segment by the
-// anchor that ENDS it (immutable call id) and the growing tail by a fixed
-// `-end` key — identity that insertion cannot move.
+// DOM range) was destroyed. The fixed segmentation keys each TEXT segment
+// by the cursor offset where its text STARTS: an anchor's arrival only ever
+// splits the tail, and the surviving tail keeps its key because its start
+// offset is unchanged — insertion cannot move any existing key.
 
 import { describe, expect, it } from 'vitest'
 import { emissionSegments } from './emissionSegments'
@@ -37,11 +38,11 @@ const SUB: ToolCall['subAgent'] = {
 describe('emissionSegments (#275)', () => {
   it('plain streaming message (no anchors): one stable tail segment', () => {
     expect(emissionSegments(msg('m1', { content: 'hello' }))!.map((s) => s.key)).toEqual([
-      'seg-m1-end',
+      'seg-m1-0',
     ])
     expect(
       emissionSegments(msg('m1', { content: 'hello world, streaming on' }))!.map((s) => s.key),
-    ).toEqual(['seg-m1-end'])
+    ).toEqual(['seg-m1-0'])
   })
 
   it('a boundary arriving mid-stream does NOT shift existing keys', () => {
@@ -51,18 +52,21 @@ describe('emissionSegments (#275)', () => {
     // the tail keeps its fixed key.
     const ask = call('ask_user', { result: {}, contentOffset: 10 })
     expect(emissionSegments(msg('m2', { content: 'first part' }))!.map((s) => s.key)).toEqual([
-      'seg-m2-end',
+      'seg-m2-0',
     ])
 
     const segs = emissionSegments(
       msg('m2', { content: 'first partsecond part', toolCalls: [ask] }),
     )!
     expect(segs.map((s) => s.key)).toEqual([
-      `seg-m2-${ask.id}`,
+      `seg-m2-0`,
       `anchor-${ask.id}`,
-      'seg-m2-end',
+      'seg-m2-10',
     ])
     expect(segs[0].content).toBe('first part')
+    // the tail keeps its key: it starts at the same cursor (10) it started at
+    // before the anchor arrived
+    expect(segs[2].key).toBe('seg-m2-10')
     expect(segs[2].content).toBe('second part')
   })
 
@@ -89,11 +93,30 @@ describe('emissionSegments (#275)', () => {
     const segs = emissionSegments(
       msg('m4', { content: 'aaaabbbbbbbbbb', toolCalls: [ask, spawn] }),
     )!
-    expect(segs[0].key).toBe(`seg-m4-${spawn.id}`)
+    expect(segs[0].key).toBe('seg-m4-0')
     expect(segs[0].content).toBe('aaaa')
     expect(segs[1].key).toBe(`anchor-${spawn.id}`)
-    expect(segs[2].key).toBe(`seg-m4-${ask.id}`)
+    expect(segs[2].key).toBe('seg-m4-4')
     expect(segs[2].content).toBe('bbbbbbbb')
+  })
+
+  it('an anchor arriving at the END of the current text does NOT change the tail key', () => {
+    // Regression (CodeRabbit return trip): the tail used to be keyed
+    // `seg-<id>-end`; when an anchor landed at the current end-of-text the
+    // tail's key became `seg-<id>-<anchor.id>` and React REPLACED the text
+    // node, clearing an in-progress selection. Keying the tail (and every
+    // text segment) by its STARTING cursor offset fixes this: the anchor's
+    // text segment has zero width (cut === cursor, emits nothing) and the
+    // surviving tail keeps key `seg-<id>-<cursor>`.
+    const ask = call('ask_user', { result: {}, contentOffset: 5 })
+    expect(emissionSegments(msg('m6', { content: 'hello' }))!.map((s) => s.key)).toEqual([
+      'seg-m6-0',
+    ])
+    const segs = emissionSegments(msg('m6', { content: 'hello', toolCalls: [ask] }))!
+    // same key as before the anchor arrived, now on the head segment; the
+    // anchor emits at the end and no tail follows
+    expect(segs.map((s) => s.key)).toEqual(['seg-m6-0', 'anchor-' + ask.id])
+    expect(segs.map((s) => s.content)).toEqual(['hello', ''])
   })
 
   it('legacy rows with an answered-but-offset-less ask return null (caller fallback)', () => {
@@ -102,7 +125,7 @@ describe('emissionSegments (#275)', () => {
     expect(emissionSegments(msg('m5', { content: 'x', toolCalls: [legacyAsk] }))).toBeNull()
     // an unanswered ask without a result is simply not an anchor
     expect(emissionSegments(msg('m5', { content: 'x', toolCalls: [plainAsk] }))).toEqual([
-      { key: 'seg-m5-end', content: 'x' },
+      { key: 'seg-m5-0', content: 'x' },
     ])
   })
 })

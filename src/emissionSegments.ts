@@ -8,11 +8,12 @@
 // selection. React keys on shifting offsets also re-pair content under
 // existing keys when anchors interleave.
 //
-// The fix: one segmentation for every live agent message, keyed by what
-// FOLLOWS each segment (the following anchor's immutable call id; the final
-// growing tail gets a fixed key). A new anchor inserted mid-stream adds new
-// keys around the insertion point; every existing segment keeps its key and
-// its DOM node — and with it, the reader's selection.
+// The fix: one segmentation for every live agent message, keyed by where
+// each segment's text STARTS (the running cursor at emission time; the
+// final growing tail is keyed by the offset it starts at). A new anchor
+// inserted mid-stream adds new keys around the insertion point and never
+// moves an existing segment's start offset; every existing segment keeps
+// its key and its DOM node — and with it, the reader's selection.
 
 import type { ReactNode } from 'react'
 import type { ChatMessage, ToolCall } from './store'
@@ -30,11 +31,13 @@ export interface EmissionSegment {
  * Split a (possibly still-streaming) agent message into emission segments.
  * Anchors are the message's answered ask_user calls and spawn_agent runs
  * that carry a contentOffset; each is placed at its recorded offset, and
- * the text between anchors becomes a segment keyed by the anchor that ends
- * it (`seg-${msg.id}-${anchor.id}`). The text after the last anchor — the
- * tail that keeps growing while the turn streams — is keyed
- * `seg-${msg.id}-end`, so it exists (under the same key) from the message's
- * first render, anchor or no anchor.
+ * every TEXT segment — including the growing tail after the last anchor —
+ * is keyed by the cursor offset where its text STARTS
+ * (`seg-${msg.id}-${cursor}`). Cursor offsets advance only when text is
+ * emitted, so keys are unique; and because an anchor's arrival only ever
+ * SPLITS the tail (an equal-offset anchor emits no text segment), every
+ * existing segment keeps its starting offset — and therefore its key and
+ * its DOM node — no matter where new boundaries land.
  *
  * Legacy rows whose answered asks lack offsets return null (the caller
  * falls back to the chronological/flat render).
@@ -64,7 +67,7 @@ export function emissionSegments(msg: ChatMessage): EmissionSegment[] | null {
     )
     if (cut > cursor) {
       segments.push({
-        key: `seg-${msg.id}-${anchor.id}`,
+        key: `seg-${msg.id}-${cursor}`,
         content: msg.content.slice(cursor, cut),
       })
       cursor = cut
@@ -72,7 +75,7 @@ export function emissionSegments(msg: ChatMessage): EmissionSegment[] | null {
     segments.push({ key: `anchor-${anchor.id}`, content: '', anchor })
   }
   if (cursor < msg.content.length || segments.length === 0) {
-    segments.push({ key: `seg-${msg.id}-end`, content: msg.content.slice(cursor) })
+    segments.push({ key: `seg-${msg.id}-${cursor}`, content: msg.content.slice(cursor) })
   }
   return segments
 }
