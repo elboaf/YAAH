@@ -23,9 +23,11 @@ describe('AgentMarkdown', () => {
 
   it('renders inline code as a chip', () => {
     render(<AgentMarkdown content={'run `npm test` now'} />)
-    const chip = screen.getByText('npm test')
+    // #275: the text lives in StreamText's span inside the chip; assert the
+    // chip (CODE) via closest.
+    const chip = screen.getByText('npm test').closest('code')
     expect(chip).toBeInTheDocument()
-    expect(chip.tagName).toBe('CODE')
+    expect(chip!.tagName).toBe('CODE')
   })
 
   it('renders unordered, ordered and task lists', () => {
@@ -133,7 +135,7 @@ describe('AgentMarkdown', () => {
     render(<AgentMarkdown content={md} />)
     expect(screen.getByRole('heading', { level: 2, name: 'Plan' })).toBeInTheDocument()
     expect(screen.getByText('fix').closest('strong')).toBeInTheDocument()
-    expect(screen.getByText('render').tagName).toBe('CODE')
+    expect(screen.getByText('render').closest('code')!.tagName).toBe('CODE')
     expect(screen.getByText('parse input')).toBeInTheDocument()
     expect(screen.getByRole('table')).toBeInTheDocument()
     expect(screen.getByText('bash')).toBeInTheDocument()
