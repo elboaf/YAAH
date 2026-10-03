@@ -1690,11 +1690,16 @@ async def _run_agent_claimed(
             # Tag-stripping above is NOT gated: stray tags never become
             # transcript junk and never reach speech either way. Computed
             # before the persist below so the briefing rides the row (#226).
-            _said = (
-                _speak.spoken_line(said, assistant_content)
-                if _say_emissions_enabled()
-                else ""
-            )
+            # #230: the row keeps the RAW model briefing (verbatim, not the
+            # spoken_line() TTS normalization) plus a fallback flag, so the
+            # export can attribute a briefing to the model vs the heuristic;
+            # the wire event stays the normalized TTS input.
+            _say_enabled = _say_emissions_enabled()
+            _said = _speak.spoken_line(said, assistant_content) if _say_enabled else ""
+            # #230: model briefings persist raw; fallback lines persist the
+            # spoken line (there is no raw model text) and are flagged.
+            _say_raw = said if (_say_enabled and said) else (_said if _say_enabled else "")
+            _say_fallback = bool(_say_enabled and not said and _said)
 
             # Persist assistant message (with tool calls if any). #226: the
             # briefing rides on the row (say column) so reloads and export
@@ -1705,7 +1710,8 @@ async def _run_agent_claimed(
                 "assistant",
                 assistant_content,
                 tool_calls=tool_calls,
-                say=_said,
+                say=_say_raw,
+                say_is_fallback=_say_fallback,
             )
 
             # Briefing-first, per emission (#66): EVERY completed model
