@@ -117,6 +117,17 @@ import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
+import { stripProviderMarkup } from './providerMarkup'
+import { transcriptSelection, googleSearchUrl } from './selectionSearch'
+import { openExternal } from './openExternal'
+
+// Issue #255: true when a stored title still carries provider-injected
+// `<system_*>` control text (captured by the title slice before the
+// sanitize fix landed). The sidebar renders the dedicated warning triangle
+// for these rows instead of letting the raw text occupy the title slot.
+export function hasProviderMarkup(title: string): boolean {
+  return /^<system_\w+>/.test(title)
+}
 
 // ---------------------------------------------------------------- code views
 
@@ -3979,6 +3990,21 @@ export function ConversationRow({
             <i />
           </span>
         ) : null}
+        {/* Issue #255: the title still carries provider-injected `<system_*>`
+            control text (the low-context warning captured by the title
+            slice before the sanitize fix). Amber triangle in the #25 status
+            slot, color-matched to the run-dots; the provider text itself
+            stays out of the sidebar — the tooltip carries it plus the
+            actionable /handoff suggestion. */}
+        {hasProviderMarkup(liveTitle ?? conv.title) && (
+          <span
+            aria-hidden="true"
+            className="mr-1.5 shrink-0 text-amber-400"
+            title="Provider signalled low context. Run /handoff to write a handoff file, then start a new chat."
+          >
+            ⚠
+          </span>
+        )}
         {isAgent && (
           <span
             aria-hidden="true"
@@ -3995,7 +4021,9 @@ export function ConversationRow({
         <span
           className={`min-w-0 flex-1 truncate ${isAgent && agentEnabled === false ? 'italic text-zinc-500' : ''}`}
         >
-          {liveTitle ?? conv.title}
+          {/* #255: provider `<system_*>` control text never occupies the
+              title slot — the triangle's tooltip carries it instead. */}
+          {stripProviderMarkup(liveTitle ?? conv.title) || 'New chat'}
           {isAgent && agentEnabled === false && (
             <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px font-mono text-[9px] not-italic text-zinc-400">
               paused
@@ -6312,7 +6340,50 @@ export function SaySettingsCard({
   )
 }
 
-function SettingsModal({ onClose }: { onClose: () => void }) {
+/** #171 — Interface-scale card: a live 100–200% slider replaces the old
+ *  preset buttons. Every change reports immediately (preview-while-dragging
+ *  via the ui-scale-changed event); persistence stays on Save/Cancel as
+ *  before. Values are quantized through quantizeUiScale (issue #133) so the
+ *  zoom never carries subpixel noise into device-pixel rounding. Exported
+ *  for isolation (SaySettingsCard precedent). */
+export function InterfaceScaleCard({
+  scale,
+  onChange,
+  disabled = false,
+}: {
+  scale: number
+  onChange: (scale: number) => void
+  /** Until getConfig() resolves, `scale` is the 1.0 default — keep the slider
+   *  inert so a pre-load drag can't strand the wrong "saved" value (#171). */
+  disabled?: boolean
+}) {
+  // Quantize (#133), then clamp to the shipped slider range — the quantizer's
+  // own [0.5, 3] envelope is wider than the UI offers end-to-end (#171).
+  const value = Math.min(2, Math.max(1, quantizeUiScale(scale)))
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <p className="min-w-0 text-[10px] text-zinc-600">
+        Zoom for the whole app — scales live while you drag; Save keeps it
+      </p>
+      <div className="flex shrink-0 items-center gap-2">
+        <input
+          type="range"
+          min={1}
+          max={2}
+          step={0.01}
+          value={value}
+          aria-label="Interface scale"
+          disabled={disabled}
+          className="w-40 accent-blue-600"
+          onChange={(e) => onChange(quantizeUiScale(Number(e.target.value)))}
+        />
+        <span className="w-10 font-mono text-xs text-zinc-300">{Math.round(value * 100)}%</span>
+      </div>
+    </div>
+  )
+}
+
+export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
   const [active, setActive] = useState('')
@@ -6343,7 +6414,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const COMPACTION_DEFAULT_K = 300
   /** Default per-provider max steps (0 = unlimited). */
   const MAX_STEPS_DEFAULT = 200
-  // Interface scale draft (1.0 / 1.1 / 1.25 / 1.5) — applied live on save.
+  // Interface scale draft (100–200% slider, #171) — applied live on drag,
+  // persisted on save.
   const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   const [saving, setSaving] = useState(false)
@@ -6419,6 +6491,26 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, removeTarget])
 
+  // #171: the slider previews live, so closing without Save (Cancel, Esc,
+  // backdrop) must restore the persisted zoom. The persisted value is stored
+  // at load time and updated when Save succeeds, so unmount can re-emit it
+  // synchronously — no async re-fetch on the way out: a rejected fetch can't
+  // strand the preview zoom, and a late response from a closed modal can't
+  // overwrite a newer modal's preview. A StrictMode dev double-mount fires
+  // this once extra, which is harmless: it re-applies the persisted value
+  // that was already on screen.
+  const scaleSavedRef = useRef(1.0)
+  const scaleDirtyRef = useRef(false)
+  useEffect(() => {
+    return () => {
+      if (scaleDirtyRef.current) {
+        window.dispatchEvent(
+          new CustomEvent('ui-scale-changed', { detail: { scale: scaleSavedRef.current } }),
+        )
+      }
+    }
+  }, [])
+
   useEffect(() => {
     // Retry the config load: the backend can be momentarily busy (or still
     // starting), and a failed load that looks like "no providers" is a
@@ -6448,6 +6540,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             ),
           )
           setUiScale(quantizeUiScale(Number(c.ui_scale) || 1.0))
+          scaleSavedRef.current = quantizeUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
           setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
           setCloudEndpoint(v?.cloud_endpoint ?? '')
@@ -6732,6 +6825,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       // noise — App.tsx quantizes again on its side, this keeps the value
       // the settings UI round-trips clean at the source.
       window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: quantizeUiScale(uiScale) } }))
+      // Save landed: the live zoom IS the persisted zoom now — a following
+      // close must not "restore" the stale saved value (#171 return trip).
+      scaleSavedRef.current = quantizeUiScale(uiScale)
+      scaleDirtyRef.current = false
       // Provider/model changes can affect the defaults inherited by new chats;
       // refresh the sidebar's model and thought-level controls.
       useAgent.getState().refreshGlobals()
@@ -7426,29 +7523,24 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             </SettingsCard>
 
             <SettingsCard title="Interface" className="col-span-4">
-              <div className="flex items-center justify-between gap-3" role="radiogroup" aria-label="Interface scale">
-                <p className="text-[10px] text-zinc-600">
-                  Zoom for the whole app — larger text at the same layout, applied live
-                </p>
-                <div className="flex shrink-0 gap-1.5">
-                  {([1.0, 1.1, 1.25, 1.5] as const).map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      role="radio"
-                      aria-checked={uiScale === s}
-                      className={`rounded   px-2.5 py-1 font-mono text-xs ${
-                        uiScale === s
-                          ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
-                          : ' text-zinc-400 hover:bg-zinc-800'
-                      }`}
-                      onClick={() => setUiScale(s)}
-                    >
-                      {s === 1.0 ? '100%' : s === 1.1 ? '110%' : s === 1.25 ? '125%' : '150%'}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {/* #171: live slider — each move previews immediately via the
+                  ui-scale-changed event; Save persists (see save()). */}
+              <InterfaceScaleCard
+                scale={uiScale}
+                // `saving` too (return trip #2): save() captures the scale at
+                // click time — a mid-save drag would preview a value the
+                // save-completion then overwrites, silently losing it.
+                disabled={!loaded || saving}
+                onChange={(s) => {
+                  setUiScale(s)
+                // preview dirties the live zoom; unmount restores the
+                // last-saved value unless a Save lands first (#171)
+                scaleDirtyRef.current = true
+                  // Preview-while-dragging: App.tsx applies the quantized
+                  // zoom on this event without waiting for Save.
+                  window.dispatchEvent(new CustomEvent('ui-scale-changed', { detail: { scale: s } }))
+                }}
+              />
             </SettingsCard>
 
             <SettingsCard title="Scheduled agents" className="col-span-4">
@@ -8174,12 +8266,12 @@ function DraftDestinationCard() {
             <button
               type="button"
               aria-label={`Branch ${gitBranch}`}
-              title="This switches the branch for every chat sharing this workspace"
+              title={`⎇ ${gitBranch} — this switches the branch for every chat sharing this workspace`}
               disabled={gitBusy}
               onClick={() => gitMenuOpen ? setGitMenuOpen(false) : void openGitBranches()}
               className="rounded   px-2 py-1 font-mono text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
             >
-              ⎇ {gitBranch}
+              ⎇ <span className="min-w-0 max-w-[10rem] truncate">{gitBranch}</span>
             </button>
             {gitMenuOpen && (
               <div role="menu" aria-label="Git branches" className="absolute right-0 top-full z-30 mt-1 max-h-48 min-w-36 overflow-auto rounded   bg-zinc-900 p-1 shadow-xl">
@@ -8432,8 +8524,46 @@ export function ChatScopePickers() {
   )
 }
 
-export function ChatPanel() {
-  const conversationId = useAgent((s) => s.conversationId)
+// Narration dedupe latch (#237). This MUST live at module level, keyed on
+// "the last say TEXT spoken for this msgId", not in a component ref:
+//
+//  - A turn is ONE coalesced message: post-tool emissions append into the
+//    same msg.id and each `say` OVERWRITES msg.say. A per-message boolean
+//    latch (n.said) early-returns after the first briefing, silencing every
+//    later emission of the turn.
+//
+//  - Component refs re-initialize on remount (chat switch away and back):
+//    the narrate effect re-feeds the unchanged msg.say, queueing N duplicate
+//    reads. The module-level map survives remounts.
+//
+// The key is the say TEXT, so a NEW briefing for the same msgId (the next
+// emission of the turn) is a different key and gets spoken. The verbatim
+// fallback (no tag at all) is guarded by the msgId key only, and stays
+// once-per-message per mount — the mount-level lastSpokenMsgIdRef below.
+const lastSpokenSayByMsg = new Map<string, string>()
+const PRUNE_SPOKEN_KEYS = 200
+function wasSaySpoken(msgId: string, say: string): boolean {
+  return lastSpokenSayByMsg.get(msgId) === say
+}
+function markSaySpoken(msgId: string, say: string): void {
+  lastSpokenSayByMsg.set(msgId, say)
+  if (lastSpokenSayByMsg.size > PRUNE_SPOKEN_KEYS) {
+    // FIFO-ish prune: drop the oldest entries (insertion order).
+    const it = lastSpokenSayByMsg.keys()
+    for (let i = 0; i < Math.floor(PRUNE_SPOKEN_KEYS / 2); i++) {
+      const k = it.next()
+      if (k.done) break
+      lastSpokenSayByMsg.delete(k.value)
+    }
+  }
+}
+
+/** Test-only: clear the module-level dedupe latch between tests. */
+export function _resetNarrationDedupeForTests(): void {
+  lastSpokenSayByMsg.clear()
+}
+
+export function ChatPanel() {  const conversationId = useAgent((s) => s.conversationId)
   const messages = useAgent(
     (s) => s.messagesByConv[s.conversationId === null ? 'draft' : String(s.conversationId)] ?? [],
   )
@@ -8463,6 +8593,15 @@ export function ChatPanel() {
     [messages],
   )
   const streaming = status === 'thinking' || status === 'running-tool'
+  // #201: right-click on an active transcript selection -> "Search on Google".
+  // Menu state is just the selected query text (null = closed); the item only
+  // appears when the right-click lands with a real selection inside the
+  // transcript (transcriptSelection enforces that), and activating it goes
+  // through the proven openExternal -> open_external default-browser path.
+  const [searchSelection, setSearchSelection] = useState<string | null>(null)
+  const onTranscriptContextMenu = useCallback(() => {
+    setSearchSelection(transcriptSelection(transcriptRef.current))
+  }, [])
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
   // show on the newest message while the run is going.
@@ -8572,13 +8711,15 @@ export function ChatPanel() {
     if (!streaming) return
     wasStreamingRef.current = true
     if (!ttsEnabled || !ttsReady || !lastAssistantId || !lastAssistantContent) return
+    const msgSay = messages.find((m) => m.id === lastAssistantId)?.say
     let n = narrationRef.current
     if (!n || n.msgId !== lastAssistantId) {
-      // Emission swap: flush the previous emission's held sentences (it
-      // ended without a usable tag) BEFORE the new utterance is announced.
-      // beginStream no longer supersedes (#83): the player queues the new
-      // emission until the current utterance drains, so the flushed
-      // sentences play through and the new voice starts right after.
+      // Emission swap (different message id): flush the previous emission's
+      // held sentences (it ended without a usable tag) BEFORE the new
+      // utterance is announced. beginStream no longer supersedes (#83): the
+      // player queues the new emission until the current utterance drains,
+      // so the flushed sentences play through and the new voice starts
+      // right after.
       const prev = n
       if (prev) {
         // Close the previous emission's stream utterance OUT: end() is what
@@ -8593,18 +8734,50 @@ export function ChatPanel() {
         // usable <say> tag still speaks, verbatim.
         for (let i = prev.spoken; i < chunks.length; i++) prev.feed.append(chunks[i])
         prev.feed.end()
+        n = null // prev is closed; the block below opens the new emission's feed
       }
+      // New emission of the same message (coalesced turn): the PREVIOUS
+      // emission's narration must be closed out even though the msgId is
+      // unchanged — end() lets its stream utterance drain so the next
+      // briefing is not stuck behind it. The flush loops below read the
+      // CURRENT msg.say, so they skip the fallback when this emission has
+      // its own briefing (same dedupe key as the spoken path).
+      if (n && msgSay != null && n.said) {
+        n.feed.end()
+        n = null
+      }
+      if (!n) {
+        const feed = beginNarration(lastAssistantId)
+        if (!feed) return
+        n = { msgId: lastAssistantId, spoken: 0, said: false, feed }
+        narrationRef.current = n
+        lastSpokenRef.current = lastAssistantId
+      }
+    }
+    if (n.said) {
+      // #237: a coalesced turn overwrites msg.say per emission on the SAME
+      // msgId. A different say text is a NEW emission's briefing: close the
+      // previous utterance out (end() lets its stream drain, #83) and start
+      // a fresh narration for the new briefing. The same-say early return
+      // is the remount guard: the module latch says this briefing played.
+      if (msgSay == null || wasSaySpoken(lastAssistantId, msgSay)) return
+      n.feed.end()
       const feed = beginNarration(lastAssistantId)
       if (!feed) return
       n = { msgId: lastAssistantId, spoken: 0, said: false, feed }
       narrationRef.current = n
-      lastSpokenRef.current = lastAssistantId
     }
-    if (n.said) return
-    const msgSay = messages.find((m) => m.id === lastAssistantId)?.say
     if (msgSay != null) {
       // Briefing arrived: drop the held verbatim sentences, speak the
       // briefing alone (spokenLine clamps it to the cap; markdown-free).
+      // #237: the latch is the say TEXT at module scope — a remount must
+      // not re-feed this briefing, but a NEW briefing for the same msgId
+      // (the next emission of the turn) must still be spoken.
+      if (wasSaySpoken(lastAssistantId, msgSay)) {
+        n.said = true
+        return
+      }
+      markSaySpoken(lastAssistantId, msgSay)
       n.said = true
       n.feed.append(spokenLine(msgSay, lastAssistantContent))
       return
@@ -8630,9 +8803,15 @@ export function ChatPanel() {
     wasStreamingRef.current = false
     const n = narrationRef.current
     if (n) {
-      if (!n.said) {
-        // The last emission ended without a briefing: flush its held
-        // sentences so the fallback stays verbatim, never silence.
+      const msgSay = messages.find((m) => m.id === n.msgId)?.say
+      if (!n.said && (msgSay == null || !wasSaySpoken(n.msgId, msgSay))) {
+        // The last emission ended without a (spoken) briefing: flush its
+        // held sentences so the fallback stays verbatim, never silence.
+        // #237: on a remount the new narration entry starts said=false even
+        // though the briefing already played (module-scope latch) — the
+        // wasSaySpoken guard keeps that remount from flushing the fallback
+        // verbatim on top of the already-spoken briefing.
+        if (msgSay != null) markSaySpoken(n.msgId, msgSay)
         const msg = messages.find((m) => m.id === n.msgId)
         const chunks = splitSentences(liveProse(msg?.content ?? ''))
         for (let i = n.spoken; i < chunks.length; i++) n.feed.append(chunks[i])
@@ -8674,8 +8853,32 @@ export function ChatPanel() {
       <div
         ref={transcriptRef}
         onScroll={onTranscriptScroll}
+        onContextMenu={onTranscriptContextMenu}
         className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4"
       >
+        {/* #201: selection search menu (FilesPanel pattern) — item renders
+            only when the contextmenu carried an active transcript selection. */}
+        {searchSelection !== null && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setSearchSelection(null)} onContextMenu={(e) => { e.preventDefault(); setSearchSelection(null) }} />
+            <div
+              className="fixed z-50 w-44 rounded bg-zinc-900 py-1 text-xs shadow-xl"
+              role="menu"
+              aria-label="Search selection"
+            >
+              <button
+                className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
+                role="menuitem"
+                onClick={(e) => {
+                  openExternal(googleSearchUrl(searchSelection), e)
+                  setSearchSelection(null)
+                }}
+              >
+                Search on Google
+              </button>
+            </div>
+          </>
+        )}
         {conversationId === null && (
           <DraftDestinationCard />
         )}
@@ -10042,7 +10245,10 @@ export function Composer() {
         // resolves through the conversation (the header values ARE what
         // runs). Falls back to the current defaults when untouched.
         const ds = useAgent.getState().draftScope
-        const created = await createConversation(displayText.slice(0, 40) || 'New chat', dest, {
+        // Issue #255: provider-injected `<system_*>` control text (the
+        // low-context warning) must never become the chat's name — strip it
+        // before the mechanical slice.
+        const created = await createConversation(stripProviderMarkup(displayText).slice(0, 40) || 'New chat', dest, {
           model: ds?.model ?? useAgent.getState().globalModel,
           effort: ds?.effort ?? useAgent.getState().globalEffort,
         })

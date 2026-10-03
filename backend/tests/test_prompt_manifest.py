@@ -199,9 +199,97 @@ def test_no_unactionable_sandbox_guidance():
     not HOST_WIN, reason="win-local render facts are canonical on Windows"
 )
 def test_win_local_keeps_sandbox_guidance():
-    """Issue #179 acceptance: Windows local renders are unchanged."""
+    """Issue #179 acceptance, updated for #186: the SANDBOX SECTION still
+    carries boot/run/stop mechanics for the local Windows render - the
+    duplicated guidelines copy was removed, not the guidance itself."""
     text = pm.render_combo("win-local")["rendered_text"]
-    assert "Boot with sandbox_test and run commands via sandbox_run" in text
+    assert "Boot with `sandbox_test`" in text
+    assert "sandbox_stop" in text
+
+
+@pytest.mark.skipif(not HOST_WIN, reason="duplication clusters are a win-local render fact")
+def test_no_duplicated_guidance_clusters_win_local():
+    """Issue #186: the five duplicated-guidance clusters must each appear
+    exactly once per rendered win-local prompt (string counts in the
+    manifest). The sandbox section is the single home for the
+    test-environment rule, containment rules, and toolkit persistence."""
+    text = pm.render_combo("win-local-compaction")["rendered_text"]
+    # SYN-12: test-environment rule (loop.py guidelines copy vs sandbox.py)
+    assert text.count("Choose the test environment") == 1
+    # SYN-17: sandbox containment x3 (never host equivalent / never host
+    # input / windows-mcp is the GUI layer)
+    assert text.count("never launch a host equivalent") == 1
+    # containment bullet in the guidelines block was removed; the
+    # keep-it-inside-the-VM idea now lives only in the sandbox section
+    assert text.count("Sandbox work stays IN the sandbox") == 0
+    assert text.count("INSIDE the VM") == 1
+    # SYN-43: the editing-leftover parenthetical was deleted
+    assert "see the sandbox section) instead. Host input" not in text
+    # SYN-44: env-line punctuation — no doubled period after the note
+    assert "utilities.; " not in text
+
+
+@pytest.mark.skipif(not HOST_WIN, reason="duplication clusters are a win-local render fact")
+def test_exit_plan_flow_once_per_render_all_win_local_variants():
+    """Issue #186 return trip (SYN-45 + review coverage): the exit-plan
+    flow appears exactly once per rendered win-local prompt — the
+    plan-mode note carries the full flow, the schema and the block
+    result stay one-line summaries — across EVERY win-local variant,
+    not just one."""
+    from backend.agent.loop import EXIT_PLAN_SCHEMA, _plan_block_result
+
+    plan_combos = [
+        "win-local-plan-compaction",
+        "win-local-noskills-nomemory-plan",
+    ]
+    other_combos = [
+        "win-local",
+        "win-local-compaction",
+        "win-local-noshot-override-sandboxonly",
+    ]
+    for combo in plan_combos:
+        text = pm.render_combo(combo)["rendered_text"]
+        assert text.count("Plan mode is ON") == 1, combo
+        assert text.count("present your plan by calling") == 1, combo
+    for combo in other_combos:
+        # plan mode is off: the note (and its exit-plan flow) is absent
+        text = pm.render_combo(combo)["rendered_text"]
+        assert text.count("Plan mode is ON") == 0, combo
+    # the schema description is a one-line summary: the re-presentation
+    # detail lives only in the plan-mode note
+    assert "re-present" not in EXIT_PLAN_SCHEMA["function"]["description"]
+    # the block result stays capability-neutral and one sentence
+    err = _plan_block_result("write_file")["error"]
+    assert err.count("plan mode is on") == 1
+    assert "exit_plan" not in err
+    # no content lost: plan renders still carry the sandbox mechanics
+    # (the sandbox-only plan combo renders the full sandbox section)
+    stext = pm.render_combo("win-local-sandboxonly")["rendered_text"]
+    assert "sandbox_status" in stext
+    assert "sandbox_stop" in stext
+    # no content lost: the sandbox section still carries mechanics
+    assert "Desktop\\\\toolkit" in stext or "Desktop\\toolkit" in stext
+
+
+def test_windows_bash_note_has_no_trailing_period():
+    """Issue #186 (SYN-44): the note composes into 'X; <note>; use
+    commands' in the local env line — a trailing period doubles up."""
+    from backend.agent import loop
+
+    note = loop._shell_phrase(True) if hasattr(loop, "_shell_phrase") else ""
+    assert not note.rstrip().endswith("."), note
+
+
+def test_posix_local_env_line_grammatical():
+    """Issue #186 AC: the posix-local env line stays grammatical after
+    the punctuation fix (no doubled sentence separator)."""
+    import re
+
+    text = pm.render_combo("posix-local")["rendered_text"]
+    m = re.search(r"Runtime environment:[^\n]*", text)
+    assert m, text[:400]
+    assert ".; " not in m.group(0), m.group(0)
+    assert "; use commands and paths valid" in m.group(0)
 
 
 def test_skills_axis_flips_skills_index_section():

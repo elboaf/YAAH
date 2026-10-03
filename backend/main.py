@@ -1328,8 +1328,14 @@ async def api_mcp_add_server(body: McpServerBody):
     trust: the command runs locally with user permissions / the URL is
     contacted with the given headers."""
     name = body.name.strip()
+    # Charset check first (same rule the UI has always shown), then the
+    # reserved-prefix rules shared with config-side registration (#194):
+    # mcp_* names would mint tool names that shadow the built-in namespace.
     if not _re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
         raise HTTPException(status_code=400, detail="name: letters/digits/-/_ only")
+    invalid = _mcp.validate_server_name(name)
+    if invalid:
+        raise HTTPException(status_code=400, detail=invalid)
     command, url = body.command.strip(), body.url.strip()
     if bool(command) == bool(url):
         raise HTTPException(
@@ -1874,6 +1880,32 @@ async def api_file_preview(body: PreviewRequest):
     return result
 
 
+@app.get("/api/files/exists")
+async def api_file_exists(workspace: str, path: str):
+    """Containment-checked existence probe for chat path linkification (#258).
+
+    True only for an existing FILE whose resolved location stays inside the
+    workspace — a path escaping the workspace must never become a link (the
+    probe deliberately answers False rather than 400 so a malicious message
+    can't distinguish outside paths from missing ones)."""
+    host = _workspace_host(workspace)
+    if host is not None:
+        res = await host.proxy(
+            "GET",
+            "/api/files/exists",
+            params={"workspace": _host_ws(host, workspace), "path": path},
+        )
+        return _proxy_result(res)
+
+    root = workspace_root(workspace)
+    if not root.exists():
+        return {"exists": False}
+    target = (root / path).resolve()
+    if target != root and root not in target.parents:
+        return {"exists": False}
+    return {"exists": target.is_file()}
+
+
 @app.delete("/api/files")
 async def api_delete_file(workspace: str, path: str):
     """Delete a file from the workspace (file-tree context menu)."""
@@ -1953,10 +1985,17 @@ async def api_export_conversation(conversation_id: int):
             lines += [f"**🔧 tool: {name}**", "", "```json", r["content"], "```", ""]
         elif role == "assistant":
             lines += [f"**🤖 assistant**", "", r["content"] or "", ""]
-            # #226: the briefing the voice spoke for this emission, when one
-            # was captured (say toggle off ⇒ column empty ⇒ no line here).
+            # #226/#230: the briefing the voice spoke for this emission, when
+            # one was captured (say toggle off ⇒ column empty ⇒ no line here).
+            # #230: fallback-derived lines are marked "(auto)" so a reader can
+            # attribute the briefing; raw model briefings render verbatim.
             if r.get("say"):
-                lines += [f"*Briefing:* {r['say']}", ""]
+                label = (
+                    "Briefing (auto)"
+                    if r.get("say_is_fallback")
+                    else "Briefing"
+                )
+                lines += [f"*{label}:* {r['say']}", ""]
             for tc in r.get("tool_calls") or []:
                 if isinstance(tc, dict) and tc.get("id") and not tc.get("name"):
                     fn = tc.get("function") or {}
@@ -2095,10 +2134,10 @@ async def api_set_config(body: ConfigUpdate):
         if "enabled" in merged_mem:
             merged_mem["enabled"] = bool(merged_mem["enabled"])
         updates["memory"] = merged_mem
-    # Interface scale is clamped to the shipped range (Settings offers
-    # 100/110/125/150%; anything wilder would break the compact layout).
+    # Interface scale is clamped to the shipped range (Settings offers a
+    # 100–200% slider since #171; anything wilder would break the layout).
     if "ui_scale" in updates:
-        updates["ui_scale"] = min(1.5, max(1.0, float(updates["ui_scale"] or 1.0)))
+        updates["ui_scale"] = min(2.0, max(1.0, float(updates["ui_scale"] or 1.0)))
     # Context-window overrides: when the key is present it is the
     # authoritative full map (Settings sends everything it shows, so removals
     # persist); when absent the stored map is untouched.
