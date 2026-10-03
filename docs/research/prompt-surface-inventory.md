@@ -33,7 +33,7 @@ wholesale — it *replaces*, not composes: loop.py:1338).
 Major sections (in output order):
 
 1. Identity line — `"You are an expert AI coding agent working inside a user's project workspace."` (loop.py:376)
-2. Runtime-environment line — dynamic, from `_local_env_line()` (loop.py:199–207) or `RemoteSession.env_line()` (remote.py:138–161); includes the shell phrase from `_shell_phrase()` (loop.py:186–196), which composes `windows_bash_note()` (shell.py:67–70) and `CMD_TOOLS_NOTE` (remote.py:111–114)
+2. Runtime-environment line — dynamic, from `_local_env_line()` (loop.py:205–212) or `RemoteSession.env_line()` (remote.py:138–161); includes the shell phrase from `_shell_phrase()` (loop.py:186–196), which composes `windows_bash_note()` (shell.py:67–70) and `CMD_TOOLS_NOTE` (remote.py:111–114)
 3. `"You have tools: …"` — a hand-maintained **prose list** of tool names (loop.py: `You have tools` block); Windows adds powershell + 11 computer-use + 4 sandbox tool names (conditional, see §3)
 4. Guidelines (loop.py:382–425) — explore-first, gh-CLI-over-scraping, edit-vs-write, test-environment-by-side-effects, sandbox containment, clean-tree failure triage, web research, commit policy, narration, shell cwd/cd lifetime
 5. Spoken briefing (`<say>`) contract (loop.py:427–446), ≤400 chars

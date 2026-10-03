@@ -222,11 +222,17 @@ MAX_AGENTS_NOTES_CHARS = 8_000
 def _shell_phrase(windows: bool) -> str:
     if windows:
         if resolve_git_bash():
-            return f"Git Bash; {windows_bash_note(True)}"
+            # No trailing period (issue #186 SYN-44): the phrase composes
+            # into "X; <note>; use commands...", and windows_bash_note's
+            # own period doubled up as ".;" in every win-local env line.
+            return f"Git Bash; {windows_bash_note(True)}".rstrip(".")
         shell = Path(os.environ.get("COMSPEC") or "cmd.exe").name.lower()
         phrase = f"the system shell ({shell})"
         if "cmd" in shell:
-            phrase += f"; {CMD_TOOLS_NOTE}"
+            # No trailing period: this phrase composes into "X; <phrase>;
+            # use commands..." (issue #186 SYN-44 — the note's own period
+            # doubled up as ".;" in every win-local env line).
+            phrase += f"; {CMD_TOOLS_NOTE}".rstrip(".")
         return phrase
     shell = Path(os.environ.get("SHELL") or "bash").name
     return f"the system shell ({shell})"
@@ -304,8 +310,8 @@ Computer use (desktop tools):
 - These move the USER'S REAL mouse and keyboard. For an app running
   inside the Windows Sandbox they are forbidden — the sandbox has its
   own input session; drive the sandbox GUI via the windows-mcp MCP
-  server (see the sandbox section) instead. Host input here is only
-  for apps running on the host itself.
+  server instead (the sandbox section covers how). Host input here is
+  only for apps running on the host itself.
 - Prefer shell/file tools for anything reachable that way; computer use
   is for GUI behavior you must observe or exercise.
 - Structured first, pixels second: read_ui_tree gives exact element
@@ -452,27 +458,14 @@ Guidelines:
   paths unless the task specifically requires the main checkout.
 """
 
-    if windows and host is None:
-        # Issue #179: the sandbox bullets name sandbox_test/sandbox_run and the
-        # windows-mcp server — tools that exist only for a local Windows
-        # session. Never name a tool the schema set does not carry.
-        prompt += """- Choose the test environment by side effects. Run automated tests and
-  validation on the host by default—including full suites, builds, Python
-  scripts, smoke tests, typechecks and lint—when they won't open a new
-  window or reasonably interfere with or interrupt the host user. Use the
-  sandbox when project execution opens/listens on a network port, when a GUI
-  window must be opened for visual inspection, or when a test could otherwise
-  disrupt the host. Boot with sandbox_test and run commands via sandbox_run.
-  Size timeouts to the work; chunk long suites when needed. The VM is a clean
-  image: install missing tools into the toolkit (installs persist across
-  sandboxes).
-- Sandbox work stays IN the sandbox: every dependency the app under test
-  needs (runtimes, browsers, portable tools) is installed into the VM's
-  toolkit — never launch a host equivalent (e.g. the host browser) to
-  exercise the app, and never drive the app's GUI with the host
-  mouse/keyboard tools; the windows-mcp MCP server (auto-started in
-  the sandbox) is the GUI layer for that.
-"""
+    # Issue #179: sandbox guidance must never name a tool the schema set
+    # does not carry — the sandbox tools exist only for a local Windows
+    # session, which is exactly when the full sandbox section
+    # (sandbox.prompt_section(), appended below) renders. Issue #186
+    # (SYN-12/17): that section is the SINGLE home for the
+    # test-environment rule, containment rules, and toolkit persistence —
+    # guidelines bullets that duplicated ~1 KB of it (and had drifted)
+    # were removed.
 
     # #207: the spoken-briefing section is only ever generated when the
     # voice.say_emissions toggle is on — with it off, these bytes would sit
@@ -821,12 +814,12 @@ EXIT_PLAN_SCHEMA = {
     "type": "function",
     "function": {
         "name": "exit_plan",
+        # SYN-45 (issue #186): one-line summary — the full approval flow
+        # (approval ends plan mode and the run continues; feedback comes
+        # back for re-presentation) lives only in the plan-mode note.
         "description": (
-            "Present your plan for approval while in plan mode. Blocks until "
-            "the user responds: approval ends plan mode and the SAME run "
-            "continues straight into execution; anything else comes back as "
-            "feedback for you to incorporate and re-present. Call this "
-            "instead of writing the plan as plain text."
+            "Present your plan for approval while in plan mode. Call "
+            "this instead of writing the plan as plain text."
         ),
         "parameters": {
             "type": "object",
