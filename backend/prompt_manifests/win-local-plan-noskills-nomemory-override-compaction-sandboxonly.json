@@ -28,9 +28,9 @@
     },
     {
       "name": "compaction-summary",
-      "bytes": 93,
-      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa",
-      "text": "Earlier conversation summary (for context only):\nFixture summary of the earlier conversation."
+      "bytes": 158,
+      "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397",
+      "text": "Earlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
     }
   ],
   "system_messages": [
@@ -41,17 +41,17 @@
     },
     {
       "role": "system",
-      "bytes": 93,
-      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa"
+      "bytes": 158,
+      "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397"
     }
   ],
-  "total_bytes": 1474,
-  "rendered_sha256": "a7f361ea1f71928df0d9ce0a8b6556c316074d830928dafd54ab0e6e2d2f65f9",
+  "total_bytes": 1539,
+  "rendered_sha256": "fe18b20490f51c77fb916c195e7e7f0277ab57c1792990ec8c15e9c6f0ef96b2",
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1247,
-      "sha256": "343499818bdedcebe9851082ffc3a9ec46992ac60e67500d32e92c06c90d8534"
+      "bytes": 1076,
+      "sha256": "95c2c6e65cdab82ccb33ea14189fd4327b050f15bfc02cc217560b3b71838bb2"
     },
     {
       "name": "get_help",
@@ -150,33 +150,33 @@
     },
     {
       "name": "mouse_move",
-      "bytes": 1174,
-      "sha256": "6e93ed436f8e7a91b08feb57ff06352e4fb5b5d450284b0c8520973848f08411"
+      "bytes": 1166,
+      "sha256": "7ac7a3e4cd782d98988c9bd4faab0c8f3a8a7a3fa9d5201951e3b3d7cea6da55"
     },
     {
       "name": "mouse_click",
-      "bytes": 1509,
-      "sha256": "319cd625269347fa0e4a445e3c1aea4f0a6b2be40eb17fc2542f1972c32c2cd4"
+      "bytes": 1501,
+      "sha256": "9f7b162cf4115e8546d102d13204c47960769cc54ef062f5424064e30fc2d171"
     },
     {
       "name": "mouse_drag",
-      "bytes": 1537,
-      "sha256": "46d60132d5e0cd9f0babb4b3d2756f173a880a14160475d4339f424fd94997ce"
+      "bytes": 1529,
+      "sha256": "90568aeea9a98db7dd8eaee8e75e87aff718c03eb25b40ac3b7ef1c3f11844c1"
     },
     {
       "name": "mouse_scroll",
-      "bytes": 1117,
-      "sha256": "d92be11aa06b729e11d01b5e8f5f30178b8d560071256516241a3e73651989a6"
+      "bytes": 1109,
+      "sha256": "8b55d6899b4c142e22be4c53e39573b3e83da0b85994836d518efa14a5e58f92"
     },
     {
       "name": "type_text",
-      "bytes": 740,
-      "sha256": "0888eaca49727651c532ef1892c528bf720ba44f142d4b3d4cae0816f309bb62"
+      "bytes": 732,
+      "sha256": "0cffa3ff9cba02e764003bfcb904a37f3e8741056dfe40772c29d5fe9519d111"
     },
     {
       "name": "press_key",
-      "bytes": 831,
-      "sha256": "11a66cd28404236b9e0312d2e3af8453af759a3dab95b6ee9b4b426b49752b2a"
+      "bytes": 823,
+      "sha256": "a73f4c4823ab95aa8a368ea2efd60a24c4b7e7a1ee6aca46221c013cbb1e26c7"
     },
     {
       "name": "wait",
@@ -185,13 +185,13 @@
     },
     {
       "name": "sandbox_test",
-      "bytes": 818,
-      "sha256": "20b8d7a11ca0ff00124be9abbb734a99da5021a719eb12ce914dcffa2b83e087"
+      "bytes": 817,
+      "sha256": "f19cb2597d3659949da951b83fa0c993ea9024369bbc07540afb56c54034b9b1"
     },
     {
       "name": "sandbox_run",
-      "bytes": 1574,
-      "sha256": "b971a9be3d45d285b8a0d9edbb53c1a613d45a392fe98f0d5c1085d9afce1ede"
+      "bytes": 957,
+      "sha256": "28f58ab55c08689970e7cd04b0370e1fd05c7a84d9fe5cf1bcba26301b83717f"
     },
     {
       "name": "sandbox_status",
@@ -205,16 +205,16 @@
     },
     {
       "name": "powershell",
-      "bytes": 1165,
-      "sha256": "6fc02d9c1ef27d76905741d24b2c57788473ca13a003896ace430915dba5211d"
+      "bytes": 879,
+      "sha256": "504ede17f08a90e99600f42e1d8e04a35e375c450d45b53ead1a18a88bc5e811"
     },
     {
       "name": "exit_plan",
-      "bytes": 516,
-      "sha256": "62c6b65dffd90d030a2bf1774d95b5db68bc4a51e4de2dd21c3444a2713df11b"
+      "bytes": 332,
+      "sha256": "ca9d3c5350d5bfa0bd4f7e610a135d48753a366607c0d26284b954f865b43b8c"
     }
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run with no user to approve anything: read-only tools (search, status checks, observation) still work, but every tool that writes or executes — file edits, bash/powershell, and the sandbox VM tools that install or change anything — comes back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves.\n\n====\n\nEarlier conversation summary (for context only):\nFixture summary of the earlier conversation."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n---\n\n# Scheduled agent: sandbox-only policy\n\nThis is an unattended scheduled run with no user to approve anything: read-only tools (search, status checks, observation) still work, but every tool that writes or executes — file edits, bash/powershell, and the sandbox VM tools that install or change anything — comes back as \"skipped: approval required\". Do not attempt them or retry after a skip. Work read-only: gather information, check status, and report findings, keeping anything disruptive as a recommendation for the user to run themselves.\n\n====\n\nEarlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
 }

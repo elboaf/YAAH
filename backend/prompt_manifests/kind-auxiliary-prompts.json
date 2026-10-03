@@ -3,16 +3,16 @@
   "kind": "auxiliary",
   "sections": [],
   "system_messages": [],
-  "total_bytes": 1190,
-  "rendered_sha256": "529df3b8c97f979ecc9d931db439f91766dde87cc5f213175539ad92cf8e2600",
+  "total_bytes": 1238,
+  "rendered_sha256": "2de2a3130715a3a90986bed31fa4979871f247b14160cd745b693c4478165fc3",
   "tool_schemas": [],
   "subagent_prompts": {},
   "auxiliary_prompts": {
     "compaction_summarizer": {
       "builder": "backend/agent/compaction.py:summarize_messages (captured)",
-      "bytes": 685,
-      "sha256": "e8c203fd5119ba6fe7e2fca79b8d9362a88ee3c471c248734db5d27b8b7ac105",
-      "text": "You compress the earlier portion of an AI agent session into a compact continuity summary. The conversation transcript remains preserved for review and search; this summary is only a bounded replacement in future model prompts. If an earlier summary is included, merge its important facts with the newly summarized messages.\nPreserve: the user's goals and explicit instructions; decisions made and why; concrete anchors — file paths, branch names, commands, function/variable names, error messages; what was attempted and what failed; the current state and obvious next steps.\nWrite at most 400 words, plain prose or terse bullets. Reply with JSON only, no fences: {\"summary\": \"...\"}"
+      "bytes": 733,
+      "sha256": "e03e4eff0b8b446cef0d9edf0c637cc72a823926fb3116c8afae22f9e8df0750",
+      "text": "You compress the earlier portion of an AI agent session into a compact continuity summary. The conversation transcript remains preserved for review and search; this summary is only a bounded replacement in future model prompts. If an earlier summary is included, merge its important facts with the newly summarized messages.\nPreserve: the user's goals and explicit instructions; decisions made and why; concrete anchors — file paths, branch names, commands, function/variable names, error messages; what was attempted and what failed; the current state and obvious next steps.\nWrite at most 400 words, plain prose or terse bullets (the platform may keep up to 12,000 characters). Reply with JSON only, no fences: {\"summary\": \"...\"}"
     },
     "title_generation": {
       "builder": "backend/agent/loop.py:_generate_conversation_title (captured)",

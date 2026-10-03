@@ -78,10 +78,15 @@ def test_system_prompt_includes_skill_index(skills_dir):
 
 def test_bodies_for_prompt(skills_dir):
     skill_registry.scan_skills()
+    # #193: unknown names are skipped here (reported as events by the loop,
+    # via split_known_unknown) so they never enter the authoritative block.
     bodies = skill_registry.bodies_for_prompt(["review", "nope"])
     assert "# Skill: review" in bodies
     assert "Review code carefully." in bodies
-    assert "# Skill not found: nope" in bodies
+    assert "nope" not in bodies
+    known, unknown = skill_registry.split_known_unknown(["review", "nope"])
+    assert known == ["review"]
+    assert unknown == ["nope"]
 
 
 def test_load_skill_tool(skills_dir):
@@ -256,3 +261,47 @@ def test_resolve_path_allows_skill_reads_but_not_writes(tmp_path, monkeypatch):
     ).resolve()
     with pytest.raises(ValueError):
         resolve_path(str(workspace), str(skills_root / "review" / "SKILL.md"), for_write=True)
+
+
+# ---- issue #192: injection cap consistency ----------------------------------
+
+def test_oversized_body_truncation_marked_in_parse_and_result(skills_dir):
+    big = "z" * (skill_registry.MAX_SKILL_BODY_CHARS + 1000)
+    make_skill(skills_dir, "big-skill", big)
+    skill = skill_registry.scan_skills()["big-skill"]
+    assert skill.body.endswith("…[truncated]")
+    assert len(skill.body) <= skill_registry.MAX_SKILL_BODY_CHARS + len(
+        "…[truncated]"
+    )
+    loaded = []
+    messages = [{"role": "system", "content": "sys"}]
+    result = skill_registry.load_skill_into_messages(
+        {"name": "big-skill"}, loaded, messages
+    )
+    assert result.get("truncated") is True
+    assert "…[truncated]" in messages[0]["content"]
+
+
+def test_body_under_cap_not_marked(skills_dir):
+    skill = skill_registry.scan_skills()["review"]
+    assert not skill.body.endswith("…[truncated]")
+
+
+def test_truncation_flag_true_only_when_actually_truncated(skills_dir):
+    # CodeRabbit return trip #1 on PR #251: a skill whose body merely ENDS
+    # with the truncation marker but is under the cap must not report
+    # truncated=True — the flag reflects an actual cut.
+    make_skill(skills_dir, "possum", "ends with the marker…[truncated]")
+    loaded = []
+    messages = [{"role": "system", "content": "sys"}]
+    result = skill_registry.load_skill_into_messages(
+        {"name": "possum"}, loaded, messages
+    )
+    assert result.get("truncated") is None
+
+
+def test_pathological_description_clamped_in_index(skills_dir):
+    make_skill(skills_dir, "loud", "Body.", description="D" * 5000)
+    idx = skill_registry.index_for_prompt()
+    line = next(ln for ln in idx.splitlines() if ln.startswith("- loud:"))
+    assert len(line) <= 300

@@ -10,7 +10,11 @@ Emits JSON-line events for the frontend:
   {'type': 'tool_progress', 'call_id', 'chunk'} - live shell output while a tool runs
   {'type': 'tool_result', 'name', 'result'} - tool output
   {'type': 'done'}                          - final answer complete
-  {'type': 'error', 'message'}              - fatal error
+  {'type': 'error', 'message', 'fatal', 'kind'} - error event; `fatal`
+                                                 marks turn-terminal hard
+                                                 failures (default true),
+                                                 `kind` names the soft path
+                                                 (e.g. "claim_refused")
 """
 
 import asyncio
@@ -22,6 +26,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
+from backend.agent.prompt_manifest import compact_summary_message
 from backend.agent import file_changes
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
@@ -43,7 +48,33 @@ from backend.db.database import (
 )
 
 
-AUTO_TITLE_MAX_CHARS = 60
+AUTO_TITLE_MAX_CHARS = 60  # hard clamp the consumer enforces; word count
+# in the prompt below is best-effort guidance, not a validated contract
+
+# The mechanical slice length the frontend uses for new-chat names — the
+# backend compare must match it exactly (loop.py:100 guard, issue #60).
+AUTO_TITLE_SLICE_CHARS = 40
+
+
+def _strip_provider_markup(text: str) -> str:
+    """Strip a leading run of provider-injected `<system_*>…</system_*>`
+    blocks (issue #255): the model provider injects control text like
+    `<system_warning>⚠️ CONTEXT LOW …` into the stream near the context
+    limit, and it must never reach the title channel. An unclosed leading
+    tag consumes the rest of the string. Mirrors src/providerMarkup.ts.
+    """
+    t = text.lstrip()
+    while True:
+        m = re.match(r"^<system_(\w+)>", t)
+        if not m:
+            return t
+        tag = m.group(1)
+        closer = f"</system_{tag}>"
+        idx = t.find(closer)
+        if idx == -1:
+            return ""
+        t = t[idx + len(closer):].lstrip()
+
 
 
 async def _emit_file_changes(
@@ -116,7 +147,7 @@ async def _generate_conversation_title(
     conv = await get_conversation(conversation_id)
     if (conv or {}).get("chat_type") == "agent":
         return None
-    current = (conv or {}).get("title") or ""
+    current = _strip_provider_markup((conv or {}).get("title") or "")
     history = await get_messages(conversation_id)
     first_user_text = next(
         (
@@ -126,7 +157,15 @@ async def _generate_conversation_title(
         ),
         user_text,
     )
-    if current != "New chat" and current != first_user_text[:40]:
+    first_user_text = _strip_provider_markup(first_user_text)
+    # An empty sanitized current means the stored title is entirely provider
+    # markup (issue #255) — not a manual rename, so the model title may
+    # replace it.
+    if (
+        current
+        and current != "New chat"
+        and current != first_user_text[:AUTO_TITLE_SLICE_CHARS]
+    ):
         return None
 
     title_prompt = [
@@ -247,11 +286,17 @@ MAX_AGENTS_NOTES_CHARS = 8_000
 def _shell_phrase(windows: bool) -> str:
     if windows:
         if resolve_git_bash():
-            return f"Git Bash; {windows_bash_note(True)}"
+            # No trailing period (issue #186 SYN-44): the phrase composes
+            # into "X; <note>; use commands...", and windows_bash_note's
+            # own period doubled up as ".;" in every win-local env line.
+            return f"Git Bash; {windows_bash_note(True)}".rstrip(".")
         shell = Path(os.environ.get("COMSPEC") or "cmd.exe").name.lower()
         phrase = f"the system shell ({shell})"
         if "cmd" in shell:
-            phrase += f"; {CMD_TOOLS_NOTE}"
+            # No trailing period: this phrase composes into "X; <phrase>;
+            # use commands..." (issue #186 SYN-44 — the note's own period
+            # doubled up as ".;" in every win-local env line).
+            phrase += f"; {CMD_TOOLS_NOTE}".rstrip(".")
         return phrase
     shell = Path(os.environ.get("SHELL") or "bash").name
     return f"the system shell ({shell})"
@@ -329,8 +374,8 @@ Computer use (desktop tools):
 - These move the USER'S REAL mouse and keyboard. For an app running
   inside the Windows Sandbox they are forbidden — the sandbox has its
   own input session; drive the sandbox GUI via the windows-mcp MCP
-  server (see the sandbox section) instead. Host input here is only
-  for apps running on the host itself.
+  server instead (the sandbox section covers how). Host input here is
+  only for apps running on the host itself.
 - Prefer shell/file tools for anything reachable that way; computer use
   is for GUI behavior you must observe or exercise.
 - Structured first, pixels second: read_ui_tree gives exact element
@@ -477,27 +522,14 @@ Guidelines:
   paths unless the task specifically requires the main checkout.
 """
 
-    if windows and host is None:
-        # Issue #179: the sandbox bullets name sandbox_test/sandbox_run and the
-        # windows-mcp server — tools that exist only for a local Windows
-        # session. Never name a tool the schema set does not carry.
-        prompt += """- Choose the test environment by side effects. Run automated tests and
-  validation on the host by default—including full suites, builds, Python
-  scripts, smoke tests, typechecks and lint—when they won't open a new
-  window or reasonably interfere with or interrupt the host user. Use the
-  sandbox when project execution opens/listens on a network port, when a GUI
-  window must be opened for visual inspection, or when a test could otherwise
-  disrupt the host. Boot with sandbox_test and run commands via sandbox_run.
-  Size timeouts to the work; chunk long suites when needed. The VM is a clean
-  image: install missing tools into the toolkit (installs persist across
-  sandboxes).
-- Sandbox work stays IN the sandbox: every dependency the app under test
-  needs (runtimes, browsers, portable tools) is installed into the VM's
-  toolkit — never launch a host equivalent (e.g. the host browser) to
-  exercise the app, and never drive the app's GUI with the host
-  mouse/keyboard tools; the windows-mcp MCP server (auto-started in
-  the sandbox) is the GUI layer for that.
-"""
+    # Issue #179: sandbox guidance must never name a tool the schema set
+    # does not carry — the sandbox tools exist only for a local Windows
+    # session, which is exactly when the full sandbox section
+    # (sandbox.prompt_section(), appended below) renders. Issue #186
+    # (SYN-12/17): that section is the SINGLE home for the
+    # test-environment rule, containment rules, and toolkit persistence —
+    # guidelines bullets that duplicated ~1 KB of it (and had drifted)
+    # were removed.
 
     # #207: the spoken-briefing section is only ever generated when the
     # voice.say_emissions toggle is on — with it off, these bytes would sit
@@ -745,29 +777,51 @@ def _reinline(item: dict) -> str:
     return reinline_attachments(item.get("text", ""), item.get("attachments"))
 
 
+def invoked_skills_wrapper(block: str) -> str:
+    """The single "# Invoked skills" wrapper shared by both injection paths
+    (turn-path in run_agent, queued-path in _apply_injected_skills).
+
+    One copy on purpose: the variants drifted historically (#195) until the
+    queued path dropped the composer phrasing and the never-deny clause.
+    """
+    return (
+        f"# Invoked skills\n\n"
+        f"The user explicitly invoked the skill(s) below (a chip or "
+        f"/name in the composer) for this turn. They are authoritative: "
+        f"follow them. A skill invoked this way may legitimately be "
+        f"absent from the Skills available list \u2014 that list only "
+        f"carries model-invocable skills, and manual-invocation skills "
+        f"are deliberately hidden from it. Never tell the user an "
+        f"invoked skill is unavailable because it is missing there.\n\n"
+        f"{block}"
+    )
+
+
 def _apply_injected_skills(
     item: dict, loaded_skills: list[str], messages: list
-) -> None:
-    """Add explicitly selected queued-message skills to the active run."""
+) -> list[dict]:
+    """Add explicitly selected queued-message skills to the active run.
+    Returns skill_not_found event dicts the caller must yield (#193: the
+    queued/steer path surfaces unknown skill names to the user exactly like
+    the turn path, instead of silently injecting a "# Skill not found"
+    heading into model context)."""
     names = [
         name
         for name in item.get("skills", [])
         if isinstance(name, str) and name.strip() and name not in loaded_skills
     ]
     if not names:
-        return
+        return []
     loaded_skills.extend(names)
-    block = skill_registry.bodies_for_prompt(names)
+    known, unknown = skill_registry.split_known_unknown(names)
+    events = [{"type": "skill_not_found", "skills": unknown}] if unknown else []
+    block = skill_registry.bodies_for_prompt(known)
     if block and messages and messages[0].get("role") == "system":
         messages[0]["content"] = (
             f"{messages[0]['content']}\n\n---\n\n"
-            f"# Invoked skills\n\n"
-            f"The user explicitly invoked the skill(s) below for this turn. "
-            f"They are authoritative: follow them. A skill invoked this way "
-            f"may legitimately be absent from the Skills available list \u2014 "
-            f"manual-invocation skills are deliberately hidden from it.\n\n"
-            f"{block}"
+            f"{invoked_skills_wrapper(block)}"
         )
+    return events
 
 
 # ---- access-mode gate (PLAN-access-modes.md) -------------------------------
@@ -831,12 +885,12 @@ EXIT_PLAN_SCHEMA = {
     "type": "function",
     "function": {
         "name": "exit_plan",
+        # SYN-45 (issue #186): one-line summary — the full approval flow
+        # (approval ends plan mode and the run continues; feedback comes
+        # back for re-presentation) lives only in the plan-mode note.
         "description": (
-            "Present your plan for approval while in plan mode. Blocks until "
-            "the user responds: approval ends plan mode and the SAME run "
-            "continues straight into execution; anything else comes back as "
-            "feedback for you to incorporate and re-present. Call this "
-            "instead of writing the plan as plain text."
+            "Present your plan for approval while in plan mode. Call "
+            "this instead of writing the plan as plain text."
         ),
         "parameters": {
             "type": "object",
@@ -1292,6 +1346,11 @@ async def run_agent(
             {
                 "type": "error",
                 "message": "a remote edit lease is active in this conversation",
+                # #243: the turn never started — the run "completed" by not
+                # running. Not a failed fire; the scheduler logs it and
+                # settles 'ok' instead of toasting a false "run failed".
+                "fatal": False,
+                "kind": "claim_refused",
             }
         )
         return
@@ -1300,6 +1359,8 @@ async def run_agent(
             {
                 "type": "error",
                 "message": "a turn is already running in this conversation",
+                "fatal": False,
+                "kind": "busy",
             }
         )
         return
@@ -1406,25 +1467,17 @@ async def _run_agent_claimed(
         # Unknown skill names must be visible to the USER, not just injected
         # as "# Skill not found" into the prompt: the chip still renders from
         # the UI's own skills list, so without this event the failure is
-        # silent and the model truthfully denies having the skill.
-        not_found = [
-            n for n in invoked if skill_registry.get_skill(n) is None
-        ]
+        # silent and the model truthfully denies having the skill. #193:
+        # bodies_for_prompt() skips unknowns, so they never reach the
+        # authoritative block either.
+        _, not_found = skill_registry.split_known_unknown(invoked)
         if not_found:
             yield _ndjson({"type": "skill_not_found", "skills": not_found})
         skill_block = skill_registry.bodies_for_prompt(invoked)
         if skill_block:
             system_prompt = (
                 f"{system_prompt}\n\n---\n\n"
-                f"# Invoked skills\n\n"
-                f"The user explicitly invoked the skill(s) below (a chip or "
-                f"/name in the composer) for this turn. They are authoritative: "
-                f"follow them. A skill invoked this way may legitimately be "
-                f"absent from the Skills available list above \u2014 that list only "
-                f"carries model-invocable skills, and manual-invocation skills "
-                f"are deliberately hidden from it. Never tell the user an "
-                f"invoked skill is unavailable because it is missing there.\n\n"
-                f"{skill_block}"
+                f"{invoked_skills_wrapper(skill_block)}"
             )
 
     # The project's own agent instructions (baseline failures, shell quirks,
@@ -1479,12 +1532,13 @@ async def _run_agent_claimed(
         if include_history else []
     )
     messages = [{"role": "system", "content": system_prompt}]
-    if include_history and prompt_state.get("summary"):
-        messages.append({
-            "role": "system",
-            "content": "Earlier conversation summary (for context only):\n"
-            + prompt_state["summary"],
-        })
+    compact_msg = (
+        compact_summary_message(prompt_state)
+        if include_history and prompt_state.get("summary")
+        else None
+    )
+    if compact_msg is not None:
+        messages.append(compact_msg)
     messages.extend(history)
     if not include_history:
         # Fresh-context agent: this turn's text rides in explicitly, with
@@ -1517,8 +1571,12 @@ async def _run_agent_claimed(
 
     # Skills the model has loaded mid-turn via load_skill (deduped, order
     # preserved). Their bodies are appended to the system prompt so every
-    # subsequent model call in this turn sees them.
-    loaded_skills: list[str] = list(invoked)
+    # subsequent model call in this turn sees them. Seeded with the KNOWN
+    # invoked names only (PR #252 return trip): unknown invoked names must
+    # stay out of the dedupe set, so a queued message repeating them still
+    # reports its own skill_not_found event.
+    _, _invoked_unknown = skill_registry.split_known_unknown(invoked)
+    loaded_skills: list[str] = [n for n in invoked if n not in _invoked_unknown]
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
@@ -1744,11 +1802,16 @@ async def _run_agent_claimed(
             # Tag-stripping above is NOT gated: stray tags never become
             # transcript junk and never reach speech either way. Computed
             # before the persist below so the briefing rides the row (#226).
-            _said = (
-                _speak.spoken_line(said, assistant_content)
-                if _say_emissions_enabled()
-                else ""
-            )
+            # #230: the row keeps the RAW model briefing (verbatim, not the
+            # spoken_line() TTS normalization) plus a fallback flag, so the
+            # export can attribute a briefing to the model vs the heuristic;
+            # the wire event stays the normalized TTS input.
+            _say_enabled = _say_emissions_enabled()
+            _said = _speak.spoken_line(said, assistant_content) if _say_enabled else ""
+            # #230: model briefings persist raw; fallback lines persist the
+            # spoken line (there is no raw model text) and are flagged.
+            _say_raw = said if (_say_enabled and said) else (_said if _say_enabled else "")
+            _say_fallback = bool(_say_enabled and not said and _said)
 
             # Persist assistant message (with tool calls if any). #226: the
             # briefing rides on the row (say column) so reloads and export
@@ -1759,7 +1822,8 @@ async def _run_agent_claimed(
                 "assistant",
                 assistant_content,
                 tool_calls=tool_calls,
-                say=_said,
+                say=_say_raw,
+                say_is_fallback=_say_fallback,
             )
 
             # Briefing-first, per emission (#66): EVERY completed model
@@ -1821,7 +1885,8 @@ async def _run_agent_claimed(
                 yield _ndjson(
                     {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "attachments": inj.get("attachments", []), "skills": inj.get("skills", [])}
                 )
-                _apply_injected_skills(inj, loaded_skills, messages)
+                for ev in _apply_injected_skills(inj, loaded_skills, messages):
+                    yield _ndjson(ev)
                 messages.append({"role": "user", "content": _parts_with_images(_reinline(inj), inj.get("images", []))})
 
             # Partition this step's tool calls: spawn_agent delegations run
@@ -2062,7 +2127,8 @@ async def _run_agent_claimed(
                             "skills": inj.get("skills", []),
                         }
                     )
-                    _apply_injected_skills(inj, loaded_skills, messages)
+                    for ev in _apply_injected_skills(inj, loaded_skills, messages):
+                        yield _ndjson(ev)
                     messages.append(
                         {
                             "role": "user",

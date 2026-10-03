@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS messages (
     attachments TEXT,         -- JSON array of structured text attachments (#142)
     sub_agent_transcript TEXT, -- JSON snapshot of a sub-agent run (spawn_agent results)
     say TEXT,                 -- #226: spoken briefing that accompanied this assistant emission
+                              -- #230: the RAW model <say> text (not the TTS
+                              -- normalization); fallback lines carry
+                              -- say_is_fallback=1
+    say_is_fallback INTEGER,  -- #230: 1 when `say` is the heuristic fallback, 0 when model-authored
     meta TEXT,                -- #198: JSON object tagging structured rows, e.g.
                               -- {"agent_prompt": true} on a scheduled run's
                               -- persisted effective-prompt user row
@@ -212,6 +216,10 @@ async def get_db() -> aiosqlite.Connection:
         # #226: the spoken briefing that accompanied an assistant emission,
         # persisted so reloads and Markdown export can render what was said.
         await db.execute("ALTER TABLE messages ADD COLUMN say TEXT")
+    if "say_is_fallback" not in cols:
+        # #230: attribution — 1 when the `say` line is the heuristic
+        # fallback, 0 when it is a model <say> briefing; NULL pre-#230 rows.
+        await db.execute("ALTER TABLE messages ADD COLUMN say_is_fallback INTEGER")
     if "meta" not in cols:
         # #198: JSON object tagging structured rows so the UI can render
         # them differently — a scheduled fire's user row carries
@@ -947,6 +955,7 @@ async def add_message(
     attachments: list | None = None,
     sub_agent_transcript: dict | None = None,
     say: str | None = None,
+    say_is_fallback: bool | None = None,
     meta: dict | None = None,
 ):
     db = await get_db()
@@ -955,8 +964,9 @@ async def add_message(
         await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, tool_calls,"
-            " tool_call_id, images, attachments, sub_agent_transcript, say, meta)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_call_id, images, attachments, sub_agent_transcript, say,"
+            " say_is_fallback, meta)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
@@ -967,6 +977,9 @@ async def add_message(
                 json.dumps(attachments) if attachments else None,
                 json.dumps(sub_agent_transcript) if sub_agent_transcript else None,
                 say,
+                # #230: attribution flag — True when the persisted `say` line
+                # is the heuristic fallback rather than a model <say> briefing.
+                1 if say_is_fallback else (0 if say_is_fallback is not None else None),
                 json.dumps(meta) if meta else None,
             ),
         )
@@ -1492,11 +1505,12 @@ async def get_prompt_summary(conversation_id: int) -> dict:
         )
         conv = await cur.fetchone()
         if conv is None:
-            return {"summary": "", "through_message_id": 0}
+            return {"summary": "", "through_message_id": 0, "source": ""}
         if conv["prompt_summary"]:
             return {
                 "summary": conv["prompt_summary"],
                 "through_message_id": conv["prompt_summary_through_message_id"] or 0,
+                "source": "prompt",
             }
         cur = await db.execute(
             "SELECT id, role, content FROM messages WHERE conversation_id = ?"
@@ -1517,8 +1531,12 @@ async def get_prompt_summary(conversation_id: int) -> dict:
                 (conversation_id, legacy["id"]),
             )
             if await cur.fetchone():
-                return {"summary": legacy["content"], "through_message_id": legacy["id"]}
-        return {"summary": "", "through_message_id": 0}
+                return {
+                    "summary": legacy["content"],
+                    "through_message_id": legacy["id"],
+                    "source": "legacy",
+                }
+        return {"summary": "", "through_message_id": 0, "source": ""}
     finally:
         await db.close()
 
