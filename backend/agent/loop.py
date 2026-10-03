@@ -48,6 +48,30 @@ from backend.db.database import (
 
 
 AUTO_TITLE_MAX_CHARS = 60
+# The mechanical slice length the frontend uses for new-chat names — the
+# backend compare must match it exactly (loop.py:100 guard, issue #60).
+AUTO_TITLE_SLICE_CHARS = 40
+
+
+def _strip_provider_markup(text: str) -> str:
+    """Strip a leading run of provider-injected `<system_*>…</system_*>`
+    blocks (issue #255): the model provider injects control text like
+    `<system_warning>⚠️ CONTEXT LOW …` into the stream near the context
+    limit, and it must never reach the title channel. An unclosed leading
+    tag consumes the rest of the string. Mirrors src/providerMarkup.ts.
+    """
+    t = text.lstrip()
+    while True:
+        m = re.match(r"^<system_(\w+)>", t)
+        if not m:
+            return t
+        tag = m.group(1)
+        closer = f"</system_{tag}>"
+        idx = t.find(closer)
+        if idx == -1:
+            return ""
+        t = t[idx + len(closer):].lstrip()
+
 
 
 async def _emit_file_changes(
@@ -91,7 +115,7 @@ async def _generate_conversation_title(
     conv = await get_conversation(conversation_id)
     if (conv or {}).get("chat_type") == "agent":
         return None
-    current = (conv or {}).get("title") or ""
+    current = _strip_provider_markup((conv or {}).get("title") or "")
     history = await get_messages(conversation_id)
     first_user_text = next(
         (
@@ -101,7 +125,15 @@ async def _generate_conversation_title(
         ),
         user_text,
     )
-    if current != "New chat" and current != first_user_text[:40]:
+    first_user_text = _strip_provider_markup(first_user_text)
+    # An empty sanitized current means the stored title is entirely provider
+    # markup (issue #255) — not a manual rename, so the model title may
+    # replace it.
+    if (
+        current
+        and current != "New chat"
+        and current != first_user_text[:AUTO_TITLE_SLICE_CHARS]
+    ):
         return None
 
     title_prompt = [
