@@ -69,10 +69,13 @@ async def current_git_branch(root: Path | str) -> str | None:
         return cached[1]
 
     branch: str | None = None
-    # _run_git (which passes --no-optional-locks, issue #279); stderr is
-    # merged into stdout, but a successful rev-parse only ever prints the
-    # ref. The DEVNULL spawn here previously dodged the lock-skip flag.
-    rc, out = await _run_git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    # _run_git (which passes --no-optional-locks, issue #279). stderr is
+    # discarded for this lookup only: a workspace with a local branch named
+    # HEAD makes rev-parse emit an ambiguity warning on stderr while still
+    # exiting 0, and merged output would poison the branch value.
+    rc, out = await _run_git(
+        root, "rev-parse", "--abbrev-ref", "HEAD", merge_stderr=False
+    )
     if rc == 0:
         branch = out or None
 
@@ -84,8 +87,11 @@ async def current_git_branch(root: Path | str) -> str | None:
 
 # ------------------------------------------------------------- ui readout
 
-async def _run_git(root: Path, *args: str) -> tuple[int, str]:
-    """One git invocation in the workspace; (returncode, combined output).
+async def _run_git(
+    root: Path, *args: str, merge_stderr: bool = True
+) -> tuple[int, str]:
+    """One git invocation in the workspace; (returncode, combined output
+    unless merge_stderr is False, which discards stderr).
 
     Always passes --no-optional-locks: this layer is a read-only UI poll, and
     taking (or blocking on) index.lock/HEAD.lock would make its 2 s burst
@@ -96,7 +102,11 @@ async def _run_git(root: Path, *args: str) -> tuple[int, str]:
         proc = await asyncio.create_subprocess_exec(
             "git", "--no-optional-locks", "-C", str(root), *args,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=(
+                asyncio.subprocess.STDOUT
+                if merge_stderr
+                else asyncio.subprocess.DEVNULL
+            ),
             **_SUBPROCESS_FLAGS,
         )
     except OSError:

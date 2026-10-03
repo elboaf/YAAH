@@ -946,14 +946,21 @@ class _Activity:
         self._started = False
         self._latencies: list[float] = []
 
-    def _note(self, elapsed_ms: float | None = None):
+    def _note(self):
+        """Record real user input (activity only). Never call this for hook
+        latency samples: callbacks fire for the agent's own injected input,
+        and treating that as activity would defeat the user-active pause."""
         now = time.monotonic()
         with self._lock:
             self._last = now
-            if elapsed_ms is not None:
-                self._latencies.append(elapsed_ms)
-                if len(self._latencies) > self._LATENCY_RING:
-                    del self._latencies[: len(self._latencies) - self._LATENCY_RING]
+
+    def _record_latency(self, elapsed_ms: float):
+        """Record one hook-callback dispatch duration (latency only; does
+        not touch idle/activity state — see _note)."""
+        with self._lock:
+            self._latencies.append(elapsed_ms)
+            if len(self._latencies) > self._LATENCY_RING:
+                del self._latencies[: len(self._latencies) - self._LATENCY_RING]
 
     @staticmethod
     def _percentile(sorted_xs: list[float], pct: float) -> float:
@@ -1061,11 +1068,11 @@ def _make_timed_callback(activity, struct_ty, injected_mask, get_user32):
                 if not flags & injected_mask:
                     activity._note()
         finally:
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
             rc = get_user32().CallNextHookEx(None, ncode, wparam, lparam)
-        # Record after CallNextHookEx: the duration the hook chain saw,
-        # which is exactly what cursor smoothness is sensitive to.
-        activity._note(elapsed_ms=elapsed_ms)
+            # Record after CallNextHookEx: the duration the hook chain saw,
+            # which is exactly what cursor smoothness is sensitive to.
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        activity._record_latency(elapsed_ms)
         return rc
 
     return _callback
