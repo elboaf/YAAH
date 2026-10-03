@@ -8664,15 +8664,44 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     [messages],
   )
   const streaming = status === 'thinking' || status === 'running-tool'
-  // #201: right-click on an active transcript selection -> "Search on Google".
-  // Menu state is just the selected query text (null = closed); the item only
-  // appears when the right-click lands with a real selection inside the
-  // transcript (transcriptSelection enforces that), and activating it goes
-  // through the proven openExternal -> open_external default-browser path.
-  const [searchSelection, setSearchSelection] = useState<string | null>(null)
-  const onTranscriptContextMenu = useCallback(() => {
-    setSearchSelection(transcriptSelection(transcriptRef.current))
+  // #201/#276: right-click on an active transcript selection -> ONE custom
+  // menu AT THE CURSOR with Copy + "Search on Google". When there is a
+  // selection we preventDefault() so the WebView2 native menu does not also
+  // appear (two menus for one right-click was the bug); with no selection
+  // the native menu is untouched. Menu state is the selected query text plus
+  // the pointer coordinates (null = closed); activating Search goes through
+  // the proven openExternal -> open_external default-browser path, Copy via
+  // the clipboard API.
+  // Review: the menu keeps the RAW selected text (Copy must preserve line
+  // breaks / indentation) alongside the normalized search query.
+  const [searchMenu, setSearchMenu] = useState<{ query: string; text: string; x: number; y: number } | null>(null)
+  const onTranscriptContextMenu = useCallback((e: React.MouseEvent) => {
+    const query = transcriptSelection(transcriptRef.current)
+    if (query === null) return
+    e.preventDefault()
+    // Review: keep the raw selection for Copy; the query stays normalized.
+    const text = window.getSelection()?.toString() ?? query
+    setSearchMenu({ query, text, x: e.clientX, y: e.clientY })
   }, [])
+  // Review: the menu does not take focus when it opens, so an Escape hit
+  // anywhere must close it (a global keydown listener, removed on close).
+  useEffect(() => {
+    if (searchMenu === null) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSearchMenu(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [searchMenu !== null])
+  // Review: keep the at-cursor menu inside the viewport when opened near an
+  // edge — clamp against the fixed menu size (w-44 = 11rem = 176px) and a
+  // small measured height.
+  const MENU_MAX_W = 176
+  const MENU_MAX_H = 96
+  const searchMenuPos = searchMenu === null ? null : {
+    left: Math.min(searchMenu.x, Math.max(0, window.innerWidth - MENU_MAX_W)),
+    top: Math.min(searchMenu.y, Math.max(0, window.innerHeight - MENU_MAX_H)),
+  }
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
   // show on the newest message while the run is going.
@@ -8927,22 +8956,46 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
         onContextMenu={onTranscriptContextMenu}
         className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4"
       >
-        {/* #201: selection search menu (FilesPanel pattern) — item renders
-            only when the contextmenu carried an active transcript selection. */}
-        {searchSelection !== null && (
+        {/* #201/#276: at-cursor context menu (FilesPanel pattern) — renders
+            only when the contextmenu carried an active transcript selection,
+            and preventDefault on the event keeps the native menu away so
+            exactly ONE menu shows. Escape / click-away / right-click-away
+            close it. */}
+        {searchMenu !== null && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setSearchSelection(null)} onContextMenu={(e) => { e.preventDefault(); setSearchSelection(null) }} />
+            <div className="fixed inset-0 z-40" onClick={() => setSearchMenu(null)} onContextMenu={(e) => { e.preventDefault(); setSearchMenu(null) }} />
             <div
               className="fixed z-50 w-44 rounded bg-zinc-900 py-1 text-xs shadow-xl"
               role="menu"
               aria-label="Search selection"
+              style={searchMenuPos === null ? undefined : { left: searchMenuPos.left, top: searchMenuPos.top }}
+              onKeyDown={(e) => { if (e.key === 'Escape') setSearchMenu(null) }}
             >
               <button
                 className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
                 role="menuitem"
                 onClick={(e) => {
-                  openExternal(googleSearchUrl(searchSelection), e)
-                  setSearchSelection(null)
+                  // Review: Copy writes the RAW selection (formatting kept);
+                  // failure surfaces on the shared error-toast path.
+                  navigator.clipboard.writeText(searchMenu.text).catch((error) => {
+                    const detail = error instanceof Error ? error.message : String(error)
+                    useAgent.getState().pushToast({
+                      kind: 'error',
+                      title: 'Could not copy selection',
+                      body: detail,
+                    })
+                  })
+                  setSearchMenu(null)
+                }}
+              >
+                Copy
+              </button>
+              <button
+                className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
+                role="menuitem"
+                onClick={(e) => {
+                  openExternal(googleSearchUrl(searchMenu.query), e)
+                  setSearchMenu(null)
                 }}
               >
                 Search on Google
