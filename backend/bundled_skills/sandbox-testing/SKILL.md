@@ -17,6 +17,7 @@ Use Windows Sandbox (`sandbox_test`, then `sandbox_run`) when project execution 
 ## Playbook
 
 - Boot with `sandbox_test` (first boot is slow; later boots reuse). The workspace appears at `C:\Users\WDAGUtilityAccount\Desktop\ws`; the persistent toolkit is at `...\Desktop\toolkit` and on PATH.
-- Before downloading tools, read `toolkit\state.json`. Install missing tools into the toolkit (zip/portable preferred, silent flags for installers); it persists across sandboxes.
+- Before downloading tools, read `toolkit\INDEX.md` (human-readable table of contents generated from `toolkit\state.json`) or `state.json` itself — one round-trip may save a full reinstall. If a needed tool is present, verify it with its `check` command and use it; do not re-download.
+- Install missing tools into the toolkit (zip/portable preferred, silent flags for installers); it persists across sandboxes. **Record every install through the wrapper, not by hand-editing JSON:** `toolkit install <name> -Version <v> -Kind zip -Path <rel path> -Check "<Test-Path probe>" -Invocation "<how to run it>" [-Note "<gotcha>"]` (on PATH inside the VM; scripts at `toolkit\bin\toolkit.ps1`). The wrapper updates `state.json` AND regenerates `INDEX.md`. `toolkit remove <name>` and `toolkit index` also exist. `toolkit install` records the manifest entry only — the actual download/extract/shim steps are still yours to do (and to verify with `-Check`).
 - Run the selected test commands via `sandbox_run`, batch commands where possible, and size `timeout_seconds` to the work.
 - Dispose the VM with `sandbox_stop` when done. The VM is an 8 GB window on the user's desktop.
