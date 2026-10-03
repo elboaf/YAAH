@@ -70,6 +70,25 @@ def test_snapshot_includes_latency_summary():
     assert snap["latency_ms"] == {"p50": 0.9, "p95": 0.9, "p99": 0.9}
 
 
+def test_hook_install_failures_reports_missing_hooks():
+    """The measurement script must refuse to report numbers when one of the
+    two hooks did not install: mouse-only samples would look healthy while
+    the keyboard hook chain is unmeasured (CodeRabbit, issue #279)."""
+    from backend.scripts.measure_hook_latency import _hook_install_failures
+
+    assert _hook_install_failures({"mouse": True, "keyboard": True}) == []
+    assert _hook_install_failures({"mouse": True, "keyboard": False}) == [
+        "keyboard"]
+    assert _hook_install_failures({"mouse": False, "keyboard": False}) == [
+        "keyboard", "mouse"]
+
+
+def test_hook_install_failures_empty_means_nothing_tried():
+    from backend.scripts.measure_hook_latency import _hook_install_failures
+
+    assert _hook_install_failures({}) == []
+
+
 @pytest.mark.skipif(not computer_mod.WINDOWS, reason="windows-only hook timing")
 def test_hook_callback_measures_dispatch(monkeypatch):
     """The real callback path wraps its work in the timing wrapper."""
