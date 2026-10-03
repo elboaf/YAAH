@@ -572,18 +572,68 @@ async def api_workspace_git_checkout(body: WorkspaceGitCheckoutBody):
     return {"ok": "error" not in result, **result}
 
 
+class BranchSelectBody(BaseModel):
+    branch: str
+
+
+@app.post("/api/conversations/{conversation_id}/branch-select")
+async def api_conversation_branch_select(conversation_id: int, body: BranchSelectBody):
+    """Set the chat's branch selector (#286, ADR-0010 slice 1).
+
+    The selector is a stored per-chat value — the chat's user-intended
+    branch. With no chat worktree yet (this slice), a flip only records
+    intent: no `git checkout` runs, the shared tree never moves, and the
+    flip is invisible to other chats. Guards mirror the checkout paths:
+    empty, option-like (`-…`), and non-local branch names are refused.
+    """
+    from fastapi import HTTPException
+
+    from backend.agent.gitinfo import list_local_branches
+    from backend.agent.tools import workspace_root
+
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    branch = body.branch.strip()
+    if not branch:
+        return {"ok": False, "error": "checkout target is empty"}
+    if branch.startswith("-"):
+        return {"ok": False, "error": "checkout target must be a local branch name"}
+
+    # Must be a local branch of the conversation's workspace (same check the
+    # checkout endpoints run). Remote:/non-repo workspaces have no branch
+    # list; the chip is hidden there, so refusal is defense-in-depth.
+    ws = conv.get("workspace") or ""
+    if not ws.strip() or ws.startswith("remote:"):
+        return {"ok": False, "error": "no local git workspace"}
+    try:
+        root = workspace_root(ws)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if branch not in await list_local_branches(root):
+        return {"ok": False, "error": f"not a local branch: {branch}"}
+
+    await update_conversation(conversation_id, selected_branch=branch)
+    return {"ok": True, "selected_branch": branch}
+
+
 @app.get("/api/conversations/{conversation_id}/git-branch")
 async def api_conversation_git_branch(conversation_id: int):
-    """Current branch of the conversation's workspace, when it is a git repo.
-
-    Cheap by design: stats .git/HEAD first and only spawns git when the file
-    changed — the UI re-polls this every couple of seconds while a session
-    is open, and terminal checkouts reflect without any push channel."""
+    """The chat's branch for the status-strip chip (#286): the stored
+    selection when the chat has one, else the workspace's checked-out
+    branch. Cheap by design: stats .git/HEAD first and only spawns git when
+    the file changed — the UI re-polls this every couple of seconds while a
+    session is open, and terminal checkouts reflect without any push
+    channel."""
     conv = await get_conversation(conversation_id)
     if conv is None:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
+    stored = conv.get("selected_branch")  # #286: per-chat pick wins
+    if stored:
+        return {"branch": stored}
     from backend.agent.gitinfo import current_git_branch
     from backend.agent.tools import workspace_root
 
@@ -751,8 +801,12 @@ async def api_conversation_git_command(conversation_id: int, body: GitCommandBod
 
 
 async def _ui_git_locked(root, conversation_id: int, action: str, body: GitCommandBody, invalidate) -> dict:
-    """The git-command body, run while holding the merge mutex (or for
-    read-only `status`). Ends with the standard invalidate+trace+return."""
+    """The git-command body, ending with the standard invalidate+trace+return.
+
+    The ADR-0008 merge-mutex wording is retired: since #286 the UI checkout
+    writes the chat's stored branch selector instead of moving the tree, so
+    no UI git action relocates the shared workspace (commit/push/pull still
+    mutate it, and stay user-initiated)."""
     if action == "status":
         result = await _run_ui_git(root, "status", "--short", "--branch")
     elif action == "commit":
@@ -781,10 +835,33 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
     elif action == "pull":
         result = await _run_ui_git(root, "pull")
     elif action == "checkout":
+        # #286 (ADR-0010 slice 1): checkout no longer moves the shared
+        # workspace tree — that yanked it out from under every other chat.
+        # It records the chat's intended branch instead; on a worktree-less
+        # chat this is pure intent, touching nothing physical.
         branch = (body.branch or "").strip()
         if not branch:
             return {"ok": False, "error": "checkout target is empty"}
-        result = await _run_ui_git(root, "checkout", branch)
+        if branch.startswith("-"):
+            return {"ok": False, "error": "checkout target must be a local branch name"}
+        conv = await get_conversation(conversation_id)
+        ws = (conv or {}).get("workspace") or ""
+        if not ws.strip() or ws.startswith("remote:"):
+            result = {"ok": False, "error": "no local git workspace"}
+        else:
+            from backend.agent.gitinfo import list_local_branches
+            from backend.agent.tools import workspace_root
+
+            try:
+                ws_root = workspace_root(ws)
+            except ValueError as e:
+                result = {"ok": False, "error": str(e)}
+            else:
+                if branch not in await list_local_branches(ws_root):
+                    result = {"ok": False, "error": f"not a local branch: {branch}"}
+                else:
+                    await update_conversation(conversation_id, selected_branch=branch)
+                    result = {"output": branch}
 
     invalidate(root)
     await _post_git_trace(conversation_id, action, result)

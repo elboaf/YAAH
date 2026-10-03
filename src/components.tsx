@@ -31,7 +31,7 @@ import {
   getGitBranch,
   getGitInfo,
   getGitBranches,
-  runGitCommand,
+  selectConversationBranch,
   type GitInfo,
   listMcpServers,
   addMcpServer,
@@ -7789,23 +7789,28 @@ function AccessModeControl() {
   )
 }
 
-/** Git cluster for the status strip: branch chip (click = checkout dropdown),
- *  a compact Git control that opens detailed sync state and Git commands.
- *  Hidden entirely for non-repos.
+/** Git cluster for the status strip: the chat's branch selector chip (click
+ *  = branch dropdown), a compact Git control that opens detailed sync state
+ *  and Git commands. Hidden entirely for non-repos.
  *
- *  Commands run directly against git (no agent turn, no tokens) and land in
- *  the conversation as synthetic tool rows; mutating actions are disabled
- *  while the agent is mid-turn (status stays readable), push/pull confirm
- *  inline first, commit opens a small popover with a visible file count. */
-function GitChipCluster({
+ *  Since #286 the branch chip is per chat: flipping it records the chat's
+ *  intended branch (a stored value on the conversation row) and runs no git
+ *  checkout, so the shared workspace tree never moves. Commands run directly
+ *  against git (no agent turn, no tokens) and land in the conversation as
+ *  synthetic tool rows; mutating actions are disabled while the agent is
+ *  mid-turn (status stays readable), push/pull confirm inline first, commit
+ *  opens a small popover with a visible file count. */
+export function GitChipCluster({
   info,
   streaming,
   conversationId,
+  selectedBranch,
   onCommandDone,
 }: {
   info: GitInfo | null
   streaming: boolean
   conversationId: number | null
+  selectedBranch: string | null
   onCommandDone: () => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
@@ -7839,6 +7844,11 @@ function GitChipCluster({
 
   const lockMutations = streaming || busyCheckout
 
+  // #286: the chip is the chat's branch — the stored selection when the
+  // chat has one, else the workspace's checked-out branch (info.branch).
+  // The checkout flip records that pick per chat and moves no tree.
+  const chipBranch = selectedBranch || info.branch
+
   const openMenu = () => {
     setMenuOpen((o) => !o)
     if (!branchesLoaded && conversationId !== null) {
@@ -7855,9 +7865,10 @@ function GitChipCluster({
     if (conversationId === null || busyCheckout) return
     setBusyCheckout(true)
     try {
-      const res = await runGitCommand(conversationId, 'checkout', { branch })
-      // Live trace row (the backend persists the same row for reloads — the
-      // live path never refetches history, so no duplicates can form).
+      // #286: the flip goes to the per-chat selector endpoint — no git
+      // checkout runs, so no shared tree moves. Trace row kept so the
+      // action shows in the transcript exactly as before.
+      const res = await selectConversationBranch(conversationId, branch)
       const callId = `ui-checkout-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
       appendRawMessage(String(conversationId), {
         id: callId,
@@ -7892,15 +7903,17 @@ function GitChipCluster({
 
   return (
     <span ref={wrapRef} className="relative flex min-w-0 items-center gap-2">
-      {/* Primary branch selector: always represents the user's working tree. */}
+      {/* Branch selector: the chat's own branch (#286) — the stored pick
+          when the chat has one, else the workspace's checked-out branch.
+          Flipping it records the pick for this chat only. */}
       <button
         className="flex shrink-0 items-center gap-1 rounded   bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-zinc-500"
         title={
           info.dirty
-            ? `Primary working-tree branch. ${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked). Click to switch branch.`
-            : 'Primary working-tree branch — click to switch'
+            ? `Branch for this chat. ${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked) in the shared workspace tree. Click to pick this chat's branch.`
+            : 'Branch for this chat — click to pick'
         }
-        aria-label="Primary branch; switch branch"
+        aria-label="Branch for this chat; pick branch"
         aria-expanded={menuOpen}
         onClick={openMenu}
       >
@@ -7908,7 +7921,7 @@ function GitChipCluster({
           className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${info.dirty ? 'bg-amber-400' : 'bg-transparent'}`}
           title={info.dirty ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)` : undefined}
         />
-        <span className="min-w-0 max-w-[10rem] truncate">{info.branch}</span>
+        <span className="min-w-0 max-w-[10rem] truncate">{chipBranch}</span>
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
@@ -7931,14 +7944,14 @@ function GitChipCluster({
                 key={b}
                 disabled={lockMutations}
                 className={`flex w-full items-center gap-2 px-3 py-1 text-left font-mono text-[11px] hover:bg-zinc-800/60 ${
-                  b === info.branch ? 'text-zinc-200' : 'text-zinc-400'
+                  b === chipBranch ? 'text-zinc-200' : 'text-zinc-400'
                 } ${lockMutations ? 'cursor-not-allowed opacity-40' : ''}`}
                 onClick={() => {
                   setMenuOpen(false)
-                  if (b !== info.branch) run(b)
+                  if (b !== chipBranch) run(b)
                 }}
               >
-                <span className="w-3 shrink-0 text-blue-400">{b === info.branch ? '✓' : ''}</span>
+                <span className="w-3 shrink-0 text-blue-400">{b === chipBranch ? '✓' : ''}</span>
                 <span className="truncate">{b}</span>
               </button>
             ))}
@@ -8731,10 +8744,20 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     s.conversationId === null ? undefined : s.contextByConv[String(s.conversationId)],
   )
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null)
+  // #286: the chat's stored branch selection (null = follow the workspace's
+  // checked-out branch). Refetched after UI git actions so a flip reflects
+  // immediately.
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
   useEffect(() => {
     setGitInfo(null)
+    setSelectedBranch(null)
     if (conversationId === null) return
     let cancelled = false
+    getGitBranch(conversationId)
+      .then((r) => {
+        if (!cancelled) setSelectedBranch(r.branch)
+      })
+      .catch(() => {})
     // Exact context readout: persisted by the backend at every model call.
     getContext(conversationId)
       .then((c) => {
@@ -8765,6 +8788,9 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     if (conversationId === null) return
     getGitInfo(conversationId)
       .then((r) => setGitInfo(r.info))
+      .catch(() => {})
+    getGitBranch(conversationId)
+      .then((r) => setSelectedBranch(r.branch))
       .catch(() => {})
   }, [conversationId])
 
@@ -9094,6 +9120,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           info={gitInfo}
           streaming={streaming}
           conversationId={conversationId}
+          selectedBranch={selectedBranch}
           onCommandDone={refreshGitInfo}
         />
         {/* Access mode lives in the composer toolbar now. Plan approval is a
