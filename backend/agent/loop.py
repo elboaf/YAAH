@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
-from backend.agent.prompt_manifest import COMPACT_SUMMARY_PREFIX
+from backend.agent.prompt_manifest import compact_summary_message
 from backend.agent import file_changes
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
@@ -1422,12 +1422,13 @@ async def _run_agent_claimed(
         if include_history else []
     )
     messages = [{"role": "system", "content": system_prompt}]
-    if include_history and prompt_state.get("summary"):
-        messages.append({
-            "role": "system",
-            "content": COMPACT_SUMMARY_PREFIX + "\n"
-            + prompt_state["summary"],
-        })
+    compact_msg = (
+        compact_summary_message(prompt_state)
+        if include_history and prompt_state.get("summary")
+        else None
+    )
+    if compact_msg is not None:
+        messages.append(compact_msg)
     messages.extend(history)
     if not include_history:
         # Fresh-context agent: this turn's text rides in explicitly, with

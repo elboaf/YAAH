@@ -237,7 +237,11 @@ async def test_compact_persists_prompt_state_without_changing_transcript(monkeyp
     assert summarized == 16
     assert rows_after == rows_before
     state = await db.get_prompt_summary(cid)
-    assert state == {"summary": "the summary", "through_message_id": through_id}
+    assert state == {
+        "summary": "the summary",
+        "through_message_id": through_id,
+        "source": "prompt",
+    }
     conv = await db.get_conversation(cid)
     assert conv["context_tokens"] is None
 
@@ -255,7 +259,11 @@ async def test_legacy_compaction_summary_is_replayed_without_system_row():
     summary_id = await db.add_message(cid, "system", "legacy continuity summary")
     await db.add_message(cid, "user", "recent question")
     state = await db.get_prompt_summary(cid)
-    assert state == {"summary": "legacy continuity summary", "through_message_id": summary_id}
+    assert state == {
+        "summary": "legacy continuity summary",
+        "through_message_id": summary_id,
+        "source": "legacy",
+    }
     history = await loop.load_history(cid, state["through_message_id"])
     assert history == [{"role": "user", "content": "recent question"}]
 
@@ -458,15 +466,22 @@ def test_summarizer_prompt_states_real_clamp():
 def test_summary_injection_label_describes_job():
     """#191: the injected summary is labeled as actionable continuity
     state, not 'for context only'."""
-    from backend.agent import loop as loop_mod
+    from backend.agent import prompt_manifest as pm
 
-    label = loop_mod.COMPACT_SUMMARY_PREFIX
+    # Prompt-only summaries leave every transcript row in place, so the
+    # label may (and should) tell the model the transcript is preserved.
+    label = pm.COMPACT_SUMMARY_PREFIX
     assert "for context only" not in label
     assert "continue" in label
-    # CodeRabbit return trip: legacy summaries replace the transcript via the
-    # history watermark, so an unconditional "preserved separately" claim is
-    # false -- the label must not make it.
-    assert "preserved separately" not in label
+    assert "preserved separately" in label
+
+    # CodeRabbit return trip #2: legacy summaries replace the transcript
+    # via the history watermark (destructive old compaction deleted the
+    # rows), so the legacy label must not claim preservation.
+    legacy_label = pm.COMPACT_SUMMARY_PREFIX_LEGACY
+    assert "for context only" not in legacy_label
+    assert "continue" in legacy_label
+    assert "preserved separately" not in legacy_label
 
 
 def test_prompt_manifest_section_naming_tracks_label():
@@ -474,7 +489,69 @@ def test_prompt_manifest_section_naming_tracks_label():
     injected compaction-summary section after the label change."""
     from backend.agent import prompt_manifest as pm
 
+    text = pm.COMPACT_SUMMARY_PREFIX + "\nbody"
+    assert pm._name_section(text) == "compaction-summary"
+    text = pm.COMPACT_SUMMARY_PREFIX_LEGACY + "\nbody"
+    assert pm._name_section(text) == "compaction-summary"
+
+
+@pytest.mark.asyncio
+async def test_prompt_summary_state_carries_source():
+    """CodeRabbit return trip #2: the state dict distinguishes prompt-only
+    summaries from legacy (destructive) ones so the injection label can
+    tell the truth about transcript preservation."""
+    cid = await db.create_conversation("summary-source")
+    await db.add_message(cid, "user", "hello")
+    rows = await db.get_messages(cid)
+    await db.compact_conversation(cid, "new-style summary", rows[0]["id"])
+    state = await db.get_prompt_summary(cid)
+    assert state["source"] == "prompt"
+
+    legacy_cid = await db.create_conversation("summary-source-legacy")
+    await db.add_message(legacy_cid, "system", "legacy continuity summary")
+    await db.add_message(legacy_cid, "user", "recent question")
+    legacy_state = await db.get_prompt_summary(legacy_cid)
+    assert legacy_state["source"] == "legacy"
+
+    empty = await db.get_prompt_summary(cid)
+    assert empty["summary"] == "new-style summary"
+
+    blank_cid = await db.create_conversation("summary-source-none")
+    assert await db.get_prompt_summary(blank_cid) == {
+        "summary": "",
+        "through_message_id": 0,
+        "source": "",
+    }
+
+
+@pytest.mark.asyncio
+async def test_injected_summary_label_matches_source():
+    """CodeRabbit return trip #2: the loop picks the prefix by summary
+    source -- prompt-only summaries get the preservation note, legacy
+    summaries do not."""
     from backend.agent import loop as loop_mod
 
-    text = loop_mod.COMPACT_SUMMARY_PREFIX + "\nbody"
-    assert pm._name_section(text) == "compaction-summary"
+    prompt_msg = loop_mod.compact_summary_message(
+        {"summary": "s", "through_message_id": 1, "source": "prompt"}
+    )
+    assert prompt_msg is not None
+    assert prompt_msg["role"] == "system"
+    assert prompt_msg["content"].startswith("Earlier conversation summary")
+    assert "preserved separately" in prompt_msg["content"]
+
+    legacy_msg = loop_mod.compact_summary_message(
+        {"summary": "s", "through_message_id": 1, "source": "legacy"}
+    )
+    assert legacy_msg is not None
+    assert legacy_msg["content"].startswith("Earlier conversation summary")
+    assert "preserved separately" not in legacy_msg["content"]
+
+    # Legacy-shaped dicts from older callers (no source key) must stay on
+    # the conservative, unqualified label.
+    unlabeled = loop_mod.compact_summary_message(
+        {"summary": "s", "through_message_id": 1}
+    )
+    assert unlabeled is not None
+    assert "preserved separately" not in unlabeled["content"]
+
+    assert loop_mod.compact_summary_message({"summary": "", "through_message_id": 0, "source": "prompt"}) is None

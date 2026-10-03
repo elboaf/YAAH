@@ -160,8 +160,32 @@ SECTION_OPENINGS = [
 SEPARATOR = "\n\n---\n\n"
 BASE_JOIN = "\n\n\n\n"
 COMPACT_SUMMARY_PREFIX = (
+    "Earlier conversation summary (decisions and state to continue from;"
+    " the full transcript is preserved separately):"
+)
+# Legacy summaries came from the old destructive compaction path, which
+# deleted the summarized transcript rows -- the preservation claim would be
+# false for them, so they keep the unqualified label.
+COMPACT_SUMMARY_PREFIX_LEGACY = (
     "Earlier conversation summary (decisions and state to continue from):"
 )
+
+
+def compact_summary_message(prompt_state: dict) -> dict | None:
+    """Build the injected compaction-summary message for a prompt state.
+
+    Returns None when there is no summary to inject. The label is chosen
+    by the summary's source: prompt-only compaction leaves every
+    transcript row in place, legacy compaction does not.
+    """
+    summary = (prompt_state.get("summary") or "").strip()
+    if not summary:
+        return None
+    source = prompt_state.get("source") or ""
+    prefix = (
+        COMPACT_SUMMARY_PREFIX if source == "prompt" else COMPACT_SUMMARY_PREFIX_LEGACY
+    )
+    return {"role": "system", "content": prefix + "\n" + summary}
 
 
 def _name_section(text: str) -> str:
