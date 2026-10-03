@@ -933,14 +933,61 @@ class _Activity:
     """Tracks the monotonic time of the last REAL (non-injected) user input
     from WH_MOUSE_LL / WH_KEYBOARD_LL hooks on a daemon thread."""
 
+    # Issue #279: hook-callback dispatch latency is the direct proxy metric
+    # for cursor lag — any backend CPU burst that delays the callback shows
+    # up as user-visible stutter. Record per-callback durations in a bounded
+    # ring so the measurement script (backend/scripts/measure_hook_latency.py)
+    # can report p50/p95/p99 against the latency budget.
+    _LATENCY_RING = 2048
+
     def __init__(self):
         self._lock = threading.Lock()
         self._last = 0.0
         self._started = False
+        self._latencies: list[float] = []
 
     def _note(self):
+        """Record real user input (activity only). Never call this for hook
+        latency samples: callbacks fire for the agent's own injected input,
+        and treating that as activity would defeat the user-active pause."""
+        now = time.monotonic()
         with self._lock:
-            self._last = time.monotonic()
+            self._last = now
+
+    def _record_latency(self, elapsed_ms: float):
+        """Record one hook-callback dispatch duration (latency only; does
+        not touch idle/activity state — see _note)."""
+        with self._lock:
+            self._latencies.append(elapsed_ms)
+            if len(self._latencies) > self._LATENCY_RING:
+                del self._latencies[: len(self._latencies) - self._LATENCY_RING]
+
+    @staticmethod
+    def _percentile(sorted_xs: list[float], pct: float) -> float:
+        idx = min(len(sorted_xs) - 1, int(round(pct / 100 * (len(sorted_xs) - 1))))
+        return sorted_xs[idx]
+
+    def latency_summary_ms(self) -> dict[str, float] | None:
+        """p50/p95/p99 of recent hook-callback dispatch times, or None when
+        no timed sample has been recorded yet."""
+        with self._lock:
+            xs = sorted(self._latencies)
+        if not xs:
+            return None
+        return {
+            "p50": round(self._percentile(xs, 50), 3),
+            "p95": round(self._percentile(xs, 95), 3),
+            "p99": round(self._percentile(xs, 99), 3),
+        }
+
+    def snapshot(self) -> dict:
+        """Diagnostics surface: hook state plus the latency summary."""
+        with self._lock:
+            started = self._started
+        return {
+            "started": started,
+            "latency_ms": self.latency_summary_ms(),
+        }
 
     def idle_seconds(self) -> float | None:
         """Seconds since the last real user input; None while not started
@@ -969,12 +1016,9 @@ class _Activity:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
-        def _callback(ncode, wparam, lparam):
-            if ncode >= 0:
-                flags = ctypes.cast(lparam, ctypes.POINTER(struct_ty)).contents.flags
-                if not flags & injected_mask:
-                    self._note()
-            return user32.CallNextHookEx(None, ncode, wparam, lparam)
+        _callback = _make_timed_callback(
+            self, struct_ty, injected_mask, lambda: user32
+        )
 
         # Declare the ABI once (LRESULT = ssize_t on 64-bit): without
         # argtypes, each thread's separately-built WINFUNCTYPE counts as a
@@ -1003,6 +1047,35 @@ class _Activity:
 
 
 _activity = _Activity()
+
+
+def _make_timed_callback(activity, struct_ty, injected_mask, get_user32):
+    """Build the LL hook callback with dispatch-latency measurement wrapped
+    in. Timing brackets the entire callback body (real-input check plus
+    CallNextHookEx): whatever delays the hook chain lands in the sample.
+
+    Kept module-level so tests can exercise the timing path without
+    installing a real hook.
+    """
+
+    def _callback(ncode, wparam, lparam):
+        t0 = time.perf_counter()
+        try:
+            if ncode >= 0:
+                flags = ctypes.cast(
+                    lparam, ctypes.POINTER(struct_ty)
+                ).contents.flags
+                if not flags & injected_mask:
+                    activity._note()
+        finally:
+            rc = get_user32().CallNextHookEx(None, ncode, wparam, lparam)
+            # Record after CallNextHookEx: the duration the hook chain saw,
+            # which is exactly what cursor smoothness is sensitive to.
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        activity._record_latency(elapsed_ms)
+        return rc
+
+    return _callback
 
 
 def _activity_idle() -> float | None:
