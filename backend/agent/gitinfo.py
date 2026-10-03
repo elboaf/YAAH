@@ -69,27 +69,12 @@ async def current_git_branch(root: Path | str) -> str | None:
         return cached[1]
 
     branch: str | None = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            **_SUBPROCESS_FLAGS,
-        )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_GIT_TIMEOUT)
-        except asyncio.TimeoutError:
-            proc.kill()
-            # Reap: an unreaped proc leaves its transport to the GC, whose
-            # __del__ pings the (by then closed) loop after the test/app
-            # cycle ends — PytestUnraisableExceptionWarning (#82).
-            await proc.wait()
-            out = b""
-        if proc.returncode == 0:
-            text = out.decode("utf-8", errors="replace").strip()
-            branch = text or None
-    except (OSError, ValueError):
-        branch = None
+    # _run_git (which passes --no-optional-locks, issue #279); stderr is
+    # merged into stdout, but a successful rev-parse only ever prints the
+    # ref. The DEVNULL spawn here previously dodged the lock-skip flag.
+    rc, out = await _run_git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if rc == 0:
+        branch = out or None
 
     # Cache keyed on the observed mtime: when HEAD changes, the mtime
     # mismatch forces a re-read.
@@ -100,10 +85,16 @@ async def current_git_branch(root: Path | str) -> str | None:
 # ------------------------------------------------------------- ui readout
 
 async def _run_git(root: Path, *args: str) -> tuple[int, str]:
-    """One git invocation in the workspace; (returncode, combined output)."""
+    """One git invocation in the workspace; (returncode, combined output).
+
+    Always passes --no-optional-locks: this layer is a read-only UI poll, and
+    taking (or blocking on) index.lock/HEAD.lock would make its 2 s burst
+    contend with the agent's own git writes — a bursty stall that shows up as
+    input-path latency (issue #279).
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(root), *args,
+            "git", "--no-optional-locks", "-C", str(root), *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_SUBPROCESS_FLAGS,
