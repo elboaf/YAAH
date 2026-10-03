@@ -92,3 +92,57 @@ describe('interface-scale slider drag stability (#274)', () => {
     fireEvent.pointerUp(slider, { clientX: 900, clientY: 5 })
   })
 })
+
+describe("interface-scale slider drag teardown (CodeRabbit return trip)", () => {
+  it("ends the drag on a window pointerup (capture lost / released off-element)", () => {
+    const seen: number[] = []
+    render(<InterfaceScaleCard scale={1} onChange={(s) => seen.push(s)} />)
+    const slider = getSlider()
+    pinTrackRect(slider)
+
+    fireEvent.pointerDown(slider, { clientX: 100, clientY: 5, pointerId: 7 })
+    fireEvent.pointerMove(slider, { clientX: 200, clientY: 5, pointerId: 7 })
+    expect(seen).toEqual([1.5])
+
+    // The zoom moved the track; release lands OUTSIDE the input — the
+    // input never fires pointerup, the window does.
+    fireEvent.pointerUp(window, { pointerId: 7 })
+    fireEvent.change(slider, { target: { value: "1.03" } })
+    expect(seen).toEqual([1.5, 1.03])
+  })
+
+  it("ignores window pointerup from a different pointer (drag stays frozen)", () => {
+    const seen: number[] = []
+    render(<InterfaceScaleCard scale={1} onChange={(s) => seen.push(s)} />)
+    const slider = getSlider()
+    pinTrackRect(slider)
+
+    fireEvent.pointerDown(slider, { clientX: 100, clientY: 5, pointerId: 7 })
+    fireEvent.pointerUp(window, { pointerId: 99 })
+    fireEvent.change(slider, { target: { value: "1.03" } })
+    expect(seen).toEqual([])
+  })
+
+  it("clears drag state when disabled flips mid-drag", () => {
+    const seen: number[] = []
+    function Holder({ disabled }: { disabled: boolean }) {
+      return (
+        <InterfaceScaleCard
+          scale={1}
+          disabled={disabled}
+          onChange={(s) => seen.push(s)}
+        />
+      )
+    }
+    const { rerender } = render(<Holder disabled={false} />)
+    const slider = getSlider()
+    pinTrackRect(slider)
+    fireEvent.pointerDown(slider, { clientX: 100, clientY: 5 })
+    // Config load resolves mid-drag and flips the slider disabled; the
+    // drag state must be wiped so a stale frozen rect can't survive it.
+    rerender(<Holder disabled={true} />)
+    rerender(<Holder disabled={false} />)
+    fireEvent.change(slider, { target: { value: "1.03" } })
+    expect(seen).toEqual([1.03])
+  })
+})

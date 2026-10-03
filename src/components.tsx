@@ -6368,6 +6368,33 @@ export function InterfaceScaleCard({
   // pointer is down; the browser's re-derived change events are ignored
   // until release. Live preview is kept: every pointermove still reports.
   const dragRectRef = useRef<DOMRect | null>(null)
+  // CodeRabbit return trip: the frozen rect is only meaningful while the
+  // pointer that started the drag is still down. Track WHICH pointer so a
+  // window-level cleanup can ignore unrelated pointers, and so teardown
+  // can't be tripped by the wrong event.
+  const dragPointerIdRef = useRef<number | null>(null)
+  const endDrag = () => {
+    dragRectRef.current = null
+    dragPointerIdRef.current = null
+  }
+  useEffect(() => {
+    // If the slider goes disabled mid-drag (config load resolving, save in
+    // flight), a stale frozen rect must not survive the re-enable.
+    if (disabled) endDrag()
+    // Window-level teardown: with pointer capture the input may never see
+    // pointerup itself (release lands off-element after zoom re-layout),
+    // so end the drag from the window, gated on the active pointer id.
+    const onRelease = (e: PointerEvent) => {
+      if (dragPointerIdRef.current === e.pointerId) endDrag()
+    }
+    window.addEventListener('pointerup', onRelease)
+    window.addEventListener('pointercancel', onRelease)
+    return () => {
+      window.removeEventListener('pointerup', onRelease)
+      window.removeEventListener('pointercancel', onRelease)
+      endDrag()
+    }
+  }, [disabled])
   const scaleAtClientX = (rect: DOMRect, clientX: number) => {
     const ratio = rect.width > 0 ? (clientX - rect.left) / rect.width : 0
     const clamped = Math.min(1, Math.max(0, ratio))
@@ -6392,14 +6419,19 @@ export function InterfaceScaleCard({
             // Freeze the hit geometry for the whole drag: the rect captured
             // here stays authoritative even after zoom re-lays the track.
             dragRectRef.current = e.currentTarget.getBoundingClientRect()
+            dragPointerIdRef.current = e.pointerId
             try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* jsdom */ }
           }}
           onPointerMove={(e) => {
             const rect = dragRectRef.current
-            if (rect) onChange(scaleAtClientX(rect, e.clientX))
+            if (rect && dragPointerIdRef.current === e.pointerId) onChange(scaleAtClientX(rect, e.clientX))
           }}
-          onPointerUp={() => { dragRectRef.current = null }}
-          onPointerCancel={() => { dragRectRef.current = null }}
+          onPointerUp={(e) => {
+            if (dragPointerIdRef.current === e.pointerId) endDrag()
+          }}
+          onPointerCancel={(e) => {
+            if (dragPointerIdRef.current === e.pointerId) endDrag()
+          }}
           onChange={(e) => {
             // Mid-drag the native input re-derives its value from the moved
             // geometry — that re-derivation IS the flicker (#274). Our
