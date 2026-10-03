@@ -6416,6 +6416,11 @@ export function InterfaceScaleCard({
           disabled={disabled}
           className="w-40 accent-blue-600"
           onPointerDown={(e) => {
+            // CodeRabbit return trip #2: a second pointer landing mid-drag
+            // (stray tap, palm touch) must not re-snapshot the geometry or
+            // hijack the active pointer id — return early while a drag is
+            // already live.
+            if (dragPointerIdRef.current !== null) return
             // Freeze the hit geometry for the whole drag: the rect captured
             // here stays authoritative even after zoom re-lays the track.
             dragRectRef.current = e.currentTarget.getBoundingClientRect()

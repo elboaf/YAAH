@@ -123,6 +123,39 @@ describe("interface-scale slider drag teardown (CodeRabbit return trip)", () => 
     expect(seen).toEqual([])
   })
 
+  it("ignores a second pointer landing mid-drag (no rect re-snapshot, no pointer hijack)", () => {
+    const seen: number[] = []
+    render(<InterfaceScaleCard scale={1} onChange={(s) => seen.push(s)} />)
+    const slider = getSlider()
+    pinTrackRect(slider)
+
+    // Pointer 7 starts the drag: the mapping freezes at left=100/width=200.
+    fireEvent.pointerDown(slider, { clientX: 100, clientY: 5, pointerId: 7 })
+    fireEvent.pointerMove(slider, { clientX: 200, clientY: 5, pointerId: 7 })
+    expect(seen).toEqual([1.5])
+
+    // A second pointer (touch palm, stray click) lands on the input mid-drag
+    // and re-derives a DIFFERENT track rect from the zoomed geometry. The
+    // active drag must keep pointer 7's frozen mapping, not adopt this one.
+    slider.getBoundingClientRect = () =>
+      ({ left: 400, top: 0, right: 500, bottom: 10, width: 100, height: 10, x: 400, y: 0, toJSON: () => ({}) }) as DOMRect
+    fireEvent.pointerDown(slider, { clientX: 450, clientY: 5, pointerId: 8 })
+
+    // Pointer 8's moves are ignored; pointer 7 still drives the frozen mapping.
+    fireEvent.pointerMove(slider, { clientX: 475, clientY: 5, pointerId: 8 })
+    expect(seen).toEqual([1.5])
+    fireEvent.pointerMove(slider, { clientX: 150, clientY: 5, pointerId: 7 })
+    expect(seen).toEqual([1.5, 1.25])
+
+    // Only the active pointer's release ends the drag.
+    fireEvent.pointerUp(window, { pointerId: 8 })
+    fireEvent.change(slider, { target: { value: "1.03" } })
+    expect(seen).toEqual([1.5, 1.25])
+    fireEvent.pointerUp(window, { pointerId: 7 })
+    fireEvent.change(slider, { target: { value: "1.03" } })
+    expect(seen).toEqual([1.5, 1.25, 1.03])
+  })
+
   it("clears drag state when disabled flips mid-drag", () => {
     const seen: number[] = []
     function Holder({ disabled }: { disabled: boolean }) {
