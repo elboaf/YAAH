@@ -353,6 +353,18 @@ def _is_rate_limit(error_text: str) -> bool:
     )
 
 
+def _settle_source(ok: bool, error_text: str) -> str:
+    """#243 AC 1: name WHY a fire settles the way it does, for the log —
+    the reported false toast left no visible trace, so the settle source
+    must become observable."""
+    if ok:
+        return "run completed"
+    if error_text:
+        return f"in-band error event: {error_text[:200]}" if not _is_rate_limit(
+            error_text) else f"rate limit: {error_text[:200]}"
+    return "exception with empty message"
+
+
 async def _run_and_settle(
     aid: str,
     conv_id: int,
@@ -389,16 +401,18 @@ async def _run_and_settle(
         ):
             # The loop persists the transcript itself; here we only relay
             # the events into the per-conversation tape buffer so the open
-            # chat can poll them for its live telemetry. An in-band error
-            # event (e.g. provider misconfigured) counts as a failed fire
-            # just like a raised exception.
+            # chat can poll them for its live telemetry. An in-band FATAL
+            # error event (e.g. provider failure that ended the turn) counts
+            # as a failed fire just like a raised exception; non-fatal ones
+            # (claim refusal / busy conversation, #243) end the stream
+            # without the run having failed — settled 'ok', logged below.
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
                 _tape_append(conv_id, event)
-            if event.get("type") == "error":
+            if event.get("type") == "error" and event.get("fatal", True):
                 ok, error_text = False, str(event.get("message", "run failed"))
     except asyncio.CancelledError:
         raise
@@ -414,6 +428,12 @@ async def _run_and_settle(
         # stays exactly as it was. Only the run bookkeeping settles.
         _retry_state.pop(aid, None)
         status = "ok" if ok else ("error_quiet" if _is_rate_limit(error_text) else "error")
+        log.info(
+            "agent %s one-shot settled %s (source: %s)", aid, status,
+            _settle_source(ok, error_text),
+        )
+        if not ok:
+            log.warning("scheduled agent %s one-shot failed: %s", aid, error_text)
         await _patch(
             aid,
             last_finished_at=datetime.now().isoformat(timespec="seconds"),
@@ -453,7 +473,12 @@ async def _run_and_settle(
     _retry_state.pop(aid, None)
     await _ensure_future_slot(aid)
     now_iso = datetime.now().isoformat(timespec="seconds")
-    await _patch(aid, last_finished_at=now_iso, last_status="ok" if ok else "error")
+    status = "ok" if ok else "error"
+    log.info(
+        "agent %s settled %s (source: %s)", aid, status,
+        _settle_source(ok, error_text),
+    )
+    await _patch(aid, last_finished_at=now_iso, last_status=status)
     if retention > 0:
         with contextlib.suppress(Exception):
             await trim_agent_transcript(conv_id, retention)

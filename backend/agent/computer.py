@@ -27,11 +27,13 @@ WINDOWS = hasattr(ctypes, "windll")
 # ---------------------------------------------------------------- schemas
 
 # Real host input — the #19/#20 nudge, repeated on every input tool so it
-# survives schema-only context windows.
+# survives schema-only context windows. Issue #187 (SYN-15): a single
+# containment clause pointing at the sandbox section — the windows-mcp
+# playbook itself has exactly one home there, not one per tool.
 _HOST_INPUT_NOTE = (
     " This is the USER'S REAL mouse/keyboard — never use it to drive an "
-    "app running inside the Windows Sandbox; drive the sandbox GUI via "
-    "the windows-mcp MCP server (see the sandbox section) instead."
+    "app running inside the Windows Sandbox; drive its GUI via the "
+    "windows-mcp MCP server instead (see the sandbox section)."
 )
 
 _OBSERVE = {

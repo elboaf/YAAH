@@ -463,6 +463,9 @@ async def run_sub_agent(
         # tools still available, told to converge NOW — so an explore-heavy
         # run can still write its deliverable instead of dying on tool calls.
         grace = False
+        # #190: closing turns carry at most one convergence nudge — a new
+        # nudge replaces the previous one in place instead of accumulating.
+        nudge_idx: int | None = None
         for turn in range(max(defn.max_turns, 1)):
             turns = turn + 1
             if cancel_ev.is_set():
@@ -479,9 +482,12 @@ async def run_sub_agent(
                 and remaining < max(3, defn.max_turns // 5)
             ):
                 if remaining == 0:
+                    # #190: this turn is NOT final — the for-else below
+                    # grants one grace wrap-up turn when it ends on tool
+                    # calls, so the text must not claim otherwise.
                     note = (
-                        "This is the final budgeted turn. Produce your final "
-                        "answer now."
+                        "The turn budget ends after this turn; one wrap-up "
+                        "turn may follow. Produce your final answer now."
                     )
                 else:
                     note = (
@@ -489,7 +495,11 @@ async def run_sub_agent(
                         "remain. Start converging now: complete the "
                         "deliverable and produce your final answer."
                     )
-                messages.append({"role": "system", "content": note})
+                if nudge_idx is not None:
+                    messages[nudge_idx] = {"role": "system", "content": note}
+                else:
+                    messages.append({"role": "system", "content": note})
+                    nudge_idx = len(messages) - 1
 
             state: dict = {"content": "", "tool_calls": None, "finish": None}
             acc: list[str] = []
