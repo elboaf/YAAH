@@ -83,10 +83,66 @@ def test_hook_install_failures_reports_missing_hooks():
         "keyboard", "mouse"]
 
 
-def test_hook_install_failures_empty_means_nothing_tried():
+def test_hook_install_failures_absent_key_is_failure():
+    """A hook thread that never reported (crashed, or still installing) is
+    not a success: the failure check must judge each expected hook name,
+    not just the keys that happen to exist in the mapping."""
+    from backend.scripts.measure_hook_latency import (
+        _EXPECTED_HOOKS,
+        _hook_install_failures,
+    )
+
+    assert set(_EXPECTED_HOOKS) == {"mouse", "keyboard"}
+    assert _hook_install_failures({}) == ["keyboard", "mouse"]
+    assert _hook_install_failures({"mouse": True}) == ["keyboard"]
+    assert _hook_install_failures(
+        {"mouse": True, "keyboard": False}) == ["keyboard"]
+
+
+def test_hook_install_failures_empty_means_nothing_tried_is_failure():
     from backend.scripts.measure_hook_latency import _hook_install_failures
 
-    assert _hook_install_failures({}) == []
+    # Kept as a regression pin for the old (absent==success) semantics:
+    # an empty mapping must now read as both hooks missing, per
+    # test_hook_install_failures_absent_key_is_failure.
+    assert _hook_install_failures({}) != []
+
+
+# ------------------------------------------------- keyboard hook exercise
+
+
+def test_keyboard_events_are_injected_and_measured_separately(monkeypatch):
+    """The regression gate must verify samples for EACH hook, not a shared
+    p99 a mouse-only run can satisfy: the keyboard hook is installed, so it
+    gets its own injected keyboard traffic and its own sample check."""
+    import backend.scripts.measure_hook_latency as m
+
+    measured = {}
+
+    def fake_measure(activities, seconds):
+        names = [n for n in activities]
+        measured["names"] = names
+        return {n: {"p50": 0.1, "p95": 0.2, "p99": 0.3} for n in names}
+
+    monkeypatch.setattr(m, "_measure_hooks", fake_measure)
+
+    rc, summaries = m._run_measurement(seconds=1.0, budget_ms=5.0)
+    assert "mouse" in measured["names"]
+    assert "keyboard" in measured["names"]
+    assert set(summaries) == {"mouse", "keyboard"}
+    assert rc == 0
+
+
+def test_keyboard_hook_without_samples_fails_even_if_mouse_is_healthy():
+    """The pass gate is per hook: a keyboard run with zero keyboard samples
+    must fail even though the mouse p99 is well inside budget."""
+    import backend.scripts.measure_hook_latency as m
+
+    rc, summaries = m._judge(
+        {"mouse": {"p50": 0.1, "p95": 0.2, "p99": 0.3}, "keyboard": None},
+        budget_ms=5.0)
+    assert rc == 1
+    assert "keyboard" in " ".join(str(x) for x in (summaries or []))
 
 
 @pytest.mark.skipif(not computer_mod.WINDOWS, reason="windows-only hook timing")
