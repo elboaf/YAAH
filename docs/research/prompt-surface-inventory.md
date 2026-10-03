@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1258+ / 1325) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1265+ / 1332) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,7 +45,7 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1258 / 1325) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1265 / 1332) →
 `_default_system_prompt` → fragments appended 1341–1390 → `messages` with
 system first (loop.py:1420).
 
@@ -99,8 +99,8 @@ plus dynamic MCP ones). Supporting description-like text:
 - **In-band model-directed strings** (not schemas but the model reads them):
   timeout-clamp note (`_clamp_note`, tools.py:860–871), get_help error nudge
   (tools.py:1401–1411), screenshot-disallowed info (tools.py:1449–1459),
-  plan-block result (`_plan_block_result`, loop.py:821–827), sandbox-only skip
-  result (`_policy_skip_result`, loop.py:768–778), sandbox hints
+  plan-block result (`_plan_block_result`, loop.py:862–873), sandbox-only skip
+  result (`_policy_skip_result`, loop.py:850–861), sandbox hints
   (`_missing_command_hint` / `_mcp_hint` / `_dialog_stall_hint`,
   sandbox.py:1103–1175),
   `IMAGES ON PAGE` note (webtools.py:274).

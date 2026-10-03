@@ -78,10 +78,15 @@ def test_system_prompt_includes_skill_index(skills_dir):
 
 def test_bodies_for_prompt(skills_dir):
     skill_registry.scan_skills()
+    # #193: unknown names are skipped here (reported as events by the loop,
+    # via split_known_unknown) so they never enter the authoritative block.
     bodies = skill_registry.bodies_for_prompt(["review", "nope"])
     assert "# Skill: review" in bodies
     assert "Review code carefully." in bodies
-    assert "# Skill not found: nope" in bodies
+    assert "nope" not in bodies
+    known, unknown = skill_registry.split_known_unknown(["review", "nope"])
+    assert known == ["review"]
+    assert unknown == ["nope"]
 
 
 def test_load_skill_tool(skills_dir):

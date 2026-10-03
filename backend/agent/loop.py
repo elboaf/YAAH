@@ -740,22 +740,29 @@ def invoked_skills_wrapper(block: str) -> str:
 
 def _apply_injected_skills(
     item: dict, loaded_skills: list[str], messages: list
-) -> None:
-    """Add explicitly selected queued-message skills to the active run."""
+) -> list[dict]:
+    """Add explicitly selected queued-message skills to the active run.
+    Returns skill_not_found event dicts the caller must yield (#193: the
+    queued/steer path surfaces unknown skill names to the user exactly like
+    the turn path, instead of silently injecting a "# Skill not found"
+    heading into model context)."""
     names = [
         name
         for name in item.get("skills", [])
         if isinstance(name, str) and name.strip() and name not in loaded_skills
     ]
     if not names:
-        return
+        return []
     loaded_skills.extend(names)
-    block = skill_registry.bodies_for_prompt(names)
+    known, unknown = skill_registry.split_known_unknown(names)
+    events = [{"type": "skill_not_found", "skills": unknown}] if unknown else []
+    block = skill_registry.bodies_for_prompt(known)
     if block and messages and messages[0].get("role") == "system":
         messages[0]["content"] = (
             f"{messages[0]['content']}\n\n---\n\n"
             f"{invoked_skills_wrapper(block)}"
         )
+    return events
 
 
 # ---- access-mode gate (PLAN-access-modes.md) -------------------------------
@@ -1401,10 +1408,10 @@ async def _run_agent_claimed(
         # Unknown skill names must be visible to the USER, not just injected
         # as "# Skill not found" into the prompt: the chip still renders from
         # the UI's own skills list, so without this event the failure is
-        # silent and the model truthfully denies having the skill.
-        not_found = [
-            n for n in invoked if skill_registry.get_skill(n) is None
-        ]
+        # silent and the model truthfully denies having the skill. #193:
+        # bodies_for_prompt() skips unknowns, so they never reach the
+        # authoritative block either.
+        _, not_found = skill_registry.split_known_unknown(invoked)
         if not_found:
             yield _ndjson({"type": "skill_not_found", "skills": not_found})
         skill_block = skill_registry.bodies_for_prompt(invoked)
@@ -1505,8 +1512,12 @@ async def _run_agent_claimed(
 
     # Skills the model has loaded mid-turn via load_skill (deduped, order
     # preserved). Their bodies are appended to the system prompt so every
-    # subsequent model call in this turn sees them.
-    loaded_skills: list[str] = list(invoked)
+    # subsequent model call in this turn sees them. Seeded with the KNOWN
+    # invoked names only (PR #252 return trip): unknown invoked names must
+    # stay out of the dedupe set, so a queued message repeating them still
+    # reports its own skill_not_found event.
+    _, _invoked_unknown = skill_registry.split_known_unknown(invoked)
+    loaded_skills: list[str] = [n for n in invoked if n not in _invoked_unknown]
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
@@ -1815,7 +1826,8 @@ async def _run_agent_claimed(
                 yield _ndjson(
                     {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "attachments": inj.get("attachments", []), "skills": inj.get("skills", [])}
                 )
-                _apply_injected_skills(inj, loaded_skills, messages)
+                for ev in _apply_injected_skills(inj, loaded_skills, messages):
+                    yield _ndjson(ev)
                 messages.append({"role": "user", "content": _parts_with_images(_reinline(inj), inj.get("images", []))})
 
             # Partition this step's tool calls: spawn_agent delegations run
@@ -2056,7 +2068,8 @@ async def _run_agent_claimed(
                             "skills": inj.get("skills", []),
                         }
                     )
-                    _apply_injected_skills(inj, loaded_skills, messages)
+                    for ev in _apply_injected_skills(inj, loaded_skills, messages):
+                        yield _ndjson(ev)
                     messages.append(
                         {
                             "role": "user",
