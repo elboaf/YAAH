@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1269 / fragment appends from 1357+) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1209+ / 1269) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -28,7 +28,7 @@ in the repo is the ops-level scheduled-agent prompt.
 
 Trigger: always, unless the conversation has a `system_prompt_override`
 (DB column `conversations.system_prompt_override`, backend/db/database.py:58; wins
-wholesale — it *replaces*, not composes: loop.py:1300).
+wholesale — it *replaces*, not composes: loop.py:1338).
 
 Major sections (in output order):
 
@@ -45,9 +45,9 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1269 / 1357) →
-`_default_system_prompt` → fragments appended 1303–1357 → `messages` with
-system first (loop.py:1381).
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1209 / 1269) →
+`_default_system_prompt` → fragments appended 1341–1390 → `messages` with
+system first (loop.py:1420).
 
 | Fragment | File:lines | Trigger | Approx size |
 |---|---|---|---|
@@ -57,9 +57,9 @@ system first (loop.py:1381).
 | Computer-use + sandbox names in tool prose list | loop.py:339–368; `screenshot` omitted when the Settings toggle is off (issue #140; `screenshot_allowed()` tools.py:1473–1484) | local-Windows | ~25 lines |
 | Skills index | `backend/agent/skills.py:242–260` (`index_for_prompt`) | ≥1 skill without `disable-model-invocation` in `~/.yaah/skills` (34 bundled skills ship; 12+ manual-only) | ~4–5 KB |
 | Sub-agent index + delegation policy | `backend/agent/subagents.py:267–291` (`index_for_prompt`) | always (2 built-ins guarantee content) | ~26 lines / ~1.7 KB |
-| AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1333–1335 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:183) | wrapper ~6 lines + content |
-| Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235–247 / 1339–1341 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
-| Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:263–277` (`bodies_for_prompt`) wrapped at loop.py:1306–1331 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
+| AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1371–1373 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:183) | wrapper ~6 lines + content |
+| Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235 / 1377–1381 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
+| Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:263–277` (`bodies_for_prompt`) wrapped at loop.py:1341–1367 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
 | Mid-turn loaded skills (`load_skill`) | `backend/agent/skills.py:280–315` (`load_skill_into_messages`); queued-message variant loop.py:669–691 (`_apply_injected_skills`) | model calls `load_skill`, or queued message carries skill chips; mutates `messages[0]` in place | header ~10 lines + body |
 | Plan-mode note | `_plan_mode_note` (loop.py:711–722), appended at loop.py:1346–1347 | `current_access_mode() == "plan"` | ~11 lines |
 | Sandbox-only (scheduled agent) note | `_sandbox_only_note` (loop.py:725–738), appended at loop.py:1350–1353 | scheduled agent with `policy == "sandbox-only"` | ~13 lines |

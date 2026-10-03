@@ -37,11 +37,21 @@ def _symbol_spans(path: Path) -> list[tuple[int, int]]:
     spans = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef, ast.If, ast.Try)):
-            spans.append((node.lineno, node.end_lineno))
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                             ast.ClassDef, ast.If, ast.Try,
+                             ast.Assign, ast.AnnAssign)):
             spans.append((node.lineno, node.end_lineno))
     return spans
+
+
+def _named_symbol_spans(path: Path,
+                        names: tuple[str, ...]) -> list[tuple[int, int, str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out = []
+    for node in tree.body:
+        name = getattr(node, "name", None)
+        if name in names and hasattr(node, "end_lineno"):
+            out.append((node.lineno, node.end_lineno, name))
+    return out
 
 
 def _overlap(cited: tuple[int, int], real: tuple[int, int]) -> float:
@@ -84,6 +94,55 @@ def test_inventory_line_refs_point_at_real_code() -> None:
     assert not stale, (
         f"{len(stale)} stale line refs in prompt-surface-inventory.md "
         f"(point at no top-level symbol in the target module): {stale}"
+    )
+
+
+def test_inventory_paired_name_refs_point_at_named_symbols() -> None:
+    # Return trip on PR #239 review: the inventory cites PAIRED line refs
+    # after a symbol name, e.g. `run_agent` / `_run_agent_claimed`
+    # (loop.py:1269 / 1236). The name-agnostic span check above cannot tell
+    # which number belongs to which name, so a swapped pairing passes it.
+    # This test pins the order: positional pairing, names[0]↔a and
+    # names[1]↔b — each number must fall inside its own name's span, so a
+    # swapped pairing (or a stale ref) fails.
+    text = INV.read_text(encoding="utf-8")
+    spans = {name: (lo, hi) for lo, hi, name in _named_symbol_spans(
+        AGENT_DIR / "loop.py", ("run_agent", "_run_agent_claimed"))}
+    assert spans, "expected run_agent/_run_agent_claimed in loop.py"
+    # The inventory pairs the two names with either "/" or an arrow
+    # ("run_agent / _run_agent_claimed" and the assembly-flow
+    # "run_agent → _run_agent_claimed"), so accept both separators —
+    # otherwise a stale citation in the arrow form passes undetected.
+    sep = r"\s*(?:/|→)\s*"
+    pair_re = re.compile(
+        r"`(?P<names>run_agent|_run_agent_claimed)`" + sep +
+        r"`(?P<names2>run_agent|_run_agent_claimed)`\s*"
+        r"\(loop\.py:(?P<a>\d+)(?:\+)?\s*/\s*(?P<b>\d+)"
+    )
+    mismatches: list[str] = []
+    paired = 0
+    for m in pair_re.finditer(text):
+        n1, n2, a, b = (m.group("names"), m.group("names2"),
+                        int(m.group("a")), int(m.group("b")))
+        if n1 == n2:
+            continue
+        paired += 1
+        # positional pairing: names[0]↔a, names[1]↔b (the original text had
+        # these reversed, which is exactly what this test must catch).
+        # Second CodeRabbit return trip: a ref that merely lands INSIDE a
+        # function body still passes the span check, so `run_agent` cited
+        # with `_run_agent_claimed`'s def line slipped through. A paired
+        # name/line ref must cite the symbol's def line exactly.
+        for num, name in ((a, n1), (b, n2)):
+            if num != spans[name][0]:
+                mismatches.append(f"{name} cited as loop.py:{num} "
+                                  f"(real span {spans[name][0]}\u2013{spans[name][1]})")
+    assert paired > 0, (
+        "no paired name refs found — regex or inventory format rot "
+        "(the pairing check ran against nothing)")
+    assert not mismatches, (
+        "paired name refs swapped or stale in prompt-surface-inventory.md: "
+        + "; ".join(mismatches)
     )
 
 
