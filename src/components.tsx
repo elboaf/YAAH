@@ -6360,6 +6360,46 @@ export function InterfaceScaleCard({
   // Quantize (#133), then clamp to the shipped slider range — the quantizer's
   // own [0.5, 3] envelope is wider than the UI offers end-to-end (#171).
   const value = Math.min(2, Math.max(1, quantizeUiScale(scale)))
+  // #274 — drag-length flicker: each onChange previews the zoom, the zoom
+  // moves the slider's own hit geometry mid-drag, and the native input
+  // re-derives its value from the moved geometry — a self-sustaining loop.
+  // Snapshot the pointer→value mapping (track rect) at pointerdown and
+  // drive the value from pointer moves against the FROZEN rect while the
+  // pointer is down; the browser's re-derived change events are ignored
+  // until release. Live preview is kept: every pointermove still reports.
+  const dragRectRef = useRef<DOMRect | null>(null)
+  // CodeRabbit return trip: the frozen rect is only meaningful while the
+  // pointer that started the drag is still down. Track WHICH pointer so a
+  // window-level cleanup can ignore unrelated pointers, and so teardown
+  // can't be tripped by the wrong event.
+  const dragPointerIdRef = useRef<number | null>(null)
+  const endDrag = () => {
+    dragRectRef.current = null
+    dragPointerIdRef.current = null
+  }
+  useEffect(() => {
+    // If the slider goes disabled mid-drag (config load resolving, save in
+    // flight), a stale frozen rect must not survive the re-enable.
+    if (disabled) endDrag()
+    // Window-level teardown: with pointer capture the input may never see
+    // pointerup itself (release lands off-element after zoom re-layout),
+    // so end the drag from the window, gated on the active pointer id.
+    const onRelease = (e: PointerEvent) => {
+      if (dragPointerIdRef.current === e.pointerId) endDrag()
+    }
+    window.addEventListener('pointerup', onRelease)
+    window.addEventListener('pointercancel', onRelease)
+    return () => {
+      window.removeEventListener('pointerup', onRelease)
+      window.removeEventListener('pointercancel', onRelease)
+      endDrag()
+    }
+  }, [disabled])
+  const scaleAtClientX = (rect: DOMRect, clientX: number) => {
+    const ratio = rect.width > 0 ? (clientX - rect.left) / rect.width : 0
+    const clamped = Math.min(1, Math.max(0, ratio))
+    return Math.min(2, Math.max(1, quantizeUiScale(1 + clamped)))
+  }
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <p className="min-w-0 text-[10px] text-zinc-600">
@@ -6375,7 +6415,35 @@ export function InterfaceScaleCard({
           aria-label="Interface scale"
           disabled={disabled}
           className="w-40 accent-blue-600"
-          onChange={(e) => onChange(quantizeUiScale(Number(e.target.value)))}
+          onPointerDown={(e) => {
+            // CodeRabbit return trip #2: a second pointer landing mid-drag
+            // (stray tap, palm touch) must not re-snapshot the geometry or
+            // hijack the active pointer id — return early while a drag is
+            // already live.
+            if (dragPointerIdRef.current !== null) return
+            // Freeze the hit geometry for the whole drag: the rect captured
+            // here stays authoritative even after zoom re-lays the track.
+            dragRectRef.current = e.currentTarget.getBoundingClientRect()
+            dragPointerIdRef.current = e.pointerId
+            try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* jsdom */ }
+          }}
+          onPointerMove={(e) => {
+            const rect = dragRectRef.current
+            if (rect && dragPointerIdRef.current === e.pointerId) onChange(scaleAtClientX(rect, e.clientX))
+          }}
+          onPointerUp={(e) => {
+            if (dragPointerIdRef.current === e.pointerId) endDrag()
+          }}
+          onPointerCancel={(e) => {
+            if (dragPointerIdRef.current === e.pointerId) endDrag()
+          }}
+          onChange={(e) => {
+            // Mid-drag the native input re-derives its value from the moved
+            // geometry — that re-derivation IS the flicker (#274). Our
+            // pointermove handler already reported the correct value.
+            if (dragRectRef.current) return
+            onChange(quantizeUiScale(Number(e.target.value)))
+          }}
         />
         <span className="w-10 font-mono text-xs text-zinc-300">{Math.round(value * 100)}%</span>
       </div>
