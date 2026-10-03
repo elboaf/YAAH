@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
 import { quantizeUiScale } from './jitter'
 import { AgentChatLiveFollow, AgentRunWatcher, ChatPanel, ImageLightbox, PreviewModal, Sidebar, ToastStack } from './components'
+import { NativeMenuGate } from './nativeMenu'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
 
@@ -224,6 +225,11 @@ function RestoreSession() {
 export default function App() {
   return (
     <div className="relative flex h-full w-full bg-zinc-900 text-zinc-100">
+      {/* #287: suppress the WebView2 default context menu outside editables
+          and images — Back/Refresh/Save as/Print is browser chrome, not Yaah
+          UI. Mount-first so the capture listener registers before anything
+          else cares. */}
+      <NativeMenuGate />
       <UiScale />
       <AccessMode />
       <SayInChatSync />
