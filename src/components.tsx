@@ -8498,8 +8498,46 @@ export function ChatScopePickers() {
   )
 }
 
-export function ChatPanel() {
-  const conversationId = useAgent((s) => s.conversationId)
+// Narration dedupe latch (#237). This MUST live at module level, keyed on
+// "the last say TEXT spoken for this msgId", not in a component ref:
+//
+//  - A turn is ONE coalesced message: post-tool emissions append into the
+//    same msg.id and each `say` OVERWRITES msg.say. A per-message boolean
+//    latch (n.said) early-returns after the first briefing, silencing every
+//    later emission of the turn.
+//
+//  - Component refs re-initialize on remount (chat switch away and back):
+//    the narrate effect re-feeds the unchanged msg.say, queueing N duplicate
+//    reads. The module-level map survives remounts.
+//
+// The key is the say TEXT, so a NEW briefing for the same msgId (the next
+// emission of the turn) is a different key and gets spoken. The verbatim
+// fallback (no tag at all) is guarded by the msgId key only, and stays
+// once-per-message per mount — the mount-level lastSpokenMsgIdRef below.
+const lastSpokenSayByMsg = new Map<string, string>()
+const PRUNE_SPOKEN_KEYS = 200
+function wasSaySpoken(msgId: string, say: string): boolean {
+  return lastSpokenSayByMsg.get(msgId) === say
+}
+function markSaySpoken(msgId: string, say: string): void {
+  lastSpokenSayByMsg.set(msgId, say)
+  if (lastSpokenSayByMsg.size > PRUNE_SPOKEN_KEYS) {
+    // FIFO-ish prune: drop the oldest entries (insertion order).
+    const it = lastSpokenSayByMsg.keys()
+    for (let i = 0; i < Math.floor(PRUNE_SPOKEN_KEYS / 2); i++) {
+      const k = it.next()
+      if (k.done) break
+      lastSpokenSayByMsg.delete(k.value)
+    }
+  }
+}
+
+/** Test-only: clear the module-level dedupe latch between tests. */
+export function _resetNarrationDedupeForTests(): void {
+  lastSpokenSayByMsg.clear()
+}
+
+export function ChatPanel() {  const conversationId = useAgent((s) => s.conversationId)
   const messages = useAgent(
     (s) => s.messagesByConv[s.conversationId === null ? 'draft' : String(s.conversationId)] ?? [],
   )
@@ -8647,13 +8685,15 @@ export function ChatPanel() {
     if (!streaming) return
     wasStreamingRef.current = true
     if (!ttsEnabled || !ttsReady || !lastAssistantId || !lastAssistantContent) return
+    const msgSay = messages.find((m) => m.id === lastAssistantId)?.say
     let n = narrationRef.current
     if (!n || n.msgId !== lastAssistantId) {
-      // Emission swap: flush the previous emission's held sentences (it
-      // ended without a usable tag) BEFORE the new utterance is announced.
-      // beginStream no longer supersedes (#83): the player queues the new
-      // emission until the current utterance drains, so the flushed
-      // sentences play through and the new voice starts right after.
+      // Emission swap (different message id): flush the previous emission's
+      // held sentences (it ended without a usable tag) BEFORE the new
+      // utterance is announced. beginStream no longer supersedes (#83): the
+      // player queues the new emission until the current utterance drains,
+      // so the flushed sentences play through and the new voice starts
+      // right after.
       const prev = n
       if (prev) {
         // Close the previous emission's stream utterance OUT: end() is what
@@ -8668,18 +8708,50 @@ export function ChatPanel() {
         // usable <say> tag still speaks, verbatim.
         for (let i = prev.spoken; i < chunks.length; i++) prev.feed.append(chunks[i])
         prev.feed.end()
+        n = null // prev is closed; the block below opens the new emission's feed
       }
+      // New emission of the same message (coalesced turn): the PREVIOUS
+      // emission's narration must be closed out even though the msgId is
+      // unchanged — end() lets its stream utterance drain so the next
+      // briefing is not stuck behind it. The flush loops below read the
+      // CURRENT msg.say, so they skip the fallback when this emission has
+      // its own briefing (same dedupe key as the spoken path).
+      if (n && msgSay != null && n.said) {
+        n.feed.end()
+        n = null
+      }
+      if (!n) {
+        const feed = beginNarration(lastAssistantId)
+        if (!feed) return
+        n = { msgId: lastAssistantId, spoken: 0, said: false, feed }
+        narrationRef.current = n
+        lastSpokenRef.current = lastAssistantId
+      }
+    }
+    if (n.said) {
+      // #237: a coalesced turn overwrites msg.say per emission on the SAME
+      // msgId. A different say text is a NEW emission's briefing: close the
+      // previous utterance out (end() lets its stream drain, #83) and start
+      // a fresh narration for the new briefing. The same-say early return
+      // is the remount guard: the module latch says this briefing played.
+      if (msgSay == null || wasSaySpoken(lastAssistantId, msgSay)) return
+      n.feed.end()
       const feed = beginNarration(lastAssistantId)
       if (!feed) return
       n = { msgId: lastAssistantId, spoken: 0, said: false, feed }
       narrationRef.current = n
-      lastSpokenRef.current = lastAssistantId
     }
-    if (n.said) return
-    const msgSay = messages.find((m) => m.id === lastAssistantId)?.say
     if (msgSay != null) {
       // Briefing arrived: drop the held verbatim sentences, speak the
       // briefing alone (spokenLine clamps it to the cap; markdown-free).
+      // #237: the latch is the say TEXT at module scope — a remount must
+      // not re-feed this briefing, but a NEW briefing for the same msgId
+      // (the next emission of the turn) must still be spoken.
+      if (wasSaySpoken(lastAssistantId, msgSay)) {
+        n.said = true
+        return
+      }
+      markSaySpoken(lastAssistantId, msgSay)
       n.said = true
       n.feed.append(spokenLine(msgSay, lastAssistantContent))
       return
@@ -8705,9 +8777,15 @@ export function ChatPanel() {
     wasStreamingRef.current = false
     const n = narrationRef.current
     if (n) {
-      if (!n.said) {
-        // The last emission ended without a briefing: flush its held
-        // sentences so the fallback stays verbatim, never silence.
+      const msgSay = messages.find((m) => m.id === n.msgId)?.say
+      if (!n.said && (msgSay == null || !wasSaySpoken(n.msgId, msgSay))) {
+        // The last emission ended without a (spoken) briefing: flush its
+        // held sentences so the fallback stays verbatim, never silence.
+        // #237: on a remount the new narration entry starts said=false even
+        // though the briefing already played (module-scope latch) — the
+        // wasSaySpoken guard keeps that remount from flushing the fallback
+        // verbatim on top of the already-spoken briefing.
+        if (msgSay != null) markSaySpoken(n.msgId, msgSay)
         const msg = messages.find((m) => m.id === n.msgId)
         const chunks = splitSentences(liveProse(msg?.content ?? ''))
         for (let i = n.spoken; i < chunks.length; i++) n.feed.append(chunks[i])
