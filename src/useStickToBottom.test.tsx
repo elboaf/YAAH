@@ -121,4 +121,56 @@ describe('useStickToBottom', () => {
     grow(rerender, 10_000)
     expect(el.scrollTop).toBe(10_000) // following again
   })
+
+  // #275: while the user drags a text selection, auto-scroll would slide
+  // content up under a stationary cursor, extending the selection over text
+  // they never crossed. While document.getSelection() holds a Range, the
+  // follow (even pinned) suspends; collapsing back to a caret re-arms it.
+  describe('#275 selection in progress', () => {
+    const setSelection = (type: 'Range' | 'Caret' | 'None') => {
+      const sel = document.getSelection()
+      const fake = { type, isCollapsed: type !== 'Range' } as Selection
+      if (!sel) {
+        Object.defineProperty(document, 'getSelection', {
+          configurable: true,
+          value: () => fake,
+        })
+        return
+      }
+      // jsdom's live Selection: shadow the two members the hook reads.
+      Object.defineProperty(sel, 'type', { configurable: true, get: () => type })
+      Object.defineProperty(sel, 'isCollapsed', {
+        configurable: true,
+        get: () => type !== 'Range',
+      })
+    }
+
+    it('suspends the pinned follow while a selection Range is active', () => {
+      const { rerender } = render(<Harness content={200} />)
+      const el = container()
+      stubLayout(el, 5_000)
+      grow(rerender, 5_000)
+      expect(el.scrollTop).toBe(5_000) // pinned, following
+      setSelection('Range') // user pressed and is dragging
+      grow(rerender, 9_000)
+      expect(el.scrollTop).toBe(5_000) // no yank mid-drag
+      setSelection('Caret') // released; caret back
+      grow(rerender, 12_000)
+      expect(el.scrollTop).toBe(12_000) // follow resumes
+    })
+
+    it('also suspends an unpinned reader\u2019s position (no fight with the drag)', () => {
+      const { rerender } = render(<Harness content={200} />)
+      const el = container()
+      stubLayout(el, 5_000)
+      grow(rerender, 5_000)
+      scrollUp(el, 1_500)
+      setSelection('Range')
+      grow(rerender, 9_000)
+      expect(el.scrollTop).toBe(1_500)
+      setSelection('None')
+      grow(rerender, 9_500)
+      expect(el.scrollTop).toBe(1_500) // still unpinned; stick just stays out of the way
+    })
+  })
 })
