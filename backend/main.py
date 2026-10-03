@@ -1985,10 +1985,17 @@ async def api_export_conversation(conversation_id: int):
             lines += [f"**🔧 tool: {name}**", "", "```json", r["content"], "```", ""]
         elif role == "assistant":
             lines += [f"**🤖 assistant**", "", r["content"] or "", ""]
-            # #226: the briefing the voice spoke for this emission, when one
-            # was captured (say toggle off ⇒ column empty ⇒ no line here).
+            # #226/#230: the briefing the voice spoke for this emission, when
+            # one was captured (say toggle off ⇒ column empty ⇒ no line here).
+            # #230: fallback-derived lines are marked "(auto)" so a reader can
+            # attribute the briefing; raw model briefings render verbatim.
             if r.get("say"):
-                lines += [f"*Briefing:* {r['say']}", ""]
+                label = (
+                    "Briefing (auto)"
+                    if r.get("say_is_fallback")
+                    else "Briefing"
+                )
+                lines += [f"*{label}:* {r['say']}", ""]
             for tc in r.get("tool_calls") or []:
                 if isinstance(tc, dict) and tc.get("id") and not tc.get("name"):
                     fn = tc.get("function") or {}

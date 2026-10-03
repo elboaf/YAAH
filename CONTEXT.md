@@ -83,3 +83,9 @@ _Avoid_: project memory (implies project-state storage), audit trail
 **Retention test**:
 The gate for saving a memory: would a fresh session, handed only the repo and the tracker, work differently for this user without it? If no, do not save.
 _Avoid_: "might be useful later"
+
+### Voice
+
+**Spoken briefing**:
+The short text the voice channel reads aloud for a completed model emission. The model authors it inside a `<say>` tag on its message; when the tag is missing or unusable, a heuristic (first/last sentence) fallback speaks instead. The briefing lives outside the conversation transcript — it is stripped from stored chat content, shipped on its own `say` wire event, and persisted on the row for reloads and export. The `spoken_line` normalization (numbers spelled out, markdown flattened, length cap) is a speak-time pass over the briefing; the raw model text is what persists.
+_Avoid_: conflating the spoken briefing with the chat transcript (it is never part of it); conflating the briefing with the `spoken_line` normalization output (one is authored content, the other a TTS rendering of it); "say message" (the briefing is not a message)
