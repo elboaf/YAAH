@@ -282,6 +282,19 @@ def test_body_under_cap_not_marked(skills_dir):
     assert not skill.body.endswith("…[truncated]")
 
 
+def test_truncation_flag_true_only_when_actually_truncated(skills_dir):
+    # CodeRabbit return trip #1 on PR #251: a skill whose body merely ENDS
+    # with the truncation marker but is under the cap must not report
+    # truncated=True — the flag reflects an actual cut.
+    make_skill(skills_dir, "possum", "ends with the marker…[truncated]")
+    loaded = []
+    messages = [{"role": "system", "content": "sys"}]
+    result = skill_registry.load_skill_into_messages(
+        {"name": "possum"}, loaded, messages
+    )
+    assert result.get("truncated") is None
+
+
 def test_pathological_description_clamped_in_index(skills_dir):
     make_skill(skills_dir, "loud", "Body.", description="D" * 5000)
     idx = skill_registry.index_for_prompt()

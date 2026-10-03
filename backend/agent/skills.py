@@ -44,6 +44,11 @@ class Skill:
     body: str
     path: str
     disable_model_invocation: bool = False
+    # Set at parse time when the body exceeded MAX_SKILL_BODY_CHARS — the
+    # load result's `truncated` flag reads this, not a marker-suffix check,
+    # so a body that legitimately ends with the marker isn't a false
+    # positive (CodeRabbit return trip #1 on PR #251).
+    truncated: bool = False
 
 
 # name -> Skill; rebuilt by scan_skills(), read by everything else.
@@ -166,12 +171,16 @@ def parse_skill_md(path: Path) -> Skill | None:
         # Marked truncation, mirroring the AGENTS-notes and memory-index
         # caps so an oversized skill never degrades silently (#192).
         body = body[:MAX_SKILL_BODY_CHARS] + TRUNCATION_MARKER
+        truncated = True
+    else:
+        truncated = False
     return Skill(
         name=name,
         description=description,
         body=body,
         path=str(path),
         disable_model_invocation=bool(meta.get("disable-model-invocation")),
+        truncated=truncated,
     )
 
 
@@ -322,7 +331,7 @@ def load_skill_into_messages(args: dict, loaded_skills: list[str], messages: lis
         "description": skill.description,
         "folder": str(Path(skill.path).parent),
     }
-    if skill.body.endswith(TRUNCATION_MARKER):
+    if skill.truncated:
         result["truncated"] = True
     return result
 

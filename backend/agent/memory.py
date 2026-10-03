@@ -248,24 +248,56 @@ _ENTRY_RE = re.compile(r"\]\(([^)]+\.md)\)")
 _PINNED_TYPES = ("user", "feedback")
 
 
-def _entry_type(idx_dir: Path, line: str) -> str:
+def _entry_type(idx_dir: Path, line: str, _cache: dict | None = None) -> str:
     """The memory file's metadata.type for an index line ('project' when
-    the file is missing or unreadable — unpinned by default)."""
+    the file is missing or unreadable — unpinned by default).
+
+    `_cache` maps memory-file path -> type so one index render reads each
+    linked file at most once (CodeRabbit return trip #1 on PR #251: the
+    naive version re-read per line, O(n) disk reads over n lines)."""
     m = _ENTRY_RE.search(line)
     if not m:
         return "project"
+    f = idx_dir / m.group(1)
+    if _cache is not None and str(f) in _cache:
+        return _cache[str(f)]
+
+    def _finish(t: str) -> str:
+        if _cache is not None:
+            _cache[str(f)] = t
+        return t
+
     try:
-        text = (idx_dir / m.group(1)).read_text(
-            encoding="utf-8", errors="replace"
-        )
+        text = f.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return "project"
+        return _finish("project")
     fm = re.match(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
     if not fm:
-        return "project"
-    tm = re.search(r"^\s*type:\s*(\S+)", fm.group(1), re.MULTILINE)
-    t = (tm.group(1).lower() if tm else "project")
-    return t if t in ("user", "feedback", "project", "reference") else "project"
+        return _finish("project")
+    # Line-parse the frontmatter: only a `type:` key nested under
+    # `metadata:` classifies the entry. A bare `^\s*type:` MULTILINE regex
+    # also anchors on a top-level `type:` key (or any line starting with
+    # one), shadowing the authoritative metadata value (CodeRabbit return
+    # trip #1 on PR #251).
+    meta_type: str | None = None
+    in_meta = False
+    for raw in fm.group(1).splitlines():
+        if not raw.strip():
+            continue
+        indented = raw[0] in (" ", "\t")
+        km = re.match(r"^\s+([\w-]+):\s*(\S*)", raw) if indented else re.match(
+            r"^([\w-]+):", raw
+        )
+        if not km:
+            continue
+        if not indented:
+            in_meta = km.group(1) == "metadata"
+        elif in_meta and km.group(1) == "type":
+            meta_type = km.group(2).strip().lower()
+    t = meta_type or "project"
+    return _finish(
+        t if t in ("user", "feedback", "project", "reference") else "project"
+    )
 
 
 def index_for_prompt(workspace: str | None) -> str:
@@ -290,17 +322,31 @@ def index_for_prompt(workspace: str | None) -> str:
     text = re.sub(r"^#\s+Persistent memory[^\n]*\n*", "", text).strip()
     lines = [ln for ln in text.splitlines() if ln.strip()]
     try:
-        pinned = [ln for ln in lines if _entry_type(idx.parent, ln) in _PINNED_TYPES]
-        rest = [ln for ln in lines if ln not in pinned]
+        types: dict = {}
+        pinned_idxs = {
+            i
+            for i, ln in enumerate(lines)
+            if _entry_type(idx.parent, ln, types) in _PINNED_TYPES
+        }
+        # Partition by position, not content membership: an unpinned line
+        # byte-identical to a pinned line must still render (CodeRabbit
+        # return trip #1 on PR #251).
+        pinned = [ln for i, ln in enumerate(lines) if i in pinned_idxs]
+        rest = [ln for i, ln in enumerate(lines) if i not in pinned_idxs]
     except Exception:  # noqa: BLE001 — optional context must never break a turn
         pinned, rest = [], lines
     ordered = pinned + rest
     body = "\n".join(ordered)
     if len(body) > MAX_INDEX_CHARS:
-        # Drop oldest-first from `rest` (pinned types survive) until it
-        # fits; mark the truncation.
+        # Drop oldest-first from `rest` until it fits; pinned types survive.
         while rest and len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
             rest.pop(0)
+        # The cap is unconditional: pinned entries alone can exceed it, in
+        # which case the oldest pinned entries drop too (keep newest pinned)
+        # (CodeRabbit return trip #1 on PR #251).
+        if len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
+            while pinned and len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
+                pinned.pop(0)
         body = "\n".join(pinned + rest) + "\n…[truncated]"
     return (
         "# Persistent memory (yours — for THIS project)\n\n"

@@ -253,6 +253,70 @@ def test_index_drop_oldest_project_first_when_over_budget(monkeypatch):
     assert "user-1.md" in block and "fb-1.md" in block  # pinned types kept
 
 
+def test_entry_type_ignores_non_type_keys(monkeypatch):
+    # CodeRabbit return trip #1 on PR #251: `default_type: user` (or any
+    # other frontmatter key ending in "type") must NOT classify the entry
+    # as pinned — only an exact `type:` key does.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        f = memory.ensure_dir(td) / "entry.md"
+        f.write_text(
+            "---\nname: e\ndescription: \"d\"\n"
+            "type: user\n"          # top-level key must NOT classify...
+            "metadata:\n"
+            "  type: project\n      # ...the metadata type is authoritative\n---\n\n# e\n",
+            encoding="utf-8",
+        )
+        assert memory._entry_type(f.parent, "- [E](entry.md) — d") == "project"
+
+
+def test_index_partition_by_index_not_content(monkeypatch):
+    # CodeRabbit return trip #1 on PR #251: an unpinned line whose text is
+    # byte-identical to a pinned line must still render — partitioning is
+    # by position, not content membership.
+    _write_index(
+        WS,
+        "- [U](user-1.md) — user line\n"
+        "- [U](user-1.md) — user line\n"
+        "- [P](p1.md) — project line\n",
+    )
+    d = memory.ensure_dir(WS)
+    (d / "user-1.md").write_text(
+        "---\nname: user-1\ndescription: \"u\"\nmetadata:\n  type: user\n---\n",
+        encoding="utf-8",
+    )
+    (d / "p1.md").write_text(
+        "---\nname: p1\ndescription: \"p\"\nmetadata:\n  type: project\n---\n",
+        encoding="utf-8",
+    )
+    block = memory.index_for_prompt(WS)
+    assert block.count("user line") == 2  # duplicate unpinned copy survives
+    assert "project line" in block
+
+
+def test_index_pinned_alone_over_budget_still_caps(monkeypatch):
+    # CodeRabbit return trip #1 on PR #251: when pinned (user/feedback)
+    # entries alone exceed MAX_INDEX_CHARS, the cap must hold — oldest
+    # pinned entries drop before the body exceeds the budget.
+    lines = []
+    for i in range(40):
+        slug = f"user-{i:03d}"
+        lines.append(f"- [U{i}]({slug}.md) — {'x' * 200}")
+        (memory.ensure_dir(WS) / f"{slug}.md").write_text(
+            f"---\nname: {slug}\ndescription: \"u\"\nmetadata:\n"
+            f"  type: user\n---\n",
+            encoding="utf-8",
+        )
+    _write_index(WS, "\n".join(lines))
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 3000)
+    block = memory.index_for_prompt(WS)
+    entry_lines = [ln for ln in block.splitlines() if ".md)" in ln]
+    assert sum(len(ln) + 1 for ln in entry_lines) <= 3000  # cap holds, pinned-only
+    assert "user-000.md" not in block  # oldest pinned dropped first
+    assert "user-039.md" in block      # newest pinned kept
+
+
 def test_save_memory_caps_body_and_reports_truncation():
     long_body = "x" * (memory.MAX_MEMORY_BODY_CHARS + 5000)
     r = memory.save_memory(WS, "big", "Big", "d", "project", long_body)
