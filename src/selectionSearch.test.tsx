@@ -265,6 +265,26 @@ describe('ChatPanel search-selection context menu', () => {
     expect(parseFloat(menu.style.top) + MENU_H).toBeLessThanOrEqual(window.innerHeight)
   })
 
+  // #276 (redo): the menu must render through a portal as a DIRECT child of
+  // <body> — outside both the transcript container and the zoomed #root
+  // subtree. Rendered in place (the #282 bug) it inherited the transcript's
+  // space-y-4 sibling margin (+16px top even at zoom 1.0) and resolved its
+  // fixed left/top against #root's zoomed box (drift of (zoom-1) x cursor —
+  // ~200px off in the reporter's real session): "one menu, but nowhere near
+  // the cursor".
+  it('renders the menu via portal outside #root and the transcript container', async () => {
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para, { clientX: 100, clientY: 80 })
+    const menu = (await findByRole('menu', { name: /search selection/i })) as HTMLElement
+    expect(menu.parentElement).toBe(document.body)
+  })
+
   // #276: with NO selection the transcript must not suppress the native
   // menu (preventDefault is only called for the custom at-cursor menu).
   it('does not preventDefault the contextmenu when there is no selection', () => {
