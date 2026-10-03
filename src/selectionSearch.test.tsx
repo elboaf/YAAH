@@ -85,6 +85,9 @@ vi.mock('./api', async (importOriginal) => ({
   ...apiMocks,
 }))
 
+// The real openExternal is a Tauri shell launch; tests observe the call only.
+vi.mock('./openExternal', () => ({ openExternal: vi.fn() }))
+
 import { ChatPanel } from './components'
 import { useAgent } from './store'
 
@@ -121,9 +124,13 @@ describe('ChatPanel search-selection context menu', () => {
     const sel = window.getSelection()!
     sel.removeAllRanges()
     sel.addRange(range)
-    fireEvent.contextMenu(para)
+    // Review: a qualifying selection must also suppress the native menu,
+    // not only open the custom one.
+    const event = createEvent.contextMenu(para)
+    fireEvent(para, event)
     const item = await findByRole('menuitem', { name: /search on google/i })
     expect(item).toBeTruthy()
+    expect(event.defaultPrevented).toBe(true)
   })
 
   it('shows no menu item on right-click without a selection', () => {
@@ -266,5 +273,24 @@ describe('ChatPanel search-selection context menu', () => {
     const event = createEvent.contextMenu(para)
     fireEvent(para, event)
     expect(event.defaultPrevented).toBe(false)
+  })
+
+  // Review: clicking Search on Google must route the encoded query through
+  // the shared openExternal path (default-browser launch), not window.open.
+  it('opens the encoded Google search URL for the selected query on click', async () => {
+    const { openExternal } = await import('./openExternal')
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para)
+    fireEvent.click(await findByRole('menuitem', { name: /search on google/i }))
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://www.google.com/search?q=selectable%20transcript%20text%20here',
+      expect.anything(),
+    )
   })
 })
