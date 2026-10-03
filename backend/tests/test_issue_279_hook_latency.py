@@ -111,6 +111,8 @@ def test_hook_install_failures_empty_means_nothing_tried_is_failure():
 # ------------------------------------------------- keyboard hook exercise
 
 
+@pytest.mark.skipif(not computer_mod.WINDOWS,
+                    reason="real LL hooks need ctypes.windll")
 def test_keyboard_events_are_injected_and_measured_separately(monkeypatch):
     """The regression gate must verify samples for EACH hook, not a shared
     p99 a mouse-only run can satisfy: the keyboard hook is installed, so it
