@@ -269,7 +269,9 @@ function withBreaks(s: string, keyBase: string): ReactNode {
   )
 }
 
-function fileAnchor(
+/** #275: shared with markdown.tsx — a confirmed path link inside streamed
+ *  text must render between (not inside) the append-only StreamText runs. */
+export function fileAnchor(
   t: PathToken,
   key: string,
   onOpen: (path: string, line: number | null) => void,

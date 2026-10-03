@@ -1678,12 +1678,12 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   )
   // ONE segmentation decides the render (#275): every agent message — plain
   // streaming or anchor-interleaved — goes through emissionSegments, whose
-  // keys are stable across mid-stream boundary insertions (keyed by the
-  // anchor that ENDS each segment, tail keyed `-end`). The old offset-keyed
-  // interleaving only engaged once an anchor existed, so the first boundary
-  // replaced the whole body DOM — destroying any in-progress selection.
-  // Legacy rows whose answered asks lack offsets fall back to the
-  // chronological (qa-seg) render below.
+  // keys are stable across mid-stream boundary insertions (keyed by each
+  // segment's starting cursor offset). But keys alone were not enough:
+  // the text INSIDE each segment also has to survive a delta, which is
+  // AgentMarkdown's job (StreamText append-only text commit, #275). Legacy
+  // rows whose answered asks lack offsets fall back to the chronological
+  // (qa-seg) render below.
   const canInterleave = emissionSegments(msg) !== null
   const interleaved: ReactNode[] = []
   if (canInterleave) {
