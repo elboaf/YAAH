@@ -20,13 +20,26 @@ export function useStickToBottom(force: boolean, deps: DependencyList) {
   // updates on every scroll event without re-rendering the transcript.
   const pinnedToBottom = useRef(true)
 
+  // #275: while the reader is dragging a text selection (getSelection holds
+  // a Range), auto-scroll would slide content up under their stationary
+  // cursor — extending the selection over text they never crossed. Suspend
+  // the follow for that effect pass; collapsing back to a caret re-arms it.
+  const selectionInProgress = () => {
+    try {
+      return document.getSelection()?.type === 'Range'
+    } catch {
+      return false
+    }
+  }
+
   // Snap to the newest content whenever deps fire (streamed deltas, message
   // reloads, mount) — but only while pinned, or when forced by an attention
   // event that requires the user's eyes.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    if (pinnedToBottom.current || force) el.scrollTop = el.scrollHeight
+    if ((pinnedToBottom.current || force) && !selectionInProgress())
+      el.scrollTop = el.scrollHeight
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, force])
 

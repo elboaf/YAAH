@@ -109,6 +109,7 @@ import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
 import { tapeOffsetPx, quantizeUiScale } from './jitter'
 import { CodeBlock, AgentMarkdown } from './markdown'
+import { emissionSegments } from './emissionSegments'
 import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
@@ -1675,54 +1676,46 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
   const anchorFor = (t: ToolCall) => (
     <QuestionAnchor key={t.id} tc={t} after={allCalls.slice(allCalls.indexOf(t) + 1)} />
   )
-  const hasSpawnAnchors = inlineSubAgents.length > 0 && inlineSubAgents.every(
-    (call) => typeof call.contentOffset === 'number',
-  )
-  const textAnchors: Array<{ offset: number; order: number; node: ReactNode }> = [
-    ...ordered.map((call, order) => ({
-      offset: call.contentOffset ?? 0,
-      order,
-      node: <QuestionAnchor key={`question-${call.id}`} tc={call} after={allCalls.slice(allCalls.indexOf(call) + 1)} />,
-    })),
-    ...inlineSubAgents.map((call, order) => ({
-      offset: hasSpawnAnchors ? call.contentOffset! : msg.content.length,
-      order: ordered.length + order,
-      node: <SubAgentBlock key={`subagent-${call.id}`} run={call.subAgent!} />,
-    })),
-  ].sort((a, b) => a.offset - b.offset || a.order - b.order)
-  // ONE predicate decides both whether the interleaved emission segments are
-  // built AND whether the render branch below uses them. It used to be two
-  // diverging copies of the same condition: the render branch accepted
-  // asks-with-offsets (no sub-agents) while the population guard required
-  // sub-agent anchors too — so an answered ask_user (the #63 shape) took the
-  // branch with an EMPTY interleaved array and the block's whole text
-  // vanished from the transcript (only the tool trace remained). Keeping the
-  // guard in one place makes that mismatch unreachable again.
-  const canInterleave =
-    textAnchors.length > 0 &&
-    ordered.every((call) => typeof call.contentOffset === 'number') &&
-    (hasSpawnAnchors || ordered.length === 0)
+  // ONE segmentation decides the render (#275): every agent message — plain
+  // streaming or anchor-interleaved — goes through emissionSegments, whose
+  // keys are stable across mid-stream boundary insertions (keyed by the
+  // anchor that ENDS each segment, tail keyed `-end`). The old offset-keyed
+  // interleaving only engaged once an anchor existed, so the first boundary
+  // replaced the whole body DOM — destroying any in-progress selection.
+  // Legacy rows whose answered asks lack offsets fall back to the
+  // chronological (qa-seg) render below.
+  const canInterleave = emissionSegments(msg) !== null
   const interleaved: ReactNode[] = []
   if (canInterleave) {
-    let cursor = 0
-    for (const anchor of textAnchors) {
-      const cut = Math.min(Math.max(anchor.offset, cursor), msg.content.length)
-      if (cut > cursor) {
+    for (const seg of emissionSegments(msg)!) {
+      if (seg.anchor) {
         interleaved.push(
-          <div key={`agent-seg-${cursor}`} data-agent-emission="" className="text-sm leading-relaxed text-zinc-200">
-            <MessageBody content={msg.content.slice(cursor, cut)} />
+          seg.anchor.name === 'spawn_agent' && seg.anchor.subAgent ? (
+            <SubAgentBlock key={seg.key} run={seg.anchor.subAgent} />
+          ) : (
+            <QuestionAnchor
+              key={seg.key}
+              tc={seg.anchor}
+              after={allCalls.slice(allCalls.indexOf(seg.anchor) + 1)}
+            />
+          ),
+        )
+      } else {
+        interleaved.push(
+          <div key={seg.key} data-agent-emission="" className="text-sm leading-relaxed text-zinc-200">
+            {/* Say-only emission fallback: empty content + a captured
+                briefing renders the briefing as the body (not a blank row). */}
+            <MessageBody content={seg.content || chatText} />
           </div>,
         )
-        cursor = cut
       }
-      interleaved.push(anchor.node)
     }
-    if (cursor < msg.content.length) {
-      interleaved.push(
-        <div key={`agent-seg-${cursor}`} data-agent-emission="" className="text-sm leading-relaxed text-zinc-200">
-          <MessageBody content={msg.content.slice(cursor)} />
-        </div>,
-      )
+    // Parity with the old fallback (#275): a live spawn_agent whose run has
+    // no recorded offset yet renders after the body, as before.
+    for (const call of inlineSubAgents) {
+      if (typeof call.contentOffset !== 'number') {
+        interleaved.push(<SubAgentBlock key={`subagent-${call.id}`} run={call.subAgent!} />)
+      }
     }
   }
   const segments: ReactNode[] = []
@@ -1760,6 +1753,16 @@ export function MessageView({ msg, live }: { msg: ChatMessage; live?: boolean })
       {canInterleave ? (
         <>
           {interleaved}
+          {/* #275: the unified segmentation owns the emission text; the say
+              briefing line and the empty-content caret keep body parity. */}
+          {showSayLine ? (
+            <em className="say-line mt-1.5 block text-xs italic text-zinc-500">
+              {msg.say}
+            </em>
+          ) : null}
+          {!msg.content && !(msg.toolCalls ?? []).length && (
+            <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
+          )}
           {live && (
             <ToolTicker calls={(msg.toolCalls ?? []).filter((call) => call.name !== 'spawn_agent')} />
           )}
