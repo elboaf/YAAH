@@ -332,6 +332,9 @@ def test_screenshot_monitor_param_still_works(fake_capture):
 
 
 def test_screenshot_region_captures_clip(fake_capture, monkeypatch):
+    # Flows through _store_png's real encode path, which needs PIL (absent
+    # on the Linux CI runner; the plumbing it covers is OS-independent).
+    pytest.importorskip("PIL")
     monkeypatch.setattr(
         computer_mod, "_clip_region",
         lambda x, y, w, h: {"left": x, "top": y, "width": w, "height": h})
