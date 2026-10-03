@@ -4,7 +4,7 @@
 // on the real ChatPanel (DOM test).
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { render, cleanup, fireEvent } from '@testing-library/react'
+import { render, cleanup, fireEvent, createEvent } from '@testing-library/react'
 import { transcriptSelection, googleSearchUrl, SEARCH_QUERY_MAX_CHARS } from './selectionSearch'
 
 // --- helpers: trigger rules + query construction -----------------------------
@@ -131,5 +131,65 @@ describe('ChatPanel search-selection context menu', () => {
     const para = getByText(TEXT)
     fireEvent.contextMenu(para)
     expect(queryByRole('menuitem', { name: /search on google/i })).toBeNull()
+  })
+
+  // #276: ONE menu, at the cursor. When a selection exists the custom menu
+  // must be positioned at the contextmenu pointer coordinates.
+  it('positions the menu at the contextmenu event coordinates', async () => {
+    const { findByRole, getByText, getByRole } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para, { clientX: 240, clientY: 180 })
+    const menu = await findByRole('menu', { name: /search selection/i })
+    expect((menu as HTMLElement).style.left).toBe('240px')
+    expect((menu as HTMLElement).style.top).toBe('180px')
+    expect(getByRole('menuitem', { name: /search on google/i })).toBeTruthy()
+  })
+
+  // #276: the menu carries Copy alongside Search on Google.
+  it('offers a Copy item that writes the selection to the clipboard', async () => {
+    const writeText = vi.fn(async () => {})
+    Object.assign(navigator, { clipboard: { writeText } })
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para)
+    fireEvent.click(await findByRole('menuitem', { name: /^copy$/i }))
+    expect(writeText).toHaveBeenCalledWith('selectable transcript text here')
+    // The menu closes after acting on it.
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+  })
+
+  // #276: Escape closes the custom menu.
+  it('closes on Escape', async () => {
+    const { findByRole, getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const range = document.createRange()
+    range.selectNodeContents(para)
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    sel.addRange(range)
+    fireEvent.contextMenu(para)
+    expect(await findByRole('menu', { name: /search selection/i })).toBeTruthy()
+    fireEvent.keyDown(document.querySelector('[role="menu"]')!, { key: 'Escape' })
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+  })
+
+  // #276: with NO selection the transcript must not suppress the native
+  // menu (preventDefault is only called for the custom at-cursor menu).
+  it('does not preventDefault the contextmenu when there is no selection', () => {
+    const { getByText } = render(<ChatPanel />)
+    const para = getByText(TEXT)
+    const event = createEvent.contextMenu(para)
+    fireEvent(para, event)
+    expect(event.defaultPrevented).toBe(false)
   })
 })

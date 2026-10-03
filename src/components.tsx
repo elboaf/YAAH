@@ -8593,14 +8593,20 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     [messages],
   )
   const streaming = status === 'thinking' || status === 'running-tool'
-  // #201: right-click on an active transcript selection -> "Search on Google".
-  // Menu state is just the selected query text (null = closed); the item only
-  // appears when the right-click lands with a real selection inside the
-  // transcript (transcriptSelection enforces that), and activating it goes
-  // through the proven openExternal -> open_external default-browser path.
-  const [searchSelection, setSearchSelection] = useState<string | null>(null)
-  const onTranscriptContextMenu = useCallback(() => {
-    setSearchSelection(transcriptSelection(transcriptRef.current))
+  // #201/#276: right-click on an active transcript selection -> ONE custom
+  // menu AT THE CURSOR with Copy + "Search on Google". When there is a
+  // selection we preventDefault() so the WebView2 native menu does not also
+  // appear (two menus for one right-click was the bug); with no selection
+  // the native menu is untouched. Menu state is the selected query text plus
+  // the pointer coordinates (null = closed); activating Search goes through
+  // the proven openExternal -> open_external default-browser path, Copy via
+  // the clipboard API.
+  const [searchMenu, setSearchMenu] = useState<{ query: string; x: number; y: number } | null>(null)
+  const onTranscriptContextMenu = useCallback((e: React.MouseEvent) => {
+    const query = transcriptSelection(transcriptRef.current)
+    if (query === null) return
+    e.preventDefault()
+    setSearchMenu({ query, x: e.clientX, y: e.clientY })
   }, [])
   // A scheduled agent run streams inside the backend — no live buffer, the
   // messages arrive by history reload — but its ticker/tape should still
@@ -8856,22 +8862,37 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
         onContextMenu={onTranscriptContextMenu}
         className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4"
       >
-        {/* #201: selection search menu (FilesPanel pattern) — item renders
-            only when the contextmenu carried an active transcript selection. */}
-        {searchSelection !== null && (
+        {/* #201/#276: at-cursor context menu (FilesPanel pattern) — renders
+            only when the contextmenu carried an active transcript selection,
+            and preventDefault on the event keeps the native menu away so
+            exactly ONE menu shows. Escape / click-away / right-click-away
+            close it. */}
+        {searchMenu !== null && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setSearchSelection(null)} onContextMenu={(e) => { e.preventDefault(); setSearchSelection(null) }} />
+            <div className="fixed inset-0 z-40" onClick={() => setSearchMenu(null)} onContextMenu={(e) => { e.preventDefault(); setSearchMenu(null) }} />
             <div
               className="fixed z-50 w-44 rounded bg-zinc-900 py-1 text-xs shadow-xl"
               role="menu"
               aria-label="Search selection"
+              style={{ left: searchMenu.x, top: searchMenu.y }}
+              onKeyDown={(e) => { if (e.key === 'Escape') setSearchMenu(null) }}
             >
               <button
                 className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
                 role="menuitem"
                 onClick={(e) => {
-                  openExternal(googleSearchUrl(searchSelection), e)
-                  setSearchSelection(null)
+                  navigator.clipboard.writeText(searchMenu.query).catch(() => {})
+                  setSearchMenu(null)
+                }}
+              >
+                Copy
+              </button>
+              <button
+                className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
+                role="menuitem"
+                onClick={(e) => {
+                  openExternal(googleSearchUrl(searchMenu.query), e)
+                  setSearchMenu(null)
                 }}
               >
                 Search on Google
