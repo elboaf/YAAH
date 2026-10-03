@@ -119,6 +119,7 @@ import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
 import { stripProviderMarkup } from './providerMarkup'
+import { createPortal } from 'react-dom'
 import { transcriptSelection, googleSearchUrl } from './selectionSearch'
 import { openExternal } from './openExternal'
 
@@ -8956,53 +8957,61 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
         onContextMenu={onTranscriptContextMenu}
         className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4"
       >
-        {/* #201/#276: at-cursor context menu (FilesPanel pattern) — renders
-            only when the contextmenu carried an active transcript selection,
-            and preventDefault on the event keeps the native menu away so
-            exactly ONE menu shows. Escape / click-away / right-click-away
+        {/* #201/#276: at-cursor context menu (FilesPanel pattern) —
+            PORTALED to document.body. Rendered in place (the #282 bug) the
+            menu inherited the transcript's space-y-4 sibling margin (+16px
+            top even at zoom 1.0) and resolved its fixed left/top against
+            #root's zoomed box — UiScale applies CSS zoom there — so the menu
+            drifted from the cursor by (zoom-1) x cursor (hundreds of px in
+            real sessions: "nowhere near the mouse cursor"). As a body child
+            it shares the viewport coordinate space the contextmenu event
+            reports, so clientX/clientY land exactly and the clamp below is
+            computed in the right space. Escape / click-away / right-click-away
             close it. */}
-        {searchMenu !== null && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setSearchMenu(null)} onContextMenu={(e) => { e.preventDefault(); setSearchMenu(null) }} />
-            <div
-              className="fixed z-50 w-44 rounded bg-zinc-900 py-1 text-xs shadow-xl"
-              role="menu"
-              aria-label="Search selection"
-              style={searchMenuPos === null ? undefined : { left: searchMenuPos.left, top: searchMenuPos.top }}
-              onKeyDown={(e) => { if (e.key === 'Escape') setSearchMenu(null) }}
-            >
-              <button
-                className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
-                role="menuitem"
-                onClick={(e) => {
-                  // Review: Copy writes the RAW selection (formatting kept);
-                  // failure surfaces on the shared error-toast path.
-                  navigator.clipboard.writeText(searchMenu.text).catch((error) => {
-                    const detail = error instanceof Error ? error.message : String(error)
-                    useAgent.getState().pushToast({
-                      kind: 'error',
-                      title: 'Could not copy selection',
-                      body: detail,
+        {searchMenu !== null &&
+          createPortal(
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setSearchMenu(null)} onContextMenu={(e) => { e.preventDefault(); setSearchMenu(null) }} />
+              <div
+                className="fixed z-50 w-44 rounded bg-zinc-900 py-1 text-xs shadow-xl"
+                role="menu"
+                aria-label="Search selection"
+                style={searchMenuPos === null ? undefined : { left: searchMenuPos.left, top: searchMenuPos.top }}
+                onKeyDown={(e) => { if (e.key === 'Escape') setSearchMenu(null) }}
+              >
+                <button
+                  className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
+                  role="menuitem"
+                  onClick={(e) => {
+                    // Review: Copy writes the RAW selection (formatting kept);
+                    // failure surfaces on the shared error-toast path.
+                    navigator.clipboard.writeText(searchMenu.text).catch((error) => {
+                      const detail = error instanceof Error ? error.message : String(error)
+                      useAgent.getState().pushToast({
+                        kind: 'error',
+                        title: 'Could not copy selection',
+                        body: detail,
+                      })
                     })
-                  })
-                  setSearchMenu(null)
-                }}
-              >
-                Copy
-              </button>
-              <button
-                className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
-                role="menuitem"
-                onClick={(e) => {
-                  openExternal(googleSearchUrl(searchMenu.query), e)
-                  setSearchMenu(null)
-                }}
-              >
-                Search on Google
-              </button>
-            </div>
-          </>
-        )}
+                    setSearchMenu(null)
+                  }}
+                >
+                  Copy
+                </button>
+                <button
+                  className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
+                  role="menuitem"
+                  onClick={(e) => {
+                    openExternal(googleSearchUrl(searchMenu.query), e)
+                    setSearchMenu(null)
+                  }}
+                >
+                  Search on Google
+                </button>
+              </div>
+            </>,
+            document.body,
+          )}
         {conversationId === null && (
           <DraftDestinationCard />
         )}
