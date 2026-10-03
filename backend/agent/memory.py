@@ -141,7 +141,11 @@ def save_memory(
     mtype: str,
     content: str,
 ) -> dict:
-    """Write one memory file (frontmatter + body) and update the index."""
+    """Write one memory file (frontmatter + body) and update the index.
+
+    The body is capped explicitly so the +2048 frontmatter/title slack can
+    never eat the tail of the fact; a truncated save says so in the result
+    (``truncated: true``) instead of reporting a clean save (#192)."""
     slug = _slug(name)
     if slug is None:
         return {
@@ -155,6 +159,10 @@ def save_memory(
         mtype = "project"
     d = ensure_dir(workspace)
     path = d / f"{slug}.md"
+    body = content.strip()
+    truncated = len(body) > MAX_MEMORY_BODY_CHARS
+    if truncated:
+        body = body[:MAX_MEMORY_BODY_CHARS] + "\n…[truncated]"
     text = (
         "---\n"
         f"name: {slug}\n"
@@ -163,14 +171,17 @@ def save_memory(
         f"  type: {mtype}\n"
         "---\n\n"
         f"# {title or slug}\n\n"
-        f"{content.strip()}\n"
+        f"{body}\n"
     )
     try:
-        path.write_text(text[: MAX_MEMORY_BODY_CHARS + 2048], encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
     except OSError as e:
         return {"error": f"Could not write memory: {e}"}
     _update_index(workspace, slug, index_entry_line(title, slug, description))
-    return {"saved": slug, "path": str(path), "type": mtype}
+    result = {"saved": slug, "path": str(path), "type": mtype}
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 def read_memory(workspace: str | None, name: str) -> dict:
@@ -232,11 +243,73 @@ file.
 """
 
 
+_ENTRY_RE = re.compile(r"\]\(([^)]+\.md)\)")
+
+_PINNED_TYPES = ("user", "feedback")
+
+
+def _entry_type(idx_dir: Path, line: str, _cache: dict | None = None) -> str:
+    """The memory file's metadata.type for an index line ('project' when
+    the file is missing or unreadable — unpinned by default).
+
+    `_cache` maps memory-file path -> type so one index render reads each
+    linked file at most once (CodeRabbit return trip #1 on PR #251: the
+    naive version re-read per line, O(n) disk reads over n lines)."""
+    m = _ENTRY_RE.search(line)
+    if not m:
+        return "project"
+    f = idx_dir / m.group(1)
+    if _cache is not None and str(f) in _cache:
+        return _cache[str(f)]
+
+    def _finish(t: str) -> str:
+        if _cache is not None:
+            _cache[str(f)] = t
+        return t
+
+    try:
+        text = f.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _finish("project")
+    fm = re.match(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
+    if not fm:
+        return _finish("project")
+    # Line-parse the frontmatter: only a `type:` key nested under
+    # `metadata:` classifies the entry. A bare `^\s*type:` MULTILINE regex
+    # also anchors on a top-level `type:` key (or any line starting with
+    # one), shadowing the authoritative metadata value (CodeRabbit return
+    # trip #1 on PR #251).
+    meta_type: str | None = None
+    in_meta = False
+    for raw in fm.group(1).splitlines():
+        if not raw.strip():
+            continue
+        indented = raw[0] in (" ", "\t")
+        km = re.match(r"^\s+([\w-]+):\s*(\S*)", raw) if indented else re.match(
+            r"^([\w-]+):", raw
+        )
+        if not km:
+            continue
+        if not indented:
+            in_meta = km.group(1) == "metadata"
+        elif in_meta and km.group(1) == "type":
+            meta_type = km.group(2).strip().lower()
+    t = meta_type or "project"
+    return _finish(
+        t if t in ("user", "feedback", "project", "reference") else "project"
+    )
+
+
 def index_for_prompt(workspace: str | None) -> str:
     """The persistent-memory block for the system prompt: the project's
     MEMORY.md index plus save/read/delete usage. Empty string while the
     project has no index yet beyond the template — a fresh project gets
-    no prompt noise until a first memory exists. Never raises."""
+    no prompt noise until a first memory exists. Never raises.
+
+    Rendered type-prioritized (#192, folded from #228): user and feedback
+    entries pin to the top; when the index is over MAX_INDEX_CHARS the
+    oldest project-typed entries drop off first instead of amputating the
+    tail wholesale."""
     idx = _index_path(workspace)
     try:
         text = idx.read_text(encoding="utf-8", errors="replace").strip()
@@ -244,13 +317,42 @@ def index_for_prompt(workspace: str | None) -> str:
         return ""
     if not text or text == MEMORY_TEMPLATE.strip():
         return ""
-    if len(text) > MAX_INDEX_CHARS:
-        text = text[:MAX_INDEX_CHARS] + "\n…[truncated]"
+    # The template's own leading heading is stripped so the block renders
+    # its heading exactly once, even after a user edit reintroduces it.
+    text = re.sub(r"^#\s+Persistent memory[^\n]*\n*", "", text).strip()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    try:
+        types: dict = {}
+        pinned_idxs = {
+            i
+            for i, ln in enumerate(lines)
+            if _entry_type(idx.parent, ln, types) in _PINNED_TYPES
+        }
+        # Partition by position, not content membership: an unpinned line
+        # byte-identical to a pinned line must still render (CodeRabbit
+        # return trip #1 on PR #251).
+        pinned = [ln for i, ln in enumerate(lines) if i in pinned_idxs]
+        rest = [ln for i, ln in enumerate(lines) if i not in pinned_idxs]
+    except Exception:  # noqa: BLE001 — optional context must never break a turn
+        pinned, rest = [], lines
+    ordered = pinned + rest
+    body = "\n".join(ordered)
+    if len(body) > MAX_INDEX_CHARS:
+        # Drop oldest-first from `rest` until it fits; pinned types survive.
+        while rest and len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
+            rest.pop(0)
+        # The cap is unconditional: pinned entries alone can exceed it, in
+        # which case the oldest pinned entries drop too (keep newest pinned)
+        # (CodeRabbit return trip #1 on PR #251).
+        if len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
+            while pinned and len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
+                pinned.pop(0)
+        body = "\n".join(pinned + rest) + "\n…[truncated]"
     return (
         "# Persistent memory (yours — for THIS project)\n\n"
         "Durable facts you have saved about this user and project; each "
         "line links a file you can read with the memory_read tool:\n\n"
-        f"{text}\n\n"
+        f"{body}\n\n"
         "Maintain this memory with the memory_save, memory_read and "
         "memory_delete tools.\n\n"
         f"{_WHEN_TO_SAVE}"

@@ -31,6 +31,9 @@ SKILLS_DIR = Path(
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
 
 MAX_SKILL_BODY_CHARS = 60_000
+MAX_SKILL_DESC_CHARS = 240  # one line, matching
+                            # memory.index_entry_line's convention (#192)
+TRUNCATION_MARKER = "…[truncated]"
 MAX_SKILLS = 200
 
 
@@ -41,6 +44,11 @@ class Skill:
     body: str
     path: str
     disable_model_invocation: bool = False
+    # Set at parse time when the body exceeded MAX_SKILL_BODY_CHARS — the
+    # load result's `truncated` flag reads this, not a marker-suffix check,
+    # so a body that legitimately ends with the marker isn't a false
+    # positive (CodeRabbit return trip #1 on PR #251).
+    truncated: bool = False
 
 
 # name -> Skill; rebuilt by scan_skills(), read by everything else.
@@ -155,14 +163,24 @@ def parse_skill_md(path: Path) -> Skill | None:
     name = str(meta.get("name") or "").strip()
     if not name:
         return None
-    description = str(meta.get("description") or "").strip()
-    body = body.strip()[:MAX_SKILL_BODY_CHARS]
+    description = " ".join(str(meta.get("description") or "").split())
+    if len(description) > MAX_SKILL_DESC_CHARS:
+        description = description[:MAX_SKILL_DESC_CHARS] + TRUNCATION_MARKER
+    body = body.strip()
+    if len(body) > MAX_SKILL_BODY_CHARS:
+        # Marked truncation, mirroring the AGENTS-notes and memory-index
+        # caps so an oversized skill never degrades silently (#192).
+        body = body[:MAX_SKILL_BODY_CHARS] + TRUNCATION_MARKER
+        truncated = True
+    else:
+        truncated = False
     return Skill(
         name=name,
         description=description,
         body=body,
         path=str(path),
         disable_model_invocation=bool(meta.get("disable-model-invocation")),
+        truncated=truncated,
     )
 
 
@@ -308,11 +326,14 @@ def load_skill_into_messages(args: dict, loaded_skills: list[str], messages: lis
             f"The skill's folder (any supporting files it references live "
             f"here) is: {Path(skill.path).parent}\n\n{skill.body}"
         )
-    return {
+    result = {
         "loaded": skill.name,
         "description": skill.description,
         "folder": str(Path(skill.path).parent),
     }
+    if skill.truncated:
+        result["truncated"] = True
+    return result
 
 
 def refresh() -> list[dict]:
