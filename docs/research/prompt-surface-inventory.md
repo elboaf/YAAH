@@ -141,8 +141,9 @@ assertions (de-facto content guards) plus one true golden fixture:
   descriptions, and again in sandbox prompt_section (sandbox.py:1283–1289).
 3. **gh-CLI preference** duplicated: bash description (tools.py:165–168),
   powershell description (tools.py:204–207), base prompt guideline (loop.py:384–385).
-4. **"Invoked skills" wrapper text duplicated with drift**: loop.py:1316–1331 vs
-  loop.py:669–691 (`_apply_injected_skills`) — same contract, slightly different wording.
+4. **"Invoked skills" wrapper — duplication resolved by #260**: both injection
+  paths now share one helper, `invoked_skills_wrapper` (loop.py:721–729), called
+  from the base-injection site and the turn-time site (loop.py:757 / 1414).
 5. **`SAY_MAX_CHARS = 400` mirrored** in backend/agent/speak.py:498 and src/speech.ts:118 (documented mirror; drift would break transcript stripping).
 6. **windows-mcp playbook tripled**: sandbox prompt_section (sandbox.py:~1283–1320), `sandbox_run` description (sandbox.py:1384–1413), and `_HOST_INPUT_NOTE` on every input tool (computer.py:31–35).
 7. **Orphan/legacy**: `_BRIEFING_MAX`, `CMD_TOOLS_NOTE` sharing is deliberate. The `git_*` names were removed with #174 (2026-09-30): they never had a schema or executor anywhere — the host's `/api/remote/exec` dispatches through the same `EXECUTORS` map, so the remote-forward path was a dead end too; `REMOTE_TOOLS` now lists only executable tools.
