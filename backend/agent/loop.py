@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
+from backend.agent.prompt_manifest import compact_summary_message
 from backend.agent import file_changes
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
@@ -47,7 +48,9 @@ from backend.db.database import (
 )
 
 
-AUTO_TITLE_MAX_CHARS = 60
+AUTO_TITLE_MAX_CHARS = 60  # hard clamp the consumer enforces; word count
+# in the prompt below is best-effort guidance, not a validated contract
+
 # The mechanical slice length the frontend uses for new-chat names — the
 # backend compare must match it exactly (loop.py:100 guard, issue #60).
 AUTO_TITLE_SLICE_CHARS = 40
@@ -141,7 +144,9 @@ async def _generate_conversation_title(
             "role": "system",
             "content": (
                 "Generate a concise title for this conversation. Reply with only "
-                "the title: 3-6 words, no quotes or period, in the user's language."
+                f"the title: a few words (aim for 3-6; titles longer than "
+                f"{AUTO_TITLE_MAX_CHARS} characters are clipped), no quotes or "
+                "period, in the user's language."
             ),
         },
         {"role": "user", "content": first_user_text[:2000]},
@@ -1461,12 +1466,13 @@ async def _run_agent_claimed(
         if include_history else []
     )
     messages = [{"role": "system", "content": system_prompt}]
-    if include_history and prompt_state.get("summary"):
-        messages.append({
-            "role": "system",
-            "content": "Earlier conversation summary (for context only):\n"
-            + prompt_state["summary"],
-        })
+    compact_msg = (
+        compact_summary_message(prompt_state)
+        if include_history and prompt_state.get("summary")
+        else None
+    )
+    if compact_msg is not None:
+        messages.append(compact_msg)
     messages.extend(history)
     if not include_history:
         # Fresh-context agent: this turn's text rides in explicitly, with

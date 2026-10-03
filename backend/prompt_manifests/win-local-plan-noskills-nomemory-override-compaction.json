@@ -22,9 +22,9 @@
     },
     {
       "name": "compaction-summary",
-      "bytes": 93,
-      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa",
-      "text": "Earlier conversation summary (for context only):\nFixture summary of the earlier conversation."
+      "bytes": 158,
+      "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397",
+      "text": "Earlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
     }
   ],
   "system_messages": [
@@ -35,12 +35,12 @@
     },
     {
       "role": "system",
-      "bytes": 93,
-      "sha256": "575b7ec727179035de1d29d8f927d427cf08c122cb1e41d55d083a3c348918aa"
+      "bytes": 158,
+      "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397"
     }
   ],
-  "total_bytes": 922,
-  "rendered_sha256": "f38aa82ae86f8e14e55ee98544ce58342ab7c8da388aeb3d64b21278e198bf94",
+  "total_bytes": 987,
+  "rendered_sha256": "c8572c24dfe79da425719c621bfabf163fd3f8c6e0d5687943582abb746a3c09",
   "tool_schemas": [
     {
       "name": "bash",
@@ -210,5 +210,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n====\n\nEarlier conversation summary (for context only):\nFixture summary of the earlier conversation."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Access mode: PLAN\n\nPlan mode is ON: file edits and shell commands are blocked, so do not attempt them. Explore, then present your plan by calling the exit_plan tool with the plan as its `plan` argument — the user approves it (plan mode ends and you continue executing in the same run) or sends change requests for you to incorporate. Do NOT just write the plan as text and stop: without an exit_plan call the user has no way to approve it.\n\n====\n\nEarlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
 }
