@@ -31,6 +31,41 @@ REPRESENTATIVES = [
 ]
 
 
+def test_git_editor_recipe_rendered_exactly_once_per_win_local_combo():
+    """Issue #187 SYN-13 return trip: the full git-editor recipe ("pass -m
+    '<message>' to git commit" + GIT_EDITOR=true) lives in exactly ONE
+    rendered schema location per win-local render, even though both the
+    bash and powershell schemas render. Host-independent: builds the
+    win-local schema set directly from tools.get_schemas' documented
+    platform shape (local = base + Windows-only schemas)."""
+    import sys
+
+    import backend.agent.tools as tools_mod
+
+    schemas = list(tools_mod.TOOLS_SCHEMA)
+    if sys.platform == "win32":
+        schemas.append(tools_mod.POWERSHELL_SCHEMA)
+        names = {s["function"]["name"] for s in schemas}
+        assert {"bash", "powershell"} <= names
+    else:
+        pytest.skip(
+            "win-local combos render the powershell schema only on Windows"
+        )
+    recipe_count = sum(
+        s["function"]["description"].count("to git commit")
+        for s in schemas
+    )
+    assert recipe_count == 1, (
+        "the full git-editor recipe must appear in exactly one schema "
+        "description; pointer copies must not carry it"
+    )
+    # The canonical home keeps the complete rule (both halves).
+    assert any(
+        "GIT_EDITOR=true" in s["function"]["description"]
+        for s in schemas
+    )
+
+
 def test_matrix_shape():
     combos = pm.iter_combos()
     assert len(combos) == 215

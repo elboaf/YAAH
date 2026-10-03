@@ -86,8 +86,8 @@
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1247,
-      "sha256": "343499818bdedcebe9851082ffc3a9ec46992ac60e67500d32e92c06c90d8534"
+      "bytes": 1076,
+      "sha256": "95c2c6e65cdab82ccb33ea14189fd4327b050f15bfc02cc217560b3b71838bb2"
     },
     {
       "name": "get_help",
@@ -181,8 +181,8 @@
     },
     {
       "name": "powershell",
-      "bytes": 1165,
-      "sha256": "6fc02d9c1ef27d76905741d24b2c57788473ca13a003896ace430915dba5211d"
+      "bytes": 879,
+      "sha256": "504ede17f08a90e99600f42e1d8e04a35e375c450d45b53ead1a18a88bc5e811"
     },
     {
       "name": "exit_plan",
