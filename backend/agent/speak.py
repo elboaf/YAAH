@@ -958,9 +958,11 @@ def _is_phone(token: str) -> bool:
 # Currency amounts (#292): $-glued only, optional thousands commas and
 # optional two-digit cents. Runs before the year pass so "$1999" reads as
 # money, not as a year with a surviving "$". The (?!\.?\d) tail mirrors
-# _NOT_FRAG's decimal clause: "$19.99" at a sentence end still matches,
-# "$19.999" / "$19.9" (fragment cents) do not.
-_CURRENCY = re.compile(r"(?<![\w.])\$([1-9]\d{0,2}(?:,\d{3})+|\d+)(?:\.(\d{2}))?(?!\.?\d)")
+# _NOT_FRAG: no glued letters ("$5th" is not an amount), no fragment
+# cents ("$19.99" at a sentence end still matches; "$19.999" / "$19.9"
+# do not), and at most three comma groups (the words stop at billions).
+_CURRENCY = re.compile(
+    r"(?<![\w.])\$([1-9]\d{0,2}(?:,\d{3}){1,3}|\d+)(?:\.(\d{2}))?(?!\.?\d)(?![A-Za-z])")
 
 _MAGNITUDE = ("", " thousand", " million", " billion")
 
