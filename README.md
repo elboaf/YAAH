@@ -1,5 +1,7 @@
 # YAAH
 
+![YAAH box art - the AI coding agent for everyone](docs/assets/box-art.png)
+
 **YAAH** = **Y**et **A**nother **A**gent/**H**arness.
 
 YAAH is a desktop AI coding agent: a model with real tools on your machine —
