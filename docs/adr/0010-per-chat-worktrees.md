@@ -4,6 +4,9 @@ Date: 2026-10-03
 Status: Accepted — supersedes ADR-0008 (worktree isolation removed),
 firing the revisit condition 0008 wrote for itself. ADR-0003/0005/0007
 remain superseded history.
+Amended 2026-10-04: selector pinning semantics (pin at creation,
+primary-tree immunity, switch-request translation, sub-agent
+injection) — see the amendment section below.
 
 ## Context
 
@@ -60,12 +63,19 @@ untouchable by agents by construction, not by prompt discipline.
 - **Selector tool.** The agent can create a branch and point the chat's
   selector at it on user request. Landing always targets the current
   selection; the selector is the single source of truth.
+  _Amended 2026-10-04: the tool is the only documented path, and the
+  start point is server-enforced as the selector's own branch at call
+  time — the primary worktree's HEAD is never consulted._
 - **Endpoints.** The per-conversation git endpoints (`git-branch`,
   `git-info`, `git-branches`, `git-command`) serve the chat's own
   worktree; the draft/primary endpoints (`/api/workspaces/git-*`) stay
   the human's primary-worktree tools. The chip's per-chat meaning
   becomes truthful. The stale merge-mutex docstrings left behind by
   ADR-0008 go with this change.
+  _Amended 2026-10-04: the draft destination card no longer performs a
+  primary-tree checkout — its branch pick pre-stores the new chat's
+  `selected_branch` at creation. No in-YAAH control moves the primary
+  worktree; the human switches it via terminal git._
 - **Pruning — age, clean only.** A chat worktree with no commits and no
   uncommitted changes past an age threshold is auto-pruned. Chat
   deletion does not itself remove the tree; the sweeper is the single
@@ -84,6 +94,43 @@ untouchable by agents by construction, not by prompt discipline.
   the selected branch, clean up) graduates into the harness system
   prompt, reaching scheduled agents and remote workspaces where project
   AGENTS.md never travels (#259's endgame note on #277).
+
+## Amendment 2026-10-04: selector pinning semantics
+
+Grilling session on the selector's relationship to the primary
+worktree. Five decisions, all subordinate to this ADR; the chip's
+tri-state and migration details are slice-level and live in the issue
+tracker, not here.
+
+1. **Pin at creation.** Every chat in a git workspace records its
+   branch at creation: from the draft destination card's pick if one
+   was made, else from the workspace's then-current branch. The chip
+   distinguishes inherited pin from explicit pick (e.g. a
+   "· workspace" marker) and flags a stale pin whose branch no longer
+   exists. Non-git workspaces stay as today: no chip, no pin.
+2. **Primary-tree immunity.** An external `git switch` on the primary
+   worktree — terminal or otherwise — affects no chat's aimed branch,
+   picked or inherited. Sequencing note: until the worktree
+   materializer lands, this immunity is semantic (what scratch
+   worktrees base on and what the prompt note states), not yet
+   physical; chip dirty/ahead-behind reads still follow the primary
+   tree until per-chat worktrees exist.
+3. **Switch-request translation.** A user request to switch branches —
+   including "put it back on main" — is a selector change and nothing
+   more. No agent ever runs a raw `git switch`/`checkout` on the
+   primary worktree; the human drives the primary tree via terminal
+   git. Enforcement is prompt-only for now (AGENTS.md working-tree
+   section plus the injected selector note); a git-shim guard was
+   considered and deferred — revisit only if prompt-only violations
+   are observed.
+4. **Start point.** A user request for a new branch derives it from
+   the chat's selected branch, never the primary worktree's HEAD.
+   Delivered by the amended selector tool (server-enforced start
+   point, atomic create + point); shell git stays possible but is not
+   the documented path.
+5. **Sub-agent injection.** The harness appends the same branch note
+   it gives chat turns to every spawned sub-agent prompt, so
+   delegation cannot silently drop branch context.
 
 ## Consequences
 

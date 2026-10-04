@@ -22,10 +22,15 @@ _Avoid_: session worktree, `agent/*` branch
 
 **Branch selector**:
 The per-chat stored value naming the branch a chat's work lands on —
-the single source of truth for landing. Flipping it checks out inside
+the single source of truth for landing. Set at chat creation from the
+destination card's pick or the workspace's current branch; it never
+follows the primary worktree afterward. Flipping it checks out inside
 the chat's own worktree and refuses while that worktree is dirty.
-Agents update it via a tool on user request.
-_Avoid_: global checkout, "switches the branch for every chat"
+Agents update it via a tool on user request; a switch request to an
+agent is a selector change, never a primary-tree checkout.
+_Avoid_: global checkout, "switches the branch for every chat", unset
+(every chat in a git workspace has a branch), inheriting from the
+primary worktree
 
 **Landing**:
 A run's merge of its scratch-worktree branch onto the chat's selected
