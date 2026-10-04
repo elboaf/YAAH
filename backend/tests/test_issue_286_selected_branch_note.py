@@ -21,8 +21,9 @@ def test_note_names_branch_and_states_intent_only_contract():
     note = loop._selected_branch_note("bigtest")
     assert "# Branch selector: bigtest" in note
     assert "bigtest" in note
-    assert "intent" in note
-    assert "Never check out" in note
+    # The promise that survived #277: the primary tree is the human's.
+    assert "primary" in note
+    assert "never" in note.lower()
 
 
 @pytest.mark.parametrize("branch", ["", None, "   "])
@@ -61,7 +62,8 @@ async def test_run_injects_selected_branch_note(tmp_path, monkeypatch):
 
     system = await _capture_system_prompt(cid, tmp_path)
     assert "# Branch selector: bigtest" in system
-    assert "Never check out" in system
+    assert "per-chat worktree" in system
+    assert "never check it out" in system
 
 
 @pytest.mark.asyncio

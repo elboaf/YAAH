@@ -866,12 +866,12 @@ def _plan_mode_note() -> str:
     )
 
 
-def _selected_branch_note(branch, chat_id=None) -> str:
+def _selected_branch_note(branch, chat_id=None, detached=False) -> str:
     """System-prompt section injected when the user picked a branch in this
-    chat's branch selector (#286 slice 1: the pick is a stored per-chat
-    value — recorded intent; the primary tree is never moved and no
-    per-chat worktree exists yet). The model has no DB access, so without
-    this note the pick is invisible to it. Returns "" when unset.
+    chat's branch selector (#277: the run happens in the chat's own
+    per-chat worktree, which the harness materializes at the first run;
+    the primary tree is never moved). The model has no DB access, so
+    without this note the pick is invisible to it. Returns "" when unset.
 
     #290: the run SOP here uses the deterministic per-chat namespace
     (`.scratch/chat-<id>/run`, branch `run/chat-<id>` — ADR-0010's path
@@ -883,24 +883,75 @@ def _selected_branch_note(branch, chat_id=None) -> str:
         return ""
     b = str(branch).strip()
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
+    residue = (
+        "If a run worktree already exists at that path, it is residue from "
+        "an earlier run: when it is clean and fully merged into the target, "
+        "it is landed-and-forgotten \u2014 remove it and proceed; when it is "
+        "dirty or has unmerged commits, leave it untouched, say so, and "
+        f"use `.scratch/chat-{cid}/run-2` for this run instead. The user "
+        'says "land it" or "scrap it" for surfaced residue \u2014 it is never '
+        "silently deleted, and never silently blocks a chat."
+    )
+    if detached:
+        # The selected branch is checked out in the primary (a master pin,
+        # or a branch another worktree holds): the chat worktree detached
+        # at the same tip, so landing-onto-the-branch is impossible here
+        # \u2014 and moving that branch is the human's move anyway
+        # (ADR-0010: the harness never moves master).
+        return (
+            f"# Branch selector: {b}\n\n"
+            f"The user selected branch `{b}` for this chat. It is checked "
+            "out in the primary tree, so this chat runs in its own "
+            f"per-chat worktree at `.scratch/chat-{cid}`, detached at "
+            f"`{b}`'s tip. The primary tree is the human's \u2014 never check "
+            f"it out or move it, and never move `{b}` from under it. When "
+            "your task writes to the tree, work in a scratch worktree at "
+            "this chat's deterministic path, based on the current commit:\n\n"
+            f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid}`\n\n"
+            "Commit there and remove the run worktree once done; your run "
+            f"branch `run/chat-{cid}` carries the work. `{b}` itself is "
+            "landed by the human \u2014 leave the primary tree alone. "
+            + residue
+        )
     return (
         f"# Branch selector: {b}\n\n"
-        f"The user selected branch `{b}` for this chat in the branch "
-        "selector. The selector records intent only: it does not move the "
-        "primary tree, and no per-chat worktree is materialized for this "
-        "chat yet. Never check out or move the primary tree to honor it. "
+        f"The user selected branch `{b}` for this chat. This chat runs in "
+        f"its own per-chat worktree at `.scratch/chat-{cid}`, which has "
+        f"`{b}` checked out; the primary tree is the human's \u2014 never "
+        "check it out or move it. When your task writes to the tree, work "
+        "in a scratch worktree at this chat's deterministic path, based "
+        "on the current branch:\n\n"
+        f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid}`\n\n"
+        "Commit there, then land inside THIS worktree "
+        f"(`git merge run/chat-{cid}` \u2014 on conflict, resolve here or "
+        "`git merge --abort` and report), then remove the run worktree "
+        f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d "
+        f"run/chat-{cid}`). "
+        + residue
+    )
+
+
+def _selected_branch_note_degraded(branch, chat_id, reason) -> str:
+    """Selector-note variant when the chat worktree could NOT be
+    materialized (non-repo, git failure): the run happens in the primary
+    like the pre-#277 SOP, and the reason is stated instead of hidden —
+    the note must never claim isolation it did not get."""
+
+    cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
+    b = str(branch).strip()
+    return (
+        f"# Branch selector: {b}\n\n"
+        f"The user selected branch `{b}` for this chat, but the per-chat "
+        f"worktree could not be materialized ({reason}), so this run "
+        "executes in the primary tree. The primary tree is the human's — "
+        "never check it out or move it, and never switch branches in it. "
         "When your task writes to the tree, work in a scratch worktree at "
         "this chat's deterministic path, based on the selected branch:\n\n"
         f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid} {b}`\n\n"
-        "Commit there and land by merging onto the selected branch inside "
-        "the run worktree; remove the worktree once landed. If a run "
-        "worktree already exists at that path, it is residue from an "
-        "earlier run: when it is clean and fully merged into the target, "
-        "it is landed-and-forgotten — remove it and proceed; when it is "
-        "dirty or has unmerged commits, leave it untouched, say so, and "
-        "use `.scratch/chat-{cid}/run-2` for this run instead. The user "
-        'says "land it" or "scrap it" for surfaced residue — it is never '
-        "silently deleted, and never silently blocks a chat."
+        "Commit there, land onto the selected branch only per the "
+        "workspace AGENTS.md interim master-landing rule, and remove the "
+        "run worktree once landed. Surfaces at run start: when a run "
+        "worktree already exists there, follow the residue protocol."
     )
 
 
@@ -1490,6 +1541,30 @@ async def _run_agent_claimed(
     # never pay for isolation). `turn_workspace` is the (possibly rebound)
     # workspace every tool call and spawn_batch sees from then on.
     turn_workspace = str(workspace)
+
+    # #277 (ADR-0010): a chat with a selected branch runs inside its own
+    # per-chat worktree, materialized HERE — at the first run, not on chat
+    # creation or branch pick, so idle and read-only chats cost nothing.
+    # Everything tool-shaped (bash, file tools, change summaries,
+    # spawn_batch) resolves from turn_workspace, so this one re-point is
+    # the whole isolation story; the primary worktree is the human's and
+    # is never moved. Remote workspaces are out of scope v1 and chats
+    # without a pick keep running in the primary exactly as before.
+    conv = await get_conversation(conversation_id)
+    selected_branch = str((conv or {}).get("selected_branch") or "").strip()
+    worktree_detached = False
+    worktree_error = ""
+    if selected_branch:
+        from backend.agent import worktrees as _worktrees
+
+        _wt = await _worktrees.ensure_chat_worktree(
+            turn_workspace, conversation_id, selected_branch
+        )
+        if _wt.get("path") is not None:
+            turn_workspace = str(_wt["path"])
+            worktree_detached = bool(_wt.get("detached"))
+        else:
+            worktree_error = str(_wt.get("error") or "unavailable")
     from backend.agent import remote as remote_mod
 
     remote_workspace = remote_mod.parse_ns(turn_workspace) is not None
@@ -1504,8 +1579,8 @@ async def _run_agent_claimed(
             attachments=attachments or None, meta=user_meta,
         )
 
-    # Per-conversation system prompt override (Q17) wins over the global one
-    conv = await get_conversation(conversation_id)
+    # Per-conversation system prompt override (Q17) wins over the global
+    # one (conv fetched up top for the #277 worktree re-point).
     system_prompt = (conv or {}).get("system_prompt_override") or _default_system_prompt(workspace)
 
     # Explicitly invoked skills (/s name or a chip): their instruction
@@ -1545,9 +1620,16 @@ async def _run_agent_claimed(
     # row, so read it fresh each turn — the model otherwise has no way to
     # see what the user aimed at. #290: the chat id rides along so the
     # note names this chat's deterministic run-worktree paths.
-    branch_note = _selected_branch_note(
-        (conv or {}).get("selected_branch"), conversation_id
-    )
+    if worktree_error:
+        branch_note = _selected_branch_note_degraded(
+            selected_branch, conversation_id, worktree_error
+        )
+    else:
+        branch_note = _selected_branch_note(
+            selected_branch,
+            conversation_id,
+            detached=worktree_detached,
+        )
     if branch_note:
         system_prompt = f"{system_prompt}\n\n---\n\n{branch_note}"
 
