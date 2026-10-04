@@ -856,27 +856,41 @@ def _plan_mode_note() -> str:
     )
 
 
-def _selected_branch_note(branch) -> str:
+def _selected_branch_note(branch, chat_id=None) -> str:
     """System-prompt section injected when the user picked a branch in this
     chat's branch selector (#286 slice 1: the pick is a stored per-chat
     value — recorded intent; the primary tree is never moved and no
     per-chat worktree exists yet). The model has no DB access, so without
-    this note the pick is invisible to it. Returns "" when unset."""
+    this note the pick is invisible to it. Returns "" when unset.
+
+    #290: the run SOP here uses the deterministic per-chat namespace
+    (`.scratch/chat-<id>/run`, branch `run/chat-<id>` — ADR-0010's path
+    shape) and carries the residue protocol, so a run knows its own
+    names without discovery and expected residue is handled the same
+    way every time.
+    """
     if not branch or not str(branch).strip():
         return ""
     b = str(branch).strip()
+    cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     return (
         f"# Branch selector: {b}\n\n"
         f"The user selected branch `{b}` for this chat in the branch "
         "selector. The selector records intent only: it does not move the "
-        "shared primary tree, and no per-chat worktree is materialized. "
-        "Never check out or move the primary tree to honor it. When your "
-        "task writes to the tree, follow the workspace's working-tree "
-        f"contract and base your scratch worktree on `{b}` (e.g. "
-        "`git worktree add .scratch/run-<date>-<slug> -b "
-        f"run-<date>-<slug> `{b}``) so the work starts where the user "
-        "aimed it; merge back per the normal contract. The selector's "
-        "value stays the user's to change."
+        "primary tree, and no per-chat worktree is materialized for this "
+        "chat yet. Never check out or move the primary tree to honor it. "
+        "When your task writes to the tree, work in a scratch worktree at "
+        "this chat's deterministic path, based on the selected branch:\n\n"
+        f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid} {b}`\n\n"
+        "Commit there and land by merging onto the selected branch inside "
+        "the run worktree; remove the worktree once landed. If a run "
+        "worktree already exists at that path, it is residue from an "
+        "earlier run: when it is clean and fully merged into the target, "
+        "it is landed-and-forgotten — remove it and proceed; when it is "
+        "dirty or has unmerged commits, leave it untouched, say so, and "
+        "use `.scratch/chat-{cid}/run-2` for this run instead. The user "
+        'says "land it" or "scrap it" for surfaced residue — it is never '
+        "silently deleted, and never silently blocks a chat."
     )
 
 
@@ -1519,8 +1533,11 @@ async def _run_agent_claimed(
 
     # #286: the user's branch-selector pick travels with the conversation
     # row, so read it fresh each turn — the model otherwise has no way to
-    # see what the user aimed at.
-    branch_note = _selected_branch_note((conv or {}).get("selected_branch"))
+    # see what the user aimed at. #290: the chat id rides along so the
+    # note names this chat's deterministic run-worktree paths.
+    branch_note = _selected_branch_note(
+        (conv or {}).get("selected_branch"), conversation_id
+    )
     if branch_note:
         system_prompt = f"{system_prompt}\n\n---\n\n{branch_note}"
 

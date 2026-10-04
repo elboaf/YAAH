@@ -693,6 +693,38 @@ async def api_conversation_git_branches(conversation_id: int):
     return {"branches": branches}
 
 
+@app.get("/api/conversations/{conversation_id}/run-worktrees")
+async def api_conversation_run_worktrees(conversation_id: int):
+    """Run-in-flight state for the status-strip badge (#290): the
+    `.scratch/chat-<id>/` run worktrees of the chat's workspace, each with
+    its residue state against the landing target. Derived from polled git
+    state (survives reload); never agent-reported. The landing target is
+    the chat's stored branch selection when it has one, else the
+    workspace's checked-out branch. Shape: {runs: [{branch, chat_id,
+    leaf, path, dirty, merged, residue}], target}."""
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="conversation not found")
+    from backend.agent.gitinfo import current_git_branch
+    from backend.agent.runwatch import run_worktrees
+    from backend.agent.tools import workspace_root
+
+    ws = conv.get("workspace") or ""
+    if not ws.strip() or ws.startswith("remote:"):
+        return {"runs": [], "target": None}
+    try:
+        root = workspace_root(ws)
+    except ValueError:
+        return {"runs": [], "target": None}
+    # Landing target: the chat's stored pick (#286) wins, else the
+    # workspace's checked-out branch — same rule the selector chip uses.
+    target = conv.get("selected_branch") or await current_git_branch(root)
+    runs = await run_worktrees(root, target)
+    return {"runs": runs, "target": target}
+
+
 class GitCommandBody(BaseModel):
     action: str  # status | commit | push | pull | checkout
     message: str | None = None  # commit message

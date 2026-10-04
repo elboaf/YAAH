@@ -31,8 +31,10 @@ import {
   getGitBranch,
   getGitInfo,
   getGitBranches,
+  getRunWorktrees,
   selectConversationBranch,
   type GitInfo,
+  type RunWorktree,
   listMcpServers,
   addMcpServer,
   removeMcpServer,
@@ -7828,6 +7830,9 @@ export function GitChipCluster({
   const [branchesLoaded, setBranchesLoaded] = useState(false)
   const [busyCheckout, setBusyCheckout] = useState(false)
   const [copied, setCopied] = useState<'local' | 'remote' | null>(null)
+  // #290: run-in-flight state — POLLED from the backend's git derivation
+  // (`git worktree list` over `.scratch/chat-<id>/`), never agent-reported.
+  const [runs, setRuns] = useState<RunWorktree[]>([])
   const wrapRef = useRef<HTMLSpanElement>(null)
   const appendRawMessage = useAgent((s) => s.appendRawMessage)
 
@@ -7836,6 +7841,28 @@ export function GitChipCluster({
     setBranches([])
     setBranchesLoaded(false)
     setMenuOpen(false)
+  }, [conversationId])
+
+  // #290: poll the run-in-flight state on the same cadence as git-info —
+  // badge lights while a run worktree exists, clears on removal, and
+  // survives reload because the state lives in git, not in the UI.
+  useEffect(() => {
+    setRuns([])
+    if (conversationId === null) return
+    let cancelled = false
+    const tick = () => {
+      getRunWorktrees(conversationId)
+        .then((r) => {
+          if (!cancelled) setRuns(r.runs)
+        })
+        .catch(() => {}) // banner owns HTTP-level failures
+    }
+    tick()
+    const poll = window.setInterval(tick, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(poll)
+    }
   }, [conversationId])
 
   // Click-outside closes the checkout dropdown.
@@ -7858,6 +7885,13 @@ export function GitChipCluster({
   // chat has one, else the workspace's checked-out branch (info.branch).
   // The checkout flip records that pick per chat and moves no tree.
   const chipBranch = selectedBranch || info.branch
+
+  // #290: this chat's run worktrees only — chip attribution is arithmetic
+  // (the chat id on the `.scratch/chat-<id>/` path), not heuristics. The
+  // badge names the run branch and the landing target (stored pick, else
+  // the workspace's checked-out branch — same rule as chipBranch).
+  const myRuns = runs.filter((r) => String(conversationId) === r.chat_id)
+  const landingTarget = selectedBranch || info.branch
 
   const openMenu = () => {
     setMenuOpen((o) => !o)
@@ -7973,6 +8007,34 @@ export function GitChipCluster({
           )}
         </div>
       )}
+
+      {/* Run-in-flight badge (#290): lit while this chat's run worktree
+          exists. Derived from polled git state — reload-safe, never an
+          agent announcement. Name > color: the badge text names the run
+          branch and its landing target. The selector chip above keeps
+          meaning "the user's pick" and is never recolored for run state. */}
+      {myRuns.map((r) => {
+        const residueTitle =
+          r.residue === 'clean'
+            ? 'Run work in flight. Branch is clean and fully landed — residue from a finished run; a run start may remove it (removable).'
+            : r.residue === 'dirty'
+              ? `Run work in flight. ${r.path} has uncommitted changes — run work is untouched and surfaced; the user says "land it" or "scrap it".`
+              : `Run work in flight. ${r.branch} has commits not yet landed — the user says "land it" or "scrap it".`
+        return (
+          <span
+            key={r.path}
+            role="status"
+            aria-label="run in flight"
+            title={residueTitle}
+            className="flex shrink-0 items-center gap-1 rounded bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-sky-300"
+          >
+            <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" />
+            <span className="max-w-[14rem] truncate">
+              {r.branch} → {landingTarget}
+            </span>
+          </span>
+        )
+      })}
 
       {/* Sync readout: local/remote short hashes (click = copy), ahead/behind
           counters. Plain text — no drawer, no command buttons. */}

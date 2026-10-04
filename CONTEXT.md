@@ -1,20 +1,38 @@
 # YAAH
 
 An agent harness where multiple chats and sub-agents can work in the
-same workspace. The vocabulary below is about how their work lands in
-the shared tree.
+same workspace. The vocabulary below is about how their work lands in per-chat
+worktrees (ADR-0010).
 
 ## Language
 
 ### Workspace
 
-**Shared tree**:
-Every chat and sub-agent works directly in the workspace's checkout.
-There is no per-chat isolation: no session worktrees, no `agent/*`
-session branches, no merge-back step. Work that should be durable is
-committed with shell git, like a human's would be. See ADR-0008
-(which supersedes ADR-0003/0005/0007).
-_Avoid_: session worktree, main tree vs agent branch, git_merge_back
+**Primary worktree**:
+The workspace's checkout as the human opened it — the only tree agents
+never touch. The draft/workspace-level git endpoints remain its tools.
+_Avoid_: main tree, shared tree, "the checkout" unqualified
+
+**Chat worktree**:
+The per-chat git worktree a chat's runs work in, materialized on first
+write at the chat's selected branch. Selector flips and landing merges
+happen inside it, so conflicts are that chat's private problem. Pruned
+by age once clean. See ADR-0010 (supersedes ADR-0008).
+_Avoid_: session worktree, `agent/*` branch
+
+**Branch selector**:
+The per-chat stored value naming the branch a chat's work lands on —
+the single source of truth for landing. Flipping it checks out inside
+the chat's own worktree and refuses while that worktree is dirty.
+Agents update it via a tool on user request.
+_Avoid_: global checkout, "switches the branch for every chat"
+
+**Landing**:
+A run's merge of its scratch-worktree branch onto the chat's selected
+branch, inside the chat's worktree; stop-and-report on conflict. The
+human integrates selector branches into master — the harness never
+does.
+_Avoid_: merge-back, auto-merge, landing to master
 
 ### Conversation history
 

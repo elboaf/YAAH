@@ -208,6 +208,25 @@ export const selectConversationBranch = (id: number, branch: string) =>
     body: JSON.stringify({ branch }),
   })
 
+/** #290: run-in-flight state for the badge — derived from polled git
+ *  state (`git worktree list`), never agent-reported. Residue: "clean" =
+ *  landed-and-forgotten (a run start may auto-remove), "dirty" /
+ *  "unmerged" = surfaced for the user to land or scrap. */
+export interface RunWorktree {
+  branch: string
+  chat_id: string
+  leaf: string
+  path: string
+  dirty: boolean
+  merged: boolean
+  residue: 'clean' | 'dirty' | 'unmerged'
+}
+
+export const getRunWorktrees = (id: number) =>
+  api<{ runs: RunWorktree[]; target: string | null }>(
+    `/api/conversations/${id}/run-worktrees`,
+  )
+
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
 
