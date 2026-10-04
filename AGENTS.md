@@ -28,6 +28,24 @@ in `.scratch/chat-<id>/run-2` instead. The user says "land it" or
 "scrap it". Residue is never silently deleted and never silently
 blocks a chat.
 
+Master landings, interim rule (pre-#277): the landing clauses above
+say "inside the run worktree", but git allows only one worktree per
+branch, and master is checked out in the primary — so when the
+selected branch is master, checkout inside the run worktree is
+impossible and the merge happens in the primary. No branch switch may
+occur there; a merge into the already-checked-out branch is the one
+permitted move, and only after all four guards pass:
+
+1. Primary clean: `git status --porcelain` is empty — otherwise stop
+   and report, leaving the run branch in place for a human.
+2. Dry run: `git merge-tree --write-tree master run/chat-<id>` —
+   non-zero exit or conflict output means stop and report.
+3. Fast-forward first: if `git merge-base --is-ancestor master
+   run/chat-<id>` succeeds, land with `git merge --ff-only
+   run/chat-<id>`; a fast-forward cannot conflict mid-merge.
+4. If anything surprises git, `git merge --abort` immediately — the
+   primary must never sit in a merge state.
+
 Branch selector picks: if the conversation's system prompt includes a
 "# Branch selector" note, the user has picked a branch for this chat,
 and two rules above change for that run: create the run worktree based
