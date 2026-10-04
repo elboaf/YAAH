@@ -16,9 +16,9 @@ from backend.main import app
 @pytest.fixture
 def tts_env(tmp_path, monkeypatch):
     """Fake model dir: the resolver only checks for the file set."""
-    d = tmp_path / "kokoro-int8-multi-lang-v1_0"
+    d = tmp_path / "kokoro-multi-lang-v1_0"
     d.mkdir()
-    (d / "model.int8.onnx").write_text("stub")
+    (d / "model.onnx").write_text("stub")
     (d / "voices.bin").write_text("stub")
     (d / "tokens.txt").write_text("stub")
     (d / "espeak-ng-data").mkdir()
@@ -41,6 +41,49 @@ def test_voice_table_is_authoritative():
 def test_voice_id_falls_back_to_default():
     assert speak.voice_id("af_heart") == 3
     assert speak.voice_id("nonexistent") == speak.voice_id(speak.DEFAULT_VOICE)
+
+
+# ---- model resolution (#298): fp32 canonical, pinned int8 escape hatch ----
+
+def _make_pack(d, *weights):
+    """A kokoro pack dir with the support set plus whichever weights files."""
+    d.mkdir(parents=True)
+    (d / "voices.bin").write_text("stub")
+    (d / "tokens.txt").write_text("stub")
+    (d / "espeak-ng-data").mkdir()
+    for w in weights:
+        (d / w).write_text("stub")
+    return d
+
+
+def test_canonical_local_model_is_fp32():
+    """#298: the int8 pack whines (steady sr/5 tones); the canonical
+    download must be the fp32 release."""
+    assert speak.MODEL_NAME == "kokoro-multi-lang-v1_0"
+    assert speak.MODEL_URL.endswith("kokoro-multi-lang-v1_0.tar.bz2")
+    assert speak.MODEL_BYTES > 300_000_000  # fp32 tarball ~350 MB
+    assert speak._MODEL_FILES[0] == "model.onnx"  # fp32 preferred
+
+
+def test_resolution_prefers_fp32_over_int8(tmp_path, monkeypatch):
+    d = _make_pack(tmp_path / "pack", "model.onnx", "model.int8.onnx")
+    monkeypatch.setenv("YAAH_TTS_MODEL_DIR", str(d))
+    assert speak.find_model_dir() == d
+    assert speak._model_file_for(d) == "model.onnx"
+
+
+def test_pinned_int8_pack_still_resolves(tmp_path, monkeypatch):
+    """YAAH_TTS_MODEL_DIR at an int8 pack keeps working (escape hatch)."""
+    d = _make_pack(tmp_path / "int8-pack", "model.int8.onnx")
+    monkeypatch.setenv("YAAH_TTS_MODEL_DIR", str(d))
+    assert speak.find_model_dir() == d
+    assert speak._model_file_for(d) == "model.int8.onnx"
+
+
+def test_support_files_without_weights_do_not_resolve(tmp_path, monkeypatch):
+    d = _make_pack(tmp_path / "weightsless")
+    monkeypatch.setenv("YAAH_TTS_MODEL_DIR", str(d))
+    assert speak.find_model_dir() is None
 
 
 # ---- prose extraction ----

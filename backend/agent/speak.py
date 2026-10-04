@@ -50,17 +50,40 @@ DEFAULT_VOICE = "af_heart"
 # English voice ids (a*/b*); the picker shows these, grouped by accent.
 ENGLISH_VOICES = [v for v in VOICES if v.startswith(("af_", "am_", "bf_", "bm_"))]
 
-MODEL_NAME = "kokoro-int8-multi-lang-v1_0"
+# Canonical local model: kokoro fp32 (#298). The int8 pack emits steady
+# iSTFT-frame tones at sr/5 and 2*sr/5 (+22..34 dB over the noise floor,
+# still ringing in sentence pauses); fp32 measures clean, synthesizes ~3x
+# faster than real time on CPU (int8 was slower than real time), and its
+# tarball costs ~350 MB once. YAAH_TTS_MODEL_DIR at a pinned int8 pack
+# keeps working (advanced escape hatch) — see _MODEL_FILES.
+MODEL_NAME = "kokoro-multi-lang-v1_0"
 # Canonical packaged model (sherpa-onnx tts-models release). HF hosts the raw
 # weights, but only this release ships the sherpa file set (voices.bin,
 # tokens.txt, espeak-ng-data) as one archive.
 MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-    "tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2"
+    "tts-models/kokoro-multi-lang-v1_0.tar.bz2"
 )
-MODEL_BYTES = 132_303_094  # shown in the Settings download button
+MODEL_BYTES = 349_906_910  # shown in the Settings download button
 
-_REQUIRED_FILES = ("model.int8.onnx", "voices.bin", "tokens.txt", "espeak-ng-data")
+# Support files every kokoro pack carries, plus the weights file(s) a pack
+# may provide — a dir resolves only with the support set AND at least one
+# weights file; the FIRST existing entry of _MODEL_FILES is the one the
+# engine loads (fp32 preferred; int8 packs still resolve for pinned dirs).
+_SUPPORT_FILES = ("voices.bin", "tokens.txt", "espeak-ng-data")
+_MODEL_FILES = ("model.onnx", "model.int8.onnx")
+
+# Production synthesis threads; the harness (scripts/measure_tts_whine.py)
+# reports against this baseline, so it lives here and not as a literal.
+_NUM_THREADS = 4
+
+
+def _pack_complete(model_dir: Path) -> bool:
+    """True when model_dir carries the sherpa support set plus a weights
+    file (the #298 resolution rule, single-sourced)."""
+    return all((model_dir / f).exists() for f in _SUPPORT_FILES) and any(
+        (model_dir / f).exists() for f in _MODEL_FILES
+    )
 
 
 # ---- Model resolution ------------------------------------------------------
@@ -95,10 +118,19 @@ def _model_dir_candidates() -> list[Path]:
     return out
 
 
+def _model_file_for(model_dir: Path) -> str:
+    """The weights file a resolved pack carries (fp32 preferred over int8 —
+    see _MODEL_FILES; pinned int8 dirs keep working via YAAH_TTS_MODEL_DIR).
+    Callers must have resolved model_dir through find_model_dir() — an
+    incomplete dir raises StopIteration here, by design."""
+    return next(f for f in _MODEL_FILES if (model_dir / f).exists())
+
+
 def find_model_dir() -> Path | None:
-    """First candidate dir containing the complete sherpa kokoro file set."""
+    """First candidate dir with the sherpa kokoro support set AND a loadable
+    weights file (fp32 preferred over int8 — see _MODEL_FILES)."""
     for d in _model_dir_candidates():
-        if all((d / f).exists() for f in _REQUIRED_FILES):
+        if _pack_complete(d):
             return d
     return None
 
@@ -170,7 +202,7 @@ def _download_model_inner(progress) -> None:
     import httpx
 
     target = _data_root() / MODEL_NAME
-    if all((target / f).exists() for f in _REQUIRED_FILES):
+    if _pack_complete(target):
         progress({"stage": "done"})
         return
     part = _data_root() / f"{MODEL_NAME}.tar.bz2.part"
@@ -192,7 +224,7 @@ def _download_model_inner(progress) -> None:
         with tarfile.open(part, "r:bz2") as tar:
             tar.extractall(tmp_dir, filter="data")
         src = tmp_dir / MODEL_NAME
-        if not all((src / f).exists() for f in _REQUIRED_FILES):
+        if not _pack_complete(src):
             raise RuntimeError("archive did not contain the expected model files")
         if target.exists():
             shutil.rmtree(target)
@@ -291,9 +323,7 @@ def get_engine():
         if model_dir is None:
             return None
         sherpa = _import_engine()
-        model_file = "model.int8.onnx"
-        if not (model_dir / model_file).exists():
-            model_file = "model.onnx"
+        model_file = _model_file_for(model_dir)
         lexicon = ",".join(
             str(model_dir / f)
             for f in ("lexicon-us-en.txt", "lexicon-gb-en.txt")
@@ -301,7 +331,7 @@ def get_engine():
         )
         cfg = sherpa.OfflineTtsConfig(
             model=sherpa.OfflineTtsModelConfig(
-                num_threads=4,
+                num_threads=_NUM_THREADS,
                 kokoro=sherpa.OfflineTtsKokoroModelConfig(
                     model=str(model_dir / model_file),
                     voices=str(model_dir / "voices.bin"),

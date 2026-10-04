@@ -26,9 +26,9 @@ from backend.main import app
 @pytest.fixture
 def tts_env(tmp_path, monkeypatch):
     """Fake local model dir: the resolver only checks for the file set."""
-    d = tmp_path / "kokoro-int8-multi-lang-v1_0"
+    d = tmp_path / "kokoro-multi-lang-v1_0"
     d.mkdir()
-    for f in ("model.int8.onnx", "voices.bin", "tokens.txt"):
+    for f in ("model.onnx", "voices.bin", "tokens.txt"):
         (d / f).write_text("stub")
     (d / "espeak-ng-data").mkdir()
     monkeypatch.setenv("YAAH_TTS_MODEL_DIR", str(d))
