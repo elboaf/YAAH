@@ -8865,11 +8865,23 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
         // later emission queues behind it, never starting — the voice goes
         // silent after the first emission of a turn.
         const prevMsg = messages.find((m) => m.id === prev.msgId)
-        const chunks = splitSentences(liveProse(prevMsg?.content ?? ''))
-        // Nothing was appended while holding (see the hold path below), so
-        // the flush hands over ALL held chunks: an emission without a
-        // usable <say> tag still speaks, verbatim.
-        for (let i = prev.spoken; i < chunks.length; i++) prev.feed.append(chunks[i])
+        // #291: the run-end flush's guard, mirrored at the swap. The held
+        // sentences flush ONLY when the previous emission ended without its
+        // (spoken) briefing. When it WAS narrated via its <say> (said=true,
+        // `spoken` stays 0), the hold path deliberately discarded its held
+        // sentences — an unguarded flush here re-feeds the WHOLE message
+        // content verbatim on top of the already-spoken briefing. This is
+        // the swap of the two real mid-run msgId swaps: a steer
+        // (startAssistantEmissionAfterUser) and the exit_plan approval
+        // split (splitAtPlanApproval).
+        const prevSay = prevMsg?.say
+        if (!prev.said && (prevSay == null || !wasSaySpoken(prev.msgId, prevSay))) {
+          const chunks = splitSentences(liveProse(prevMsg?.content ?? ''))
+          // Nothing was appended while holding (see the hold path below), so
+          // the flush hands over ALL held chunks: an emission without a
+          // usable <say> tag still speaks, verbatim.
+          for (let i = prev.spoken; i < chunks.length; i++) prev.feed.append(chunks[i])
+        }
         prev.feed.end()
         n = null // prev is closed; the block below opens the new emission's feed
       }
