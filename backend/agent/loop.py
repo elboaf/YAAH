@@ -856,6 +856,30 @@ def _plan_mode_note() -> str:
     )
 
 
+def _selected_branch_note(branch) -> str:
+    """System-prompt section injected when the user picked a branch in this
+    chat's branch selector (#286 slice 1: the pick is a stored per-chat
+    value — recorded intent; the primary tree is never moved and no
+    per-chat worktree exists yet). The model has no DB access, so without
+    this note the pick is invisible to it. Returns "" when unset."""
+    if not branch or not str(branch).strip():
+        return ""
+    b = str(branch).strip()
+    return (
+        f"# Branch selector: {b}\n\n"
+        f"The user selected branch `{b}` for this chat in the branch "
+        "selector. The selector records intent only: it does not move the "
+        "shared primary tree, and no per-chat worktree is materialized. "
+        "Never check out or move the primary tree to honor it. When your "
+        "task writes to the tree, follow the workspace's working-tree "
+        f"contract and base your scratch worktree on `{b}` (e.g. "
+        "`git worktree add .scratch/run-<date>-<slug> -b "
+        f"run-<date>-<slug> `{b}``) so the work starts where the user "
+        "aimed it; merge back per the normal contract. The selector's "
+        "value stays the user's to change."
+    )
+
+
 def _sandbox_only_note() -> str:
     """System-prompt section injected for scheduled agents running with the
     sandbox-only approval policy (issue #41): no user is watching, so
@@ -1492,6 +1516,13 @@ async def _run_agent_claimed(
     memory_notes = _memory_notes(workspace)
     if memory_notes:
         system_prompt = f"{system_prompt}\n\n---\n\n{memory_notes}"
+
+    # #286: the user's branch-selector pick travels with the conversation
+    # row, so read it fresh each turn — the model otherwise has no way to
+    # see what the user aimed at.
+    branch_note = _selected_branch_note((conv or {}).get("selected_branch"))
+    if branch_note:
+        system_prompt = f"{system_prompt}\n\n---\n\n{branch_note}"
 
     # Plan mode tells the model what it cannot do, so it plans instead of
     # hitting blocked-tool errors all turn.
