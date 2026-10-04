@@ -763,6 +763,62 @@ const isPhone = (token: string): boolean => {
   return digits.length === 10 || digits.length === 11
 }
 
+// Currency amounts (#292): $-glued only, optional thousands commas and
+// optional two-digit cents. Runs before the year pass so "$1999" reads as
+// money, not as a year with a surviving "$". The (?!\.?\d) tail mirrors
+// NOT_FRAG's decimal clause: "$19.99" at a sentence end still matches,
+// "$19.999" / "$19.9" (fragment cents) do not.
+const CURRENCY =
+  /(?<![\w.])\$([1-9]\d{0,2}(?:,\d{3})+|\d+)(?:\.(\d{2}))?(?!\.?\d)/g
+
+const MAGNITUDE = ['', ' thousand', ' million', ' billion']
+
+const underThousand = (n: number): string => {
+  const hundreds = Math.floor(n / 100)
+  const rest = n % 100
+  if (!hundreds) return underHundred(rest)
+  const out = ONES[hundreds] + ' hundred'
+  return rest ? `${out} ${underHundred(rest)}` : out
+}
+
+/** Cardinal for the dollars part of an amount (1299 -> one thousand two
+ *  hundred ninety-nine). Humans say twelve hundred too; the grouped written
+ *  form decomposes by magnitude, so the words follow the commas. */
+const cardinalWords = (n: number): string => {
+  if (n === 0) return 'zero'
+  const parts: string[] = []
+  for (const mag of MAGNITUDE) {
+    const chunk = n % 1000
+    n = Math.floor(n / 1000)
+    if (chunk) parts.push(underThousand(chunk) + mag)
+    if (!n) break
+  }
+  return parts.reverse().join(' ')
+}
+
+/** The cents pair the way prices are said: plain two-digit (99 ->
+ *  ninety-nine), oh-padded below ten (05 -> oh five). */
+const centsPlain = (cc: string): string => {
+  const n = parseInt(cc, 10)
+  if (n === 0) return ''
+  return n < 10 ? `oh ${DIGITS[String(n)]}` : underHundred(n)
+}
+
+const currencyWords = (_m: string, dollarsRaw: string, cc: string | undefined): string => {
+  const dollars = parseInt(dollarsRaw.replace(/,/g, ''), 10)
+  const centsVal = cc ? parseInt(cc, 10) : 0
+  if (!dollars) {
+    // Sub-dollar: read in cents with the unit (75 -> seventy-five cents).
+    if (!centsVal) return 'zero dollars'
+    return centsVal === 1 ? 'one cent' : underHundred(centsVal) + ' cents'
+  }
+  // With cents, units elide the way humans say prices: nineteen
+  // ninety-nine, not nineteen dollars and ninety-nine cents. Whole
+  // amounts keep the unit (five dollars).
+  if (centsVal) return `${cardinalWords(dollars)} ${centsPlain(cc ?? '0')}`
+  return cardinalWords(dollars) + (dollars === 1 ? ' dollar' : ' dollars')
+}
+
 const versionWords = (_m: string, head: string | undefined, dotted: string, suffix: string | undefined): string => {
   const groups = dotted.split('.')
   // A bare two-group decimal with a single-digit head (3.14, 1.3) is an
@@ -804,6 +860,10 @@ export function normalizeForSpeech(text: string): string {
   let t = text.replace(SSML_TAG, ' ')
   t = t.replace(EMOTION_MARKER, (m, inner: string) => (isEmotionMarker(inner) ? '' : m))
   t = t.replace(/ {2,}/g, ' ').replace(/ ([,.!?;:])/g, '$1')
+
+  // 1.5 Currency amounts ($19.99, $1,299.50, $5) before the year pass:
+  // money is never a year, and the $ must not survive into synthesis.
+  t = t.replace(CURRENCY, currencyWords)
 
   // 2. Years (1000-2999) before generic digit-run rules.
   t = t.replace(new RegExp(`(?<![\\w.])([12]\\d{3})${NOT_FRAG}`, 'g'),

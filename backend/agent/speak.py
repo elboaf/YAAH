@@ -955,6 +955,66 @@ def _is_phone(token: str) -> bool:
     return len(digits) in (10, 11)
 
 
+# Currency amounts (#292): $-glued only, optional thousands commas and
+# optional two-digit cents. Runs before the year pass so "$1999" reads as
+# money, not as a year with a surviving "$". The (?!\.?\d) tail mirrors
+# _NOT_FRAG's decimal clause: "$19.99" at a sentence end still matches,
+# "$19.999" / "$19.9" (fragment cents) do not.
+_CURRENCY = re.compile(r"(?<![\w.])\$([1-9]\d{0,2}(?:,\d{3})+|\d+)(?:\.(\d{2}))?(?!\.?\d)")
+
+_MAGNITUDE = ("", " thousand", " million", " billion")
+
+
+def _under_thousand(n: int) -> str:
+    hundreds, rest = divmod(n, 100)
+    if not hundreds:
+        return _under_hundred(rest)
+    out = _ONES[hundreds] + " hundred"
+    return f"{out} {_under_hundred(rest)}" if rest else out
+
+
+def _cardinal_words(n: int) -> str:
+    """Cardinal for the dollars part of an amount (1299 -> one thousand
+    two hundred ninety-nine). Humans say twelve hundred too; the grouped
+    written form decomposes by magnitude, so the words follow the commas."""
+    if n == 0:
+        return "zero"
+    parts: list[str] = []
+    for mag in _MAGNITUDE:
+        n, chunk = divmod(n, 1000)
+        if chunk:
+            parts.append(_under_thousand(chunk) + mag)
+        if not n:
+            break
+    return " ".join(reversed(parts))
+
+
+def _cents_plain(cc: str) -> str:
+    """The cents pair the way prices are said: plain two-digit (99 ->
+    ninety-nine), oh-padded below ten (05 -> oh five)."""
+    n = int(cc)
+    if n == 0:
+        return ""
+    return f"oh {_DIGITS[str(n)]}" if n < 10 else _under_hundred(n)
+
+
+def _currency_words(m: "re.Match") -> str:
+    dollars = int(m.group(1).replace(",", ""))
+    cc = m.group(2)
+    cents_val = int(cc) if cc is not None else 0
+    if not dollars:
+        # Sub-dollar: read in cents with the unit (75 -> seventy-five cents).
+        if not cents_val:
+            return "zero dollars"
+        return "one cent" if cents_val == 1 else _under_hundred(cents_val) + " cents"
+    # With cents, units elide the way humans say prices: nineteen
+    # ninety-nine, not nineteen dollars and ninety-nine cents. Whole
+    # amounts keep the unit (five dollars).
+    if cents_val:
+        return f"{_cardinal_words(dollars)} {_cents_plain(cc or '0')}"
+    return _cardinal_words(dollars) + (" dollar" if dollars == 1 else " dollars")
+
+
 def _version_words(m: "re.Match") -> str:
     head, dotted, suffix = m.group(1) or "", m.group(2), m.group(3) or ""
     groups = dotted.split(".")
@@ -1011,6 +1071,10 @@ def normalize_for_speech(text: str) -> str:
     )
     t = re.sub(r"  +", " ", t)
     t = re.sub(r" ([,.!?;:])", r"\1", t)
+
+    # 1.5 Currency amounts ($19.99, $1,299.50, $5) before the year pass:
+    # money is never a year, and the $ must not survive into synthesis.
+    t = _CURRENCY.sub(_currency_words, t)
 
     # 2. Years (1000-2999) before generic digit-run rules.
     t = re.sub(r"(?<![\w.])([12]\d{3})" + _NOT_FRAG,

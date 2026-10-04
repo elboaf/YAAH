@@ -31,6 +31,13 @@ const SHARED_CASES: Array<[string, string]> = [
   ['Say it <break time="500ms"/> slowly.', 'Say it slowly.'],
   // IPA in brackets survives (the documented escape hatch for names).
   ['The name is [dʒeɪson].', 'The name is [dʒeɪson].'],
+  // Currency (#292): the $ never reaches synthesis (no "dollar" prefix),
+  // the decimal point is not "point", thousands commas don't mangle.
+  ['may the best $19.99 win', 'may the best nineteen ninety-nine win'],
+  ['$1,299.50 at checkout', 'one thousand two hundred ninety-nine fifty at checkout'],
+  ['That totals $5.', 'That totals five dollars.'],
+  ['under $0.75 total', 'under seventy-five cents total'],
+  ['$12 subtotal', 'twelve dollars subtotal'],
 ]
 
 describe('normalizeForSpeech (#206 mirror of speak.py)', () => {
@@ -46,5 +53,15 @@ describe('normalizeForSpeech (#206 mirror of speak.py)', () => {
   it('strips unlisted emotion markers but keeps bracketed IPA', () => {
     expect(normalizeForSpeech('Done [sighs] at last.')).toBe('Done at last.')
     expect(normalizeForSpeech('The name is [dʒeɪson].')).toBe('The name is [dʒeɪson].')
+  })
+
+  it('leaves non-currency numbers alone', () => {
+    // The currency rule owns $-glued amounts ONLY: bare decimals, version
+    // triples, years, phones and IPs keep today's behavior.
+    expect(normalizeForSpeech('Pi is about 3.14.')).toBe('Pi is about 3.14.')
+    expect(normalizeForSpeech('Running 1.0.5 now.')).toBe('Running one point oh point five now.')
+    expect(normalizeForSpeech('Shipped in 1999.')).toBe('Shipped in nineteen ninety-nine.')
+    expect(normalizeForSpeech('Call 555-0100.')).toBe('Call five five five, oh one oh oh.')
+    expect(normalizeForSpeech('Host is 10.0.0.1.')).toBe('Host is ten dot oh dot oh dot one.')
   })
 })
