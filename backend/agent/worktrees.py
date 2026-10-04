@@ -46,8 +46,10 @@ async def ensure_chat_worktree(
 
     Returns {"path": Path, "detached": bool, "created": bool} on success
     or {"path": None, "error": str} when the chat cannot have one (no
-    local git workspace, unknown start point). Idempotent: an existing
-    worktree is reported as-is, never recreated.
+    local git workspace, unknown start point). Never recreated; when the
+    selection changed since the last run, an existing clean tree is
+    retargeted in place (flip = checkout inside the chat worktree; the
+    dirty-flip guard runs upstream in branch_select).
     """
     chat_dir = chat_worktree_path(workspace, chat_id)
     if chat_dir is None or not branch or not str(branch).strip():
@@ -55,7 +57,25 @@ async def ensure_chat_worktree(
     branch = str(branch).strip()
 
     if chat_dir.exists():
-        return {"path": chat_dir, "detached": _is_detached(chat_dir), "created": False}
+        # The dirty-flip guard ran in the caller, so an existing tree may
+        # be retargeted in place: flip = checkout inside the chat's own
+        # worktree (ADR-0010, branch-selector decision). Attached trees
+        # switch to the branch (git refuses if another worktree holds it
+        # - then detach at its tip, the same one-checkout fallback as
+        # creation); detached trees re-attach only if the branch is free.
+        was_detached = _is_detached(chat_dir)
+        rc, out = await _run_git(chat_dir, "checkout", "-q", branch)
+        if rc == 0:
+            return {"path": chat_dir, "detached": False, "created": False}
+        rc, out2 = await _run_git(chat_dir, "checkout", "-q", "--detach", branch)
+        if rc == 0:
+            return {"path": chat_dir, "detached": True, "created": False}
+        return {
+            "path": chat_dir,
+            "detached": was_detached,
+            "created": False,
+            "error": (out2 or out).strip() or "worktree flip failed",
+        }
 
     root = workspace_root(workspace)
     # Start at the selected branch itself; when git refuses (the branch is
