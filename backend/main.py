@@ -74,6 +74,18 @@ async def lifespan(app: FastAPI):
     from backend.agent import scheduler
 
     await scheduler.ensure_scheduled()
+    # #277 (ADR-0010 pruning): retire clean chat worktrees of dead chats
+    # past the idle threshold. Best-effort and logged, never fatal; the
+    # rate limiter makes this once-per-boot (then hourly at most).
+    from backend.agent import wt_sweep
+
+    if wt_sweep.should_sweep():
+        try:
+            _swept = await wt_sweep.sweep_stale_chat_worktrees()
+            if _swept.get("swept"):
+                log.info("chat-worktree sweep: %s", _swept)
+        except Exception:  # noqa: BLE001 - maintenance never blocks serving
+            log.exception("chat-worktree sweep failed")
     yield
     await mcp_client.manager.shutdown()
     scheduler.stop_scheduler()
@@ -671,6 +683,13 @@ async def api_conversation_git_info(conversation_id: int):
         root = workspace_root(ws)
     except ValueError:
         return {"info": None}
+    # #277: once the chat has its own worktree, the chip reads THAT tree —
+    # dirty/ahead-behind describe where the chat's work actually happens.
+    from backend.agent import worktrees as _worktrees
+
+    chat_dir = _worktrees.chat_worktree_path(ws, conversation_id)
+    if chat_dir is not None and chat_dir.exists():
+        root = chat_dir
     return {"info": await git_workspace_info(root)}
 
 

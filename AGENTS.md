@@ -20,6 +20,12 @@ is still a global checkout until #277 ships. On landing conflicts, stop
 and report; leave the worktree and branch for a human. Read-only runs
 skip all of this — no worktree, no branch.
 
+#277 transition: when this chat has a branch-selector pick, the harness
+materializes a per-chat worktree at `.scratch/chat-<id>/` and the run
+executes inside it — create run worktrees nested there as the SOP says,
+and land inside the chat worktree (the selector note has the exact
+commands for your case). The primary worktree stays the human's.
+
 Residue at run start (#290): if `.scratch/chat-<id>/run` already
 exists, an earlier run left it. Clean AND fully merged into the
 selected branch → landed-and-forgotten: remove it and proceed. Dirty
