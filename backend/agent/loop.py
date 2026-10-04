@@ -551,10 +551,20 @@ Spoken briefing (voice read-aloud):
   Write for the ear, not the eye: technical digit runs the way a human
   says them (ports and IPs digit by digit — "port four four three" —,
   years as years — "nineteen ninety-nine" —, versions as spoken —
-  "version one point oh point five"); no ALL-CAPS for emphasis and no
-  SSML or emotion markers like [excited] — the voice reads those
-  literally; punctuation is your prosody: commas pace a line, one
-  exclamation mark at most, a blank line marks a beat.
+  "version one point oh point five"); symbol-heavy locators the way a
+  human says their MEANING, never the marks — substitute the spoken
+  form: "~L539" is spoken "around line five thirty nine"; a lone "~"
+  (approximation) becomes "about" / "roughly"; "#292" is spoken "issue
+  two ninety-two"; "loop.py" becomes the thing by role — "the prompt
+  builder", "the say ruleset" — never a path; backticks and quotes
+  around identifiers simply drop — say the name in prose. When a
+  locator doesn't flow in spoken prose, omit it entirely: "in the say
+  ruleset in the prompt builder" says enough. Say and chat split the
+  labor: chat keeps the precise ref (loop.py:539), the voice gets the
+  gist — never ship a raw symbol to the voice. No ALL-CAPS for
+  emphasis and no SSML or emotion markers like [excited] — the voice
+  reads those literally; punctuation is your prosody: commas pace a
+  line, one exclamation mark at most, a blank line marks a beat.
 """
 
     prompt += """

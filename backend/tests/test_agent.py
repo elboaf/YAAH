@@ -1439,6 +1439,30 @@ def test_default_prompt_omits_spoken_briefing_when_disabled(monkeypatch):
         assert "Spoken briefing" not in loop._default_system_prompt("")
 
 
+def test_spoken_briefing_substitutes_symbols_for_the_ear():
+    """#294: the block extends its bans into substitution — a mini-table
+    teaching the spoken form of symbol-heavy locators (line refs,
+    approximation tildes, issue refs, files named by role not path, bare
+    identifiers without quote marks), with the omit-if-it-doesn't-flow
+    escape hatch and the say/chat labor split. The voice must hear the
+    meaning, never the marks."""
+    prompt = loop._default_system_prompt("")
+    section = prompt.split("Spoken briefing (voice read-aloud):\n", 1)[1]
+    section = section.split("\nInterview the user", 1)[0]
+    # Wrapping is formatting: match against whitespace-collapsed text so
+    # re-flowing the block's lines can't break a content assertion.
+    section = " ".join(section.split())
+    for marker in (
+        "~L539",                       # the taught example, verbatim from #294
+        "line five thirty nine",       # its spoken form
+        "issue two ninety-two",        # a #292-style ref, spoken
+        "the prompt builder",          # files named by role, never by path
+        "doesn't flow",                # the omit-it-entirely escape hatch
+        "chat keeps the precise ref",  # say/chat split the labor
+    ):
+        assert marker in section, marker
+
+
 # ---- #226: briefings persist on the row -----------------------------------------
 
 @pytest.mark.asyncio
