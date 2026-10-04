@@ -420,6 +420,108 @@ GET_HELP_SCHEMA = {
 }
 
 
+BRANCH_SELECT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "branch_select",
+        "description": (
+            "Point this chat's branch selector at a branch, on the user's "
+            "request (ADR-0010/#277). Creates the branch first when it "
+            "does not exist, derived from the chat's currently selected "
+            "branch - never from the primary worktree's HEAD - then "
+            "records the selection. Refuses while the chat's worktree has "
+            "uncommitted changes: commit or discard first. Never checks "
+            "out or moves the primary worktree."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "branch": {
+                    "type": "string",
+                    "description": "Branch name to select (created when missing)",
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": "Create the branch when it does not exist (default true)",
+                },
+            },
+            "required": ["branch"],
+        },
+    },
+}
+
+
+async def branch_select(
+    workspace: str = "",
+    branch: str = "",
+    create: bool = True,
+    conversation_id: int | None = None,
+    on_chunk=None,
+) -> dict:
+    """The ADR-0010 selector tool: create-if-missing from the chat's own
+    selection, then store. The primary worktree is never touched; the
+    stored pick is applied by worktrees.ensure_chat_worktree on the next
+    run (and by the flip guard, which refuses over a dirty chat
+    worktree)."""
+    from backend.agent import gitinfo
+    from backend.db import database as db
+
+    branch = (branch or "").strip()
+    if not branch or branch.startswith("-"):
+        return {"ok": False, "error": "branch must be a local branch name"}
+    if conversation_id is None:
+        return {"ok": False, "error": "no conversation context for a branch selection"}
+    conv = await db.get_conversation(conversation_id)
+    if conv is None:
+        return {"ok": False, "error": "conversation not found"}
+    ws = (conv.get("workspace") or workspace or "").strip()
+    if not ws or ws.startswith("remote:"):
+        return {"ok": False, "error": "no local git workspace"}
+    try:
+        root = workspace_root(ws)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    exists = branch in await gitinfo.list_local_branches(root)
+    if not exists and not create:
+        return {"ok": False, "error": f"not a local branch: {branch}"}
+    if not exists:
+        # Server-enforced start point: derive from the chat's currently
+        # selected branch, falling back to the primary's checked-out
+        # branch. The primary's HEAD is never consulted while a
+        # selection exists (amendment: pin at creation, start point).
+        start = str(conv.get("selected_branch") or "").strip()
+        if start:
+            rc, out = await gitinfo._run_git(root, "branch", branch, start)
+        else:
+            rc, out = await gitinfo._run_git(root, "branch", branch)
+        if rc != 0:
+            return {"ok": False, "error": (out or "").strip() or "branch creation failed"}
+
+    # Dirty-flip guard (ADR-0010): refuse while the chat's own worktree
+    # has uncommitted changes. A flip with dirty state would strand those
+    # changes relative to the landing target.
+    from backend.agent import worktrees as _worktrees
+
+    chat_dir = _worktrees.chat_worktree_path(ws, conversation_id)
+    if chat_dir is not None and chat_dir.exists():
+        rc, out = await gitinfo._run_git(chat_dir, "status", "--porcelain")
+        if rc != 0 or (out or "").strip():
+            return {
+                "ok": False,
+                "error": (
+                    "this chat's worktree has uncommitted changes - "
+                    "commit or discard before switching branches"
+                ),
+            }
+
+    await db.update_conversation(conversation_id, selected_branch=branch)
+    from backend.agent.gitinfo import invalidate_git_caches
+
+    invalidate_git_caches(root)
+    return {"ok": True, "selected_branch": branch, "created": not exists}
+
+
 async def get_help(workspace: str = "", tool_name: str = "") -> dict:
     name = (tool_name or "").strip()
     schemas = {s["function"]["name"]: s for s in get_schemas()}
@@ -447,7 +549,7 @@ async def get_help(workspace: str = "", tool_name: str = "") -> dict:
     return doc
 
 
-TOOLS_SCHEMA += [GET_HELP_SCHEMA]
+TOOLS_SCHEMA += [GET_HELP_SCHEMA, BRANCH_SELECT_SCHEMA]
 
 # Issue #169: the persistent-memory tool names, used by the Settings toggle
 # (memory.enabled, default OFF) to filter the schema and gate execution.
@@ -1358,6 +1460,7 @@ EXECUTORS = {
     "search_conversation_history": search_conversation_history,
     "install_git": _install_git_executor,
     "get_help": get_help,
+    "branch_select": branch_select,
     "memory_save": _memory_executor("save"),
     "memory_read": _memory_executor("read"),
     "memory_delete": _memory_executor("delete"),
@@ -1423,6 +1526,9 @@ _MUTATING_TOOLS = {
     # persistent memory lives outside the workspace (~/.yaah/memory) but
     # is model-authored content, so it gates like a file write
     "memory_save", "memory_delete",
+    # creates a git branch ref (selector write); the flip itself moves no
+    # tree, but ref creation is a repo mutation - gate like a file write
+    "branch_select",
 }
 _SHELL_TOOLS = {
     "bash", "powershell",

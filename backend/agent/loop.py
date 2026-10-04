@@ -899,7 +899,7 @@ def _selected_branch_note(branch, chat_id=None, detached=False) -> str:
         # \u2014 and moving that branch is the human's move anyway
         # (ADR-0010: the harness never moves master).
         return (
-            f"# Branch selector: {b}\n\n"
+            f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
             f"The user selected branch `{b}` for this chat. It is checked "
             "out in the primary tree, so this chat runs in its own "
             f"per-chat worktree at `.scratch/chat-{cid}`, detached at "
@@ -914,7 +914,7 @@ def _selected_branch_note(branch, chat_id=None, detached=False) -> str:
             + residue
         )
     return (
-        f"# Branch selector: {b}\n\n"
+        f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
         f"The user selected branch `{b}` for this chat. This chat runs in "
         f"its own per-chat worktree at `.scratch/chat-{cid}`, which has "
         f"`{b}` checked out; the primary tree is the human's \u2014 never "
@@ -940,7 +940,7 @@ def _selected_branch_note_degraded(branch, chat_id, reason) -> str:
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     b = str(branch).strip()
     return (
-        f"# Branch selector: {b}\n\n"
+        f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
         f"The user selected branch `{b}` for this chat, but the per-chat "
         f"worktree could not be materialized ({reason}), so this run "
         "executes in the primary tree. The primary tree is the human's — "
@@ -1181,7 +1181,9 @@ async def _execute_with_progress(
         queue.put_nowait(text)
 
     tool_kwargs = {"on_chunk": on_chunk}
-    if name == "search_conversation_history":
+    if name in ("search_conversation_history", "branch_select"):
+        # Per-tool context: history search scopes to this conversation;
+        # branch_select stores the chat's own selector (#277).
         tool_kwargs["conversation_id"] = conversation_id
     task = asyncio.create_task(
         execute_tool(name, args, workspace, **tool_kwargs)
