@@ -672,11 +672,16 @@ async def create_conversation(
     chat_type: str = "chat",
     model: str | None = None,
     effort: str | None = None,
+    selected_branch: str | None = None,
 ):
     """Create a conversation. model/effort: the chat's pinned scope (#51/#76).
     Blank strings are legal writes (the chat's deliberate Default); None
     stamps the current global default (drafts already carry explicit picks,
     so None is the "unspecified" path for API callers).
+    #277 (ADR-0010 amendment: pin at creation): the draft destination
+    card's branch pick pre-stores selected_branch at creation, so the
+    first run materializes the chat worktree on the right branch. None
+    leaves the selector unset (the chat runs in the primary as before).
 
     #132: an explicit-but-BARE model id is qualified with the active
     provider at write time — the row must be self-describing, or a later
@@ -697,9 +702,9 @@ async def create_conversation(
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO conversations (title, workspace, chat_type, model, effort)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (title, workspace, chat_type, model, effort),
+            "INSERT INTO conversations (title, workspace, chat_type, model, effort, selected_branch)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (title, workspace, chat_type, model, effort, selected_branch),
         )
         await db.commit()
         return cur.lastrowid

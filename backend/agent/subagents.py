@@ -322,10 +322,17 @@ def _resolve_tools(defn: AgentDef, workspace: str | None = None) -> list[dict]:
     return list(allowed.values())
 
 
-def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
+def _sub_agent_system_prompt(
+    defn: AgentDef,
+    workspace: str,
+    branch_note: str = "",
+) -> str:
     """System prompt for a sub-agent run: its definition body plus the
     same environment grounding the parent gets (env line, workspace
-    notes, skills index) so commands and paths are valid for the host."""
+    notes, skills index) so commands and paths are valid for the host.
+    branch_note: the parent's #277 selector note, appended verbatim so
+    delegation cannot silently drop branch context (ADR-0010
+    amendment, decision 5)."""
     from backend.agent import remote as remote_mod
     from backend.agent.loop import _local_env_line, _agents_notes
 
@@ -376,6 +383,8 @@ def _sub_agent_system_prompt(defn: AgentDef, workspace: str) -> str:
         "open git's interactive editor - pass -m to commit.\n"
     )
     notes = _agents_notes(workspace)
+    if branch_note:
+        prompt += f"\n\n---\n\n{branch_note}"
     if notes:
         prompt += f"\n\n---\n\n{notes}"
     skill_index = skill_registry.index_for_prompt()
@@ -409,6 +418,7 @@ async def run_sub_agent(
     on_event=None,
     gate=None,
     run_label: str = "",
+    branch_note: str = "",
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
@@ -437,7 +447,10 @@ async def run_sub_agent(
         return result
 
     messages = [
-        {"role": "system", "content": _sub_agent_system_prompt(defn, workspace)},
+        {
+            "role": "system",
+            "content": _sub_agent_system_prompt(defn, workspace, branch_note=branch_note),
+        },
         {"role": "user", "content": prompt},
     ]
     tools = _resolve_tools(defn, workspace=run_workspace)
@@ -845,6 +858,7 @@ async def spawn_batch(
     cancel_ev: asyncio.Event,
     on_event=None,
     gate=None,
+    branch_note: str = "",
 ) -> dict[str, dict]:
     """Run every spawn_agent call in one parent turn in parallel (capped
     by MAX_CONCURRENT via a semaphore). Returns {call_id: result}.
@@ -923,6 +937,7 @@ async def spawn_batch(
                 on_event=_forward if on_event else None,
                 gate=agent_gate,
                 run_label=call_id,
+                branch_note=branch_note,
             )
             if on_event:
                 on_event(

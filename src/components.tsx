@@ -8234,6 +8234,7 @@ function DraftDestinationCard() {
   const workspace = useAgent((s) => s.workspace)
   const draftDestination = useAgent((s) => s.draftDestination)
   const pinDraftDestination = useAgent((s) => s.pinDraftDestination)
+  const setDraftScope = useAgent((s) => s.setDraftScope)
   const devices = useRemote((s) => s.devices)
   const scope = useRemote((s) => s.scope)
   const [rows, setRows] = useState<WorkspaceRow[]>([])
@@ -8374,18 +8375,16 @@ function DraftDestinationCard() {
     }
   }
 
+  /** #277: the draft card's pick records intent only - the branch is
+   *  pre-stored on the conversation at creation; no primary-tree
+   *  checkout runs (ADR-0010 amendment). */
   const checkoutDraftBranch = async (branch: string) => {
     if (!dest || gitBusy) return
     setGitBusy(true)
     setGitError(null)
     try {
-      const result = await checkoutWorkspaceBranch(dest, branch)
-      if (destRef.current !== dest) return
-      if (!result.ok) {
-        setGitError(result.error || 'Branch checkout failed')
-        return
-      }
       setGitBranch(branch)
+      setDraftScope({ branch })
       setGitMenuOpen(false)
     } catch (e) {
       if (destRef.current === dest) {
@@ -10539,6 +10538,7 @@ export function Composer() {
         const created = await createConversation(stripProviderMarkup(displayText).slice(0, 40) || 'New chat', dest, {
           model: ds?.model ?? useAgent.getState().globalModel,
           effort: ds?.effort ?? useAgent.getState().globalEffort,
+          branch: ds?.branch ?? null,
         })
         cid = created.id
         // Atomic: re-key the draft buffer (optimistic messages included).

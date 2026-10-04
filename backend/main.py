@@ -248,6 +248,8 @@ class NewConversation(BaseModel):
     # distinct from "unspecified".
     model: str = ""
     effort: str = ""
+    # #277: the draft destination card's branch pick, pinned at creation
+    selected_branch: str | None = None
 
 
 class ConversationUpdate(BaseModel):
@@ -277,7 +279,8 @@ class NewMessage(BaseModel):
 @app.post("/api/conversations")
 async def api_create_conversation(body: NewConversation):
     cid = await create_conversation(
-        body.title, body.workspace, model=body.model, effort=body.effort
+        body.title, body.workspace, model=body.model, effort=body.effort,
+        selected_branch=body.selected_branch,
     )
     return {"id": cid}
 

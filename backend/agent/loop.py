@@ -2348,7 +2348,8 @@ async def _run_agent_claimed(
 
                 batch = asyncio.create_task(
                     subagents_mod.spawn_batch(
-                        calls, turn_workspace, cancel_ev, on_event=_emit, gate=_sub_gate
+                        calls, turn_workspace, cancel_ev, on_event=_emit, gate=_sub_gate,
+                        branch_note=branch_note,
                     )
                 )
 

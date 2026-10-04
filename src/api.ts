@@ -134,6 +134,8 @@ export interface ConversationRow {
    *  effort: '' = Default (reasoning_effort param not sent). */
   model?: string
   effort?: string
+  /** #277: the chat's pinned branch selector (draft card pre-store). */
+  selected_branch?: string | null
 }
 
 export interface ContextInfo {
@@ -237,7 +239,7 @@ export const getConversation = (id: number) =>
 export const createConversation = (
   title: string,
   workspace?: string | null,
-  scope?: { model?: string; effort?: string },
+  scope?: { model?: string; effort?: string; branch?: string | null },
 ) =>
   api<{ id: number }>('/api/conversations', {
     method: 'POST',
@@ -246,6 +248,7 @@ export const createConversation = (
       workspace: workspace ?? null,
       model: scope?.model ?? '',
       effort: scope?.effort ?? '',
+      selected_branch: scope?.branch ?? null,
     }),
   })
 

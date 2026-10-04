@@ -45,10 +45,7 @@ describe('draft destination card (#90)', () => {
       branch: 'main',
       branches: ['feature', 'main'],
     })
-    checkoutWorkspaceBranch.mockResolvedValue({
-      ok: true,
-      output: 'Switched to branch feature',
-    })
+    checkoutWorkspaceBranch.mockResolvedValue({ ok: true, output: "" })
     useAgent.setState({
       conversationId: null,
       workspace: 'C:/repos/project',
@@ -85,22 +82,18 @@ describe('draft destination card (#90)', () => {
     expect(await screen.findByRole('menuitem', { name: /feature/ })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('menuitem', { name: /feature/ }))
 
-    await waitFor(() => expect(checkoutWorkspaceBranch).toHaveBeenCalledWith('C:/repos/project', 'feature'))
+    expect(checkoutWorkspaceBranch).not.toHaveBeenCalled()
     expect(await screen.findByRole('button', { name: /branch feature/i })).toBeInTheDocument()
   })
 
-  it('surfaces checkout failures in the draft card', async () => {
-    checkoutWorkspaceBranch.mockResolvedValueOnce({
-      ok: false,
-      error: 'local changes would be overwritten',
-    })
+  it('records the branch pick without any checkout (#277)', async () => {
     render(<DraftDestinationCard />)
 
     fireEvent.click(await screen.findByRole('button', { name: /branch main/i }))
     fireEvent.click(await screen.findByRole('menuitem', { name: /feature/ }))
 
-    expect(await screen.findByText('local changes would be overwritten')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /branch main/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /branch feature/i })).toBeInTheDocument()
+    expect(checkoutWorkspaceBranch).not.toHaveBeenCalled()
   })
 
   it('does not offer cached workspaces as destinations while their device is offline', async () => {
