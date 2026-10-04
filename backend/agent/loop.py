@@ -489,6 +489,8 @@ def _default_system_prompt(workspace: str = "") -> str:
         "sub-agents index below)",
         "ask_user",
         "load_skill",
+        "branch_select (point this chat's branch selector at a branch, on the "
+        "user's request; creates it when missing)",
         "memory_save", "memory_read", "memory_delete",
         "search_conversation_history",
     ]

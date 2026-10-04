@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1373 / 1440) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1428 / 1495) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,7 +45,7 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1373 / 1440) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1428 / 1495) →
 `_default_system_prompt` → fragments appended 1341–1390 → `messages` with
 system first (loop.py:1428).
 
@@ -87,7 +87,7 @@ at tools.py:1293–1334, filtering in `get_schemas()` tools.py:1487–1551).
 | `backend/agent/tools.py:188–221` | 1: powershell (`POWERSHELL_SCHEMA`, Windows-only append, tools.py get_schemas:1495) | |
 | `backend/agent/tools.py:225–238` | 1: install_git (Windows + git missing + bundled installer, tools.py get_schemas:1518–1524) | |
 | `backend/agent/computer.py:92–361` | 11: read_ui_tree, screenshot, list_windows, focus_window, mouse_move, mouse_click, mouse_drag, mouse_scroll, type_text, press_key, wait (`COMPUTER_TOOLS_SCHEMA`, merged tools.py:1318–321) | 7 input tools embed shared `_HOST_INPUT_NOTE` (computer.py:33–37); `_MONITOR_PARAM`/`_OBSERVE` param descriptions shared |
-| `backend/agent/sandbox.py:1348–1448` | 4: sandbox_test/run/status/stop (`SANDBOX_TOOLS_SCHEMA`, merged tools.py:1330–1333; stripped for remote sessions, tools.py get_schemas:1526–1532) | `sandbox_run` description is a mini-playbook (~23 lines) |
+| `backend/agent/sandbox.py:1348–1448` | 4: sandbox_test/run/status/stop (`SANDBOX_TOOLS_SCHEMA`, merged tools.py:1481–1487; stripped for remote sessions, tools.py get_schemas:1526–1532) | `sandbox_run` description is a mini-playbook (~23 lines) |
 | `backend/agent/loop.py:751–773` | 1: exit_plan (plan mode only) | |
 
 **Total: 37 self-defined tool descriptions** (plus parameter-level descriptions,
@@ -97,7 +97,7 @@ plus dynamic MCP ones). Supporting description-like text:
   `COMPUTER_HELP_DOCS` (computer.py:67–90, 3 tools) served by `get_help`
   (tools.py:377–401); "the schemas stay short; this reaches the model only when it calls get_help".
 - **In-band model-directed strings** (not schemas but the model reads them):
-  timeout-clamp note (`_clamp_note`, tools.py:860–871), get_help error nudge
+  timeout-clamp note (`_clamp_note`, tools.py:1009–1018), get_help error nudge
   (tools.py:1401–1411), screenshot-disallowed info (tools.py:1449–1459),
   plan-block result (`_plan_block_result`, loop.py:870–881), sandbox-only skip
   result (`_policy_skip_result`, loop.py:858–869), sandbox hints
