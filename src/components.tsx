@@ -9403,26 +9403,42 @@ export function Composer() {
   const recorderRef = useRef<VoiceRecorder | null>(null)
 
   useEffect(() => {
-    // Retry: on a fresh launch this request races backend startup (the
-    // supervisor may still be cycling), and giving up on the first failure
-    // hid the mic button for the whole session. Re-check whenever the
-    // backend reports it's back up.
+    // Availability gate for the mic button. Probe fast at first: on a fresh
+    // launch this request races backend startup (the supervisor may still
+    // be cycling). Once the fast budget is spent, keep probing on a slow
+    // cadence rather than giving up silently — the button must never depend
+    // on catching a one-shot 'up' event (the supervisor emits it into a
+    // webview that may not have listeners attached yet) or the user loses
+    // dictation for the whole session (post-update report, 2026-10-04).
+    // While unavailable the probe is the only traffic; a healthy answer
+    // stops the ladder until a status event restarts it.
     let cancelled = false
+    let timer = 0
     const check = (attempt = 0) => {
+      if (cancelled) return
       transcribeStatus()
         .then((s) => {
           if (!cancelled) setMicAvailable(s.engine === 'cloud' ? s.cloud_configured : s.local_available)
         })
         .catch(() => {
-          if (cancelled || attempt >= 8) return
-          window.setTimeout(() => check(attempt + 1), 1500 * (attempt + 1))
+          if (cancelled) return
+          // Fast backoff for the first 9 attempts (1.5s..13.5s, ~54s
+          // total), then a steady 15s poll for as long as it takes.
+          const delay = attempt >= 8 ? 15_000 : 1500 * (attempt + 1)
+          timer = window.setTimeout(() => check(attempt + 1), delay)
         })
     }
     check()
-    const onBackendStatus = () => check()
+    const onBackendStatus = () => {
+      // Supervisor events (up/down/error) force an immediate re-check;
+      // drop any pending slow poll so the two ladders can't stack.
+      window.clearTimeout(timer)
+      check()
+    }
     window.addEventListener('backend-status', onBackendStatus)
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
       window.removeEventListener('backend-status', onBackendStatus)
     }
   }, [])
