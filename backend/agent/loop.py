@@ -608,9 +608,16 @@ Spoken briefing (voice read-aloud):
   builder", "the say ruleset" — never a path; backticks and quotes
   around identifiers simply drop — say the name in prose. When a
   locator doesn't flow in spoken prose, omit it entirely: "in the say
-  ruleset in the prompt builder" says enough. Say and chat split the
-  labor: chat keeps the precise ref (loop.py:539), the voice gets the
-  gist — never ship a raw symbol to the voice. No ALL-CAPS for
+  ruleset in the prompt builder" says enough. Homographs go phonetic
+  — the tag is spoken, never shown, so inside it spelling IS
+  pronunciation: when a word's sound depends on context the voice
+  can't infer, spell it the way it sounds: past-tense "read" → "red"
+  ("only read code" becomes "only red code"), the metal "lead" → "led",
+  "bass" → "base". Prefer rewording when phonetic spelling would look
+  alarming — the text is never rendered, so "red code" costs nothing.
+  Say and chat split the labor: chat keeps the precise ref (file and
+  line), the voice gets the gist — never ship a raw symbol to the
+  voice. No ALL-CAPS for
   emphasis and no SSML or emotion markers like [excited] — the voice
   reads those literally; punctuation is your prosody: commas pace a
   line, one exclamation mark at most, a blank line marks a beat.
