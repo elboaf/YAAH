@@ -54,6 +54,7 @@ import {
   deleteAgentInstruction,
   type ScheduledAgent,
   type AgentPolicy,
+  type AgentLandingMode,
   type AgentScheduleType,
   type AgentBody,
   type AgentInstruction,
@@ -5312,6 +5313,9 @@ function AgentForm({
   const [time, setTime] = useState(agent?.schedule_spec?.time ?? '09:00')
   const [weekday, setWeekday] = useState(String(agent?.schedule_spec?.weekday ?? 0))
   const [policy, setPolicy] = useState<AgentPolicy>(agent?.approval_policy ?? 'sandbox-only')
+  // #278: where each fire's work lands (off mirrors today's chat behavior).
+  const [landingMode, setLandingMode] = useState<AgentLandingMode>(agent?.landing_mode ?? 'off')
+  const [landingBranch, setLandingBranch] = useState(agent?.landing_branch ?? '')
   const [model, setModel] = useState(agent?.model ?? '')
   const [effort, setEffort] = useState(agent?.effort ?? '')
   const [memory, setMemory] = useState(agent?.memory_enabled ?? true)
@@ -5364,6 +5368,8 @@ function AgentForm({
               ? { time }
               : { weekday: parseInt(weekday, 10) || 0, time },
         approval_policy: policy,
+        landing_mode: landingMode,
+        landing_branch: landingMode === 'fixed' ? landingBranch.trim() : '',
         model: model.trim(),
         effort,
         memory_enabled: memory,
@@ -5453,7 +5459,37 @@ function AgentForm({
             <option value="autonomous">autonomous</option>
           </select>
         </label>
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Landing</span>
+          <select
+            className={agentInputCls}
+            value={landingMode}
+            onChange={(e) => setLandingMode(e.target.value as AgentLandingMode)}
+          >
+            <option value="off">off — chat's own branch</option>
+            <option value="fixed">fixed — one branch</option>
+            <option value="per-run">per-run — branch per fire</option>
+          </select>
+        </label>
       </div>
+      {landingMode === 'fixed' && (
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Landing branch</span>
+          <input
+            className={`w-full ${agentInputCls}`}
+            value={landingBranch}
+            onChange={(e) => setLandingBranch(e.target.value)}
+            placeholder="e.g. nightly-refactor"
+          />
+        </label>
+      )}
+      <p className="text-[10px] leading-relaxed text-zinc-600">
+        {landingMode === 'off'
+          ? 'Off (default): each fire runs in the pinned chat\u2019s own branch — where its work ends up is up to the chat.'
+          : landingMode === 'fixed'
+            ? 'Fixed: every fire lands on the branch above (it must exist in the workspace). The primary worktree is never touched.'
+            : 'Per-run: every fire gets its own branch (<agent>-<date>-<time>), left unmerged for you to integrate manually.'}
+      </p>
       <p className="text-[10px] leading-relaxed text-zinc-600">
         {policy === 'sandbox-only'
           ? 'Sandbox-only (default): tools that would need approval are skipped ("skipped: approval required") and the run continues — safe unattended.'
@@ -5796,6 +5832,8 @@ function agentToBody(a: ScheduledAgent, enabled: boolean): AgentBody {
     schedule_type: a.schedule_type,
     schedule_spec: a.schedule_spec,
     approval_policy: a.approval_policy,
+    landing_mode: a.landing_mode,
+    landing_branch: a.landing_branch,
     model: a.model,
     effort: a.effort,
     memory_enabled: a.memory_enabled,

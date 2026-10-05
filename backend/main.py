@@ -1603,6 +1603,9 @@ async def _agent_view(agent: dict) -> dict:
         "allow_ask_user": bool(agent.get("allow_ask_user")),
         "notify_on_success": bool(agent.get("notify_on_success")),
         "retention": int(agent.get("retention") or 0),
+        # #278: landing settings surface to the editor verbatim.
+        "landing_mode": str(agent.get("landing_mode") or "off"),
+        "landing_branch": str(agent.get("landing_branch") or ""),
         "schedule_spec": scheduler_mod.parse_schedule_spec(agent["schedule_spec"]),
         "schedule_text": scheduler_mod.describe_schedule(
             agent["schedule_type"], agent["schedule_spec"]
@@ -1620,6 +1623,10 @@ class AgentBody(BaseModel):
     schedule_type: str = "interval"          # interval | daily | weekly
     schedule_spec: dict = {}                 # see database.SCHEMA agents comment
     approval_policy: str = "sandbox-only"    # sandbox-only | autonomous
+    # #278: where each fire's work lands — off (chat's own branch),
+    # fixed (landing_branch), per-run (a branch per fire, unmerged).
+    landing_mode: str = "off"
+    landing_branch: str = ""
     model: str = ""                          # '' = active global model
     effort: str = ""                         # '' | provider-advertised effort
     memory_enabled: bool = True
@@ -1663,6 +1670,11 @@ async def api_agents_add(body: AgentBody):
         raise HTTPException(status_code=400, detail="prompt is required")
     if body.approval_policy not in scheduler_mod.VALID_POLICIES:
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
+    if body.landing_mode not in scheduler_mod.VALID_LANDING_MODES:
+        raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
+    landing_branch = body.landing_branch.strip()
+    if body.landing_mode == "fixed" and not landing_branch:
+        raise HTTPException(status_code=400, detail="fixed landing_mode requires landing_branch")
     stype, spec = _validate_schedule(body.schedule_type, body.schedule_spec)
     conv_id = await create_conversation(
         title=body.name.strip(), workspace=body.workspace or None, chat_type="agent"
@@ -1675,6 +1687,10 @@ async def api_agents_add(body: AgentBody):
         "schedule_type": stype,
         "schedule_spec": spec,
         "approval_policy": body.approval_policy,
+        "landing_mode": body.landing_mode,
+        # #278: the named target only travels in fixed mode — other modes
+        # must not wake up with a stale branch name if the mode flips later.
+        "landing_branch": landing_branch if body.landing_mode == "fixed" else "",
         # #132: qualify a bare id — the agent's row must be self-describing
         # too (scheduler fires resolve through the same bare branch).
         "model": qualify_model_scope(body.model.strip()),
@@ -1737,6 +1753,11 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         raise HTTPException(status_code=404, detail="agent not found")
     if body.approval_policy not in scheduler_mod.VALID_POLICIES:
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
+    if body.landing_mode not in scheduler_mod.VALID_LANDING_MODES:
+        raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
+    landing_branch = body.landing_branch.strip()
+    if body.landing_mode == "fixed" and not landing_branch:
+        raise HTTPException(status_code=400, detail="fixed landing_mode requires landing_branch")
     stype, spec = _validate_schedule(body.schedule_type, body.schedule_spec)
     fields = {
         "workspace": body.workspace,
@@ -1745,6 +1766,10 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         "schedule_type": stype,
         "schedule_spec": spec,
         "approval_policy": body.approval_policy,
+        "landing_mode": body.landing_mode,
+        # #278: the named target only travels in fixed mode — other modes
+        # must not wake up with a stale branch name if the mode flips later.
+        "landing_branch": landing_branch if body.landing_mode == "fixed" else "",
         # #132: qualify a bare id (full-record replace write path).
         "model": qualify_model_scope(body.model.strip()),
         "effort": body.effort.strip(),

@@ -820,6 +820,10 @@ export const checkMcpCommand = (command: string) =>
 
 export type AgentPolicy = 'sandbox-only' | 'autonomous'
 export type AgentScheduleType = 'interval' | 'daily' | 'weekly'
+/** #278: off = the pinned chat's own branch (today's behavior); fixed =
+ *  every fire lands on landing_branch; per-run = a branch per fire, left
+ *  unmerged for manual integration. */
+export type AgentLandingMode = 'off' | 'fixed' | 'per-run'
 export interface AgentScheduleSpec {
   minutes?: number
   time?: string
@@ -842,6 +846,9 @@ export interface ScheduledAgent {
   schedule_spec: AgentScheduleSpec
   schedule_text: string
   approval_policy: AgentPolicy
+  /** #278: where each fire's work lands. */
+  landing_mode: AgentLandingMode
+  landing_branch: string
   model: string
   effort: string
   memory_enabled: boolean

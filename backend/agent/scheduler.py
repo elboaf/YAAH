@@ -21,8 +21,11 @@ Spec decisions implemented here:
 """
 import asyncio
 import contextlib
+import asyncio
 import json
 import logging
+import re
+import subprocess
 from datetime import datetime, timedelta
 
 from backend.agent.config import load_config, qualify_model_scope, save_config
@@ -33,6 +36,7 @@ from backend.db.database import (
     list_instructions,
     trim_agent_transcript,
     update_agent as _db_update_agent,
+    update_conversation,
 )
 
 
@@ -44,6 +48,11 @@ log = logging.getLogger("yaah.scheduler")
 
 VALID_SCHEDULE_TYPES = ("interval", "daily", "weekly")
 VALID_POLICIES = ("sandbox-only", "autonomous")
+# #278: where a scheduled fire's work lands. 'off' (default) = today's
+# behavior — the pinned chat runs on its own selected branch; 'fixed' =
+# every fire lands on landing_branch; 'per-run' = each fire gets its own
+# branch, left unmerged for manual integration.
+VALID_LANDING_MODES = ("off", "fixed", "per-run")
 WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 # Interval bounds: below this would hammer the model provider; above a
@@ -243,6 +252,99 @@ def _is_due(agent: dict, now: datetime) -> bool:
         return False
 
 
+async def resolve_landing(agent_id: str) -> tuple[str, str]:
+    """#278: the (mode, branch) landing setting of `agent_id`, normalized.
+
+    Unknown/blank modes read as 'off'. landing_branch is honored only in
+    fixed mode, and only when it exists locally at fire time — a dead
+    target would hand the run a stale pin (#302), so the fire keeps the
+    chat's own branch instead and the miss is logged. Remote workspaces
+    are out of scope v1 (no branch list to check) and read as 'off'."""
+    agent = await get_agent(agent_id)
+    if not agent:
+        return "off", ""
+    mode = str(agent.get("landing_mode") or "off").strip() or "off"
+    if mode not in VALID_LANDING_MODES:
+        mode = "off"
+    if mode != "fixed":
+        return mode, ""
+    branch = str(agent.get("landing_branch") or "").strip()
+    if not branch:
+        return "off", ""
+    from backend.agent.gitinfo import is_git_repo, list_local_branches
+    from backend.agent.tools import workspace_root
+
+    try:
+        root = workspace_root(agent.get("workspace") or "")
+    except ValueError:
+        root = None
+    if root is None or not is_git_repo(root) or branch not in await list_local_branches(root):
+        log.warning(
+            "agent %s: fixed landing branch %r not found locally; fire keeps the chat pin",
+            agent_id, branch,
+        )
+        return "off", ""
+    return "fixed", branch
+
+
+async def _create_per_run_branch(
+    workspace: str, agent_id: str, start_point: str | None = None
+) -> str | None:
+    """#278: create this fire's per-run branch and return its name, or
+    None when creation is impossible. Deterministic name
+    `<agent>-<YYYYMMDD-HHMM>` (slug of the agent id), collision-bumped
+    with -2, -3… — a branch is never overwritten, and two fires in the
+    same minute each get their own. Start point is the chat's selected
+    branch when it exists (ADR-0010: new branches derive from the chat's
+    selection, never the primary's HEAD), else HEAD."""
+    from backend.agent.gitinfo import is_git_repo, list_local_branches
+    from backend.agent.tools import workspace_root
+
+    slug = re.sub(r"[^a-z0-9]+", "-", str(agent_id).lower()).strip("-") or "agent"
+    base = f"{slug}-{datetime.now().strftime('%Y%m%d-%H%M')}"
+    try:
+        root = workspace_root(workspace)
+    except ValueError:
+        return None
+    if not is_git_repo(root):
+        return None
+
+    def _fresh_branches():
+        # Raw git, not list_local_branches: the helper is TTL-cached, and a
+        # bump must see the branch the previous attempt just created.
+        proc = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            cwd=str(root), capture_output=True, text=True, timeout=30,
+        )
+        return set(proc.stdout.split()) if proc.returncode == 0 else set()
+
+    existing = _fresh_branches()
+    start = start_point if start_point in existing else None
+    name, n = base, 2
+    for _ in range(8):
+        args = ["git", "branch", name] + ([start] if start else [])
+        proc = await asyncio.to_thread(
+            subprocess.run, args, cwd=str(root), capture_output=True, text=True,
+            timeout=30,
+        )
+        if proc.returncode == 0:
+            return name
+        existing = _fresh_branches()
+        if name in existing:
+            # Collision (another fire won the race): bump and retry — a
+            # branch is never overwritten.
+            name = f"{base}-{n}"
+            n += 1
+            continue
+        log.warning(
+            "agent %s: per-run branch %s creation failed: %s",
+            agent_id, name, (proc.stderr or "").strip(),
+        )
+        return None
+    log.warning("agent %s: per-run branch naming exhausted after 8 bumps", agent_id)
+    return None
+
+
 async def fire_agent(
     agent: dict, is_retry: bool = False, one_shot: bool = False
 ) -> str:
@@ -304,6 +406,31 @@ async def fire_agent(
         )
     await _patch(aid, **fire_fields)
 
+    # #278: resolve this fire's landing (where its work should end up) and
+    # write it through to the pinned chat before the run starts. The run
+    # path already reads conv["selected_branch"] to materialize the chat
+    # worktree and inject the run SOP, so the write-through reuses the
+    # whole #277 machinery and the landing stays prompt-driven. Deferred
+    # imports: the scheduler must import without touching the git layer.
+    # Keep the primary worktree out of it entirely — the harness never
+    # moves a branch checked out in the primary (ADR-0010).
+    landing_mode, landing_branch = await resolve_landing(aid)
+    if landing_mode == "fixed":
+        await update_conversation(
+            conv_id, selected_branch=landing_branch, branch_pin_origin="explicit"
+        )
+    elif landing_mode == "per-run":
+        created = await _create_per_run_branch(conv.get("workspace") or "", aid)
+        if created is None:
+            log.warning(
+                "agent %s: per-run branch creation failed; the run keeps the "
+                "chat's current pin", aid,
+            )
+        else:
+            await update_conversation(
+                conv_id, selected_branch=created, branch_pin_origin="explicit"
+            )
+
     # Effective prompt (issue #41): the user's prompt verbatim + standing
     # instructions. No auto-prepended context, no template variables.
     instructions = await list_instructions(aid)
@@ -311,6 +438,18 @@ async def fire_agent(
     if instructions:
         lines = "\n".join(f"- {i['content']}" for i in instructions)
         prompt = f"{prompt}\n\n# Standing instructions\n\n{lines}"
+    if landing_mode == "per-run":
+        # #278, per-run mode: each fire's work lands on its own branch,
+        # which stays unmerged for manual integration (ADR-0010: the
+        # harness never merges into shared trees unattended). Landing
+        # still happens inside the chat worktree per the selector note;
+        # this line stops the agent from deleting the branch after it.
+        prompt += (
+            "\n\n# Landing\n\nThis is a scheduled per-run fire: your work "
+            "lands on the branch named in the branch-selector note above. "
+            "Leave that branch in place for manual integration — never "
+            "delete it and never merge it into a shared branch."
+        )
 
     task = asyncio.create_task(
         _run_and_settle(

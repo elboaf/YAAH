@@ -89,8 +89,13 @@ untouchable by agents by construction, not by prompt discipline.
 - **Shell git stays.** No structured git tools return; agents work with
   shell git inside their worktree exactly as ADR-0008 decided. What
   returns is isolation, not ceremony.
-- **Scheduled agents** are pinned conversations and inherit chat
-  behavior until #278 (fixed / per-run / off landing modes) lands.
+- **Scheduled agents** carry their own landing setting (#278): off (the
+  default — inherit chat behavior), fixed (every fire lands on one
+  named branch), per-run (each fire gets a collision-bumped
+  `<agent>-<date>-<time>` branch, left unmerged for manual
+  integration). The mode is written through to the chat's pin at fire
+  time; landing itself stays prompt-driven via the #277 selector note,
+  and the harness never merges into shared trees unattended.
 - **Remote workspaces stay out of scope v1** — no chat worktrees on
   `remote:<host>:<path>`; the gap is recorded here, consistent with the
   existing remote skips in AGENTS.md injection and the git endpoints.
