@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import sys
 import tempfile
@@ -331,6 +332,11 @@ LOCAL_WS = str(Path(tempfile.gettempdir()) / "yaah-manifest-local-ws")
 # rendered sub-agent prompt output, so committed fixtures (and their
 # bytes/sha256 fields) are machine-independent (#182 return trip).
 LOCAL_WS_TOKEN = "<LOCAL_WS>"
+# #301: the pinned branch note embeds the fixture conversation's id in its
+# deterministic run paths (`.scratch/chat-<id>/run`). That id is a DB
+# autoincrement counter — it drifts between renders in one process — so it
+# is canonicalized out here too, to the same end: reproducible manifests.
+CHAT_ID_TOKEN = "<CHAT_ID>"
 
 _FIXTURE_INFO = {
     "host_id": FIXTURE_HOST_ID,
@@ -695,11 +701,28 @@ def _drive_turn(flags: dict) -> dict:
             ws_dir = Path(LOCAL_WS)
             ws_dir.mkdir(parents=True, exist_ok=True)
             workspace = str(ws_dir)
+            # #301: the branch note renders only for a pinned chat, and a
+            # pin needs a real local git repo — seed one once (idempotent)
+            # so the render matrix carries the widened trigger.
+            if not (ws_dir / ".git").exists():
+                import subprocess
+
+                subprocess.run(
+                    ["git", "init", "-q", "-b", "master", str(ws_dir)],
+                    check=True, capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(ws_dir),
+                     "-c", "user.email=fixture@yaah.local",
+                     "-c", "user.name=Fixture",
+                     "commit", "-q", "--allow-empty", "-m", "fixture"],
+                    check=True, capture_output=True,
+                )
             if flags["kind"] == "remote":
                 workspace = REMOTE_WS
             elif flags["kind"] == "remote-offline":
                 workspace = OFFLINE_WS
-            cid = await create_conversation("manifest")
+            cid = await create_conversation("manifest", workspace=workspace)
             if flags["override"]:
                 await update_conversation(
                     cid,
@@ -777,7 +800,9 @@ def render_local_family(combo: str, flags: dict) -> dict:
     messages = captured["messages"]
     system_messages = [m for m in messages if m.get("role") == "system"]
     sep = chr(10) * 2 + "====" + chr(10) * 2
-    rendered = sep.join(str(m.get("content") or "") for m in system_messages)
+    rendered = _canonicalize_chat_ids(
+        sep.join(str(m.get("content") or "") for m in system_messages)
+    )
     tools = captured["tools"]
     return {
         "combo": combo,
@@ -788,13 +813,15 @@ def render_local_family(combo: str, flags: dict) -> dict:
         "sections": [
             section
             for m in system_messages
-            for section in _split_sections(str(m.get("content") or ""))
+            for section in _split_sections(
+                _canonicalize_chat_ids(str(m.get("content") or ""))
+            )
         ],
         "system_messages": [
             {
                 "role": "system",
-                "bytes": len(str(m.get("content") or "").encode("utf-8")),
-                "sha256": _sha256_text(str(m.get("content") or "")),
+                "bytes": len(_canonicalize_chat_ids(str(m.get("content") or "")).encode("utf-8")),
+                "sha256": _sha256_text(_canonicalize_chat_ids(str(m.get("content") or ""))),
             }
             for m in system_messages
         ],
@@ -978,6 +1005,13 @@ def render_combo(combo: str) -> dict:
 # ---------------------------------------------------------------------------
 # Manifest serialization + batch generation
 # ---------------------------------------------------------------------------
+
+def _canonicalize_chat_ids(text: str) -> str:
+    """Replace every `chat-<id>` spelling (the branch note's deterministic
+    `.scratch/chat-<id>/run` paths) with the `<CHAT_ID>` token before
+    sizing/hashing/splitting — the fixture id is a DB counter, not data."""
+    return re.sub(r"chat-\d+", CHAT_ID_TOKEN, text)
+
 
 def manifest_to_json(manifest: dict) -> str:
     return json.dumps(manifest, indent=2, sort_keys=False, ensure_ascii=False) + chr(10)

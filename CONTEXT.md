@@ -24,7 +24,13 @@ _Avoid_: session worktree, `agent/*` branch
 The per-chat stored value naming the branch a chat's work lands on —
 the single source of truth for landing. Set at chat creation from the
 destination card's pick or the workspace's current branch; it never
-follows the primary worktree afterward. Flipping it checks out inside
+follows the primary worktree afterward. Every pin carries an **origin**:
+_explicit_ (a user pick — destination card, chip, or the branch_select
+tool) or _inherited_ (the workspace's branch at creation; also what
+legacy NULL rows lazily pin as on first read). Picking the inherited
+branch from the chip adopts it into an explicit pick. A pin whose
+branch no longer exists locally is **stale** — surfaced, never silently
+re-created. Flipping it checks out inside
 the chat's own worktree and refuses while that worktree is dirty.
 Agents update it via a tool on user request; a switch request to an
 agent is a selector change, never a primary-tree checkout.

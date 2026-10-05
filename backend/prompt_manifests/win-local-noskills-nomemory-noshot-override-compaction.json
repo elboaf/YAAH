@@ -15,6 +15,12 @@
       "text": "# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text."
     },
     {
+      "name": "unrecognized",
+      "bytes": 1574,
+      "sha256": "757c9c0b8c53a5dc32e1060e07d04f7e8964cfba32c51fb059cc3a6188191219",
+      "text": "# Branch selector: master\n\nTo point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. Branch `master` is this chat's inherited pin (the workspace's branch at creation - no explicit pick yet; a UI pick or a branch_select call makes it explicit). It is checked out in the primary tree, so this chat runs in its own per-chat worktree at `.scratch/<CHAT_ID>`, detached at `master`'s tip. The primary tree is the human's — never check it out or move it, and never move `master` from under it. When your task writes to the tree, work in a scratch worktree at this chat's deterministic path, based on the current commit:\n\n`git worktree add .scratch/<CHAT_ID>/run -b run/<CHAT_ID>`\n\nCommit there and remove the run worktree once done; your run branch `run/<CHAT_ID>` carries the work. `master` itself is landed by the human — leave the primary tree alone. A terminal `git switch` on the primary tree changes nothing about this chat's aim - the stored pin, not live HEAD, drives it. New branches derive from this chat's selected branch, never from the primary HEAD. If a run worktree already exists at that path, it is residue from an earlier run: when it is clean and fully merged into the target, it is landed-and-forgotten — remove it and proceed; when it is dirty or has unmerged commits, leave it untouched, say so, and use `.scratch/<CHAT_ID>/run-2` for this run instead. The user says \"land it\" or \"scrap it\" for surfaced residue — it is never silently deleted, and never silently blocks a chat."
+    },
+    {
       "name": "compaction-summary",
       "bytes": 158,
       "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397",
@@ -24,8 +30,8 @@
   "system_messages": [
     {
       "role": "system",
-      "bytes": 371,
-      "sha256": "bcf5a10c50a4200dfc692f2f6d6c3e0aed7635a418b9f2650fa1bec129903800"
+      "bytes": 1952,
+      "sha256": "c6a0bd917e02b31746e137e78335498ae761c2b510952d28499bc14721b06539"
     },
     {
       "role": "system",
@@ -33,8 +39,8 @@
       "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397"
     }
   ],
-  "total_bytes": 537,
-  "rendered_sha256": "9966f23b2f5c254559d87fcb9daf42ff0b5aa38c35be3ab787774c3c9209211e",
+  "total_bytes": 2118,
+  "rendered_sha256": "9c5707212331883d162031677c4435ef8979d912b0d8e8ac37179ded07b82729",
   "tool_schemas": [
     {
       "name": "bash",
@@ -199,5 +205,5 @@
   ],
   "subagent_prompts": {},
   "auxiliary_prompts": {},
-  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n====\n\nEarlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
+  "rendered_text": "You are a pirate. Speak in pirate.\n\n---\n\n# Project notes (C:\\Users\\Administrator\\AppData\\Local\\Temp\\yaah-manifest-local-ws\\AGENTS.md)\n\nThe project's own instructions for coding agents follow; they override the general guidance below where they conflict.\n\n# YAAH\n\nRender-matrix fixture workspace notes: the harness verifies the project-notes injection path, not this text.\n\n---\n\n# Branch selector: master\n\nTo point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. Branch `master` is this chat's inherited pin (the workspace's branch at creation - no explicit pick yet; a UI pick or a branch_select call makes it explicit). It is checked out in the primary tree, so this chat runs in its own per-chat worktree at `.scratch/<CHAT_ID>`, detached at `master`'s tip. The primary tree is the human's — never check it out or move it, and never move `master` from under it. When your task writes to the tree, work in a scratch worktree at this chat's deterministic path, based on the current commit:\n\n`git worktree add .scratch/<CHAT_ID>/run -b run/<CHAT_ID>`\n\nCommit there and remove the run worktree once done; your run branch `run/<CHAT_ID>` carries the work. `master` itself is landed by the human — leave the primary tree alone. A terminal `git switch` on the primary tree changes nothing about this chat's aim - the stored pin, not live HEAD, drives it. New branches derive from this chat's selected branch, never from the primary HEAD. If a run worktree already exists at that path, it is residue from an earlier run: when it is clean and fully merged into the target, it is landed-and-forgotten — remove it and proceed; when it is dirty or has unmerged commits, leave it untouched, say so, and use `.scratch/<CHAT_ID>/run-2` for this run instead. The user says \"land it\" or \"scrap it\" for surfaced residue — it is never silently deleted, and never silently blocks a chat.\n\n====\n\nEarlier conversation summary (decisions and state to continue from; the full transcript is preserved separately):\nFixture summary of the earlier conversation."
 }

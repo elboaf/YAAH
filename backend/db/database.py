@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import aiosqlite
@@ -39,6 +40,10 @@ DB_PATH = Path(
 # per process (module global), not on every get_db() call — see the comment in
 # migrate_workspaces.
 _last_workspace_seeded = False
+# #301: one lazy-pin ATTEMPT per row per process (see get_conversation) —
+# rows that can't pin (detached HEAD, branch deleted) don't pay the git
+# probes on every read; the next process retries once.
+_lazy_pin_attempted: dict[float, tuple[str, int]] = {}
 
 
 def basename(path: str) -> str:
@@ -682,6 +687,33 @@ async def init_db():
 
 # ---- Conversation CRUD ----
 
+async def _pin_from_workspace(workspace: str | None) -> tuple[str, str] | None:
+    """#301 (pin at creation, decision 1): the (branch, 'inherited') pin a
+    local git workspace contributes, or None when there is nothing sane to
+    pin — remote:/empty workspaces, non-repos, and a detached HEAD (which
+    reports a short SHA: a pin born stale; local branch names only)."""
+    ws = (workspace or "").strip()
+    if not ws or ws.startswith("remote:"):
+        return None
+    from backend.agent.gitinfo import (
+        current_git_branch,
+        is_git_repo,
+        list_local_branches,
+    )
+    from backend.agent.tools import workspace_root
+
+    try:
+        root = workspace_root(ws)
+    except ValueError:
+        return None
+    if not is_git_repo(root):
+        return None
+    branch = await current_git_branch(root)
+    if branch and branch in await list_local_branches(root):
+        return branch, "inherited"
+    return None
+
+
 async def create_conversation(
     title: str = "New Task",
     workspace: str | None = None,
@@ -739,25 +771,9 @@ async def create_conversation(
         if not branch_pin_origin:
             branch_pin_origin = "explicit"
     else:
-        branch_pin_origin = None
-        ws = (workspace or "").strip()
-        if ws and not ws.startswith("remote:"):
-            from backend.agent.gitinfo import (
-                current_git_branch,
-                is_git_repo,
-                list_local_branches,
-            )
-            from backend.agent.tools import workspace_root
-
-            try:
-                root = workspace_root(ws)
-            except ValueError:
-                root = None
-            if root is not None and is_git_repo(root):
-                branch = await current_git_branch(root)
-                if branch and branch in await list_local_branches(root):
-                    selected_branch = branch
-                    branch_pin_origin = "inherited"
+        pin = await _pin_from_workspace(workspace)
+        if pin is not None:
+            selected_branch, branch_pin_origin = pin
     db = await get_db()
     try:
         cur = await db.execute(
@@ -793,33 +809,31 @@ async def get_conversation(conversation_id: int) -> dict | None:
     # #301 (lazy pin, amendment decision 1): a legacy NULL row has no
     # other sane value than the workspace's then-current branch — pin it
     # 'inherited' on first read instead of running a blocking backfill.
-    # One DENS update per chat: the pin freezes at the first read and
-    # later reads are pure SELECTs, so a workspace that moves on after
-    # the upgrade doesn't drag old chats along.
-    if not result.get("selected_branch") and not result.get("branch_pin_origin"):
-        ws = (result.get("workspace") or "").strip()
-        if ws and not ws.startswith("remote:"):
-            from backend.agent.gitinfo import (
-                current_git_branch,
-                is_git_repo,
-                list_local_branches,
+    # The write happens at most once per chat: the pin freezes at the
+    # first read and every later read is a pure SELECT, so a workspace
+    # that moves on after the upgrade doesn't drag old chats along. The
+    # per-process flag keeps rows that CAN'T pin (detached HEAD, branch
+    # deleted) from paying the git probes on every read — the next
+    # process retries once.
+    now = time.monotonic()
+    for stamp in [t for t, key in _lazy_pin_attempted.items() if now - t > 2.0]:
+        _lazy_pin_attempted.pop(stamp, None)
+    if (
+        not result.get("selected_branch")
+        and not result.get("branch_pin_origin")
+        and (str(DB_PATH), conversation_id) not in _lazy_pin_attempted.values()
+    ):
+        attempted_at = time.monotonic()
+        pin = await _pin_from_workspace(result.get("workspace"))
+        if pin is not None:
+            await update_conversation(
+                conversation_id,
+                selected_branch=pin[0],
+                branch_pin_origin=pin[1],
             )
-            from backend.agent.tools import workspace_root
-
-            try:
-                root = workspace_root(ws)
-            except ValueError:
-                root = None
-            if root is not None and is_git_repo(root):
-                branch = await current_git_branch(root)
-                if branch and branch in await list_local_branches(root):
-                    await update_conversation(
-                        conversation_id,
-                        selected_branch=branch,
-                        branch_pin_origin="inherited",
-                    )
-                    result["selected_branch"] = branch
-                    result["branch_pin_origin"] = "inherited"
+            result["selected_branch"] = pin[0]
+            result["branch_pin_origin"] = pin[1]
+        _lazy_pin_attempted[attempted_at] = (str(DB_PATH), conversation_id)
     return result
 
 
