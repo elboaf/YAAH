@@ -419,6 +419,7 @@ async def run_sub_agent(
     gate=None,
     run_label: str = "",
     branch_note: str = "",
+    conversation_id: int | None = None,
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
@@ -441,7 +442,11 @@ async def run_sub_agent(
 
         async def execute(name: str, args: dict, path: str) -> dict:
             return await execute_tool(
-                name, args, path, on_chunk=on_chunk if on_event else None
+                name, args, path,
+                on_chunk=on_chunk if on_event else None,
+                # #303: chat-scoped tools (branch_select,
+                # search_conversation_history) need the calling chat's id.
+                conversation_id=conversation_id,
             )
         result = await execute(name, args, run_workspace)
         return result
@@ -859,6 +864,7 @@ async def spawn_batch(
     on_event=None,
     gate=None,
     branch_note: str = "",
+    conversation_id: int | None = None,
 ) -> dict[str, dict]:
     """Run every spawn_agent call in one parent turn in parallel (capped
     by MAX_CONCURRENT via a semaphore). Returns {call_id: result}.
@@ -938,6 +944,8 @@ async def spawn_batch(
                 gate=agent_gate,
                 run_label=call_id,
                 branch_note=branch_note,
+                # #303: chat-scoped tools resolve to the PARENT chat.
+                conversation_id=conversation_id,
             )
             if on_event:
                 on_event(

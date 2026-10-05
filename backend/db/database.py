@@ -784,6 +784,13 @@ async def create_conversation(
         pin = await _pin_from_workspace(workspace)
         if pin is not None:
             selected_branch, branch_pin_origin = pin
+        else:
+            # Origin is state OF the pin (#302): when no pin results, a
+            # caller-passed origin is an orphan and is dropped, never
+            # stored. (Restored — the #301 rewrite lost the #302 guard
+            # from 2e0584d; tri-state test test_origin_without_a_pin_is_
+            # not_stored caught it.)
+            branch_pin_origin = None
     db = await get_db()
     try:
         cur = await db.execute(
@@ -927,6 +934,11 @@ async def update_conversation(conversation_id: int, **fields):
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
+    # #302: origin is state OF the pin — never stored without one. An
+    # origin-only update is an orphan and is dropped (to re-origin an
+    # existing pin, pass selected_branch and branch_pin_origin together).
+    if updates.get("branch_pin_origin") and not updates.get("selected_branch"):
+        updates.pop("branch_pin_origin")
     if updates.get("model"):
         from backend.agent.config import load_config, qualify_model_scope
 

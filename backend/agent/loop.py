@@ -32,7 +32,13 @@ from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
-from backend.agent.tools import execute_tool, get_schemas, tool_risk, workspace_root
+from backend.agent.tools import (
+    CONTEXT_TOOLS,
+    execute_tool,
+    get_schemas,
+    tool_risk,
+    workspace_root,
+)
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.agent.shell import resolve_git_bash, windows_bash_note
 from backend.db.database import (
@@ -1287,9 +1293,11 @@ async def _execute_with_progress(
         queue.put_nowait(text)
 
     tool_kwargs = {"on_chunk": on_chunk}
-    if name in ("search_conversation_history", "branch_select"):
+    if name in CONTEXT_TOOLS:
         # Per-tool context: history search scopes to this conversation;
-        # branch_select stores the chat's own selector (#277).
+        # branch_select stores the chat's own selector (#277). The
+        # injection itself lives in execute_tool (#303) so every path
+        # (direct, gate re-exec, sub-agents) gets it — this kwarg feeds it.
         tool_kwargs["conversation_id"] = conversation_id
     task = asyncio.create_task(
         execute_tool(name, args, workspace, **tool_kwargs)
@@ -2328,6 +2336,12 @@ async def _run_agent_claimed(
                                         box,
                                         cancel_ev=cancel_ev,
                                         steer_ev=steer_ev,
+                                        # #303: the approved re-exec is the
+                                        # same tool call — it needs the chat
+                                        # id like the direct path (this is
+                                        # the COMMON path for mutating tools
+                                        # under ask mode).
+                                        conversation_id=conversation_id,
                                     ):
                                         yield _ndjson(pev)
                                     result = box.get("result")
@@ -2484,6 +2498,9 @@ async def _run_agent_claimed(
                     subagents_mod.spawn_batch(
                         calls, turn_workspace, cancel_ev, on_event=_emit, gate=_sub_gate,
                         branch_note=branch_note,
+                        # #303: chat-scoped tools inside sub-agents resolve
+                        # to this (the parent) conversation.
+                        conversation_id=conversation_id,
                     )
                 )
 
