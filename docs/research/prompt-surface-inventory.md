@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–517) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1532 / 1599) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1547 / 1614) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,9 +45,9 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1532 / 1599) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1547 / 1614) →
 `_default_system_prompt` → fragments appended 1341–1390 → `messages` with
-system first (loop.py:1532).
+system first (loop.py:1547).
 
 | Fragment | File:lines | Trigger | Approx size |
 |---|---|---|---|
@@ -66,7 +66,7 @@ system first (loop.py:1532).
 | Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235 / 1428–1389 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
 | Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:263–277` (`bodies_for_prompt`) wrapped at loop.py:1392–1418 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
 | Mid-turn loaded skills (`load_skill`) | `backend/agent/skills.py:280–315` (`load_skill_into_messages`); queued-message variant loop.py:720–742 (`_apply_injected_skills`) | model calls `load_skill`, or queued message carries skill chips; mutates `messages[0]` in place | header ~10 lines + body |
-| Plan-mode note | `_plan_mode_note` (loop.py:762–773), appended at loop.py:1397–1398 | `current_access_mode() == "plan"` | ~11 lines |
+| Plan-mode note | `_plan_mode_note` (loop.py:906–917), appended at loop.py:1782–1783 | `current_access_mode() == "plan"` | ~11 lines |
 | Sandbox-only (scheduled agent) note | `_sandbox_only_note` (loop.py:776–789), appended at loop.py:1401–1404 | scheduled agent with `policy == "sandbox-only"` | ~13 lines |
 | Offline-remote note | `remote_runner.py:103–128` (`_system_prompt` wraps the base builder) | remote turn whose owning device is offline | 3 lines |
 | Compaction summary injection | loop.py:1434–1438 — `"Earlier conversation summary (for context only):\n" + summary` | compaction has fired (`prompt_state["summary"]` non-empty) | 1 line + summary (≤ `_SUMMARY_MAX_CHARS`) |
@@ -99,8 +99,8 @@ plus dynamic MCP ones). Supporting description-like text:
   (tools.py:377–401); "the schemas stay short; this reaches the model only when it calls get_help".
 - **In-band model-directed strings** (not schemas but the model reads them):
   timeout-clamp note (`_clamp_note`, tools.py:1009–1018), get_help error nudge
-  (tools.py:1401–1411), screenshot-disallowed info (tools.py:1449–1459),
-  plan-block result (`_plan_block_result`, loop.py:913–924), sandbox-only skip
+  (tools.py:1583–1593), screenshot-disallowed info (tools.py:1615–1625),
+  plan-block result (`_plan_block_result`, loop.py:1133–1144), sandbox-only skip
   result (`_policy_skip_result`, loop.py:901–912), sandbox hints
   (`_missing_command_hint` / `_mcp_hint` / `_dialog_stall_hint`,
   sandbox.py:1103–1175),

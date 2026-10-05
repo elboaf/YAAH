@@ -134,7 +134,16 @@ def _service_class():
                 # presence as a console run.
                 run_server("0.0.0.0", 8765)
             except Exception as exc:  # noqa: BLE001 - SCM needs a clean exit
-                servicemanager.LogErrorMsg(f"{SERVICE_NAME} crashed: {exc!r}")
+                hint = ""
+                # Classic headless collision: a YAAH desktop app on the same
+                # box holds 8765, uvicorn's bind fails (WinError 10048), the
+                # service dies and the SCM restart loop repeats it forever.
+                if "10048" in repr(exc) or "bind" in str(exc).lower():
+                    hint = (" — port 8765 is already in use: is a YAAH "
+                            "desktop app running on this box? stop it, or "
+                            "serve on another port")
+                servicemanager.LogErrorMsg(
+                    f"{SERVICE_NAME} crashed: {exc!r}{hint}")
                 self.ReportServiceStatus(win32serviceutil.SERVICE_STOPPED)
 
     return YaahService
@@ -202,6 +211,128 @@ def _installed_exe() -> "os.PathLike | str":
     return os.path.join(local, WIN_INSTALL_DIR, "yaah-server-setup.exe")
 
 
+def _grant_logon_right(user: str) -> bool:
+    """Grant ``SeServiceLogonRight`` to ``user`` (best-effort).
+
+    Services.msc grants this right implicitly when you enter an account's
+    password, but the programmatic path (pywin32's ChangeServiceConfig,
+    same as `sc.exe obj=`/`password=`) does NOT — the service then fails
+    to start with 1069 "logon failure: user has not been granted the
+    requested logon type" (event 7041 names the missing right). We run
+    elevated in the wizard, so LsaAddAccountRights just works.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    if sys.platform != "win32":
+        return False
+
+    class LsaObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", wintypes.LPVOID),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class LsaUnicodeString(ctypes.Structure):
+        # LSA_UNICODE_STRING: Length/MaximumLength are BYTE counts (no NUL).
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    def lsa_str(s: str) -> LsaUnicodeString:
+        us = LsaUnicodeString()
+        raw = s.encode("utf-16-le")
+        us.Length = len(raw)
+        us.MaximumLength = len(raw) + 2
+        us.Buffer = ctypes.cast(ctypes.create_unicode_buffer(s),
+                                wintypes.LPWSTR)
+        return us
+
+    advapi = ctypes.windll.advapi32
+    advapi.LsaAddAccountRights.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID,
+        ctypes.POINTER(LsaUnicodeString), wintypes.ULONG,
+    ]
+    sid_size = ctypes.c_ulong(0)
+    domain_size = ctypes.c_ulong(0)
+    use = ctypes.c_ulong(0)
+    lp_user = ctypes.c_wchar_p(user)
+
+    if not advapi.LookupAccountNameW(None, lp_user, None,
+                                     ctypes.byref(sid_size), None,
+                                     ctypes.byref(domain_size),
+                                     ctypes.byref(use)):
+        sid = ctypes.create_string_buffer(sid_size.value)
+        domain = ctypes.create_unicode_buffer(domain_size.value)
+        if not advapi.LookupAccountNameW(None, lp_user, sid,
+                                         ctypes.byref(sid_size), domain,
+                                         ctypes.byref(domain_size),
+                                         ctypes.byref(use)):
+            print(f"warning: could not resolve account {user!r} to a SID")
+            return False
+
+    oa = LsaObjectAttributes()
+    oa.Length = ctypes.sizeof(oa)
+    lsa = ctypes.c_void_p()
+    # NULL system name = local machine. NTSTATUS 0 = STATUS_SUCCESS.
+    if advapi.LsaOpenPolicy(None, ctypes.byref(oa), 0x00F0FFF,
+                            ctypes.byref(lsa)):
+        print("warning: could not open LSA policy to grant logon right")
+        return False
+    try:
+        rights = (LsaUnicodeString * 1)(lsa_str("SeServiceLogonRight"))
+        nt = advapi.LsaAddAccountRights(lsa, sid, rights, 1)
+        if nt == 0:
+            print(f"granted 'Log on as a service' right to {user}")
+            return True
+        print(f"warning: LsaAddAccountRights returned "
+              f"0x{nt & 0xFFFFFFFF:08x} for {user}")
+        return False
+    finally:
+        advapi.LsaClose(lsa)
+
+
+def _service_state() -> str:
+    """The installed service's current state ("" when not installed)."""
+    import subprocess
+
+    out = subprocess.run(
+        ["sc", "query", SERVICE_NAME], capture_output=True, text=True,
+        check=False,
+    ).stdout
+    for line in out.splitlines():
+        if "STATE" in line:
+            return line.split(None, 3)[-1].strip()  # e.g. "4  RUNNING"
+    return ""
+
+
+def _start_and_await(installed: str, timeout: float = 10.0) -> str:
+    """`start` the service, then poll the SCM until it settles.
+
+    Returns the final state string ("4  RUNNING" on success). pywin32's
+    HandleCommandLine always exits 0 — its return code says nothing about
+    whether the service actually came up, so the SCM is the only truth.
+    """
+    import subprocess
+    import time
+
+    subprocess.run([installed, "start"], check=False)
+    deadline = time.time() + timeout
+    while True:
+        state = _service_state()
+        if state.endswith("RUNNING") or (state and "PENDING" not in state):
+            return state
+        if time.time() >= deadline:
+            return state
+        time.sleep(0.5)
+
+
 def _run_setup_wizard() -> int:
     """Interactive Windows install: prompts, self-copy, service, start.
 
@@ -262,6 +393,11 @@ def _run_setup_wizard() -> int:
         print(f"error: service install failed (exit {rc})")
         return rc
 
+    # The programmatic install does NOT grant the logon right (only
+    # Services.msc does) — without it the SCM refuses to start the
+    # service: "did not start due to a logon failure" (1069).
+    _grant_logon_right(user)
+
     # Auto-restart on crash (every failure, 5s apart, counters reset daily).
     # Best-effort: arg spacing varies across sc builds.
     subprocess.run(
@@ -270,11 +406,16 @@ def _run_setup_wizard() -> int:
         capture_output=True,
     )
 
-    rc = subprocess.run([installed, "start"]).returncode
-    if rc != 0:
-        print("error: service installed but failed to start — check "
-              "Services.msc → " + SERVICE_DISPLAY)
-        return rc
+    # HandleCommandLine always exits 0 — its return code does not reflect
+    # whether the service actually started. Poll the SCM for the truth.
+    state = _start_and_await(installed)
+    if not state.endswith("RUNNING"):
+        print("error: service did not reach RUNNING (state: "
+              f"{state or 'not installed'}) — check Services.msc → "
+              + SERVICE_DISPLAY)
+        print("(Application log line 'YaahServer crashed' names the cause; "
+              "a port 8765 collision means a YAAH desktop app is running.)")
+        return 1
 
     print()
     print("done: YAAH Headless Server is installed and running.")
