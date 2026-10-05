@@ -558,6 +558,12 @@ TOOLS_SCHEMA += [GET_HELP_SCHEMA, BRANCH_SELECT_SCHEMA]
 # (memory.enabled, default OFF) to filter the schema and gate execution.
 _MEMORY_TOOL_NAMES = {"memory_save", "memory_read", "memory_delete"}
 
+# #303: tools whose execution is scoped to the calling chat. The harness
+# injects conversation_id at the single dispatch funnel (execute_tool);
+# the model never passes it, and the executor signatures take it
+# optionally so direct calls (tests, other harness code) still work.
+CONTEXT_TOOLS = ("search_conversation_history", "branch_select")
+
 TOOLS_SCHEMA += [
     {
         "type": "function",
@@ -1627,7 +1633,10 @@ async def execute_tool(
                 "if saving or reading project memories is needed."
             )
         }
-    if name == "search_conversation_history":
+    if name in CONTEXT_TOOLS:
+        # #303: one injection point for chat-scoped tools — the model can't
+        # pass its own conversation id, and every dispatch path (direct,
+        # gate-approved re-exec, sub-agent) funnels through execute_tool.
         arguments = {**arguments, "conversation_id": conversation_id}
     try:
         if on_chunk is not None and name in ("bash", "powershell"):
