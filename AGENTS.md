@@ -15,16 +15,23 @@ this chat's run worktree at the deterministic path
 this chat's conversation id — the run always knows its own name, no
 discovery needed), commit there, then land by merging the run branch
 onto the selected branch inside the run worktree, and remove the
-worktree. Never switch branches in the primary worktree — the selector
-is still a global checkout until #277 ships. On landing conflicts, stop
+worktree. Never switch branches in the primary worktree — the branch
+selector is the single source of branch truth (#301): a switch request
+is a `branch_select` call or a chat-branch selector write, never a
+checkout of the primary tree; new branches derive from the chat's
+selected branch, never the primary HEAD; and a terminal `git switch`
+on the primary tree changes nothing about what a chat aims at — the
+stored pin, not live HEAD, drives it. On landing conflicts, stop
 and report; leave the worktree and branch for a human. Read-only runs
 skip all of this — no worktree, no branch.
 
-#277 transition: when this chat has a branch-selector pick, the harness
-materializes a per-chat worktree at `.scratch/chat-<id>/` and the run
-executes inside it — create run worktrees nested there as the SOP says,
-and land inside the chat worktree (the selector note has the exact
-commands for your case). The primary worktree stays the human's.
+#277 transition: when this chat has a branch pin (every git-workspace
+chat does since #301 — inherited from the workspace's branch at
+creation, or an explicit pick), the harness materializes a per-chat
+worktree at `.scratch/chat-<id>/` and the run executes inside it —
+create run worktrees nested there as the SOP says, and land inside the
+chat worktree (the selector note has the exact commands for your
+case). The primary worktree stays the human's.
 
 Residue at run start (#290): if `.scratch/chat-<id>/run` already
 exists, an earlier run left it. Clean AND fully merged into the

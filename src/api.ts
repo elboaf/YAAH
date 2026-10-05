@@ -669,11 +669,9 @@ export interface WorkspaceGitBranches {
 export const getWorkspaceGitBranches = (workspace: string) =>
   api<WorkspaceGitBranches>(`/api/workspaces/git-branches?workspace=${encodeURIComponent(workspace)}`)
 
-export const checkoutWorkspaceBranch = (workspace: string, branch: string) =>
-  api<GitCommandResult>('/api/workspaces/git-checkout', {
-    method: 'POST',
-    body: JSON.stringify({ workspace, branch }),
-  })
+// #301: checkoutWorkspaceBranch is gone with /api/workspaces/git-checkout —
+// no in-YAAH control moves the primary worktree; a draft pick pre-stores
+// selected_branch at creation instead.
 
 export const deleteWorkspace = (id: number, ownerId?: string) =>
   api<{ ok: boolean; relocated: number }>(

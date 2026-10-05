@@ -125,7 +125,11 @@ def test_git_branches_lists_local(client, tmp_path):
     assert r.json()["branches"] == ["feature", "master"]
 
 
-def test_workspace_git_branches_and_checkout_before_conversation(client, tmp_path):
+def test_workspace_git_branches_and_pin_at_creation(client, tmp_path):
+    """#301: with the draft-card endpoint gone, "switch to X" before a chat
+    exists is a selector write. A no-pick creation pins the workspace's
+    branch as 'inherited', and a terminal `git switch` afterwards changes
+    nothing the chat aims at (semantic primary-tree immunity)."""
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
 
@@ -133,18 +137,27 @@ def test_workspace_git_branches_and_checkout_before_conversation(client, tmp_pat
     assert r.status_code == 200, r.text
     assert r.json() == {"branch": "master", "branches": ["feature", "master"]}
 
+    conv_id = _conversation(client, repo)
+    g = client.get(f"/api/conversations/{conv_id}/git-branch").json()
+    assert g == {"branch": "master", "pin_origin": "inherited", "stale": False}
+
+
+def test_workspace_git_checkout_endpoint_is_gone(client, tmp_path):
+    """#301: no in-YAAH control moves the primary worktree anymore."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+    from backend.main import app
+
+    assert all(
+        getattr(rt, "path", "") != "/api/workspaces/git-checkout"
+        for rt in app.routes
+    )
     r = client.post(
         "/api/workspaces/git-checkout",
         json={"workspace": str(repo), "branch": "feature"},
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True
-    assert _git(repo, "branch", "--show-current") == "feature"
-
-    info = client.get(
-        "/api/workspaces/git-branches", params={"workspace": str(repo)}
-    ).json()
-    assert info["branch"] == "feature"
+    assert r.status_code in (404, 405)  # no handler either way
+    assert _git(repo, "branch", "--show-current") == "master"
 
 
 def test_workspace_git_endpoints_hide_nonrepo_default_and_remote(client, tmp_path):
@@ -159,39 +172,6 @@ def test_workspace_git_endpoints_hide_nonrepo_default_and_remote(client, tmp_pat
     assert client.get(
         "/api/workspaces/git-branches", params={"workspace": "remote:host"}
     ).json() == {"branch": None, "branches": []}
-
-
-def test_workspace_git_checkout_surfaces_dirty_tree_refusal(client, tmp_path):
-    repo = _repo_with_commit(tmp_path)
-    _git(repo, "branch", "feature")
-    _git(repo, "checkout", "feature")
-    (repo / "hello.txt").write_text("feature version\n", encoding="utf-8")
-    _git(repo, "add", "hello.txt")
-    _git(repo, "commit", "-q", "-m", "feature change")
-    _git(repo, "checkout", "master")
-    (repo / "hello.txt").write_text("uncommitted version\n", encoding="utf-8")
-
-    r = client.post(
-        "/api/workspaces/git-checkout",
-        json={"workspace": str(repo), "branch": "feature"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["ok"] is False
-    assert "local changes" in r.json()["error"].lower()
-    assert _git(repo, "branch", "--show-current") == "master"
-
-
-def test_workspace_git_checkout_rejects_empty_and_option_like_branch(client, tmp_path):
-    repo = _repo_with_commit(tmp_path)
-    for branch in ("", "--detach"):
-        r = client.post(
-            "/api/workspaces/git-checkout",
-            json={"workspace": str(repo), "branch": branch},
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["ok"] is False
-        assert r.json().get("error")
-    assert _git(repo, "branch", "--show-current") == "master"
 
 
 def test_git_command_checkout_writes_selector_not_tree(client, tmp_path):
@@ -385,33 +365,37 @@ def test_branch_select_validates_like_checkout(client, tmp_path):
         "/api/conversations/999999/branch-select", json={"branch": "master"}
     ).status_code == 404
 
-    # Nothing was written.
-    assert client.get(f"/api/conversations/{conv_id}").json()["selected_branch"] is None
+    # Nothing was written by the refused calls: the chat keeps the pin it
+    # was born with (#301: creation already stamped the workspace branch).
+    conv = client.get(f"/api/conversations/{conv_id}").json()
+    assert conv["selected_branch"] == "master"
+    assert conv["branch_pin_origin"] == "inherited"
 
 
-def test_git_branch_reads_fall_back_to_workspace_until_set(client, tmp_path):
-    """NULL selected_branch (every pre-existing row, and new chats that never
-    flipped) falls back to the workspace's checked-out branch — and once a
-    selection exists, it wins even though the tree says otherwise."""
+def test_chat_pinned_at_creation_does_not_follow_the_tree(client, tmp_path):
+    """#301 supersedes the pre-#301 fallback: a git-workspace chat is born
+    pinned to the workspace's then-current branch ('inherited'), so a
+    terminal `git switch` on the primary tree afterwards changes nothing
+    the chat aims at (semantic primary-tree immunity). An explicit pick
+    still overrides, and git-info keeps reporting the physical tree."""
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
     conv_id = _conversation(client, repo)
 
-    # Unset: the fallback serves the workspace's branch (#302 shape: no
-    # pin, so no origin, never stale).
+    # Born pinned: the workspace's branch at creation, marked inherited.
     assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
-        "branch": "master", "pin_origin": None, "stale": False,
+        "branch": "master", "pin_origin": "inherited", "stale": False,
     }
 
     # The human checks out feature in the shared tree (their tool); the
-    # still-unset chat follows along.
+    # chat's inherited pin does not follow along.
     _git(repo, "checkout", "feature")
     invalidate_git_caches(repo)
     assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
-        "branch": "feature", "pin_origin": None, "stale": False,
+        "branch": "master", "pin_origin": "inherited", "stale": False,
     }
 
-    # The chat flips: its stored pick now wins over the tree…
+    # The chat flips: its explicit pick now wins over everything…
     assert client.post(
         f"/api/conversations/{conv_id}/branch-select", json={"branch": "master"}
     ).json()["ok"] is True
@@ -424,9 +408,9 @@ def test_git_branch_reads_fall_back_to_workspace_until_set(client, tmp_path):
     assert client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]["branch"] == "feature"
 
 
-def test_workspace_git_checkout_still_moves_the_primary_tree(client, tmp_path):
-    """#286 leaves the draft-card endpoints alone: the human's primary-worktree
-    checkout must keep being a real checkout."""
+async def test_no_path_moves_the_primary_tree(client, tmp_path):
+    """#301: the selector flip records intent and moves nothing — the tree
+    is the human's. The endpoint that used to move it is gone entirely."""
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
     conv_id = _conversation(client, repo)
@@ -434,12 +418,7 @@ def test_workspace_git_checkout_still_moves_the_primary_tree(client, tmp_path):
         f"/api/conversations/{conv_id}/branch-select", json={"branch": "feature"}
     ).json()["ok"] is True
 
-    r = client.post(
-        "/api/workspaces/git-checkout", json={"workspace": str(repo), "branch": "feature"}
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True
-    assert _git(repo, "branch", "--show-current") == "feature"  # the tree moved
+    assert _git(repo, "branch", "--show-current") == "master"  # the tree stayed
 
 
 async def test_selected_branch_migration_on_legacy_db(monkeypatch, tmp_path):

@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1448 / 1515) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1489 / 1556) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,12 +45,13 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1448 / 1515) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1489 / 1556) →
 `_default_system_prompt` → fragments appended 1341–1390 → `messages` with
-system first (loop.py:1448).
+system first (loop.py:1489).
 
 | Fragment | File:lines | Trigger | Approx size |
 |---|---|---|---|
+| Branch-selector note | `_selected_branch_note` family (loop.py:881–962; variants 965–992, 995–1018), appended at loop.py:1726–1727 | every conversation with a stored pin — since #301 every local-git-workspace chat is pinned at creation (inherited: the workspace's branch at creation; explicit: the draft card's pick or a later pick); wording varies by pin origin (`inherited` never claims "the user selected"); carries the amendment rules (immunity/start point) | ~82 src lines / ~1–2 KB |
 | Computer-use section | `backend/agent/loop.py:250–299` (`_computer_use_prompt`); embedded `panic_notice()` from `computer.py:1374–1383` | `windows AND host is None` (local sessions only) | ~50 src lines / ~2.7 KB |
 | Sandbox section | `prompt_section` (backend/agent/sandbox.py:1217–1338), appended in the tools/sandbox block | local-Windows | ~122 src lines / ~9 KB (largest fragment) |
 | Powershell line in tool prose list | loop.py:337–338 | `windows` | 1 line |

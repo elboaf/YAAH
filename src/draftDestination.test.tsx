@@ -1,12 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
-const { listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches, checkoutWorkspaceBranch } = vi.hoisted(() => ({
+const { listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches } = vi.hoisted(() => ({
   listLocalWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
   getWorkspaceGitBranches: vi.fn(),
-  checkoutWorkspaceBranch: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
@@ -17,7 +16,6 @@ vi.mock('./api', async (importOriginal) => {
     listWorkspaces,
     addWorkspace,
     getWorkspaceGitBranches,
-    checkoutWorkspaceBranch,
   }
 })
 
@@ -45,7 +43,6 @@ describe('draft destination card (#90)', () => {
       branch: 'main',
       branches: ['feature', 'main'],
     })
-    checkoutWorkspaceBranch.mockResolvedValue({ ok: true, output: "" })
     useAgent.setState({
       conversationId: null,
       workspace: 'C:/repos/project',
@@ -74,26 +71,15 @@ describe('draft destination card (#90)', () => {
     expect(useAgent.getState().draftDestination).toBe('C:/repos/project')
   })
 
-  it('shows and checks out a git branch before the draft is saved', async () => {
-    render(<DraftDestinationCard />)
-
-    expect(await screen.findByRole('button', { name: /branch main/i })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /branch main/i }))
-    expect(await screen.findByRole('menuitem', { name: /feature/ })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('menuitem', { name: /feature/ }))
-
-    expect(checkoutWorkspaceBranch).not.toHaveBeenCalled()
-    expect(await screen.findByRole('button', { name: /branch feature/i })).toBeInTheDocument()
-  })
-
-  it('records the branch pick without any checkout (#277)', async () => {
+  it('records the branch pick without any checkout (#277/#301)', async () => {
+    // The first draft of this test expected a workspace checkout; #277 made
+    // the pick intent-only and #301 deleted the checkout endpoint entirely.
     render(<DraftDestinationCard />)
 
     fireEvent.click(await screen.findByRole('button', { name: /branch main/i }))
     fireEvent.click(await screen.findByRole('menuitem', { name: /feature/ }))
 
     expect(await screen.findByRole('button', { name: /branch feature/i })).toBeInTheDocument()
-    expect(checkoutWorkspaceBranch).not.toHaveBeenCalled()
   })
 
   it('does not offer cached workspaces as destinations while their device is offline', async () => {

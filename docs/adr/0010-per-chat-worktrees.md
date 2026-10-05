@@ -68,14 +68,19 @@ untouchable by agents by construction, not by prompt discipline.
   time — the primary worktree's HEAD is never consulted._
 - **Endpoints.** The per-conversation git endpoints (`git-branch`,
   `git-info`, `git-branches`, `git-command`) serve the chat's own
-  worktree; the draft/primary endpoints (`/api/workspaces/git-*`) stay
-  the human's primary-worktree tools. The chip's per-chat meaning
+  worktree; the draft/primary endpoints (`/api/workspaces/git-*`) stayed
+  the human's primary-worktree tools at this amendment's writing. The chip's per-chat meaning
   becomes truthful. The stale merge-mutex docstrings left behind by
   ADR-0008 go with this change.
   _Amended 2026-10-04: the draft destination card no longer performs a
   primary-tree checkout — its branch pick pre-stores the new chat's
   `selected_branch` at creation. No in-YAAH control moves the primary
-  worktree; the human switches it via terminal git._
+  worktree; the human switches it via terminal git. Amended again for
+  #301: `/api/workspaces/git-checkout` is removed entirely (the
+  remaining `/api/workspaces/git-*` endpoints are read-only), and every
+  local-git-workspace chat is pinned at creation — the no-pick path
+  inherits the workspace's branch (`branch_pin_origin='inherited'`),
+  legacy NULL rows lazily pin on first read._
 - **Pruning — age, clean only.** A chat worktree with no commits and no
   uncommitted changes past an age threshold is auto-pruned. Chat
   deletion does not itself remove the tree; the sweeper is the single

@@ -126,6 +126,23 @@ describe('branch chip tri-state (#302)', () => {
     await vi.waitFor(() => expect(selectConversationBranch).toHaveBeenCalledWith(7, 'feature'))
   })
 
+  it('adopting an inherited pin into an explicit pick is one click (#301)', async () => {
+    // The chip shows the inherited pin ("· workspace"); picking the same
+    // branch from the dropdown re-stamps it explicit via the per-chat
+    // endpoint — no separate adopt affordance, no workspace checkout.
+    const { container } = mountCluster({ info: info(), selectedBranch: 'master', selectedOrigin: 'inherited' })
+
+    fireEvent.click(chipButton())
+    await screen.findByText('master')
+
+    const items = container.querySelectorAll('.max-h-56 button')
+    const masterItem = Array.from(items).find((b) => b.textContent?.includes('master'))
+    expect(masterItem, 'master item in the dropdown').toBeTruthy()
+    fireEvent.click(masterItem!)
+
+    await vi.waitFor(() => expect(selectConversationBranch).toHaveBeenCalledWith(7, 'master'))
+  })
+
   it('the dropdown checkmark follows the chat branch even when stale', async () => {
     // The dropdown was opened while the branch still listed (or the list
     // predates the deletion): the checkmark must still follow the chat's

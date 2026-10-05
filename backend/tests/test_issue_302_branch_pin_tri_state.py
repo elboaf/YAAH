@@ -125,11 +125,10 @@ async def test_git_branch_without_pick_reports_no_origin(client, tmp_path):
     repo = _repo_with_commit(tmp_path)
     cid = await create_conversation("t", workspace=str(repo))
     r = client.get(f"/api/conversations/{cid}/git-branch").json()
-    # No pin: the chip follows the workspace's checked-out branch, so the
-    # shown branch IS the workspace's (the UI renders the inherited marker
-    # from pin_origin being None).
+    # #301: a git-workspace chat is born pinned — the workspace's branch
+    # at creation, stamped 'inherited' (the chip's inherited marker).
     assert r["branch"] == "master"
-    assert r["pin_origin"] is None
+    assert r["pin_origin"] == "inherited"
     assert r["stale"] is False
 
 

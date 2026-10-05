@@ -868,7 +868,17 @@ def _plan_mode_note() -> str:
     )
 
 
-def _selected_branch_note(branch, chat_id=None, detached=False) -> str:
+# #301 (ADR-0010 amendment): the selector note states the amendment rules
+# verbatim - semantic primary-tree immunity, server-enforced start point -
+# because the model has no other surface to learn them from.
+_AMENDMENT_RULES = (
+    "A terminal `git switch` on the primary tree changes nothing about this "
+    "chat's aim - the stored pin, not live HEAD, drives it. New branches "
+    "derive from this chat's selected branch, never from the primary HEAD. "
+)
+
+
+def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit") -> str:
     """System-prompt section injected when the user picked a branch in this
     chat's branch selector (#277: the run happens in the chat's own
     per-chat worktree, which the harness materializes at the first run;
@@ -902,9 +912,19 @@ def _selected_branch_note(branch, chat_id=None, detached=False) -> str:
         # (ADR-0010: the harness never moves master).
         return (
             f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
-            f"The user selected branch `{b}` for this chat. It is checked "
-            "out in the primary tree, so this chat runs in its own "
-            f"per-chat worktree at `.scratch/chat-{cid}`, detached at "
+            + (
+                f"The user selected branch `{b}` for this chat. It is "
+                "checked out in the primary tree, so this chat runs in "
+                "its own "
+                if origin != "inherited"
+                else
+                f"Branch `{b}` is this chat's inherited pin (the "
+                "workspace's branch at creation - no explicit pick yet; "
+                "a UI pick or a branch_select call makes it explicit). "
+                "It is checked out in the primary tree, so this chat "
+                "runs in its own "
+            )
+            + f"per-chat worktree at `.scratch/chat-{cid}`, detached at "
             f"`{b}`'s tip. The primary tree is the human's \u2014 never check "
             f"it out or move it, and never move `{b}` from under it. When "
             "your task writes to the tree, work in a scratch worktree at "
@@ -913,14 +933,23 @@ def _selected_branch_note(branch, chat_id=None, detached=False) -> str:
             "Commit there and remove the run worktree once done; your run "
             f"branch `run/chat-{cid}` carries the work. `{b}` itself is "
             "landed by the human \u2014 leave the primary tree alone. "
+            + _AMENDMENT_RULES
             + residue
         )
     return (
         f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
-        f"The user selected branch `{b}` for this chat. This chat runs in "
-        f"its own per-chat worktree at `.scratch/chat-{cid}`, which has "
+        + (
+            f"The user selected branch `{b}` for this chat. "
+            if origin != "inherited"
+            else
+            f"Branch `{b}` is this chat's inherited pin (the workspace's "
+            "branch at creation - no explicit pick yet; a UI pick or a "
+            "branch_select call makes it explicit). "
+        )
+        + f"This chat runs in its own per-chat worktree at `.scratch/chat-{cid}`, which has "
         f"`{b}` checked out; the primary tree is the human's \u2014 never "
-        "check it out or move it. When your task writes to the tree, work "
+        "check it out or move it. " + _AMENDMENT_RULES +
+        "When your task writes to the tree, work "
         "in a scratch worktree at this chat's deterministic path, based "
         "on the current branch:\n\n"
         f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid}`\n\n"
@@ -933,7 +962,7 @@ def _selected_branch_note(branch, chat_id=None, detached=False) -> str:
     )
 
 
-def _selected_branch_note_degraded(branch, chat_id, reason) -> str:
+def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit") -> str:
     """Selector-note variant when the chat worktree could NOT be
     materialized (non-repo, git failure): the run happens in the primary
     like the pre-#277 SOP, and the reason is stated instead of hidden —
@@ -943,8 +972,14 @@ def _selected_branch_note_degraded(branch, chat_id, reason) -> str:
     b = str(branch).strip()
     return (
         f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
-        f"The user selected branch `{b}` for this chat, but the per-chat "
-        f"worktree could not be materialized ({reason}), so this run "
+        + (
+            f"The user selected branch `{b}` for this chat, but the "
+            if origin != "inherited"
+            else
+            f"Branch `{b}` is this chat's inherited pin (the workspace's "
+            "branch at creation - no explicit pick yet), but the "
+        )
+        + f"per-chat worktree could not be materialized ({reason}), so this run "
         "executes in the primary tree. The primary tree is the human's — "
         "never check it out or move it, and never switch branches in it. "
         "When your task writes to the tree, work in a scratch worktree at "
@@ -957,7 +992,7 @@ def _selected_branch_note_degraded(branch, chat_id, reason) -> str:
     )
 
 
-def _selected_branch_note_stale(branch, chat_id) -> str:
+def _selected_branch_note_stale(branch, chat_id, origin="explicit") -> str:
     """Selector-note variant when the selected branch no longer exists
     locally (#302, ADR-0010 amendment decision 1): it was deleted
     upstream of the chat. The run states the staleness instead of
@@ -969,8 +1004,14 @@ def _selected_branch_note_stale(branch, chat_id) -> str:
     return (
         f"# Branch selector: {b} (STALE)\n\n"
         "To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
-        f"The branch `{b}` this chat was pinned to no longer exists locally "
-        "(deleted upstream of the chat), so the pin is STALE. Do not treat "
+        + (
+            f"The branch `{b}` this chat was pinned to no longer exists "
+            if origin != "inherited"
+            else
+            f"The branch `{b}` this chat inherited (the workspace's branch "
+            "at creation) no longer exists "
+        )
+        + "(deleted upstream of the chat), so the pin is STALE. Do not treat "
         "it as a landing target and do not re-create it unprompted. Tell "
         "the user the pin is stale and ask which branch to select. The "
         "primary tree is the human's - never check it out or move it."
@@ -1576,6 +1617,9 @@ async def _run_agent_claimed(
     # without a pick keep running in the primary exactly as before.
     conv = await get_conversation(conversation_id)
     selected_branch = str((conv or {}).get("selected_branch") or "").strip()
+    # #301: the note must not claim a selection the user never made - an
+    # inherited pin reads as inherited, not as "the user selected".
+    pin_origin = str((conv or {}).get("branch_pin_origin") or "explicit").strip()
     worktree_detached = False
     worktree_error = ""
     # #302: a pin whose branch no longer exists locally (deleted upstream
@@ -1664,17 +1708,20 @@ async def _run_agent_claimed(
     # note names this chat's deterministic run-worktree paths.
     if worktree_error:
         branch_note = _selected_branch_note_degraded(
-            selected_branch, conversation_id, worktree_error
+            selected_branch, conversation_id, worktree_error, origin=pin_origin
         )
     elif branch_pin_stale:
         # #302: the pin is dead — the run hears that, not a materialization
         # failure, and never lands on a branch that no longer exists.
-        branch_note = _selected_branch_note_stale(selected_branch, conversation_id)
+        branch_note = _selected_branch_note_stale(
+            selected_branch, conversation_id, origin=pin_origin
+        )
     else:
         branch_note = _selected_branch_note(
             selected_branch,
             conversation_id,
             detached=worktree_detached,
+            origin=pin_origin,
         )
     if branch_note:
         system_prompt = f"{system_prompt}\n\n---\n\n{branch_note}"

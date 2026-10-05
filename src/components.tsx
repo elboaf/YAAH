@@ -70,7 +70,6 @@ import {
   listLocalWorkspaces,
   addWorkspace,
   getWorkspaceGitBranches,
-  checkoutWorkspaceBranch,
   deleteWorkspace,
   discoverHosts,
   localInstanceInfo,
@@ -8022,7 +8021,12 @@ export function GitChipCluster({
                 } ${lockMutations ? 'cursor-not-allowed opacity-40' : ''}`}
                 onClick={() => {
                   setMenuOpen(false)
-                  if (b !== chipBranch) run(b)
+                  // #301: an inherited pin (or no pin) adopts into an
+                  // explicit pick on the same click — only a live explicit
+                  // pick makes the same-branch click a no-op. A stale
+                  // explicit pin also stays click-locked: re-picking a
+                  // dead branch name must not silently re-create it.
+                  if (b !== chipBranch || selectedOrigin !== 'explicit') run(b)
                 }}
               >
                 <span className="w-3 shrink-0 text-blue-400">{b === chipBranch ? '✓' : ''}</span>
@@ -8452,7 +8456,7 @@ function DraftDestinationCard() {
             <button
               type="button"
               aria-label={`Branch ${gitBranch}`}
-              title={`⎇ ${gitBranch} — this switches the branch for every chat sharing this workspace`}
+              title={`⎇ ${gitBranch} — a pick below saves this chat's own branch; nothing moves the workspace`}
               disabled={gitBusy}
               onClick={() => gitMenuOpen ? setGitMenuOpen(false) : void openGitBranches()}
               className="rounded   px-2 py-1 font-mono text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"

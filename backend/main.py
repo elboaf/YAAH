@@ -549,42 +549,11 @@ async def api_workspace_git_branches(workspace: str = ""):
 
 
 
-class WorkspaceGitCheckoutBody(BaseModel):
-    workspace: str
-    branch: str
-
-
-@app.post("/api/workspaces/git-checkout")
-async def api_workspace_git_checkout(body: WorkspaceGitCheckoutBody):
-    """Checkout a selected local branch before a draft conversation exists.
-
-    Like the saved-chat checkout, this is user-initiated, shell-free, and
-    serialized with agent merges. Git's own dirty-worktree refusal is returned
-    verbatim to the card rather than hidden.
-    """
-    from fastapi import HTTPException
-    from backend.agent.gitinfo import invalidate_git_caches, list_local_branches
-    from backend.agent.tools import workspace_root
-
-    workspace = body.workspace.strip()
-    branch = body.branch.strip()
-    if not workspace or workspace.startswith("remote:"):
-        return {"ok": False, "error": "no local git workspace"}
-    if not branch:
-        return {"ok": False, "error": "checkout target is empty"}
-    if branch.startswith("-"):
-        return {"ok": False, "error": "checkout target must be a local branch name"}
-    try:
-        root = workspace_root(workspace)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    branches = await list_local_branches(root)
-    if branch not in branches:
-        return {"ok": False, "error": f"not a local branch: {branch}"}
-    result = await _run_ui_git(root, "checkout", branch)
-    invalidate_git_caches(root)
-    return {"ok": "error" not in result, **result}
+# #301 (ADR-0010 amendment): /api/workspaces/git-checkout is GONE — it was
+# the last in-YAAH control that moved the primary worktree. "Switch to X"
+# before a chat exists is now purely a selector write (the draft card's
+# pick pre-stores selected_branch at creation); the human's primary tree
+# is moved only by the human's own terminal git.
 
 
 class BranchSelectBody(BaseModel):

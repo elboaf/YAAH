@@ -53,7 +53,10 @@ def test_create_conversation_prestores_selected_branch(client, tmp_path):
     _git(repo, "rev-parse", "--verify", "master")
 
 
-def test_create_without_branch_leaves_selector_unset(client, tmp_path):
+def test_create_without_branch_pins_the_workspace_branch(client, tmp_path):
+    """#301 (pin at creation) supersedes the #277 slice-c behavior: the
+    unset state is gone for git-workspace chats — the no-pick creation
+    inherits the workspace's branch as an 'inherited' pin."""
     repo = _repo_with_commit(tmp_path)
     r = client.post(
         "/api/conversations",
@@ -61,7 +64,8 @@ def test_create_without_branch_leaves_selector_unset(client, tmp_path):
     )
     cid = r.json()["id"]
     row = client.get(f"/api/conversations/{cid}").json()
-    assert not row.get("selected_branch")
+    assert row.get("selected_branch") == "master"
+    assert row.get("branch_pin_origin") == "inherited"
 
 
 @pytest.mark.asyncio

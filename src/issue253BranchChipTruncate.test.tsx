@@ -1,12 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 
-const { listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches, checkoutWorkspaceBranch } = vi.hoisted(() => ({
+const { listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches } = vi.hoisted(() => ({
   listLocalWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
   getWorkspaceGitBranches: vi.fn(),
-  checkoutWorkspaceBranch: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
@@ -17,7 +16,6 @@ vi.mock('./api', async (importOriginal) => {
     listWorkspaces,
     addWorkspace,
     getWorkspaceGitBranches,
-    checkoutWorkspaceBranch,
   }
 })
 
@@ -46,7 +44,6 @@ describe('draft destination branch chip (#253)', () => {
       branch: 'feature/very-long-branch-name-that-would-otherwise-squish-the-workspace-select',
       branches: ['feature/very-long-branch-name-that-would-otherwise-squish-the-workspace-select', 'main'],
     })
-    checkoutWorkspaceBranch.mockResolvedValue({ ok: true, output: '' })
     useAgent.setState({
       conversationId: null,
       workspace: 'C:/repos/project',

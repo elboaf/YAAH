@@ -695,10 +695,16 @@ async def create_conversation(
     Blank strings are legal writes (the chat's deliberate Default); None
     stamps the current global default (drafts already carry explicit picks,
     so None is the "unspecified" path for API callers).
-    #277 (ADR-0010 amendment: pin at creation): the draft destination
-    card's branch pick pre-stores selected_branch at creation, so the
-    first run materializes the chat worktree on the right branch. None
-    leaves the selector unset (the chat runs in the primary as before).
+    #277/#301 (ADR-0010 amendment: pin at creation): the draft destination
+    card's branch pick pre-stores selected_branch at creation (origin
+    'explicit'), so the first run materializes the chat worktree on the
+    right branch. With NO pick, a local git workspace pins its
+    then-current branch instead (origin 'inherited'): the unset state
+    disappears for git-workspace chats, and an external `git switch` on
+    the primary tree no longer changes what new chats aim at (decision
+    2, semantic immunity). remote:/non-git workspaces keep no pin
+    (branch stays None). A detached-HEAD workspace pins nothing — a
+    short SHA would be a pin born stale (decision: local names only).
 
     #302: branch_pin_origin is chip state for that pin — 'inherited' or
     'explicit'. Only stored alongside a selected_branch; when the caller
@@ -721,13 +727,37 @@ async def create_conversation(
     # No provider arg: qualify_model_scope resolves the active provider
     # itself (the load_config above only ran when a default was needed).
     model = qualify_model_scope(model or "")
-    # #302: origin is state OF the pin — never stored without one, and a
-    # branch without an origin is derived explicit (every pick this schema
-    # could record pre-#302 was a user pick).
-    if not selected_branch:
+    # #302/#301: origin is state OF the pin — never stored without one,
+    # and a branch without an origin is derived explicit (every pick this
+    # schema could record pre-#302 was a user pick). #301 (pin at
+    # creation, decision 1): with no caller branch, a local git workspace
+    # contributes its then-current branch as an 'inherited' pin — the
+    # unset state disappears for git-workspace chats. remote:/non-git
+    # workspaces keep no pin, and a detached HEAD reports a short SHA,
+    # which would be a pin born stale — local branch names only.
+    if selected_branch:
+        if not branch_pin_origin:
+            branch_pin_origin = "explicit"
+    else:
         branch_pin_origin = None
-    elif not branch_pin_origin:
-        branch_pin_origin = "explicit"
+        ws = (workspace or "").strip()
+        if ws and not ws.startswith("remote:"):
+            from backend.agent.gitinfo import (
+                current_git_branch,
+                is_git_repo,
+                list_local_branches,
+            )
+            from backend.agent.tools import workspace_root
+
+            try:
+                root = workspace_root(ws)
+            except ValueError:
+                root = None
+            if root is not None and is_git_repo(root):
+                branch = await current_git_branch(root)
+                if branch and branch in await list_local_branches(root):
+                    selected_branch = branch
+                    branch_pin_origin = "inherited"
     db = await get_db()
     try:
         cur = await db.execute(
@@ -757,6 +787,46 @@ async def list_conversations():
 
 
 async def get_conversation(conversation_id: int) -> dict | None:
+    result = await _get_conversation_row(conversation_id)
+    if result is None:
+        return None
+    # #301 (lazy pin, amendment decision 1): a legacy NULL row has no
+    # other sane value than the workspace's then-current branch — pin it
+    # 'inherited' on first read instead of running a blocking backfill.
+    # One DENS update per chat: the pin freezes at the first read and
+    # later reads are pure SELECTs, so a workspace that moves on after
+    # the upgrade doesn't drag old chats along.
+    if not result.get("selected_branch") and not result.get("branch_pin_origin"):
+        ws = (result.get("workspace") or "").strip()
+        if ws and not ws.startswith("remote:"):
+            from backend.agent.gitinfo import (
+                current_git_branch,
+                is_git_repo,
+                list_local_branches,
+            )
+            from backend.agent.tools import workspace_root
+
+            try:
+                root = workspace_root(ws)
+            except ValueError:
+                root = None
+            if root is not None and is_git_repo(root):
+                branch = await current_git_branch(root)
+                if branch and branch in await list_local_branches(root):
+                    await update_conversation(
+                        conversation_id,
+                        selected_branch=branch,
+                        branch_pin_origin="inherited",
+                    )
+                    result["selected_branch"] = branch
+                    result["branch_pin_origin"] = "inherited"
+    return result
+
+
+async def _get_conversation_row(conversation_id: int) -> dict | None:
+    """The raw row read: one SELECT, no lazy-pin side effects. The lazy
+    pin's write path goes through update_conversation (whose own row
+    reads must not recurse)."""
     db = await get_db()
     try:
         cur = await db.execute(

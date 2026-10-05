@@ -32,8 +32,8 @@ import type { GitInfo } from './api'
 
 // #286: the status-strip branch chip is the chat's own branch. Flipping it
 // calls the per-chat branch-select endpoint (which stores the pick and runs
-// no git checkout) — never the workspace checkout, which stays the draft
-// card's / the human's primary-worktree tool.
+// no git checkout). #301: the workspace checkout endpoint is gone entirely —
+// no in-YAAH control moves the primary worktree anymore.
 function info(overrides: Partial<GitInfo> = {}): GitInfo {
   return {
     branch: 'master',
