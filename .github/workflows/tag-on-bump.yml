@@ -28,13 +28,20 @@ concurrency:
 jobs:
   tag:
     name: Validate + push version tag
-    runs-on: ubuntu-latest
+    runs-on: Linux
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       pushed: ${{ steps.push.outputs.pushed }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
+
+      # The version step shells out to bare `node`; GitHub-hosted runners
+      # have it preinstalled, the self-hosted herp pool gets it here (same
+      # precedent as ci.yml / release.yml on this runner).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Read canonical version
         id: version
