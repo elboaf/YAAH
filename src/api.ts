@@ -361,6 +361,9 @@ export interface AgentConfig {
     say_emissions?: boolean
     /** #207: show captured briefings on their messages in chat. */
     say_in_chat?: boolean
+    /** #295: narrator persona for spoken briefings; unknown/unset reads
+     *  neutral server-side. Fixed v1 enum neutral | jester | elitest. */
+    say_persona?: string
     /** Narration engine (#205): local Kokoro or a remote
      *  OpenAI-compatible /v1/audio/speech endpoint. */
     tts_engine?: 'local' | 'remote'
@@ -444,6 +447,8 @@ export const updateConfig = (
       say_emissions?: boolean
       /** #207: show captured briefings on their messages in chat. */
       say_in_chat?: boolean
+      /** #295: narrator persona for spoken briefings. */
+      say_persona?: string
       tts_engine?: 'local' | 'remote'
       tts_endpoint?: string
       tts_api_key?: string

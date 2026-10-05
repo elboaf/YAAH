@@ -418,6 +418,47 @@ def _say_emissions_enabled() -> bool:
     return voice.get("say_emissions") is not False
 
 
+# #295: narrator personas for the spoken <say> briefings. Data-driven so
+# the picker stays a fixed enum and each persona's guardrails live in the
+# persona text itself. v1 ships neutral (today's bytes, verbatim),
+# jester, and elitest; free-text custom personas are a follow-up issue.
+SAY_PERSONAS: dict[str, str] = {
+    "neutral": "",
+    "jester": """\
+Narrator persona — jester:
+- Your spoken briefings come from the court jester: playful, quick, fond
+  of a pun, a light joke or a wry aside about what just happened. Keep the
+  wit warm, never at the user's expense — the butt of a joke is the
+  situation, a tool misbehaving, or you yourself, never the person you
+  serve.
+- This persona shapes ONLY the <say> briefing tag. Your regular chat text
+  (explanations, code, commit messages) is NEVER written in this voice —
+  it stays plain and professional.
+""",
+    "elitest": """\
+Narrator persona — elitest:
+- Your spoken briefings carry an effortlessly superior air: whatever just
+  happened, the briefing implies it was almost beneath your considerable
+  talents — the bug never stood a chance, the build fix was a trifle.
+  Condescension is aimed strictly at the PROBLEM, never at the user — no
+  insults, no mockery of the person, no slurs, no profanity, and never
+  actually unhelpful: the briefing still delivers the real outcome first.
+- This persona shapes ONLY the <say> briefing tag. Your regular chat text
+  (explanations, code, commit messages) is NEVER written in this voice —
+  it stays plain and professional.
+""",
+}
+
+
+def _say_persona() -> str:
+    """#295: the selected narrator persona for <say> briefings. Fixed v1
+    enum neutral|jester|elitest; absent/unset/unknown reads neutral
+    (same precedent as say_emissions) — no migration."""
+    voice = load_config().get("voice") or {}
+    persona = (voice.get("say_persona") or "").strip().lower()
+    return persona if persona in SAY_PERSONAS else "neutral"
+
+
 def _default_system_prompt(workspace: str = "") -> str:
     """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
     and the runtime-environment line must match what execute_tool can
@@ -568,7 +609,9 @@ Spoken briefing (voice read-aloud):
   reads those literally; punctuation is your prosody: commas pace a
   line, one exclamation mark at most, a blank line marks a beat.
 """
-
+        persona = _say_persona()
+        if persona != "neutral":
+            prompt += SAY_PERSONAS[persona]
     prompt += """
 Interview the user (ask_user tool):
 - Ask before consequential choices the user has not authorized and that

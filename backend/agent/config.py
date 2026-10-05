@@ -67,6 +67,13 @@ DEFAULTS = {
         # the chat tape (a reading aid; briefings are live-stream only —
         # they are stripped server-side before persistence).
         "say_in_chat": False,
+        # #295: narrator persona for the spoken <say> briefings. Prompt
+        # text only — the TTS voice (tts_voice) is orthogonal. Fixed v1
+        # enum neutral|jester|elitest; absent/unset/unknown reads neutral
+        # (say_emissions precedent, no migration). Chat emissions are
+        # never colored by it; the boundary is written into each persona
+        # block (see loop.SAY_PERSONAS).
+        "say_persona": "neutral",
         # Read-aloud narration engine (#205): local Kokoro via sherpa-onnx,
         # or remote = a standard OpenAI /v1/audio/speech endpoint (the
         # owner-run Kokoro server at herp.local is a faithful subset;

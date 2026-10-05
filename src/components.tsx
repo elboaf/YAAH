@@ -6248,6 +6248,16 @@ function SettingsCard({
 const settingsInputCls =
   'rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none'
 
+/** #295: narrator personas for the spoken briefings. Shared between the
+ *  Voice-tab picker and its component tests; mirrors the backend enum in
+ *  loop.SAY_PERSONAS (unknown/unset values read neutral server-side, so
+ *  the picker falls back the same way). */
+export const SAY_PERSONA_OPTIONS = [
+  { value: 'neutral', label: 'Neutral (default)' },
+  { value: 'jester', label: 'Jester — playful puns and asides' },
+  { value: 'elitest', label: 'Elitest — smug about the bug, not you' },
+] as const
+
 /** #231: the remote narration voice picker, isolated for component tests
  *  (the SaySettingsCard precedent). With a server list: a select mirroring
  *  local mode, keeping the saved voice selectable even when the server
@@ -6307,14 +6317,23 @@ export function RemoteVoiceField({
 export function SaySettingsCard({
   sayEmissions,
   sayInChat,
+  sayPersona,
   onSayEmissions,
   onSayInChat,
+  onSayPersona,
 }: {
   sayEmissions: boolean
   sayInChat: boolean
+  /** #295: narrator persona for the spoken briefings; the picker greys
+   *  out with the rest of the card when emissions are off. */
+  sayPersona: string
   onSayEmissions: (on: boolean) => void
   onSayInChat: (on: boolean) => void
+  onSayPersona: (persona: string) => void
 }) {
+  const personaValue = SAY_PERSONA_OPTIONS.some((p) => p.value === sayPersona)
+    ? sayPersona
+    : 'neutral'
   return (
     <SettingsCard title="Spoken briefings" className="col-span-2">
       <div className="space-y-1.5">
@@ -6343,13 +6362,32 @@ export function SaySettingsCard({
           />
           Show &lt;say&gt; emissions in chat
         </label>
+        <label
+          className={`flex items-center gap-2 text-xs text-zinc-300 ${sayEmissions ? '' : 'opacity-50'}`}
+        >
+          Narrator persona
+          <select
+            className={`${settingsInputCls} min-w-0 flex-1`}
+            value={personaValue}
+            disabled={!sayEmissions}
+            onChange={(e) => onSayPersona(e.target.value)}
+            aria-label="Narrator persona"
+          >
+            {SAY_PERSONA_OPTIONS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
       <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-600">
         Disabling emissions drops the spoken-briefing instruction from the system
         prompt (saves output tokens on every turn) and stops narration briefings —
         playback mute is separate, under Read aloud. The in-chat option renders the
         spoken line under its message as a reading aid; briefings are not stored,
-        so only live-streamed ones show.
+        so only live-streamed ones show. The persona colors only what the voice
+        says — chat text is never written in character.
       </p>
     </SettingsCard>
   )
@@ -6524,9 +6562,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [ttsVoiceDraft, setTtsVoiceDraft] = useState('af_heart')
   const [ttsSpeedDraft, setTtsSpeedDraft] = useState(1.0)
   // #207: spoken-briefing drafts. Emissions default ON (absent key reads
-  // enabled — no migration); in-chat display defaults hidden.
+  // enabled — no migration); in-chat display defaults hidden. #295:
+  // narrator persona draft; unknown/unset reads neutral (backend enum).
   const [sayEmissions, setSayEmissions] = useState(true)
   const [sayInChatUi, setSayInChatUi] = useState(false)
+  const [sayPersonaUi, setSayPersonaUi] = useState('neutral')
   // Narration engine (#205): local Kokoro or a remote OpenAI-compatible
   // /v1/audio/speech endpoint; drafts for its credentials + Test probe.
   const [ttsEngine, setTtsEngine] = useState<'local' | 'remote'>('local')
@@ -6634,6 +6674,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setTtsSpeedDraft(v?.tts_speed ?? 1.0)
           setSayEmissions(v?.say_emissions !== false)
           setSayInChatUi(v?.say_in_chat === true)
+          setSayPersonaUi(v?.say_persona ?? 'neutral')
           setTtsEngine(v?.tts_engine === 'remote' ? 'remote' : 'local')
           setTtsEndpoint(v?.tts_endpoint ?? '')
           setTtsKeySaved(v?.tts_api_key === 'set')
@@ -6887,6 +6928,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           tts_speed: ttsSpeedDraft,
           say_emissions: sayEmissions,
           say_in_chat: sayInChatUi,
+          say_persona: sayPersonaUi,
           tts_engine: ttsEngine,
           tts_endpoint: ttsEndpoint,
           // Typed key replaces; empty/kept field is dropped server-side so
@@ -7330,8 +7372,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             <SaySettingsCard
               sayEmissions={sayEmissions}
               sayInChat={sayInChatUi}
+              sayPersona={sayPersonaUi}
               onSayEmissions={setSayEmissions}
               onSayInChat={setSayInChatUi}
+              onSayPersona={setSayPersonaUi}
             />
 
             <SettingsCard title="Read aloud" className="col-span-2">
