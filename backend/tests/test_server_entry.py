@@ -187,10 +187,16 @@ def test_start_and_await_gives_up_on_stopped(entry, monkeypatch):
 def test_wizard_fails_when_service_never_reaches_running(entry, monkeypatch,
                                                          capsys):
     """The whole point of the v0.16.x bug: a failed start must exit 1 and
-    say so — never print "installed and running" over a dead service."""
+    say so — never print "installed and running" over a dead service.
+
+    Windows-only: the wizard refuses to run off-Windows before any of the
+    patched seams are reached, so on Linux this asserts nothing."""
     import getpass as getpass_mod
     import subprocess as subprocess_mod
     import types
+
+    if sys.platform != "win32":
+        pytest.skip("the setup wizard is Windows-only")
 
     monkeypatch.setattr(entry, "_is_elevated", lambda: True)
     monkeypatch.setattr(entry, "_persist_remote", lambda updates: None)
