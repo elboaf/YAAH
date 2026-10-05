@@ -515,11 +515,14 @@ async def branch_select(
                 ),
             }
 
-    await db.update_conversation(conversation_id, selected_branch=branch)
+    # #302: a branch_select pick is by definition an explicit pick.
+    await db.update_conversation(
+        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
+    )
     from backend.agent.gitinfo import invalidate_git_caches
 
     invalidate_git_caches(root)
-    return {"ok": True, "selected_branch": branch, "created": not exists}
+    return {"ok": True, "selected_branch": branch, "created": not exists, "pin_origin": "explicit"}
 
 
 async def get_help(workspace: str = "", tool_name: str = "") -> dict:

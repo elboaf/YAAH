@@ -957,6 +957,26 @@ def _selected_branch_note_degraded(branch, chat_id, reason) -> str:
     )
 
 
+def _selected_branch_note_stale(branch, chat_id) -> str:
+    """Selector-note variant when the selected branch no longer exists
+    locally (#302, ADR-0010 amendment decision 1): it was deleted
+    upstream of the chat. The run states the staleness instead of
+    pretending the pin is live — the worktree materializer already
+    failed on the unknown revision, so without this note the model sees
+    a generic failure and might guess. The stale pin is surfaced, never
+    silently re-created."""
+    b = str(branch).strip()
+    return (
+        f"# Branch selector: {b} (STALE)\n\n"
+        "To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
+        f"The branch `{b}` this chat was pinned to no longer exists locally "
+        "(deleted upstream of the chat), so the pin is STALE. Do not treat "
+        "it as a landing target and do not re-create it unprompted. Tell "
+        "the user the pin is stale and ask which branch to select. The "
+        "primary tree is the human's - never check it out or move it."
+    )
+
+
 def _sandbox_only_note() -> str:
     """System-prompt section injected for scheduled agents running with the
     sandbox-only approval policy (issue #41): no user is watching, so
@@ -1558,7 +1578,25 @@ async def _run_agent_claimed(
     selected_branch = str((conv or {}).get("selected_branch") or "").strip()
     worktree_detached = False
     worktree_error = ""
+    # #302: a pin whose branch no longer exists locally (deleted upstream
+    # of the chat) must reach the run as a stale note, not as a generic
+    # worktree failure — checked before materialization so the failure
+    # names the actual problem. Same TTL-cached branch list the chip's
+    # staleness flag reads, so chip and note agree.
+    branch_pin_stale = False
     if selected_branch:
+        from backend.agent.gitinfo import is_git_repo, list_local_branches
+        from backend.agent.tools import workspace_root
+
+        try:
+            ws_root = workspace_root(workspace)
+        except ValueError:
+            ws_root = None  # remote:/invalid: no local branch list to check
+        # Non-repo workspaces skip the check too — an empty branch list
+        # there means "no repo", not "the branch was deleted".
+        if ws_root is not None and is_git_repo(ws_root):
+            branch_pin_stale = selected_branch not in await list_local_branches(ws_root)
+    if selected_branch and not branch_pin_stale:
         from backend.agent import worktrees as _worktrees
 
         _wt = await _worktrees.ensure_chat_worktree(
@@ -1628,6 +1666,10 @@ async def _run_agent_claimed(
         branch_note = _selected_branch_note_degraded(
             selected_branch, conversation_id, worktree_error
         )
+    elif branch_pin_stale:
+        # #302: the pin is dead — the run hears that, not a materialization
+        # failure, and never lands on a branch that no longer exists.
+        branch_note = _selected_branch_note_stale(selected_branch, conversation_id)
     else:
         branch_note = _selected_branch_note(
             selected_branch,

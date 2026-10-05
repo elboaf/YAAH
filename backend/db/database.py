@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS conversations (
     selected_branch TEXT,     -- #286: the chat's branch selector (ADR-0010) --
                               -- user-intended branch, NULL = follow the
                               -- workspace's checked-out branch
+    branch_pin_origin TEXT,   -- #302 (ADR-0010 amendment, decision 1): WHY
+                              -- the branch is pinned — 'inherited' (the
+                              -- workspace's branch at creation) or 'explicit'
+                              -- (draft card / selector / branch_select pick).
+                              -- NULL = no pin at all. Chip state only; the
+                              -- pin-at-creation semantics are #301's.
     remote_revision_counter INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -273,6 +279,16 @@ async def get_db() -> aiosqlite.Connection:
         # nothing physical.
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN selected_branch TEXT"
+        )
+    if "branch_pin_origin" not in conv_cols:
+        # #302 (ADR-0010 amendment, decision 1): the pin's origin —
+        # 'inherited' (workspace branch at creation) vs 'explicit' (draft
+        # card / selector / branch_select pick). Chip state only: existing
+        # rows keep NULL until a pick or creation stamps them, and the
+        # read endpoint reports NULL-origin picks as explicit (every pick
+        # this schema knew how to record was a user pick).
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN branch_pin_origin TEXT"
         )
     cur = await db.execute("PRAGMA table_info(agents)")
     agent_cols = {r[1] for r in await cur.fetchall()}
@@ -673,6 +689,7 @@ async def create_conversation(
     model: str | None = None,
     effort: str | None = None,
     selected_branch: str | None = None,
+    branch_pin_origin: str | None = None,
 ):
     """Create a conversation. model/effort: the chat's pinned scope (#51/#76).
     Blank strings are legal writes (the chat's deliberate Default); None
@@ -682,6 +699,11 @@ async def create_conversation(
     card's branch pick pre-stores selected_branch at creation, so the
     first run materializes the chat worktree on the right branch. None
     leaves the selector unset (the chat runs in the primary as before).
+
+    #302: branch_pin_origin is chip state for that pin — 'inherited' or
+    'explicit'. Only stored alongside a selected_branch; when the caller
+    passes a branch without an origin, 'explicit' is derived (every pick
+    this schema could record pre-#302 was a user pick).
 
     #132: an explicit-but-BARE model id is qualified with the active
     provider at write time — the row must be self-describing, or a later
@@ -699,12 +721,19 @@ async def create_conversation(
     # No provider arg: qualify_model_scope resolves the active provider
     # itself (the load_config above only ran when a default was needed).
     model = qualify_model_scope(model or "")
+    # #302: origin is state OF the pin — never stored without one, and a
+    # branch without an origin is derived explicit (every pick this schema
+    # could record pre-#302 was a user pick).
+    if not selected_branch:
+        branch_pin_origin = None
+    elif not branch_pin_origin:
+        branch_pin_origin = "explicit"
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO conversations (title, workspace, chat_type, model, effort, selected_branch)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (title, workspace, chat_type, model, effort, selected_branch),
+            "INSERT INTO conversations (title, workspace, chat_type, model, effort,"
+            " selected_branch, branch_pin_origin) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (title, workspace, chat_type, model, effort, selected_branch, branch_pin_origin),
         )
         await db.commit()
         return cur.lastrowid
@@ -789,9 +818,9 @@ async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
 
 async def update_conversation(conversation_id: int, **fields):
     """Update allowed conversation fields (title, workspace,
-    system_prompt_override, model, effort, selected_branch). #132: a bare
-    model write is qualified with the active provider — '' stays ''
-    (deliberate Default)."""
+    system_prompt_override, model, effort, selected_branch,
+    branch_pin_origin). #132: a bare model write is qualified with the
+    active provider — '' stays '' (deliberate Default)."""
     allowed = {
         "title",
         "workspace",
@@ -799,6 +828,7 @@ async def update_conversation(conversation_id: int, **fields):
         "model",
         "effort",
         "selected_branch",  # #286: per-chat branch selector (ADR-0010)
+        "branch_pin_origin",  # #302: chip state for that pin — 'inherited'/'explicit'
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:

@@ -152,8 +152,16 @@ export interface ContextInfo {
 export const getContext = (id: number) =>
   api<ContextInfo>(`/api/conversations/${id}/context`)
 
+/** #302 (ADR-0010 amendment, decision 1): the chip's tri-state feed.
+ *  pin_origin — 'explicit' (draft card / selector pick), 'inherited' (the
+ *  workspace's branch at creation; also the fallback when no pin exists,
+ *  since the shown branch IS the workspace's), or null (no pin; the
+ *  fallback branch still names the workspace's). stale — the selected
+ *  branch no longer exists locally. */
 export interface GitBranchInfo {
   branch: string | null
+  pin_origin?: 'explicit' | 'inherited' | null
+  stale?: boolean
 }
 
 export const getGitBranch = (id: number) =>
@@ -201,6 +209,7 @@ export const runGitCommand = (id: number, action: GitAction, opts?: { message?: 
 export interface BranchSelectResult {
   ok: boolean
   selected_branch?: string
+  pin_origin?: 'explicit'
   error?: string
 }
 

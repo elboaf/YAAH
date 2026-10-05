@@ -320,7 +320,7 @@ def test_branch_select_updates_stored_value_without_tree_move(client, tmp_path):
 
     r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": "feature"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "selected_branch": "feature"}
+    assert r.json() == {"ok": True, "selected_branch": "feature", "pin_origin": "explicit"}
 
     # The stored value updated…
     assert client.get(f"/api/conversations/{conv_id}").json()["selected_branch"] == "feature"
@@ -347,9 +347,13 @@ def test_branch_select_flips_are_private_per_chat(client, tmp_path):
         f"/api/conversations/{conv_b}/branch-select", json={"branch": "master"}
     ).json()["ok"] is True
 
-    # Each chat reads its own pick…
-    assert client.get(f"/api/conversations/{conv_a}/git-branch").json() == {"branch": "feature"}
-    assert client.get(f"/api/conversations/{conv_b}/git-branch").json() == {"branch": "master"}
+    # Each chat reads its own pick (#302: explicit origin, not stale)…
+    assert client.get(f"/api/conversations/{conv_a}/git-branch").json() == {
+        "branch": "feature", "pin_origin": "explicit", "stale": False,
+    }
+    assert client.get(f"/api/conversations/{conv_b}/git-branch").json() == {
+        "branch": "master", "pin_origin": "explicit", "stale": False,
+    }
 
     # …and the single physical tree is untouched throughout.
     invalidate_git_caches(repo)
@@ -393,20 +397,27 @@ def test_git_branch_reads_fall_back_to_workspace_until_set(client, tmp_path):
     _git(repo, "branch", "feature")
     conv_id = _conversation(client, repo)
 
-    # Unset: the fallback serves the workspace's branch.
-    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {"branch": "master"}
+    # Unset: the fallback serves the workspace's branch (#302 shape: no
+    # pin, so no origin, never stale).
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
+        "branch": "master", "pin_origin": None, "stale": False,
+    }
 
     # The human checks out feature in the shared tree (their tool); the
     # still-unset chat follows along.
     _git(repo, "checkout", "feature")
     invalidate_git_caches(repo)
-    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {"branch": "feature"}
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
+        "branch": "feature", "pin_origin": None, "stale": False,
+    }
 
     # The chat flips: its stored pick now wins over the tree…
     assert client.post(
         f"/api/conversations/{conv_id}/branch-select", json={"branch": "master"}
     ).json()["ok"] is True
-    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {"branch": "master"}
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
+        "branch": "master", "pin_origin": "explicit", "stale": False,
+    }
 
     # …while git-info keeps reporting the physical tree.
     invalidate_git_caches(repo)

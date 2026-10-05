@@ -48,6 +48,11 @@
       "sha256": "a6f8198631959cf7d597b05edf43dd4162ea9a13052870408438ba6537149d07"
     },
     {
+      "name": "branch_select",
+      "bytes": 737,
+      "sha256": "24087650cb633b381470480a3f6daaf06ff747aee3a699b7a852a579b48433ed"
+    },
+    {
       "name": "web_search",
       "bytes": 395,
       "sha256": "4781173e2c60c25583f9b4b5420bf565e6f3e128b0b824519bdf219c4a2a4046"

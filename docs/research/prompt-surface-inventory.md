@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–476) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1428 / 1495) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1448 / 1515) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,9 +45,9 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1428 / 1495) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1448 / 1515) →
 `_default_system_prompt` → fragments appended 1341–1390 → `messages` with
-system first (loop.py:1428).
+system first (loop.py:1448).
 
 | Fragment | File:lines | Trigger | Approx size |
 |---|---|---|---|
@@ -59,7 +59,7 @@ system first (loop.py:1428).
 | Sub-agent index + delegation policy | `backend/agent/subagents.py:267–291` (`index_for_prompt`) | always (2 built-ins guarantee content) | ~26 lines / ~1.7 KB |
 | AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1532–1534 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:183) | wrapper ~6 lines + content |
 | Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235–247 / 1347–1349 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
-| Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:270–284` (`bodies_for_prompt`) wrapped via `invoked_skills_wrapper` (loop.py:724–737), called at loop.py:1417 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
+| Explicitly invoked skills (`/name`, chips) | `backend/agent/skills.py:270–284` (`bodies_for_prompt`) wrapped via `invoked_skills_wrapper` (loop.py:724–737), called at loop.py:1646 | skill names passed with the turn | header ~13 lines + bodies (each ≤ `MAX_SKILL_BODY_CHARS = 60_000`, skills.py:33) |
 | Mid-turn loaded skills (`load_skill`) | `backend/agent/skills.py:289–336` (`load_skill_into_messages`); queued-message variant loop.py:677–699 (`_apply_injected_skills`) | model calls `load_skill`, or queued message carries skill chips; mutates `messages[0]` in place; result carries a `truncated` flag when the parse-time body cap fired | header ~10 lines + body |
 | AGENTS.md project notes | `_agents_notes` (loop.py:210–232), appended at loop.py:1379–1381 | `<workspace>/AGENTS.md` exists and non-empty; skipped for `remote:` workspaces; capped at `MAX_AGENTS_NOTES_CHARS = 8_000` (loop.py:183) | wrapper ~6 lines + content |
 | Persistent memory block | `backend/agent/memory.py:204–245` (`_WHEN_TO_SAVE` + `index_for_prompt`), appended via loop.py:235 / 1385–1389 | `MEMORY.md` index exists and differs from template; capped `MAX_INDEX_CHARS = 12_000` | wrapper ~20 lines + index |
@@ -71,7 +71,7 @@ system first (loop.py:1428).
 | Compaction summary injection | loop.py:1391–1395 — `"Earlier conversation summary (for context only):\n" + summary` | compaction has fired (`prompt_state["summary"]` non-empty) | 1 line + summary (≤ `_SUMMARY_MAX_CHARS`) |
 | Standing instructions (scheduler) | backend/agent/scheduler.py:293–301 | scheduled agent has saved instructions | header + 1 line each |
 | Attachment re-inlining | `backend/agent/attachments.py:15–27` (`inline_attachment_text`) | message has structured attachments (#142); exact format pinned by the byte-identical backend/TS golden fixture (test_attachment_inline.py + src/attachmentFixture.ts) | ~10 lines/attachment |
-| MCP tool descriptions | `backend/agent/mcp_client.py:147–169` (`_discover`, mcp_client.py:147+) merged by tools.py:1541–1549 | MCP server configured & connected; descriptions come from the server (fallback string); names prefixed `mcp_<server>_<tool>` | dynamic |
+| MCP tool descriptions | `backend/agent/mcp_client.py:147–169` (`_discover`, mcp_client.py:147+) merged by tools.py:1546–1554 | MCP server configured & connected; descriptions come from the server (fallback string); names prefixed `mcp_<server>_<tool>` | dynamic |
 | Scheduled-run user prompt | scheduler.py:295–301 — the agent's own `prompt` field, verbatim | scheduler fire | user-defined |
 | `exit_plan` tool schema | `EXIT_PLAN_SCHEMA` (loop.py:751–773), appended to tools only in plan mode (loop.py:1415–1417) | plan mode | 1 description (~5 lines) |
 

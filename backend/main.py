@@ -629,18 +629,24 @@ async def api_conversation_branch_select(conversation_id: int, body: BranchSelec
     if branch not in await list_local_branches(root):
         return {"ok": False, "error": f"not a local branch: {branch}"}
 
-    await update_conversation(conversation_id, selected_branch=branch)
-    return {"ok": True, "selected_branch": branch}
+    # #302: a selector flip is by definition an explicit pick.
+    await update_conversation(
+        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
+    )
+    return {"ok": True, "selected_branch": branch, "pin_origin": "explicit"}
 
 
 @app.get("/api/conversations/{conversation_id}/git-branch")
 async def api_conversation_git_branch(conversation_id: int):
     """The chat's branch for the status-strip chip (#286): the stored
     selection when the chat has one, else the workspace's checked-out
-    branch. Cheap by design: stats .git/HEAD first and only spawns git when
-    the file changed — the UI re-polls this every couple of seconds while a
-    session is open, and terminal checkouts reflect without any push
-    channel."""
+    branch. #302 (ADR-0010 amendment, decision 1): the response also
+    carries the pin's origin — 'explicit' or 'inherited' (None = no pin;
+    the fallback branch IS the workspace's, so the UI marks it inherited)
+    — and a stale flag: the selected branch no longer exists locally,
+    deleted upstream of the chat. Cheap by design: the stale check rides
+    the TTL-cached branch list, so a poll spawns no more git than before.
+    """
     conv = await get_conversation(conversation_id)
     if conv is None:
         from fastapi import HTTPException
@@ -648,18 +654,38 @@ async def api_conversation_git_branch(conversation_id: int):
         raise HTTPException(status_code=404, detail="conversation not found")
     stored = conv.get("selected_branch")  # #286: per-chat pick wins
     if stored:
-        return {"branch": stored}
+        # #302: a pre-#302 pick (origin NULL) was only ever a user pick —
+        # reporting explicit keeps legacy rows honest instead of suddenly
+        # growing inherited markers.
+        reported_origin = conv.get("branch_pin_origin") or "explicit"
+        stale = False
+        ws = conv.get("workspace") or ""
+        if ws.strip() and not ws.startswith("remote:"):
+            from backend.agent.gitinfo import is_git_repo, list_local_branches
+            from backend.agent.tools import workspace_root
+
+            try:
+                root = workspace_root(ws)
+            except ValueError:
+                stale = False
+            else:
+                # Non-repo guard (mirrors the run path in loop.py): an
+                # empty branch list for a vanished workspace means "no
+                # repo", not "the branch was deleted".
+                if is_git_repo(root):
+                    stale = stored not in await list_local_branches(root)
+        return {"branch": stored, "pin_origin": reported_origin, "stale": stale}
     from backend.agent.gitinfo import current_git_branch
     from backend.agent.tools import workspace_root
 
     ws = conv.get("workspace") or ""
     if not ws.strip() or ws.startswith("remote:"):
-        return {"branch": None}
+        return {"branch": None, "pin_origin": None, "stale": False}
     try:
         root = workspace_root(ws)
     except ValueError:
-        return {"branch": None}
-    return {"branch": await current_git_branch(root)}
+        return {"branch": None, "pin_origin": None, "stale": False}
+    return {"branch": await current_git_branch(root), "pin_origin": None, "stale": False}
 
 
 @app.get("/api/conversations/{conversation_id}/git-info")
@@ -914,7 +940,10 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
                 if branch not in await list_local_branches(ws_root):
                     result = {"ok": False, "error": f"not a local branch: {branch}"}
                 else:
-                    await update_conversation(conversation_id, selected_branch=branch)
+                    # #302: a checkout through the UI is an explicit pick.
+                    await update_conversation(
+                        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
+                    )
                     result = {"output": branch}
 
     invalidate(root)

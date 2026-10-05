@@ -51,6 +51,14 @@ def _head_path(root: Path) -> Path | None:
     return None
 
 
+def is_git_repo(root: Path | str) -> bool:
+    """True when the directory looks like a git repo or worktree checkout
+    (a .git dir or stub file). Pure stat — no spawn. #302: the staleness
+    checks guard with this, because list_local_branches returns [] for a
+    non-repo (git fails), which must not read as 'branch deleted'."""
+    return _head_path(Path(root)) is not None
+
+
 async def current_git_branch(root: Path | str) -> str | None:
     """Current branch name, or None when the workspace is not a git repo
     (detached HEADs report the short SHA)."""
@@ -227,14 +235,30 @@ async def git_workspace_info(root: Path | str) -> dict | None:
     return info
 
 
+_branch_list_cache: dict[str, tuple[float, list[str]]] = {}
+_BRANCH_LIST_TTL = 2.0  # seconds; matches the info-readout cache cadence
+
+
 async def list_local_branches(root: Path | str) -> list[str]:
     """Local branch names for the chip's dropdown (current branch included;
-    sorted by git's default ordering). Empty when not a repo / unborn HEAD."""
+    sorted by git's default ordering). Empty when not a repo / unborn HEAD.
+
+    #302: TTL-cached — the chip's staleness read rides this list every
+    ~2s poll, and a per-poll spawn would break the git-branch endpoint's
+    cheap-by-design contract. Callers that must see fresh state after a
+    branch write go through invalidate_git_caches, which drops it."""
     root = Path(root)
+    key = str(root)
+    now = time.monotonic()
+    cached = _branch_list_cache.get(key)
+    if cached and now - cached[0] < _BRANCH_LIST_TTL:
+        return cached[1]
     rc, out = await _run_git(root, "branch", "--format=%(refname:short)")
     if rc != 0:
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    branches = [line.strip() for line in out.splitlines() if line.strip()]
+    _branch_list_cache[key] = (now, branches)
+    return branches
 
 
 def invalidate_git_caches(root: Path | str) -> None:
@@ -243,3 +267,4 @@ def invalidate_git_caches(root: Path | str) -> None:
     root = Path(root)
     _invalidate_branch_cache(root)
     _info_cache.pop(str(root), None)
+    _branch_list_cache.pop(str(root), None)  # #302: staleness reads re-read

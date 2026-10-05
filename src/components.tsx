@@ -7817,12 +7817,19 @@ export function GitChipCluster({
   streaming,
   conversationId,
   selectedBranch,
+  selectedOrigin,
+  selectedStale,
   onCommandDone,
 }: {
   info: GitInfo | null
   streaming: boolean
   conversationId: number | null
   selectedBranch: string | null
+  /** #302: why the branch is pinned — 'inherited' | 'explicit' | null
+      (no pin; the fallback branch names the workspace's). */
+  selectedOrigin?: 'explicit' | 'inherited' | null
+  /** #302: the pinned branch no longer exists locally. */
+  selectedStale?: boolean
   onCommandDone: () => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
@@ -7885,6 +7892,13 @@ export function GitChipCluster({
   // chat has one, else the workspace's checked-out branch (info.branch).
   // The checkout flip records that pick per chat and moves no tree.
   const chipBranch = selectedBranch || info.branch
+  // #302 (ADR-0010 amendment, decision 1): the tri-state. stale wins the
+  // flag slot; the "· workspace" marker names the inherited origin. The
+  // endpoint reports origin null both for a stored inherited pin and for
+  // no pin at all (the fallback branch IS the workspace's — api.ts's
+  // contract), so anything not explicitly a pick renders inherited.
+  const stale = Boolean(selectedStale)
+  const inherited = !stale && selectedOrigin !== 'explicit'
 
   // #290: this chat's run worktrees only — chip attribution is arithmetic
   // (the chat id on the `.scratch/chat-<id>/` path), not heuristics. The
@@ -7966,6 +7980,22 @@ export function GitChipCluster({
           title={info.dirty ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)` : undefined}
         />
         <span className="min-w-0 max-w-[10rem] truncate">{chipBranch}</span>
+        {/* #302 tri-state: the inherited marker names the origin; a stale
+            pin is flagged instead of silently rendering a dead name. */}
+        {stale ? (
+          <span className="shrink-0 rounded bg-red-500/15 px-1 font-mono text-[9px] uppercase tracking-wide text-red-400">
+            stale
+          </span>
+        ) : (
+          inherited && (
+            <span
+              className="shrink-0 font-mono text-[9px] text-zinc-500"
+              title="Inherited from the workspace's branch — no explicit pick for this chat yet"
+            >
+              · workspace
+            </span>
+          )
+        )}
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
@@ -8819,14 +8849,24 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   // checked-out branch). Refetched after UI git actions so a flip reflects
   // immediately.
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
+  // #302: the pin's origin and staleness — the chip's tri-state beyond the
+  // name. Refetched with the branch after UI git actions.
+  const [selectedOrigin, setSelectedOrigin] = useState<'explicit' | 'inherited' | null>(null)
+  const [selectedStale, setSelectedStale] = useState(false)
   useEffect(() => {
     setGitInfo(null)
     setSelectedBranch(null)
+    setSelectedOrigin(null)
+    setSelectedStale(false)
     if (conversationId === null) return
     let cancelled = false
     getGitBranch(conversationId)
       .then((r) => {
-        if (!cancelled) setSelectedBranch(r.branch)
+        if (!cancelled) {
+          setSelectedBranch(r.branch)
+          setSelectedOrigin(r.pin_origin ?? null)
+          setSelectedStale(r.stale ?? false)
+        }
       })
       .catch(() => {})
     // Exact context readout: persisted by the backend at every model call.
@@ -8838,11 +8878,22 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       .catch(() => {})
     // Git cluster readout: TTL-cached backend read (branch, dirty, counts,
     // hashes), re-polled every 2s while this session is on screen so
-    // terminal activity reflects without any push channel.
+    // terminal activity reflects without any push channel. #302: the same
+    // tick carries the selector tri-state (origin + stale) so a branch
+    // deleted in a terminal flips the chip within a poll.
     const tick = () => {
       getGitInfo(conversationId)
         .then((r) => {
           if (!cancelled) setGitInfo(r.info)
+        })
+        .catch(() => {})
+      getGitBranch(conversationId)
+        .then((r) => {
+          if (!cancelled) {
+            setSelectedBranch(r.branch)
+            setSelectedOrigin(r.pin_origin ?? null)
+            setSelectedStale(r.stale ?? false)
+          }
         })
         .catch(() => {})
     }
@@ -8861,7 +8912,11 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       .then((r) => setGitInfo(r.info))
       .catch(() => {})
     getGitBranch(conversationId)
-      .then((r) => setSelectedBranch(r.branch))
+      .then((r) => {
+        setSelectedBranch(r.branch)
+        setSelectedOrigin(r.pin_origin ?? null)
+        setSelectedStale(r.stale ?? false)
+      })
       .catch(() => {})
   }, [conversationId])
 
@@ -9204,6 +9259,8 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           streaming={streaming}
           conversationId={conversationId}
           selectedBranch={selectedBranch}
+          selectedOrigin={selectedOrigin}
+          selectedStale={selectedStale}
           onCommandDone={refreshGitInfo}
         />
         {/* Access mode lives in the composer toolbar now. Plan approval is a
