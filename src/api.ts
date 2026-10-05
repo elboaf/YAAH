@@ -824,6 +824,8 @@ export type AgentScheduleType = 'interval' | 'daily' | 'weekly'
  *  every fire lands on landing_branch; per-run = a branch per fire, left
  *  unmerged for manual integration. */
 export type AgentLandingMode = 'off' | 'fixed' | 'per-run'
+/** #296: when a fired run's spoken briefing gets spoken. */
+export type AgentSayMode = 'arrival' | 'visible'
 export interface AgentScheduleSpec {
   minutes?: number
   time?: string
@@ -849,6 +851,8 @@ export interface ScheduledAgent {
   /** #278: where each fire's work lands. */
   landing_mode: AgentLandingMode
   landing_branch: string
+  /** #296: when a fire's spoken briefing gets spoken. */
+  say_mode: AgentSayMode
   model: string
   effort: string
   memory_enabled: boolean

@@ -1606,6 +1606,8 @@ async def _agent_view(agent: dict) -> dict:
         # #278: landing settings surface to the editor verbatim.
         "landing_mode": str(agent.get("landing_mode") or "off"),
         "landing_branch": str(agent.get("landing_branch") or ""),
+        # #296: fire-time speech policy surfaces to the editor verbatim.
+        "say_mode": str(agent.get("say_mode") or "arrival"),
         "schedule_spec": scheduler_mod.parse_schedule_spec(agent["schedule_spec"]),
         "schedule_text": scheduler_mod.describe_schedule(
             agent["schedule_type"], agent["schedule_spec"]
@@ -1627,6 +1629,8 @@ class AgentBody(BaseModel):
     # fixed (landing_branch), per-run (a branch per fire, unmerged).
     landing_mode: str = "off"
     landing_branch: str = ""
+    # #296: when a fired run's spoken briefing gets spoken (default arrival).
+    say_mode: str = "arrival"
     model: str = ""                          # '' = active global model
     effort: str = ""                         # '' | provider-advertised effort
     memory_enabled: bool = True
@@ -1672,6 +1676,8 @@ async def api_agents_add(body: AgentBody):
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
     if body.landing_mode not in scheduler_mod.VALID_LANDING_MODES:
         raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
+    if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
+        raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
     landing_branch = body.landing_branch.strip()
     if body.landing_mode == "fixed" and not landing_branch:
         raise HTTPException(status_code=400, detail="fixed landing_mode requires landing_branch")
@@ -1691,6 +1697,8 @@ async def api_agents_add(body: AgentBody):
         # #278: the named target only travels in fixed mode — other modes
         # must not wake up with a stale branch name if the mode flips later.
         "landing_branch": landing_branch if body.landing_mode == "fixed" else "",
+        # #296: fire-time speech policy.
+        "say_mode": body.say_mode,
         # #132: qualify a bare id — the agent's row must be self-describing
         # too (scheduler fires resolve through the same bare branch).
         "model": qualify_model_scope(body.model.strip()),
@@ -1755,6 +1763,8 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
     if body.landing_mode not in scheduler_mod.VALID_LANDING_MODES:
         raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
+    if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
+        raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
     landing_branch = body.landing_branch.strip()
     if body.landing_mode == "fixed" and not landing_branch:
         raise HTTPException(status_code=400, detail="fixed landing_mode requires landing_branch")
@@ -1770,6 +1780,8 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         # #278: the named target only travels in fixed mode — other modes
         # must not wake up with a stale branch name if the mode flips later.
         "landing_branch": landing_branch if body.landing_mode == "fixed" else "",
+        # #296: fire-time speech policy (full-record replace write path).
+        "say_mode": body.say_mode,
         # #132: qualify a bare id (full-record replace write path).
         "model": qualify_model_scope(body.model.strip()),
         "effort": body.effort.strip(),

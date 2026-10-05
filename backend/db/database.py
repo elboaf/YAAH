@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS agents (
     approval_policy TEXT NOT NULL DEFAULT 'sandbox-only',
     landing_mode TEXT NOT NULL DEFAULT 'off', -- #278: off | fixed | per-run
     landing_branch TEXT NOT NULL DEFAULT '',  -- #278: fixed mode's target branch
+    say_mode TEXT NOT NULL DEFAULT 'arrival', -- #296: arrival | visible
     model TEXT NOT NULL DEFAULT '',           -- '' = the active global model
     effort TEXT NOT NULL DEFAULT '',          -- '' = don't send reasoning_effort
     memory_enabled INTEGER NOT NULL DEFAULT 1,
@@ -311,6 +312,11 @@ async def get_db() -> aiosqlite.Connection:
     if "landing_branch" not in agent_cols:
         # #278: fixed mode's named target ('' with any other mode).
         await db.execute("ALTER TABLE agents ADD COLUMN landing_branch TEXT NOT NULL DEFAULT ''")
+    if "say_mode" not in agent_cols:
+        # #296: when a fire's spoken briefing gets spoken. 'arrival' (the
+        # default) speaks it as the fire emits it; 'visible' holds it until
+        # the conversation becomes the on-screen one.
+        await db.execute("ALTER TABLE agents ADD COLUMN say_mode TEXT NOT NULL DEFAULT 'arrival'")
     cur = await db.execute("PRAGMA table_info(workspaces)")
     ws_cols = {r[1] for r in await cur.fetchall()}
     if "position" not in ws_cols:
@@ -1768,7 +1774,7 @@ async def search_conversation_history(
 
 AGENT_FIELDS = (
     "workspace", "name", "prompt", "schedule_type", "schedule_spec",
-    "approval_policy", "landing_mode", "landing_branch",
+    "approval_policy", "landing_mode", "landing_branch", "say_mode",
     "model", "effort", "memory_enabled",
     "allow_ask_user", "retention",
     "notify_on_success", "enabled", "conversation_id",

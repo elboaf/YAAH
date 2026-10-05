@@ -53,6 +53,11 @@ VALID_POLICIES = ("sandbox-only", "autonomous")
 # every fire lands on landing_branch; 'per-run' = each fire gets its own
 # branch, left unmerged for manual integration.
 VALID_LANDING_MODES = ("off", "fixed", "per-run")
+# #296: when a fired run's spoken briefing gets spoken — arrival (the
+# default: as the fire emits it, chat on screen or not) or visible (held
+# until the conversation becomes the on-screen one). Consumed by the
+# frontend's say watcher; the backend only stores and validates it.
+VALID_SAY_MODES = ("arrival", "visible")
 WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 # Interval bounds: below this would hammer the model provider; above a

@@ -55,6 +55,7 @@ import {
   type ScheduledAgent,
   type AgentPolicy,
   type AgentLandingMode,
+  type AgentSayMode,
   type AgentScheduleType,
   type AgentBody,
   type AgentInstruction,
@@ -902,9 +903,16 @@ function oneLine(s: string): string {
  *  events from the backend's tape buffer). `elapsed` is the client-measured
  *  tool duration when known; the polled path omits it. Returns null for
  *  events that carry no tape text. */
-function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | null {
-  if (ev.type === 'thinking') {
+/** Exported for #296's tape-render test; internal otherwise. */
+export function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | null {  if (ev.type === 'thinking') {
     return ev.text ? oneLine(ev.text) + ' ' : null
+  }
+  if (ev.type === 'say') {
+    // #296: a fire's spoken briefing reaches the tape with its text (the
+    // backend relay keeps it; see test_issue_296_say_fire.py). Render it
+    // — before this branch the event had no chunk and the tape showed
+    // nothing at all for the one line the user is supposed to hear about.
+    return ev.text ? oneLine(ev.text) + '    ' : null
   }
   if (ev.type === 'tool_start') {
     const a = (ev.args ?? {}) as Record<string, unknown>
@@ -5316,6 +5324,8 @@ function AgentForm({
   // #278: where each fire's work lands (off mirrors today's chat behavior).
   const [landingMode, setLandingMode] = useState<AgentLandingMode>(agent?.landing_mode ?? 'off')
   const [landingBranch, setLandingBranch] = useState(agent?.landing_branch ?? '')
+  // #296: when a fire's spoken briefing gets spoken (default arrival).
+  const [sayMode, setSayMode] = useState<AgentSayMode>(agent?.say_mode ?? 'arrival')
   const [model, setModel] = useState(agent?.model ?? '')
   const [effort, setEffort] = useState(agent?.effort ?? '')
   const [memory, setMemory] = useState(agent?.memory_enabled ?? true)
@@ -5370,6 +5380,7 @@ function AgentForm({
         approval_policy: policy,
         landing_mode: landingMode,
         landing_branch: landingMode === 'fixed' ? landingBranch.trim() : '',
+        say_mode: sayMode,
         model: model.trim(),
         effort,
         memory_enabled: memory,
@@ -5469,6 +5480,17 @@ function AgentForm({
             <option value="off">off — chat's own branch</option>
             <option value="fixed">fixed — one branch</option>
             <option value="per-run">per-run — branch per fire</option>
+          </select>
+        </label>
+        <label>
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Voice</span>
+          <select
+            className={agentInputCls}
+            value={sayMode}
+            onChange={(e) => setSayMode(e.target.value as AgentSayMode)}
+          >
+            <option value="arrival">arrival — speak when fired</option>
+            <option value="visible">visible — speak when opened</option>
           </select>
         </label>
       </div>
@@ -5834,6 +5856,7 @@ function agentToBody(a: ScheduledAgent, enabled: boolean): AgentBody {
     approval_policy: a.approval_policy,
     landing_mode: a.landing_mode,
     landing_branch: a.landing_branch,
+    say_mode: a.say_mode,
     model: a.model,
     effort: a.effort,
     memory_enabled: a.memory_enabled,
@@ -6007,6 +6030,132 @@ export function AgentChatLiveFollow() {
       void drainTape(true).catch(() => {})
     }
   }, [running, conversationId])
+  return null
+}
+
+// Fire-time spoken briefings (#296). A scheduled fire emits its briefing
+// onto the conversation's tape; this watcher is the speech consumer the
+// interactive stream has and the scheduled path never had. Per-agent
+// say_mode (maintainer decision on the issue, default 'arrival'):
+//
+//   arrival — speak as the fire emits it, background chat or not (the
+//             scheduler lives in the app process, so app-closed is
+//             already silent by construction);
+//   visible — hold the briefing until the conversation becomes the
+//             on-screen one, then speak it once.
+//
+// Both modes ride the same serialized SpeechPlayer queue the interactive
+// narrate effect uses (3-deep pending lane, supersede/stop aware) — no
+// new audio machinery. No double-speak exists by construction: the
+// narrate effect only engages during INTERACTIVE turns (streaming never
+// goes true for a fire), so the watcher is the only speaker on this path.
+
+/** Module-level ledger of say texts already processed, per conversation.
+ *  The tape cursor's offset resume is the real guard (the buffer never
+ *  replays old events); this is the belt-and-braces that also survives a
+ *  cursor reset (e.g. the buffer reset between fires) colliding with a
+ *  still-identical briefing text. Pruned FIFO-ish like the #237 latch. */
+const fireSaySeen = new Map<string, true>()
+const FIRE_SAY_LEDGER_CAP = 200
+export function _resetFireSayLedgerForTests(): void {
+  fireSaySeen.clear()
+}
+function markFireSay(convKey: string, text: string): void {
+  fireSaySeen.set(`${convKey}\u0000${text}`, true)
+  if (fireSaySeen.size > FIRE_SAY_LEDGER_CAP) {
+    const it = fireSaySeen.keys()
+    for (let i = 0; i < Math.floor(FIRE_SAY_LEDGER_CAP / 2); i++) {
+      const k = it.next()
+      if (k.done) break
+      fireSaySeen.delete(k.value)
+    }
+  }
+}
+
+/** One parked 'visible'-mode briefing: fires when its conversation becomes
+ *  the on-screen one. Keyed by conversation (one hold per fire conversation
+ *  — a NEW briefing text replaces the parked one: last-unsaid wins). */
+const parkedFireSays = new Map<string, { text: string }>()
+
+/** Consume the say events of one drained fire tape. `onScreen` decides
+ *  speak-now (arrival mode, or visible mode with the chat up) vs park. */
+function consumeFireSayEvents(
+  convId: number,
+  events: Array<{ type: string; text?: string }>,
+  onScreen: boolean,
+  sayMode: 'arrival' | 'visible',
+): void {
+  const convKey = String(convId)
+  for (const ev of events) {
+    if (ev.type !== 'say') continue
+    const text = (ev.text ?? '').trim()
+    if (!text) continue
+    const dedupeKey = `${convKey}\u0000${text}`
+    if (fireSaySeen.has(dedupeKey)) continue
+    markFireSay(convKey, text)
+    if (sayMode === 'arrival' || onScreen) {
+      useTts.getState().speakMessage(`fire-${convKey}`, text, text)
+    } else {
+      parkedFireSays.set(convKey, { text })
+    }
+  }
+}
+
+/** Drain the parked 'visible' holds whose conversation is now on screen. */
+function drainParkedFireSays(onScreenKey: string | null): void {
+  if (onScreenKey === null || parkedFireSays.size === 0) return
+  const parked = parkedFireSays.get(onScreenKey)
+  if (!parked) return
+  parkedFireSays.delete(onScreenKey)
+  useTts.getState().speakMessage(`fire-${onScreenKey}`, parked.text, parked.text)
+}
+
+/** App-level watcher: speaks scheduled fires' spoken briefings (#296).
+ *  Mounted once in App, next to AgentChatLiveFollow. Polls ONLY while some
+ *  agent is running, and only the RUNNING agents' conversations — a fire
+ *  is the sole producer of fire-tape say events, so the poll budget is
+ *  zero when nothing is in flight. */
+export function AgentSayWatcher() {
+  const agents = useAgent((s) => s.agents)
+  const conversationId = useAgent((s) => s.conversationId)
+  const running = agents.filter((a) => a.running && a.conversation_id)
+  const runningKey = running.map((a) => `${a.id}:${a.conversation_id}:${a.say_mode ?? 'arrival'}`).join('|')
+  useEffect(() => {
+    if (running.length === 0) return
+    let alive = true
+    const cursors = new Map<number, number>()
+    const sayModeOf = new Map<number, 'arrival' | 'visible'>()
+    for (const a of running) {
+      cursors.set(a.conversation_id, 0)
+      sayModeOf.set(a.conversation_id, a.say_mode === 'visible' ? 'visible' : 'arrival')
+    }
+    const tick = () => {
+      if (!alive) return
+      for (const [cid, after] of cursors) {
+        getAgentTape(cid, after)
+          .then((res) => {
+            if (!alive) return
+            cursors.set(cid, res.offset)
+            const mode = sayModeOf.get(cid) ?? 'arrival'
+            const onScreen = conversationId === cid
+            consumeFireSayEvents(cid, res.events as Array<{ type: string; text?: string }>, onScreen, mode)
+          })
+          .catch(() => {})
+      }
+    }
+    tick()
+    const t = window.setInterval(tick, 1000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runningKey, conversationId])
+  // Parked 'visible' briefings speak when the conversation becomes the
+  // on-screen one — this effect is the "became visible" edge.
+  useEffect(() => {
+    drainParkedFireSays(conversationId === null ? null : String(conversationId))
+  }, [conversationId])
   return null
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
 import { quantizeUiScale } from './jitter'
-import { AgentChatLiveFollow, AgentRunWatcher, ChatPanel, ImageLightbox, PreviewModal, Sidebar, ToastStack } from './components'
+import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, ImageLightbox, PreviewModal, Sidebar, ToastStack } from './components'
 import { NativeMenuGate } from './nativeMenu'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
@@ -239,6 +239,8 @@ export default function App() {
       {/* Scheduled agents (issue #41): poller (toasts + store map) + toast stack */}
       <AgentRunWatcher />
       <AgentChatLiveFollow />
+      {/* #296: speaks scheduled fires' spoken briefings (per-agent say_mode). */}
+      <AgentSayWatcher />
       <Sidebar />
       {/* FilesPanel is GUI-removed (see DESIGN.md Layout): the component and
           its wiring stay in components.tsx — restore by re-adding the mount:
