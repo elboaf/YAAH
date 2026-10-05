@@ -85,7 +85,8 @@ def test_agents_md_adopts_the_namespace():
     root = Path(__file__).resolve().parents[2]
     text = (root / "AGENTS.md").read_text(encoding="utf-8")
     assert ".scratch/chat-<id>/run" in text
-    assert "run/chat-<id>" in text
+    assert "run/<title-slug>-<chat-id>" in text  # #312: named after the work
+    assert "run/chat-<id>" in text  # the generic-title fallback stays documented
     assert "run-YYYYMMDD" not in text
     # Residue protocol present: dirty/unmerged surfaces, nothing silent.
     assert "scrap it" in text

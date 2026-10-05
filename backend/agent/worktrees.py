@@ -12,8 +12,10 @@ a time, and the selected branch is usually checked out in the primary.
 A chat worktree therefore checks out the selected branch when git
 allows it, and detaches at the branch's tip when it does not - the
 commit is identical either way; the agent's scratch run worktrees
-(``run/chat-<id>``) are what carry work. Master only ever moves by
-human merge; the harness never moves it (ADR-0010, landing contract).
+(``.scratch/chat-<id>/run``, branch ``run/<title-slug>-<chat-id>``
+since #312, ``run/chat-<id>`` before) are what carry work. Master only
+ever moves by human merge; the harness never moves it (ADR-0010,
+landing contract).
 
 Kept out of the tool layer on purpose: this is app state, not a model
 tool. Remote (``remote:``) workspaces are out of scope v1 (ADR-0010),

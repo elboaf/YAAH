@@ -934,7 +934,30 @@ _AMENDMENT_RULES = (
 )
 
 
-def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit") -> str:
+def _run_branch_name(title, chat_id=None) -> str:
+    """This chat's run branch: ``run/<title-slug>-<chat-id>`` (#312).
+
+    Readable when sifting `git branch`, with the chat id kept as the
+    stable, collision-free suffix (titles repeat and change mid-chat).
+    Falls back to ``run/chat-<id>`` while the title is still the generic
+    default or slugs to nothing. Presentational only: every consumer
+    (runwatch badge, sweep, residue) keys off the deterministic worktree
+    PATH, never the name - the slug cannot break landing, and a mistyped
+    one is cosmetic. Same prompt-discipline footing as the old
+    ``run/chat-<id>`` name.
+    """
+    cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
+    slug = (
+        re.sub(r"[^a-z0-9]+", "-", str(title or "").strip().lower())
+        .strip("-")[:40]
+        .rstrip("-")
+    )
+    if not slug or slug == "new-task":
+        return f"run/chat-{cid}"
+    return f"run/{slug}-{cid}"
+
+
+def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit", title=None) -> str:
     """System-prompt section injected when the user picked a branch in this
     chat's branch selector (#277: the run happens in the chat's own
     per-chat worktree, which the harness materializes at the first run;
@@ -942,15 +965,17 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
     without this note the pick is invisible to it. Returns "" when unset.
 
     #290: the run SOP here uses the deterministic per-chat namespace
-    (`.scratch/chat-<id>/run`, branch `run/chat-<id>` — ADR-0010's path
-    shape) and carries the residue protocol, so a run knows its own
-    names without discovery and expected residue is handled the same
-    way every time.
+    (`.scratch/chat-<id>/run` - ADR-0010's path shape) and carries the
+    residue protocol, so a run knows its own names without discovery and
+    expected residue is handled the same way every time. #312: the run
+    branch is named after the work (`run/<title-slug>-<id>`) so branch
+    lists stay human-readable; see _run_branch_name.
     """
     if not branch or not str(branch).strip():
         return ""
     b = str(branch).strip()
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
+    rb = _run_branch_name(title, chat_id)
     residue = (
         "If a run worktree already exists at that path, it is residue from "
         "an earlier run: when it is clean and fully merged into the target, "
@@ -985,9 +1010,9 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
             f"it out or move it, and never move `{b}` from under it. When "
             "your task writes to the tree, work in a scratch worktree at "
             "this chat's deterministic path, based on the current commit:\n\n"
-            f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid}`\n\n"
+            f"`git worktree add .scratch/chat-{cid}/run -b {rb}`\n\n"
             "Commit there and remove the run worktree once done; your run "
-            f"branch `run/chat-{cid}` carries the work. `{b}` itself is "
+            f"branch `{rb}` carries the work. `{b}` itself is "
             "landed by the human \u2014 leave the primary tree alone. "
             + _AMENDMENT_RULES
             + residue
@@ -1008,17 +1033,17 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
         "When your task writes to the tree, work "
         "in a scratch worktree at this chat's deterministic path, based "
         "on the current branch:\n\n"
-        f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid}`\n\n"
+        f"`git worktree add .scratch/chat-{cid}/run -b {rb}`\n\n"
         "Commit there, then land inside THIS worktree "
-        f"(`git merge run/chat-{cid}` \u2014 on conflict, resolve here or "
+        f"(`git merge {rb}` \u2014 on conflict, resolve here or "
         "`git merge --abort` and report), then remove the run worktree "
         f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d "
-        f"run/chat-{cid}`). "
+        f"{rb}`). "
         + residue
     )
 
 
-def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit") -> str:
+def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit", title=None) -> str:
     """Selector-note variant when the chat worktree could NOT be
     materialized (non-repo, git failure): the run happens in the primary
     like the pre-#277 SOP, and the reason is stated instead of hidden —
@@ -1026,6 +1051,7 @@ def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit") -
 
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     b = str(branch).strip()
+    rb = _run_branch_name(title, chat_id)
     return (
         f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
         + (
@@ -1040,7 +1066,7 @@ def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit") -
         "never check it out or move it, and never switch branches in it. "
         "When your task writes to the tree, work in a scratch worktree at "
         "this chat's deterministic path, based on the selected branch:\n\n"
-        f"`git worktree add .scratch/chat-{cid}/run -b run/chat-{cid} {b}`\n\n"
+        f"`git worktree add .scratch/chat-{cid}/run -b {rb} {b}`\n\n"
         "Commit there, land onto the selected branch only per the "
         "workspace AGENTS.md interim master-landing rule, and remove the "
         "run worktree once landed. Surfaces at run start: when a run "
@@ -1678,6 +1704,10 @@ async def _run_agent_claimed(
     # #301: the note must not claim a selection the user never made - an
     # inherited pin reads as inherited, not as "the user selected".
     pin_origin = str((conv or {}).get("branch_pin_origin") or "explicit").strip()
+    # #312: the run branch is named after the work, so `git branch` reads
+    # like a changelog instead of a phone book. The title rides along here
+    # (fetched up top for the #277 worktree re-point).
+    conv_title = str((conv or {}).get("title") or "").strip()
     worktree_detached = False
     worktree_error = ""
     # #302: a pin whose branch no longer exists locally (deleted upstream
@@ -1766,7 +1796,8 @@ async def _run_agent_claimed(
     # note names this chat's deterministic run-worktree paths.
     if worktree_error:
         branch_note = _selected_branch_note_degraded(
-            selected_branch, conversation_id, worktree_error, origin=pin_origin
+            selected_branch, conversation_id, worktree_error, origin=pin_origin,
+            title=conv_title,
         )
     elif branch_pin_stale:
         # #302: the pin is dead — the run hears that, not a materialization
@@ -1780,6 +1811,7 @@ async def _run_agent_claimed(
             conversation_id,
             detached=worktree_detached,
             origin=pin_origin,
+            title=conv_title,
         )
     if branch_note:
         system_prompt = f"{system_prompt}\n\n---\n\n{branch_note}"

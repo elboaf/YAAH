@@ -1008,9 +1008,22 @@ def render_combo(combo: str) -> dict:
 
 def _canonicalize_chat_ids(text: str) -> str:
     """Replace every `chat-<id>` spelling (the branch note's deterministic
-    `.scratch/chat-<id>/run` paths) with the `<CHAT_ID>` token before
-    sizing/hashing/splitting — the fixture id is a DB counter, not data."""
-    return re.sub(r"chat-\d+", CHAT_ID_TOKEN, text)
+    `.scratch/chat-<id>/run` paths) - and, since #312, the id suffix of
+    every `run/<title-slug>-<id>` branch name - with the `<CHAT_ID>`
+    token before sizing/hashing/splitting: the fixture id is a DB
+    counter, not data."""
+    text = re.sub(r"chat-\d+", CHAT_ID_TOKEN, text)
+    # #312: the run branch carries the id as its LAST dash
+    # segment (run/<slug>-<id>); the slug itself may contain
+    # digits (a title like "version 2 fix"), so only the
+    # trailing run is scrubbed. The lookbehind pins this to
+    # run/-prefixed names, leaving residue leaves like
+    # `.../run-2` (no slash before run) untouched.
+    return re.sub(
+        r"(?<=run/)([a-z0-9][a-z0-9-]*)-(\d+)\b",
+        lambda m: f"{m.group(1)}-{CHAT_ID_TOKEN}",
+        text,
+    )
 
 
 def manifest_to_json(manifest: dict) -> str:
