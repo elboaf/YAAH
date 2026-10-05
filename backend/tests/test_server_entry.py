@@ -147,3 +147,71 @@ def test_install_flags_before_verb_reach_handle_commandline(entry, monkeypatch):
             "--password", "x", "install"]
     assert entry._handle_service_command(argv) == 0
     assert captured["argv"] == [""] + argv
+
+
+# ---------------------------------------------------------------- service start truthfulness
+
+def test_start_and_await_polls_scm_not_exit_code(entry, monkeypatch):
+    """HandleCommandLine always exits 0 — the wizard must read the actual
+    service state instead (v0.16.x printed "installed and running" over a
+    service that never started: 1069 logon failure)."""
+    import subprocess as subprocess_mod
+    import types
+
+    started = []
+
+    def fake_run(cmd, *a, **k):
+        started.append([str(c) for c in cmd])
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    monkeypatch.setattr(entry, "_service_state", lambda: "4  RUNNING")
+    state = entry._start_and_await("some.exe", timeout=2)
+    assert state.endswith("RUNNING")
+    assert started == [["some.exe", "start"]]
+
+
+def test_start_and_await_gives_up_on_stopped(entry, monkeypatch):
+    """A STOPPED state must end the wait immediately (no point polling
+    the full timeout when the SCM already gave a final answer)."""
+    import types
+
+    import subprocess as subprocess_mod
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        lambda cmd, *a, **k: types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(entry, "_service_state", lambda: "1  STOPPED")
+    assert entry._start_and_await("some.exe", timeout=10) == "1  STOPPED"
+
+
+def test_wizard_fails_when_service_never_reaches_running(entry, monkeypatch,
+                                                         capsys):
+    """The whole point of the v0.16.x bug: a failed start must exit 1 and
+    say so — never print "installed and running" over a dead service."""
+    import getpass as getpass_mod
+    import subprocess as subprocess_mod
+    import types
+
+    monkeypatch.setattr(entry, "_is_elevated", lambda: True)
+    monkeypatch.setattr(entry, "_persist_remote", lambda updates: None)
+    monkeypatch.setattr(entry, "_grant_logon_right", lambda user: True)
+    monkeypatch.setattr(entry, "_service_state", lambda: "1  STOPPED")
+    monkeypatch.setattr(getpass_mod, "getuser", lambda: "tester")
+    answers = iter(["secret-pass", "win-password"])
+    monkeypatch.setattr(getpass_mod, "getpass", lambda *a, **k: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+
+    def fake_run(cmd, *a, **k):
+        cmd = [str(c) for c in cmd]
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    # Self-copy skip: point _installed_exe at THIS process's own exe so the
+    # wizard sees source == dest and never touches the disk.
+    monkeypatch.setattr(entry, "_installed_exe", lambda: sys.executable)
+
+    rc = entry._run_setup_wizard()
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "did not reach RUNNING" in out
+    assert "installed and running" not in out
