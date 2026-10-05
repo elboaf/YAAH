@@ -164,3 +164,27 @@ but the placement classifier, merge mutex, dirty-overlap veto,
 trash/salvage teardown, structured git tools, and merge-back engine do
 not — the chat worktree is plain workspace management, and landing is a
 plain merge in private space.
+
+## Amendment 2026-10-05: run branches named after the work (#312)
+
+Run branches rename from `run/chat-<id>` to `run/<title-slug>-<chat-id>`
+(e.g. `run/fix-tts-whine-631`) so `git branch` reads like a changelog.
+Decisions:
+
+- **The chat id stays in the name.** Titles repeat and change mid-chat;
+  the id suffix keeps names collision-free and gives a stable
+  cross-reference (`git branch --list '*-631'`) across renames.
+- **Generic titles fall back.** While the title is still the mechanical
+  default ("New Task") or slugs to nothing, the name stays
+  `run/chat-<id>` — no fake descriptiveness.
+- **Presentational only.** The name remains prompt discipline, not
+  enforcement, and every programmatic consumer (the #290 run badge,
+  the sweep, residue classification) keys off the deterministic
+  `.scratch/chat-<id>/` PATH, never the name. A mistyped slug is
+  cosmetic. The path namespace is untouched, so residue from before
+  this amendment surfaces exactly as before.
+- **Slug rule.** Lowercase, `[^a-z0-9]+ → -`, trimmed, capped at 40
+  chars. Unicode titles slug to their ASCII remainder or fall back.
+
+Pre-existing `run/chat-*` branches need no migration: they land, sweep
+and surface through the same name-blind machinery.
