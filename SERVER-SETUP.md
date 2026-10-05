@@ -34,10 +34,12 @@ runs as, gated by a passphrase only. Install it on machines you control.
    and starts it.
 
 The account must have a password: Windows refuses to run services under
-passwordless accounts (blank-password security policy). If your account has
-none, set one (`net user <name> <password>`, keep auto-login via
-`netplwiz`), or re-point the service manually in Services.msc → YaahServer
-→ Properties → Log On after install.
+passwordless accounts (blank-password security policy). The wizard grants
+your account the "Log on as a service" right automatically — without it the
+service fails to start with "did not start due to a logon failure" (the
+programmatic install does not add it the way Services.msc does). If that
+error still appears, re-check the right in secpol.msc; a Group Policy can
+strip it again.
 
 First-run firewall note: if you ever ran the exe manually from Downloads,
 Windows' allow rule is pinned to that path. The service runs from
@@ -55,6 +57,19 @@ Manage the service (elevated):
 Verify: `curl http://127.0.0.1:8765/api/remote/info` — `workspace_root`
 must be your home. If it says `...system32\config\systemprofile`, the
 service is running as LocalSystem and can't read your passphrase.
+
+Two events in the System log look scary but aren't failures:
+
+- **7039** ("a service process other than the one launched by the Service
+  Control Manager connected") — the PyInstaller bootloader parent spawns
+  the real process, which then connects to the SCM. Windows logs the
+  mismatch and proceeds; the service runs.
+- **One start of the service and one of the desktop app can't share port
+  8765.** If a YAAH desktop app is running on the box, the service crashes
+  at bind ("service-specific error 1" + a `YaahServer crashed` line in the
+  Application log naming the port). Stop the desktop app (or don't install
+  the service on a desktop-use box); the SCM restart policy retries every
+  5 s, so the service picks the port up once it frees.
 
 ## Linux (deb)
 
