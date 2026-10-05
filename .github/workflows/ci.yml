@@ -6,12 +6,20 @@ on:
   pull_request:
     branches: [master]
 
+# One push supersedes the previous: cancel the in-flight run for the same
+# ref so the self-hosted Linux runners spend their time on the newest
+# commit instead of serially chewing through superseded history.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend:
     name: Frontend build
-    # herp only: the Windows runner's default shell is PowerShell and its
-    # execution policy blocks even `npm ci` — and these are bash-flavored
-    # jobs. GitHub-hosted runners never carry the bare "Linux" label.
+    # herp pool (either runner): the Windows runners' default shell is
+    # PowerShell and their execution policy blocks even `npm ci` - and
+    # these are bash-flavored jobs. GitHub-hosted runners never carry
+    # the bare "Linux" label.
     runs-on: Linux
     steps:
       - uses: actions/checkout@v4
@@ -37,8 +45,15 @@ jobs:
           path: dist/
 
   backend:
-    name: Backend tests
-    # herp only (see frontend note).
+    name: Backend tests (shard ${{ matrix.shard }})
+    # herp pool: the two Linux runners take one shard each, so the suite's
+    # wall time is roughly half of the single-job era. The bare "Linux"
+    # label matches only the herp runners (GitHub-hosted runners never
+    # carry it).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     runs-on: Linux
     steps:
       - uses: actions/checkout@v4
@@ -49,11 +64,18 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          # The runner cache keys on requirements.txt only; pytest-shard is
+          # listed there, but a warm runner whose cache predates the pin
+          # would otherwise run unshardable. Explicit here until the next
+          # full requirements refresh repopulates the cache.
+          python -c "import pytest_shard" 2>/dev/null || pip install "pytest-shard>=0.1.2"
 
       - name: Run tests
         run: |
-          pytest backend/tests -v 2>&1 | tee test-output.log
+          pytest backend/tests -v --shard-id ${{ matrix.shard }} --num-shards 2 \
+            2>&1 | tee test-output.log
           test ${PIPESTATUS[0]} -eq 0
 
       # Logs are auth-gated on GitHub; surface failures via annotations,

@@ -39,3 +39,4 @@ comtypes>=1.4.0; sys_platform == "win32"
 Pillow>=11.0; sys_platform == "win32"
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
+pytest-shard>=0.1.2

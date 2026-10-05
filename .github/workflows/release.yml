@@ -3,6 +3,12 @@ name: Release
 # Desktop installers (Q34 / plan Step 13): built with the Tauri CLI on tag push.
 # Publishes the GitHub Release automatically (no manual draft promotion).
 # Apps are unsigned — expect OS security warnings on first run.
+#
+# Runner layout (#62 follow-up): the pool is TWO self-hosted Linux runners
+# (herp, herp-2, bare "Linux" label) and TWO self-hosted Windows runners
+# (bare "windows-desktop" label). The matrix below is the pool itself -
+# one job per physical machine, four builds in parallel instead of two
+# machines serially building two artifacts each.
 
 on:
   push:
@@ -37,16 +43,17 @@ on:
         default: false
 
 jobs:
-  build-tauri:
-    name: Desktop build (${{ matrix.os }})
+  build:
+    name: Build (${{ matrix.artifact }} / ${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        # Self-hosted runners (#62 follow-up): "Linux" matches only the herp
-        # runner, "windows-desktop" only the Windows runner (GitHub-hosted
-        # runners never carry these labels). Release builds run on our own
-        # pushes/tags only — fork PRs never reach this workflow.
+        # The runner pool, spelled out: 2x Linux (herp pool) x {desktop,
+        # server} + 2x Windows x {desktop, server}. Each cell lands on its
+        # own physical machine; desktop and server no longer queue behind
+        # each other on the same box.
         os: [Linux, windows-desktop]
+        artifact: [desktop, server]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -56,14 +63,16 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-node@v4
+        if: matrix.artifact == 'desktop'
         with:
           node-version: 20
           cache: npm
 
-      # Self-hosted runners may not have the GitHub CLI on PATH (the upload
-      # step below needs it). Idempotent: skips if `gh` already resolves.
+      # Both Linux cells upload via gh below. Idempotent: skips if `gh`
+      # already resolves (the herp runners have it preinstalled; this is
+      # the fallback for a fresh/replaced runner).
       - name: Ensure gh CLI
-        if: runner.os == 'Linux'
+        if: matrix.os == 'Linux'
         shell: bash
         run: |
           if ! command -v gh >/dev/null 2>&1; then
@@ -80,10 +89,10 @@ jobs:
       # Tag/version drift guard (#14): the tag must match package.json
       # (the canonical version). Without this a stale or hand-made tag
       # ships installers that report a different version than they're
-      # labeled with. package.json is read with Node (no jq on Windows
-      # runners); a multi-line JSON strip means grep can't false-positive
-      # on a substring of a longer version.
+      # labeled with. package.json is read with Node; exactly ONE cell
+      # runs this - four copies would be four chances to race a bad tag.
       - name: Guard — tag must match package.json version
+        if: matrix.os == 'Linux' && matrix.artifact == 'desktop'
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -98,8 +107,10 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.artifact == 'desktop'
 
       - uses: swatinem/rust-cache@v2
+        if: matrix.artifact == 'desktop'
         with:
           workspaces: src-tauri
 
@@ -107,14 +118,23 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Server builds skip the desktop Rust toolchain and system GUI deps
+      # entirely: PyInstaller + Python is their whole toolchain.
       - name: Install Linux system deps
-        if: matrix.os == 'Linux'
+        if: matrix.os == 'Linux' && matrix.artifact == 'desktop'
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
+          # Idempotent: the herp runners are persistent, so re-running
+          # apt-get update + install on every release just burns minutes.
+          if pkg-config --exists webkit2gtk-4.1 2>/dev/null && command -v patchelf >/dev/null 2>&1; then
+            echo "Linux system deps already present"
+          else
+            sudo apt-get update
+            sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
+          fi
 
       - name: Install frontend deps
+        if: matrix.artifact == 'desktop'
         # bash, not the Windows runner's default PowerShell (its execution
         # policy blocks script execution entirely).
         shell: bash
@@ -124,6 +144,7 @@ jobs:
       # no system Python. externalBin makes this file mandatory for the
       # Tauri CLI, so it must exist before `tauri build`.
       - name: Build backend sidecar
+        if: matrix.artifact == 'desktop'
         shell: bash
         run: bash scripts/build_sidecar.sh
 
@@ -132,6 +153,7 @@ jobs:
       # (service host + wizard). Linux: binary packaged as the daemon
       # .deb (scripts/build_server.sh, build_server_deb.sh).
       - name: Build headless server
+        if: matrix.artifact == 'server'
         shell: bash
         run: |
           bash scripts/build_server.sh
@@ -145,11 +167,12 @@ jobs:
           fi
 
       - name: Build (verbose, logged)
+        if: matrix.artifact == 'desktop'
         shell: bash
         run: npx tauri build --verbose 2>&1 | tee build.log
 
       - name: Report failure cause
-        if: failure()
+        if: failure() && matrix.artifact == 'desktop'
         shell: bash
         run: |
           grep -inE "error(\[E[0-9]+\])?:|error:|failed to|panicked" build.log | head -20 | while IFS= read -r line; do
@@ -161,10 +184,10 @@ jobs:
           npx tauri info 2>&1 | tail -40 || true
 
       - name: Attach full build log to release
-        if: failure()
+        if: failure() && matrix.artifact == 'desktop'
         shell: bash
         run: cp build.log "build-${RUNNER_OS,,}.log"
-      - if: failure()
+      - if: failure() && matrix.artifact == 'desktop'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
@@ -178,9 +201,9 @@ jobs:
       # Uploads via gh with per-file retries: softprops/action-gh-release has
       # none, and the 110–240MB assets have repeatedly died mid-upload on
       # GitHub's flaky release endpoint ("Error saving asset", "Headers
-      # Timeout Error", HTML 502s). Per-file so one bad upload can't sink the
-      # rest; --clobber so re-runs overwrite instead of name-conflicting.
-      - name: Upload release assets
+      # Timeout Error", HTML 502s). --clobber so re-runs overwrite instead of
+      # name-conflicting. Each cell uploads ONLY the artifact it built.
+      - name: Upload release asset
         if: success()
         shell: bash
         env:
@@ -188,14 +211,20 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           tag="${RELEASE_TAG:-${GITHUB_REF_NAME}}"
-          # Exactly four artifacts: one setup exe + one setup deb per OS.
-          # Desktop NSIS/deb are renamed from tauri's versioned names.
           if [ "$RUNNER_OS" = Windows ]; then
-            mv src-tauri/target/release/bundle/nsis/yaah_*_x64-setup.exe yaah-desktop-setup.exe
-            files="yaah-desktop-setup.exe yaah-server-setup.exe"
+            if [ "${{ matrix.artifact }}" = desktop ]; then
+              mv src-tauri/target/release/bundle/nsis/yaah_*_x64-setup.exe yaah-desktop-setup.exe
+              files="yaah-desktop-setup.exe"
+            else
+              files="yaah-server-setup.exe"
+            fi
           else
-            mv src-tauri/target/release/bundle/deb/yaah_*_amd64.deb yaah-desktop-setup.deb
-            files="yaah-desktop-setup.deb yaah-server-setup.deb"
+            if [ "${{ matrix.artifact }}" = desktop ]; then
+              mv src-tauri/target/release/bundle/deb/yaah_*_amd64.deb yaah-desktop-setup.deb
+              files="yaah-desktop-setup.deb"
+            else
+              files="yaah-server-setup.deb"
+            fi
           fi
           echo "assets:"; echo "$files"
           # #62: the RC channel is a property of the version, not of who
@@ -207,8 +236,8 @@ jobs:
             release_args+=(--prerelease)
           fi
           gh release view "$tag" >/dev/null 2>&1 || {
-            # Both OS jobs can race to create the same release. Ignore a create
-            # failure only if the other job successfully created it meanwhile.
+            # All four cells race to create the same release. Ignore a create
+            # failure only if someone successfully created it meanwhile.
             gh release create "${release_args[@]}" || gh release view "$tag" >/dev/null 2>&1 || exit 1
           }
           rc=0
