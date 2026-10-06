@@ -4,9 +4,11 @@ Spec: elboaf/YAAH#160. Synthesis ticket: elboaf/YAAH#166.
 
 **Baseline: master @ `fb85de2140add03f687bcf3fc5a68aa57f0cd92a`** (2026-09-30,
 "Fix CI: two test-isolation landmines the harness tripped"), worktree
-`C:\Users\Administrator\YAAH-prompt-review`. All `file:line` references below are
-to that commit. Fact base: `docs/research/prompt-surface-inventory.md` (pinned to
-`aeba2e7`; drift re-checks in the area reports found none in reviewed files
+`C:\Users\Administrator\YAAH-prompt-review`. All `file:line` references in
+§§1–2, 4–7 are to that commit. **Re-measurements (#300, 2026-10-06): §3 was
+re-walked at master @ `5dc98b9`** — byte tables there supersede the ones in
+the SYN rows. Fact base: `docs/research/prompt-surface-inventory.md` (re-pinned
+to `5dc98b9`; drift re-checks in the area reports found none in reviewed files
 except where noted). Evidence base: the 140 committed manifests in
 `backend/prompt_manifests/` plus targeted fresh `--render` runs made by the area
 reviews (never `--all`; the worktree was not modified).
@@ -144,32 +146,42 @@ measured redundancy in the default local prompt (~38% of the 17.8 KB base)** —
 before counting the wrong-platform guidance SYN-07 makes dead weight in
 posix/remote renders (~2.6 KB of guidelines).
 
-## 3. Token economy (manifest `total_bytes` at `fb85de2`)
+## 3. Token economy (manifest `total_bytes` at `5dc98b9` — re-measured for #300; previous walk was `fb85de2`)
 
 | Combo | Total bytes | Largest sections |
 |---|---|---|
-| win-local-plan-compaction | 18,235 | windows-sandbox 6,749 · guidelines 2,692 · computer-use 2,610 · subagent-index 1,310 · tools 780 · spoken-briefing 758 · ask-user 689 |
-| win-local-compaction (full default) | 17,785 | same shape (−plan note, −exit_plan schema); bare base subtotal (identity+env+tools+guidelines+briefing+ask-user) = **5,176** |
-| win-local-noshot | 17,773 | guidelines 2,692 · windows-sandbox 6,749 · computer-use 2,610 · persistent-memory 1,242 · subagent-index 1,310 |
-| win-local-override-compaction | ≈9.7 KB | override head replaces the whole base; fragments/indexes still appended |
-| win-remote-compaction | 7,809 | guidelines ≈2.6 KB · subagent-index 1,310 · identity ≈370 (schemas 12,236 B / 20 tools) |
-| win-remote-offline-plan | 16,293 | byte-identical to `-normal` (SYN-06) |
-| posix-local | 6,699 | guidelines ≈2.6 KB — carries Windows guidance it cannot act on (SYN-07) · subagent-index 1,310 |
-| Sub-agent prompts (per spawn batch) | 1,881 + 1,818 = 3,699 | subagent-base 633/570 · tools 347 · guidelines 542 · skills-index 352; ~28% exact-line overlap with parent lines, mostly the shared skills index (per-spawn, not per-turn) |
+| win-local-plan-compaction | 21,464 | windows-sandbox 6,824 · spoken-briefing 2,385 · computer-use 2,589 · subagent-index 1,615 · persistent-memory 1,593 · guidelines 1,610 |
+| win-local-compaction (full default) | 21,014 | same shape (−plan note, −exit_plan schema); bare base subtotal (identity+tools+guidelines+briefing+ask-user) = **5,923** |
+| win-local-noshot-compaction | 21,002 | same shape (−screenshot); tools prose list one name shorter |
+| win-local-nomemory-noshot | 19,236 | −persistent-memory; skills-index still in (354) |
+| win-local-noskills-nomemory-noshot | 18,882 | the all-flags-off floor |
+| win-local-noshot-override-compaction | 3,736 | override head replaces the whole base; fragments/indexes still appended |
+| win-remote-compaction | 9,379 | subagent-index 1,615 · guidelines 1,610 (schemas 12,391 B / 21 tools) |
+| win-remote-offline-plan | 17,654 | offline note replaces the whole base head (SYN-06 shape) |
+| Sub-agent prompts (per spawn batch) | 3,687 + 1,842 = 5,529 | subagent-base 447/441 · tools 328/89 · guidelines 670/670 · project-notes 276/276 · skills-index 352/352 · persistent-memory 1,593/— (general-purpose/explore) |
 
-Reading: the sandbox section alone is 37% of the default local prompt; the
-always-on injected baseline (notes + memory + one skill) adds ~2.9 KB of which
-~1.6 KB is fixed wrapper/guidance text; the unbounded always-on costs are the
-skill-index descriptions (SYN-32) and the memory index (capped 12 KB, marked);
-the unbounded per-turn costs are attachment `content` (SYN-11) and MCP
-descriptions (SYN-30). Schema-set sizes: win-local 35 tools / 25,482 B;
-win-remote 20 / 12,236 B; posix 19 / 11,075 B.
+Reading: the sandbox section is ~32% of the default local prompt; the
+always-on injected baseline (notes + memory + skills index) adds ~3.5 KB;
+the spoken-briefing section (2,385 B) now outranks guidelines — it carries the
+#295 narrator personas (only rendered when `voice.say_emissions` is on, #207).
+The branch-selector note (~1.6 KB, #301) is recorded by the harness as
+`"unrecognized"` — `SECTION_OPENINGS` (prompt_manifest.py:137–162) has no
+opening for it; named here by elimination, not renamed in the harness.
+The unbounded always-on costs remain the skill-index descriptions (SYN-32)
+and the memory index (capped 12 KB, marked); the unbounded per-turn costs
+are attachment `content` (SYN-11) and MCP descriptions (SYN-30).
+Schema-set sizes: win-local 36 tools / 25,151 B; win-remote 21 / 12,391 B
+(posix combos are never committed from a Windows host).
 
-**Correction of record:** the "~24 KB base prompt" figure in the spec and
-inventory §1 is wrong by ~35% — the measured bare base is **5,176 B** and the
-largest observed combo is 18,235 B (SYN-18). The fixture skills index is 354 B
-with two one-line skills; a real 34-skill install will be several KB
-(inventory estimates 4-5 KB, unmeasured by the harness).
+**Correction of record (SYN-18, re-measured):** the "~24 KB base prompt"
+folklore figure remains wrong, and the *measured* numbers have moved since
+`fb85de2`: bare base 5,176 → **5,923 B**, full default 17,785 → **21,014 B**,
+largest combo 18,235 → **22,004 B** (win-local-plan-noshot-compaction-
+sandboxonly). The old "nothing approaches the folkloric 24 KB with a ceiling
+≈19.7 KB" margin is gone — the max combo is now within ~2 KB of 24 KB. The
+fixture skills index is still 354 B (two one-line skills); a real 40-skill
+bundled install will be several KB (inventory estimates 4–5 KB, unmeasured
+by the harness).
 
 ## 4. Contradictions between area reports (resolved)
 
@@ -246,7 +258,8 @@ evidence does not model the real prompt:
   SYN-09 consolidation, where the tool-list helper would make adding them
   cheap.
 - **Non-actionable corrections owned by this document:** the 24 KB folklore
-  figure (corrected in §3, SYN-18) and the stale inventory line reference
+  figure (corrected in §3, SYN-18 — re-measured at 5dc98b9 for #300: bare base
+  is now 5,923 B, max combo 22,004 B) and the stale inventory line reference
   (folded into SYN-19) need no separate fix work beyond the doc updates
   already tracked by their SYN rows.
 
