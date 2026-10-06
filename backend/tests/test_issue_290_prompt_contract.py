@@ -82,16 +82,17 @@ async def test_run_injects_deterministic_paths(tmp_path, monkeypatch):
 
 def test_agents_md_does_not_restate_the_run_sop():
     """#322: the harness's injected SOP is the single, workspace-agnostic
-    source (the #290 criterion prescribing AGENTS.md adoption is revised
-    away with the #277 graduation that moved the SOP into the injected
-    note). A workspace AGENTS.md adds only project-specific deltas; the
-    deterministic namespace and branch grammar live in loop.py alone."""
+    source — homogeneous across projects. AGENTS.md carries ZERO worktree
+    discipline (the #290 criterion prescribing AGENTS.md adoption is
+    revised away with the #277 graduation; the section was testbed
+    scaffolding and is deleted outright). The deterministic namespace and
+    branch grammar live in loop.py alone."""
     root = Path(__file__).resolve().parents[2]
     text = (root / "AGENTS.md").read_text(encoding="utf-8")
-    assert ".scratch/chat-<id>/run" not in text
-    assert "run/<title-slug>-<chat-id>" not in text
-    assert "run/chat-<id>" not in text
-    assert "run-YYYYMMDD" not in text
+    # #322 follow-up: the topic is gone entirely, not just the tokens.
+    assert "Working tree discipline" not in text
+    assert "worktree" not in text.lower()
+    assert "primary worktree" not in text.lower()
     assert "land it" not in text and "scrap it" not in text
 
 
