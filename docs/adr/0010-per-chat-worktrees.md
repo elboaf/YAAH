@@ -83,7 +83,8 @@ untouchable by agents by construction, not by prompt discipline.
   local-git-workspace chat is pinned at creation — the no-pick path
   inherits the workspace's branch (`branch_pin_origin='inherited'`),
   legacy NULL rows lazily pin on first read._
-- **Pruning — age, clean only.** A chat worktree with no commits and no
+- **Pruning — age, clean only.** (Superseded 2026-10-06 by the
+  land-means-clean amendment below, #329.) A chat worktree with no commits and no
   uncommitted changes past an age threshold is auto-pruned. Chat
   deletion does not itself remove the tree; the sweeper is the single
   retirement mechanism, so uncommitted work always survives to the
@@ -148,7 +149,8 @@ tracker, not here.
 
 Accepted losses:
 
-- **Disk.** One checkout per chat that has ever written, until pruned.
+- **Disk.** (Amended 2026-10-06, #329: clean trees retire at run end.)
+  One checkout per chat that has ever written, until pruned.
   Bounded by the clean-age sweeper; per-worktree untracked bulk
   (dependency installs and the like) is re-fetched by whichever tool
   creates it.
@@ -245,3 +247,31 @@ human pushes. Decisions:
   to be a run branch, deleting the origin ref after the merge is part
   of landing; the local run branch is already deleted by the SOP's
   teardown.
+
+
+## Amendment 2026-10-06: land-means-clean (#329)
+
+A worktree exists only while its work is in flight. In the requester's
+words, confirmed in-session: "A worktree exists only while its work is
+in flight. When the work lands on the chat's selected branch, everything
+created for that work goes away - run worktree and the chat worktree if
+the chat has nothing left in it. Only dirty residue survives landing,
+and then it's surfaced to the user, never silently kept. Branches are
+never held open by finished work." Decisions:
+
+- **Post-run retirement.** When a run ends and the chat worktree is
+  clean and residue-free, the harness retires it, freeing any branch
+  checkout the tree held. The agent never removes the tree it stands
+  in: this is harness code after run end, never agent SOP.
+- **The sweeper's live gate is per chat, not per workspace.** A dead
+  chat's clean tree sweeps even in a workspace with live conversations.
+  (The per-workspace gate made the sweeper a permanent no-op in the
+  main workspace - the pile-up #329 documents.)
+- **Pre-#277 standalone clones** (`.git` a directory) become retirably
+  visible: clean-checked and removed like any other residue-free tree.
+- **Dirty residue survives and surfaces** via the residue protocol -
+  never silently kept, never silently deleted.
+- **Re-materialization is cheap.** `ensure_chat_worktree` recreates the
+  tree on the next run; #321 keeps the namespace git-invisible.
+- **The age threshold stays as backstop** for residue the run-end path
+  missed (a crashed run), not as the primary lifecycle.

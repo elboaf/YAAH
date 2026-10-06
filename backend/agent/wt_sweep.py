@@ -1,6 +1,10 @@
-"""Per-chat worktree maintenance (issue #277, ADR-0010 pruning clause).
+"""Per-chat worktree maintenance (issue #277; lifecycle per ADR-0010 as
+amended 2026-10-06 by #329, land-means-clean).
 
-The sweeper is the single retirement mechanism for chat worktrees:
+Primary retirement is post-run, in the harness: a clean, residue-free
+chat worktree is removed when its run ends, freeing any branch checkout.
+The sweeper is the backstop for residue the run-end path missed:
+clean-only, dead-chat-only, past an age threshold.
 clean-only, dead-chat-only, past an age threshold. "Clean" is a whole
 `git status --porcelain` on the chat worktree — which a nested run
 worktree (`.scratch/chat-<id>/run`) shows as an untracked entry, so an
@@ -8,6 +12,11 @@ in-flight or residue run automatically pins the tree as dirty and it is
 never swept. Deletion never touches a conversation row: chat deletion
 alone does not remove the tree (ADR-0010), the sweeper is what retires
 it once the chat is gone AND the tree sat clean past the threshold.
+
+KNOWN DEFECT (#329, unfixed here): the dead-chat gate below is
+per-WORKSPACE - any live conversation pins every tree in that
+workspace, so in the main workspace the sweeper never fires. The fix
+is a per-chat gate (conversation row gone + clean + age).
 """
 import time
 from pathlib import Path
