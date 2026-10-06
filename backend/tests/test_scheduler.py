@@ -222,7 +222,7 @@ async def test_fired_run_tags_user_row_as_agent_prompt(fake_model, tmp_path):
     assert len(user_rows) == 1
     fired_row = user_rows[0]
     assert fired_row["meta"] == {"agent_prompt": True}
-    # Per-run copy (CONTEXT.md: avoid "snapshot" for prompt text): the
+    # Per-run copy (GLOSSARY.md: avoid "snapshot" for prompt text): the
     # verbatim effective prompt, standing instructions appended at fire time.
     assert fired_row["content"].startswith("summarize commits")
     assert "# Standing instructions" in fired_row["content"]
