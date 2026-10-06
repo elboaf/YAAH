@@ -14,6 +14,7 @@ and could not see at creation. The brief (triage, 2026-10-05) specifies:
   landing `off`, `_agent_view` carries the pinned chat's branch and pin
   origin so the form can name what its fires would land on.
 """
+import asyncio
 import json
 import subprocess
 
@@ -67,10 +68,6 @@ def _body(**kw):
     }
     base.update(kw)
     return base
-
-
-async def _chat(cid):
-    return await get_conversation(cid)
 
 
 # ---- Part A: creation ----
@@ -224,3 +221,80 @@ def test_agent_view_pin_fields_are_null_without_a_pin(tmp_path):
         created = c.post("/api/agents", json=_body(workspace=str(d))).json()
         assert created["chat_selected_branch"] is None
         assert created["chat_branch_pin_origin"] is None
+
+
+# ---- the flip guards (ADR-0010 dirty-flip guard + local-branch check) ----
+
+
+def test_patch_explicit_branch_refuses_a_dirty_chat_worktree(tmp_path):
+    """ADR-0010 dirty-flip guard: a selector flip refuses while the chat's
+    own worktree has uncommitted changes — same contract as the
+    branch_select tool."""
+    from backend.agent.worktrees import ensure_chat_worktree
+
+    repo = _repo(tmp_path)
+    _git(repo, "branch", "nightly")
+    invalidate_git_caches(str(repo))
+    with _client() as c:
+        created = c.post("/api/agents", json=_body(workspace=str(repo))).json()
+        conv = created["conversation_id"]
+        wt = asyncio.run(ensure_chat_worktree(str(repo), conv, "master"))
+        assert wt.get("path"), wt
+        (wt["path"] / "scratch.txt").write_text("uncommitted" + chr(10), encoding="utf-8")
+        r = c.patch(
+            f"/api/agents/{created['id']}",
+            json=_body(workspace=str(repo), selected_branch="nightly"),
+        )
+        assert r.status_code == 409
+        assert "uncommitted" in r.json()["detail"]
+        # The selector never moved.
+        chat = _chat_sync(conv)
+        assert chat["selected_branch"] == "master"
+        assert chat["branch_pin_origin"] == "inherited"
+
+
+def test_patch_explicit_branch_refuses_a_non_local_branch(tmp_path):
+    """Every flip path refuses a branch the workspace doesn't have — a
+    stored pin born stale would fail materialization at fire time."""
+    repo = _repo(tmp_path)
+    invalidate_git_caches(str(repo))
+    with _client() as c:
+        created = c.post("/api/agents", json=_body(workspace=str(repo))).json()
+        r = c.patch(
+            f"/api/agents/{created['id']}",
+            json=_body(workspace=str(repo), selected_branch="ghost"),
+        )
+        assert r.status_code == 400
+        assert "not a local branch" in r.json()["detail"]
+
+
+def test_patch_inherit_default_skips_the_guards(tmp_path):
+    """The no-op path must not pay for (or trip) the flip guards."""
+    from backend.agent.worktrees import ensure_chat_worktree
+
+    repo = _repo(tmp_path)
+    invalidate_git_caches(str(repo))
+    with _client() as c:
+        created = c.post("/api/agents", json=_body(workspace=str(repo))).json()
+        conv = created["conversation_id"]
+        wt = asyncio.run(ensure_chat_worktree(str(repo), conv, "master"))
+        assert wt.get("path"), wt
+        (wt["path"] / "scratch.txt").write_text("uncommitted" + chr(10), encoding="utf-8")
+        r = c.patch(f"/api/agents/{created['id']}", json=_body(workspace=str(repo)))
+        assert r.status_code == 200
+
+
+# ---- the inherit fallback's edges, end to end ----
+
+
+def test_create_detached_head_pins_nothing(tmp_path):
+    repo = _repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "--detach", sha)
+    invalidate_git_caches(str(repo))
+    with _client() as c:
+        r = c.post("/api/agents", json=_body(workspace=str(repo)))
+        assert r.status_code == 200
+        chat = _chat_sync(r.json()["conversation_id"])
+        assert chat["selected_branch"] is None
+        assert chat["branch_pin_origin"] is None

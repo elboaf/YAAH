@@ -163,6 +163,25 @@ describe('issue #314: agent form branch picker', () => {
     expect(screen.queryByText(/lands on/)).toBeNull()
   })
 
+  it('an untouched edit save sends no branch (never re-origins the pin)', async () => {
+    /** The picker must rest on the inherit default on edit — initializing
+     *  from the chat's current branch would silently stamp an inherited
+     *  pin as explicit on every save. The current branch shows in the
+     *  caption instead. */
+    render(
+      <AgentForm
+        agent={{ ...baseAgent, chat_selected_branch: 'master', chat_branch_pin_origin: 'inherited' }}
+        wsPath={ws}
+        onDone={() => {}}
+        onCancel={() => {}}
+      />,
+    )
+    await screen.findByRole('option', { name: 'master' })
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent' }))
+    await waitFor(() => expect(updateAgent).toHaveBeenCalled())
+    expect(updateAgent.mock.calls[0][1].selected_branch).toBeUndefined()
+  })
+
   it('off option reads as following the chat selector', async () => {
     render(<AgentForm agent={null} wsPath={ws} onDone={() => {}} onCancel={() => {}} />)
     const opt = screen.getByRole('option', { name: /follows the chat's branch selector/ }) as HTMLOptionElement

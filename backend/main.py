@@ -1630,8 +1630,6 @@ class AgentBody(BaseModel):
     schedule_type: str = "interval"          # interval | daily | weekly
     schedule_spec: dict = {}                 # see database.SCHEMA agents comment
     approval_policy: str = "sandbox-only"    # sandbox-only | autonomous
-    # #278: where each fire's work lands — off (chat's own branch),
-    # fixed (landing_branch), per-run (a branch per fire, unmerged).
     # #314: the form's branch pick for the agent's pinned chat. None/blank
     # = the inherit default (the #301 fallback stamps the workspace's
     # then-current branch, origin 'inherited'); an explicit pick pins the
@@ -1821,11 +1819,41 @@ async def api_agents_update(agent_id: str, body: AgentBody):
     # for fixed/per-run at fire time. The inherit default is a deliberate
     # NO-OP: the selector matters mainly in off mode, and switching the
     # agent back to off should keep the chat where the last explicit pick
-    # (or the last fire) left it.
+    # (or the last fire) left it. The flip guards mirror the branch_select
+    # tool (ADR-0010): a stored pick must be a local branch of the chat's
+    # workspace, and a flip refuses while the chat's own worktree has
+    # uncommitted changes — stranding them relative to the new landing
+    # target is the exact failure the dirty-flip guard exists to kill.
     picked = (body.selected_branch or "").strip()
-    if picked and existing.get("conversation_id"):
+    conv_id = existing.get("conversation_id")
+    if picked and conv_id:
+        from backend.agent import worktrees as _worktrees
+        from backend.agent.gitinfo import _run_git, list_local_branches
+        from backend.agent.tools import workspace_root
+
+        conv = await get_conversation(conv_id)
+        ws = (conv or {}).get("workspace") or ""
+        if not ws.strip() or ws.startswith("remote:"):
+            raise HTTPException(status_code=400, detail="no local git workspace")
+        try:
+            root = workspace_root(ws)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if picked not in await list_local_branches(root):
+            raise HTTPException(status_code=400, detail=f"not a local branch: {picked}")
+        chat_dir = _worktrees.chat_worktree_path(ws, conv_id)
+        if chat_dir is not None and chat_dir.exists():
+            rc, out = await _run_git(chat_dir, "status", "--porcelain")
+            if rc != 0 or (out or "").strip():
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "this chat's worktree has uncommitted changes - "
+                        "commit or discard before switching branches"
+                    ),
+                )
         await update_conversation(
-            existing["conversation_id"],
+            conv_id,
             selected_branch=picked,
             branch_pin_origin="explicit",
         )

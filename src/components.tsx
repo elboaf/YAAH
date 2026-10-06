@@ -5356,7 +5356,10 @@ export function AgentForm({
   // at creation (origin 'explicit'); on edit it writes through to the
   // chat's selector (it matters mainly in off mode — fixed/per-run
   // overwrite the selector at every fire anyway).
-  const [pinBranch, setPinBranch] = useState(agent?.chat_selected_branch ?? '')
+  // Rests on '' (the inherit default) on edit too: preselecting the chat's
+  // current branch would silently re-stamp an inherited pin as explicit on
+  // every untouched save. The current target shows in the caption instead.
+  const [pinBranch, setPinBranch] = useState('')
   // #314: the workspace's branch list for the picker (null while loading,
   // [] when the workspace contributes none — non-git/remote/disabled).
   const [wsBranches, setWsBranches] = useState<string[] | null>(null)
@@ -5594,7 +5597,7 @@ export function AgentForm({
                   agent.chat_branch_pin_origin
                     ? ` (${agent.chat_branch_pin_origin === 'explicit' ? 'explicit pick' : 'inherited from workspace'})`
                     : ''
-                }`
+                }; the picker rests on the inherit default — an explicit pick writes through to the chat`
               : `a new chat will inherit the workspace's current branch at creation`
           }.`}
         {landingMode === 'fixed'
