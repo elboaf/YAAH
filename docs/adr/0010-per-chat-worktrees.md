@@ -301,3 +301,9 @@ Decisions:
   residue rule; neither may weaken the other's protections. Existing
   standing trees are handled by the implemented mechanism — the
   requester explicitly deferred any manual cleanup pass.
+- **Re-materialization is cheap.** `ensure_chat_worktree` recreates the
+  tree on the chat's next run; #321 keeps the namespace
+  git-invisible from birth, so retirement costs nothing but disk.
+- **The age threshold stays as backstop** for trees the run-end path
+  missed (a crashed run, a chat deleted mid-run) — not as the primary
+  lifecycle.
