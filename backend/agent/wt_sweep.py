@@ -1,21 +1,32 @@
-"""Per-chat worktree maintenance (issue #277, ADR-0010 pruning clause).
+"""Per-chat worktree maintenance (#277 slice D; lifecycle per #329/ADR-0010).
 
-The sweeper is the single retirement mechanism for chat worktrees:
-clean-only, dead-chat-only, past an age threshold. "Clean" is a whole
-`git status --porcelain` on the chat worktree, PLUS absence of the
-nested run worktree: since #321 the `.scratch/` namespace is
-git-invisible (`.git/info/exclude`), so the nested
-`.scratch/chat-<id>/run` worktree shows no untracked entry — an
-in-flight or residue run pins the tree by EXISTENCE, not dirtiness
-(#330). Deletion never touches a conversation row: chat deletion
-alone does not remove the tree (ADR-0010), the sweeper is what retires
-it once the chat is gone AND the tree sat clean past the threshold.
+The sweeper is one of two retirement mechanisms for chat worktrees - the
+other is the post-run hook (``worktrees.retire_chat_worktree``, called at
+run end from loop.py). The sweeper catches what the hook leaves behind:
+trees of chats that no longer exist at all. Retirement is clean-only and
+residue-only-never: a tree that is dirty, or that still holds the
+deterministic run namespace (``<chat>/run``, ``<chat>/.scratch`` -
+git-invisible since #321, so pinned by EXISTENCE per #330), is never
+swept.
 
+Gating is PER CHAT (#329): a chat is dead when its conversation row is
+gone - detected by listing the ``.scratch/chat-*`` dirs and resolving
+each id against the conversations table - not by skipping whole
+workspaces that have any live conversation. The main workspace always
+has live chats; the old per-workspace gate made the sweeper a permanent
+no-op exactly where the pile grows.
+
+Pre-#277 standalone clones (``.git`` a directory, not worktree-registered)
+are retirably visible too: the same per-chat checks run, and removal
+falls back to plain rmtree when ``git worktree remove`` refuses them.
 """
+import os
+import shutil
 import time
 from pathlib import Path
 
 from backend.agent.gitinfo import _run_git
+from backend.agent.worktrees import chat_worktree_has_run_tree
 
 # A chat worktree with no uncommitted changes and no residue past this
 # age is auto-pruned. Idle trees cost disk; this bounds it.
@@ -25,11 +36,27 @@ _last_sweep = 0.0
 _MIN_INTERVAL = 3600.0  # once per process start, then at most hourly
 
 
+def _rmtree_readonly(path: Path) -> None:
+    """rmtree that clears Windows read-only bits (git marks pack files
+    0444). onerror-style retries are deprecated on 3.12+; do it with
+    explicit resets."""
+    import stat
+
+    def _reset(fn, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            fn(p)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=_reset)
+
+
 async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -> dict:
     """Retire clean chat worktrees of dead chats past the age threshold.
 
     Returns {checked, swept: [paths], kept} for logging; never raises
-    over an individual tree — a busy or unreadable tree is just kept
+    over an individual tree - a busy or unreadable tree is just kept
     this round.
     """
     from backend.db.database import get_db
@@ -39,12 +66,14 @@ async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -
     try:
         db = await get_db()
         try:
-            cur = await db.execute("SELECT path FROM workspaces")
+            cur = await db.execute(
+                "SELECT path FROM workspaces"
+            )
             ws_rows = [dict(r) for r in await cur.fetchall()]
             cur = await db.execute(
-                "SELECT DISTINCT workspace FROM conversations WHERE workspace IS NOT NULL"
+                "SELECT DISTINCT id FROM conversations"
             )
-            live = {str(r["workspace"]) for r in await cur.fetchall()}
+            live_ids = {str(r["id"]) for r in await cur.fetchall()}
         finally:
             await db.close()
     except Exception:  # noqa: BLE001 - the sweeper must never break boot
@@ -53,16 +82,26 @@ async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -
     now = time.time()
     for row in ws_rows:
         ws = str(row.get("path") or "")
-        if not ws or ws.startswith("remote:") or ws in live:
+        if not ws or ws.startswith("remote:"):
             continue
         # Find this workspace's chat worktrees by path arithmetic instead
-        # of trusting any single chat id.
+        # of trusting any single chat id. The chat-id parse IS the dead
+        # chat gate (#329): a dir whose id has no conversation row is
+        # sweepable no matter how many OTHER chats of this workspace are
+        # live right now.
         scratch = Path(ws) / ".scratch"
         if not scratch.is_dir():
             continue
         for child in scratch.iterdir():
             if not child.is_dir() or not child.name.startswith("chat-"):
                 continue
+            chat_id = child.name.removeprefix("chat-")
+            try:
+                int(chat_id)
+            except ValueError:
+                continue  # not a per-chat worktree (e.g. chat-mic-gate)
+            if chat_id in live_ids:
+                continue  # a live chat's tree is never swept here
             checked += 1
             # Age gate on mtime: cheap; the clean gate is authoritative.
             try:
@@ -74,19 +113,26 @@ async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -
             rc, out = await _run_git(child, "status", "--porcelain")
             if rc != 0 or (out or "").strip():
                 continue  # dirty: never swept
-            # #330: the nested worktree namespace is git-invisible (#321
-            # exclude), so a run worktree (`<chat>/run`) or a nested chat
-            # tree (`<chat>/.scratch/chat-<id>`) shows no untracked entry
-            # — pin by EXISTENCE, not dirtiness. Both shapes live in the
-            # deterministic harness namespace under the chat tree, so
-            # their presence is the honest "something lives here" gate;
-            # they can never read swept-away as invisible untracked
-            # entries used to.
-            if (child / "run").exists() or (child / ".scratch").exists():
-                continue  # in-flight or residue work: never swept
+            # #330: the run namespace is git-invisible (#321), so pin by
+            # existence - a live run or residue keeps the tree standing.
+            if chat_worktree_has_run_tree(child):
+                continue
             rc2, _ = await _run_git(ws, "worktree", "remove", str(child))
-            if rc2 == 0:
-                swept.append(str(child))
+            if rc2 != 0:
+                # Legacy pre-#277 standalone clone (#329): `.git` is a
+                # directory, git refuses - but it is clean, dead, aged,
+                # and unregistered, so plain removal retires it all the
+                # same. Only when it is genuinely NOT worktree-registered
+                # (no `.git` FILE); a registered tree failing `worktree
+                # remove` is kept for surface, never rmtree'd.
+                if not (child / ".git").is_file():
+                    try:
+                        _rmtree_readonly(child)
+                        swept.append(str(child))
+                    except OSError:
+                        pass
+                continue
+            swept.append(str(child))
     return {"checked": checked, "swept": swept, "kept": checked - len(swept)}
 
 

@@ -20,6 +20,7 @@ Emits JSON-line events for the frontend:
 import asyncio
 import itertools
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -52,6 +53,8 @@ from backend.db.database import (
     set_conversation_usage,
     update_conversation,
 )
+
+log = logging.getLogger("yaah.loop")
 
 
 AUTO_TITLE_MAX_CHARS = 60  # hard clamp the consumer enforces; word count
@@ -943,7 +946,9 @@ def _residue_protocol(cid: str) -> str:
         "dirty or has unmerged commits, leave it untouched, say so, and "
         f"use `.scratch/chat-{cid}/run-2` for this run instead. The user "
         'says "land it" or "scrap it" for surfaced residue \u2014 it is never '
-        "silently deleted, and never silently blocks a chat."
+        "silently deleted, and never silently blocks a chat. The harness "
+        "retires a landed-clean chat worktree at run end (#329); if you "
+        "still see one standing, surface it rather than removing it."
     )
 
 
@@ -2755,6 +2760,27 @@ async def _run_agent_claimed(
             )
             if file_summary:
                 await _persist_file_change_summary(conversation_id, file_summary)
+        # #329 (land-means-clean): the run is over — if the chat worktree
+        # is clean and holds no run residue, retire it now. This frees
+        # any branch checkout a finished chat's tree was holding and
+        # keeps worktrees from piling up per chat that ever wrote. The
+        # tree was in use moments ago, so no age gate here; dirt and
+        # residue make retirement a no-op and surface via the residue
+        # protocol instead. Never fatal: teardown must not mask the turn
+        # result. Skipped when the turn degraded out of the worktree (a
+        # failed materialization has nothing to retire).
+        if worktree_error == "" and not remote_workspace:
+            try:
+                from backend.agent.worktrees import retire_chat_worktree
+
+                _ret = await retire_chat_worktree(turn_workspace, conversation_id)
+                if _ret.get("retired"):
+                    log.info(
+                        "chat worktree retired after run (#329): %s",
+                        _ret.get("path"),
+                    )
+            except Exception:  # noqa: BLE001 - teardown never blocks
+                log.exception("post-run chat worktree retirement failed")
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

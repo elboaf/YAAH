@@ -16,8 +16,12 @@ _Avoid_: main tree, shared tree, "the checkout" unqualified
 **Chat worktree**:
 The per-chat git worktree a chat's runs work in, materialized on first
 write at the chat's selected branch. Selector flips and landing merges
-happen inside it, so conflicts are that chat's private problem. Pruned
-by age once clean. See ADR-0010 (supersedes ADR-0008).
+happen inside it, so conflicts are that chat's private problem.
+Retired when its work lands and the tree is clean — a worktree exists
+only while its work is in flight; branches are never held open by
+finished work. Trees of dead chats retire the same way past an age
+threshold. See ADR-0010 (supersedes ADR-0008; land-means-clean
+lifecycle per #329).
 _Avoid_: session worktree, `agent/*` branch
 
 **Branch selector**:
