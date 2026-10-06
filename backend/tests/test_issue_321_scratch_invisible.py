@@ -102,10 +102,21 @@ async def test_unwritable_exclude_degrades_without_blocking(tmp_path):
     info = repo / ".git" / "info"
     info.mkdir(exist_ok=True)
     # A DIRECTORY where info/exclude belongs: every read/write probe
-    # fails with an OSError, so the guard must log-and-continue.
+    # fails with an OSError, so the guard must log-and-continue. (A
+    # directory there is tolerated by WINDOWS git, where this test was
+    # written — CI's Linux git refuses to run once info/exclude is a
+    # dir, so the degrade path never got to prove anything. chmod is
+    # the cross-platform injection; on a Windows admin it is a no-op,
+    # in which case the exclude write succeeds and the worktree is
+    # still created — the degrade path, just not the warning flavor.
+    # #321 CI-failure analysis, 2026-10-06.)
     (info / "exclude").unlink()  # git templates a file here
-    (info / "exclude").mkdir()
-    out = await worktrees.ensure_chat_worktree(str(repo), 35, "feature")
+    (info / "exclude").write_text("original\n", encoding="utf-8")
+    try:
+        (info / "exclude").chmod(0o444)
+        out = await worktrees.ensure_chat_worktree(str(repo), 35, "feature")
+    finally:
+        (info / "exclude").chmod(0o644)
     assert out["created"] is True  # the run is never blocked
     assert (repo / ".scratch" / "chat-35").exists()
 
