@@ -262,6 +262,25 @@ def test_git_command_push_without_upstream_falls_back(client, tmp_path):
     assert row["tool_call_id"].startswith("ui-git-push-")
 
 
+def test_git_command_push_refuses_run_branch_head(client, tmp_path):
+    """#320: when HEAD is a run/* branch, push is refused BEFORE any push
+    is attempted - the --set-upstream fallback must never publish a run
+    branch as a brand-new origin ref (ADR-0010: run branches stay local
+    until landed on a primary branch)."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "checkout", "-b", "run/chat-999")
+    conv_id = _conversation(client, repo)
+    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "push"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert "run/* branches stay local" in body["error"]
+    assert "note" not in body  # the --set-upstream fallback never ran
+    msgs = client.get(f"/api/conversations/{conv_id}/messages").json()
+    row = msgs[-1]
+    assert row["tool_call_id"].startswith("ui-git-push-")
+
+
 def test_git_command_whitelist_rejects_arbitrary_actions(client, tmp_path):
     repo = _repo_with_commit(tmp_path)
     conv_id = _conversation(client, repo)

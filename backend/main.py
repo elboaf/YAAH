@@ -868,19 +868,37 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
         else:
             result = await _run_ui_git(root, "commit", "-m", msg)
     elif action == "push":
-        result = await _run_ui_git(root, "push")
-        err = result.get("error", "").lower()
-        if "error" in result and ("upstream" in err or "push destination" in err):
-            # No upstream (new branch) or no remote configured yet: retry
-            # with --set-upstream and say so in the recorded output.
-            probe = await _run_ui_git(root, "rev-parse", "--abbrev-ref", "HEAD")
-            branch = probe.get("output", "").strip() if "output" in probe else ""
-            if branch:
-                retried = await _run_ui_git(
-                    root, "push", "--set-upstream", "origin", branch
-                )
-                retried.setdefault("note", f"set upstream to origin/{branch}")
-                result = retried
+        # #320 (ADR-0010): run branches (`run/*`, per-chat worktree HEADs)
+        # are private scratch - the status strip never publishes them, and
+        # the --set-upstream fallback below would create a brand-new origin
+        # ref for one. Refuse before any git call; the refusal is traced
+        # like every other result.
+        head = await _run_ui_git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        branch = head.get("output", "").strip() if "output" in head else ""
+        if branch.startswith("run/"):
+            result = {
+                "ok": False,
+                "error": (
+                    f"refusing to push `{branch}`: run/* branches stay "
+                    "local until landed on a primary branch (ADR-0010); "
+                    "switch the workspace to the landed branch and push "
+                    "that instead"
+                ),
+            }
+        else:
+            result = await _run_ui_git(root, "push")
+            err = result.get("error", "").lower()
+            if "error" in result and ("upstream" in err or "push destination" in err):
+                # No upstream (new branch) or no remote configured yet: retry
+                # with --set-upstream and say so in the recorded output.
+                probe = await _run_ui_git(root, "rev-parse", "--abbrev-ref", "HEAD")
+                branch = probe.get("output", "").strip() if "output" in probe else ""
+                if branch:
+                    retried = await _run_ui_git(
+                        root, "push", "--set-upstream", "origin", branch
+                    )
+                    retried.setdefault("note", f"set upstream to origin/{branch}")
+                    result = retried
     elif action == "pull":
         result = await _run_ui_git(root, "pull")
     elif action == "checkout":

@@ -953,6 +953,15 @@ _AMENDMENT_RULES = (
     "derive from this chat's selected branch, never from the primary HEAD. "
 )
 
+# #320: run branches are private scratch (ADR-0010). Publishing one as an
+# origin ref - by pushing it or PR-ing from it - breaks the landing
+# contract; work reaches origin only inside a landed primary branch.
+_LOCAL_ONLY_RULES = (
+    "The run branch stays LOCAL: never `git push` it and never open a PR "
+    "from it - work reaches origin only inside a landed branch, which the "
+    "human pushes. "
+)
+
 
 def _run_branch_name(title, chat_id=None) -> str:
     """This chat's run branch: ``run/<title-slug>-<chat-id>`` (#312).
@@ -1027,6 +1036,7 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
             f"branch `{rb}` carries the work. `{b}` itself is "
             "landed by the human \u2014 leave the primary tree alone. "
             + _AMENDMENT_RULES
+            + _LOCAL_ONLY_RULES
             + residue
         )
     return (
@@ -1050,8 +1060,7 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
         f"(`git merge {rb}` \u2014 on conflict, resolve here or "
         "`git merge --abort` and report), then remove the run worktree "
         f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d "
-        f"{rb}`). "
-        + residue
+        f"{rb}`). " + _LOCAL_ONLY_RULES + residue
     )
 
 
@@ -1092,6 +1101,7 @@ def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit", t
         "worktree, and report so the human lands it. "
         "Surfaces at run start: when a run worktree already exists at "
         "that path, follow the residue protocol. "
+        + _LOCAL_ONLY_RULES
         + _residue_protocol(cid)
     )
 
