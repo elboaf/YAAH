@@ -195,6 +195,8 @@ function agentRow() {
     last_status: '',
     instructions: [],
     chat_title: 'nightly agent',
+    chat_selected_branch: null,
+    chat_branch_pin_origin: null,
   }
 }
 
