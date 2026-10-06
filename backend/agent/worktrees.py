@@ -23,10 +23,13 @@ matching the existing remote skips in loop injection and the git
 endpoints; non-git and Default (home) workspaces have no branch to
 attach to and are skipped the same way.
 """
+import logging
 from pathlib import Path
 
 from backend.agent.gitinfo import _run_git
 from backend.agent.tools import workspace_root
+
+log = logging.getLogger("yaah.worktrees")
 
 
 def chat_worktree_path(workspace: str | None, chat_id: int | str) -> Path | None:
@@ -39,6 +42,66 @@ def chat_worktree_path(workspace: str | None, chat_id: int | str) -> Path | None
     if not ws or ws.startswith("remote:") or ws == ".":
         return None
     return workspace_root(ws) / ".scratch" / f"chat-{chat_id}"
+
+
+async def _ensure_scratch_invisible(workspace: str | None) -> None:
+    """Keep ``<workspace>/.scratch/`` invisible to git (#321, ADR-0010).
+
+    The whole per-chat namespace is welded to the deterministic
+    ``.scratch/chat-<id>/`` path - the residue sweeper (``wt_sweep``) and
+    ``runwatch`` both find worktrees only by that path shape - so a
+    workspace whose own ``.gitignore`` does not cover ``.scratch/`` shows
+    it as untracked noise and tempts agents into relocating worktrees,
+    which silently breaks all of that. Invisibility is established via
+    the UNTRACKED ``.git/info/exclude`` - never the user's tracked
+    ``.gitignore``: no user file is modified, nothing is committed, and
+    the rule is per-clone by design.
+
+    Best-effort by contract: any probe or write failure logs a warning
+    and returns - the worktree is still created, degrading to the
+    pre-#321 behavior instead of blocking a run.
+    """
+    ws = (workspace or "").strip()
+    if not ws or ws.startswith("remote:") or ws == ".":
+        return  # no local git workspace: nothing to keep invisible
+    root = workspace_root(ws)
+    rc, _ = await _run_git(root, "check-ignore", "-q", ".scratch/")
+    if rc == 0:
+        return  # already ignored (rule, tracked .gitignore, or exclude)
+    # rc == 1: not ignored -> the rule is missing. rc >= 2 (or 127, no
+    # git): git could not answer at all - fall through, one warning below.
+    rc2, out = await _run_git(root, "rev-parse", "--git-path", "info/exclude")
+    exclude = out.strip() if rc2 == 0 and out.strip() else None
+    if not exclude:
+        log.warning(
+            "scratch-invisible: cannot resolve info/exclude in %s; "
+            ".scratch/ may show as untracked",
+            root,
+        )
+        return
+    try:
+        exclude_path = Path(exclude)
+        if not exclude_path.is_absolute():
+            exclude_path = root / exclude_path
+        lines = (
+            exclude_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if exclude_path.exists()
+            else []
+        )
+        if any(line.strip() == ".scratch/" for line in lines):
+            return  # already listed: idempotent even if check-ignore disagreed
+        lines = [line for line in lines if line.strip()]
+        lines.append("# added by YAAH (#321): per-chat worktree namespace stays untracked")
+        lines.append(".scratch/")
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        exclude_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "scratch-invisible: could not update %s (%s); .scratch/ may "
+            "show as untracked",
+            exclude,
+            exc,
+        )
 
 
 async def ensure_chat_worktree(
@@ -59,6 +122,9 @@ async def ensure_chat_worktree(
     branch = str(branch).strip()
 
     if chat_dir.exists():
+        # #321: establish .scratch/ invisibility before anything else
+        # touches the namespace (idempotent, best-effort).
+        await _ensure_scratch_invisible(workspace)
         # The dirty-flip guard ran in the caller, so an existing tree may
         # be retargeted in place: flip = checkout inside the chat's own
         # worktree (ADR-0010, branch-selector decision). Attached trees
@@ -80,6 +146,9 @@ async def ensure_chat_worktree(
         }
 
     root = workspace_root(workspace)
+    # #321: make .scratch/ git-invisible BEFORE the first worktree add,
+    # so the deterministic namespace starts life untracked-and-invisible.
+    await _ensure_scratch_invisible(workspace)
     # Start at the selected branch itself; when git refuses (the branch is
     # checked out in the primary or another worktree - the common case for
     # master), detach at the same tip. One checkout per branch is a git
