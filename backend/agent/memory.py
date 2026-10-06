@@ -232,7 +232,7 @@ Never save — these have exactly one home, and memory is not it:
 - workflow state (issue filed, PR opened, review round, CI status, \
 merge, release): the issue tracker owns this.
 - project knowledge (architecture, bugs, fixes, plans, constraints): \
-the repo owns this (CONTEXT.md, docs/, ADRs).
+the repo owns this (GLOSSARY.md, docs/, ADRs).
 - anything the repo or tracker already records, or details that only \
 matter to the current conversation.
 

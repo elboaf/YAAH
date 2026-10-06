@@ -11,7 +11,7 @@ so the newest entries reached no one.
 We decided memory is **strictly a model of the owner**: `user` facts and
 `feedback` on how to work (plus rarely a durable `reference` pointer).
 Workflow state has exactly one home — the tracker; project knowledge has
-exactly one home — the repo (CONTEXT.md, docs/, ADRs). Every save must pass
+exactly one home — the repo (GLOSSARY.md, docs/, ADRs; named CONTEXT.md at the time of writing). Every save must pass
 the **retention test**: would a fresh session, handed only the repo and the
 tracker, work differently for this user without it?
 

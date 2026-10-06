@@ -2882,6 +2882,13 @@ export function RemoteTranscriptDialog({
   // key keeps it collision-safe against same-ID local chats.
   const remoteKey = remoteConversationKey(hostId, conversationId)
   const remoteStatus = useAgent((s) => s.statusByConv[remoteKey] ?? 'idle')
+  // Issue #308: this dialog IS the on-screen remote chat — tell the store so
+  // the #25 finish-signal rule knows which remote chat is being watched, and
+  // clear any stale signal from a turn that ended while it was closed.
+  useEffect(() => {
+    useAgent.getState().setActiveRemoteKey(remoteKey)
+    return () => useAgent.getState().setActiveRemoteKey(null)
+  }, [remoteKey])
   // The turn's workspace: the cached conversation row's workspace is resolved
   // by the backend when the body omits it, but sending the remote-namespaced
   // workspace here makes dispatch explicit (the runner fails closed without
@@ -2911,7 +2918,7 @@ export function RemoteTranscriptDialog({
         ],
       },
     }))
-    useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
+    useAgent.getState().setStatus(remoteKey, 'thinking')
     setComposerText('')
     const ac = new AbortController()
     const applyEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
@@ -2922,16 +2929,24 @@ export function RemoteTranscriptDialog({
         // captured on the message so MessageView's say-line can render.
         useAgent.getState().setSay(remoteKey, asstId, ev.text ?? ev.say ?? '')
       } else if (ev.type === 'thinking') {
-        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'thinking' } }))
+        useAgent.getState().setStatus(remoteKey, 'thinking')
       } else if (ev.type === 'tool_start') {
         useAgent.getState().startToolCall(remoteKey, asstId, `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
-        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'running-tool' } }))
+        useAgent.getState().setStatus(remoteKey, 'running-tool')
       } else if (ev.type === 'tool_result') {
         useAgent.getState().finishToolCall(remoteKey, asstId, '', typeof ev.result === 'string' ? ev.result : JSON.stringify(ev.result ?? {}))
       } else if (ev.type === 'error') {
-        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'error' } }))
+        useAgent.getState().setStatus(remoteKey, 'error')
       }
       setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+    }
+    // Issue #308 (CodeRabbit): distinguish a rejected send from a failed
+    // stream. Once an event has been delivered the turn started; a later
+    // rejection keeps its rows and signals error instead of rolling back.
+    let turnStarted = false
+    const onEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
+      turnStarted = true
+      applyEvent(ev)
     }
     try {
       await streamRemoteTurn(
@@ -2939,28 +2954,37 @@ export function RemoteTranscriptDialog({
         conversationId,
         text,
         workspace ?? '',
-        applyEvent,
+        onEvent,
         ac.signal,
         () => {},
       )
+      // Issue #308: through setStatus so the #25 finish signal can fire.
       if (useAgent.getState().statusByConv[remoteKey] !== 'error') {
-        useAgent.setState((s) => ({ statusByConv: { ...s.statusByConv, [remoteKey]: 'idle' } }))
+        useAgent.getState().setStatus(remoteKey, 'idle')
       }
       // Persist the streamed rows into the viewer's own transcript cache.
       setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
     } catch (error) {
-      // The turn never started (offline/409): roll the optimistic rows back
-      // and restore the draft so nothing is lost.
-      useAgent.setState((s) => {
-        const remaining = (s.messagesByConv[remoteKey] ?? []).filter((m) => m.id !== userId && m.id !== asstId)
-        return {
-          messagesByConv: { ...s.messagesByConv, [remoteKey]: remaining },
-          statusByConv: { ...s.statusByConv, [remoteKey]: 'idle' },
-        }
-      })
-      setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
-      setComposerText(text)
-      setSendNote(`Message could not be sent — ${String((error as Error).message ?? error)}`)
+      if (turnStarted) {
+        // The stream failed mid-turn: preserve what was streamed and mark the
+        // row with an error signal instead of silently going idle.
+        useAgent.getState().setStatus(remoteKey, 'error')
+        setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+        setSendNote(`Turn failed — ${String((error as Error).message ?? error)}`)
+      } else {
+        // The turn never started (offline/409): roll the optimistic rows back
+        // and restore the draft so nothing is lost.
+        useAgent.setState((s) => {
+          const remaining = (s.messagesByConv[remoteKey] ?? []).filter((m) => m.id !== userId && m.id !== asstId)
+          return {
+            messagesByConv: { ...s.messagesByConv, [remoteKey]: remaining },
+            statusByConv: { ...s.statusByConv, [remoteKey]: 'idle' }, // abort path: no signal (the turn never started)
+          }
+        })
+        setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+        setComposerText(text)
+        setSendNote(`Message could not be sent — ${String((error as Error).message ?? error)}`)
+      }
     } finally {
       streamingRef.current = false
     }
@@ -3068,6 +3092,11 @@ export function DeviceGroups({
   const [loadingDeviceChats, setLoadingDeviceChats] = useState<Record<string, boolean>>({})
   const [deviceChatErrors, setDeviceChatErrors] = useState<Record<string, string | null>>({})
   const deviceChatRequestRef = useRef<Record<string, number>>({})
+  // Issue #308: liveness for the remote device chat rows (working dots,
+  // finished bar/pill) reads the same per-conversation status maps the local
+  // rows use — remote keys live in statusByConv/finishedByConv too.
+  const statusByConv = useAgent((s) => s.statusByConv)
+  const finishedByConv = useAgent((s) => s.finishedByConv)
   const [remoteConversation, setRemoteConversation] = useState<{
     hostId: string
     conversationId: string
@@ -3251,7 +3280,21 @@ export function DeviceGroups({
                 {deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <div role="alert" className="flex items-center justify-between gap-2 px-6 py-1 text-[10px] text-red-400"><span>Could not load device chats</span><button className="rounded px-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onClick={() => void refreshDeviceChats(device.host_id)}>Retry</button></div>}
                 {ownedConversations.map((conversation) => {
                   const transcriptOnline = connected && deviceChatStatus[device.host_id] === 'online'
-                  return <button key={`remote:${device.host_id}:${conversation.conversation_id}`} className="block w-full truncate rounded py-1 pl-6 pr-2 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · ${transcriptOnline ? 'remote chat' : 'cached · read-only offline'}`} onClick={() => setRemoteConversation({ hostId: device.host_id, conversationId: conversation.conversation_id, title: conversation.title, online: transcriptOnline, workspace: conversation.workspace })}>{conversation.title}<span className={`ml-1 font-mono text-[9px] ${transcriptOnline ? 'text-zinc-600' : 'text-zinc-500'}`}>{transcriptOnline ? 'remote' : 'cached · read-only'}</span></button>
+                  // Issue #308: liveness signals for remote rows, same slot
+                  // and precedence as ConversationRow (blocked > finished >
+                  // running). Blocked needs remote ask_user cards — out of
+                  // scope here (dependency noted in the issue).
+                  const rowKey = remoteConversationKey(device.host_id, conversation.conversation_id)
+                  const finished = finishedByConv[rowKey] ?? null
+                  const running = statusByConv[rowKey] === 'thinking' || statusByConv[rowKey] === 'running-tool'
+                  const statusSlot = finished === 'error'
+                    ? <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
+                    : finished === 'ok'
+                      ? <span aria-hidden="true" className="run-bar run-bar-green mr-1.5 shrink-0" title="Run finished" />
+                      : running
+                        ? <span aria-hidden="true" className="run-dots mr-1.5 shrink-0" title="Working…"><i /><i /><i /></span>
+                        : null
+                  return <button key={`remote:${device.host_id}:${conversation.conversation_id}`} className="block w-full truncate rounded py-1 pl-6 pr-2 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · ${transcriptOnline ? 'remote chat' : 'cached · read-only offline'}`} onClick={() => setRemoteConversation({ hostId: device.host_id, conversationId: conversation.conversation_id, title: conversation.title, online: transcriptOnline, workspace: conversation.workspace })}>{statusSlot}{conversation.title}<span className={`ml-1 font-mono text-[9px] ${transcriptOnline ? 'text-zinc-600' : 'text-zinc-500'}`}>{transcriptOnline ? 'remote' : 'cached · read-only'}</span></button>
                 })}
                 {!loadingDeviceChats[device.host_id] && !deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">No cached device chats</p>}
               </div>
@@ -3581,26 +3624,29 @@ export function ConversationList({
   // the sidebar. renderRow turns them into row props; the collapsed-group
   // filter uses isLive to decide which rows survive collapse. One source of
   // truth, so the two can never disagree.
-  const isRunning = (id: number) =>
-    statusByConv[String(id)] === 'thinking' ||
-    statusByConv[String(id)] === 'running-tool' ||
+  // Issue #308: remote device chats have no numeric id — their status lives
+  // under the `remote:<host>:<conv>` key, so the helpers take the row's key
+  // shape and read both stores uniformly with the numeric local rows.
+  const isRunning = (key: string, id: number) =>
+    statusByConv[key] === 'thinking' ||
+    statusByConv[key] === 'running-tool' ||
     agentRunningConvs.has(id)
-  const isBlocked = (id: number) =>
+  const isBlocked = (key: string) =>
     Boolean(
-      pendingQuestions[String(id)] ||
-        pendingApprovals[String(id)] ||
-        pendingPlanApprovals[String(id)],
+      pendingQuestions[key] ||
+        pendingApprovals[key] ||
+        pendingPlanApprovals[key],
     )
-  const isFinished = (id: number) => Boolean(finishedByConv[String(id)])
-  const isLive = (id: number) => isRunning(id) || isBlocked(id) || isFinished(id)
+  const isFinished = (key: string) => Boolean(finishedByConv[key])
+  const isLive = (key: string, id: number) => isRunning(key, id) || isBlocked(key) || isFinished(key)
 
   const renderRow = (c: typeof convs[number], isAgent: boolean) => (
     <ConversationRow
       key={c.id}
       conv={c}
       active={c.id === conversationId}
-      running={isRunning(c.id)}
-      blocked={isBlocked(c.id)}
+      running={isRunning(String(c.id), c.id)}
+      blocked={isBlocked(String(c.id))}
       finished={finishedByConv[String(c.id)] ?? null}
       isAgent={isAgent}
       menuOpen={menuOpenId === c.id}
@@ -3673,7 +3719,7 @@ export function ConversationList({
         // collapsed surfaces without user action and a live chat that goes
         // idle disappears again. Same rows, same status-slot precedence as
         // expanded rendering.
-        const liveRows = isExpanded ? [] : [...wsAgents, ...chats].filter((c) => isLive(c.id))
+        const liveRows = isExpanded ? [] : [...wsAgents, ...chats].filter((c) => isLive(String(c.id), c.id))
         return (
           <div key={ws.path ?? 'default'} className="mb-3">
             {/* Workspace section: bold header, hairline top rule, chat count,
