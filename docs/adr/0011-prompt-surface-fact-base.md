@@ -30,7 +30,7 @@ What survives, and where it lives now:
 - **Deliberate-duplication verdicts** ("this echo is intentional", "that
   finding was resolved by #174") → closed issues + release notes, as before.
 - **Orientation** (how assembly works: one base builder + conditional
-  fragments + one manifest harness) → CONTEXT.md, "Prompt surface" section.
+  fragments + one manifest harness) → GLOSSARY.md, "Prompt surface" section (file was named CONTEXT.md at the time of writing).
 - **The one orphaned guard** (`remote manifests carry no stripped
   schemas`) → moved into `test_prompt_manifest.py`; it guarded manifests,
   not the doc.

@@ -38,7 +38,7 @@ Follow the /implement pipeline:
 
 - Implement the ticket one red-green slice at a time, test-first (TDD: write
   the failing test, make it pass, refactor).
-- Respect the repo's coding standards and any `CONTEXT.md` domain vocabulary.
+- Respect the repo's coding standards and any `GLOSSARY.md` domain vocabulary.
 - Verify: run the relevant tests/lint/build for the code you touched. If the
   full suite is too long for one run, run it in chunks (per directory).
 - Do not open a PR unless the ticket asks for one. Commit with a message that
