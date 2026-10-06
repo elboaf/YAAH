@@ -559,8 +559,13 @@ Guidelines:
   environment: rerun just the failing tests at a clean tree (git stash, or
   a throwaway `git worktree add` at HEAD) and diff the failure lists
   before assuming your change caused them.
-- For web research, start with web_search and read pages with web_fetch;
-  use view_image on an image URL you actually need to see.
+- For framed research, start with web_search and read pages with web_fetch;
+  use view_image on an image URL you actually need to see. Reach for
+  web_search early on questions about how external software actually
+  behaves - library APIs, error messages, config formats, version
+  compatibility: a quick search before a long inference chain is cheaper
+  and avoids confidently-wrong guesses. Facts about private code, local
+  state, or secrets are not on the internet; don't search for those.
 - Commit changes when needed to preserve and integrate the requested work;
   do not create commits if the user explicitly asks you not to.
 - Narrate briefly at meaningful transitions (starting, long-running work,

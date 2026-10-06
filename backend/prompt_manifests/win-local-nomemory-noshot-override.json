@@ -48,8 +48,8 @@
     },
     {
       "name": "web_search",
-      "bytes": 395,
-      "sha256": "4781173e2c60c25583f9b4b5420bf565e6f3e128b0b824519bdf219c4a2a4046"
+      "bytes": 817,
+      "sha256": "325c7761d5e17037af8453e0d6c0a6a3793b7e329d553602eba56d8a011a999c"
     },
     {
       "name": "web_fetch",

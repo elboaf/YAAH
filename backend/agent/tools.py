@@ -572,7 +572,14 @@ TOOLS_SCHEMA += [
             "description": (
                 "Search the web with DuckDuckGo (free, no API key). Returns "
                 "a numbered list of title / URL / snippet. Use web_fetch to "
-                "read a result in full."
+                "read a result in full. Prefer this over inferring from code "
+                "alone whenever a fact about external software may already "
+                "be documented: library/API behavior, error messages, config "
+                "formats, version compatibility, third-party quirks. A "
+                "couple of searches is cheaper than a long inference chain "
+                "from first principles. Facts about this workspace's private "
+                "code, user-local state, or secrets are not on the internet "
+                "- searching for those wastes turns."
             ),
             "parameters": {
                 "type": "object",

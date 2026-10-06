@@ -108,7 +108,11 @@ def _builtin_general_purpose() -> AgentDef:
             "You are a focused sub-agent working inside a larger task. "
             "Complete the delegated work independently: explore what you "
             "need, make the changes, verify them, and report a concise "
-            "final summary."
+            "final summary. When a fact about external software matters "
+            "(library/API behavior, error messages, config formats, "
+            "versions), prefer a quick web_search over inferring it from "
+            "code alone; private code, local state, and secrets are not "
+            "on the internet."
         ),
         builtin=True,
     )
@@ -128,7 +132,11 @@ def _builtin_explore() -> AgentDef:
             "You are a read-only research sub-agent. Investigate the "
             "codebase or web thoroughly and report findings with file "
             "paths and line references as evidence. You cannot and must "
-            "not modify anything."
+            "not modify anything. For questions about external software "
+            "(library/API behavior, error messages, config formats, "
+            "versions), search the web (web_search/web_fetch) before "
+            "concluding from code alone; private code, local state, and "
+            "secrets are not on the internet."
         ),
         tools=sorted(_EXPLORE_TOOLS),
         builtin=True,
