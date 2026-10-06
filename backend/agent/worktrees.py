@@ -24,6 +24,7 @@ endpoints; non-git and Default (home) workspaces have no branch to
 attach to and are skipped the same way.
 """
 import logging
+import time
 from pathlib import Path
 
 from backend.agent.gitinfo import _run_git
@@ -161,6 +162,65 @@ async def ensure_chat_worktree(
             return {"path": None, "error": (out2 or out).strip() or "worktree add failed"}
         detached = True
     return {"path": chat_dir, "detached": detached, "created": True}
+
+
+def chat_worktree_has_run_tree(chat_dir: Path) -> bool:
+    """True when the deterministic harness namespace under the chat tree
+    still holds anything (#329, #330): the run worktree
+    (``<chat>/run``) or a nested chat tree (``<chat>/.scratch``) — both
+    git-invisible since #321, so neither shows in ``status --porcelain``.
+    The same existence gate the sweeper pins in-flight/residue trees
+    with; retirement must never remove a tree the sweeper would keep.
+    """
+    return (chat_dir / "run").exists() or (chat_dir / ".scratch").exists()
+
+
+async def retire_chat_worktree(
+    workspace: str | None, chat_id: int | str, min_age_seconds: int = 0
+) -> dict:
+    """Retire the chat's worktree after its work has landed (#329).
+
+    The lifecycle contract: a worktree exists only while its work is in
+    flight. When the work lands on the chat's selected branch, the run
+    worktree and the chat worktree itself go away — unless the chat tree
+    is dirty or still holds run residue (then it survives and surfaces
+    via the residue protocol) or a run tree still exists inside it. The
+    agent never removes the tree it stands in: this is harness code,
+    called at run end, never agent SOP.
+
+    ``min_age_seconds`` guards the rapid-turn case: only retire a tree
+    that has sat untouched (mtime) that long — 0 retires immediately
+    (the post-run hook's choice; the tree was just used deliberately).
+    Best-effort like the sweeper: any failure logs and reports
+    ``{"retired": False, "reason": ...}`` without raising.
+
+    Freeing the branch checkout is the point (``git worktree remove``
+    releases it), so a finished chat never holds `auto/nightly-build`
+    hostage the way chat-381 did (#329 census).
+    """
+    chat_dir = chat_worktree_path(workspace, chat_id)
+    if chat_dir is None or not chat_dir.exists():
+        return {"retired": False, "reason": "no chat worktree"}
+    try:
+        if min_age_seconds:
+            age = time.time() - chat_dir.stat().st_mtime
+            if age < min_age_seconds:
+                return {"retired": False, "reason": f"age {int(age)}s < {min_age_seconds}s"}
+        rc, out = await _run_git(chat_dir, "status", "--porcelain")
+        if rc != 0:
+            return {"retired": False, "reason": (out or "status failed").strip()[:200]}
+        if (out or "").strip():
+            return {"retired": False, "reason": "dirty"}
+        if chat_worktree_has_run_tree(chat_dir):
+            return {"retired": False, "reason": "run residue present"}
+        rc, out = await _run_git(
+            workspace_root(workspace), "worktree", "remove", str(chat_dir)
+        )
+        if rc != 0:
+            return {"retired": False, "reason": (out or "worktree remove failed").strip()[:200]}
+        return {"retired": True, "path": str(chat_dir)}
+    except OSError as exc:
+        return {"retired": False, "reason": str(exc)[:200]}
 
 
 def _is_detached(chat_dir: Path) -> bool:

@@ -9,6 +9,10 @@ primary-tree immunity, switch-request translation, sub-agent
 injection) — see the amendment section below.
 Amended 2026-10-05: universal degraded-mode landing rule (#322) —
 see the amendment section below.
+Amended 2026-10-06: run branches never reach origin (#320) — see the
+amendment section below.
+Amended 2026-10-06: land-means-clean lifecycle (#329) — see the
+amendment section below.
 
 ## Context
 
@@ -83,12 +87,14 @@ untouchable by agents by construction, not by prompt discipline.
   local-git-workspace chat is pinned at creation — the no-pick path
   inherits the workspace's branch (`branch_pin_origin='inherited'`),
   legacy NULL rows lazily pin on first read._
-- **Pruning — age, clean only.** (Superseded 2026-10-06 by the
-  land-means-clean amendment below, #329.) A chat worktree with no commits and no
+- **Pruning — age, clean only.** A chat worktree with no commits and no
   uncommitted changes past an age threshold is auto-pruned. Chat
   deletion does not itself remove the tree; the sweeper is the single
   retirement mechanism, so uncommitted work always survives to the
   threshold.
+  _Superseded by the 2026-10-06 land-means-clean amendment (#329):
+  retirement is now age OR landed-clean, and the sweeper is no longer
+  the single mechanism._
 - **Shell git stays.** No structured git tools return; agents work with
   shell git inside their worktree exactly as ADR-0008 decided. What
   returns is isolation, not ceremony.
@@ -149,11 +155,13 @@ tracker, not here.
 
 Accepted losses:
 
-- **Disk.** (Amended 2026-10-06, #329: clean trees retire at run end.)
-  One checkout per chat that has ever written, until pruned.
+- **Disk.** One checkout per chat that has ever written, until pruned.
   Bounded by the clean-age sweeper; per-worktree untracked bulk
   (dependency installs and the like) is re-fetched by whichever tool
   creates it.
+  _Superseded by the 2026-10-06 land-means-clean amendment (#329):
+  a landed-clean chat's checkout is retired at run end, not held until
+  some age threshold._
 - **Flip friction.** A dirty chat must commit or discard before a branch
   flip. Accepted: silent stash-and-carry across branches is the failure
   mode this design exists to kill.
@@ -248,30 +256,54 @@ human pushes. Decisions:
   of landing; the local run branch is already deleted by the SOP's
   teardown.
 
+## Amendment 2026-10-06: land-means-clean lifecycle (#329)
 
-## Amendment 2026-10-06: land-means-clean (#329)
+A worktree exists only while its work is in flight. The contract, in
+the requester's verbatim words (confirmed in-session, 2026-10-06):
 
-A worktree exists only while its work is in flight. In the requester's
-words, confirmed in-session: "A worktree exists only while its work is
-in flight. When the work lands on the chat's selected branch, everything
-created for that work goes away - run worktree and the chat worktree if
-the chat has nothing left in it. Only dirty residue survives landing,
-and then it's surfaced to the user, never silently kept. Branches are
-never held open by finished work." Decisions:
+> A worktree exists only while its work is in flight. When the work
+> lands on the chat's selected branch, everything created for that work
+> goes away — run worktree **and** the chat worktree if the chat has
+> nothing left in it. Only dirty residue survives landing, and then
+> it's surfaced to the user, never silently kept. Branches are never
+> held open by finished work.
+
+This replaces the original pruning clause ("age, clean only") and the
+Disk accepted-loss ("one checkout per chat that has ever written, until
+pruned") — the `.scratch/` pile-up those clauses produced (29 standing
+trees at amendment time) was the old model working as written.
+
+Decisions:
 
 - **Post-run retirement.** When a run ends and the chat worktree is
-  clean and residue-free, the harness retires it, freeing any branch
-  checkout the tree held. The agent never removes the tree it stands
-  in: this is harness code after run end, never agent SOP.
-- **The sweeper's live gate is per chat, not per workspace.** A dead
-  chat's clean tree sweeps even in a workspace with live conversations.
-  (The per-workspace gate made the sweeper a permanent no-op in the
-  main workspace - the pile-up #329 documents.)
-- **Pre-#277 standalone clones** (`.git` a directory) become retirably
-  visible: clean-checked and removed like any other residue-free tree.
-- **Dirty residue survives and surfaces** via the residue protocol -
-  never silently kept, never silently deleted.
+  clean with no run residue (the deterministic run namespace
+  `<chat>/run`, `<chat>/.scratch` — pinned by existence per #330, since
+  #321 makes it git-invisible), the harness retires the tree at run end
+  (`worktrees.retire_chat_worktree`, called from loop.py's teardown).
+  This frees any branch checkout the tree was holding: a finished chat
+  never keeps `auto/nightly-build` hostage the way chat-381 did. Dirty
+  or residue-holding trees survive and surface via the residue
+  protocol. The agent never removes the tree it stands in — retirement
+  is harness code after run end, never agent SOP.
+- **The sweeper gates per chat, not per workspace.** Dead-chat
+  detection is per `.scratch/chat-<id>` dir: the id has no conversation
+  row, the tree is clean, holds no run namespace, and is past the age
+  threshold — retire. A workspace full of live chats no longer grants
+  its dead chats immunity (the old `ws in live` gate made the sweeper a
+  permanent no-op in the main workspace, where live chats always exist).
+- **Legacy standalone clones are retirably visible.** Pre-#277
+  `.scratch/chat-*` dirs (`.git` a directory, never
+  worktree-registered) fail `git worktree remove` by construction; the
+  sweeper falls back to plain removal for those, only when the same
+  clean/dead/aged gates pass.
+- **Mechanisms are additive.** Post-run retirement (landed-clean trees)
+  and the sweeper (dead-chat trees) share one existence gate and one
+  residue rule; neither may weaken the other's protections. Existing
+  standing trees are handled by the implemented mechanism — the
+  requester explicitly deferred any manual cleanup pass.
 - **Re-materialization is cheap.** `ensure_chat_worktree` recreates the
-  tree on the next run; #321 keeps the namespace git-invisible.
-- **The age threshold stays as backstop** for residue the run-end path
-  missed (a crashed run), not as the primary lifecycle.
+  tree on the chat's next run; #321 keeps the namespace
+  git-invisible from birth, so retirement costs nothing but disk.
+- **The age threshold stays as backstop** for trees the run-end path
+  missed (a crashed run, a chat deleted mid-run) — not as the primary
+  lifecycle.

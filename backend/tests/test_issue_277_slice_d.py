@@ -1,8 +1,9 @@
 """Slice D of #277 (ADR-0010): worktree maintenance + chip reads.
 
 The sweeper retires clean chat worktrees of dead chats past the idle
-threshold; an in-flight or residue run (nested run worktree = untracked
-entry = dirty) is never swept. Chip git-info reads follow the chat's
+threshold; an in-flight or residue run (nested run worktree present)
+is never swept — pinned by existence since #321 hid `.scratch/` from
+status (#330). Chip git-info reads follow the chat's
 own worktree once it exists (ADR-0010 amendment: chip reads follow the
 chat tree; before materialization they stay on the primary).
 """
@@ -99,8 +100,10 @@ async def test_sweep_keeps_recent_trees(tmp_path):
 
 @pytest.mark.asyncio
 async def test_sweep_keeps_residue_trees(tmp_path):
-    """A nested run worktree (or any untracked entry) pins the tree as
-    dirty — in-flight and residue runs are never swept."""
+    """A nested run worktree pins the tree even though #321 keeps
+    `.scratch/` git-invisible — the run dir reads neither as untracked
+    noise nor as anything at all in `status --porcelain`, so the pin is
+    by EXISTENCE (#330): in-flight and residue runs are never swept."""
     from backend.agent import wt_sweep, worktrees
 
     repo = _repo_with_commit(tmp_path)
@@ -115,6 +118,99 @@ async def test_sweep_keeps_residue_trees(tmp_path):
     result = await wt_sweep.sweep_stale_chat_worktrees()
     assert chat_dir.exists()
     assert str(chat_dir) not in result["swept"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_keeps_dirty_untracked_files(tmp_path):
+    """Plain untracked noise (not a run worktree) still pins via
+    porcelain — the existence pin (#330) is additive, never a
+    replacement for the dirty gate."""
+    from backend.agent import wt_sweep, worktrees
+
+    repo = _repo_with_commit(tmp_path)
+    await _register_workspace(repo)
+    out = await worktrees.ensure_chat_worktree(str(repo), 778, "master")
+    chat_dir = out["path"]
+    (chat_dir / "scratch-note.txt").write_text("user noise", encoding="utf-8")
+    _age(chat_dir)
+
+    result = await wt_sweep.sweep_stale_chat_worktrees()
+    assert chat_dir.exists()
+    assert str(chat_dir) not in result["swept"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_is_gated_per_chat_not_per_workspace(tmp_path):
+    """#329: a dead chat's clean tree sweeps even while OTHER chats of
+    the same workspace are live — the old per-workspace gate made the
+    sweeper a permanent no-op in the main workspace, where live chats
+    always exist. The live chat's own tree is never touched."""
+    from backend.db.database import create_conversation
+    from backend.agent import wt_sweep, worktrees
+
+    repo = _repo_with_commit(tmp_path)
+    await _register_workspace(repo)
+    live_id = await create_conversation("live chat", str(repo))
+    live = await worktrees.ensure_chat_worktree(str(repo), live_id, "master")
+    dead = await worktrees.ensure_chat_worktree(str(repo), 555, "master")
+    _age(live["path"])
+    _age(dead["path"])
+
+    result = await wt_sweep.sweep_stale_chat_worktrees()
+    assert live["path"].exists()
+    assert str(live["path"]) not in result["swept"]
+    assert not dead["path"].exists()
+    assert str(dead["path"]) in result["swept"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_retires_legacy_standalone_clone(tmp_path):
+    """#329: a pre-#277 standalone clone (.git a directory, never
+    worktree-registered) is invisible to `git worktree remove` — but a
+    clean, dead, aged one is retired via plain removal all the same."""
+    import uuid
+
+    from backend.agent import wt_sweep, worktrees
+
+    # Unique name: this file's tests share one process DB, so workspace
+    # rows accumulate across tests — isolation comes from the path, not
+    # the table.
+    repo = _repo_with_commit(tmp_path, name=f"repo-{uuid.uuid4().hex[:8]}")
+    await _register_workspace(repo)
+    scratch = repo / ".scratch"
+    clone = scratch / "chat-4711"
+    _git(repo, "clone", "-q", str(repo), str(clone))
+    assert (clone / ".git").is_dir()  # standalone: not worktree-registered
+    assert str(clone) not in _git(repo, "worktree", "list", "--porcelain")
+    _age(clone)
+
+    result = await wt_sweep.sweep_stale_chat_worktrees()
+    assert not clone.exists()
+    assert str(clone) in result["swept"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_keeps_non_chat_ids_alone(tmp_path):
+    """Dirs under .scratch/ that are not per-chat worktrees (no numeric
+    id) are never candidates — the chat-id parse is the gate."""
+    import uuid
+
+    from backend.agent import wt_sweep
+
+    repo = _repo_with_commit(tmp_path, name=f"repo-{uuid.uuid4().hex[:8]}")
+    await _register_workspace(repo)
+    odd = repo / ".scratch" / "chat-mic-gate"
+    odd.mkdir(parents=True)
+    (odd / "f.txt").write_text("x", encoding="utf-8")
+    _age(odd)
+
+    result = await wt_sweep.sweep_stale_chat_worktrees()
+    assert odd.exists()
+    # Scope to THIS repo: workspace rows accumulate across the file's
+    # tests (shared process DB), so global checked/kept counts include
+    # earlier tests' candidates.
+    mine = [p for p in result["swept"] if p.startswith(str(repo))]
+    assert mine == []
 
 
 @pytest.fixture()
