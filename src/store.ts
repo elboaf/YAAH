@@ -182,6 +182,14 @@ interface AgentState {
    * session is stale the moment the app restarts.
    */
   finishedByConv: Record<string, 'ok' | 'error'>
+  /**
+   * The on-screen remote chat's key (`remote:<host>:<conv>`), or null — the
+   * remote-path mirror of `conversationId` (issue #308). The remote viewer is
+   * a dialog, not a numbered conversation, so `conversationId` cannot track
+   * it; the #25 "don't signal the chat you're watching" rule reads both.
+   */
+  activeRemoteKey: string | null
+  setActiveRemoteKey: (key: string | null) => void
   clearFinished: (key: string) => void
   /** Per-conversation stream/failed-send error (rendered by the owning chat). */
   errorByConv: Record<string, string | null>
@@ -585,8 +593,15 @@ export const useAgent = create<AgentState>((set, get) => ({
       // non-numeric keys have no sidebar row, so they never signal.
       const wasRunning = prev === 'thinking' || prev === 'running-tool'
       const ended = status === 'idle' || status === 'error'
+      // Issue #308: key-shape-agnostic. A key is a "sidebar chat" if it is a
+      // numeric local chat or a remote device-chat key — both always have a
+      // sidebar row. The "is this the chat on screen" check differs by shape:
+      // numeric keys compare conversationId, remote keys compare
+      // activeRemoteKey. Anything else (draft buffers) has no row to signal.
       const idNum = Number(key)
-      if (wasRunning && ended && Number.isFinite(idNum) && s.conversationId !== idNum) {
+      const isChatKey = Number.isFinite(idNum) || key.startsWith('remote:')
+      const onScreen = Number.isFinite(idNum) ? s.conversationId === idNum : key === s.activeRemoteKey
+      if (wasRunning && ended && isChatKey && !onScreen) {
         return {
           statusByConv: { ...s.statusByConv, [key]: status },
           finishedByConv: { ...s.finishedByConv, [key]: status === 'error' ? 'error' : 'ok' },
@@ -595,6 +610,16 @@ export const useAgent = create<AgentState>((set, get) => ({
       return { statusByConv: { ...s.statusByConv, [key]: status } }
     }),
   finishedByConv: {},
+  // Issue #308: the on-screen remote viewer's key; setActiveRemoteKey
+  // acknowledges (clears) its finished signal, mirroring setConversationId.
+  activeRemoteKey: null,
+  setActiveRemoteKey: (key) =>
+    set((s) => {
+      if (key === null || !(key in s.finishedByConv)) return { activeRemoteKey: key }
+      const finishedByConv = { ...s.finishedByConv }
+      delete finishedByConv[key]
+      return { activeRemoteKey: key, finishedByConv }
+    }),
   clearFinished: (key) =>
     set((s) => {
       if (!(key in s.finishedByConv)) return s
