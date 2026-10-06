@@ -80,16 +80,18 @@ by hand inside a chat, and it works — within a documented convention.
 2. **Landing-contract pin.** Pin line, to be stated verbatim wherever
    implement-spec-style flows are documented or run here:
 
-   > **Landing-contract pin (ADR-0010):** the integration branch is
-   > the chat's selected branch (or a chat-owned integration branch
-   > the selector points at); every landing is a plain merge inside
-   > the chat's worktree; tickets close by landing, never by PR/merge
-   > to master — **master never moves**.
+   > **Landing-contract pin (ADR-0010):** landing requires a non-master
+   > selection: if the chat's selector points at `master`, stop until
+   > the selector points at a non-master branch. The integration branch
+   > is the selected non-master branch (or a chat-owned integration
+   > branch the selector points at); every landing is a plain merge
+   > inside the chat's worktree; tickets close by landing, never by
+   > PR/merge to master — **master never moves**.
 
    The harness-injected branch note outranks the skill's step 8
    ("resolve each ticket the way the issue tracker closes work");
    under this pin, "the way the tracker closes work" means land onto
-   the selected branch.
+   the selected non-master branch.
 3. **/resolving-merge-conflicts stays vendored; deletion not
    accepted.** Upstream's rationale ("a harness concern, not a skill
    concern") argues *for* keeping it here: YAAH is the harness, its

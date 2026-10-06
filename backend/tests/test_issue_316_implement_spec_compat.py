@@ -47,6 +47,9 @@ def test_adr_0012_carries_landing_contract_pin_line():
     landing targets the chat's selected branch, never master."""
     text = _text(ADR_0012)
     assert re.search(r"[Ll]anding-contract pin", text)
+    # master is excluded from landing targets: a chat whose selector
+    # points at master must stop until a non-master branch is selected.
+    assert "selected non-master branch" in text
     assert "selected branch" in text
     assert "master never moves" in text
 
