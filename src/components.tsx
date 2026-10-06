@@ -3281,7 +3281,9 @@ export function DeviceGroups({
     </section>
   )
 }
-function ConversationList({
+// Exported for the collapsed-live-chats tests (issue #310) — same pattern as
+// ConversationRow: the sidebar's list is a testable seam.
+export function ConversationList({
   addingDevice,
   setAddingDevice,
 }: {
@@ -3575,21 +3577,30 @@ function ConversationList({
     g.items.sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   }
 
+  // Liveness atoms (issue #310): what makes a chat's run state visible in
+  // the sidebar. renderRow turns them into row props; the collapsed-group
+  // filter uses isLive to decide which rows survive collapse. One source of
+  // truth, so the two can never disagree.
+  const isRunning = (id: number) =>
+    statusByConv[String(id)] === 'thinking' ||
+    statusByConv[String(id)] === 'running-tool' ||
+    agentRunningConvs.has(id)
+  const isBlocked = (id: number) =>
+    Boolean(
+      pendingQuestions[String(id)] ||
+        pendingApprovals[String(id)] ||
+        pendingPlanApprovals[String(id)],
+    )
+  const isFinished = (id: number) => Boolean(finishedByConv[String(id)])
+  const isLive = (id: number) => isRunning(id) || isBlocked(id) || isFinished(id)
+
   const renderRow = (c: typeof convs[number], isAgent: boolean) => (
     <ConversationRow
       key={c.id}
       conv={c}
       active={c.id === conversationId}
-      running={
-        statusByConv[String(c.id)] === 'thinking' ||
-        statusByConv[String(c.id)] === 'running-tool' ||
-        agentRunningConvs.has(c.id)
-      }
-      blocked={Boolean(
-        pendingQuestions[String(c.id)] ||
-          pendingApprovals[String(c.id)] ||
-          pendingPlanApprovals[String(c.id)],
-      )}
+      running={isRunning(c.id)}
+      blocked={isBlocked(c.id)}
       finished={finishedByConv[String(c.id)] ?? null}
       isAgent={isAgent}
       menuOpen={menuOpenId === c.id}
@@ -3653,6 +3664,16 @@ function ConversationList({
         const visible =
           activeIdx >= base ? [...head, chats[activeIdx]] : head
         const hidden = chats.length - visible.length
+        // Issue #310: a collapsed group must not hide chats with live run
+        // state — working (streaming turn or scheduled-agent run), blocked
+        // on the user, or finished-but-unacknowledged. isLive is shared
+        // with renderRow above so the collapsed filter and the row props
+        // cannot drift. Derived from the store on every render (never
+        // snapshotted at collapse time), so a chat that gets blocked while
+        // collapsed surfaces without user action and a live chat that goes
+        // idle disappears again. Same rows, same status-slot precedence as
+        // expanded rendering.
+        const liveRows = isExpanded ? [] : [...wsAgents, ...chats].filter((c) => isLive(c.id))
         return (
           <div key={ws.path ?? 'default'} className="mb-3">
             {/* Workspace section: bold header, hairline top rule, chat count,
@@ -3732,8 +3753,8 @@ function ConversationList({
                 />
               )}
             </div>
-            {isExpanded &&
-              (items.length > 0 ? (
+            {isExpanded ? (
+              items.length > 0 ? (
                 <>
                   {wsAgents.map((c) => renderRow(c, true))}
                   {visible.map((c) => renderRow(c, false))}
@@ -3753,7 +3774,12 @@ function ConversationList({
                 </>
               ) : (
                 <p className="px-3 py-1 text-[10px] text-zinc-600">No conversations yet.</p>
-              ))}
+              )
+            ) : liveRows.length > 0 ? (
+              // Issue #310: collapsed but something is live — surface those
+              // chats under the header, exactly as they render expanded.
+              liveRows.map((c) => renderRow(c, c.chat_type === 'agent'))
+            ) : null}
             </div>
           </div>
         )
