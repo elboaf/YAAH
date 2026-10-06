@@ -39,20 +39,32 @@ def test_verdict_counts():
     assert counts == {"A": 7, "B": 3, "C": 1}
 
 
-def test_mattpocock_pr_and_retro_are_bundled_and_parse():
+def test_mattpocock_pr_and_retro_are_bundled_and_parse(monkeypatch):
     # #315: pr + retro vendored from mattpocock/skills v1.3.1.
     entry = skills_ledger.lookup("mattpocock/skills")
     assert entry is not None and entry["verdict"] == "A"
+    from backend.agent import skills as skill_registry
     from backend.agent.skills import bundled_source_dir, parse_skill_md
 
     src = bundled_source_dir()
     assert src is not None
+    # Exercise the real registry against the bundled directory so a bundled
+    # skill flipping to model-invocable (e.g. retro) can't slip through.
+    monkeypatch.setattr(skill_registry, "SKILLS_DIR", src)
+    monkeypatch.setattr(skill_registry, "_skills", {})
+    monkeypatch.setattr(skill_registry, "_scanned", False)
     for name, model_invocable in (("pr", True), ("retro", False)):
         skill = parse_skill_md(src / name / "SKILL.md")
         assert skill is not None, name
         assert skill.name == name
         assert skill.disable_model_invocation is not model_invocable
         assert not skill.truncated
+    skill_registry.scan_skills()
+    assert "retro" not in {
+        s.name for s in skill_registry.model_invocable()
+    }
+    assert "retro" not in skill_registry.index_for_prompt()
+    assert "pr" in skill_registry.index_for_prompt()
 
 
 def test_load_ledger_from_explicit_path(tmp_path):
