@@ -108,6 +108,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.artifact == 'desktop'
+        # rc.16 release fix: the action only appends CARGO_HOME\bin to PATH
+        # when it takes its install-rustup branch. On the persistent Windows
+        # runners rustup outlives the job (rc.16's first attempt installed
+        # it), so the retry attempt skipped that branch and every later
+        # `rustc`/`cargo` call died with exit 127 (command not found).
+        # Unconditionally put the cargo bin dir on this job's PATH.
+      - name: Put cargo bin on PATH
+        if: matrix.artifact == 'desktop'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "${CARGO_HOME:-$USERPROFILE\.cargo}\bin" >> "$GITHUB_PATH"
+          else
+            echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          fi
 
       - uses: swatinem/rust-cache@v2
         if: matrix.artifact == 'desktop'
