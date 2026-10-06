@@ -12,43 +12,14 @@ prompt. The contract under test:
 - with say_emissions off, the section (persona included) is omitted
   entirely — no persona bytes leak into any prompt.
 """
-import os
-
 import pytest
 
 from backend.agent import loop
-
-
-@pytest.fixture
-def restored_config():
-    """conftest writes config.json once per session; a test that flips
-    config MUST restore it or the mutation poisons every later test (and
-    the prompt-manifest drift guard). Same protocol as test_agent.py."""
-    path = os.environ["YAAH_CONFIG_PATH"]
-    with open(path, "rb") as f:
-        saved = f.read()
-    try:
-        yield
-    finally:
-        with open(path, "wb") as f:
-            f.write(saved)
-
-
-def _config_with_voice(**overrides):
-    """A config dict with voice overrides, built WITHOUT mutating the
-    shared DEFAULTS (test_agent.py precedent — load_config returns a
-    shallow copy)."""
-    from backend.agent.config import load_config, save_config
-
-    voice = {**(load_config().get("voice") or {}), **overrides}
-    save_config({**load_config(), "voice": voice})
-
-
-def _say_section(prompt: str) -> str:
-    """The spoken-briefing section, sliced between its opening line and
-    the next section (ask-user) — the only region a persona may touch."""
-    section = prompt.split("Spoken briefing (voice read-aloud):\n", 1)[1]
-    return section.split("\nInterview the user", 1)[0]
+from backend.tests.support_say import (  # noqa: F401 (restored_config is a fixture)
+    restored_config,
+    save_config_with_voice as _config_with_voice,
+    say_section as _say_section,
+)
 
 
 # ---- enum -----------------------------------------------------------------
