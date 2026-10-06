@@ -1606,6 +1606,11 @@ async def _agent_view(agent: dict) -> dict:
         # #278: landing settings surface to the editor verbatim.
         "landing_mode": str(agent.get("landing_mode") or "off"),
         "landing_branch": str(agent.get("landing_branch") or ""),
+        # #314: the pinned chat's effective landing target — with landing
+        # mode off, this is where every fire lands. The editor names it
+        # read-only instead of leaving the value invisible.
+        "chat_selected_branch": (conv or {}).get("selected_branch"),
+        "chat_branch_pin_origin": (conv or {}).get("branch_pin_origin"),
         # #296: fire-time speech policy surfaces to the editor verbatim.
         "say_mode": str(agent.get("say_mode") or "arrival"),
         "schedule_spec": scheduler_mod.parse_schedule_spec(agent["schedule_spec"]),
@@ -1625,6 +1630,12 @@ class AgentBody(BaseModel):
     schedule_type: str = "interval"          # interval | daily | weekly
     schedule_spec: dict = {}                 # see database.SCHEMA agents comment
     approval_policy: str = "sandbox-only"    # sandbox-only | autonomous
+    # #314: the form's branch pick for the agent's pinned chat. None/blank
+    # = the inherit default (the #301 fallback stamps the workspace's
+    # then-current branch, origin 'inherited'); an explicit pick pins the
+    # chat at creation with origin 'explicit' — same contract as the draft
+    # destination card's NewConversation.selected_branch.
+    selected_branch: str | None = None
     # #278: where each fire's work lands — off (chat's own branch),
     # fixed (landing_branch), per-run (a branch per fire, unmerged).
     landing_mode: str = "off"
@@ -1682,8 +1693,14 @@ async def api_agents_add(body: AgentBody):
     if body.landing_mode == "fixed" and not landing_branch:
         raise HTTPException(status_code=400, detail="fixed landing_mode requires landing_branch")
     stype, spec = _validate_schedule(body.schedule_type, body.schedule_spec)
+    # #314: the form's explicit pick pre-stores the pinned chat's branch at
+    # creation — create_conversation derives origin 'explicit' when a branch
+    # is given, and runs the #301 workspace fallback when none is.
     conv_id = await create_conversation(
-        title=body.name.strip(), workspace=body.workspace or None, chat_type="agent"
+        title=body.name.strip(),
+        workspace=body.workspace or None,
+        chat_type="agent",
+        selected_branch=(body.selected_branch or "").strip() or None,
     )
     record = await db_create_agent({
         "id": _new_agent_id(),
@@ -1797,6 +1814,49 @@ async def api_agents_update(agent_id: str, body: AgentBody):
     if record["name"] != existing["name"] and existing.get("conversation_id"):
         # Keep the pinned chat's title in sync with the agent name.
         await update_conversation(existing["conversation_id"], title=record["name"])
+    # #314: an explicit branch pick on edit writes through to the pinned
+    # chat's selector — the same conversation-row write fire_agent performs
+    # for fixed/per-run at fire time. The inherit default is a deliberate
+    # NO-OP: the selector matters mainly in off mode, and switching the
+    # agent back to off should keep the chat where the last explicit pick
+    # (or the last fire) left it. The flip guards mirror the branch_select
+    # tool (ADR-0010): a stored pick must be a local branch of the chat's
+    # workspace, and a flip refuses while the chat's own worktree has
+    # uncommitted changes — stranding them relative to the new landing
+    # target is the exact failure the dirty-flip guard exists to kill.
+    picked = (body.selected_branch or "").strip()
+    conv_id = existing.get("conversation_id")
+    if picked and conv_id:
+        from backend.agent import worktrees as _worktrees
+        from backend.agent.gitinfo import _run_git, list_local_branches
+        from backend.agent.tools import workspace_root
+
+        conv = await get_conversation(conv_id)
+        ws = (conv or {}).get("workspace") or ""
+        if not ws.strip() or ws.startswith("remote:"):
+            raise HTTPException(status_code=400, detail="no local git workspace")
+        try:
+            root = workspace_root(ws)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if picked not in await list_local_branches(root):
+            raise HTTPException(status_code=400, detail=f"not a local branch: {picked}")
+        chat_dir = _worktrees.chat_worktree_path(ws, conv_id)
+        if chat_dir is not None and chat_dir.exists():
+            rc, out = await _run_git(chat_dir, "status", "--porcelain")
+            if rc != 0 or (out or "").strip():
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "this chat's worktree has uncommitted changes - "
+                        "commit or discard before switching branches"
+                    ),
+                )
+        await update_conversation(
+            conv_id,
+            selected_branch=picked,
+            branch_pin_origin="explicit",
+        )
     if existing.get("enabled") and not record.get("enabled"):
         # Pausing a mid-run agent stops that run too: the user unchecking
         # "enabled" expects the agent to go quiet now, not after the current

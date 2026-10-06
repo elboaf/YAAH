@@ -851,6 +851,11 @@ export interface ScheduledAgent {
   /** #278: where each fire's work lands. */
   landing_mode: AgentLandingMode
   landing_branch: string
+  /** #314: the pinned chat's effective landing target — with landing mode
+   *  off, this is where every fire lands. Read-only chip data for the
+   *  agent editor; the branch itself lives on the conversation row. */
+  chat_selected_branch: string | null
+  chat_branch_pin_origin: 'explicit' | 'inherited' | null
   /** #296: when a fire's spoken briefing gets spoken. */
   say_mode: AgentSayMode
   model: string
@@ -877,12 +882,15 @@ export interface AgentsPayload {
   retry: { retry_count: number; retry_backoff_minutes: number }
 }
 
-/** The edit/create form payload — the dialogue edits the whole record. */
+/** The edit/create form payload — the dialogue edits the whole record.
+ *  #314: selected_branch is the form's optional branch pick for the pinned
+ *  chat — absent/blank = the inherit default (a PATCH no-op on the chat). */
 export type AgentBody = Omit<
   ScheduledAgent,
   'id' | 'schedule_spec' | 'schedule_text' | 'running' | 'instructions' | 'chat_title' |
+    'chat_selected_branch' | 'chat_branch_pin_origin' |
     'conversation_id' | 'next_fire_at' | 'last_fired_at' | 'last_finished_at' | 'last_status'
-> & { schedule_spec: AgentScheduleSpec }
+> & { schedule_spec: AgentScheduleSpec; selected_branch?: string }
 
 export const listAgents = (workspace?: string) =>
   api<AgentsPayload>(

@@ -5329,7 +5329,7 @@ function InstructionsEditor({ agent }: { agent: ScheduledAgent }) {
 }
 
 /** The create/edit form. `agent` null = new agent in workspace `wsPath`. */
-function AgentForm({
+export function AgentForm({
   agent,
   wsPath,
   onDone,
@@ -5350,6 +5350,19 @@ function AgentForm({
   // #278: where each fire's work lands (off mirrors today's chat behavior).
   const [landingMode, setLandingMode] = useState<AgentLandingMode>(agent?.landing_mode ?? 'off')
   const [landingBranch, setLandingBranch] = useState(agent?.landing_branch ?? '')
+  // #314: the pinned chat's branch — '' = the inherit default ("inherit
+  // workspace's current branch"), which sends NO selected_branch so the
+  // #301 fallback runs exactly as before. An explicit pick pins the chat
+  // at creation (origin 'explicit'); on edit it writes through to the
+  // chat's selector (it matters mainly in off mode — fixed/per-run
+  // overwrite the selector at every fire anyway).
+  // Rests on '' (the inherit default) on edit too: preselecting the chat's
+  // current branch would silently re-stamp an inherited pin as explicit on
+  // every untouched save. The current target shows in the caption instead.
+  const [pinBranch, setPinBranch] = useState('')
+  // #314: the workspace's branch list for the picker (null while loading,
+  // [] when the workspace contributes none — non-git/remote/disabled).
+  const [wsBranches, setWsBranches] = useState<string[] | null>(null)
   // #296: when a fire's spoken briefing gets spoken (default arrival).
   const [sayMode, setSayMode] = useState<AgentSayMode>(agent?.say_mode ?? 'arrival')
   const [model, setModel] = useState(agent?.model ?? '')
@@ -5379,6 +5392,20 @@ function AgentForm({
         setActiveProvider(r.active_provider)
       })
       .catch(() => {})
+    // #314: the branch picker feeds from the same workspace branch read the
+    // draft destination card uses. No list (non-git/remote) disables the
+    // picker into its inherit placeholder.
+    if (wsPath) {
+      getWorkspaceGitBranches(wsPath)
+        .then((r) => {
+          if (alive) setWsBranches(r.branches ?? [])
+        })
+        .catch(() => {
+          if (alive) setWsBranches([])
+        })
+    } else {
+      setWsBranches([])
+    }
     return () => {
       alive = false
     }
@@ -5406,6 +5433,9 @@ function AgentForm({
         approval_policy: policy,
         landing_mode: landingMode,
         landing_branch: landingMode === 'fixed' ? landingBranch.trim() : '',
+        // #314: only an explicit pick travels; the inherit default sends
+        // nothing so the backend's #301 fallback runs unchanged.
+        ...(pinBranch.trim() ? { selected_branch: pinBranch.trim() } : {}),
         say_mode: sayMode,
         model: model.trim(),
         effort,
@@ -5440,6 +5470,34 @@ function AgentForm({
             disabled
           />
         </label>
+      </div>
+      <div className="flex gap-2">
+        <label className="min-w-0 flex-1">
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">
+            Initial branch — where this agent's chat starts
+          </span>
+          <select
+            className={`w-full ${agentInputCls}`}
+            value={pinBranch}
+            disabled={!wsBranches || wsBranches.length === 0}
+            aria-label="Initial branch"
+            onChange={(e) => setPinBranch(e.target.value)}
+          >
+            <option value="">
+              {wsPath
+                ? agent && pinBranch
+                  ? `keep current — ${pinBranch}`
+                  : 'inherit workspace\u2019s current branch'
+                : 'no workspace — no branch pin'}
+            </option>
+            {(wsBranches ?? []).map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="w-44 shrink-0" />
       </div>
       <label className="block">
         <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">
@@ -5503,7 +5561,7 @@ function AgentForm({
             value={landingMode}
             onChange={(e) => setLandingMode(e.target.value as AgentLandingMode)}
           >
-            <option value="off">off — chat's own branch</option>
+            <option value="off">off — follows the chat&apos;s branch selector</option>
             <option value="fixed">fixed — one branch</option>
             <option value="per-run">per-run — branch per fire</option>
           </select>
@@ -5532,11 +5590,22 @@ function AgentForm({
         </label>
       )}
       <p className="text-[10px] leading-relaxed text-zinc-600">
-        {landingMode === 'off'
-          ? 'Off (default): each fire runs in the pinned chat\u2019s own branch — where its work ends up is up to the chat.'
-          : landingMode === 'fixed'
-            ? 'Fixed: every fire lands on the branch above (it must exist in the workspace). The primary worktree is never touched.'
-            : 'Per-run: every fire gets its own branch (<agent>-<date>-<time>), left unmerged for you to integrate manually.'}
+        {landingMode === 'off' &&
+          `Off (default): each fire runs in the pinned chat’s own branch — ${
+            agent
+              ? `currently lands on ${agent.chat_selected_branch ?? 'no branch (no pin)'}${
+                  agent.chat_branch_pin_origin
+                    ? ` (${agent.chat_branch_pin_origin === 'explicit' ? 'explicit pick' : 'inherited from workspace'})`
+                    : ''
+                }; the picker rests on the inherit default — an explicit pick writes through to the chat`
+              : `a new chat will inherit the workspace's current branch at creation`
+          }.`}
+        {landingMode === 'fixed'
+          ? 'Fixed: every fire lands on the branch above (it must exist in the workspace). The primary worktree is never touched.'
+          : ''}
+        {landingMode === 'per-run'
+          ? 'Per-run: every fire gets its own branch (<agent>-<date>-<time>), left unmerged for you to integrate manually.'
+          : ''}
       </p>
       <p className="text-[10px] leading-relaxed text-zinc-600">
         {policy === 'sandbox-only'
