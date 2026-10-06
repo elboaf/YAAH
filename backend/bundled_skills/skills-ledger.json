@@ -3,19 +3,19 @@
     "repo": "obra/superpowers",
     "verdict": "A",
     "title": "15 markdown skills (methodology: TDD, debugging, plans...)",
-    "notes": "Strict name+description frontmatter. Upstream install routes are per-harness plugin marketplaces; the Claude-Code-only part is a SessionStart hook injecting the using-superpowers bootstrap skill — in YAAH the equivalent is the model loading it from the description index (or a future session-start auto-load toggle). Two skills assume subagent dispatch but ship written inline fallbacks. TDD/git skills assume a shell tool, which YAAH has."
+    "notes": "Strict name+description frontmatter. Upstream install routes are per-harness plugin marketplaces; the Claude-Code-only part is a SessionStart hook injecting the using-superpowers bootstrap skill \u2014 in YAAH the equivalent is the model loading it from the description index (or a future session-start auto-load toggle). Two skills assume subagent dispatch but ship written inline fallbacks. TDD/git skills assume a shell tool, which YAAH has."
   },
   {
     "repo": "DietrichGebert/ponytail",
     "verdict": "A",
     "title": "6 markdown-only skills (lazy-senior-dev style)",
-    "notes": "name/description/argument-hint/license frontmatter. Always-on activation upstream is hook-driven; the skill still works when invoked (/s ponytail). Its description is a YAML block scalar (description: >) — parses with PyYAML (shipped), mangled only under a no-PyYAML flat fallback; worth a comment in a vendored copy."
+    "notes": "name/description/argument-hint/license frontmatter. Always-on activation upstream is hook-driven; the skill still works when invoked (/s ponytail). Its description is a YAML block scalar (description: >) \u2014 parses with PyYAML (shipped), mangled only under a no-PyYAML flat fallback; worth a comment in a vendored copy."
   },
   {
     "repo": "ayghri/i-have-adhd",
     "verdict": "A",
     "title": "1 pure-prose output-style skill",
-    "notes": "Frontmatter includes disable-model-invocation: true — exactly YAAH's own field, honored today. Plugin/npm/manual-copy install routes; manual copy works immediately."
+    "notes": "Frontmatter includes disable-model-invocation: true \u2014 exactly YAAH's own field, honored today. Plugin/npm/manual-copy install routes; manual copy works immediately."
   },
   {
     "repo": "JuliusBrussee/caveman",
@@ -27,7 +27,7 @@
     "repo": "K-Dense-AI/scientific-agent-skills",
     "verdict": "A",
     "title": "166 skills: SKILL.md + references/ + Python scripts/ + assets/",
-    "notes": "Strict closed-set frontmatter. Drop-in; scripts need a Python environment at runtime — surface, don't provision. Description index stays cheap (name + one-liner); bodies load on invocation."
+    "notes": "Strict closed-set frontmatter. Drop-in; scripts need a Python environment at runtime \u2014 surface, don't provision. Description index stays cheap (name + one-liner); bodies load on invocation."
   },
   {
     "repo": "cathrynlavery/diagram-design",
@@ -39,7 +39,7 @@
     "repo": "Graphify-Labs/graphify",
     "verdict": "B",
     "title": "Markdown playbook driving a Python CLI (uv tool install graphifyy)",
-    "notes": "Works if the user installs its CLI. The body's subagent-orchestration step would mislead YAAH's model; upstream has a sequential fallback for agents without subagents. references/ sidecars work — YAAH hands the model the folder path."
+    "notes": "Works if the user installs its CLI. The body's subagent-orchestration step would mislead YAAH's model; upstream has a sequential fallback for agents without subagents. references/ sidecars work \u2014 YAAH hands the model the folder path."
   },
   {
     "repo": "mvanhorn/last30days-skill",
@@ -51,12 +51,18 @@
     "repo": "sickn33/agentic-awesome-skills",
     "verdict": "B",
     "title": "Registry of 2,406 curated skills + Node 22 CLI + MCP control plane",
-    "notes": "B as a source, A per individual skill. Strongest evidence curation-at-scale is solved elsewhere (per-skill risk taxonomy, per-target compatibility JSON). Full-repo installs exhaust context on other hosts — subsets only. Good browse-tab source; nothing to integrate at runtime."
+    "notes": "B as a source, A per individual skill. Strongest evidence curation-at-scale is solved elsewhere (per-skill risk taxonomy, per-target compatibility JSON). Full-repo installs exhaust context on other hosts \u2014 subsets only. Good browse-tab source; nothing to integrate at runtime."
   },
   {
     "repo": "Egonex-AI/Understand-Anything",
     "verdict": "C",
     "title": "9 skills orchestrating 10 subagent definitions + pnpm/TypeScript core + local dashboard",
     "notes": "Harness-coupled: needs subagent orchestration (up to 7 concurrent), a pnpm build, $CLAUDE_PLUGIN_ROOT resolution, and a dashboard server. No install path works in YAAH; using it is a port, not an install. The manager must be able to say 'no' convincingly."
+  },
+  {
+    "repo": "mattpocock/skills",
+    "verdict": "A",
+    "title": "11 markdown engineering skills; pr + retro bundled at v1.3.1 (#315)",
+    "notes": "pr and retro vendored verbatim from tag v1.3.1 into bundled_skills/. Their 'Call the Skill tool with X' wording maps to YAAH's load_skill tool; retro's step-1 cross-reference (writing-for-agents) resolves in YAAH, pr has none. pr frontmatter also carries a metadata.credits block beyond YAAH's three honored fields - harmless (ignored by the parser), kept verbatim. Neither skill touches git topology. Remaining upstream skills (incl. implement-spec) not bundled: see #316."
   }
 ]
