@@ -927,6 +927,52 @@ async def test_connect_accepts_matching_protocol(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_remote_session_prefers_handshake_display_name():
+    """#313: the host's configured Settings→Remote name wins over the raw
+    hostname once the handshake carries it (it has since the first
+    remote-hosting build — the client just never read it)."""
+    session = remote_mod.RemoteSession("http://h", "p", {
+        "display_name": "Studio Tower", "hostname": "DESKTOP-AB12CD3",
+        "protocol": remote_mod.PROTOCOL_VERSION,
+    })
+    assert session.name == "Studio Tower"
+
+
+@pytest.mark.asyncio
+async def test_remote_session_falls_back_when_display_name_blank():
+    """Blank or whitespace-only display_name means the host never set one —
+    hostname is the honest fallback (this is discovery's own rule)."""
+    for blank in ("", "   ", None):
+        session = remote_mod.RemoteSession("http://h", "p", {
+            "display_name": blank, "hostname": "Host",
+            "protocol": remote_mod.PROTOCOL_VERSION,
+        })
+        assert session.name == "Host"
+
+
+@pytest.mark.asyncio
+async def test_connect_uses_host_display_name(monkeypatch):
+    """End-to-end through /api/remote/connect: a host advertising a
+    configured display name surfaces under that name, not its hostname."""
+    import backend.main as main_mod
+
+    body = remote_mod.host_info()
+    body["protocol"] = remote_mod.PROTOCOL_VERSION
+    body["instance_id"] = "some-other-instance"
+    body["display_name"] = "Studio Tower"
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.body = body
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/connect",
+            json={"url": "http://10.0.0.5:8765", "passphrase": "p"},
+        )
+    assert res.status_code == 200
+    assert res.json()["name"] == "Studio Tower"
+    assert res.json()["host_id"] == body["host_id"]
+
+
+@pytest.mark.asyncio
 async def test_connect_refuses_protocol_mismatch(monkeypatch):
     import backend.main as main_mod
 

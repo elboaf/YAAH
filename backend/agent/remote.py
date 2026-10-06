@@ -129,7 +129,12 @@ class RemoteSession:
         self.host_id = info.get("host_id") or (
             "h-" + (info.get("hostname") or self.url).lower().replace(" ", "-")
         )
-        self.name = info.get("hostname") or self.url
+        # Show the host's configured Settings→Remote name (#313) when the
+        # handshake carries it; hostname is the fallback for blank names and
+        # older peers — matching discovery's own display-name rule.
+        display = info.get("display_name")
+        self.name = (display.strip() if isinstance(display, str) else "") \
+            or info.get("hostname") or self.url
 
     @property
     def windows(self) -> bool:
