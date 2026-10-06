@@ -281,6 +281,113 @@ def test_git_command_push_refuses_run_branch_head(client, tmp_path):
     assert row["tool_call_id"].startswith("ui-git-push-")
 
 
+# ---- #328: git-command follows the chat worktree, like git-info ----
+
+
+def _chat_worktree(repo, conv_id):
+    """Materialize the chat worktree synchronously (the endpoint under
+    test is sync; ensure_chat_worktree is async)."""
+    import asyncio
+
+    from backend.agent.worktrees import ensure_chat_worktree
+
+    return asyncio.run(ensure_chat_worktree(str(repo), conv_id, "master"))["path"]
+
+
+def test_git_command_push_refuses_run_branch_in_chat_worktree(client, tmp_path):
+    """#328: the standard config — the chat works in .scratch/chat-N/run
+    on a run/* branch while the primary tree sits on master. The refusal
+    must guard the WORKTREE head, where it actually lives; on the
+    unmapped root this guard is dead code."""
+    repo = _repo_with_commit(tmp_path)
+    conv_id = _conversation(client, repo)
+    chat_dir = _chat_worktree(repo, conv_id)
+    _git(repo, "branch", "run/fix-whine-999")  # the worktree's start point
+    _git(str(chat_dir), "checkout", "-q", "run/fix-whine-999")
+
+    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "push"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert "run/* branches stay local" in body["error"]
+
+
+def test_git_command_commit_lands_in_chat_worktree(client, tmp_path):
+    """#328: chip commit mutates the tree the chat works in, not the
+    primary tree the agent may have left on another branch."""
+    repo = _repo_with_commit(tmp_path)
+    conv_id = _conversation(client, repo)
+    chat_dir = _chat_worktree(repo, conv_id)
+    (chat_dir / "work.txt").write_text("agent work", encoding="utf-8")
+
+    r = client.post(
+        f"/api/conversations/{conv_id}/git-command",
+        json={"action": "commit", "message": "chip commit"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+    # The commit landed in the worktree...
+    out = _git(str(chat_dir), "show", "--stat", "--format=%s")
+    assert "chip commit" in out
+    assert "work.txt" in out
+    # ...and the primary tree is untouched.
+    assert "chip commit" not in _git(repo, "log", "--format=%s", "-5")
+
+
+def test_git_command_status_reads_chat_worktree(client, tmp_path):
+    """#328: status describes the worktree's dirt, not the primary's —
+    the strip must not contradict the git-info chip beside it."""
+    repo = _repo_with_commit(tmp_path)
+    conv_id = _conversation(client, repo)
+    chat_dir = _chat_worktree(repo, conv_id)
+    # Dirt ONLY in the chat worktree; the primary stays clean.
+    (chat_dir / "scratch.txt").write_text("wip", encoding="utf-8")
+
+    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "status"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert "?? scratch.txt" in body["output"]
+
+
+def test_git_command_pull_fast_forwards_in_chat_worktree(client, tmp_path):
+    """#328: pull operates on the chat worktree — the fetch/merge against
+    the worktree branch's upstream lands in the worktree, not the
+    primary tree."""
+    repo = _repo_with_commit(tmp_path)
+    # A local clone acts as "origin"; the source repo gets it as its
+    # remote so every worktree shares the fetch configuration.
+    origin = tmp_path / "origin"
+    _git(tmp_path, "clone", "-q", str(repo), str(origin))
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    # Advance the clone on a feature branch by one commit.
+    _git(origin, "checkout", "-q", "-b", "feature")
+    (origin / "hello.txt").write_text("from origin\n", encoding="utf-8")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "origin work")
+    # The source repo: feature exists locally at the base, tracking the
+    # clone's advanced branch.
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "branch", "feature")
+    _git(repo, "branch", "-u", "origin/feature", "feature")
+
+    conv_id = _conversation(client, repo)
+    chat_dir = _chat_worktree(repo, conv_id)
+    _git(str(chat_dir), "checkout", "-q", "feature")
+    assert "from origin" not in (chat_dir / "hello.txt").read_text(encoding="utf-8")
+
+    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "pull"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True, r.json()
+    # The fast-forward landed in the WORKTREE...
+    assert "from origin" in (chat_dir / "hello.txt").read_text(encoding="utf-8")
+    # ...and the primary tree (master, no upstream) is untouched.
+    assert "from origin" not in (repo / "hello.txt").read_text(encoding="utf-8")
+
+
 def test_git_command_whitelist_rejects_arbitrary_actions(client, tmp_path):
     repo = _repo_with_commit(tmp_path)
     conv_id = _conversation(client, repo)

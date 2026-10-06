@@ -752,8 +752,13 @@ _GIT_ACTIONS = {"status", "commit", "push", "pull", "checkout"}
 
 
 async def _conversation_git_root(conversation_id: int):
-    """Resolved workspace root for a conversation, or None when the session
-    has no local git workspace (remote:/empty/non-repo handled by callers)."""
+    """Resolved git root for a conversation — the CHAT worktree when one
+    exists, else the workspace root (#328; the same remap git-info has
+    made since #277) — or None when the session has no local git
+    workspace (remote:/empty/non-repo handled by callers). The status
+    strip acts on the tree the chat works in: commit/push/pull mutate
+    where the agent commits, and the run/* refusal guards the worktree
+    HEAD where it actually lives."""
     from backend.agent.tools import workspace_root
 
     conv = await get_conversation(conversation_id)
@@ -765,9 +770,15 @@ async def _conversation_git_root(conversation_id: int):
     if not ws.strip() or ws.startswith("remote:"):
         return None
     try:
-        return workspace_root(ws)
+        root = workspace_root(ws)
     except ValueError:
         return None
+    from backend.agent import worktrees as _worktrees
+
+    chat_dir = _worktrees.chat_worktree_path(ws, conversation_id)
+    if chat_dir is not None and chat_dir.exists():
+        return chat_dir
+    return root
 
 
 async def _run_ui_git(root, *args: str) -> dict:
