@@ -103,6 +103,10 @@ _Avoid_: nested prompt
 The complete set of prompts the harness can assemble, enumerated across every fragment's trigger conditions; produced by the manifest harness for review and drift checks.
 _Avoid_: prompt snapshots (implies byte-goldens)
 
+**Fact bases**:
+Where prompt-surface truth lives. Measured facts — sizes, section breakdowns, rendered bytes — live in the committed manifests under `backend/prompt_manifests/`, regenerated and byte-drift-guarded against the code. Orientation lives in this section and in ADR-0011. There is no hand-pinned line-number document; those rot (ADR-0011 records the deletion of the prose inventory/findings docs).
+_Avoid_: `docs/research/prompt-surface-*.md` (deleted); re-deriving sizes by hand instead of reading a manifest
+
 ### Memory
 
 **Memory**:
