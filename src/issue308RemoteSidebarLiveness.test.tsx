@@ -49,14 +49,14 @@ const workspaces: WorkspaceRow[] = []
 beforeEach(() => {
   getRemoteDeviceMessages.mockResolvedValue([row('earlier message')])
   listRemoteDeviceConversations.mockResolvedValue({ status: 'online', conversations: [] })
-  useAgent.setState({ statusByConv: {}, finishedByConv: {}, activeRemoteKey: null, conversationId: null })
+  useAgent.setState({ statusByConv: {}, finishedByConv: {}, activeRemoteKey: null, conversationId: null, messagesByConv: {} })
   useRemoteConversations.setState({ transcripts: {} })
 })
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  useAgent.setState({ statusByConv: {}, finishedByConv: {}, activeRemoteKey: null, conversationId: null })
+  useAgent.setState({ statusByConv: {}, finishedByConv: {}, activeRemoteKey: null, conversationId: null, messagesByConv: {} })
   useRemoteConversations.setState({ transcripts: {} })
 })
 
@@ -180,6 +180,43 @@ describe('remote turn path (#308): status flows through setStatus', () => {
     fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'run it' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(useAgent.getState().statusByConv[KEY]).toBe('idle'))
+    expect(useAgent.getState().finishedByConv[KEY]).toBeUndefined()
+  })
+
+  it('a mid-stream failure keeps the turn rows and leaves an error signal', async () => {
+    streamRemoteTurn.mockImplementation(
+      (_h: string, _c: string, _m: string, _w: string, onEvent: (ev: { type: string; text?: string }) => void) =>
+        new Promise<void>((_resolve, reject) => {
+          onEvent({ type: 'text', text: 'partial reply' })
+          setTimeout(() => reject(new Error('stream dropped')), 10)
+        }),
+    )
+    render(
+      <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
+    )
+    await screen.findByText('earlier message')
+    fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'run it' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    // The failure lands mid-stream: the turn's rows stay, and the remote row
+    // gets an error signal instead of a silent rollback to idle.
+    await waitFor(() => expect(useAgent.getState().statusByConv[KEY]).toBe('error'))
+    const messages = useAgent.getState().messagesByConv[KEY] ?? []
+    expect(messages.some((m) => m.role === 'assistant' && m.content.includes('partial reply'))).toBe(true)
+    expect(useAgent.getState().finishedByConv[KEY]).toBeUndefined() // watched in its own chat
+  })
+
+  it('a rejected send (never started) still rolls back and does not signal', async () => {
+    streamRemoteTurn.mockRejectedValue(new Error('offline'))
+    render(
+      <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
+    )
+    await screen.findByText('earlier message')
+    fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'run it' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() =>
+      expect((useAgent.getState().messagesByConv[KEY] ?? []).some((m) => m.role === 'user' && m.content === 'run it')).toBe(false),
+    )
+    expect(useAgent.getState().statusByConv[KEY]).toBe('idle')
     expect(useAgent.getState().finishedByConv[KEY]).toBeUndefined()
   })
 })

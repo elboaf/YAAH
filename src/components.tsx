@@ -2940,13 +2940,21 @@ export function RemoteTranscriptDialog({
       }
       setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
     }
+    // Issue #308 (CodeRabbit): distinguish a rejected send from a failed
+    // stream. Once an event has been delivered the turn started; a later
+    // rejection keeps its rows and signals error instead of rolling back.
+    let turnStarted = false
+    const onEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
+      turnStarted = true
+      applyEvent(ev)
+    }
     try {
       await streamRemoteTurn(
         hostId,
         conversationId,
         text,
         workspace ?? '',
-        applyEvent,
+        onEvent,
         ac.signal,
         () => {},
       )
@@ -2957,18 +2965,26 @@ export function RemoteTranscriptDialog({
       // Persist the streamed rows into the viewer's own transcript cache.
       setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
     } catch (error) {
-      // The turn never started (offline/409): roll the optimistic rows back
-      // and restore the draft so nothing is lost.
-      useAgent.setState((s) => {
-        const remaining = (s.messagesByConv[remoteKey] ?? []).filter((m) => m.id !== userId && m.id !== asstId)
-        return {
-          messagesByConv: { ...s.messagesByConv, [remoteKey]: remaining },
-          statusByConv: { ...s.statusByConv, [remoteKey]: 'idle' }, // abort path: no signal (the turn never started)
-        }
-      })
-      setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
-      setComposerText(text)
-      setSendNote(`Message could not be sent — ${String((error as Error).message ?? error)}`)
+      if (turnStarted) {
+        // The stream failed mid-turn: preserve what was streamed and mark the
+        // row with an error signal instead of silently going idle.
+        useAgent.getState().setStatus(remoteKey, 'error')
+        setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+        setSendNote(`Turn failed — ${String((error as Error).message ?? error)}`)
+      } else {
+        // The turn never started (offline/409): roll the optimistic rows back
+        // and restore the draft so nothing is lost.
+        useAgent.setState((s) => {
+          const remaining = (s.messagesByConv[remoteKey] ?? []).filter((m) => m.id !== userId && m.id !== asstId)
+          return {
+            messagesByConv: { ...s.messagesByConv, [remoteKey]: remaining },
+            statusByConv: { ...s.statusByConv, [remoteKey]: 'idle' }, // abort path: no signal (the turn never started)
+          }
+        })
+        setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
+        setComposerText(text)
+        setSendNote(`Message could not be sent — ${String((error as Error).message ?? error)}`)
+      }
     } finally {
       streamingRef.current = false
     }
