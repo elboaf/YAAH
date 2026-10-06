@@ -49,6 +49,18 @@ def _wav_bytes(pcm: bytes = b"\x00\x01" * 2400, rate: int = 24000) -> bytes:
 
 
 @pytest.fixture(autouse=True)
+def clean_floor():
+    """Reset the module-level supersede floor around every test (#317):
+    these tests post low epochs (1..3) against the real floor, so a floor
+    raised by any earlier test in the same pytest process turned
+    200/502 into 409 (suite order failed, isolation passed). Reset on
+    both ends so this module never leaks either."""
+    speak._floor = 0
+    yield
+    speak._floor = 0
+
+
+@pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     """Redirect CONFIG_PATH to a per-test file: config PUTs here never leak
     into other modules (test_speak.py narrates with local defaults), and

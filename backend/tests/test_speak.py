@@ -328,7 +328,11 @@ def test_synthesize_same_epoch_prefetch_survives(tts_env, monkeypatch, clean_flo
     assert len(first[0]) == 6 and len(second[0]) == 6
 
 
-def test_ensure_epoch_floor_never_lowers(tts_env):
+def test_ensure_epoch_floor_never_lowers(tts_env, clean_floor):
+    # clean_floor (#317): this test ratchets the REAL global to 5 on
+    # purpose; without the reset that floor leaked into every later test
+    # in the same pytest process (remote-TTS tests post epoch 1..3 and
+    # got 409s in suite order, passed in isolation).
     assert speak.ensure_epoch(5) == 5
     assert speak.ensure_epoch(2) == 5  # ignored
     assert speak.superseded(5) and speak.superseded(4)
@@ -352,7 +356,7 @@ async def test_tts_synthesize_superseded_maps_to_409(tts_env, monkeypatch):
     not os.environ.get("YAAH_TTS_MODEL_DIR"),
     reason="real Kokoro model not available (CI)",
 )
-def test_real_engine_synthesizes_with_abort_callback():
+def test_real_engine_synthesizes_with_abort_callback(clean_floor):
     """Guards the lazy `import numpy` inside sherpa's generate(callback=...):
     the callback is marshaled through numpy, so the frozen sidecar must
     bundle numpy even though sherpa only imports it on this path (PyInstaller
