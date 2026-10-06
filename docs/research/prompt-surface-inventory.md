@@ -12,7 +12,7 @@ walked and measured at `aeba2e7`.
 Prompts are assembled **in Python code, not template files**. There is exactly one
 base-prompt builder — `backend/agent/loop.py::_default_system_prompt()`
 (loop.py:309–517) — that every chat turn flows through, then `run_agent` /
-`_run_agent_claimed` (loop.py:1573 / 1640) appends conditional fragments to it with `\n\n---\n\n` separators.
+`_run_agent_claimed` (loop.py:1578 / 1645) appends conditional fragments to it with `\n\n---\n\n` separators.
 Tool descriptions live as JSON-schema literals in four modules and are merged by
 `backend/agent/tools.py::get_schemas()` (tools.py:1487–1551). Auxiliary model calls
 (compaction, title generation) have their own one-off prompts. The only prompt .md
@@ -45,9 +45,9 @@ Major sections (in output order):
 
 ## 2. Conditional fragments (chat turn assembly)
 
-Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1573 / 1640) →
+Assembly flow: `run_agent` → `_run_agent_claimed` (loop.py:1578 / 1645) →
 `_default_system_prompt` → fragments appended 1341–1390 → `messages` with
-system first (loop.py:1573).
+system first (loop.py:1578).
 
 | Fragment | File:lines | Trigger | Approx size |
 |---|---|---|---|
@@ -88,7 +88,7 @@ at tools.py:1293–1334, filtering in `get_schemas()` tools.py:1487–1551).
 | `backend/agent/tools.py:188–221` | 1: powershell (`POWERSHELL_SCHEMA`, Windows-only append, tools.py get_schemas:1495) | |
 | `backend/agent/tools.py:225–238` | 1: install_git (Windows + git missing + bundled installer, tools.py get_schemas:1518–1524) | |
 | `backend/agent/computer.py:92–361` | 11: read_ui_tree, screenshot, list_windows, focus_window, mouse_move, mouse_click, mouse_drag, mouse_scroll, type_text, press_key, wait (`COMPUTER_TOOLS_SCHEMA`, merged tools.py:1318–321) | 7 input tools embed shared `_HOST_INPUT_NOTE` (computer.py:33–37); `_MONITOR_PARAM`/`_OBSERVE` param descriptions shared |
-| `backend/agent/sandbox.py:1348–1448` | 4: sandbox_test/run/status/stop (`SANDBOX_TOOLS_SCHEMA`, merged tools.py:1481–1487; stripped for remote sessions, tools.py get_schemas:1526–1532) | `sandbox_run` description is a mini-playbook (~23 lines) |
+| `backend/agent/sandbox.py:1348–1448` | 4: sandbox_test/run/status/stop (`SANDBOX_TOOLS_SCHEMA`, merged tools.py:1488–1494; stripped for remote sessions, tools.py get_schemas:1526–1532) | `sandbox_run` description is a mini-playbook (~23 lines) |
 | `backend/agent/loop.py:794–816` | 1: exit_plan (plan mode only) | |
 
 **Total: 37 self-defined tool descriptions** (plus parameter-level descriptions,
@@ -99,7 +99,7 @@ plus dynamic MCP ones). Supporting description-like text:
   (tools.py:377–401); "the schemas stay short; this reaches the model only when it calls get_help".
 - **In-band model-directed strings** (not schemas but the model reads them):
   timeout-clamp note (`_clamp_note`, tools.py:1009–1018), get_help error nudge
-  (tools.py:1583–1593), screenshot-disallowed info (tools.py:1615–1625),
+  (tools.py:1590–1600), screenshot-disallowed info (tools.py:1615–1625),
   plan-block result (`_plan_block_result`, loop.py:1159–1170), sandbox-only skip
   result (`_policy_skip_result`, loop.py:901–912), sandbox hints
   (`_missing_command_hint` / `_mcp_hint` / `_dialog_stall_hint`,
@@ -148,7 +148,7 @@ assertions (de-facto content guards) plus one true golden fixture:
   powershell description (tools.py:204–207), base prompt guideline (loop.py:384–385).
 4. **"Invoked skills" wrapper — duplication resolved by #260**: both injection
   paths now share one helper, `invoked_skills_wrapper` (loop.py:831–839), called
-  from the base-injection site and the turn-time site (loop.py:873 / 1531).
+  from the base-injection site and the turn-time site (loop.py:879 / 1531).
 5. **`SAY_MAX_CHARS = 400` mirrored** in backend/agent/speak.py:498 and src/speech.ts:118 (documented mirror; drift would break transcript stripping).
 6. **windows-mcp playbook tripled**: sandbox prompt_section (sandbox.py:~1283–1320), `sandbox_run` description (sandbox.py:1384–1413), and `_HOST_INPUT_NOTE` on every input tool (computer.py:33–37).
 7. **Orphan/legacy**: `_BRIEFING_MAX`, `CMD_TOOLS_NOTE` sharing is deliberate. The `git_*` names were removed with #174 (2026-09-30): they never had a schema or executor anywhere — the host's `/api/remote/exec` dispatches through the same `EXECUTORS` map, so the remote-forward path was a dead end too; `REMOTE_TOOLS` now lists only executable tools.
