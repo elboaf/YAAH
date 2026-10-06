@@ -472,3 +472,24 @@ def test_auxiliary_kind_captures_both_prompts():
     for entry in prompts.values():
         assert entry["bytes"] > 0
         assert entry["text"]
+
+
+@pytest.mark.parametrize("manifest", [
+    "win-remote-normal.json", "win-remote-compaction.json",
+])
+def test_remote_manifests_carry_no_stripped_schemas(manifest: str) -> None:
+    # Inherited from the deleted inventory-refs guard (#196/#300 -> ADR-0011):
+    # stripped sandbox/computer schemas are omitted from remote manifests
+    # (regenerated without them in the #172/#200 line), so the byte totals
+    # add up instead of counting 6-byte name-only rows. Hard-coded win-*:
+    # the committed matrix is the canonical Windows host's render set.
+    schemas = json.loads(
+        (MANIFEST_DIR / manifest).read_text(encoding="utf-8"))["tool_schemas"]
+    stripped = {"sandbox_test", "sandbox_run", "sandbox_status",
+                "sandbox_stop", "screenshot", "list_windows",
+                "read_ui_tree", "focus_window", "mouse_move", "mouse_click",
+                "mouse_drag", "mouse_scroll", "type_text", "press_key",
+                "wait"}
+    names = {s["name"] for s in schemas}
+    assert not names & stripped, f"{manifest} lists stripped schemas: {names & stripped}"
+    assert all(s["bytes"] > 16 for s in schemas), "name-only schema rows"
