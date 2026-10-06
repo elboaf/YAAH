@@ -65,6 +65,17 @@ def test_note_falls_back_without_a_title():
     assert "run/chat-7" in note
 
 
+def test_degraded_note_landing_rule_is_universal():
+    """#322: the degraded SOP lands when safe and reports otherwise,
+    decided by a git probe the run executes itself — never by deferring
+    to a workspace AGENTS.md rule."""
+    note = loop._selected_branch_note_degraded("bigtest", 7, "non-repo")
+    assert "git worktree list" in note
+    assert "NO other worktree" in note
+    assert "do NOT land" in note
+    assert "worktree remove" in note
+
+
 def test_degraded_note_honors_the_title_too():
     note = loop._selected_branch_note_degraded("bigtest", 7, "non-repo", title="Fix TTS whine")
     assert "run/fix-tts-whine-7 bigtest" in note

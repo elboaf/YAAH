@@ -7,6 +7,8 @@ remain superseded history.
 Amended 2026-10-04: selector pinning semantics (pin at creation,
 primary-tree immunity, switch-request translation, sub-agent
 injection) — see the amendment section below.
+Amended 2026-10-05: universal degraded-mode landing rule (#322) —
+see the amendment section below.
 
 ## Context
 
@@ -188,3 +190,31 @@ Decisions:
 
 Pre-existing `run/chat-*` branches need no migration: they land, sweep
 and surface through the same name-blind machinery.
+
+## Amendment 2026-10-05: universal degraded-mode landing rule (#322)
+
+When a chat worktree cannot be materialized (non-repo, git failure), the
+degraded run SOP's landing rule previously deferred to a per-workspace
+"AGENTS.md interim master-landing rule" — a rule that existed in no
+workspace (a dangling leftover from the pre-#277 SOP). Decisions:
+
+- **The SOP ships universal in the harness prompt.** No note variant may
+  reference workspace-specific rules or files; a workspace AGENTS.md
+  contributes only project-specific deltas on top. YAAH's own AGENTS.md
+  is pinned (test) to NOT restate the run SOP — the injected note is
+  the single source, everywhere.
+- **Degraded landing: land when safe, else commit-and-report.** Safe =
+  the selected branch is checked out in no other worktree, discovered by
+  the run itself via `git worktree list` (prose, not harness code —
+  zero git calls added to the path where git is already failing).
+  Merging onto an unchecked-out branch moves only the ref; no human's
+  working tree is touched. When the branch IS checked out elsewhere
+  (the common degraded case), the run commits in its run worktree,
+  removes it, and reports — the human lands.
+- **The residue protocol is extracted** into a shared helper
+  (`_residue_protocol`) so every selector-note variant states it
+  identically.
+
+Work still stops at selector branches in the normal path; this amendment
+only repairs the degraded fallback so no workspace ever improvises a
+landing rule again.

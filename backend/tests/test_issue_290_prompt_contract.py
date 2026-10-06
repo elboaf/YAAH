@@ -5,8 +5,10 @@ The run SOP is a prompt contract until the harness materializes chat
 worktrees itself: `.scratch/chat-<id>/run` on branch `run/chat-<id>`,
 with the residue protocol at run start (clean+merged auto-clears; dirty
 or unmerged is surfaced, never silently deleted, never silently
-blocking). The surfaces that carry it: the branch-selector note shim
-(#286) and the workspace AGENTS.md.
+blocking). The surface that carries it: the branch-selector note shim (#286) —
+fully injected, workspace-agnostic; the workspace AGENTS.md deliberately
+does NOT restate it (#322: the shipped prompt is the single source, any
+project's AGENTS.md only adds project-specific deltas).
 """
 from pathlib import Path
 
@@ -78,15 +80,31 @@ async def test_run_injects_deterministic_paths(tmp_path, monkeypatch):
     assert "bigtest" in system
 
 
-def test_agents_md_adopts_the_namespace():
-    """The workspace's own AGENTS.md prescribes the deterministic paths —
-    the acceptance criterion names it, and it is the injected surface the
-    SOP actually travels by."""
+def test_agents_md_does_not_restate_the_run_sop():
+    """#322: the harness's injected SOP is the single, workspace-agnostic
+    source (the #290 criterion prescribing AGENTS.md adoption is revised
+    away with the #277 graduation that moved the SOP into the injected
+    note). A workspace AGENTS.md adds only project-specific deltas; the
+    deterministic namespace and branch grammar live in loop.py alone."""
     root = Path(__file__).resolve().parents[2]
     text = (root / "AGENTS.md").read_text(encoding="utf-8")
-    assert ".scratch/chat-<id>/run" in text
-    assert "run/<title-slug>-<chat-id>" in text  # #312: named after the work
-    assert "run/chat-<id>" in text  # the generic-title fallback stays documented
+    assert ".scratch/chat-<id>/run" not in text
+    assert "run/<title-slug>-<chat-id>" not in text
+    assert "run/chat-<id>" not in text
     assert "run-YYYYMMDD" not in text
-    # Residue protocol present: dirty/unmerged surfaces, nothing silent.
-    assert "scrap it" in text
+    assert "land it" not in text and "scrap it" not in text
+
+
+def test_notes_are_workspace_agnostic():
+    """#322: no note variant may lean on a workspace AGENTS.md rule or any
+    other project-specific file — the SOP is self-contained everywhere,
+    YAAH or not. (Regression pin for the dangling 'interim master-landing
+    rule' reference in the degraded variant.)"""
+    for note in (
+        loop._selected_branch_note("bigtest", 7, title="Fix TTS whine"),
+        loop._selected_branch_note("bigtest", 7, detached=True),
+        loop._selected_branch_note_degraded("bigtest", 7, "non-repo", title="Fix TTS whine"),
+        loop._selected_branch_note_stale("bigtest", 7),
+    ):
+        assert "AGENTS.md" not in note
+        assert "interim" not in note

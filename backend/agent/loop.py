@@ -932,6 +932,21 @@ def _plan_mode_note() -> str:
 # #301 (ADR-0010 amendment): the selector note states the amendment rules
 # verbatim - semantic primary-tree immunity, server-enforced start point -
 # because the model has no other surface to learn them from.
+def _residue_protocol(cid: str) -> str:
+    """The residue protocol (#290), shared by every selector-note variant:
+    a left-behind run worktree is never silently deleted and never
+    silently blocks a chat - the user says "land it" or "scrap it"."""
+    return (
+        "If a run worktree already exists at that path, it is residue from "
+        "an earlier run: when it is clean and fully merged into the target, "
+        "it is landed-and-forgotten \u2014 remove it and proceed; when it is "
+        "dirty or has unmerged commits, leave it untouched, say so, and "
+        f"use `.scratch/chat-{cid}/run-2` for this run instead. The user "
+        'says "land it" or "scrap it" for surfaced residue \u2014 it is never '
+        "silently deleted, and never silently blocks a chat."
+    )
+
+
 _AMENDMENT_RULES = (
     "A terminal `git switch` on the primary tree changes nothing about this "
     "chat's aim - the stored pin, not live HEAD, drives it. New branches "
@@ -981,15 +996,7 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
     b = str(branch).strip()
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     rb = _run_branch_name(title, chat_id)
-    residue = (
-        "If a run worktree already exists at that path, it is residue from "
-        "an earlier run: when it is clean and fully merged into the target, "
-        "it is landed-and-forgotten \u2014 remove it and proceed; when it is "
-        "dirty or has unmerged commits, leave it untouched, say so, and "
-        f"use `.scratch/chat-{cid}/run-2` for this run instead. The user "
-        'says "land it" or "scrap it" for surfaced residue \u2014 it is never '
-        "silently deleted, and never silently blocks a chat."
-    )
+    residue = _residue_protocol(cid)
     if detached:
         # The selected branch is checked out in the primary (a master pin,
         # or a branch another worktree holds): the chat worktree detached
@@ -1072,10 +1079,20 @@ def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit", t
         "When your task writes to the tree, work in a scratch worktree at "
         "this chat's deterministic path, based on the selected branch:\n\n"
         f"`git worktree add .scratch/chat-{cid}/run -b {rb} {b}`\n\n"
-        "Commit there, land onto the selected branch only per the "
-        "workspace AGENTS.md interim master-landing rule, and remove the "
-        "run worktree once landed. Surfaces at run start: when a run "
-        "worktree already exists there, follow the residue protocol."
+        "Commit there. Landing is universal (no workspace-specific rule "
+        "applies): first run `git worktree list` — when the selected "
+        f"branch `{b}` appears in NO other worktree, land by merging this "
+        f"run branch into `{b}` "
+        "(an unchecked-out branch merge moves only the ref; no human's "
+        "working tree is touched), then remove the run worktree "
+        f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d {rb}`). "
+        f"When `{b}` IS checked out in another worktree — the common "
+        "degraded case, since that is usually why materialization failed "
+        f"— do NOT land: leave `{rb}` carrying the work, remove the run "
+        "worktree, and report so the human lands it. "
+        "Surfaces at run start: when a run worktree already exists at "
+        "that path, follow the residue protocol. "
+        + _residue_protocol(cid)
     )
 
 
