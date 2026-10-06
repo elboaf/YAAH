@@ -1,8 +1,9 @@
 """Slice D of #277 (ADR-0010): worktree maintenance + chip reads.
 
 The sweeper retires clean chat worktrees of dead chats past the idle
-threshold; an in-flight or residue run (nested run worktree = untracked
-entry = dirty) is never swept. Chip git-info reads follow the chat's
+threshold; an in-flight or residue run (nested run worktree present)
+is never swept — pinned by existence since #321 hid `.scratch/` from
+status (#330). Chip git-info reads follow the chat's
 own worktree once it exists (ADR-0010 amendment: chip reads follow the
 chat tree; before materialization they stay on the primary).
 """
@@ -99,8 +100,10 @@ async def test_sweep_keeps_recent_trees(tmp_path):
 
 @pytest.mark.asyncio
 async def test_sweep_keeps_residue_trees(tmp_path):
-    """A nested run worktree (or any untracked entry) pins the tree as
-    dirty — in-flight and residue runs are never swept."""
+    """A nested run worktree pins the tree even though #321 keeps
+    `.scratch/` git-invisible — the run dir reads neither as untracked
+    noise nor as anything at all in `status --porcelain`, so the pin is
+    by EXISTENCE (#330): in-flight and residue runs are never swept."""
     from backend.agent import wt_sweep, worktrees
 
     repo = _repo_with_commit(tmp_path)
@@ -110,6 +113,25 @@ async def test_sweep_keeps_residue_trees(tmp_path):
     # Residue: a nested run worktree inside the chat tree.
     nested = await worktrees.ensure_chat_worktree(str(chat_dir), 777, "master")
     assert nested["path"] is not None
+    _age(chat_dir)
+
+    result = await wt_sweep.sweep_stale_chat_worktrees()
+    assert chat_dir.exists()
+    assert str(chat_dir) not in result["swept"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_keeps_dirty_untracked_files(tmp_path):
+    """Plain untracked noise (not a run worktree) still pins via
+    porcelain — the existence pin (#330) is additive, never a
+    replacement for the dirty gate."""
+    from backend.agent import wt_sweep, worktrees
+
+    repo = _repo_with_commit(tmp_path)
+    await _register_workspace(repo)
+    out = await worktrees.ensure_chat_worktree(str(repo), 778, "master")
+    chat_dir = out["path"]
+    (chat_dir / "scratch-note.txt").write_text("user noise", encoding="utf-8")
     _age(chat_dir)
 
     result = await wt_sweep.sweep_stale_chat_worktrees()

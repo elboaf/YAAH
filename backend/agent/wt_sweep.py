@@ -2,12 +2,15 @@
 
 The sweeper is the single retirement mechanism for chat worktrees:
 clean-only, dead-chat-only, past an age threshold. "Clean" is a whole
-`git status --porcelain` on the chat worktree — which a nested run
-worktree (`.scratch/chat-<id>/run`) shows as an untracked entry, so an
-in-flight or residue run automatically pins the tree as dirty and it is
-never swept. Deletion never touches a conversation row: chat deletion
+`git status --porcelain` on the chat worktree, PLUS absence of the
+nested run worktree: since #321 the `.scratch/` namespace is
+git-invisible (`.git/info/exclude`), so the nested
+`.scratch/chat-<id>/run` worktree shows no untracked entry — an
+in-flight or residue run pins the tree by EXISTENCE, not dirtiness
+(#330). Deletion never touches a conversation row: chat deletion
 alone does not remove the tree (ADR-0010), the sweeper is what retires
 it once the chat is gone AND the tree sat clean past the threshold.
+
 """
 import time
 from pathlib import Path
@@ -70,7 +73,17 @@ async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -
                 continue
             rc, out = await _run_git(child, "status", "--porcelain")
             if rc != 0 or (out or "").strip():
-                continue  # dirty, in-flight, or residue: never swept
+                continue  # dirty: never swept
+            # #330: the nested worktree namespace is git-invisible (#321
+            # exclude), so a run worktree (`<chat>/run`) or a nested chat
+            # tree (`<chat>/.scratch/chat-<id>`) shows no untracked entry
+            # — pin by EXISTENCE, not dirtiness. Both shapes live in the
+            # deterministic harness namespace under the chat tree, so
+            # their presence is the honest "something lives here" gate;
+            # they can never read swept-away as invisible untracked
+            # entries used to.
+            if (child / "run").exists() or (child / ".scratch").exists():
+                continue  # in-flight or residue work: never swept
             rc2, _ = await _run_git(ws, "worktree", "remove", str(child))
             if rc2 == 0:
                 swept.append(str(child))
