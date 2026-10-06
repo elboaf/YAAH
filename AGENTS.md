@@ -5,20 +5,13 @@ same workspace concurrently.
 
 ## Working tree discipline
 
-Graduated (ADR-0010, #277): the run SOP — worktree paths, branch
-grammar, landing, residue — ships in the harness base prompt with
-each chat's own ids filled in; the design and its amendments live in
-`docs/adr/0010-per-chat-worktrees.md`. This repo adds only:
-
-- The primary worktree is the human's; agents have no business there.
-- Branch truth is the branch selector: a switch request is a
-  `branch_select` call or a chip pick, never a checkout of the primary
-  tree, and new branches derive from the chat's selected branch.
-- Residue is surfaced, never silent: a left-behind run worktree is
-  named in the report and blocks nothing quietly — the user decides
-  its fate.
-- Design and vocabulary: `docs/adr/0010-per-chat-worktrees.md` and
-  `CONTEXT.md`.
+The run SOP — worktree paths, branch grammar, landing, residue —
+is not this file's business: YAAH injects it into every run's system
+prompt with the chat's own ids filled in (ADR-0010, #277/#322; the
+design and its amendments live in `docs/adr/0010-per-chat-worktrees.md`,
+vocabulary in `CONTEXT.md`). External agents without that injection:
+never move or check out the primary worktree, and leave any worktree
+under `.scratch/` alone — surface it, don't delete it.
 
 
 ## Agent skills
