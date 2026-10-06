@@ -41,3 +41,8 @@ src-tauri/shim/target/
 
 # per-session scratch: reports, issue bodies, patch scripts (never committed)
 .scratch/
+
+# Per-chat worktree namespace (ADR-0010, #321): the harness keeps it
+# git-invisible per-clone via .git/info/exclude; this repo also ignores
+# it in the tracked .gitignore for belt-and-braces.
+.scratch/
