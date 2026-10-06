@@ -218,3 +218,30 @@ workspace (a dangling leftover from the pre-#277 SOP). Decisions:
 Work still stops at selector branches in the normal path; this amendment
 only repairs the degraded fallback so no workspace ever improvises a
 landing rule again.
+
+## Amendment 2026-10-06: run branches never reach origin (#320)
+
+Run worktree branches (`run/*`, named per the #312 amendment) are
+private scratch: they exist only in the local repository and reach
+origin solely as commits inside a landed primary branch, which the
+human pushes. Decisions:
+
+- **Landing is local-merge only.** No PR-based landing: opening a PR
+  from a run branch requires publishing that branch as an origin ref,
+  which is exactly the leak this amendment closes (observed on #318 and
+  again on #325-#327). The #322 degraded probe (`git worktree list`)
+  already keeps landing off checked-out branches; it stays the safe
+  path.
+- **The run SOP forbids publishing.** Every run-branch note variant
+  states the rule - never pushed, never PR'd (`_LOCAL_ONLY_RULES` in
+  loop.py); an agent inside a run worktree cannot rationally publish.
+- **The status strip refuses run-branch pushes.** The UI git-command
+  push action - and its `--set-upstream` fallback, which minted
+  brand-new origin refs for upstream-less branches - refuses when HEAD
+  names a `run/*` branch; the refusal is traced like any other result.
+  Agents get the same rule through the SOP; there is deliberately no
+  second server-side chokepoint shadowing arbitrary agent git execs.
+- **Landed run refs are cleaned up.** When a landed PR's head turns out
+  to be a run branch, deleting the origin ref after the merge is part
+  of landing; the local run branch is already deleted by the SOP's
+  teardown.

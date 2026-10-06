@@ -109,3 +109,20 @@ def test_notes_are_workspace_agnostic():
     ):
         assert "AGENTS.md" not in note
         assert "interim" not in note
+
+
+def test_notes_forbid_pushing_or_pr_ing_the_run_branch():
+    """#320: every run-SOP variant states that the run branch is local
+    scratch - never pushed, never PR'd - so an agent inside a run worktree
+    cannot rationally publish it (the leak #318/#325-327 exhibited)."""
+    for note in (
+        loop._selected_branch_note("bigtest", 7, title="Fix TTS whine"),
+        loop._selected_branch_note("bigtest", 7, detached=True),
+        loop._selected_branch_note_degraded("bigtest", 7, "non-repo", title="Fix TTS whine"),
+    ):
+        assert "stays LOCAL" in note
+        assert "never `git push`" in note
+        assert "never open a PR" in note
+        assert "landed" in note
+    # The stale variant names no run branch, so the rule does not apply.
+    assert "stays LOCAL" not in loop._selected_branch_note_stale("bigtest", 7)
