@@ -1640,6 +1640,13 @@ async def execute_tool(
                 "if saving or reading project memories is needed."
             )
         }
+    if name in _SANDBOX_NAMES and not sandbox_enabled():
+        # Issue #340: same degrade-gracefully rule when the sandbox toggle
+        # flipped after the schemas were sent — or when the agent has just
+        # edited the config file to flip it back. Refuse and point at
+        # Settings; crucially, the error must NOT name the config key or
+        # file (the old message taught agents to bypass the toggle).
+        return {"info": _SANDBOX_DISABLED_MSG}
     if name in CONTEXT_TOOLS:
         # #303: one injection point for chat-scoped tools — the model can't
         # pass its own conversation id, and every dispatch path (direct,
@@ -1681,6 +1688,27 @@ def memory_enabled() -> bool:
         return bool((load_config().get("memory") or {}).get("enabled", False))
     except Exception:  # noqa: BLE001 — fail closed, memory is opt-in
         return False
+
+
+def sandbox_enabled() -> bool:
+    """Issue #340: is the sandbox VM integration enabled? Global setting
+    (sandbox.enabled), read live so a toggle applies to new turns without a
+    restart. Any read failure keeps today's behavior (ON)."""
+    try:
+        from backend.agent.config import load_config
+
+        return bool((load_config().get("sandbox") or {}).get("enabled", True))
+    except Exception:  # noqa: BLE001 — fail open, never break a turn
+        return True
+
+
+# Issue #340: one refusal, shared by every sandbox entry point. Security
+# copy must never drift — a "helpful" variant is how the original error
+# ended up teaching agents the bypass recipe.
+_SANDBOX_DISABLED_MSG = (
+    "The Windows Sandbox is disabled in Settings. Only the user can "
+    "re-enable it from the Settings window."
+)
 
 
 def get_schemas(workspace: str | None = None) -> list:
@@ -1753,5 +1781,13 @@ def get_schemas(workspace: str | None = None) -> list:
         schemas = [
             s for s in schemas
             if s["function"]["name"] not in _MEMORY_TOOL_NAMES
+        ]
+    # Issue #340: same rule for the sandbox VM tools. When the user has
+    # disabled the sandbox in Settings, the schemas never reach the model —
+    # otherwise the model is invited to call a tool that must refuse, and
+    # observant agents go looking for the switch instead.
+    if not sandbox_enabled():
+        schemas = [
+            s for s in schemas if s["function"]["name"] not in _SANDBOX_NAMES
         ]
     return schemas

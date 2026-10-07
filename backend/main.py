@@ -2357,13 +2357,18 @@ async def api_set_config(body: ConfigUpdate):
     # Windows Sandbox block merges the same way (#112): a Settings save that
     # only touches enabled must not reset memory_mb / vgpu / etc. The toggle
     # never disables the Windows feature itself — only the agent's use of it.
+    # Issue #340: the sandbox block is user-only — strip every key except
+    # `enabled` so agents can't tuck extra sandbox settings into a
+    # legitimate-looking save (an API write is not how the user flips it).
     sandbox = updates.get("sandbox")
     if isinstance(sandbox, dict):
         existing = load_config().get("sandbox") or {}
-        merged_sb = {**existing, **sandbox}
-        if "enabled" in merged_sb:
-            merged_sb["enabled"] = bool(merged_sb["enabled"])
-        updates["sandbox"] = merged_sb
+        if "enabled" in sandbox:
+            updates["sandbox"] = {
+                **existing, "enabled": bool(sandbox["enabled"]),
+            }
+        else:
+            updates.pop("sandbox", None)
     # Computer-use block merges the same way (#140): a Settings save that only
     # touches allow_screenshot must not reset panic_hotkey / observe_default.
     cu = updates.get("computer_use")

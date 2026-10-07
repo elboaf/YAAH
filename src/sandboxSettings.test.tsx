@@ -79,3 +79,14 @@ describe('Windows Sandbox settings card (#112)', () => {
     expect(Object.keys(patch)).toEqual(['sandbox'])
   })
 })
+
+describe('SandboxSettingsCard copy (issue #340)', () => {
+  it('promises only-the-user can re-enable, never the old agent-can-use phrasing', async () => {
+    getSandboxStatus.mockResolvedValue({ available: true, enabled: true, running: false })
+    render(<SandboxSettingsCard />)
+    await screen.findByRole('checkbox', { name: /Windows Sandbox/i })
+    const copy = document.body.textContent || ''
+    expect(copy).toMatch(/Only you can change this from the Settings window/)
+    expect(copy).not.toMatch(/stops the agent from using the sandbox/)
+  })
+})

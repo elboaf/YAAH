@@ -518,15 +518,20 @@ def _default_system_prompt(workspace: str = "") -> str:
             computer_section = _computer_use_prompt()
             # Same rule: the sandbox integration drives THIS machine's
             # disposable VMs, so it's only offered in local sessions.
+            # Issue #340: never advertise them when the user disabled the
+            # sandbox in Settings — the model isn't invited to call tools
+            # that must refuse (same rule as #140 above).
+            from backend.agent.tools import sandbox_enabled
             from backend.agent import sandbox as sandbox_mod
 
-            tools += [
-                "sandbox_test (boot/reuse a disposable Windows Sandbox VM "
-                "for tests that need isolation, such as servers/ports or GUI checks)",
-                "sandbox_run (run a command inside that VM)",
-                "sandbox_status", "sandbox_stop",
-            ]
-            sandbox_section = sandbox_mod.prompt_section()
+            if sandbox_enabled():
+                tools += [
+                    "sandbox_test (boot/reuse a disposable Windows Sandbox VM "
+                    "for tests that need isolation, such as servers/ports or GUI checks)",
+                    "sandbox_run (run a command inside that VM)",
+                    "sandbox_status", "sandbox_stop",
+                ]
+                sandbox_section = sandbox_mod.prompt_section()
     # #181: the prose line must cover the whole schema set. The tail tools
     # below previously existed only as schemas (search_conversation_history
     # was never mentioned anywhere); annotations keep the useful pointers.

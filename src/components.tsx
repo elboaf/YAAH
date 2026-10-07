@@ -6340,8 +6340,8 @@ export function SandboxSettingsCard() {
       </label>
       <p className="text-[10px] leading-relaxed text-zinc-600">
         Disposable Windows VMs the agent can start for live verification and isolated GUI work.
-        Turning this off only stops the agent from using the sandbox — it never disables the
-        Windows feature itself.
+        Only you can change this from the Settings window; the agent is not given this toggle.
+        Turning this off never disables the Windows feature itself.
       </p>
       {status && !status.available && (
         <div className="space-y-1 rounded   bg-amber-500/10 p-2 text-[10px] leading-relaxed text-amber-300">

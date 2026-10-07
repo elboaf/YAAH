@@ -684,6 +684,15 @@ def _sandbox_pids() -> list[int]:
 
 def _spawn(exe: Path, wsb: Path, logs: Path):
     """Launch the sandbox. Split out so tests can fake the VM side."""
+    # Issue #340: a boot is a security-relevant event — the last thing the
+    # harness observed before an agent secretly re-enabled a disabled
+    # sandbox was its own boot line. Always log it, with the config value
+    # AS SEEN AT SPAWN TIME (validate-before-spawn per the Appendix C threat
+    # model in docs/history/testing-enhancements-research.md).
+    logging.getLogger(__name__).warning(
+        "sandbox boot: spawning %s (workspace wsb=%s, sandbox.enabled=%s)",
+        exe, wsb, bool(_cfg().get("enabled", True)),
+    )
     return subprocess.Popen(
         [str(exe), str(wsb)], creationflags=_CREATE_NO_WINDOW, close_fds=True,
     )
@@ -741,10 +750,13 @@ def start_sync(workspace: str) -> dict:
     global _SESSION
     cfg = _cfg()
     if not cfg.get("enabled", True):
-        return {
-            "error": "the sandbox feature is disabled in yaah's config "
-                     "(config.json: sandbox.enabled = true re-enables it)"
-        }
+        # Issue #340: the old error helpfully named the config key and the
+        # exact value that re-enables it — agents followed the hint, flipped
+        # sandbox.enabled back and launched anyway. One shared refusal with
+        # tools.py, pointing at Settings only.
+        from backend.agent.tools import _SANDBOX_DISABLED_MSG
+
+        return {"error": _SANDBOX_DISABLED_MSG}
     exe = sandbox_exe()
     if exe is None:
         return {"error": _ENABLE_NUDGE}
@@ -798,6 +810,23 @@ def start_sync(workspace: str) -> dict:
                     "workspace": workspace, "adopted": False,
                     "spawn_t": time.time(), "request_t": request_t}
         _set_last_workspace(workspace)
+
+        # Issue #340, defense in depth: validate before spawn. The launch
+        # above was gated on a config value read earlier in this call; if
+        # the toggle flipped in between (e.g. an agent editing config.json
+        # concurrently), refuse to meet the VM rather than booting it. The
+        # spawn is reaped and the session torn down, so nothing is left
+        # half-started.
+        if not _cfg().get("enabled", True):
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001 — best-effort reaping
+                pass
+            _SESSION = None
+            from backend.agent.tools import _SANDBOX_DISABLED_MSG
+
+            return {"error": _SANDBOX_DISABLED_MSG}
 
         deadline = time.time() + max(15, int(cfg.get("startup_timeout") or 180))
         while time.time() < deadline:

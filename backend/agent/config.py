@@ -11,6 +11,7 @@ provider's fields.
 """
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -302,6 +303,19 @@ def save_config(updates: dict):
         current["providers"] = merged
         updates = {k: v for k, v in updates.items() if k != "providers"}
 
+    # Issue #340: the sandbox block is user-owned. A write that flips it is
+    # worth a permanent trace — this is the only sink that fires no matter
+    # which path an agent takes (file tools, shell, or the config API).
+    # Read BEFORE the merge below: after current.update(updates) the old
+    # value is gone and no flip would ever be detected.
+    if "sandbox" in updates and "sandbox" in current:
+        old_on = bool((current["sandbox"] or {}).get("enabled", True))
+        new_on = bool((updates["sandbox"] or {}).get("enabled", old_on))
+        if old_on != new_on:
+            logging.getLogger(__name__).warning(
+                "sandbox.enabled changed via config write: %s -> %s",
+                old_on, new_on,
+            )
     current.update(updates)
     current.setdefault("providers", {})
     # An empty providers map is legitimate (fresh install, user hasn't
