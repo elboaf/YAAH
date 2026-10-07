@@ -1387,6 +1387,14 @@ export interface AgentEvent {
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number
   deleted?: number
+  /** Where those changes landed (issue: the report must say WHERE):
+   *  tree kind per the glossary, absolute tree path, tree path relative
+   *  to the workspace root (null when it IS the root), and the branch
+   *  the run worked toward. Absent on legacy backends. */
+  worktree_role?: 'chat' | 'primary' | null
+  worktree?: string | null
+  worktree_rel?: string | null
+  branch?: string | null
   /** The provider+model this turn's chat call is waiting on (model_call).
    *  Unset between the response arriving and the next call of the turn. */
   modelCall?: { provider: string; model: string; startedAt: number }

@@ -7,6 +7,7 @@ import difflib
 import os
 import sys
 from dataclasses import dataclass
+from typing import Literal
 from pathlib import Path
 
 
@@ -175,6 +176,10 @@ async def summarize_file_changes(
     files: list[dict],
     baseline: WorkspaceSnapshot | None = None,
     current: WorkspaceSnapshot | None = None,
+    worktree_role: Literal["chat", "primary"] | None = None,
+    worktree: str | None = None,
+    worktree_rel: str | None = None,
+    branch: str | None = None,
 ) -> dict | None:
     """Add aggregate line counts and omit empty/no-op summaries.
 
@@ -182,6 +187,15 @@ async def summarize_file_changes(
     chip shows the latest short sha plus a count of additional commits; any
     git failure or uncommitted state degrades to ``commit=None`` ("not
     committed"). Never raises on git trouble.
+
+    Location provenance (issue: the "files changed" report must say WHERE
+    the changes were made): ``worktree_role`` names the tree kind per the
+    glossary ("chat" per-chat worktree vs "primary"), ``worktree`` the
+    absolute path of the tree the run executed in, ``worktree_rel`` the
+    same tree relative to the workspace root for compact chip display
+    (None when it IS the workspace root), and ``branch`` the branch that
+    run worked toward. The caller computes all of it - it knows the run's
+    actual geometry; this layer only records what it is told.
     """
     if not files:
         return None
@@ -191,6 +205,10 @@ async def summarize_file_changes(
         "deleted": sum(file.get("deleted", 0) for file in files),
         "commit": None,
         "extra_commits": 0,
+        "worktree_role": worktree_role,
+        "worktree": worktree,
+        "worktree_rel": worktree_rel,
+        "branch": branch,
     }
     if baseline is None or current is None:
         return summary
