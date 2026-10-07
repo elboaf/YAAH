@@ -29,26 +29,15 @@ vi.mock('./store', async (importOriginal) => {
 
 import { GitChipCluster } from './components'
 import type { GitInfo } from './api'
+import { baseGitInfo } from './gitInfoFixture'
 
 // #286: the status-strip branch chip is the chat's own branch. Flipping it
 // calls the per-chat branch-select endpoint (which stores the pick and runs
 // no git checkout). #301: the workspace checkout endpoint is gone entirely —
 // no in-YAAH control moves the primary worktree anymore.
 function info(overrides: Partial<GitInfo> = {}): GitInfo {
-  return {
-    branch: 'master',
-    upstream: null,
-    local_hash: 'abc1234',
-    remote_hash: null,
-    ahead: 0,
-    behind: 0,
-    added: 0,
-    deleted: 0,
-    dirty: false,
-    untracked: 0,
-    changed: 0,
-    ...overrides,
-  }
+  return baseGitInfo(overrides)
+
 }
 
 function mountCluster(opts: { info: GitInfo; selectedBranch: string | null }) {

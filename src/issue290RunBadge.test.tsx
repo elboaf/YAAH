@@ -15,25 +15,14 @@ vi.mock('./api', async (importOriginal) => {
 
 import { GitChipCluster } from './components'
 import type { GitInfo, RunWorktree } from './api'
+import { baseGitInfo } from './gitInfoFixture'
 
 // #290: a separate badge in the chip cluster shows run-in-flight state,
 // POLLED from git (never agent announcements), and the selector chip —
 // the user's pick (#286's whole point) — is never recolored for it.
 function info(overrides: Partial<GitInfo> = {}): GitInfo {
-  return {
-    branch: 'master',
-    upstream: null,
-    local_hash: 'abc1234',
-    remote_hash: null,
-    ahead: 0,
-    behind: 0,
-    added: 0,
-    deleted: 0,
-    dirty: false,
-    untracked: 0,
-    changed: 0,
-    ...overrides,
-  }
+  return baseGitInfo(overrides)
+
 }
 
 function run(overrides: Partial<RunWorktree> = {}): RunWorktree {
