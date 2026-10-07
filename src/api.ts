@@ -174,6 +174,12 @@ export interface GitInfo {
   upstream: string | null
   local_hash: string | null
   remote_hash: string | null
+  /** #350: HEAD of the chat's own worktree (.scratch/chat-<id>); null when
+      the chat has no tree - the UI omits the hash, never zero-fills. */
+  worktree_hash?: string | null
+  /** #350: commits the chat worktree has that the primary worktree lacks (diverged
+      counts as ahead; unrelated histories read 0). */
+  worktree_ahead?: number
   ahead: number
   behind: number
   added: number

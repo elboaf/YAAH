@@ -28,25 +28,14 @@ vi.mock('./store', async (importOriginal) => {
 
 import { GitChipCluster } from './components'
 import type { GitInfo } from './api'
+import { baseGitInfo } from './gitInfoFixture'
 
 // #302 (ADR-0010 amendment, decision 1): the chip distinguishes an
 // inherited pin from an explicit pick ("· workspace" marker) and flags a
 // stale pin whose branch no longer exists locally.
 function info(overrides: Partial<GitInfo> = {}): GitInfo {
-  return {
-    branch: 'master',
-    upstream: null,
-    local_hash: 'abc1234',
-    remote_hash: null,
-    ahead: 0,
-    behind: 0,
-    added: 0,
-    deleted: 0,
-    dirty: false,
-    untracked: 0,
-    changed: 0,
-    ...overrides,
-  }
+  return baseGitInfo(overrides)
+
 }
 
 function mountCluster(opts: {

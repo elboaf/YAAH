@@ -678,19 +678,28 @@ async def api_conversation_git_info(conversation_id: int):
         # #333: info is None only for a blank workspace (handled above);
         # offline (with the channel's error detail, when git itself
         # refused) passes through — the strip renders the explicit state.
-        return {"info": info}
+        # #350: the stored pick rides along, so the remote local hash is
+        # the selected branch's tip even when the host tree is detached.
+        return {"info": await git_workspace_info(ws, branch=conv.get("selected_branch"))}
     try:
         root = workspace_root(ws)
     except ValueError:
         return {"info": None}
-    # #277: once the chat has its own worktree, the chip reads THAT tree —
-    # dirty/ahead-behind describe where the chat's work actually happens.
+    # #350: the chat's stored branch pick names the branch whose tip the
+    # local hash reports; None falls back to the read tree's own branch.
+    stored = conv.get("selected_branch")
+    # #277 + #350: when the chat's own worktree exists, the worktree hash
+    # and the dirty/line counts describe THAT tree - the substitution now
+    # happens inside gitinfo, so the hash trio and the counts describe one
+    # instant instead of two.
     from backend.agent import worktrees as _worktrees
 
     chat_dir = _worktrees.chat_worktree_path(ws, conversation_id)
-    if chat_dir is not None and chat_dir.exists():
-        root = chat_dir
-    return {"info": await git_workspace_info(root)}
+    if chat_dir is None or not chat_dir.exists():
+        chat_dir = None
+    return {
+        "info": await git_workspace_info(root, chat_root=chat_dir, branch=stored)
+    }
 
 
 @app.get("/api/conversations/{conversation_id}/git-branches")

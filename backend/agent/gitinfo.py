@@ -9,6 +9,7 @@ non-repo workspace costs one failed stat per poll.
 """
 import asyncio
 import os
+import re
 import time
 from pathlib import Path
 
@@ -31,6 +32,10 @@ _BRANCH_TTL = 2.0  # seconds; matches the UI poll cadence
 _info_cache: dict[str, tuple[float, dict]] = {}
 _INFO_TTL = 2.0  # seconds; matches the UI poll cadence
 _GIT_TIMEOUT = 5.0
+
+# #350: a 7-char git hash line, for filtering gateway output that arrives
+# stderr-merged (warnings must never poison a hash slot).
+_HASH_RE = re.compile(r"[0-9a-f]{7,40}")
 
 
 def _head_path(root: Path) -> Path | None:
@@ -164,23 +169,58 @@ def _invalidate_branch_cache(root: Path | str) -> None:
     _cache.pop(str(Path(root)), None)
 
 
-async def git_workspace_info(root: Path | str) -> dict | None:
+def _pop_info_entries(root: Path) -> None:
+    """Drop every info-cache entry for this workspace (#350). Keys are
+    root-prefixed with per-chat qualifiers (chat_root, selected branch),
+    so a plain pop would miss them; exact legacy keys are included."""
+    prefix = str(root)
+    for k in [k for k in _info_cache if k == prefix or k.startswith(prefix + "|")]:
+        _info_cache.pop(k, None)
+
+
+async def _tip(root: Path, ref: str) -> str | None:
+    """7-char short hash of `ref`, or None when it does not resolve."""
+    rc, out = await _run_git(root, "rev-parse", "--short=7", ref)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+async def git_workspace_info(
+    root: Path | str,
+    *,
+    chat_root: Path | str | None = None,
+    branch: str | None = None,
+) -> dict | None:
     """Everything the status strip's git readouts need, in one git burst.
 
     Returns None when the workspace is not a git repo. Shape:
       branch            current branch name (detached HEAD -> short SHA)
-      local_hash        7-char short hash of HEAD, or None
-      remote_hash       7-char hash of the upstream ref, None = no upstream
+      local_hash        7-char short hash of the branch TIP (#350) - stable
+                        across checkouts/detachments of the read tree
+      remote_hash       7-char hash of the branch's upstream ref, None =
+                        no upstream; resolved from the branch, so a
+                        detached read tree no longer hides it (#350)
+      worktree_hash     HEAD of the chat's own worktree (chat_root), None
+                        when the chat has no tree - omitted, never
+                        zero-filled (#350; local chats only)
+      worktree_ahead          commits the chat tree has that the primary tree
+                        lacks (diverged counts as ahead; unrelated
+                        histories -> 0) (#350)
+      upstream          upstream ref name, None = none
       ahead, behind     commit counts vs upstream (0/0 when no upstream)
       added, deleted    net diff lines vs HEAD (tracked changes only)
       dirty             worktree has any change (incl. untracked files)
       untracked         count of untracked files (tooltip detail)
-    TTL-cached: the strip's readouts must describe one instant, and the UI
-    polls every ~2s, so the cache lives 2s.
+
+    `branch` names the chat's selected branch (the endpoint passes the
+    stored pick); the dirty/line counts read `chat_root` when the chat's
+    own worktree exists - the #277 substitution, now explicit here so the
+    hash trio and the dirtiness describe the same instant. TTL-cached: the
+    strip's readouts must describe one instant, and the UI polls every
+    ~2s, so the cache lives 2s.
     """
     root = Path(root)
-    key = str(root)
-    remote = parse_ns(key) is not None
+    key = f"{root}|{chat_root or ''}|{branch or ''}"
+    remote = parse_ns(str(root)) is not None
     now = time.monotonic()
     cached = _info_cache.get(key)
     if cached and now - cached[0] < _INFO_TTL:
@@ -205,59 +245,114 @@ async def git_workspace_info(root: Path | str) -> dict | None:
             return info
         info = _info_from_status(out)
         if info["branch"] is None:
-            # Detached HEAD: porcelain cannot name it, but the local path
-            # reports the short SHA — match that parity (unborn HEAD fails
+            # Detached HEAD: porcelain cannot name it. The endpoint passes
+            # the chat's selected branch (#350) - fall back to the old
+            # short-SHA read only when no name is known (unborn HEAD fails
             # rc!=0 and stays None, same as local).
-            res2 = await gitexec.run_git(key, "rev-parse", "--short=7", "HEAD")
-            if res2 is not None and res2[0] == 0:
-                info["branch"] = res2[1] or None
-                info["local_hash"] = info["branch"]
+            info["branch"] = branch
+            if not info["branch"]:
+                res2 = await gitexec.run_git(key, "rev-parse", "--short=7", "HEAD")
+                if res2 is not None and res2[0] == 0:
+                    info["branch"] = res2[1] or None
+        # #350: porcelain cannot express hashes - one extra rev-parse
+        # burst fills both. Both refs are already host-resolved (branch
+        # and upstream names come from the status header). `--short`
+        # refuses multiple revisions ("Needed a single revision"), so
+        # full hashes come back and are sliced here; the shape filter is
+        # belt-and-braces because the channel merges stderr at the source.
+        if info["branch"]:
+            refs = [info["branch"]]
+            if info["upstream"]:
+                refs.append(info["upstream"])
+            rc_h, out_h = await gitexec.run_git(key, "rev-parse", *refs)
+            if rc_h == 0 and out_h:
+                hashes = [
+                    line.strip()[:7]
+                    for line in out_h.splitlines()
+                    if _HASH_RE.fullmatch(line.strip())
+                ]
+                info["local_hash"] = hashes[0] if hashes else None
+                info["remote_hash"] = hashes[1] if len(hashes) > 1 else None
         _info_cache[key] = (now, info)
         return info
 
-    branch = await current_git_branch(root)
-    if branch is None:
+    # #350: which tree the dirty/line counts read. When the chat has its
+    # own worktree, they describe THAT tree - the substitution #277 made
+    # at the endpoint, now explicit here so the hash trio and the counts
+    # describe the same instant.
+    read_root = root
+    if chat_root is not None and Path(chat_root).exists():
+        read_root = Path(chat_root)
+
+    tree_branch = await current_git_branch(read_root)  # the counts' tree
+    if tree_branch is None:
         _info_cache[key] = (now, None)
         return None
+    # The hashes resolve from the chat's SELECTED branch (stored pick,
+    # else the read tree's branch) - never from the read tree's HEAD, so
+    # a detached chat tree (the #277 geometry) cannot blind the upstream
+    # readout the way `@{upstream}`-from-HEAD did. `branch` itself keeps
+    # the #277 contract: it names the read tree (detached -> short SHA).
+    sel = branch or tree_branch
+    # A stale stored pick (branch deleted since) must not blank the
+    # readout (#350 review): absence is data only for an unborn repo,
+    # so an unresolvable pick falls back to the read tree's branch.
+    if sel and await _tip(root, sel) is None:
+        sel = tree_branch
 
-    # rev-list --left-right --count gives ahead/behind in one call;
-    # numstat gives added/deleted lines. `git diff` on an unborn branch
-    # (no commits yet) fails — fall back to zeroed numbers.
-    head_ok, head_ref = await _run_git(root, "rev-parse", "HEAD")
-    if head_ok == 0:
-        head_ref = head_ref.strip()
-    else:
-        head_ref = None
+    # Branch tip first: its resolution doubles as the has-commits check
+    # (an unborn branch resolves to nothing, and a worktree of the same
+    # repository cannot have commits either).
+    local_hash = await _tip(root, sel) if sel else None
+    has_commits = local_hash is not None
 
     upstream: str | None = None
-    if head_ref:
-        rc, out = await _run_git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    if has_commits:
+        rc, out = await _run_git(
+            root, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+            f"{sel}@{{upstream}}",
+        )
         if rc == 0:
             upstream = out.strip() or None
     ahead = behind = 0
-    if upstream and head_ref:
+    if upstream and has_commits:
+        # rev-list --left-right --count gives ahead/behind in one call.
         rc, out = await _run_git(
-            root, "rev-list", "--left-right", "--count", f"{upstream}...HEAD"
+            root, "rev-list", "--left-right", "--count",
+            f"{upstream}...{sel}",
         )
         if rc == 0 and out:
             parts = out.split()
             if len(parts) == 2:
                 behind, ahead = int(parts[0]), int(parts[1])
 
-    local_hash = remote_hash = None
-    if head_ref:
-        rc, out = await _run_git(root, "rev-parse", "--short=7", "HEAD")
-        if rc == 0:
-            local_hash = out.strip() or None
-    if upstream:
-        rc, out = await _run_git(root, "rev-parse", "--short=7", upstream)
-        if rc == 0:
-            remote_hash = out.strip() or None
+    remote_hash = await _tip(root, upstream) if upstream else None
+
+    worktree_hash: str | None = None
+    worktree_ahead = 0
+    if read_root != root and has_commits:
+        worktree_hash = await _tip(read_root, "HEAD")
+        if worktree_hash:
+            # Commits the chat tree has that the primary tree lacks.
+            # A related history (merge base exists) counts with two dots -
+            # diverged trees read their own commits, per the #350 color
+            # rule "ahead = any commits primary lacks". Unrelated
+            # histories have no merge base and read 0: never claim a
+            # direction the histories cannot back.
+            rc_mb, _ = await _run_git(
+                root, "merge-base", "HEAD", worktree_hash
+            )
+            if rc_mb == 0:
+                rc, out = await _run_git(
+                    root, "rev-list", "--count", f"HEAD..{worktree_hash}"
+                )
+                if rc == 0 and out.strip().isdigit():
+                    worktree_ahead = int(out.strip())
 
     added = deleted = 0
     untracked = 0
-    if head_ref:
-        rc, out = await _run_git(root, "diff", "--numstat", "HEAD")
+    if has_commits:
+        rc, out = await _run_git(read_root, "diff", "--numstat", "HEAD")
         if rc == 0:
             for line in out.splitlines():
                 if not line.strip():
@@ -271,19 +366,21 @@ async def git_workspace_info(root: Path | str) -> dict | None:
                 # Binary files report "-" for both counts; ignore them.
                 added += int(a) if a.isdigit() else 0
                 deleted += int(d) if d.isdigit() else 0
-    rc, out = await _run_git(root, "ls-files", "--others", "--exclude-standard")
+    rc, out = await _run_git(read_root, "ls-files", "--others", "--exclude-standard")
     if rc == 0:
         untracked = sum(1 for line in out.splitlines() if line.strip())
 
-    rc, out = await _run_git(root, "status", "--porcelain")
+    rc, out = await _run_git(read_root, "status", "--porcelain")
     dirty = rc == 0 and bool(out.strip())
     changed = sum(1 for line in out.splitlines() if line.strip()) if rc == 0 else 0
 
     info = {
-        "branch": branch,
+        "branch": tree_branch,
         "upstream": upstream,
         "local_hash": local_hash,
         "remote_hash": remote_hash,
+        "worktree_hash": worktree_hash,
+        "worktree_ahead": worktree_ahead,
         "ahead": ahead,
         "behind": behind,
         "added": added,
@@ -350,6 +447,10 @@ def _info_from_status(out: str) -> dict:
         "upstream": upstream,
         "local_hash": None,
         "remote_hash": None,
+        # #350: a local-only concept - the host-side chat-tree
+        # substitution (#334) will fill it later; shape parity today.
+        "worktree_hash": None,
+        "worktree_ahead": 0,
         "ahead": ahead,
         "behind": behind,
         "added": 0,
@@ -411,5 +512,5 @@ def invalidate_git_caches(root: Path | str) -> None:
     root = Path(root)
     _invalidate_branch_cache(root)
     _branch_times.pop(str(root), None)  # #333: remote branch-TTL bookkeeping
-    _info_cache.pop(str(root), None)
+    _pop_info_entries(root)
     _branch_list_cache.pop(str(root), None)  # #302: staleness reads re-read

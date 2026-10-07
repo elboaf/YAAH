@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   listConversations,
   createConversation,
@@ -8188,7 +8188,7 @@ export function GitChipCluster({
   const [branches, setBranches] = useState<string[]>([])
   const [branchesLoaded, setBranchesLoaded] = useState(false)
   const [busyCheckout, setBusyCheckout] = useState(false)
-  const [copied, setCopied] = useState<'local' | 'remote' | null>(null)
+  const [copied, setCopied] = useState<'local' | 'remote' | 'worktree' | null>(null)
   // #290: run-in-flight state — POLLED from the backend's git derivation
   // (`git worktree list` over `.scratch/chat-<id>/`), never agent-reported.
   const [runs, setRuns] = useState<RunWorktree[]>([])
@@ -8307,7 +8307,7 @@ export function GitChipCluster({
     }
   }
 
-  const copyHash = (h: string, which: 'local' | 'remote') => {
+  const copyHash = (h: string, which: 'local' | 'remote' | 'worktree') => {
     navigator.clipboard
       ?.writeText(h)
       .then(() => {
@@ -8317,12 +8317,42 @@ export function GitChipCluster({
       .catch(() => {})
   }
 
-  const pairAway = info.ahead > 0 || info.behind > 0
-  const pairDiverged = info.ahead > 0 && info.behind > 0
-  const pairColor = pairDiverged ? 'text-red-400' : pairAway ? 'text-zinc-400' : 'text-zinc-500'
-  const pairTitle =
-    `local ${info.local_hash ?? '?'} · upstream ${info.upstream ?? '(none)'} ${info.remote_hash ?? '—'}` +
-    (pairAway ? ` — ↑${info.ahead} ahead ↓${info.behind} behind` : ' — in sync')
+  // #350 sync readout: three hashes, each colored by its own divergence.
+  // local = the selected branch's TIP (neutral; the branch itself never
+  // moves); upstream = its upstream tip (blue when ahead of local, red
+  // when behind or diverged, zinc in sync; unrelated histories stay zinc
+  // - no color claim we cannot back); worktree = the chat worktree's
+  // HEAD, amber when it carries commits the primary worktree lacks. The
+  // old whole-pair coloring is gone: per-hash color owns the divergence
+  // signal now; the counters keep magnitude.
+  const upColor =
+    info.behind > 0 ? 'text-red-400' : info.ahead > 0 ? 'text-blue-400' : 'text-zinc-400'
+  const wtAhead = info.worktree_ahead ?? 0
+  const wtColor = wtAhead > 0 ? 'text-yellow-400' : 'text-zinc-400'
+  const wtTitle =
+    `worktree — HEAD of this chat's worktree${wtAhead > 0 ? ` — ↑${wtAhead} ahead of the primary worktree` : ' — in sync with the primary worktree'}`
+  const sep = <span className="px-0.5 text-zinc-700">·</span>
+  type HashSlot = { which: 'local' | 'remote' | 'worktree'; hash: string; title: string | null; color: string }
+  const slots: HashSlot[] = [
+    info.local_hash && {
+      which: 'local' as const,
+      hash: info.local_hash,
+      title: copied === 'local' ? null : `local — copy ${info.local_hash}`,
+      color: 'text-zinc-400',
+    },
+    info.remote_hash && {
+      which: 'remote' as const,
+      hash: info.remote_hash,
+      title: copied === 'remote' ? null : `${info.upstream ?? 'upstream'} — copy ${info.remote_hash}`,
+      color: upColor,
+    },
+    info.worktree_hash && {
+      which: 'worktree' as const,
+      hash: info.worktree_hash,
+      title: copied === 'worktree' ? null : `${wtTitle} — copy ${info.worktree_hash}`,
+      color: wtColor,
+    },
+  ].filter((s): s is HashSlot => Boolean(s))
 
   return (
     <span ref={wrapRef} className="relative flex min-w-0 items-center gap-2">
@@ -8436,31 +8466,23 @@ export function GitChipCluster({
         )
       })}
 
-      {/* Sync readout: local/remote short hashes (click = copy), ahead/behind
-          counters. Plain text — no drawer, no command buttons. */}
-      <span
-        className={`flex shrink-0 items-center font-mono text-[10px] ${pairColor}`}
-        title={pairTitle}
-      >
-        {info.local_hash && (
-          <button
-            className="hover:text-zinc-200"
-            title={copied === 'local' ? 'copied' : `copy ${info.local_hash}`}
-            onClick={() => copyHash(info.local_hash!, 'local')}
-          >
-            {copied === 'local' ? '✓' : info.local_hash.slice(0, 7)}
-          </button>
-        )}
-        {info.local_hash && info.remote_hash && <span className="px-0.5 text-zinc-700">·</span>}
-        {info.remote_hash && (
-          <button
-            className="hover:text-zinc-200"
-            title={copied === 'remote' ? 'copied' : `copy ${info.remote_hash}`}
-            onClick={() => copyHash(info.remote_hash!, 'remote')}
-          >
-            {copied === 'remote' ? '✓' : info.remote_hash.slice(0, 7)}
-          </button>
-        )}
+      {/* Sync readout (#350): three short hashes — the selected branch's
+          tip, its upstream's tip, the chat worktree's HEAD — click = copy,
+          each colored by its own divergence; ahead/behind counters kept.
+          Plain text — no drawer, no command buttons. */}
+      <span className="flex shrink-0 items-center font-mono text-[10px] text-zinc-400">
+        {slots.map(({ which, hash, title, color }) => (
+          <Fragment key={which}>
+            {which !== 'local' && sep}
+            <button
+              className={`${color} hover:text-zinc-200`}
+              title={title ?? 'copied'}
+              onClick={() => copyHash(hash!, which)}
+            >
+              {copied === which ? '✓' : hash!.slice(0, 7)}
+            </button>
+          </Fragment>
+        ))}
         {info.ahead > 0 && <span className="ml-1">↑{info.ahead}</span>}
         {info.behind > 0 && <span className="ml-1">↓{info.behind}</span>}
       </span>
