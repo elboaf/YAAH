@@ -195,15 +195,152 @@ async def ensure_chat_worktree(
     return {"path": chat_dir, "detached": detached, "created": True}
 
 
-def chat_worktree_has_run_tree(chat_dir: Path) -> bool:
-    """True when the deterministic harness namespace under the chat tree
-    still holds anything (#329, #330): the run worktree
-    (``<chat>/run``) or a nested chat tree (``<chat>/.scratch``) — both
-    git-invisible since #321, so neither shows in ``status --porcelain``.
-    The same existence gate the sweeper pins in-flight/residue trees
-    with; retirement must never remove a tree the sweeper would keep.
+async def chat_worktree_has_run_tree(chat_dir: Path) -> bool:
+    """True when the chat tree still holds a REGISTERED git worktree
+    under the deterministic run namespace (#329, #330, #342).
+
+    The #330 existence pin (``<chat>/run`` or ``<chat>/.scratch`` simply
+    existing) was too blunt: after the agent removes the run worktree
+    per the SOP, git leaves the EMPTY ``<chat>/.scratch/chat-<id>/`` husk
+    behind forever, and the existence probe read that husk as residue on
+    every cleanly-landed chat — retirement refused forever (#342). The
+    verdict now keys on the git worktree registry: a registered
+    worktree under the chat tree is residue (in-flight run or unpulled
+    remnant); an empty husk is not state. Directory existence still
+    short-circuits to False first — no namespace, nothing to look up.
     """
-    return (chat_dir / "run").exists() or (chat_dir / ".scratch").exists()
+    run = chat_dir / "run"
+    scratch = chat_dir / ".scratch"
+    if not run.exists() and not scratch.exists():
+        return False
+    return await _registered_worktrees(chat_dir) != []
+
+
+async def _registered_worktrees(chat_dir: Path) -> list[tuple[Path, str | None]]:
+    """``(path, branch-or-None)`` for every worktree git registers under
+    ``chat_dir`` — branch is None for detached entries. Paths compare
+    case-insensitively and separator-normalized (Windows drive-casing in
+    `worktree list` output vs how the tree was built differ).
+
+    Best-effort: when git fails (no repo, corrupt tree) the #330
+    directory-existence verdict decides instead, and it fails toward
+    KEEPING — a standing ``run`` dir reads as residue even unreadable,
+    because retirement must never remove a tree it cannot prove empty.
+    """
+    run_dir = chat_dir / "run"
+    if not await _git_ok(chat_dir):
+        return [(run_dir, None)] if run_dir.exists() else []
+    rc, out = await _run_git(chat_dir, "worktree", "list", "--porcelain")
+    if rc != 0:
+        return [(run_dir, None)] if run_dir.exists() else []
+    root = str(chat_dir).lower().replace("\\", "/").rstrip("/")
+    found: list[tuple[Path, str | None]] = []
+    path: Path | None = None
+    branch: str | None = None
+    for line in (out or "").splitlines() + [""]:
+        if line.startswith("worktree "):
+            if path is not None and _under(str(path), root):
+                found.append((path, branch))
+            path = Path(line[len("worktree "):])
+            branch = None
+        elif line.startswith("branch "):
+            branch = line[len("branch "):].removeprefix("refs/heads/")
+        elif not line and path is not None:
+            if _under(str(path), root):
+                found.append((path, branch))
+            path, branch = None, None
+    return found
+
+
+def _under(path: str, root: str) -> bool:
+    return path.lower().replace("\\", "/").rstrip("/").startswith(root + "/")
+
+
+async def _git_ok(cwd: Path) -> bool:
+    rc, _ = await _run_git(cwd, "rev-parse", "--git-dir")
+    return rc == 0
+
+
+async def run_branch_candidates(chat_dir: Path, chat_id: int | str) -> list[str]:
+    """Run-branch names this chat owns (#312 + #343): the agent's run
+    branch is ``run/<slug>-<chat-id>`` (or ``run/chat-<id>`` before a
+    title exists), so the chat id IS the ownership key. Discovered by
+    name — NOT by the worktree registry alone: by retirement time the
+    agent has already removed the run worktree per the SOP, and with it
+    the registry entry that named the branch. Registry-derived names
+    (a still-registered run worktree) are unioned in for completeness.
+    Deliberately narrow: another chat's branch carries another id and
+    can never match; user branches outside ``run/*`` are invisible."""
+    cid = str(chat_id)
+    names = {
+        b
+        for _, b in await _registered_worktrees(chat_dir)
+        if b and b.startswith("run/")
+    }
+    rc, out = await _run_git(
+        chat_dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/run/"
+    )
+    if rc == 0:
+        for line in (out or "").splitlines():
+            n = line.strip()
+            if n.endswith("-" + cid) or n == "run/chat-" + cid:
+                names.add(n)
+    return sorted(names)
+
+
+async def reap_merged_run_branches(
+    workspace_root: str | Path,
+    candidates: list[str],
+    merged_into: str | None,
+) -> list[str]:
+    """Delete the chat's landed run-branch refs, verified safe (#343).
+
+    Safe mode here is an explicit `merge-base --is-ancestor` check of
+    each candidate against ``merged_into`` -- the branch the chat tree
+    had checked out (the landing target), captured BEFORE the tree's
+    removal. A bare `branch -d` would measure against the primary
+    checkout's HEAD, which is the WRONG merge target (the primary sits
+    on its own branch) and would refuse every correctly-landed run
+    branch. Only after the ancestor check passes does the ref get
+    deleted (`-D`), so a branch with commits unreachable from the
+    landing target is never reaped. Candidates come from
+    `run_branch_candidates(chat_dir, chat_id)` -- the #312 id-suffix
+    contract -- captured BEFORE `git worktree remove`. Never raises;
+    returns the names actually reaped."""
+    if not merged_into:
+        return []
+    reaped: list[str] = []
+    for name in candidates:
+        rc, _ = await _run_git(
+            workspace_root, "merge-base", "--is-ancestor", name, merged_into
+        )
+        if rc != 0:
+            continue  # not merged into the landing target: keep the ref
+        rc2, _ = await _run_git(workspace_root, "branch", "-D", name)
+        if rc2 == 0:
+            reaped.append(name)
+    return reaped
+
+
+def _prune_empty_husks(chat_dir: Path) -> None:
+    """Best-effort rmdir of the empty dirs `git worktree remove` leaves
+    behind (#342): `<chat>/.scratch/chat-<id>` then `<chat>/.scratch`.
+    Cosmetic only — the residue probe no longer reads them — but leaving
+    husks forever makes `.scratch` a graveyard and confuses humans.
+    Refuses non-empty dirs silently (shutil.rmtree is NOT used here)."""
+    scratch = chat_dir / ".scratch"
+    for chat_id_dir in list(scratch.iterdir()) if scratch.is_dir() else []:
+        try:
+            chat_id_dir.rmdir()
+        except OSError:
+            pass
+    try:
+        scratch.rmdir()
+    except OSError:
+        pass
+
+
+
 
 
 async def retire_chat_worktree(
@@ -242,14 +379,28 @@ async def retire_chat_worktree(
             return {"retired": False, "reason": (out or "status failed").strip()[:200]}
         if (out or "").strip():
             return {"retired": False, "reason": "dirty"}
-        if chat_worktree_has_run_tree(chat_dir):
+        if await chat_worktree_has_run_tree(chat_dir):
             return {"retired": False, "reason": "run residue present"}
+        # #343: capture the run-branch names BEFORE the remove (the
+        # remove empties the registry this discovery reads) and reap
+        # AFTER it (the freed checkout is what lets `branch -d` accept
+        # the ref). Safe mode end to end: git refuses unmerged refs, and
+        # a refused retirement leaves every ref untouched.
+        candidates = await run_branch_candidates(chat_dir, chat_id)
+        brc, br = await _run_git(chat_dir, "branch", "--show-current")
+        merged_into = (br or "").strip() or None if brc == 0 else None
         rc, out = await _run_git(
             workspace_root(workspace), "worktree", "remove", str(chat_dir)
         )
         if rc != 0:
             return {"retired": False, "reason": (out or "worktree remove failed").strip()[:200]}
-        return {"retired": True, "path": str(chat_dir)}
+        # #342: the husks git left behind are not state; clear the empty
+        # ones so `.scratch` is not a graveyard of `<chat-id>` shells.
+        _prune_empty_husks(chat_dir)
+        reaped = await reap_merged_run_branches(
+            workspace_root(workspace), candidates, merged_into
+        )
+        return {"retired": True, "path": str(chat_dir), "reaped_branches": reaped}
     except OSError as exc:
         return {"retired": False, "reason": str(exc)[:200]}
 
