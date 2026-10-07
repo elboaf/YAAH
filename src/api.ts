@@ -670,6 +670,11 @@ export const reorderWorkspaces = (orderedIds: number[]) =>
 export interface WorkspaceGitBranches {
   branch: string | null
   branches: string[]
+  // #335: explicit remote states — the host could not be reached
+  // (offline), or it answered and git refused (error). Local reads
+  // never set them.
+  offline?: boolean
+  error?: string
 }
 
 export const getWorkspaceGitBranches = (workspace: string) =>

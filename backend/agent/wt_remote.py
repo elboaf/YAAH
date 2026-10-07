@@ -189,6 +189,42 @@ async def _ensure_scratch_invisible_remote(ws: str) -> None:
         )
 
 
+# --------------------------------------------------------------- selector
+
+
+async def chat_tree_state(ws: str, chat_id: int | str) -> tuple[str, str] | None:
+    """The chat worktree's existence-and-cleanliness ON THE HOST, one
+    probe (#335): ("missing", "") when no chat tree is listed,
+    ("clean", "") when listed with an empty status, ("dirty", output)
+    when listed with uncommitted changes, ("error", git output) when git
+    itself refused; None = the host could not be reached.
+
+    Published for the selector flip (tools._remote_selector_flip): the
+    guard-before-move ordering and the fail-closed reading live with the
+    module that owns the namespace, instead of each caller re-walking
+    the worktree list."""
+    rel = chat_worktree_rel(chat_id)
+    wl = await _run(ws, "worktree", "list", "--porcelain")
+    if wl is None:
+        return None
+    if wl[0] != 0:
+        return ("error", (wl[1] or "").strip() or "git worktree list failed")
+    listed = any(
+        p.replace("\\", "/").endswith(f"/{rel}")
+        for p in _worktree_paths(wl[1])
+    )
+    if not listed:
+        return ("missing", "")
+    status = await _run(ws, "-C", rel, "status", "--porcelain")
+    if status is None:
+        return None
+    if status[0] != 0:
+        return ("error", (status[1] or "").strip() or "git status failed")
+    if (status[1] or "").strip():
+        return ("dirty", status[1] or "")
+    return ("clean", "")
+
+
 # ---------------------------------------------------------- materialization
 
 

@@ -487,50 +487,53 @@ async def _remote_selector_flip(
     host_branches = gitinfo._plain_branch_names(out_l) if rc_l == 0 else []
     exists = branch in host_branches
     created = not exists
-    if not exists and not create:
-        return {"ok": False, "error": f"not a local branch: {branch}"}
     if not exists:
+        if not create:
+            return {"ok": False, "error": f"not a local branch: {branch}"}
         # Server-enforced start point: derived from the chat's own pin
         # (never the primary's HEAD — the amendment's start-point rule),
-        # over the gateway: one `git branch <new> <start>` hop.
+        # over the gateway: one `git branch <new> <start>` hop. With no
+        # start derivable the creation is refused — falling through to
+        # materialization would detach the tree at the primary's HEAD
+        # and call that a selection.
         conv = await db.get_conversation(conversation_id)
         start = str(conv.get("selected_branch") or "").strip() if conv else ""
-        if start:
-            res = await gitexec.run_git(ws, "branch", branch, start)
-            if res is None or res[0] != 0:
-                return {
-                    "ok": False,
-                    "error": (res[1] if res else "").strip()
-                    or "branch creation failed",
-                }
+        if not start:
+            return {
+                "ok": False,
+                "error": (
+                    f"not a local branch: {branch} (no chat branch to "
+                    "derive it from - the host's HEAD is detached or "
+                    "unborn)"
+                ),
+            }
+        res = await gitexec.run_git(ws, "branch", branch, start)
+        if res is None or res[0] != 0:
+            return {
+                "ok": False,
+                "error": (res[1] if res else "").strip()
+                or "branch creation failed",
+            }
 
     # Dirty-flip guard FIRST (ADR-0010): an existing chat tree that
-    # carries uncommitted changes refuses before anything moves. The
-    # canonical existence probe is the worktree list (what wt_remote
-    # itself uses): a tree not listed does not exist, and a missing or
-    # offline answer falls through to ensure_chat_worktree, which
-    # reports the explicit failure.
-    rel = wt_remote.chat_worktree_rel(conversation_id)
-    wl = await wt_remote._run(ws, "worktree", "list", "--porcelain")
-    if wl is not None and wl[0] == 0:
-        listed = any(
-            p.replace("\\", "/").endswith(f"/{rel}")
-            for p in wt_remote._worktree_paths(wl[1])
-        )
-        if listed:
-            status = await wt_remote._run(
-                ws, "-C", rel, "status", "--porcelain"
-            )
-            if status is None:
-                return {"ok": False, "error": "host unreachable"}
-            if status[0] != 0 or (status[1] or "").strip():
-                return {
-                    "ok": False,
-                    "error": (
-                        "this chat's worktree has uncommitted changes - "
-                        "commit or discard before switching branches"
-                    ),
-                }
+    # carries uncommitted changes refuses before anything moves, and a
+    # git refusal FAILS CLOSED — the flip never proceeds unchecked; a
+    # missing tree falls through to materialization (which performs the
+    # checkout at the branch).
+    state = await wt_remote.chat_tree_state(ws, conversation_id)
+    if state is None:
+        return {"ok": False, "error": "host unreachable"}
+    verdict, detail = state
+    if verdict == "error":
+        return {"ok": False, "error": detail}
+    if verdict == "dirty":
+        return {
+            "ok": False,
+            "error": (
+                "this chat's worktree has uncommitted changes - "
+                "commit or discard before switching branches"
+            ),
+        }
 
     # The flip itself: materialization creates the tree AT the branch
     # (first flip before any run), an existing tree flips in place —

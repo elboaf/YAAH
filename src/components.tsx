@@ -8669,6 +8669,8 @@ function DraftDestinationCard() {
   const [gitLoading, setGitLoading] = useState(false)
   const [gitBusy, setGitBusy] = useState(false)
   const [gitError, setGitError] = useState<string | null>(null)
+  // #335: the remote host is unreachable — an explicit state on the card.
+  const [gitOffline, setGitOffline] = useState(false)
 
   // The live destination: pinned value, else the active workspace ('' =
   // Default, the no-root pseudo-workspace).
@@ -8684,21 +8686,25 @@ function DraftDestinationCard() {
     setGitLoading(false)
     setGitBusy(false)
     setGitError(null)
+    setGitOffline(false)
     // #335 (selector parity): remote destinations read the HOST's
     // branches through the gateway — the picker is live for remote
-    // drafts; offline hosts answer empty and the chip stays hidden.
+    // drafts; an unreachable host is an EXPLICIT state on the card
+    // (never a silent vanish, per the #332 UI-parity decision).
     if (!dest) return
     getWorkspaceGitBranches(dest)
       .then((result) => {
         if (!cancelled) {
           setGitBranch(result.branch)
           setGitBranches(result.branches)
+          setGitOffline(result.offline === true)
         }
       })
       .catch(() => {
         if (!cancelled) {
           setGitBranch(null)
           setGitBranches([])
+          setGitOffline(false)
         }
       })
     return () => { cancelled = true }
@@ -8843,8 +8849,8 @@ function DraftDestinationCard() {
           ))}
         </select>
         {/* #335: live for remote destinations too — the branch read is
-            the host's, through the gateway; an unreachable host answers
-            empty and this chip simply does not render. */}
+            the host's, through the gateway; an unreachable host renders
+            the explicit offline state below. */}
         {gitBranch && (
           <div className="relative shrink-0">
             <button
@@ -8918,6 +8924,11 @@ function DraftDestinationCard() {
       )}
       {err && <p className="mt-1 text-[10px] text-red-400">{err}</p>}
       {gitError && <p role="alert" className="mt-1 text-[10px] text-red-400">{gitError}</p>}
+      {gitOffline && (
+        <p role="status" className="mt-1 text-[10px] text-amber-400">
+          Host offline — branch selection unavailable until it reconnects.
+        </p>
+      )}
     </div>
   )
 }

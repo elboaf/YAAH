@@ -87,6 +87,18 @@ describe('draft destination card on a remote workspace (#335)', () => {
     expect(screen.queryByRole('button', { name: /branch /i })).not.toBeInTheDocument()
   })
 
+  it('renders the explicit offline state when the host is unreachable (#332 UI parity)', async () => {
+    getWorkspaceGitBranches.mockResolvedValue({
+      branch: null,
+      branches: [],
+      offline: true,
+    })
+    render(<DraftDestinationCard />)
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/host offline/i)
+    expect(screen.queryByRole('button', { name: /branch /i })).not.toBeInTheDocument()
+  })
+
   it('does not preload host branches when no destination is pinned', async () => {
     // The dest-less draft (Default) reads nothing — unchanged rule.
     useAgent.setState({ workspace: '', draftDestination: null })

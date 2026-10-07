@@ -519,9 +519,14 @@ async def api_workspace_git_branches(workspace: str = ""):
     Draft chats have no conversation id yet, so keep this read path keyed by
     the destination path instead. #335: remote destinations read the
     HOST's branches through the gateway (the draft card's picker is live
-    for remote chats); offline hosts give the explicit empty answer.
+    for remote chats); an unreachable host is the explicit offline state.
     """
-    from backend.agent.gitinfo import current_git_branch, list_local_branches
+    from backend.agent.gitexec import run_git
+    from backend.agent.gitinfo import (
+        _plain_branch_names,
+        current_git_branch,
+        list_local_branches,
+    )
     from backend.agent.remote import parse_ns
     from backend.agent.tools import workspace_root
 
@@ -530,14 +535,23 @@ async def api_workspace_git_branches(workspace: str = ""):
         return {"branch": None, "branches": []}
 
     # #335: remote drafts read the HOST's branches through the gateway;
-    # offline hosts give the explicit empty answer (same as the chat
-    # endpoints — absence of data, never fabricated names).
+    # the raw distinguishability contract is surfaced, not collapsed:
+    # None = host unreachable (an explicit `offline` for the card),
+    # git-refused = the host answered but git failed (the card shows
+    # the refusal), an empty list on success = no branches.
     if parse_ns(workspace) is not None:
+        listing = await run_git(workspace, "branch")
+        if listing is None:
+            return {"branch": None, "branches": [], "offline": True}
+        rc_b, out_b = listing
+        if rc_b != 0:
+            return {
+                "branch": None,
+                "branches": [],
+                "error": (out_b or "git failed").strip(),
+            }
         branch = await current_git_branch(workspace)
-        branches = await list_local_branches(workspace)
-        if not branches:
-            return {"branch": None, "branches": []}
-        return {"branch": branch, "branches": branches}
+        return {"branch": branch, "branches": _plain_branch_names(out_b)}
 
     try:
         root = workspace_root(workspace)

@@ -129,6 +129,22 @@ def _fresh_caches():
 
 
 @pytest.fixture()
+def _no_branch_cache():
+    """A test that mutates host git state behind the TTL cache drops the
+    branch-list/branch caches explicitly (the suites' invalidation is
+    read-path-driven; a raw host-side `git checkout` bypasses it)."""
+    from backend.agent import gitinfo
+
+    gitinfo._branch_list_cache.clear()
+    gitinfo._cache.clear()
+    gitinfo._branch_times.clear()
+    yield
+    gitinfo._branch_list_cache.clear()
+    gitinfo._cache.clear()
+    gitinfo._branch_times.clear()
+
+
+@pytest.fixture()
 def client():
     from backend.main import app
 
@@ -290,6 +306,82 @@ async def wt_remote_ensure(repo, cid, branch):
     return await wt_remote.ensure_chat_worktree(
         ns_path("h-335", str(repo)), cid, branch
     )
+
+
+@pytest.mark.asyncio
+async def test_flip_refused_when_git_refuses_the_probe(
+    tmp_path, _clear_sessions, client
+):
+    """Fail closed: when git itself refuses the cleanliness probe on a
+    REACHABLE host (corrupt repo, locked index), the flip is refused —
+    it never proceeds unchecked."""
+    from backend.agent import remote as remote_mod
+    from backend.agent import wt_remote
+
+    repo = _repo_with_commit(tmp_path, "host-failclosed")
+    _git(repo, "branch", "feature")
+    session = _FakeHostSession(repo)
+    remote_mod.register_remote(session)
+    cid = await create_conversation("t", workspace=_ns(remote_mod, session, repo))
+    mat = await wt_remote_ensure(repo, cid, "master")
+    assert mat["path"] is not None
+
+    # Sabotage the probe: a corrupt worktree index makes
+    # `git -C <tree> status` fail while `worktree list` still succeeds —
+    # the transient-corruption case the fail-closed rule exists for.
+    admin_index = (
+        repo / ".git" / "worktrees" / f"chat-{cid}" / "index"
+    )
+    admin_index.write_bytes(b"GARBAGEJUNK")
+
+    r = client.post(
+        f"/api/conversations/{cid}/branch-select", json={"branch": "feature"}
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"]  # git's refusal is surfaced, not swallowed
+    conv = await get_conversation(cid)
+    assert conv["selected_branch"] in (None, "master")
+
+
+@pytest.mark.asyncio
+async def test_tool_create_without_start_point_refuses(
+    tmp_path, _clear_sessions, _no_branch_cache
+):
+    """A missing branch with NO derivable start (no pin, detached host
+    HEAD) is refused explicitly — never an accidental detached
+    materialization at the primary's HEAD."""
+    from backend.agent import remote as remote_mod
+    from backend.agent import gitinfo
+    from backend.agent.tools import branch_select
+    from backend.db.database import get_db
+
+    repo = _repo_with_commit(tmp_path, "host-nostart")
+    session = _FakeHostSession(repo)
+    remote_mod.register_remote(session)
+    cid = await create_conversation("t", workspace=_ns(remote_mod, session, repo))
+    # Strip the pin raw (the lazy pin would otherwise have pinned the
+    # inherited master before this test detached the primary).
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE conversations SET selected_branch = NULL,"
+            " branch_pin_origin = NULL WHERE id = ?",
+            (cid,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    _git(repo, "checkout", "--detach", "HEAD")
+    gitinfo.invalidate_git_caches(_ns(remote_mod, session, repo))
+
+    out = await branch_select(
+        branch="fresh", conversation_id=cid,
+        workspace=_ns(remote_mod, session, repo),
+    )
+    assert out["ok"] is False
+    assert "fresh" in out["error"]
+    assert not (repo / ".scratch" / "remote" / f"chat-{cid}").exists()
 
 
 @pytest.mark.asyncio
@@ -595,7 +687,27 @@ async def test_workspace_git_branches_endpoint_offline(
         "/api/workspaces/git-branches?workspace="
         + remote_mod.ns_path(session.host_id, "C:/repo")
     ).json()
-    assert body == {"branch": None, "branches": []}
+    # #332 (UI parity): offline is an EXPLICIT state on the draft card,
+    # not a silent empty answer.
+    assert body == {"branch": None, "branches": [], "offline": True}
+
+
+@pytest.mark.asyncio
+async def test_draft_chip_offline_explicit_never_fabricates(
+    tmp_path, _clear_sessions, client
+):
+    """Offline draft read: the explicit offline state, never a fabricated
+    branch name (the card renders 'host offline', not a picker)."""
+    from backend.agent import remote as remote_mod
+
+    session = _OfflineSession()
+    remote_mod.register_remote(session)
+    body = client.get(
+        "/api/workspaces/git-branches?workspace="
+        + remote_mod.ns_path(session.host_id, "C:/repo")
+    ).json()
+    assert body["offline"] is True
+    assert body["branch"] is None and body["branches"] == []
 
 
 # ---- local behavior unchanged (guard rails around the flip) ----

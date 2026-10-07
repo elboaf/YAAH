@@ -169,9 +169,12 @@ def test_workspace_git_endpoints_hide_nonrepo_default_and_remote(client, tmp_pat
     assert client.get(
         "/api/workspaces/git-branches", params={"workspace": ""}
     ).json() == {"branch": None, "branches": []}
+    # #335: a remote destination is served through the gateway; with no
+    # session for the host the answer is the explicit offline state —
+    # the old silent-hide ({branch: None, branches: []}) is gone.
     assert client.get(
         "/api/workspaces/git-branches", params={"workspace": "remote:host"}
-    ).json() == {"branch": None, "branches": []}
+    ).json() == {"branch": None, "branches": [], "offline": True}
 
 
 def test_git_command_checkout_writes_selector_not_tree(client, tmp_path):
