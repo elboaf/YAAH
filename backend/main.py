@@ -664,8 +664,21 @@ async def api_conversation_git_info(conversation_id: int):
     from backend.agent.tools import workspace_root
 
     ws = conv.get("workspace") or ""
-    if not ws.strip() or ws.startswith("remote:"):
+    if not ws.strip():
         return {"info": None}
+    # #333: remote chats read through the gateway with the raw namespaced
+    # string — workspace_root's Path.resolve() would mangle it into a
+    # client-local path. When remote chats grow host-side chat worktrees
+    # (ticket #334), the root substitution happens on the host side the
+    # same way the local branch substitutes below.
+    from backend.agent.remote import parse_ns
+
+    if parse_ns(ws) is not None:
+        info = await git_workspace_info(ws)
+        # #333: info is None only for a blank workspace (handled above);
+        # offline (with the channel's error detail, when git itself
+        # refused) passes through — the strip renders the explicit state.
+        return {"info": info}
     try:
         root = workspace_root(ws)
     except ValueError:

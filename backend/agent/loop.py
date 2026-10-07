@@ -349,6 +349,49 @@ def _agents_notes(workspace: str) -> str:
     )
 
 
+async def _agents_notes_async(workspace: str) -> str:
+    """Async twin of ``_agents_notes`` so remote workspaces (#334) get
+    the same injection: the host's AGENTS.md is fetched through the
+    channel (read_file executor) with the same size cap; a missing file
+    degrades exactly like the local missing-file case (''). Local
+    workspaces keep the sync path untouched."""
+    if workspace and workspace.startswith("remote:"):
+        from backend.agent.remote import parse_ns, remote_for_workspace
+
+        ns = parse_ns(workspace)
+        if ns is None or not ns[1]:
+            return ""
+        session = remote_for_workspace(workspace)
+        if session is None:
+            return ""  # host offline: skip like a missing file, never break
+        try:
+            res = await session.exec_tool(
+                "read_file", {"path": "AGENTS.md"}, workspace=workspace
+            )
+        except Exception:  # noqa: BLE001 — optional context never breaks
+            return ""
+        if not isinstance(res, dict) or res.get("error"):
+            return ""
+        # read_file numbers lines for the model; strip the gutter back
+        # off before injecting (the local read injects raw text).
+        lines = []
+        for line in str(res.get("content") or "").splitlines():
+            text = line.partition("\t")[2]
+            lines.append(text if text else line)
+        text = "\n".join(lines)
+        if not text.strip():
+            return ""
+        if len(text) > MAX_AGENTS_NOTES_CHARS:
+            text = text[:MAX_AGENTS_NOTES_CHARS] + "\n…[truncated]"
+        return (
+            f"# Project notes ({ns[1]}/AGENTS.md)\n\n"
+            "The project's own instructions for coding agents follow; they "
+            "override the general guidance below where they conflict.\n\n"
+            f"{text}"
+        )
+    return _agents_notes(workspace)
+
+
 def _memory_notes(workspace: str) -> str:
     """Persistent-memory block: the project's MEMORY.md index plus the
     save/read/delete guidance. Empty for a fresh project (no memories
@@ -918,7 +961,10 @@ def _run_branch_name(title, chat_id=None) -> str:
     return f"run/{slug}-{cid}"
 
 
-def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit", title=None) -> str:
+def _selected_branch_note(
+    branch, chat_id=None, detached=False, origin="explicit", title=None,
+    remote=False,
+) -> str:
     """System-prompt section injected when the user picked a branch in this
     chat's branch selector (#277: the run happens in the chat's own
     per-chat worktree, which the harness materializes at the first run;
@@ -931,6 +977,14 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
     expected residue is handled the same way every time. #312: the run
     branch is named after the work (`run/<title-slug>-<id>`) so branch
     lists stay human-readable; see _run_branch_name.
+
+    #334: `remote=True` selects the remote-workspace variant for the two
+    places the geometry differs: the chat worktree lives on the HOST at
+    `.scratch/remote/chat-<id>` (host-placed, client-owned), and the
+    primary tree is the host's checkout. Every run-SOP line below is
+    IDENTICAL to the local variant because the agent's shell runs inside
+    the chat tree either way - the nested run-worktree recipe is
+    chat-tree-relative, not workspace-relative.
     """
     if not branch or not str(branch).strip():
         return ""
@@ -938,6 +992,10 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     rb = _run_branch_name(title, chat_id)
     residue = _residue_protocol(cid)
+    # #334: remote geometry - the chat tree is the client-owned
+    # host-placed namespace, and "primary" means the host's checkout.
+    chat_tree = f".scratch/remote/chat-{cid}" if remote else f".scratch/chat-{cid}"
+    primary = "the host's primary tree" if remote else "the primary tree"
     if detached:
         # The selected branch is checked out in the primary (a master pin,
         # or a branch another worktree holds): the chat worktree detached
@@ -958,8 +1016,8 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
                 "It is checked out in the primary tree, so this chat "
                 "runs in its own "
             )
-            + f"per-chat worktree at `.scratch/chat-{cid}`, detached at "
-            f"`{b}`'s tip. The primary tree is the human's \u2014 never check "
+            + f"per-chat worktree at `{chat_tree}`, detached at "
+            f"`{b}`'s tip. {primary.capitalize()} is the human's \u2014 never check "
             f"it out or move it, and never move `{b}` from under it. When "
             "your task writes to the tree, work in a scratch worktree at "
             "this chat's deterministic path, based on the current commit:\n\n"
@@ -984,8 +1042,8 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
             "branch at creation - no explicit pick yet; a UI pick or a "
             "branch_select call makes it explicit). "
         )
-        + f"This chat runs in its own per-chat worktree at `.scratch/chat-{cid}`, which has "
-        f"`{b}` checked out; the primary tree is the human's \u2014 never "
+        + f"This chat runs in its own per-chat worktree at `{chat_tree}`, which has "
+        f"`{b}` checked out; {primary} is the human's \u2014 never "
         "check it out or move it. " + _AMENDMENT_RULES +
         "When your task writes to the tree, work "
         "in a scratch worktree at this chat's deterministic path, based "
@@ -1002,15 +1060,20 @@ def _selected_branch_note(branch, chat_id=None, detached=False, origin="explicit
     )
 
 
-def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit", title=None) -> str:
+def _selected_branch_note_degraded(
+    branch, chat_id, reason, origin="explicit", title=None, remote=False,
+) -> str:
     """Selector-note variant when the chat worktree could NOT be
-    materialized (non-repo, git failure): the run happens in the primary
-    like the pre-#277 SOP, and the reason is stated instead of hidden —
-    the note must never claim isolation it did not get."""
+    materialized (non-repo, git failure, host offline): the run happens
+    in the primary like the pre-#277 SOP, and the reason is stated
+    instead of hidden — the note must never claim isolation it did not
+    get. `remote=True` only renames the primary (the host's checkout)."""
 
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     b = str(branch).strip()
     rb = _run_branch_name(title, chat_id)
+    chat_tree = f".scratch/remote/chat-{cid}" if remote else f".scratch/chat-{cid}"
+    primary = "the host's primary tree" if remote else "the primary tree"
     return (
         f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
         + (
@@ -1021,11 +1084,11 @@ def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit", t
             "branch at creation - no explicit pick yet), but the "
         )
         + f"per-chat worktree could not be materialized ({reason}), so this run "
-        "executes in the primary tree. The primary tree is the human's — "
+        f"executes in {primary}. {primary.capitalize()} is the human's — "
         "never check it out or move it, and never switch branches in it. "
         "When your task writes to the tree, work in a scratch worktree at "
         "this chat's deterministic path, based on the selected branch:\n\n"
-        f"`git worktree add .scratch/chat-{cid}/run -b {rb} {b}`\n\n"
+        f"`git worktree add {chat_tree}/run -b {rb} {b}`\n\n"
         "The harness keeps `.scratch/` git-invisible via the repo's "
         "`.git/info/exclude` (#321), so the namespace never shows as "
         "untracked noise. "
@@ -1035,7 +1098,7 @@ def _selected_branch_note_degraded(branch, chat_id, reason, origin="explicit", t
         f"run branch into `{b}` "
         "(an unchecked-out branch merge moves only the ref; no human's "
         "working tree is touched), then remove the run worktree "
-        f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d {rb}`). "
+        f"(`git worktree remove {chat_tree}/run && git branch -d {rb}`). "
         f"When `{b}` IS checked out in another worktree — the common "
         "degraded case, since that is usually why materialization failed "
         f"— do NOT land: leave `{rb}` carrying the work, remove the run "
@@ -1670,7 +1733,9 @@ async def _run_agent_claimed(
     # Everything tool-shaped (bash, file tools, change summaries,
     # spawn_batch) resolves from turn_workspace, so this one re-point is
     # the whole isolation story; the primary worktree is the human's and
-    # is never moved. Remote workspaces are out of scope v1 and chats
+    # is never moved. #334: remote chats get the same treatment — their
+    # worktree materializes ON THE HOST (client-owned namespace) and the
+    # re-point stays namespaced so tools keep routing there. Chats
     # without a pick keep running in the primary exactly as before.
     conv = await get_conversation(conversation_id)
     selected_branch = str((conv or {}).get("selected_branch") or "").strip()
@@ -1683,6 +1748,11 @@ async def _run_agent_claimed(
     conv_title = str((conv or {}).get("title") or "").strip()
     worktree_detached = False
     worktree_error = ""
+    # #334: the remote teardown path only pays a channel round-trip when
+    # this run actually materialized/used a host chat worktree.
+    worktree_materialized = False
+    wt_remote_workspace = None
+    from backend.agent import remote as remote_mod
     # #302: a pin whose branch no longer exists locally (deleted upstream
     # of the chat) must reach the run as a stale note, not as a generic
     # worktree failure — checked before materialization so the failure
@@ -1702,17 +1772,33 @@ async def _run_agent_claimed(
         if ws_root is not None and is_git_repo(ws_root):
             branch_pin_stale = selected_branch not in await list_local_branches(ws_root)
     if selected_branch and not branch_pin_stale:
-        from backend.agent import worktrees as _worktrees
-
+        # #334: remote chats materialize their chat worktree ON THE HOST
+        # (client-owned namespace `.scratch/remote/chat-<id>/`, through
+        # the #333 gateway) instead of refusing; local keeps the local
+        # module. The failure path is shared shape: worktree_error turns
+        # into the degraded note (#322) either way.
+        wt_remote_workspace = remote_mod.parse_ns(turn_workspace)
+        if wt_remote_workspace is not None:
+            from backend.agent import wt_remote as _worktrees
+        else:
+            from backend.agent import worktrees as _worktrees
         _wt = await _worktrees.ensure_chat_worktree(
             turn_workspace, conversation_id, selected_branch
         )
         if _wt.get("path") is not None:
-            turn_workspace = str(_wt["path"])
+            # #334: the remote path is ABSOLUTE ON THE HOST — it must stay
+            # namespaced (`remote:<hid>:...`) so every tool call keeps
+            # routing to the host and the host strips it to the raw path.
+            if wt_remote_workspace is not None:
+                turn_workspace = remote_mod.ns_path(
+                    wt_remote_workspace[0], str(_wt["path"])
+                )
+            else:
+                turn_workspace = str(_wt["path"])
             worktree_detached = bool(_wt.get("detached"))
+            worktree_materialized = True
         else:
             worktree_error = str(_wt.get("error") or "unavailable")
-    from backend.agent import remote as remote_mod
 
     remote_workspace = remote_mod.parse_ns(turn_workspace) is not None
     change_baseline = (
@@ -1753,7 +1839,9 @@ async def _run_agent_claimed(
 
     # The project's own agent instructions (baseline failures, shell quirks,
     # prerequisites) travel with the workspace, so read them fresh each turn.
-    notes = _agents_notes(workspace)
+    # #334: async twin — a remote workspace's AGENTS.md is fetched through
+    # the channel (same cap, same missing-file degradation as local).
+    notes = await _agents_notes_async(workspace)
     if notes:
         system_prompt = f"{system_prompt}\n\n---\n\n{notes}"
 
@@ -1770,7 +1858,7 @@ async def _run_agent_claimed(
     if worktree_error:
         branch_note = _selected_branch_note_degraded(
             selected_branch, conversation_id, worktree_error, origin=pin_origin,
-            title=conv_title,
+            title=conv_title, remote=remote_workspace,
         )
     elif branch_pin_stale:
         # #302: the pin is dead — the run hears that, not a materialization
@@ -1785,6 +1873,7 @@ async def _run_agent_claimed(
             detached=worktree_detached,
             origin=pin_origin,
             title=conv_title,
+            remote=remote_workspace,
         )
     if branch_note:
         system_prompt = f"{system_prompt}\n\n---\n\n{branch_note}"
@@ -2510,6 +2599,10 @@ async def _run_agent_claimed(
                     subagents_mod.spawn_batch(
                         calls, turn_workspace, cancel_ev, on_event=_emit, gate=_sub_gate,
                         branch_note=branch_note,
+                        # #334: the notes the parent already fetched (the
+                        # remote fetch rides the channel) — sub-agents must
+                        # not re-pay the round-trips per spawn.
+                        workspace_notes=notes,
                         # #303: chat-scoped tools inside sub-agents resolve
                         # to this (the parent) conversation.
                         conversation_id=conversation_id,
@@ -2696,6 +2789,11 @@ async def _run_agent_claimed(
         # protocol instead. Never fatal: teardown must not mask the turn
         # result. Skipped when the turn degraded out of the worktree (a
         # failed materialization has nothing to retire).
+        # #334: remote chats retire too, through the gateway — but the
+        # turn ran in the HOST-ABSOLUTE worktree path, so retirement is
+        # keyed on the WORKSPACE NAMESPACE (the gateway's cwd), not on
+        # turn_workspace. Host offline at teardown: refused explicitly,
+        # the tree stands, the next run retries.
         if worktree_error == "" and not remote_workspace:
             try:
                 from backend.agent.worktrees import retire_chat_worktree
@@ -2708,6 +2806,26 @@ async def _run_agent_claimed(
                     )
             except Exception:  # noqa: BLE001 - teardown never blocks
                 log.exception("post-run chat worktree retirement failed")
+        elif worktree_error == "" and remote_workspace and worktree_materialized:
+            try:
+                from backend.agent import wt_remote
+
+                _ret = await wt_remote.retire_chat_worktree(
+                    str(workspace), conversation_id
+                )
+                if _ret.get("retired"):
+                    log.info(
+                        "remote chat worktree retired after run (#329/#334): %s",
+                        _ret.get("path"),
+                    )
+                elif _ret.get("reason") not in ("no chat worktree",):
+                    log.info(
+                        "remote chat worktree kept after run (%s): %s",
+                        _ret.get("reason"),
+                        wt_remote.chat_worktree_path(str(workspace), conversation_id),
+                    )
+            except Exception:  # noqa: BLE001 - teardown never blocks
+                log.exception("post-run remote chat worktree retirement failed")
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

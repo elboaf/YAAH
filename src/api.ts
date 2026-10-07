@@ -181,6 +181,10 @@ export interface GitInfo {
   dirty: boolean
   untracked: number
   changed: number
+  /** #333: present (and every other field absent) when a remote host is
+      unreachable — the strip renders the explicit offline chip instead of
+      the old silent-by-absence null. */
+  offline?: true
 }
 
 export const getGitInfo = (id: number) =>
