@@ -334,6 +334,7 @@ def _sub_agent_system_prompt(
     defn: AgentDef,
     workspace: str,
     branch_note: str = "",
+    workspace_notes: str = "",
 ) -> str:
     """System prompt for a sub-agent run: its definition body plus the
     same environment grounding the parent gets (env line, workspace
@@ -390,7 +391,9 @@ def _sub_agent_system_prompt(
         "- Git work goes through the bash tool (git is on PATH); never "
         "open git's interactive editor - pass -m to commit.\n"
     )
-    notes = _agents_notes(workspace)
+    # #334: the notes arrive from the parent (which fetched them already —
+    # remotely through the channel); the sync fallback covers direct calls.
+    notes = workspace_notes if workspace_notes else _agents_notes(workspace)
     if branch_note:
         prompt += f"\n\n---\n\n{branch_note}"
     if notes:
@@ -428,6 +431,7 @@ async def run_sub_agent(
     run_label: str = "",
     branch_note: str = "",
     conversation_id: int | None = None,
+    workspace_notes: str = "",
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
@@ -462,7 +466,10 @@ async def run_sub_agent(
     messages = [
         {
             "role": "system",
-            "content": _sub_agent_system_prompt(defn, workspace, branch_note=branch_note),
+            "content": _sub_agent_system_prompt(
+                defn, workspace, branch_note=branch_note,
+                workspace_notes=workspace_notes,
+            ),
         },
         {"role": "user", "content": prompt},
     ]
@@ -873,6 +880,7 @@ async def spawn_batch(
     gate=None,
     branch_note: str = "",
     conversation_id: int | None = None,
+    workspace_notes: str = "",
 ) -> dict[str, dict]:
     """Run every spawn_agent call in one parent turn in parallel (capped
     by MAX_CONCURRENT via a semaphore). Returns {call_id: result}.
@@ -954,6 +962,7 @@ async def spawn_batch(
                 branch_note=branch_note,
                 # #303: chat-scoped tools resolve to the PARENT chat.
                 conversation_id=conversation_id,
+                workspace_notes=workspace_notes,
             )
             if on_event:
                 on_event(
