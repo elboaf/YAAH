@@ -367,6 +367,44 @@ async def _has_run_residue(ws: str, chat_rel: str, host_path: str) -> bool | Non
     return False
 
 
+async def _run_branch_candidates_remote(
+    ws: str, rel: str, chat_id: int | str
+) -> list[str]:
+    """Run-branch names checked out at worktrees registered under the
+    chat tree on the host (#343) — the remote twin of the local
+    ``worktrees.run_branch_candidates``. One channel hop: `worktree
+    list --porcelain` already reports each entry's ``branch``; the path
+    match roots on the host-absolute chat path so nothing foreign
+    qualifies. Empty on any channel failure — best-effort, never a
+    retirement blocker."""
+    ns = parse_ns(ws)
+    if ns is None or not ns[1]:
+        return []
+    chat_abs = _abs_host_path(ns[1], chat_id).lower().replace("\\", "/").rstrip("/")
+    root = chat_abs + "/"
+    reg = await _run(ws, "-C", rel, "worktree", "list", "--porcelain")
+    if reg is None or reg[0] != 0:
+        return []
+    names: list[str] = []
+    p: str | None = None
+    under = False
+    b: str | None = None
+    for line in (reg[1] or "").splitlines() + [""]:
+        if line.startswith("worktree "):
+            if p is not None and under and b:
+                names.append(b)
+            p = line[len("worktree "):]
+            under = p.lower().replace("\\", "/").rstrip("/").startswith(root)
+            b = None
+        elif line.startswith("branch "):
+            b = line[len("branch "):].removeprefix("refs/heads/")
+        elif not line and p is not None:
+            if under and b:
+                names.append(b)
+            p, under, b = None, False, None
+    return [n for n in names if n.startswith("run/")]
+
+
 async def retire_chat_worktree(workspace: str, chat_id: int | str) -> dict:
     """Retire the remote chat's worktree after its work has landed — the
     remote twin of ``worktrees.retire_chat_worktree`` (#329 semantics):
@@ -403,6 +441,12 @@ async def retire_chat_worktree(workspace: str, chat_id: int | str) -> dict:
         # under it, exactly like the local hook.
         return {"retired": False, "reason": "run residue present"}
 
+    # #343: run-branch candidates (#312 id-suffix names + registry
+    # union), captured BEFORE the remove empties the registry.
+    candidates = await _run_branch_candidates_remote(workspace, rel, chat_id)
+    cur = await _run(workspace, "-C", rel, "branch", "--show-current")
+    merged_into = (cur[1] or "").strip() or None if cur is not None and cur[0] == 0 else None
+
     res = await _run(workspace, "worktree", "remove", rel)
     rc, out = res or (1, "host unreachable")
     if rc != 0:
@@ -410,8 +454,30 @@ async def retire_chat_worktree(workspace: str, chat_id: int | str) -> dict:
             "retired": False,
             "reason": (out or "worktree remove failed").strip()[:200],
         }
+    # #343 (remote parity): candidates came from the registry BEFORE the
+    # remove; reap AFTER the remove frees the checkouts. Verified
+        # delete: `merge-base --is-ancestor` gates each ref; only a
+    # branch merged into the landing target is deleted (-D).
+    # rides the channel, and only this chat's registry named them.
+    reaped = []
+    bad = {chr(34), chr(39), chr(96), ';', '|', '$', '&', '<', '>', chr(92), ' ', chr(9)}
+    for name in candidates:
+        if not name.startswith("run/") or bad.intersection(name) or not merged_into:
+            continue
+        mb = await _run(
+            workspace, "merge-base", "--is-ancestor", name, merged_into
+        )
+        if mb is None or mb[0] != 0:
+            continue  # not merged into the landing target: keep the ref
+        d = await _run(workspace, "branch", "-D", name)
+        if d is not None and d[0] == 0:
+            reaped.append(name)
     await _prune_empty_parents(workspace, chat_id)
-    return {"retired": True, "path": _abs_host_path(host_path, chat_id)}
+    return {
+        "retired": True,
+        "path": _abs_host_path(host_path, chat_id),
+        "reaped_branches": reaped,
+    }
 
 
 async def _prune_empty_parents(ws: str, chat_id: int | str) -> None:

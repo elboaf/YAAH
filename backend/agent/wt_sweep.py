@@ -26,7 +26,11 @@ import time
 from pathlib import Path
 
 from backend.agent.gitinfo import _run_git
-from backend.agent.worktrees import chat_worktree_has_run_tree
+from backend.agent.worktrees import (
+    chat_worktree_has_run_tree,
+    reap_merged_run_branches,
+    run_branch_candidates,
+)
 
 # A chat worktree with no uncommitted changes and no residue past this
 # age is auto-pruned. Idle trees cost disk; this bounds it.
@@ -55,13 +59,14 @@ def _rmtree_readonly(path: Path) -> None:
 async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -> dict:
     """Retire clean chat worktrees of dead chats past the age threshold.
 
-    Returns {checked, swept: [paths], kept} for logging; never raises
-    over an individual tree - a busy or unreadable tree is just kept
-    this round.
+    Returns {checked, swept: [paths], kept, reaped_branches} for
+    logging; never raises over an individual tree - a busy or unreadable
+    tree is just kept this round.
     """
     from backend.db.database import get_db
 
     swept: list[str] = []
+    reaped_branches: list[str] = []
     checked = 0
     try:
         db = await get_db()
@@ -115,8 +120,14 @@ async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -
                 continue  # dirty: never swept
             # #330: the run namespace is git-invisible (#321), so pin by
             # existence - a live run or residue keeps the tree standing.
-            if chat_worktree_has_run_tree(child):
+            if await chat_worktree_has_run_tree(child):
                 continue
+            # #343: capture run-branch names BEFORE the remove empties
+            # the registry; reap AFTER it frees the checkouts. Same
+            # before/after ordering the post-run hook uses.
+            candidates = await run_branch_candidates(child, chat_id)
+            brc, br = await _run_git(child, "branch", "--show-current")
+            merged_into = (br or "").strip() or None if brc == 0 else None
             rc2, _ = await _run_git(ws, "worktree", "remove", str(child))
             if rc2 != 0:
                 # Legacy pre-#277 standalone clone (#329): `.git` is a
@@ -133,7 +144,15 @@ async def sweep_stale_chat_worktrees(max_idle_seconds: int = MAX_IDLE_SECONDS) -
                         pass
                 continue
             swept.append(str(child))
-    return {"checked": checked, "swept": swept, "kept": checked - len(swept)}
+            reaped_branches.extend(
+                await reap_merged_run_branches(ws, candidates, merged_into)
+            )
+    return {
+        "checked": checked,
+        "swept": swept,
+        "kept": checked - len(swept),
+        "reaped_branches": reaped_branches,
+    }
 
 
 def should_sweep(now: float | None = None) -> bool:

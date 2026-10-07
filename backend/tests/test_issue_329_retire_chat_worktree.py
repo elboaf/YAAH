@@ -74,13 +74,22 @@ async def test_retire_keeps_dirty_tree(tmp_path):
 
 async def test_retire_keeps_tree_with_run_residue(tmp_path):
     """The run namespace is invisible to status (#321), so residue is
-    pinned by existence (#330): a tree holding `<chat>/run` survives."""
+    pinned by the worktree REGISTRY (#342): a tree holding a registered
+    `<chat>/run` worktree survives. (An empty `<chat>/run` directory is
+    a husk, not state — #342 retired the old existence pin.)"""
     from backend.agent.worktrees import retire_chat_worktree
 
     repo = _repo_with_commit(tmp_path)
     out = await _materialize(repo)
     chat_dir = out["path"]
-    (chat_dir / "run").mkdir()  # residue: the run worktree dir remains
+    # Real residue geometry: the harness nests the run worktree at
+    # <chat>/.scratch/chat-<id>/run (git-invisible since #321), and it
+    # stays registered until the agent's SOP removes it.
+    _git(
+        chat_dir,
+        "worktree", "add", "--detach",
+        str(chat_dir / ".scratch" / "chat-42" / "run"), "HEAD",
+    )
 
     result = await retire_chat_worktree(str(repo), 42)
     assert result["retired"] is False
