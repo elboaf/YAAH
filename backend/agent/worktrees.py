@@ -157,6 +157,37 @@ async def ensure_chat_worktree(
     rc, out = await _run_git(root, "worktree", "add", str(chat_dir), branch)
     detached = False
     if rc != 0:
+        # #331: an unborn HEAD (fresh `git init`, no commits) makes that
+        # fail with 'invalid reference' - the repo is real, just empty.
+        # The orphan fallback is UNBORN-GATED (rev-parse --verify HEAD
+        # fails): on a born repo git would happily accept --orphan -b for
+        # a not-yet-existing branch name and silently hand back an empty
+        # history-less worktree, masking whatever the plain add actually
+        # failed on. When the primary later makes the first commit on the
+        # shared unborn branch, both HEADs lift onto it together.
+        rc_probe, _ = await _run_git(
+            root, "rev-parse", "--verify", "--quiet", "HEAD", merge_stderr=False
+        )
+        if rc_probe != 0:
+            rc2, out2 = await _run_git(
+                root, "worktree", "add", "--orphan", "-b", branch, str(chat_dir)
+            )
+            if rc2 == 0:
+                return {"path": chat_dir, "detached": False, "created": True}
+            # Old git without orphan inference: the specified clear error,
+            # not a generic worktree failure (triage criterion 3).
+            return {
+                "path": None,
+                "error": (
+                    "workspace repo has no commits yet - make the first "
+                    "commit before creating a chat worktree"
+                    + (f": {(out2 or '').strip()}" if (out2 or '').strip() else "")
+                ),
+            }
+        # Born repo: the plain add failed for a real reason (branch held by
+        # the primary or another worktree - the common case for master).
+        # Detach at the same tip: one checkout per branch is a git
+        # constraint, not a policy; the tip is identical either way.
         rc, out2 = await _run_git(root, "worktree", "add", "--detach", str(chat_dir), branch)
         if rc != 0:
             return {"path": None, "error": (out2 or out).strip() or "worktree add failed"}

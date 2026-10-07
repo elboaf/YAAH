@@ -73,7 +73,11 @@ async def current_git_branch(root: Path | str) -> str | None:
 
     key = str(root)
     cached = _cache.get(key)
-    if cached and cached[0] == mtime:
+    if cached and cached[0] == mtime and cached[1] is not None:
+        # Negative entries are never trusted (#331): a None cached while
+        # HEAD was unborn (or by the pre-#331 build) would otherwise
+        # outlive the first commit - HEAD's mtime does not change when it
+        # is born, so there is no mtime signal to invalidate it.
         return cached[1]
 
     branch: str | None = None
@@ -86,11 +90,32 @@ async def current_git_branch(root: Path | str) -> str | None:
     )
     if rc == 0:
         branch = out or None
+    else:
+        # #331: an unborn HEAD (fresh `git init`, no commits yet) fails
+        # rev-parse - that is a repo with a branch, not a non-repo. The
+        # symref read below reports it, so the workspace is recognized
+        # from the moment git init runs, not from the first commit.
+        branch = await head_branch(root)
 
     # Cache keyed on the observed mtime: when HEAD changes, the mtime
     # mismatch forces a re-read.
     _cache[key] = (mtime, branch)
     return branch
+
+
+async def head_branch(root: Path | str) -> str | None:
+    """The branch name HEAD points at - born or unborn (#331) - or None
+    when it cannot be read (no repo, detached HEAD, corrupt .git).
+
+    `rev-parse --abbrev-ref HEAD` needs HEAD to resolve; `branch
+    --show-current` just reads the symref git records for exactly the
+    unborn state (and returns empty for a detached HEAD: no name)."""
+    rc, out = await _run_git(
+        Path(root), "branch", "--show-current", merge_stderr=False
+    )
+    if rc != 0:
+        return None
+    return out or None
 
 
 # ------------------------------------------------------------- ui readout
@@ -241,7 +266,9 @@ _BRANCH_LIST_TTL = 2.0  # seconds; matches the info-readout cache cadence
 
 async def list_local_branches(root: Path | str) -> list[str]:
     """Local branch names for the chip's dropdown (current branch included;
-    sorted by git's default ordering). Empty when not a repo / unborn HEAD.
+    sorted by git's default ordering). Empty when not a repo; for an
+    unborn HEAD (fresh `git init`, #331) the single symref name HEAD
+    points at is reported, so the workspace reads as the repo it is.
 
     #302: TTL-cached — the chip's staleness read rides this list every
     ~2s poll, and a per-poll spawn would break the git-branch endpoint's
@@ -257,6 +284,13 @@ async def list_local_branches(root: Path | str) -> list[str]:
     if rc != 0:
         return []
     branches = [line.strip() for line in out.splitlines() if line.strip()]
+    if not branches:
+        # #331: an unborn HEAD lists no branches, but the repo does have
+        # one - the symref name HEAD points at. Report it so the #314
+        # picker and the #302 staleness guard treat the repo as healthy.
+        unborn = await head_branch(root)
+        if unborn:
+            branches = [unborn]
     _branch_list_cache[key] = (now, branches)
     return branches
 
