@@ -8332,22 +8332,25 @@ export function GitChipCluster({
   const wtTitle =
     `worktree — HEAD of this chat's worktree${wtAhead > 0 ? ` — ↑${wtAhead} ahead of the primary worktree` : ' — in sync with the primary worktree'}`
   const sep = <span className="px-0.5 text-zinc-700">·</span>
-  type HashSlot = { which: 'local' | 'remote' | 'worktree'; hash: string; title: string | null; color: string }
+  type HashSlot = { which: 'local' | 'remote' | 'worktree'; label: string; hash: string; title: string | null; color: string }
   const slots: HashSlot[] = [
     info.local_hash && {
       which: 'local' as const,
+      label: 'local',
       hash: info.local_hash,
       title: copied === 'local' ? null : `local — copy ${info.local_hash}`,
       color: 'text-zinc-400',
     },
     info.remote_hash && {
       which: 'remote' as const,
+      label: 'origin',
       hash: info.remote_hash,
       title: copied === 'remote' ? null : `${info.upstream ?? 'upstream'} — copy ${info.remote_hash}`,
       color: upColor,
     },
     info.worktree_hash && {
       which: 'worktree' as const,
+      label: 'worktree',
       hash: info.worktree_hash,
       title: copied === 'worktree' ? null : `${wtTitle} — copy ${info.worktree_hash}`,
       color: wtColor,
@@ -8355,7 +8358,7 @@ export function GitChipCluster({
   ].filter((s): s is HashSlot => Boolean(s))
 
   return (
-    <span ref={wrapRef} className="relative flex min-w-0 items-center gap-2">
+    <span ref={wrapRef} className="relative flex min-w-0 items-end gap-2">
       {/* Branch selector: the chat's own branch (#286) — the stored pick
           when the chat has one, else the workspace's checked-out branch.
           Flipping it records the pick for this chat only. */}
@@ -8469,18 +8472,23 @@ export function GitChipCluster({
       {/* Sync readout (#350): three short hashes — the selected branch's
           tip, its upstream's tip, the chat worktree's HEAD — click = copy,
           each colored by its own divergence; ahead/behind counters kept.
-          Plain text — no drawer, no command buttons. */}
-      <span className="flex shrink-0 items-center font-mono text-[10px] text-zinc-400">
-        {slots.map(({ which, hash, title, color }) => (
+          Each hash sits in a column with its role named above it (plain
+          text, always visible — name > hover-only title). items-end: the
+          columns hang from the strip's top edge like the selector chip. */}
+      <span className="flex shrink-0 items-end font-mono text-[10px] text-zinc-400">
+        {slots.map(({ which, label, hash, title, color }) => (
           <Fragment key={which}>
             {which !== 'local' && sep}
-            <button
-              className={`${color} hover:text-zinc-200`}
-              title={title ?? 'copied'}
-              onClick={() => copyHash(hash!, which)}
-            >
-              {copied === which ? '✓' : hash!.slice(0, 7)}
-            </button>
+            <span className="flex flex-col items-center leading-tight">
+              <span className="text-[9px] leading-none tracking-wide text-zinc-500">{label}</span>
+              <button
+                className={`${color} hover:text-zinc-200`}
+                title={title ?? 'copied'}
+                onClick={() => copyHash(hash!, which)}
+              >
+                {copied === which ? '✓' : hash!.slice(0, 7)}
+              </button>
+            </span>
           </Fragment>
         ))}
         {info.ahead > 0 && <span className="ml-1">↑{info.ahead}</span>}
