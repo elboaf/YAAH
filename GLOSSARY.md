@@ -36,6 +36,13 @@ there, and the chat's worktree materializes there too (ADR-0010,
 _Avoid_: treating it as metadata-only; assuming the repo exists on the
 client; hiding features instead of stating where they run
 
+**Host offline**:
+The explicit state a remote workspace’s git surfaces show when the host
+cannot be reached over the channel (#333) — rendered as its own chip,
+never read as data (a missing repo is data; unreachability is not).
+_Avoid_: silent absence; conflating a non-repo workspace with an
+unreachable host
+
 **Branch selector**:
 The per-chat stored value naming the branch a chat's work lands on —
 the single source of truth for landing. Set at chat creation from the

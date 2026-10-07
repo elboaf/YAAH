@@ -15,18 +15,13 @@ from pathlib import Path
 from backend.agent import gitexec
 from backend.agent.remote import parse_ns
 
-# Windows: suppress the console window a console child of the windowed app
-# would pop up. POSIX: own process group (mirrors tools.py).
-_SUBPROCESS_FLAGS = (
-    {"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}
-)
-
-# (resolved workspace root) -> (mtime_ns captured at last read, branch text)
+# (resolved workspace root) -> (mtime_ns captured at last read, branch text;
+# remote entries carry captured-at 0.0 and are gated by _branch_times)
 _cache: dict[str, tuple[float, str | None]] = {}
 
 # #333: remote roots have no HEAD to stat, so their branch-cache entries
-# are time-gated instead of mtime-gated (keyed by monotonic capture time).
-_cache_times: dict[str, float] = {}
+# are time-gated instead of mtime-gated.
+_branch_times: dict[str, float] = {}
 _BRANCH_TTL = 2.0  # seconds; matches the UI poll cadence
 
 # (resolved workspace root) -> (monotonic time captured, info dict). One git
@@ -93,7 +88,7 @@ async def current_git_branch(root: Path | str) -> str | None:
     if cached:
         if not remote and cached[0] == mtime:
             return cached[1]
-        if remote and time.monotonic() - _cache_times.get(key, 0.0) < _BRANCH_TTL:
+        if remote and time.monotonic() - _branch_times.get(key, 0.0) < _BRANCH_TTL:
             return cached[1]
 
     branch: str | None = None
@@ -122,7 +117,7 @@ async def current_git_branch(root: Path | str) -> str | None:
     # when HEAD changes, the mtime mismatch forces a re-read.
     if remote:
         _cache[key] = (0.0, branch)
-        _cache_times[key] = time.monotonic()
+        _branch_times[key] = time.monotonic()
     else:
         _cache[key] = (mtime, branch)
     return branch
@@ -130,37 +125,12 @@ async def current_git_branch(root: Path | str) -> str | None:
 
 # ------------------------------------------------------------- ui readout
 
-async def _run_git(
-    root: Path, *args: str, merge_stderr: bool = True
-) -> tuple[int, str]:
-    """One git invocation in the workspace; (returncode, combined output
-    unless merge_stderr is False, which discards stderr).
-
-    Always passes --no-optional-locks: this layer is a read-only UI poll, and
-    taking (or blocking on) index.lock/HEAD.lock would make its 2 s burst
-    contend with the agent's own git writes — a bursty stall that shows up as
-    input-path latency (issue #279).
-    """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "git", "--no-optional-locks", "-C", str(root), *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=(
-                asyncio.subprocess.STDOUT
-                if merge_stderr
-                else asyncio.subprocess.DEVNULL
-            ),
-            **_SUBPROCESS_FLAGS,
-        )
-    except OSError:
-        return 127, "git not found"
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_GIT_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return 124, "git timed out"
-    return proc.returncode, out.decode("utf-8", errors="replace").strip()
+def _run_git(root: Path, *args: str, merge_stderr: bool = True):
+    """The local executor. The subprocess implementation lives once, in
+    the gateway (gitexec._run_git_local); this wrapper keeps this
+    module's signature — including merge_stderr=False, the branch-lookup
+    ambiguity guard — for every existing caller and test."""
+    return gitexec._run_git_local(str(root), *args, merge_stderr=merge_stderr)
 
 
 def _invalidate_branch_cache(root: Path | str) -> None:
@@ -199,7 +169,25 @@ async def git_workspace_info(root: Path | str) -> dict | None:
             info = {"offline": True}
             _info_cache[key] = (now, info)
             return info
-        return _info_from_status(out=res[1], branch=None, key=key, now=now)
+        rc, out = res
+        if rc != 0:
+            # Git ran and refused (not a repo, repository corrupt): report
+            # the refusal — a fabricated readout would be worse than
+            # absence, and unreachability would be the wrong state.
+            info = {"offline": True, "error": out or "git failed"}
+            _info_cache[key] = (now, info)
+            return info
+        info = _info_from_status(out)
+        if info["branch"] is None:
+            # Detached HEAD: porcelain cannot name it, but the local path
+            # reports the short SHA — match that parity (unborn HEAD fails
+            # rc!=0 and stays None, same as local).
+            res2 = await gitexec.run_git(key, "rev-parse", "--short=7", "HEAD")
+            if res2 is not None and res2[0] == 0:
+                info["branch"] = res2[1] or None
+                info["local_hash"] = info["branch"]
+        _info_cache[key] = (now, info)
+        return info
 
     branch = await current_git_branch(root)
     if branch is None:
@@ -282,39 +270,55 @@ async def git_workspace_info(root: Path | str) -> dict | None:
     return info
 
 
-def _info_from_status(
-    out: str, branch: str | None, key: str, now: float
-) -> dict:
+def _info_from_status(out: str) -> dict:
     """#333: the remote readout, from one `git status -sb --porcelain`
     burst (cross-dialect safe, one round-trip). Shape matches the local
-    info dict; counts git cannot express stay 0 rather than wrong."""
+    info dict; details git cannot express in porcelain stay 0/None rather
+    than wrong. Only porcelain lines are read — the channel's shell merges
+    stderr into the output, so any warning line must never poison the
+    counts (porcelain v1 entries are "XY PATH" / "? PATH" / "## ...")."""
     branch = None
     upstream: str | None = None
     ahead = behind = 0
     lines = out.splitlines()
-    if lines:
-        head = lines[0]
-        if head.startswith("##"):
-            head = head[2:].strip()
-            # Forms: branch...upstream [ahead N, behind M] | branch | HEAD
-            # (detached, short SHA) | branch (no upstream).
-            if "..." in head:
-                b, _, rest = head.partition("...")
-                branch = b.strip() or None
-                rest, _, _trail = rest.partition(" [")
-                upstream = rest.strip() or None
-                marker = out.split(" [", 1)[1].rsplit("]", 1)[0] if " [" in out else ""
-                for part in marker.split(","):
-                    part = part.strip()
-                    if part.startswith("ahead"):
-                        ahead = _int_or_zero(part[5:])
-                    elif part.startswith("behind"):
-                        behind = _int_or_zero(part[6:])
-            else:
-                branch = head.strip() or None
-    dirty = any(
-        line.strip() and not line.startswith("## ") for line in lines
+    body = [
+        line for line in lines
+        if line.startswith("?? ")
+        or (len(line) >= 3 and line[2] == " " and line[:2] != "##")
+    ]
+    head = next(
+        (line for line in lines if line.startswith("##")), None
     )
+    if head is not None:
+        # The head line's position is not assumed: the channel's shell
+        # merges stderr, so warnings can precede it in the stream.
+        head = head[2:].strip()
+        # Forms: "branch...upstream [ahead N, behind M]", "branch...upstream",
+        # "branch" (no upstream), "HEAD (no branch)" — detached, which the
+        # local path reports as the short SHA; porcelain cannot, so the
+        # branch reads None there (the chip falls back to the stored pin).
+        marker = ""
+        if "..." in head:
+            b, _, rest = head.partition("...")
+            branch = b.strip() or None
+            rest, _, trail = rest.partition(" [")
+            upstream = rest.strip() or None
+            if trail:
+                marker = trail.rsplit("]", 1)[0]
+        else:
+            # "No commits yet on <branch>" — unborn HEAD (git cannot use
+            # "..." form there); the branch is still nameable.
+            if head.startswith("No commits yet on "):
+                branch = head[len("No commits yet on "):] or None
+            else:
+                branch = None if head.startswith("HEAD") else (head or None)
+        for part in marker.split(","):
+            part = part.strip()
+            if part.startswith("ahead"):
+                ahead = _int_or_zero(part[5:])
+            elif part.startswith("behind"):
+                behind = _int_or_zero(part[6:])
+    dirty = bool(body)
     return {
         "branch": branch,
         "upstream": upstream,
@@ -325,12 +329,8 @@ def _info_from_status(
         "added": 0,
         "deleted": 0,
         "dirty": dirty,
-        "untracked": sum(
-            1 for line in lines if line.startswith("?? ")
-        ),
-        "changed": sum(
-            1 for line in lines if line.strip() and not line.startswith("##")
-        ),
+        "untracked": sum(1 for line in body if line.startswith("?? ")),
+        "changed": sum(1 for line in body if not line.startswith("?? ")),
     }
 
 
@@ -375,6 +375,6 @@ def invalidate_git_caches(root: Path | str) -> None:
     checkout, commit, push, pull ...)."""
     root = Path(root)
     _invalidate_branch_cache(root)
-    _cache_times.pop(str(root), None)  # #333: remote branch-TTL bookkeeping
+    _branch_times.pop(str(root), None)  # #333: remote branch-TTL bookkeeping
     _info_cache.pop(str(root), None)
     _branch_list_cache.pop(str(root), None)  # #302: staleness reads re-read

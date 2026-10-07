@@ -683,10 +683,9 @@ async def api_conversation_git_info(conversation_id: int):
 
     if parse_ns(ws) is not None:
         info = await git_workspace_info(ws)
-        if info is not None and info.get("offline"):
-            # An unreachable host is an explicit state — the strip renders
-            # "host offline" instead of the chip vanishing.
-            return {"info": {"offline": True}}
+        # #333: info is None only for a blank workspace (handled above);
+        # offline (with the channel's error detail, when git itself
+        # refused) passes through — the strip renders the explicit state.
         return {"info": info}
     try:
         root = workspace_root(ws)

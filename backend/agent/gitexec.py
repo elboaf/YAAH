@@ -20,8 +20,8 @@ must stay cross-dialect safe: on a Windows host without Git Bash the
 remote bash tool runs cmd.exe, so the corpus never relies on quoting,
 parens, shell chaining, or globbing. cwd is already the workspace on the
 host side, so no -C <path> and no path quoting are ever needed. One git
-operation = one channel round-trip (accepted cost, spec #332; the
-gitinfo TTL caches soften it exactly as they do for local polls).
+operation = one channel round-trip (accepted cost, spec #332); gitinfo
+caches the composed readout per its usual TTL, so pollers share one hop.
 """
 
 from __future__ import annotations
@@ -59,15 +59,23 @@ async def run_git(
     return await _run_git_remote(ws, *args)
 
 
-async def _run_git_local(root: str, *args: str) -> tuple[int, str]:
-    """The local executor: today's subprocess shape (gitinfo._run_git),
-    kept byte-compatible — --no-optional-locks, merged stderr, the same
-    timeout and return conventions."""
+async def _run_git_local(
+    root: str, *args: str, merge_stderr: bool = True
+) -> tuple[int, str]:
+    """The local executor: the subprocess shape gitinfo.py has always had
+    (--no-optional-locks so a read-only poll never contends with the
+    agent's own git writes, issue #279; merged stderr by default; the
+    127/124 rc conventions). merge_stderr=False discards stderr — the
+    branch-lookup ambiguity guard (a local branch named HEAD)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "git", "--no-optional-locks", "-C", root, *args,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=(
+                asyncio.subprocess.STDOUT
+                if merge_stderr
+                else asyncio.subprocess.DEVNULL
+            ),
             **_SUBPROCESS_FLAGS,
         )
     except OSError:
@@ -81,7 +89,7 @@ async def _run_git_local(root: str, *args: str) -> tuple[int, str]:
     return proc.returncode, out.decode("utf-8", errors="replace").strip()
 
 
-def _compose(*args: str) -> str | None:
+def _cross_dialect_command(*args: str) -> str | None:
     """The remote corpus: bare args joined with single spaces. None when an
     arg would force shell-dependent reading — the command must parse
     identically in POSIX sh and cmd.exe (no quoting, chaining, globs,
@@ -102,7 +110,7 @@ async def _run_git_remote(
     namespace and runs there), so the composition is cwd-free by design.
     None = git could not run (host unknown/offline, channel error,
     malformed reply, uncomposable command, timeout)."""
-    command = _compose(*args)
+    command = _cross_dialect_command(*args)
     if command is None:
         return None
     session = remote_for_workspace(workspace)

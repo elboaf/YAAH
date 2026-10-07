@@ -292,3 +292,137 @@ async def test_git_info_endpoint_remote_offline_is_explicit(
     )
     r = client.get(f"/api/conversations/{cid}/git-info").json()
     assert r["info"] == {"offline": True}
+
+
+# ---- review findings: wire-shape hazards, caching, parity ----
+
+
+@pytest.mark.asyncio
+async def test_remote_warning_lines_never_poison_readout(
+    tmp_path, _clear_sessions
+):
+    """The channel's shell merges stderr: a routine CRLF warning must not
+    mark a clean tree dirty (only porcelain-shaped lines are read)."""
+    from backend.agent import gitinfo
+    from backend.agent.remote import ns_path, register_remote
+
+    class _NoisyHost(_FakeHostSession):
+        async def exec_tool(self, name, args, workspace=""):
+            result = await super().exec_tool(name, args, workspace)
+            if result.get("exit_code") == 0 and args["command"].startswith("git status"):
+                result = dict(result)
+                result["output"] = (
+                    "warning: in the working copy of 'x.txt', LF will be "
+                    "replaced by CRLF the next time Git touches it\n"
+                ) + result["output"]
+            return result
+
+    repo = _repo_with_commit(tmp_path, "noisyrepo")
+    session = _NoisyHost(repo)
+    register_remote(session)
+    gitinfo._info_cache.pop(ns_path("h-fake", str(repo)), None)
+    info = await gitinfo.git_workspace_info(ns_path("h-fake", str(repo)))
+    assert info["dirty"] is False
+    assert info["branch"] == "master"
+    assert info["changed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_remote_git_failure_is_reported_not_fabricated(
+    tmp_path, _clear_sessions
+):
+    """A non-repo on the host must surface the refusal (offline + error),
+    never a fabricated dirty readout."""
+    from backend.agent import gitinfo
+    from backend.agent.remote import ns_path, register_remote
+
+    bare = tmp_path / "notarepo"
+    bare.mkdir()
+    session = _FakeHostSession(bare)
+    register_remote(session)
+    ws = ns_path("h-fake", str(bare))
+    gitinfo._info_cache.pop(ws, None)
+    info = await gitinfo.git_workspace_info(ws)
+    assert info.get("offline") is True
+    assert "not a git repository" in info.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_remote_online_result_is_ttl_cached(tmp_path, _clear_sessions):
+    """All pollers share one channel burst per TTL — the composed readout
+    is cached exactly as the local readout is."""
+    from backend.agent import gitinfo
+    from backend.agent.remote import ns_path, register_remote
+
+    repo = _repo_with_commit(tmp_path, "cachedrepo")
+    session = _FakeHostSession(repo)
+    calls = {"n": 0}
+
+    class _Counting(_FakeHostSession):
+        async def exec_tool(self, name, args, workspace=""):
+            calls["n"] += 1
+            return await super().exec_tool(name, args, workspace)
+
+    session = _Counting(repo)
+    register_remote(session)
+    ws = ns_path("h-fake", str(repo))
+    gitinfo._info_cache.pop(ws, None)
+    first = await gitinfo.git_workspace_info(ws)
+    second = await gitinfo.git_workspace_info(ws)
+    burst1 = calls["n"]
+    assert first == second
+    assert burst1 == calls["n"]
+
+
+@pytest.mark.asyncio
+async def test_remote_detached_head_reports_short_sha(
+    tmp_path, _clear_sessions
+):
+    from backend.agent import gitinfo
+    from backend.agent.remote import ns_path, register_remote
+
+    repo = _repo_with_commit(tmp_path, "detachedrepo")
+    sha = _git(repo, "rev-parse", "--short=7", "HEAD")
+    _git(repo, "checkout", "-q", "--detach")
+    session = _FakeHostSession(repo)
+    register_remote(session)
+    ws = ns_path("h-fake", str(repo))
+    gitinfo._info_cache.pop(ws, None)
+    info = await gitinfo.git_workspace_info(ws)
+    assert info["branch"] == sha
+    assert info["local_hash"] == sha
+
+
+def test_info_from_status_marker_survives_bracket_paths():
+    """A C-quoted path containing ' [' in the body must not corrupt the
+    ahead/behind marker parsed from the ## head line."""
+    from backend.agent.gitinfo import _info_from_status
+
+    out = (
+        "## master...origin/master [ahead 2, behind 1]\n"
+        '?? "weird [bracket] name.txt"\n'
+    )
+    info = _info_from_status(out)
+    assert info["ahead"] == 2
+    assert info["behind"] == 1
+    assert info["untracked"] == 1
+    assert info["dirty"] is True
+
+
+@pytest.mark.asyncio
+async def test_remote_branch_lookup_via_gateway(tmp_path, _clear_sessions):
+    """current_git_branch's remote branch (TTL-gated cache, single-line
+    guard) — covered, since the endpoint skips no longer reach it."""
+    from backend.agent import gitinfo
+    from backend.agent.remote import ns_path, register_remote
+
+    repo = _repo_with_commit(tmp_path, "branchrepo")
+    session = _FakeHostSession(repo)
+    register_remote(session)
+    ws = ns_path("h-fake", str(repo))
+    gitinfo._cache.pop(ws, None)
+    gitinfo._branch_times.pop(ws, None)
+    assert await gitinfo.current_git_branch(ws) == "master"
+    # TTL-gated: the second poll inside the window costs no round-trip.
+    assert await gitinfo.current_git_branch(ws) == "master"
+    assert session.commands.count("git rev-parse --abbrev-ref HEAD") == 1
