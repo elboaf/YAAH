@@ -1001,6 +1001,13 @@ def _canonicalize_chat_ids(text: str) -> str:
     # trailing run is scrubbed. The lookbehind pins this to
     # run/-prefixed names, leaving residue leaves like
     # `.../run-2` (no slash before run) untouched.
+    # ADR-0015: wip branches share the shape and the fixture-id
+    # discipline - wip/<slug>-<id> canonicalizes the same way.
+    text = re.sub(
+        r"(?<=wip/)([a-z0-9][a-z0-9-]*)-(\d+)\b",
+        lambda m: f"{m.group(1)}-{CHAT_ID_TOKEN}",
+        text,
+    )
     return re.sub(
         r"(?<=run/)([a-z0-9][a-z0-9-]*)-(\d+)\b",
         lambda m: f"{m.group(1)}-{CHAT_ID_TOKEN}",

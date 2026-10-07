@@ -919,7 +919,10 @@ def _residue_protocol(cid: str) -> str:
     a left-behind run worktree is never silently deleted and never
     silently blocks a chat - the user types "land it" or "scrap it",
     or (where ask_user exists) answers the #349 end-of-work landing
-    ask, which offers the same choices proactively."""
+    ask, which offers the same choices proactively. ADR-0015 adds the
+    wip residue class: a `wip/` branch swept from the primary during a
+    landing follows run-branch visibility - surfaced, never silently
+    removed (the human restores or deletes it)."""
     return (
         "If a run worktree already exists at that path, it is residue from "
         "an earlier run: when it is clean and fully merged into the target, "
@@ -930,7 +933,10 @@ def _residue_protocol(cid: str) -> str:
         "residue \u2014 it is never silently deleted, and never silently "
         "blocks a chat. The harness "
         "retires a landed-clean chat worktree at run end (#329); if you "
-        "still see one standing, surface it rather than removing it."
+        "still see one standing, surface it rather than removing it. A "
+        "`wip/` branch swept during a landing (ADR-0015) is residue too: "
+        "report it in the landing ask/report and leave restoring or "
+        "deleting it to the human."
     )
 
 
@@ -947,6 +953,14 @@ _LOCAL_ONLY_RULES = (
     "The run branch stays LOCAL: never `git push` it and never open a PR "
     "from it - work reaches origin only inside a landed branch, which the "
     "human pushes. "
+)
+
+# #351/ADR-0015: the single statement of the resolution policy, shared by
+# every landing path so the wording cannot drift between variants.
+_RUN_WINS_RULE = (
+    "on conflict the run branch's side wins: every conflicted path "
+    "resolves to the run branch's version, and the landing report lists "
+    "each resolved file"
 )
 
 
@@ -971,6 +985,18 @@ def _run_branch_name(title, chat_id=None) -> str:
     if not slug or slug == "new-task":
         return f"run/chat-{cid}"
     return f"run/{slug}-{cid}"
+
+
+def _wip_branch_name(title, chat_id=None) -> str:
+    """A wip branch holding the primary's uncommitted work during an
+    ADR-0015 landing: ``wip/<title-slug>-<chat-id>`` - the same slug
+    discipline and readable-branch-list rationale as the run branch
+    (#312), with the ``wip/`` prefix marking whose work it carries:
+    the human's, swept only to preserve it, never to claim it.
+    Local-only like run branches (#320): never pushed, never a PR
+    source; the landing report names the branch and how to restore.
+    """
+    return _run_branch_name(title, chat_id).replace("run/", "wip/", 1)
 
 
 _LANDING_ASK_MARKER = "# End-of-work landing ask"
@@ -1007,7 +1033,10 @@ def _landing_ask(branch, option1) -> str:
         "ONCE, when the request is complete - never mid-task, never on a "
         "run that changed nothing, and never re-asking a landing outcome "
         "the user pre-stated (execute what they already said instead, or "
-        "respect a stated leave-unlanded, and just report)."
+        "respect a stated leave-unlanded, and just report). When the "
+        "landing will sweep WIP or resolve conflicts (ADR-0015), say so "
+        "in the option's description: name the wip branch, the files it "
+        "saves, and how to restore them."
     )
 
 
@@ -1069,6 +1098,7 @@ def _selected_branch_note(
     b = str(branch).strip()
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     rb = _run_branch_name(title, chat_id)
+    wipb = _wip_branch_name(title, chat_id)
     residue = _residue_protocol(cid)
     # #334: remote geometry - the chat tree is the client-owned
     # host-placed namespace, and "primary" means the host's checkout.
@@ -1104,24 +1134,49 @@ def _selected_branch_note(
             "`.git/info/exclude` (#321), so the namespace never shows as "
             "untracked noise. "
             "Commit there; the run branch carries the work. When the "
-            f"user chooses to land into `{b}` (ADR-0014 safe-sync SOP, "
-            "the target is checked out in the primary tree):\n"
-            "1. Only if `git -C <primary worktree> status --porcelain` is "
-            f"EMPTY: `git update-ref refs/heads/{b} <run tip>` "
+            f"user chooses to land into `{b}` (ADR-0014 safe-sync SOP with "
+            "ADR-0015's resolution contract, the target is checked out in "
+            "the primary tree):\n"
+            "1. FREEZE check first: when the primary is mid merge/rebase/"
+            "cherry-pick (MERGE_HEAD, CHERRY_PICK_HEAD, or "
+            "rebase-merge/rebase-apply present) - a half-finished human "
+            "operation - do not sweep it, do not unwind it; leave "
+            "everything untouched and report the landing as manual-only.\n"
+            "2. WIP sweep, checkout-free (ADR-0015) - never `git switch` "
+            f"in the primary: when `git -C <primary> status --porcelain` "
+            "is not empty, preserve the human's work with plumbing only: "
+            f"`git -C <primary> add -A`, `git -C <primary> write-tree`, "
+            f"`git commit-tree <tree> -p <{b} tip> -m 'wip: primary state "
+            "before landing <run branch>'`, then "
+            f"`git update-ref refs/heads/{wipb} <wip commit>`. This "
+            "creates the local wip branch "
+            f"`{wipb}` without touching HEAD or any existing ref - a "
+            "commit, not a stash: inspectable, no surprise "
+            "pop-conflicts. A wip branch is local-only: never `git "
+            "push` it, never open a PR from it (#320). The landing "
+            "report names the wip branch and the restore command "
+            f"(`git -C <primary> cherry-pick {wipb}`), and lists the "
+            "files it saves.\n"
+            "3. Land the run branch first, in plumbing, while `{b}` "
+            "still points at its old tip: if the run branch is a "
+            f"fast-forward of `{b}`, the landing tip is the run tip; "
+            "otherwise `git merge-tree "
+            f"--write-tree --merge-base=<merge base of {rb} and {b}> "
+            f"{rb} {b}` - on conflict, do not abort and do not fake it: "
+            f"{_RUN_WINS_RULE} (replay with `git merge-tree --write-tree "
+            "--merge-base=<merge base> -X theirs "
+            f"{rb} {b}`), then `git commit-tree <tree> -p {rb} -p {b}` "
+            "(merge commits by agents are allowed per ADR-0014). The "
+            "result is the landing tip.\n"
+            "4. Only then the safe-sync ref move and tree follow: "
+            f"`git update-ref refs/heads/{b} <landing tip>` "
             "(`git branch -f` REFUSES a checked-out branch - never use it "
             "here; plain merges are impossible without checkout), then "
             f"`git -C <primary> reset --hard {b}` so the human's tree "
-            "follows the ref. Any non-empty status: do not move the ref - "
-            "leave landing to the human and report.\n"
-            f"2. If `{b}` diverged from the run branch, land via plumbing "
-            "merge: `git merge-tree --write-tree <run base> <run branch>` "
-            " - on conflict, do not fake it: report and offer to rebase "
-            f"the run branch onto `{b}`; on success commit the returned "
-            "tree with `git commit-tree` (merge commits by agents are "
-            "allowed per ADR-0014) and move the ref to that commit before "
-            "the clean-primary checks.\n"
-            "3. Then remove the run worktree "
-            f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d {rb}`).\n"
+            "follows the ref - the sweep already made that safe, and "
+            f"`{b}` is the only ref the move touches.\n"
+            "5. Then remove the run worktree "
+            f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d {rb}).\n"
             + _AMENDMENT_RULES
             + _LOCAL_ONLY_RULES
             + residue
@@ -1129,8 +1184,12 @@ def _selected_branch_note(
                 _landing_ask(
                     b,
                     f"run the ADR-0014 safe-sync SOP above into `{b}` "
-                    "(clean primary only), then clean up the run worktree "
-                    "and branch",
+                    f"with ADR-0015: sweep any dirty-primary WIP to this "
+                    f"chat's local wip branch ({wipb}), resolve merge "
+                    "conflicts with the run branch's side winning, then "
+                    "clean up the run worktree and branch (mid merge/"
+                    "rebase/cherry-pick primaries still freeze as "
+                    "manual-only)",
                 )
                 if with_ask
                 else ""
@@ -1158,15 +1217,16 @@ def _selected_branch_note(
         "untracked noise. "
         "Commit there; the run branch carries the work. When the user "
         f"chooses to land into `{b}`: land inside THIS worktree "
-        f"(`git merge {rb}` \u2014 on conflict, resolve here or "
-        "`git merge --abort` and report), then remove the run worktree "
+        f"(`git merge -X theirs {rb}` \u2014 {_RUN_WINS_RULE}; never abort "
+        "a landing in progress), then remove the run worktree "
         f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d "
         f"{rb}`). " + _LOCAL_ONLY_RULES + residue
         + (
             _landing_ask(
                 b,
-                f"land inside this chat worktree (`git merge {rb}`), then "
-                "remove the run worktree and branch",
+                f"land inside this chat worktree (`git merge -X theirs "
+                f"{rb}`, conflicts resolve with the run branch's side "
+                "winning), then remove the run worktree and branch",
             )
             if with_ask
             else ""
@@ -1187,6 +1247,7 @@ def _selected_branch_note_degraded(
     cid = str(chat_id).strip() if chat_id is not None and str(chat_id).strip() else "<id>"
     b = str(branch).strip()
     rb = _run_branch_name(title, chat_id)
+    wipb = _wip_branch_name(title, chat_id)
     chat_tree = f".scratch/remote/chat-{cid}" if remote else f".scratch/chat-{cid}"
     primary = "the host's primary tree" if remote else "the primary tree"
     return (
@@ -1207,17 +1268,36 @@ def _selected_branch_note_degraded(
         "The harness keeps `.scratch/` git-invisible via the repo's "
         "`.git/info/exclude` (#321), so the namespace never shows as "
         "untracked noise. "
-        "Commit there. Landing is universal (no workspace-specific rule "
+        "Commit there. Landing is universal (ADR-0014 safe-sync with "
+        "ADR-0015's resolution contract; no workspace-specific rule "
         "applies): first run `git worktree list` — when the selected "
         f"branch `{b}` appears in NO other worktree, land by merging this "
         f"run branch into `{b}` "
         "(an unchecked-out branch merge moves only the ref; no human's "
-        "working tree is touched), then remove the run worktree "
+        f"working tree is touched; on conflict {_RUN_WINS_RULE} - replay "
+        f"with `git merge-tree --write-tree --merge-base=<merge base> "
+        f"-X theirs {rb} {b}`), then remove the run worktree "
         f"(`git worktree remove {chat_tree}/run && git branch -d {rb}`). "
         f"When `{b}` IS checked out in another worktree — the common "
         "degraded case, since that is usually why materialization failed "
-        f"— do NOT land: leave `{rb}` carrying the work, remove the run "
-        "worktree, and report so the human lands it. "
+        "— land through it under ADR-0015. FREEZE first if that worktree "
+        "is mid merge/rebase/cherry-pick (MERGE_HEAD, CHERRY_PICK_HEAD, "
+        "or rebase-merge/rebase-apply present: a half-finished human "
+        "operation - report manual-only, touch nothing). Otherwise sweep "
+        "its uncommitted WIP checkout-free with plumbing - never `git "
+        f"switch` in it: `git -C <that worktree> add -A`, `write-tree`, "
+        f"`commit-tree <tree> -p <{b} tip> -m 'wip: primary state before "
+        f"landing'`, `update-ref refs/heads/{wipb} <wip commit>` - "
+        f"local-only, never pushed; the landing report names `{wipb}`, "
+        f"the restore command (`git -C <that worktree> cherry-pick "
+        f"{wipb}`), and the files it saves. Then land the run branch in "
+        f"plumbing while `{b}` still points at its old tip "
+        "(fast-forward, else `git merge-tree --write-tree "
+        f"--merge-base=<merge base> {rb} {b}`, replaying with `-X theirs` "
+        f"on conflict - {_RUN_WINS_RULE} - and `git commit-tree <tree> "
+        f"-p {rb} -p {b}`), and only then move the ref "
+        f"(`git update-ref refs/heads/{b} <landing tip>`) and make the "
+        f"checkout follow (`git -C <that worktree> reset --hard {b}`). "
         "Surfaces at run start: when a run worktree already exists at "
         "that path, follow the residue protocol. "
         + _LOCAL_ONLY_RULES
@@ -1225,9 +1305,10 @@ def _selected_branch_note_degraded(
         + (
             _landing_ask(
                 b,
-                "perform the landing SOP above, then clean up the run "
-                "worktree and branch (checked-out-elsewhere targets follow "
-                "the safe-sync rules: clean primary only)",
+                "perform the landing SOP above (ADR-0015: sweep "
+                f"dirty-WIP to a local wip branch {wipb}, resolve "
+                "conflicts with the run branch's side winning), then "
+                "clean up the run worktree and branch",
             )
             if with_ask
             else ""

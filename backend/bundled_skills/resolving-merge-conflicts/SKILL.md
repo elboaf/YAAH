@@ -3,13 +3,15 @@ name: resolving-merge-conflicts
 description: "Use when you need to resolve an in-progress git merge/rebase conflict."
 ---
 
-> **Compatibility note (ADR-0010, #316).** In YAAH, a landing merge
-> happens inside a chat's own worktree, where `merge --abort` is free:
-> if a landing conflict is unresolvable, abort it and stop-and-report
-> rather than improvising a resolution. This skill's "always resolve;
-> never `--abort`" discipline applies when finishing a merge or rebase
-> others depend on — an integration branch, a shared branch, the
-> primary worktree. Choose by audience, not reflex.
+> **Compatibility note (ADR-0010, #316; amended by ADR-0015).** In
+> YAAH, a landing merge happens inside a chat's own worktree, and
+> since ADR-0015 it carries no abort escape: a landing conflict
+> resolves with the run branch's side winning, every resolved file
+> listed in the landing report. This skill's "always resolve; never
+> `--abort`" discipline is therefore the landing discipline too —
+> keep choosing resolution over abort for any merge or rebase others
+> depend on: an integration branch, a shared branch, the primary
+> worktree.
 
 
 1. **See the current state** of the merge/rebase. Check git history, and the conflicting files.
