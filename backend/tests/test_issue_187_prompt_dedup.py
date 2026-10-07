@@ -93,20 +93,15 @@ def test_gh_cli_stated_only_in_guidelines():
 
 # ------------------------------------------------- SYN-15: windows-mcp playbook
 
-def test_host_input_note_is_one_clause_without_playbook():
-    """_HOST_INPUT_NOTE repeats on six input tools; it must be a single
-    containment clause that points at the sandbox section, not a copy of
-    the windows-mcp playbook."""
-    from backend.agent import computer as computer_mod
-    note = computer_mod._HOST_INPUT_NOTE
-    assert "REAL mouse/keyboard" in note
-    assert "Windows Sandbox" in note
-    # one containment clause + pointer; not a playbook copy
-    assert "windows-mcp MCP server" in note
-    assert "mcp.json" not in note
-    assert "Bearer" not in note
-    assert "Snapshot" not in note
-    assert "auto-start" not in note
+def test_host_input_note_gone_with_computer_use():
+    """#339: the host input tools (and their shared _HOST_INPUT_NOTE in
+    backend.agent.computer) are removed; the sandbox section is the only
+    place GUI containment is taught."""
+    import importlib.util
+
+    assert importlib.util.find_spec("backend.agent.computer") is None
+    text = _render(_local_combo())
+    assert "REAL mouse/keyboard" not in text
 
 
 def test_mcp_playbook_lives_only_in_sandbox_section():

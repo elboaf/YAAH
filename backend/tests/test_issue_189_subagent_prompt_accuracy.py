@@ -2,8 +2,9 @@
 
 SYN-23: the parent-facing index description for general-purpose claimed
 "all tools except ask_user and spawn_agent" while the real exclusion set
-(_ALWAYS_EXCLUDED | _COMPUTER_TOOLS) is larger — the clause is now
-DERIVED from those sets so it cannot drift again.
+(_ALWAYS_EXCLUDED) was larger at the time — the clause is now DERIVED
+from that set so it cannot drift again. (#339 later removed the host
+computer-use tools outright, shrinking the set to its current shape.)
 
 SYN-24: the final-message contract ("your final message is the only
 thing the parent receives; make it self-contained: what you did, what
@@ -26,7 +27,7 @@ def _prompt(name: str) -> str:
 def test_general_purpose_description_names_every_excluded_tool():
     """The index description is derivable from the real exclusion sets."""
     desc = subagents.get_agent_def("general-purpose").description
-    excluded = subagents._ALWAYS_EXCLUDED | subagents._COMPUTER_TOOLS
+    excluded = subagents._ALWAYS_EXCLUDED
     for tool in excluded:
         assert tool in desc, (
             f"general-purpose description omits real exclusion {tool!r}"

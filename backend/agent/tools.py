@@ -1482,16 +1482,6 @@ EXECUTORS = {
     "memory_delete": _memory_executor("delete"),
 }
 
-# Computer use (Q2: Windows-only hard line, same pattern as powershell but
-# unconditional — non-Windows never imports this module, so the tools don't
-# exist for the model there). The executors import pynput/mss lazily.
-if os.name == "nt":
-    from backend.agent.computer import COMPUTER_EXECUTORS, COMPUTER_HELP_DOCS, COMPUTER_TOOLS_SCHEMA
-
-    TOOLS_SCHEMA += COMPUTER_TOOLS_SCHEMA
-    EXECUTORS.update(COMPUTER_EXECUTORS)
-    HELP_DOCS.update(COMPUTER_HELP_DOCS)
-
 # Windows Sandbox tools (disposable test VMs + persistent dev toolkit,
 # see backend/agent/sandbox.py): Windows-only for the same reason, and
 # additionally stripped for remote sessions in get_schemas() — the sandbox
@@ -1517,8 +1507,6 @@ SCHEMAS = {s["function"]["name"]: s for s in TOOLS_SCHEMA}
 _READ_TOOLS = {
     "read_file", "search_files",
     "web_search", "web_fetch", "view_image", "load_skill",
-    # observation-only computer-use tools (no input injection)
-    "screenshot", "list_windows", "read_ui_tree", "wait",
     # pure observation: availability, enabled, session state
     "sandbox_status",
     # documentation lookup — reads only the schema set
@@ -1548,9 +1536,6 @@ _MUTATING_TOOLS = {
 }
 _SHELL_TOOLS = {
     "bash", "powershell",
-    # computer-use control tools drive the real mouse/keyboard
-    "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
-    "type_text", "press_key", "focus_window",
     # arbitrary command execution inside the sandbox VM
     "sandbox_run", "sandbox_stop",
 }
@@ -1619,17 +1604,6 @@ async def execute_tool(
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
-    if name == "screenshot" and not screenshot_allowed():
-        # Setting changed after the schemas were sent (or a stale client):
-        # degrade gracefully instead of capturing (issue #140).
-        return {
-            "info": (
-                "The screenshot tool is currently disallowed in Settings "
-                "(General -> 'Allow screenshot tool'). Re-enable it there if "
-                "screen observation is needed; read_ui_tree and list_windows "
-                "remain available."
-            )
-        }
     if name in _MEMORY_TOOL_NAMES and not memory_enabled():
         # Persistent memory is opt-in (#169): degrade gracefully if the
         # toggle flipped after the schemas were sent.
@@ -1662,20 +1636,6 @@ async def execute_tool(
     except Exception as e:  # noqa: BLE001
         return _with_help_nudge(name, {"error": f"{type(e).__name__}: {e}"})
     return result
-
-
-def screenshot_allowed() -> bool:
-    """Issue #140: is the `screenshot` tool allowed? Global setting
-    (computer_use.allow_screenshot), read live so a toggle applies to new
-    turns without a restart. Any read failure keeps today's behavior."""
-    try:
-        from backend.agent.config import load_config
-
-        return bool((load_config().get("computer_use") or {}).get(
-            "allow_screenshot", True
-        ))
-    except Exception:  # noqa: BLE001 — fail open, never break a turn
-        return True
 
 
 def memory_enabled() -> bool:
@@ -1727,20 +1687,6 @@ def get_schemas(workspace: str | None = None) -> list:
     )
     windows = host.windows if host is not None else (os.name == "nt" and not remote_target)
     schemas = TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA
-    if remote_target and host is None:
-        # Never expose local-only host-computer tools when an explicitly
-        # selected remote host is unavailable; execution will fail closed.
-        _local_computer_names = {
-            "screenshot", "list_windows", "read_ui_tree", "focus_window",
-            "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
-            "type_text", "press_key", "wait", "sandbox_test", "sandbox_run",
-            "sandbox_status", "sandbox_stop",
-        }
-        schemas = [
-            s for s in schemas
-            if s["function"]["name"] not in _SANDBOX_NAMES
-            and s["function"]["name"] not in _local_computer_names
-        ]
     # install_git installs on THIS machine with the client's bundled
     # installer, so it's only offered in local sessions when git is
     # actually missing and the installer shipped in this build.
@@ -1756,25 +1702,11 @@ def get_schemas(workspace: str | None = None) -> list:
     if host is not None or remote_target:
         schemas = [s for s in schemas
                    if s["function"]["name"] not in _SANDBOX_NAMES]
-        if remote_target:
-            schemas = [
-                s for s in schemas
-                if s["function"]["name"] not in {
-                    "screenshot", "list_windows", "read_ui_tree", "focus_window",
-                    "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
-                    "type_text", "press_key", "wait",
-                }
-            ]
     # MCP server tools (mcp_<server>_<tool>) merge in dynamically — they're
     # client-local like web/ask_user, regardless of where file tools run.
     from backend.agent import mcp_client
 
     schemas = schemas + mcp_client.manager.schemas()
-    # Issue #140: the Settings toggle filters `screenshot` by name, the same
-    # pattern as the _local_computer_names strip above. Other computer-use
-    # tools stay (read_ui_tree / list_windows are the cheap alternatives).
-    if not screenshot_allowed():
-        schemas = [s for s in schemas if s["function"]["name"] != "screenshot"]
     # Issue #169: persistent memory is opt-in; until enabled the memory
     # tools never appear in the schema.
     if not memory_enabled():

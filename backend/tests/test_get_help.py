@@ -20,26 +20,12 @@ def test_view_image_doc_matches_same_turn_attach():
     assert "next model call" in doc
 
 
-def test_get_help_known_tool_returns_schema_and_notes():
-    res = asyncio.run(
-        tools.execute_tool("get_help", {"tool_name": "screenshot"}, workspace="")
-    )
-    if tools.os.name != "nt":
-        # Computer-use tools don't exist off-Windows; get_help must say so.
-        assert "Unknown tool" in res["error"]
-        return
-    assert res["name"] == "screenshot"
-    assert "properties" in res["schema"]
-    # The trimmed screenshot caveats live in the help notes.
-    assert "ruler" in res["notes"]
-
-
 def test_get_help_unknown_tool_errors_with_hint():
     res = asyncio.run(
-        tools.execute_tool("get_help", {"tool_name": "mouse_clickx"}, workspace="")
+        tools.execute_tool("get_help", {"tool_name": "definitely_not_a_tool"}, workspace="")
     )
     assert "Unknown tool" in res["error"]
-    assert "mouse_click" in res["error"]
+    assert "definitely_not_a_tool" in res["error"]
 
 
 def test_get_help_is_read_classified():

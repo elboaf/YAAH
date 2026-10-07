@@ -59,14 +59,6 @@ async def lifespan(app: FastAPI):
     from backend.agent import mcp_client
 
     mcp_client.manager.start_all()
-    # Computer use (Windows only): real-input activity detector + panic
-    # hotkey listener. Never fatal — a failure just means no pause/no hotkey.
-    # Skipped entirely in headless mode (the yaah-server binary): there is
-    # no interactive session to hook on a headless box.
-    if os.name == "nt" and os.environ.get("YAAH_HEADLESS") != "1":
-        from backend.agent import computer
-
-        computer.start_background()
     # Scheduled agents (issue #41): overdue next_fire slots roll forward
     # (missed fires skip silently — no catch-up), then the due-run tick
     # starts if any agent exists. Fires only while a backend process is
@@ -1138,9 +1130,6 @@ class ConfigUpdate(BaseModel):
     # Windows Sandbox toggle (issue #112): only "enabled" is user-editable
     # from Settings; the rest of the block merges through untouched.
     sandbox: dict | None = None
-    # Computer-use settings block (issue #140): Settings toggles only
-    # `allow_screenshot`; the rest of the block merges through untouched.
-    computer_use: dict | None = None
     # Persistent-memory block (issue #169): Settings toggles only
     # `enabled`; the rest of the block merges through untouched.
     memory: dict | None = None
@@ -2308,8 +2297,6 @@ async def api_get_config():
         "remote": cfg.get("remote") or {},
         # Windows Sandbox block (Settings toggles sandbox.enabled, #112).
         "sandbox": cfg.get("sandbox") or {},
-        # Computer-use block (Settings toggles allow_screenshot, #140).
-        "computer_use": cfg.get("computer_use") or {},
         # Persistent-memory block (Settings toggles memory.enabled, #169).
         "memory": cfg.get("memory") or {},
         # Per-model context-window overrides (Settings edits these).

@@ -1099,9 +1099,8 @@ function ToolCallRow({ tc }: { tc: ToolCall }) {
       return <DiffBlock oldText={args.old_text} newText={args.new_text} />
     }
     // #50: ANY tool result that carries a stored image renders it — not just
-    // view_image. The backend stores every computer-use capture (screenshot,
-    // the observe-crops from mouse_move/click/drag/scroll) and webtool/MCP
-    // downloads the same way ({image: rel} / {images: [rels]}), so the audit
+    // view_image. The backend stores webtool/MCP downloads the same way
+    // ({image: rel} / {images: [rels]}), so the audit
     // trail can show what the agent actually saw. Falls through to the JSON
     // dump when the field is absent so error results keep their text.
     const resultObj = tc.result && typeof tc.result === 'object' ? (tc.result as Record<string, unknown>) : null
@@ -6363,47 +6362,6 @@ export function SandboxSettingsCard() {
   )
 }
 
-/** Settings card: the GLOBAL screenshot-tool toggle (issue #140). Each
- *  capture sends a full-resolution image to the model, so sessions that
- *  don't need screen observation can disallow it. Applies to new turns. */
-function ScreenshotToolToggle() {
-  const [allowed, setAllowed] = useState(true)
-
-  useEffect(() => {
-    getConfig()
-      .then((c) => setAllowed(c.computer_use?.allow_screenshot !== false))
-      .catch(() => {})
-  }, [])
-
-  const toggle = async (next: boolean) => {
-    setAllowed(next)
-    try {
-      await updateConfig({ computer_use: { allow_screenshot: next } })
-    } catch {
-      setAllowed(!next)
-    }
-  }
-
-  return (
-    <div className="space-y-1.5">
-      <label className="flex items-center gap-2 text-xs text-zinc-300">
-        <input
-          type="checkbox"
-          className="accent-blue-600"
-          checked={allowed}
-          onChange={(e) => void toggle(e.target.checked)}
-        />
-        Allow screenshot tool
-      </label>
-      <p className="text-[10px] leading-relaxed text-zinc-600">
-        Screen captures are sent to the model as full-resolution images. Disabling removes the
-        tool from new turns; read_ui_tree and list_windows stay available. Applies to new turns
-        and sessions.
-      </p>
-    </div>
-  )
-}
-
 /** Settings card: the GLOBAL persistent-memory toggle (issue #169). Memory
  *  is opt-in (default OFF): enabling exposes memory_save/read/delete and the
  *  prompt block. Disabling preserves the on-disk store under ~/.yaah/memory/. */
@@ -7931,10 +7889,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               <>
                 <SettingsCard title="Windows Sandbox" className="col-span-2">
                   <SandboxSettingsCard />
-                </SettingsCard>
-
-                <SettingsCard title="Screenshot tool" className="col-span-2">
-                  <ScreenshotToolToggle />
                 </SettingsCard>
 
                 <SettingsCard title="Memory" className="col-span-2">
