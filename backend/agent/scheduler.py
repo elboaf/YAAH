@@ -28,6 +28,7 @@ import re
 import subprocess
 from datetime import datetime, timedelta
 
+from backend.agent import gitexec
 from backend.agent.config import load_config, qualify_model_scope, save_config
 from backend.db.database import (
     get_agent,
@@ -261,10 +262,16 @@ async def resolve_landing(agent_id: str) -> tuple[str, str]:
     """#278: the (mode, branch) landing setting of `agent_id`, normalized.
 
     Unknown/blank modes read as 'off'. landing_branch is honored only in
-    fixed mode, and only when it exists locally at fire time — a dead
-    target would hand the run a stale pin (#302), so the fire keeps the
-    chat's own branch instead and the miss is logged. Remote workspaces
-    are out of scope v1 (no branch list to check) and read as 'off'."""
+    fixed mode, and only when it exists in the workspace's repo at fire
+    time — a dead target would hand the run a stale pin (#302), so the
+    fire keeps the chat's own branch instead and the miss is logged.
+
+    #337: remote workspaces resolve through the #333 gateway exactly as
+    local — the branch list comes from the host repo, and the write-through
+    to the chat pin proceeds identically. The one degradation is host
+    unreachable: the fire cannot ask the host anything, so it keeps the
+    chat pin and logs (a distinguishable arm from a live host's
+    missing-branch miss)."""
     agent = await get_agent(agent_id)
     if not agent:
         return "off", ""
@@ -279,15 +286,42 @@ async def resolve_landing(agent_id: str) -> tuple[str, str]:
     from backend.agent.gitinfo import is_git_repo, list_local_branches
     from backend.agent.tools import workspace_root
 
-    try:
-        root = workspace_root(agent.get("workspace") or "")
-    except ValueError:
-        root = None
-    if root is None or not is_git_repo(root) or branch not in await list_local_branches(root):
-        log.warning(
-            "agent %s: fixed landing branch %r not found locally; fire keeps the chat pin",
-            agent_id, branch,
-        )
+    workspace = agent.get("workspace") or ""
+    remote = gitexec.parse_ns(workspace) is not None
+    if remote:
+        # The NAMESPACED string is the routing unit — resolving it to a
+        # local-looking path would silently misroute the gateway.
+        target = workspace
+    else:
+        target = workspace_root(workspace)
+        if not is_git_repo(target):
+            log.warning(
+                "agent %s: fixed landing branch %r not found locally; fire keeps the chat pin",
+                agent_id, branch,
+            )
+            return "off", ""
+    branches = await list_local_branches(target)
+    if branch not in branches:
+        if remote and not branches:
+            # An absent answer is not an empty repo: ask once whether the
+            # host could not be reached or the workspace is not a repo,
+            # so the log names the real reason.
+            probe = await gitexec.run_git(target, "rev-parse", "--git-dir")
+            why = (
+                "workspace is not a git repository"
+                if probe is not None and probe[0] != 0
+                else "host unreachable"
+            )
+            log.warning(
+                "agent %s: %s, cannot check fixed landing branch %r; "
+                "fire keeps the chat pin",
+                agent_id, why, branch,
+            )
+        else:
+            log.warning(
+                "agent %s: fixed landing branch %r not found; fire keeps the chat pin",
+                agent_id, branch,
+            )
         return "off", ""
     return "fixed", branch
 
@@ -301,50 +335,122 @@ async def _create_per_run_branch(
     with -2, -3… — a branch is never overwritten, and two fires in the
     same minute each get their own. Start point is the chat's selected
     branch when it exists (ADR-0010: new branches derive from the chat's
-    selection, never the primary's HEAD), else HEAD."""
-    from backend.agent.gitinfo import is_git_repo, list_local_branches
-    from backend.agent.tools import workspace_root
+    selection, never the primary's HEAD), else HEAD.
 
+    #337: remote workspaces create the branch ON THE HOST through the
+    #333 gateway — same naming, same bump rule, same refusal to
+    overwrite. Host unreachable (or any unrunnable command) returns
+    None: creation failure keeps the chat's current pin."""
     slug = re.sub(r"[^a-z0-9]+", "-", str(agent_id).lower()).strip("-") or "agent"
     base = f"{slug}-{datetime.now().strftime('%Y%m%d-%H%M')}"
-    try:
-        root = workspace_root(workspace)
-    except ValueError:
-        return None
-    if not is_git_repo(root):
+
+    if gitexec.parse_ns(workspace) is None:
+        # ------------------------------------------------- local arm: as before
+        from backend.agent.gitinfo import is_git_repo
+        from backend.agent.tools import workspace_root
+
+        try:
+            root = workspace_root(workspace)
+        except ValueError:
+            return None
+        if not is_git_repo(root):
+            return None
+
+        def _fresh_branches():
+            # Raw git, not list_local_branches: the helper is TTL-cached,
+            # and a bump must see the branch the previous attempt created.
+            proc = subprocess.run(
+                ["git", "branch", "--format=%(refname:short)"],
+                cwd=str(root), capture_output=True, text=True, timeout=30,
+            )
+            return set(proc.stdout.split()) if proc.returncode == 0 else set()
+
+        existing = _fresh_branches()
+        start = start_point if start_point in existing else None
+        name, n = base, 2
+        for _ in range(8):
+            args = ["git", "branch", name] + ([start] if start else [])
+            proc = await asyncio.to_thread(
+                subprocess.run, args, cwd=str(root), capture_output=True, text=True,
+                timeout=30,
+            )
+            if proc.returncode == 0:
+                return name
+            existing = _fresh_branches()
+            if name in existing:
+                # Collision (another fire won the race): bump and retry — a
+                # branch is never overwritten.
+                name = f"{base}-{n}"
+                n += 1
+                continue
+            log.warning(
+                "agent %s: per-run branch %s creation failed: %s",
+                agent_id, name, (proc.stderr or "").strip(),
+            )
+            return None
+        log.warning("agent %s: per-run branch naming exhausted after 8 bumps", agent_id)
         return None
 
-    def _fresh_branches():
-        # Raw git, not list_local_branches: the helper is TTL-cached, and a
-        # bump must see the branch the previous attempt just created.
-        proc = subprocess.run(
-            ["git", "branch", "--format=%(refname:short)"],
-            cwd=str(root), capture_output=True, text=True, timeout=30,
+    # ------------------------------------------------------- remote arm (#337)
+    # The NAMESPACED workspace is the routing unit — workspace_root would
+    # resolve it into a local-looking path the gateway never sees.
+    # One cheap hop decides reachability AND repo-ness before any branch
+    # command ships; a not-a-repo host dir never sees one.
+    probe = await gitexec.run_git(workspace, "rev-parse", "--git-dir")
+    if probe is None or probe[0] != 0:
+        why = (
+            "workspace is not a git repository"
+            if probe is not None
+            else "host unreachable"
         )
-        return set(proc.stdout.split()) if proc.returncode == 0 else set()
+        log.warning(
+            "agent %s: per-run branch creation failed: %s", agent_id, why,
+        )
+        return None
 
-    existing = _fresh_branches()
-    start = start_point if start_point in existing else None
+    # Raw gateway listing, not a cached helper: a bump must see the branch
+    # the previous attempt just created. Plain `git branch`, not
+    # --format (parens/percent are forbidden by the cross-dialect
+    # corpus) — parsed exactly as #335's remote branch list is.
+    # None = the gateway could not run git (host offline/channel).
+    async def _host_branches() -> set[str] | None:
+        from backend.agent.gitinfo import _plain_branch_names
+
+        res = await gitexec.run_git(workspace, "branch")
+        if res is None:
+            return None
+        return set(_plain_branch_names(res[1] or "")) if res[0] == 0 else set()
+
+    async def _host_create(name: str, start: str | None) -> tuple[int, str] | None:
+        return await gitexec.run_git(
+            workspace, "branch", name, *([start] if start else [])
+        )
+
+    existing = await _host_branches()
+    start = start_point if start_point in (existing or set()) else None
     name, n = base, 2
     for _ in range(8):
-        args = ["git", "branch", name] + ([start] if start else [])
-        proc = await asyncio.to_thread(
-            subprocess.run, args, cwd=str(root), capture_output=True, text=True,
-            timeout=30,
-        )
-        if proc.returncode == 0:
+        res = await _host_create(name, start)
+        if res is not None and res[0] == 0:
             return name
-        existing = _fresh_branches()
-        if name in existing:
+        existing = await _host_branches()
+        if existing is not None and name in existing:
             # Collision (another fire won the race): bump and retry — a
             # branch is never overwritten.
             name = f"{base}-{n}"
             n += 1
             continue
-        log.warning(
-            "agent %s: per-run branch %s creation failed: %s",
-            agent_id, name, (proc.stderr or "").strip(),
-        )
+        if existing is None:
+            log.warning(
+                "agent %s: per-run branch creation failed: host unreachable",
+                agent_id,
+            )
+        else:
+            log.warning(
+                "agent %s: per-run branch %s creation failed: %s",
+                agent_id, name,
+                ((res[1] if res else "") or "git refused").strip(),
+            )
         return None
     log.warning("agent %s: per-run branch naming exhausted after 8 bumps", agent_id)
     return None
@@ -417,8 +523,11 @@ async def fire_agent(
     # worktree and inject the run SOP, so the write-through reuses the
     # whole #277 machinery and the landing stays prompt-driven. Deferred
     # imports: the scheduler must import without touching the git layer.
-    # Keep the primary worktree out of it entirely — the harness never
-    # moves a branch checked out in the primary (ADR-0010).
+    # #337: resolution routes local vs remote through the git gateway, so
+    # remote fires steer identically (fixed validates against the host's
+    # branches; per-run creates on the host). Keep the primary worktree
+    # out of it entirely — the harness never moves a branch checked out
+    # in the primary (ADR-0010).
     landing_mode, landing_branch = await resolve_landing(aid)
     if landing_mode == "fixed":
         await update_conversation(
