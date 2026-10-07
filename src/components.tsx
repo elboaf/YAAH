@@ -1311,6 +1311,14 @@ type FileChangeSummary = {
   commit?: string | null
   /** Commits made during the run beyond the latest one. */
   extra_commits?: number
+  /** Where the changes were made: tree kind per the glossary, the tree's
+   *  absolute path, its workspace-relative display path (null when it IS
+   *  the workspace root), and the branch the run worked toward. Absent on
+   *  legacy rows - the chip renders no location segment for them. */
+  worktree_role?: 'chat' | 'primary' | null
+  worktree?: string | null
+  worktree_rel?: string | null
+  branch?: string | null
 }
 
 /** Collapsible per-turn file-change summary (files added/removed + counts). */
@@ -1341,6 +1349,19 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
               : ''}
           </span>
         )}
+        {/* Location provenance: WHERE the changes were made. Absent on
+            legacy rows; the primary worktree is the workspace root, so
+            only chat trees carry a relative path on the chip. The full
+            absolute path lives in the expanded panel footer. */}
+        {summary.worktree_role !== undefined && (
+          <span className="whitespace-nowrap text-zinc-500">
+            · {summary.worktree_role === 'chat' ? 'chat worktree' : 'primary worktree'}
+            {summary.branch ? ` · ${summary.branch}` : ''}
+            {summary.worktree_role === 'chat' && summary.worktree_rel
+              ? ` · ${summary.worktree_rel}`
+              : ''}
+          </span>
+        )}
       </button>
       {open && (
         <div id={panelId} className=" " role="list" aria-label="Changed files">
@@ -1358,6 +1379,12 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
               )}
             </div>
           ))}
+          {summary.worktree_role !== undefined && summary.worktree && (
+            <div className="truncate px-2 py-1 text-zinc-500" title={summary.worktree}>
+              {summary.worktree}
+              {summary.branch ? ` · ${summary.branch}` : ''}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -10581,6 +10608,16 @@ export function Composer() {
             files: ev.files ?? [],
             added: ev.added ?? 0,
             deleted: ev.deleted ?? 0,
+            // Pass location through when the backend sent it (legacy
+            // backends omit it; the chip then renders no segment).
+            ...(ev.worktree_role !== undefined
+              ? {
+                  worktree_role: ev.worktree_role,
+                  worktree: ev.worktree ?? null,
+                  worktree_rel: ev.worktree_rel ?? null,
+                  branch: ev.branch ?? null,
+                }
+              : {}),
           },
         }),
       })

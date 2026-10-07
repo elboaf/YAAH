@@ -24,7 +24,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 from backend.agent import model_client
 from backend.agent.prompt_manifest import compact_summary_message
@@ -88,7 +88,12 @@ def _strip_provider_markup(text: str) -> str:
 
 
 async def _emit_file_changes(
-    _conversation_id: int, workspace: str, baseline: file_changes.WorkspaceSnapshot
+    _conversation_id: int,
+    workspace: str,
+    baseline: file_changes.WorkspaceSnapshot,
+    worktree_role: str | None = None,
+    worktree_rel: str | None = None,
+    branch: str | None = None,
 ) -> dict | None:
     """Persist the run's net file changes and return its stream payload."""
     if baseline is None:
@@ -99,6 +104,10 @@ async def _emit_file_changes(
             await file_changes.diff_snapshots(baseline, current),
             baseline=baseline,
             current=current,
+            worktree_role=worktree_role,
+            worktree=workspace,
+            worktree_rel=worktree_rel,
+            branch=branch,
         )
         return summary
     except Exception:
@@ -1866,6 +1875,7 @@ async def _run_agent_claimed(
     conv_title = str((conv or {}).get("title") or "").strip()
     worktree_detached = False
     worktree_error = ""
+    worktree_flip_failed = False
     # #334: the remote teardown path only pays a channel round-trip when
     # this run actually materialized/used a host chat worktree.
     worktree_materialized = False
@@ -1915,6 +1925,10 @@ async def _run_agent_claimed(
                 turn_workspace = str(_wt["path"])
             worktree_detached = bool(_wt.get("detached"))
             worktree_materialized = True
+            # A failed retarget leaves the tree on its PREVIOUS branch; the
+            # run proceeds there, so the file-changes report must resolve
+            # the branch from the tree, not repeat the stale pick.
+            worktree_flip_failed = bool(_wt.get("error"))
         else:
             worktree_error = str(_wt.get("error") or "unavailable")
 
@@ -1923,6 +1937,41 @@ async def _run_agent_claimed(
         None if remote_workspace else await file_changes.snapshot_workspace(turn_workspace)
     )
     file_summary_emitted = False
+
+    # Location provenance for the file-changes summary: name the tree the
+    # run actually executes in (chat worktree when materialized, primary
+    # otherwise) and the branch that run works toward - the selected branch
+    # when a worktree was materialized on it (detached-at-tip included:
+    # identical tip, per ADR-0010 that is the same branch; a FAILED flip
+    # leaves the old branch, so the tree's own HEAD is reported instead),
+    # else the primary's current branch. Reported even when unresolvable,
+    # so the chip always says where; remote runs emit no summary at all.
+    worktree_role: Literal["chat", "primary"] = (
+        "chat" if worktree_materialized else "primary"
+    )
+    worktree_rel: str | None = None
+    if worktree_role == "chat" and not remote_workspace:
+        # Chip display form: the chat tree relative to the workspace root
+        # (e.g. ".scratch/chat-7"); the absolute path rides along in the
+        # summary's `worktree` for the expanded panel footer. Remote chat
+        # trees carry a host namespace path that has no local relative form.
+        from backend.agent.tools import workspace_root as _workspace_root
+
+        try:
+            worktree_rel = (
+                Path(turn_workspace).resolve()
+                .relative_to(_workspace_root(workspace).resolve())
+                .as_posix()
+            )
+        except ValueError:
+            worktree_rel = None
+    report_branch: str | None = None
+    if selected_branch and worktree_role == "chat" and not worktree_flip_failed:
+        report_branch = selected_branch
+    elif not remote_workspace:
+        from backend.agent.gitinfo import current_git_branch
+
+        report_branch = await current_git_branch(turn_workspace)
 
     if persist_user:
         await add_message(
@@ -2096,7 +2145,12 @@ async def _run_agent_claimed(
         for _step in range(max_steps) if max_steps > 0 else itertools.count():
             if cancel_ev.is_set():
                 file_summary = await _emit_file_changes(
-                    conversation_id, turn_workspace, change_baseline
+                    conversation_id,
+                    turn_workspace,
+                    change_baseline,
+                    worktree_role=worktree_role,
+                    worktree_rel=worktree_rel,
+                    branch=report_branch,
                 )
                 file_summary_emitted = True
                 if file_summary:
@@ -2253,7 +2307,12 @@ async def _run_agent_claimed(
 
             if cancel_ev.is_set():
                 file_summary = await _emit_file_changes(
-                    conversation_id, turn_workspace, change_baseline
+                    conversation_id,
+                    turn_workspace,
+                    change_baseline,
+                    worktree_role=worktree_role,
+                    worktree_rel=worktree_rel,
+                    branch=report_branch,
                 )
                 file_summary_emitted = True
                 if file_summary:
@@ -2369,7 +2428,12 @@ async def _run_agent_claimed(
                 if remaining:
                     yield _ndjson({"type": "queued_autosend", "items": remaining})
                 file_summary = await _emit_file_changes(
-                    conversation_id, turn_workspace, change_baseline
+                    conversation_id,
+                    turn_workspace,
+                    change_baseline,
+                    worktree_role=worktree_role,
+                    worktree_rel=worktree_rel,
+                    branch=report_branch,
                 )
                 file_summary_emitted = True
                 if file_summary:
@@ -2408,7 +2472,12 @@ async def _run_agent_claimed(
             for tc in regular_calls:
                 if cancel_ev.is_set():
                     file_summary = await _emit_file_changes(
-                        conversation_id, turn_workspace, change_baseline
+                        conversation_id,
+                        turn_workspace,
+                        change_baseline,
+                        worktree_role=worktree_role,
+                        worktree_rel=worktree_rel,
+                        branch=report_branch,
                     )
                     file_summary_emitted = True
                     if file_summary:
@@ -2830,7 +2899,12 @@ async def _run_agent_claimed(
         )
         await add_message(conversation_id, "system", f"turn failed: {budget_msg}")
         file_summary = await _emit_file_changes(
-            conversation_id, turn_workspace, change_baseline
+            conversation_id,
+            turn_workspace,
+            change_baseline,
+            worktree_role=worktree_role,
+            worktree_rel=worktree_rel,
+            branch=report_branch,
         )
         file_summary_emitted = True
         if file_summary:
@@ -2865,7 +2939,12 @@ async def _run_agent_claimed(
         # failure the transcript would read as if the turn never happened.
         await add_message(conversation_id, "system", f"turn failed: {e}")
         file_summary = await _emit_file_changes(
-            conversation_id, turn_workspace, change_baseline
+            conversation_id,
+            turn_workspace,
+            change_baseline,
+            worktree_role=worktree_role,
+            worktree_rel=worktree_rel,
+            branch=report_branch,
         )
         file_summary_emitted = True
         if file_summary:
@@ -2881,7 +2960,12 @@ async def _run_agent_claimed(
             conversation_id, "system", f"turn failed: {type(e).__name__}: {e}"
         )
         file_summary = await _emit_file_changes(
-            conversation_id, turn_workspace, change_baseline
+            conversation_id,
+            turn_workspace,
+            change_baseline,
+            worktree_role=worktree_role,
+            worktree_rel=worktree_rel,
+            branch=report_branch,
         )
         file_summary_emitted = True
         if file_summary:
@@ -2899,7 +2983,12 @@ async def _run_agent_claimed(
             # the next history load without yielding from async-generator
             # finalization.
             file_summary = await _emit_file_changes(
-                conversation_id, turn_workspace, change_baseline
+                conversation_id,
+                turn_workspace,
+                change_baseline,
+                worktree_role=worktree_role,
+                worktree_rel=worktree_rel,
+                branch=report_branch,
             )
             if file_summary:
                 await _persist_file_change_summary(conversation_id, file_summary)

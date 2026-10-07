@@ -249,6 +249,12 @@ async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path,
     assert event["deleted"] == 2
     assert {f["path"] for f in event["files"]} == {"existing.txt", "added.txt", "previous-run.txt"}
     assert "earlier.txt" not in {f["path"] for f in event["files"]}
+    # The report must say WHERE the changes landed. No branch pick here,
+    # so the run executed in the primary worktree.
+    assert event["worktree_role"] == "primary"
+    assert event["worktree"] == str(wt.resolve())
+    assert event["worktree_rel"] is None  # primary IS the workspace root
+    assert event["branch"] is None  # non-git workspace: no branch exists
     assert events[-1]["type"] == "done"
 
     persisted = await get_messages(cid)
@@ -259,7 +265,173 @@ async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path,
         "deleted": 2,
         "commit": None,
         "extra_commits": 0,
+        "worktree_role": "primary",
+        "worktree": str(wt.resolve()),
+        "worktree_rel": None,
+        "branch": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_file_change_summary_reports_chat_worktree_location(fake_model, tmp_path, monkeypatch):
+    """With a branch pick, the run works inside the chat worktree and the
+    summary must say so: role 'chat', the selected branch, that tree's path."""
+    from backend.db.database import create_conversation, get_messages
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "main")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "baseline")
+
+    async def no_title(*_args):
+        return None
+
+    monkeypatch.setattr(loop, "_generate_conversation_title", no_title)
+    baseline = await loop.file_changes.snapshot_workspace(str(repo))
+    original_snapshot = loop.file_changes.snapshot_workspace
+    snapshots = 0
+
+    async def fake_snapshot(path):
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 1:
+            return baseline
+        # The run writes one new file into whatever tree it executes in.
+        (Path(path) / "changed.txt").write_text("run work\n", encoding="utf-8")
+        return await original_snapshot(path)
+
+    monkeypatch.setattr(loop.file_changes, "snapshot_workspace", fake_snapshot)
+    cid = await create_conversation(
+        "chat worktree location", workspace=str(repo),
+        selected_branch="main", branch_pin_origin="explicit",
+    )
+    fake_model.append([{"type": "content", "text": "Done."}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(repo)))
+    event = next(e for e in events if e["type"] == "file_changes")
+    assert event["worktree_role"] == "chat"
+    assert event["branch"] == "main"
+    expected_tree = (repo / ".scratch" / f"chat-{cid}").resolve()
+    assert Path(event["worktree"]).resolve() == expected_tree
+    # Chip display: path relative to the workspace root, forward slashes.
+    assert event["worktree_rel"] == ".scratch/chat-%s" % cid
+
+    persisted = await get_messages(cid)
+    saved = next(json.loads(m["content"]) for m in persisted if m["role"] == "system" and "file_changes" in m["content"])
+    assert saved["file_changes"]["worktree_role"] == "chat"
+    assert saved["file_changes"]["branch"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_file_change_summary_reports_primary_branch_without_chat_tree(fake_model, tmp_path, monkeypatch):
+    """A degraded-to-primary run (stale pin: branch no longer exists) still
+    says where it ran: primary worktree, on the primary's current branch."""
+    from backend.db.database import create_conversation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "main")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "baseline")
+
+    async def no_title(*_args):
+        return None
+
+    monkeypatch.setattr(loop, "_generate_conversation_title", no_title)
+    baseline = await loop.file_changes.snapshot_workspace(str(repo))
+    original_snapshot = loop.file_changes.snapshot_workspace
+    snapshots = 0
+
+    async def fake_snapshot(path):
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 1:
+            return baseline
+        (Path(path) / "changed.txt").write_text("run work\n", encoding="utf-8")
+        return await original_snapshot(path)
+
+    monkeypatch.setattr(loop.file_changes, "snapshot_workspace", fake_snapshot)
+    # "vanished" does not exist locally: stale pin, no chat worktree.
+    cid = await create_conversation(
+        "stale pin run", workspace=str(repo),
+        selected_branch="vanished", branch_pin_origin="explicit",
+    )
+    fake_model.append([{"type": "content", "text": "Done."}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(repo)))
+    event = next(e for e in events if e["type"] == "file_changes")
+    assert event["worktree_role"] == "primary"
+    assert event["worktree"] == str(repo.resolve())
+    assert event["worktree_rel"] is None
+    assert event["branch"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_file_change_summary_reports_true_branch_when_flip_fails(fake_model, tmp_path, monkeypatch):
+    """When the chat tree cannot be retargeted to the selected branch, the
+    run still happens in it - on the OLD branch, and the report must say
+    that branch, not the one the user picked."""
+    from backend.db.database import create_conversation
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "main")
+    run_git(repo, "config", "user.email", "t@t")
+    run_git(repo, "config", "user.name", "t")
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "baseline")
+    # A second tree the flipped chat worktree will point at, on another
+    # branch - where the run will really execute.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    run_git(elsewhere, "init", "-q", "-b", "old-branch")
+    run_git(elsewhere, "config", "user.email", "t@t")
+    run_git(elsewhere, "config", "user.name", "t")
+    (elsewhere / "seed.txt").write_text("seed\n", encoding="utf-8")
+    run_git(elsewhere, "add", "-A")
+    run_git(elsewhere, "commit", "-q", "-m", "baseline")
+
+    async def flip_fails(workspace, chat_id, branch):
+        return {"path": elsewhere, "detached": False, "created": False,
+                "error": "worktree flip failed"}
+
+    async def no_title(*_args):
+        return None
+
+    monkeypatch.setattr("backend.agent.worktrees.ensure_chat_worktree", flip_fails)
+    monkeypatch.setattr(loop, "_generate_conversation_title", no_title)
+    baseline = await loop.file_changes.snapshot_workspace(str(elsewhere))
+    original_snapshot = loop.file_changes.snapshot_workspace
+    snapshots = 0
+
+    async def fake_snapshot(path):
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 1:
+            return baseline
+        (Path(path) / "changed.txt").write_text("run work\n", encoding="utf-8")
+        return await original_snapshot(path)
+
+    monkeypatch.setattr(loop.file_changes, "snapshot_workspace", fake_snapshot)
+    cid = await create_conversation(
+        "flip failure run", workspace=str(repo),
+        selected_branch="main", branch_pin_origin="explicit",
+    )
+    fake_model.append([{"type": "content", "text": "Done."}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(repo)))
+    event = next(e for e in events if e["type"] == "file_changes")
+    assert event["worktree_role"] == "chat"
+    assert event["branch"] == "old-branch"  # where the run REALLY worked
+    assert Path(event["worktree"]).resolve() == elsewhere.resolve()
 @pytest.mark.asyncio
 async def test_usage_event_uses_frontend_context_token_field(fake_model, tmp_path):
     """The streamed usage count must match the frontend's usage_tokens contract."""
