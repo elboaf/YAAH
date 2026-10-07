@@ -8391,8 +8391,8 @@ export function GitChipCluster({
           r.residue === 'clean'
             ? 'Run work in flight. Branch is clean and fully landed — residue from a finished run; a run start may remove it (removable).'
             : r.residue === 'dirty'
-              ? `Run work in flight. ${r.path} has uncommitted changes — run work is untouched and surfaced; the user says "land it" or "scrap it".`
-              : `Run work in flight. ${r.branch} has commits not yet landed — the user says "land it" or "scrap it".`
+              ? `Run work in flight. ${r.path} has uncommitted changes — run work is untouched and surfaced; the agent asks (land / another branch / leave / scrap); typed "land it"/"scrap it" still work.`
+              : `Run work in flight. ${r.branch} has commits not yet landed — the agent asks (land / another branch / leave / scrap); typed "land it"/"scrap it" still work.`
         return (
           <span
             key={r.path}

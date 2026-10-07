@@ -337,7 +337,11 @@ def _sub_agent_system_prompt(
     delegation cannot silently drop branch context (ADR-0010
     amendment, decision 5)."""
     from backend.agent import remote as remote_mod
-    from backend.agent.loop import _local_env_line, _agents_notes
+    from backend.agent.loop import (
+        _agents_notes,
+        _local_env_line,
+        _note_without_landing_ask,
+    )
 
     # #188: ONE host resolution for the whole prompt — the env line, the
     # prose tool list, and (via run_sub_agent) the schemas all derive from
@@ -388,7 +392,11 @@ def _sub_agent_system_prompt(
     # #334: the notes arrive from the parent (which fetched them already —
     # remotely through the channel); the sync fallback covers direct calls.
     notes = workspace_notes if workspace_notes else _agents_notes(workspace)
+    # #349: the parent's note carries the landing-ask block, but
+    # sub-agents have no ask_user - strip it here, at the seam, so every
+    # spawn path inherits the rule. Branch context survives the strip.
     if branch_note:
+        branch_note = _note_without_landing_ask(branch_note)
         prompt += f"\n\n---\n\n{branch_note}"
     if notes:
         prompt += f"\n\n---\n\n{notes}"

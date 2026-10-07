@@ -908,15 +908,18 @@ def _plan_mode_note() -> str:
 def _residue_protocol(cid: str) -> str:
     """The residue protocol (#290), shared by every selector-note variant:
     a left-behind run worktree is never silently deleted and never
-    silently blocks a chat - the user says "land it" or "scrap it"."""
+    silently blocks a chat - the user types "land it" or "scrap it",
+    or (where ask_user exists) answers the #349 end-of-work landing
+    ask, which offers the same choices proactively."""
     return (
         "If a run worktree already exists at that path, it is residue from "
         "an earlier run: when it is clean and fully merged into the target, "
         "it is landed-and-forgotten \u2014 remove it and proceed; when it is "
         "dirty or has unmerged commits, leave it untouched, say so, and "
-        f"use `.scratch/chat-{cid}/run-2` for this run instead. The user "
-        'says "land it" or "scrap it" for surfaced residue \u2014 it is never '
-        "silently deleted, and never silently blocks a chat. The harness "
+        f"use `.scratch/chat-{cid}/run-2` for this run instead. Typed "
+        '"land it" or "scrap it" remain the manual fallback for surfaced '
+        "residue \u2014 it is never silently deleted, and never silently "
+        "blocks a chat. The harness "
         "retires a landed-clean chat worktree at run end (#329); if you "
         "still see one standing, surface it rather than removing it."
     )
@@ -961,9 +964,75 @@ def _run_branch_name(title, chat_id=None) -> str:
     return f"run/{slug}-{cid}"
 
 
+_LANDING_ASK_MARKER = "# End-of-work landing ask"
+
+
+def _landing_ask(branch, option1) -> str:
+    """The #349 end-of-work landing ask: shared block appended to the
+    interactive selector-note variants. Direction inversion of the
+    residue protocol - the agent no longer waits for the user to type
+    "land it"; it asks which landing to perform, via ask_user, once the
+    user's request is complete and residue exists. `option1` describes
+    how to execute the "Land in <branch>" answer (the per-variant SOP).
+    Only ever injected where ask_user exists: interactive chats and
+    scheduled runs with allow_ask_user. Sub-agents get the note WITHOUT
+    this block (_note_without_landing_ask) - they have no ask_user."""
+    b = str(branch).strip()
+    return (
+        f"\n\n{_LANDING_ASK_MARKER}\n\n"
+        "When the user's request is complete and your work left unlanded "
+        "residue (commits on the run branch or a run worktree standing), "
+        "do NOT stop and wait for \"land it\": proactively call ask_user "
+        "with these options, recommended one first:\n"
+        f"1. \"Land in `{b}`\" - {option1}\n"
+        '2. "Land in another branch" - the user names branch Y in the '
+        "answer: FIRST call branch_select to Y (the chat continues on Y), "
+        "then perform Y's landing exactly as above, clean up the run "
+        "worktree and branch, and report both the move and the landing.\n"
+        '3. "Leave for now" - leave the residue in place; typed "land '
+        'it"/"scrap it" stay the fallback.\n'
+        '4. "Scrap it" - remove the run worktree '
+        "(`git worktree remove --force .scratch/chat-<id>/run`) and its "
+        "run branch without landing.\n"
+        "The user may answer with anything else: follow that answer. Ask "
+        "ONCE, when the request is complete - never mid-task, never on a "
+        "run that changed nothing, and never re-asking a landing outcome "
+        "the user pre-stated (execute what they already said instead, or "
+        "respect a stated leave-unlanded, and just report)."
+    )
+
+
+def _note_without_landing_ask(note: str) -> str:
+    """The same selector note with the #349 landing-ask block removed.
+    Sub-agents receive the branch context verbatim (ADR-0010 amendment,
+    decision 5) but never the ask: they have no ask_user tool, and an
+    ask instruction they cannot follow is worse than none. The ask
+    block is always appended LAST in the note, so stripping is a clean
+    cut; the passive residue protocol survives in every variant."""
+    if not note:
+        return note
+    marker = f"\n\n{_LANDING_ASK_MARKER}"
+    i = note.find(marker)
+    if i == -1:
+        return note
+    rest = note[i + len(marker):]
+    j = rest.find("\n\n# ")
+    return note[:i] + (rest[j:] if j != -1 else "")
+
+
+def _can_ask_landing_question(policy, allow_ask_user: bool) -> bool:
+    """#349: whether THIS run may be told to ask the landing question.
+    Same semantics as the ask_user tool itself: an interactive chat has
+    no scheduled policy and can always ask; a scheduled run asks only
+    with the allow_ask_user opt-in (#93). The ask block is injected
+    only when this returns True - an instruction the run cannot follow
+    is worse than none."""
+    return policy is None or bool(allow_ask_user)
+
+
 def _selected_branch_note(
     branch, chat_id=None, detached=False, origin="explicit", title=None,
-    remote=False,
+    remote=False, with_ask=True,
 ) -> str:
     """System-prompt section injected when the user picked a branch in this
     chat's branch selector (#277: the run happens in the chat's own
@@ -1025,12 +1094,38 @@ def _selected_branch_note(
             "The harness keeps `.scratch/` git-invisible via the repo's "
             "`.git/info/exclude` (#321), so the namespace never shows as "
             "untracked noise. "
-            "Commit there and remove the run worktree once done; your run "
-            f"branch `{rb}` carries the work. `{b}` itself is "
-            "landed by the human \u2014 leave the primary tree alone. "
+            "Commit there; the run branch carries the work. When the "
+            f"user chooses to land into `{b}` (ADR-0014 safe-sync SOP, "
+            "the target is checked out in the primary tree):\n"
+            "1. Only if `git -C <primary worktree> status --porcelain` is "
+            f"EMPTY: `git update-ref refs/heads/{b} <run tip>` "
+            "(`git branch -f` REFUSES a checked-out branch - never use it "
+            "here; plain merges are impossible without checkout), then "
+            f"`git -C <primary> reset --hard {b}` so the human's tree "
+            "follows the ref. Any non-empty status: do not move the ref - "
+            "leave landing to the human and report.\n"
+            f"2. If `{b}` diverged from the run branch, land via plumbing "
+            "merge: `git merge-tree --write-tree <run base> <run branch>` "
+            " - on conflict, do not fake it: report and offer to rebase "
+            f"the run branch onto `{b}`; on success commit the returned "
+            "tree with `git commit-tree` (merge commits by agents are "
+            "allowed per ADR-0014) and move the ref to that commit before "
+            "the clean-primary checks.\n"
+            "3. Then remove the run worktree "
+            f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d {rb}`).\n"
             + _AMENDMENT_RULES
             + _LOCAL_ONLY_RULES
             + residue
+            + (
+                _landing_ask(
+                    b,
+                    f"run the ADR-0014 safe-sync SOP above into `{b}` "
+                    "(clean primary only), then clean up the run worktree "
+                    "and branch",
+                )
+                if with_ask
+                else ""
+            )
         )
     return (
         f"# Branch selector: {b}\n\n""To point this chat at a different branch at the user's request, call the branch_select tool - never a checkout of the primary tree. "
@@ -1052,16 +1147,27 @@ def _selected_branch_note(
         "The harness keeps `.scratch/` git-invisible via the repo's "
         "`.git/info/exclude` (#321), so the namespace never shows as "
         "untracked noise. "
-        "Commit there, then land inside THIS worktree "
+        "Commit there; the run branch carries the work. When the user "
+        f"chooses to land into `{b}`: land inside THIS worktree "
         f"(`git merge {rb}` \u2014 on conflict, resolve here or "
         "`git merge --abort` and report), then remove the run worktree "
         f"(`git worktree remove .scratch/chat-{cid}/run && git branch -d "
         f"{rb}`). " + _LOCAL_ONLY_RULES + residue
+        + (
+            _landing_ask(
+                b,
+                f"land inside this chat worktree (`git merge {rb}`), then "
+                "remove the run worktree and branch",
+            )
+            if with_ask
+            else ""
+        )
     )
 
 
 def _selected_branch_note_degraded(
     branch, chat_id, reason, origin="explicit", title=None, remote=False,
+    with_ask=True,
 ) -> str:
     """Selector-note variant when the chat worktree could NOT be
     materialized (non-repo, git failure, host offline): the run happens
@@ -1107,6 +1213,16 @@ def _selected_branch_note_degraded(
         "that path, follow the residue protocol. "
         + _LOCAL_ONLY_RULES
         + _residue_protocol(cid)
+        + (
+            _landing_ask(
+                b,
+                "perform the landing SOP above, then clean up the run "
+                "worktree and branch (checked-out-elsewhere targets follow "
+                "the safe-sync rules: clean primary only)",
+            )
+            if with_ask
+            else ""
+        )
     )
 
 
@@ -1131,7 +1247,9 @@ def _selected_branch_note_stale(branch, chat_id, origin="explicit") -> str:
         )
         + "(deleted upstream of the chat), so the pin is STALE. Do not treat "
         "it as a landing target and do not re-create it unprompted. Tell "
-        "the user the pin is stale and ask which branch to select. The "
+        "the user the pin is stale and ask which branch to select - they "
+        "may pick it in the branch selector, or name one for you to "
+        "branch_select. The "
         "primary tree is the human's - never check it out or move it."
     )
 
@@ -1855,10 +1973,14 @@ async def _run_agent_claimed(
     # row, so read it fresh each turn — the model otherwise has no way to
     # see what the user aimed at. #290: the chat id rides along so the
     # note names this chat's deterministic run-worktree paths.
+    # #349: the landing ask rides only where ask_user exists - an
+    # interactive chat (no scheduled policy) or a scheduled run that
+    # opted in (#93).
+    can_ask = _can_ask_landing_question(policy, allow_ask_user)
     if worktree_error:
         branch_note = _selected_branch_note_degraded(
             selected_branch, conversation_id, worktree_error, origin=pin_origin,
-            title=conv_title, remote=remote_workspace,
+            title=conv_title, remote=remote_workspace, with_ask=can_ask,
         )
     elif branch_pin_stale:
         # #302: the pin is dead — the run hears that, not a materialization
@@ -1874,6 +1996,7 @@ async def _run_agent_claimed(
             origin=pin_origin,
             title=conv_title,
             remote=remote_workspace,
+            with_ask=can_ask,
         )
     if branch_note:
         system_prompt = f"{system_prompt}\n\n---\n\n{branch_note}"

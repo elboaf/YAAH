@@ -63,10 +63,15 @@ primary worktree
 
 **Landing**:
 A run's merge of its scratch-worktree branch onto the chat's selected
-branch, inside the chat's worktree; stop-and-report on conflict. The
-human integrates selector branches into master — the harness never
-does.
-_Avoid_: merge-back, auto-merge, landing to master
+branch, inside the chat's worktree; stop-and-report on conflict. On
+the user's explicit choice at the #349 end-of-work landing ask,
+agents execute the landing — including into a branch checked out in
+the primary tree (e.g. master) under ADR-0014's safe-sync SOP
+(update-ref the ref, never branch -f; clean primary before, reset
+--hard after; plumbing merge when diverged). Typed "land it" /
+"scrap it" remain the manual fallback.
+_Avoid_: merge-back, auto-merge, landing without an explicit user
+choice, `git branch -f` on a checked-out branch
 
 ### Conversation history
 
