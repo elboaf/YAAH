@@ -391,12 +391,6 @@ export interface AgentConfig {
     startup_timeout?: number
     auto_reboot_on_crash?: boolean
   }
-  /** Computer-use block (#140); Settings toggles only `allow_screenshot`. */
-  computer_use?: {
-    allow_screenshot?: boolean
-    observe_default?: boolean
-    panic_hotkey?: string
-  }
   /** Persistent-memory block (#169); Settings toggles only `enabled`.
    *  Default OFF (opt-in): no memory tools, no prompt block. */
   memory?: {
@@ -462,9 +456,6 @@ export const updateConfig = (
     }
     sandbox?: {
       enabled?: boolean
-    }
-    computer_use?: {
-      allow_screenshot?: boolean
     }
     memory?: {
       enabled?: boolean

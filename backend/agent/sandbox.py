@@ -1335,9 +1335,7 @@ def prompt_section() -> str:
         "browser, runtime or portable tool, install/download it into "
         "the sandbox (toolkit) and run it there — never launch a host "
         "equivalent (host browser, host python) to exercise the app. "
-        "And NEVER drive the sandbox's GUI with the host mouse/keyboard "
-        "tools (mouse_click, type_text, press_key, ...): they move the "
-        "user's REAL desktop input. The VM has its own input session — "
+        "The VM has its own input session — "
         "drive its GUI via the windows-mcp MCP server (below).\n"
         "- The VM is a CLEAN WINDOWS IMAGE: git, python, node and other "
         "dev tools are NOT preinstalled — expect 'is not recognized as "
@@ -1453,11 +1451,10 @@ SANDBOX_TOOLS_SCHEMA = [
                 "harmless automated tests and validation on the host. Work "
                 "that does need isolation stays inside the VM: dependencies "
                 "run in here (never host equivalents), and its GUI is "
-                "driven via the windows-mcp MCP server — never the host "
-                "mouse/keyboard tools; see the sandbox prompt section for "
-                "the full playbook. Prompts the user in ask mode. Returns "
-                "once the sandbox is ready (first boot is a slow cold "
-                "start)."
+                "driven via the windows-mcp MCP server; see the sandbox "
+                "prompt section for the full playbook. Prompts the user in "
+                "ask mode. Returns once the sandbox is ready (first boot is "
+                "a slow cold start)."
             ),
             "parameters": {
                 "type": "object",

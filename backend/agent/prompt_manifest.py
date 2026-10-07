@@ -10,7 +10,7 @@ text; the harness only injects at the seams the tests already use
 DB/config/memory/skills roots, scripted model_client.chat).
 
 Combo id grammar (flags in canonical order):
-  <win|posix>-<family>[-plan|-noskills|-nomemory|-noshot|-override|-compaction|-sandboxonly]
+  <win|posix>-<family>[-plan|-noskills|-nomemory|-override|-compaction|-sandboxonly]
 Families:
   local        full chat turn through loop.run_agent_turn
   remote       chat turn over a remote-namespaced workspace (fixture host)
@@ -104,7 +104,6 @@ def _warm_lazy_imports():
                 "plan": False,
                 "skills": False,
                 "memory": False,
-                "shot": True,
                 "override": False,
                 "compaction": False,
                 "policy": False,
@@ -142,7 +141,6 @@ SECTION_OPENINGS = [
     ("project-notes", "# Project notes"),
     ("persistent-memory", "# Persistent memory ("),
     ("persistent-memory", "# Persistent memory"),
-    ("computer-use", "Computer use (desktop tools):"),
     ("windows-sandbox", "# Windows Sandbox (for tests that need isolation)"),
     ("skills-index", "Skills available (load with the load_skill tool"),
     ("subagent-index", "Sub-agents available"),
@@ -251,13 +249,6 @@ def _sha256_text(text: str) -> str:
 # Tool-schema matrices
 # ---------------------------------------------------------------------------
 
-_LOCAL_COMPUTER_NAMES = {
-    "screenshot", "list_windows", "read_ui_tree", "focus_window",
-    "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
-    "type_text", "press_key", "wait",
-}
-
-
 def _schema_names_for(windows: bool, remote_target: bool, host_windows: bool) -> set:
     """Names get_schemas() returns on each platform/target, derived from the
     real import-time append (tools.py:1316-1334). On a posix box the
@@ -275,14 +266,14 @@ def _schema_names_for(windows: bool, remote_target: bool, host_windows: bool) ->
         # Windows machine or a remote WINDOWS host (either client OS).
         expected.add("powershell")
     if remote_target:
-        # tools.py strips local-only computer + sandbox tools for remote.
-        expected -= _LOCAL_COMPUTER_NAMES | {
+        # tools.py strips local-only sandbox tools for remote.
+        expected -= {
             "sandbox_test", "sandbox_run", "sandbox_status", "sandbox_stop",
         }
     elif not windows:
         # posix local: TOOLS_SCHEMA never carries the Windows-only schemas;
         # on a Windows dev box, subtract them to get the posix shape.
-        expected -= _LOCAL_COMPUTER_NAMES | {
+        expected -= {
             "powershell", "sandbox_test", "sandbox_run", "sandbox_status",
             "sandbox_stop",
         }
@@ -383,43 +374,38 @@ def _reset_remotes() -> None:
 # Render matrix: 192 local + 14 remote + 4 remote-offline + 6 kind combos.
 # ---------------------------------------------------------------------------
 
-def _local_flags(shot: bool) -> list:
+def _local_flags() -> list:
     flags = ["plan", "skills", "memory"]
-    if shot:
-        flags.append("shot")
     flags += ["override", "compaction", "policy"]
     return flags
 
 
 def _iter_local(windows: bool) -> list:
-    """Every local combo id, generated from toggles (2^7 for win, 2^6 posix:
-    noshot is Windows-only -- the computer-use tools (and screenshot with
-    them) only exist on a local Windows machine)."""
+    """Every local combo id, generated from toggles (2^6 on each platform:
+    combo ids enumerate plan/skills/memory/override/compaction/policy; the
+    former screenshot (noshot) axis died with host computer use (#339)."""
     out = []
     prefix = "win" if windows else "posix"
     for plan in (0, 1):
         for skills in (0, 1):
             for memory in (0, 1):
-                for shot in ((0, 1) if windows else (0,)):
-                    for override in (0, 1):
-                        for compaction in (0, 1):
-                            for policy in (0, 1):
-                                parts = [f"{prefix}-local"]
-                                if plan:
-                                    parts.append("plan")
-                                if not skills:
-                                    parts.append("noskills")
-                                if not memory:
-                                    parts.append("nomemory")
-                                if windows and not shot:
-                                    parts.append("noshot")
-                                if override:
-                                    parts.append("override")
-                                if compaction:
-                                    parts.append("compaction")
-                                if policy:
-                                    parts.append("sandboxonly")
-                                out.append("-".join(parts))
+                for override in (0, 1):
+                    for compaction in (0, 1):
+                        for policy in (0, 1):
+                            parts = [f"{prefix}-local"]
+                            if plan:
+                                parts.append("plan")
+                            if not skills:
+                                parts.append("noskills")
+                            if not memory:
+                                parts.append("nomemory")
+                            if override:
+                                parts.append("override")
+                            if compaction:
+                                parts.append("compaction")
+                            if policy:
+                                parts.append("sandboxonly")
+                            out.append("-".join(parts))
     return out
 
 
@@ -487,8 +473,7 @@ def _split_combo(combo: str) -> dict:
             # shows the chosen invariant (memory section iff the resolved
             # schemas include a memory tool).
             "memory": "subagents" in parts,
-            "shot": True,
-            "override": False,
+                "override": False,
             "compaction": False,
             "policy": False,
         }
@@ -496,7 +481,6 @@ def _split_combo(combo: str) -> dict:
         "plan": "plan" in parts,
         "skills": "noskills" not in parts,
         "memory": "nomemory" not in parts,
-        "shot": "noshot" not in parts,
         "override": "override" in parts,
         "compaction": "compaction" in parts,
         "policy": "sandboxonly" in parts,
@@ -509,7 +493,6 @@ def _split_combo(combo: str) -> dict:
             "plan": "plan" in parts,
             "skills": "noskills" not in parts,
             "memory": "nomemory" not in parts,
-            "shot": False,
             "override": False,
             "compaction": "compaction" in parts,
             "policy": "sandboxonly" in parts,
@@ -600,7 +583,6 @@ def _prep_flags(flags: dict, tmp: Path) -> None:
 
     cfg = {
         "access_mode": "plan" if flags["plan"] else "full",
-        "computer_use": {"allow_screenshot": bool(flags["shot"])},
     }
     save_config(cfg)
 

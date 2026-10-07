@@ -70,15 +70,9 @@ class AgentDef:
 
 
 # Tool sets for the built-ins. Sub-agents never get ask_user (they cannot
-# block on the user), spawn_agent (no nesting), or computer-use tools (one
-# shared mouse/keyboard).
+# block on the user) or spawn_agent (no nesting).
 _ALWAYS_EXCLUDED = {
     "ask_user", "spawn_agent", "search_conversation_history",
-}
-_COMPUTER_TOOLS = {
-    "screenshot", "list_windows", "focus_window", "read_ui_tree",
-    "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
-    "type_text", "press_key", "wait",
 }
 
 _EXPLORE_TOOLS = {
@@ -91,7 +85,7 @@ def _exclusion_clause() -> str:
     """The index description is generated from the SAME sets the
     runtime enforces (#189/SYN-23), so prose and enforcement cannot
     drift apart again."""
-    excluded = sorted(_ALWAYS_EXCLUDED | _COMPUTER_TOOLS)
+    excluded = sorted(_ALWAYS_EXCLUDED)
     return "all tools except: " + ", ".join(excluded)
 
 
@@ -320,7 +314,7 @@ def _resolve_tools(defn: AgentDef, workspace: str | None = None) -> list[dict]:
     allowed: dict[str, dict] = {}
     for s in schemas:
         n = s["function"]["name"]
-        if n in _ALWAYS_EXCLUDED or n in _COMPUTER_TOOLS:
+        if n in _ALWAYS_EXCLUDED:
             continue
         allowed[n] = s
     if defn.tools is not None:

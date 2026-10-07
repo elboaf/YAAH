@@ -113,18 +113,6 @@ DEFAULTS = {
     # Desktop / Cursor configs. Registration is trust: a registered server
     # runs arbitrary local code and its tools are always available.
     "mcpServers": {},
-    # Computer use (Windows only): the panic hotkey force-cancels every
-    # running turn. pynput syntax; invalid falls back to the default.
-    # observe_default: mouse tools return a post-action crop by default.
-    "computer_use": {
-        "panic_hotkey": "<ctrl>+<alt>+y",
-        "observe_default": True,
-        # Issue #140: Settings toggle to allow/disallow the `screenshot`
-        # tool (each capture sends a full-resolution image to the model).
-        # True = today's behavior; False filters the schema, suppresses the
-        # prompt line, and turns stray calls into a graceful pointer.
-        "allow_screenshot": True,
-    },
     # Per-model context-window overrides (model id -> tokens). Wins over the
     # provider-reported value and the built-in table; set from Settings.
     # `model_context` (model id -> {context_window}) is the newer per-model

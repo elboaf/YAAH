@@ -44,11 +44,9 @@ from backend.db.database import (
 
 # Local-only tools that must never be offered on a remote-owned turn: they
 # act on THIS machine or this process's local conversation state, which is
-# not where this conversation's workspace lives.
+# not where this conversation's workspace lives. (The host desktop tools
+# that used to lead this set were removed outright — #339.)
 _LOCAL_ONLY_TOOL_NAMES = {
-    "screenshot", "list_windows", "focus_window", "read_ui_tree",
-    "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
-    "type_text", "press_key", "wait",
     "sandbox_test", "sandbox_run", "sandbox_status", "sandbox_stop",
     # Local conversation search: the model context here is the fetched
     # owner snapshot, not the local numeric-keyed transcript tables.

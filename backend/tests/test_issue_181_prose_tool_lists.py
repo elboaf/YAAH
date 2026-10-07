@@ -133,7 +133,7 @@ def test_parent_prose_names_match_its_schema_set():
     schema_names = {
         s["function"]["name"] for s in tools.get_schemas()
     }
-    # tools conditionally stripped (screenshot toggle, install_git) may be
+    # tools conditionally stripped (install_git) may be
     # absent from the schema set; everything present must be mentioned.
     missing = schema_names - _drop_annotation_overflow(prose)
     assert not missing, missing

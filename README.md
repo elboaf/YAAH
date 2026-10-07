@@ -57,9 +57,10 @@ same store the desktop app's Settings writes — so they survive restarts and
 both apps see the same values. Without a passphrase the server still starts
 and is discoverable, but every remote exec request is refused (401).
 
-The server build is deliberately lean: no voice (whisper/sherpa-onnx) and no
-computer-use dependencies, because a remote client only forwards workspace
-tools to its host.
+The server build is deliberately lean: no voice (whisper/sherpa-onnx)
+dependencies, because a remote client only forwards workspace tools to its
+host — and #339 removed the host computer-use stack entirely, for every
+host. GUI control lives inside the Windows Sandbox via windows-mcp.
 
 ## Building from source
 

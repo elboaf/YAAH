@@ -68,7 +68,9 @@ def test_git_editor_recipe_rendered_exactly_once_per_win_local_combo():
 
 def test_matrix_shape():
     combos = pm.iter_combos()
-    assert len(combos) == 215
+    # 151 since #339 removed the shot/noshot axis (64 win-local combos
+    # halved); was 215 before host computer use was retired.
+    assert len(combos) == 151
     assert len(set(combos)) == len(combos)
     assert "win-local-plan-compaction" in combos
     assert "posix-remote-offline-normal" in combos
@@ -109,13 +111,14 @@ def test_committed_manifests_match_regeneration():
 
 def test_platform_sections_match_host_prefix():
     """Windows-only sections appear in win renders, never in posix ones
-    (flipped on a Windows host, native elsewhere)."""
+    (flipped on a Windows host, native elsewhere). #339 removed the
+    computer-use section outright; the sandbox section stays win-only."""
     if HOST_WIN:
         win = pm.render_combo("win-local-compaction")
         posix = pm.render_combo("posix-local")
         win_names = [s["name"] for s in win["sections"]]
         posix_names = [s["name"] for s in posix["sections"]]
-        assert "computer-use" in win_names
+        assert "computer-use" not in win_names
         assert "windows-sandbox" in win_names
         assert "computer-use" not in posix_names
         assert "windows-sandbox" not in posix_names
@@ -245,7 +248,7 @@ def test_exit_plan_flow_once_per_render_all_win_local_variants():
     other_combos = [
         "win-local",
         "win-local-compaction",
-        "win-local-noshot-override-sandboxonly",
+        "win-local-override-sandboxonly",
     ]
     for combo in plan_combos:
         text = pm.render_combo(combo)["rendered_text"]
@@ -321,14 +324,12 @@ def test_override_replaces_base_prompt_wholesale():
     assert "override" not in plain_names
 
 
-@pytest.mark.skipif(not HOST_WIN, reason="screenshot axis exists only in win combos")
-def test_screenshot_axis_flips_screenshot_tool():
-    shot = pm.render_combo("win-local-compaction")
-    noshot = pm.render_combo("win-local-noshot-compaction")
-    shot_tools = {t["name"] for t in shot["tool_schemas"]}
-    noshot_tools = {t["name"] for t in noshot["tool_schemas"]}
-    assert "screenshot" in shot_tools
-    assert "screenshot" not in noshot_tools
+def test_no_screenshot_axis_or_tool_anywhere():
+    """#339: the shot/noshot axis and the screenshot tool are gone."""
+    for combo in pm._iter_local(True):
+        assert "noshot" not in combo
+    tools = {t["name"] for t in pm.render_combo("win-local-compaction")["tool_schemas"]}
+    assert "screenshot" not in tools
 
 
 def test_offline_note_only_for_offline_remote():
@@ -486,10 +487,7 @@ def test_remote_manifests_carry_no_stripped_schemas(manifest: str) -> None:
     schemas = json.loads(
         (MANIFEST_DIR / manifest).read_text(encoding="utf-8"))["tool_schemas"]
     stripped = {"sandbox_test", "sandbox_run", "sandbox_status",
-                "sandbox_stop", "screenshot", "list_windows",
-                "read_ui_tree", "focus_window", "mouse_move", "mouse_click",
-                "mouse_drag", "mouse_scroll", "type_text", "press_key",
-                "wait"}
+                "sandbox_stop"}
     names = {s["name"] for s in schemas}
     assert not names & stripped, f"{manifest} lists stripped schemas: {names & stripped}"
     assert all(s["bytes"] > 16 for s in schemas), "name-only schema rows"

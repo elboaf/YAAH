@@ -20,7 +20,6 @@ from backend.agent.tools import tool_risk
 def test_read_tools_are_free_in_every_mode():
     for name in ("read_file", "search_files",
                  "web_search", "web_fetch", "view_image", "load_skill",
-                 "screenshot", "list_windows", "read_ui_tree", "wait",
                  "spawn_agent"):
         assert tool_risk(name) == "read", name
 
@@ -32,8 +31,7 @@ def test_mutating_tools_ask():
 
 
 def test_shell_tools_ask():
-    for name in ("bash", "powershell",
-                 "mouse_click", "type_text", "press_key", "focus_window"):
+    for name in ("bash", "powershell"):
         assert tool_risk(name) == "shell", name
 
 

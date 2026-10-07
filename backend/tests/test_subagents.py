@@ -72,10 +72,13 @@ def test_explore_allowlist_names_are_executable():
         assert name in executable, name
 
 
-def test_computer_tools_never_reach_subagents():
+def test_host_gui_tools_never_reach_subagents():
+    """#339: host computer-use tools are gone outright — a sub-agent must
+    never see them even if a stale schema leaks back into the registry."""
     gp = subagents.get_agent_def("general-purpose")
     tools = {s["function"]["name"] for s in subagents._resolve_tools(gp, workspace=None)}
-    for forbidden in ("screenshot", "mouse_click", "type_text", "read_ui_tree"):
+    for forbidden in ("screenshot", "mouse_click", "type_text", "read_ui_tree",
+                      "panic_hotkey", "start_panic_hotkey"):
         assert forbidden not in tools, forbidden
 
 

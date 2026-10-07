@@ -368,58 +368,6 @@ def _memory_notes(workspace: str) -> str:
         return ""
 
 
-def _computer_use_prompt() -> str:
-    """Computer-use section for the system prompt (Windows local only).
-    General principles only — tool mechanics live in the tool schemas,
-    depth in the bundled computer-use skill. Kept deliberately lean:
-    hyper-specific rules accrete per dogfood session and go stale."""
-    from backend.agent import computer as computer_mod
-
-    return f"""
-
-Computer use (desktop tools):
-- These tools exist for TESTING apps: launch the app under test via the
-  shell tools, find it with list_windows, then drive and verify its UI.
-  Do not move the user's mouse or type into windows outside the task.
-- These move the USER'S REAL mouse and keyboard. For an app running
-  inside the Windows Sandbox they are forbidden — the sandbox has its
-  own input session; drive the sandbox GUI via the windows-mcp MCP
-  server instead (the sandbox section covers how). Host input here is
-  only for apps running on the host itself.
-- Prefer shell/file tools for anything reachable that way; computer use
-  is for GUI behavior you must observe or exercise.
-- Structured first, pixels second: read_ui_tree gives exact element
-  names, values and center coordinates — prefer it for locating
-  controls and verifying state; fall back to screenshots when the tree
-  is empty or useless.
-- COORDINATE CONTRACT: pixel coordinates from a screenshot are
-  MONITOR-LOCAL — pass them to mouse tools with that monitor number,
-  never converted by hand. Screenshots carry labeled coordinate
-  rulers: click values read off a ruler, never visually estimated
-  positions.
-- CORRECTIONS come from measurement: after a miss, use the observe
-  crop or a region screenshot to measure the delta and adjust once.
-  Re-guessing from the full screen, or repeating the same coordinates,
-  is a failure pattern, not persistence.
-- Honor what tool results tell you: ok:false notes and warnings are
-  instructions. If a result says "user-activity pause", the user is at
-  the machine — wait a few seconds and retry when idle.
-- VERIFY outcomes against a baseline: state claims need before/after
-  evidence, weak indicators are hints rather than conclusions, and two
-  checks that don't settle it mean report what you know and ask.
-  Prefer state-independent actions over toggles, and never toggle
-  state you haven't verified.
-- Be decisive: most desktop requests are 2-4 actions (find, focus,
-  act, verify). When a request is done, say so; when it can't be
-  completed, say that instead of wandering.
-- mcp_* tools come from connected tool servers. When one matches the
-  task, prefer it — structured tool calls beat GUI automation every
-  time; fall back to the desktop tools only for what no server covers.
-- Screenshot only when the task requires seeing the screen — never to
-  inspect the user's other work. Screenshots go to the model provider.
-- {computer_mod.panic_notice()}"""
-
-
 def _say_emissions_enabled() -> bool:
     """#207: voice.say_emissions gates spoken-briefing GENERATION (prompt
     section + `say` events). Absent key reads enabled — no migration."""
@@ -493,31 +441,12 @@ def _default_system_prompt(workspace: str = "") -> str:
         windows = os.name == "nt"
         env = _local_env_line()
     tools = ["bash (shell commands)"]
-    computer_section = ""
     sandbox_section = ""
     if windows:
         tools.append("powershell (Windows PowerShell)")
         if host is None:
-            # Computer use always drives THIS machine (never forwarded to a
-            # remote host), so the section only appears without a host.
-            # Issue #140: never advertise `screenshot` when the Settings
-            # toggle disallows it — the model isn't invited to call a tool
-            # it doesn't have.
-            _cu_tools = [
-                "list_windows", "focus_window",
-                "read_ui_tree (structured UI elements of a window — prefer "
-                "this over screenshots for locating controls)",
-                "mouse_move", "mouse_click", "mouse_drag", "mouse_scroll",
-                "type_text", "press_key", "wait",
-            ]
-            from backend.agent.tools import screenshot_allowed
-
-            if screenshot_allowed():
-                _cu_tools.insert(0, "screenshot")
-            tools += _cu_tools
-            computer_section = _computer_use_prompt()
-            # Same rule: the sandbox integration drives THIS machine's
-            # disposable VMs, so it's only offered in local sessions.
+            # The sandbox integration drives THIS machine's disposable VMs,
+            # so it's only offered in local sessions.
             from backend.agent import sandbox as sandbox_mod
 
             tools += [
@@ -646,8 +575,6 @@ Interview the user (ask_user tool):
 - If a safety boundary blocks the requested outcome, explain the blocker,
   what remains unchanged, and safe options before asking how to proceed."""
 
-    if computer_section:
-        prompt += computer_section
     if sandbox_section:
         # #173: append with the standard separator — sandbox.prompt_section()
         # opens with a markdown H1, which would glue mid-line otherwise.
@@ -1588,8 +1515,8 @@ async def load_history(
 
 
 # Providers cap vision inputs (and price every one of them): a long
-# computer-use session would otherwise replay dozens of full screenshots
-# on every turn. Keep the most recent KEEP_RECENT_IMAGES images intact;
+# image-heavy session would otherwise replay dozens of full images on
+# every turn. Keep the most recent KEEP_RECENT_IMAGES images intact;
 # older ones become a text placeholder (the tool result's text survives).
 KEEP_RECENT_IMAGES = 6
 
@@ -1608,7 +1535,7 @@ def _prune_old_images(messages: list, keep: int = KEEP_RECENT_IMAGES) -> list:
                 if seen > keep:
                     content[i] = {
                         "type": "text",
-                        "text": "[older screenshot pruned from context]",
+                        "text": "[older image pruned from context]",
                     }
         # a parts-list whose images were all pruned still has its text part
         if not has_image and len(content) == 1 and isinstance(content[0], dict):

@@ -149,64 +149,9 @@
       "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
     },
     {
-      "name": "read_ui_tree",
-      "bytes": 856,
-      "sha256": "732e8a3dacc3dbb222a489236a1a0b5822942619c163e35c7ad0de94383d7a63"
-    },
-    {
-      "name": "screenshot",
-      "bytes": 1546,
-      "sha256": "02dc4208555de81340fad4119c64805fca6469885a20df9a3fe4139dc981f2da"
-    },
-    {
-      "name": "list_windows",
-      "bytes": 276,
-      "sha256": "40e3209003eed2e6eb301be397bdc1bf43dde14979c618da8c0bdadd918b4a7f"
-    },
-    {
-      "name": "focus_window",
-      "bytes": 600,
-      "sha256": "62de3aa6da4eb94a488e0eadf8772728f825b75adc2b57136a13c8f807bca699"
-    },
-    {
-      "name": "mouse_move",
-      "bytes": 1166,
-      "sha256": "7ac7a3e4cd782d98988c9bd4faab0c8f3a8a7a3fa9d5201951e3b3d7cea6da55"
-    },
-    {
-      "name": "mouse_click",
-      "bytes": 1501,
-      "sha256": "9f7b162cf4115e8546d102d13204c47960769cc54ef062f5424064e30fc2d171"
-    },
-    {
-      "name": "mouse_drag",
-      "bytes": 1529,
-      "sha256": "90568aeea9a98db7dd8eaee8e75e87aff718c03eb25b40ac3b7ef1c3f11844c1"
-    },
-    {
-      "name": "mouse_scroll",
-      "bytes": 1109,
-      "sha256": "8b55d6899b4c142e22be4c53e39573b3e83da0b85994836d518efa14a5e58f92"
-    },
-    {
-      "name": "type_text",
-      "bytes": 732,
-      "sha256": "0cffa3ff9cba02e764003bfcb904a37f3e8741056dfe40772c29d5fe9519d111"
-    },
-    {
-      "name": "press_key",
-      "bytes": 823,
-      "sha256": "a73f4c4823ab95aa8a368ea2efd60a24c4b7e7a1ee6aca46221c013cbb1e26c7"
-    },
-    {
-      "name": "wait",
-      "bytes": 242,
-      "sha256": "2d4a4775fc48a564708c6c45596b6e233ea391b75ee981d6f6be60c3eec47b0c"
-    },
-    {
       "name": "sandbox_test",
-      "bytes": 817,
-      "sha256": "f19cb2597d3659949da951b83fa0c993ea9024369bbc07540afb56c54034b9b1"
+      "bytes": 774,
+      "sha256": "ed2202bf0216711c6b9302c6a68e4194c0c9898dbb3a5ebbf22d527674bf8033"
     },
     {
       "name": "sandbox_run",
