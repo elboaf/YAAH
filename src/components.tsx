@@ -8684,7 +8684,10 @@ function DraftDestinationCard() {
     setGitLoading(false)
     setGitBusy(false)
     setGitError(null)
-    if (!dest || dest.startsWith('remote:')) return
+    // #335 (selector parity): remote destinations read the HOST's
+    // branches through the gateway — the picker is live for remote
+    // drafts; offline hosts answer empty and the chip stays hidden.
+    if (!dest) return
     getWorkspaceGitBranches(dest)
       .then((result) => {
         if (!cancelled) {
@@ -8839,7 +8842,10 @@ function DraftDestinationCard() {
             <option key={w.path} value={w.path!}>{w.owner_id ? `${devices.find((d) => d.host_id === w.owner_id)?.name ?? 'Device'} · ${w.label}` : w.label}</option>
           ))}
         </select>
-        {gitBranch && !parseNsWorkspace(dest) && (
+        {/* #335: live for remote destinations too — the branch read is
+            the host's, through the gateway; an unreachable host answers
+            empty and this chip simply does not render. */}
+        {gitBranch && (
           <div className="relative shrink-0">
             <button
               type="button"

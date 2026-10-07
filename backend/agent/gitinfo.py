@@ -145,7 +145,17 @@ async def head_branch(root: Path | str) -> str | None:
 
     `rev-parse --abbrev-ref HEAD` needs HEAD to resolve; `branch
     --show-current` just reads the symref git records for exactly the
-    unborn state (and returns empty for a detached HEAD: no name)."""
+    unborn state (and returns empty for a detached HEAD: no name).
+
+    #335: remote workspaces ask the host through the gateway (same
+    answer, one hop); local keeps the direct spawn."""
+    root = Path(root)
+    ws = str(root)
+    if parse_ns(ws) is not None:
+        res = await gitexec.run_git(ws, "branch", "--show-current")
+        if res is None or res[0] != 0:
+            return None
+        return res[1] or None
     rc, out = await _run_git(
         Path(root), "branch", "--show-current", merge_stderr=False
     )
@@ -481,20 +491,38 @@ async def list_local_branches(root: Path | str) -> list[str]:
     #302: TTL-cached — the chip's staleness read rides this list every
     ~2s poll, and a per-poll spawn would break the git-branch endpoint's
     cheap-by-design contract. Callers that must see fresh state after a
-    branch write go through invalidate_git_caches, which drops it."""
+    branch write go through invalidate_git_caches, which drops it.
+
+    #335: remote workspaces ask the host through the gateway. The
+    cross-dialect corpus forbids `--format=%(refname:short)` (parens,
+    percent), so the remote arm composes plain `git branch` and parses
+    the listing — exact, because a refname can never hold a space or a
+    `*` (git refuses both), so the two-column listing strips without
+    ambiguity. The local arm keeps the format string it has always
+    used; both share the cache, the unborn fallback, and the
+    unreachable-means-empty (never cached) rule."""
     root = Path(root)
     key = str(root)
     now = time.monotonic()
     cached = _branch_list_cache.get(key)
     if cached and now - cached[0] < _BRANCH_LIST_TTL:
         return cached[1]
-    res = await gitexec.run_git(root, "branch", "--format=%(refname:short)")
-    if res is None:
-        return []
-    rc, out = res
-    if rc != 0:
-        return []
-    branches = [line.strip() for line in out.splitlines() if line.strip()]
+    if parse_ns(key) is not None:
+        res = await gitexec.run_git(key, "branch")
+        if res is None:
+            return []  # host unreachable: absence, not an empty repo
+        rc, out = res
+        branches = _plain_branch_names(out) if rc == 0 else []
+    else:
+        res = await gitexec.run_git(root, "branch", "--format=%(refname:short)")
+        if res is None:
+            return []
+        rc, out = res
+        branches = (
+            [line.strip() for line in out.splitlines() if line.strip()]
+            if rc == 0
+            else []
+        )
     if not branches:
         # #331: an unborn HEAD lists no branches, but the repo does have
         # one - the symref name HEAD points at. Report it so the #314
@@ -504,6 +532,30 @@ async def list_local_branches(root: Path | str) -> list[str]:
             branches = [unborn]
     _branch_list_cache[key] = (now, branches)
     return branches
+
+
+def _plain_branch_names(out: str) -> list[str]:
+    """Branch names from plain `git branch`'s listing (#335). The current
+    branch is marked `* `; a marker line whose name starts with `(` is
+    git's detached-HEAD/unborn annotation, not a ref, and is dropped —
+    a real branch name can never begin with a parenthesis-and-space
+    form here because git refuses `(` after the marker only for its own
+    synthetic entries."""
+    names: list[str] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("* "):
+            name = line[2:].strip()
+            if name.startswith("("):
+                continue
+            if name:
+                names.append(name)
+        else:
+            name = line.strip()
+            if name:
+                names.append(name)
+    return names
 
 
 def invalidate_git_caches(root: Path | str) -> None:

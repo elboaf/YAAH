@@ -517,15 +517,27 @@ async def api_workspace_git_branches(workspace: str = ""):
     """Current branch and local branch names for an unsaved draft workspace.
 
     Draft chats have no conversation id yet, so keep this read path keyed by
-    the destination path instead. Default and remote destinations have no
-    local checkout to inspect.
+    the destination path instead. #335: remote destinations read the
+    HOST's branches through the gateway (the draft card's picker is live
+    for remote chats); offline hosts give the explicit empty answer.
     """
+    from backend.agent.gitinfo import current_git_branch, list_local_branches
+    from backend.agent.remote import parse_ns
+    from backend.agent.tools import workspace_root
+
     workspace = workspace.strip()
-    if not workspace or workspace.startswith("remote:"):
+    if not workspace:
         return {"branch": None, "branches": []}
 
-    from backend.agent.gitinfo import current_git_branch, list_local_branches
-    from backend.agent.tools import workspace_root
+    # #335: remote drafts read the HOST's branches through the gateway;
+    # offline hosts give the explicit empty answer (same as the chat
+    # endpoints — absence of data, never fabricated names).
+    if parse_ns(workspace) is not None:
+        branch = await current_git_branch(workspace)
+        branches = await list_local_branches(workspace)
+        if not branches:
+            return {"branch": None, "branches": []}
+        return {"branch": branch, "branches": branches}
 
     try:
         root = workspace_root(workspace)
@@ -577,11 +589,22 @@ async def api_conversation_branch_select(conversation_id: int, body: BranchSelec
     if branch.startswith("-"):
         return {"ok": False, "error": "checkout target must be a local branch name"}
 
-    # Must be a local branch of the conversation's workspace (same check the
-    # checkout endpoints run). Remote:/non-repo workspaces have no branch
-    # list; the chip is hidden there, so refusal is defense-in-depth.
     ws = conv.get("workspace") or ""
-    if not ws.strip() or ws.startswith("remote:"):
+    # #335 (selector parity): remote chats flip for real — the same
+    # dirty-refusing checkout inside the chat's own worktree that the
+    # agent tool performs, through the gateway. The pin is stored only
+    # when the flip (or the branch creation) succeeded.
+    from backend.agent.remote import parse_ns
+
+    if parse_ns(ws) is not None:
+        from backend.agent.tools import _remote_selector_flip
+
+        # The endpoint has no create flag: a flip to a branch the host
+        # does not have is refused, exactly like the local arm.
+        return await _remote_selector_flip(
+            ws, conversation_id, branch, create=False
+        )
+    if not ws.strip():
         return {"ok": False, "error": "no local git workspace"}
     try:
         root = workspace_root(ws)
@@ -635,12 +658,31 @@ async def api_conversation_git_branch(conversation_id: int):
                 # repo", not "the branch was deleted".
                 if is_git_repo(root):
                     stale = stored not in await list_local_branches(root)
+        elif ws.strip():
+            # #335: the staleness check reads the HOST's branch list
+            # through the gateway. An unreachable host is not "the branch
+            # was deleted" — the empty list there means cannot-know, the
+            # same reading the non-repo guard gives locally.
+            from backend.agent.gitinfo import list_local_branches
+
+            branches = await list_local_branches(ws)
+            stale = bool(branches) and stored not in branches
         return {"branch": stored, "pin_origin": reported_origin, "stale": stale}
     from backend.agent.gitinfo import current_git_branch
     from backend.agent.tools import workspace_root
 
+    from backend.agent.remote import parse_ns
+
     ws = conv.get("workspace") or ""
-    if not ws.strip() or ws.startswith("remote:"):
+    # #335: with no pin, remote chats report the host's checked-out
+    # branch through the gateway (offline -> None, the offline posture).
+    if parse_ns(ws) is not None:
+        return {
+            "branch": await current_git_branch(ws),
+            "pin_origin": None,
+            "stale": False,
+        }
+    if not ws.strip():
         return {"branch": None, "pin_origin": None, "stale": False}
     try:
         root = workspace_root(ws)
@@ -713,8 +755,15 @@ async def api_conversation_git_branches(conversation_id: int):
     from backend.agent.gitinfo import list_local_branches
     from backend.agent.tools import workspace_root
 
+    from backend.agent.remote import parse_ns
+
     ws = conv.get("workspace") or ""
-    if not ws.strip() or ws.startswith("remote:"):
+    # #335: the chip's dropdown lists the HOST's branches through the
+    # gateway; offline renders the same explicit empty answer the git-info
+    # strip already shows.
+    if parse_ns(ws) is not None:
+        return {"branches": await list_local_branches(ws)}
+    if not ws.strip():
         return {"branches": []}
     try:
         root = workspace_root(ws)

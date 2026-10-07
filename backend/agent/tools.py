@@ -451,6 +451,108 @@ BRANCH_SELECT_SCHEMA = {
 }
 
 
+async def _remote_selector_flip(
+    ws: str, conversation_id: int, branch: str, create: bool = True
+) -> dict:
+    """The remote twin of the selector flip (#335, spec #332): one arm
+    serving both the agent tool and the HTTP endpoint, so they cannot
+    drift. Same contract as the local flow, hop for hop over the #333
+    gateway:
+
+    - empty/option-like names refused (mirroring the local guards);
+    - the branch must exist on the host, or be created from the chat's
+      current pin (`create`, default true) — never from the primary's
+      HEAD;
+    - a dirty chat worktree refuses the flip (the ADR-0010 guard),
+      checked BEFORE anything moves;
+    - the flip is a REAL checkout inside the chat's own worktree on the
+      host (#334's tree, materialized when it does not exist yet);
+    - the explicit pin is stored only after the flip succeeded.
+    """
+    branch = (branch or "").strip()
+    if not branch or branch.startswith("-"):
+        return {"ok": False, "error": "branch must be a local branch name"}
+
+    from backend.agent import gitexec, gitinfo, wt_remote
+    from backend.db import database as db
+
+    # The branch list rides the raw gateway answer, not the collapsing
+    # helper: None (host unreachable) must surface as unreachability,
+    # never read as "the branch list is empty" (the distinguishability
+    # contract — absence of contact is not absence of branches).
+    listing = await wt_remote._run(ws, "branch")
+    if listing is None:
+        return {"ok": False, "error": "host unreachable"}
+    rc_l, out_l = listing
+    host_branches = gitinfo._plain_branch_names(out_l) if rc_l == 0 else []
+    exists = branch in host_branches
+    created = not exists
+    if not exists and not create:
+        return {"ok": False, "error": f"not a local branch: {branch}"}
+    if not exists:
+        # Server-enforced start point: derived from the chat's own pin
+        # (never the primary's HEAD — the amendment's start-point rule),
+        # over the gateway: one `git branch <new> <start>` hop.
+        conv = await db.get_conversation(conversation_id)
+        start = str(conv.get("selected_branch") or "").strip() if conv else ""
+        if start:
+            res = await gitexec.run_git(ws, "branch", branch, start)
+            if res is None or res[0] != 0:
+                return {
+                    "ok": False,
+                    "error": (res[1] if res else "").strip()
+                    or "branch creation failed",
+                }
+
+    # Dirty-flip guard FIRST (ADR-0010): an existing chat tree that
+    # carries uncommitted changes refuses before anything moves. The
+    # canonical existence probe is the worktree list (what wt_remote
+    # itself uses): a tree not listed does not exist, and a missing or
+    # offline answer falls through to ensure_chat_worktree, which
+    # reports the explicit failure.
+    rel = wt_remote.chat_worktree_rel(conversation_id)
+    wl = await wt_remote._run(ws, "worktree", "list", "--porcelain")
+    if wl is not None and wl[0] == 0:
+        listed = any(
+            p.replace("\\", "/").endswith(f"/{rel}")
+            for p in wt_remote._worktree_paths(wl[1])
+        )
+        if listed:
+            status = await wt_remote._run(
+                ws, "-C", rel, "status", "--porcelain"
+            )
+            if status is None:
+                return {"ok": False, "error": "host unreachable"}
+            if status[0] != 0 or (status[1] or "").strip():
+                return {
+                    "ok": False,
+                    "error": (
+                        "this chat's worktree has uncommitted changes - "
+                        "commit or discard before switching branches"
+                    ),
+                }
+
+    # The flip itself: materialization creates the tree AT the branch
+    # (first flip before any run), an existing tree flips in place —
+    # wt_remote's flip is the same checkout the local flow performs.
+    mat = await wt_remote.ensure_chat_worktree(ws, conversation_id, branch)
+    if mat.get("path") is None:
+        return {"ok": False, "error": mat.get("error") or "worktree flip failed"}
+
+    # #302: a branch_select pick is by definition an explicit pick —
+    # stored only after the flip succeeded, exactly like local.
+    await db.update_conversation(
+        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
+    )
+    gitinfo.invalidate_git_caches(ws)
+    return {
+        "ok": True,
+        "selected_branch": branch,
+        "created": created,
+        "pin_origin": "explicit",
+    }
+
+
 async def branch_select(
     workspace: str = "",
     branch: str = "",
@@ -475,8 +577,17 @@ async def branch_select(
     if conv is None:
         return {"ok": False, "error": "conversation not found"}
     ws = (conv.get("workspace") or workspace or "").strip()
-    if not ws or ws.startswith("remote:"):
+    if not ws:
         return {"ok": False, "error": "no local git workspace"}
+    from backend.agent.remote import parse_ns
+
+    # #335 (selector parity): remote chats flip for real — the same
+    # dirty-refusing checkout inside the chat's own worktree, through
+    # the gateway. One arm, so the endpoint and the tool cannot drift.
+    if parse_ns(ws) is not None:
+        return await _remote_selector_flip(
+            ws, conversation_id, branch, create=create
+        )
     try:
         root = workspace_root(ws)
     except ValueError as e:

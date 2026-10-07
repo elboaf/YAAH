@@ -709,13 +709,28 @@ async def _pin_from_workspace(workspace: str | None) -> tuple[str, str] | None:
     pin — remote:/empty workspaces, non-repos, and a detached HEAD (which
     reports a short SHA: a pin born stale; local branch names only)."""
     ws = (workspace or "").strip()
-    if not ws or ws.startswith("remote:"):
+    if not ws:
         return None
     from backend.agent.gitinfo import (
         current_git_branch,
+        head_branch,
         is_git_repo,
         list_local_branches,
     )
+    from backend.agent.remote import parse_ns
+
+    # #335 (selector parity): a remote workspace pins the HOST's
+    # then-current branch, read through the gateway — the local rule,
+    # remote twin. Detached HEAD reports a short SHA and pins nothing
+    # (same "pin born stale" rule as local); an unreachable host pins
+    # nothing here so creation never blocks on the channel — the
+    # lazy-pin-on-first-read path covers it when the host is back.
+    if parse_ns(ws) is not None:
+        branch = await current_git_branch(ws) or await head_branch(ws)
+        if branch and branch in await list_local_branches(ws):
+            return branch, "inherited"
+        return None
+
     from backend.agent.tools import workspace_root
 
     try:
