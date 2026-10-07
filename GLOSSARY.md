@@ -17,12 +17,24 @@ _Avoid_: main tree, shared tree, "the checkout" unqualified
 The per-chat git worktree a chat's runs work in, materialized on first
 write at the chat's selected branch. Selector flips and landing merges
 happen inside it, so conflicts are that chat's private problem.
+For a chat aimed at a remote workspace, the worktree
+materializes on the remote host — same lifecycle, client-driven
+(#305).
 Retired when its work lands and the tree is clean — a worktree exists
 only while its work is in flight; branches are never held open by
 finished work. Trees of dead chats retire the same way past an age
 threshold. See ADR-0010 (supersedes ADR-0008; land-means-clean
 lifecycle per #329).
 _Avoid_: session worktree, `agent/*` branch
+
+**Remote workspace**:
+A workspace whose tree lives on another host — a second YAAH instance
+reached through its exec channel (`remote:<host>:<path>`). Everything
+about the chat is local except the tree: workspace tools execute
+there, and the chat's worktree materializes there too (ADR-0010,
+#305).
+_Avoid_: treating it as metadata-only; assuming the repo exists on the
+client; hiding features instead of stating where they run
 
 **Branch selector**:
 The per-chat stored value naming the branch a chat's work lands on —
@@ -33,7 +45,7 @@ _explicit_ (a user pick — destination card, chip, or the branch_select
 tool) or _inherited_ (the workspace's branch at creation; also what
 legacy NULL rows lazily pin as on first read). Picking the inherited
 branch from the chip adopts it into an explicit pick. A pin whose
-branch no longer exists locally is **stale** — surfaced, never silently
+branch no longer exists in the workspace's repository is **stale** — surfaced, never silently
 re-created. Flipping it checks out inside
 the chat's own worktree and refuses while that worktree is dirty.
 Agents update it via a tool on user request; a switch request to an

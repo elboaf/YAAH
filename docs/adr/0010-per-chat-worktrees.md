@@ -14,6 +14,9 @@ amendment section below.
 Amended 2026-10-06: land-means-clean lifecycle (#329) — see the
 amendment section below.
 
+Amended 2026-10-06: remote parity (#305) — see the
+amendment section below.
+
 ## Context
 
 ADR-0008 removed all worktree isolation because concurrent chats on one
@@ -108,6 +111,8 @@ untouchable by agents by construction, not by prompt discipline.
 - **Remote workspaces stay out of scope v1** — no chat worktrees on
   `remote:<host>:<path>`; the gap is recorded here, consistent with the
   existing remote skips in AGENTS.md injection and the git endpoints.
+  _Superseded by the 2026-10-06 remote parity amendment (#305): see
+  the amendment section below._
 - **Prompt graduation.** The AGENTS.md working-tree section shrinks to
   project-specific notes; the run SOP (scratch worktree, commit, land on
   the selected branch, clean up) graduates into the harness system
@@ -170,6 +175,8 @@ Accepted losses:
   into a shared tree is the serialization trap this ADR exists to avoid.
 - **Remote chats keep today's exposure** until remote worktree parity is
   built.
+  _Superseded by the 2026-10-06 remote parity amendment (#305): parity
+  is built — see the amendment section below._
 
 Restored from ADR-0003's era, deliberately narrower: worktrees return,
 but the placement classifier, merge mutex, dirty-overlap veto,
@@ -307,3 +314,50 @@ Decisions:
 - **The age threshold stays as backstop** for trees the run-end path
   missed (a crashed run, a chat deleted mid-run) — not as the primary
   lifecycle.
+
+## Amendment 2026-10-06: remote parity — client-driven worktrees on the host (#305)
+
+The recorded gap ("remote workspaces stay out of scope v1") closes.
+Remote workspaces turned out fully executable: a remote host is a second
+YAAH instance and the client's workspace tools already run there through
+the exec channel — only the worktree layer never followed. Decisions:
+
+- **Parity goal, one non-goal.** A client-side chat aimed at a
+  `remote:<host>:<path>` workspace gets the full ADR-0010 machinery:
+  chat worktree, selector pins and flips, run SOP and AGENTS.md
+  injection, landing, git endpoints, UI. Device-local chats (the
+  remote-device turn runner) stay outside this amendment — an explicit
+  non-goal; that codepath is untouched.
+- **Client-driven git, zero host changes.** Every git operation ships as
+  a command through the existing remote exec channel; the host learns
+  nothing new and the protocol does not move. A structured git-ops
+  protocol extension was considered and rejected: it would need
+  capability advertising and coordinated host upgrades, while the bash
+  channel is as old as the protocol itself. Accepted loss: the client
+  parses git's text output over the wire, and each git operation pays a
+  channel round-trip.
+- **Host-placed, client-owned namespace.** The repo exists only on the
+  host, so remote chat worktrees materialize there, at the host repo's
+  `.scratch/remote/chat-<id>/` — one level inside the #321
+  git-invisible namespace and outside the host instance's sweeper glob
+  by construction. The host instance never sees these trees; the client
+  drives materialization, landed-clean retirement (#329), and dead-chat
+  sweeping through the channel. An offline host simply holds its trees
+  until the next online sweep — the existing offline-degraded posture,
+  not a new failure mode.
+- **Everything else replicates verbatim.** Pin at creation (draft pick
+  or the host workspace's branch; lazy pin when the host is unreachable
+  at creation), dirty-refusing selector flips on the host tree, run SOP
+  and branch notes and sub-agent injection, AGENTS.md fetched through
+  the channel size-capped like the local read, the landing contract with
+  the #322 degraded rule, the #329 residue protocol, the #320 run-branch
+  publish ban including the push refusal, and #312 run-branch naming.
+- **Scheduled landing modes go live for remote** (#278). The silent
+  "off" degradation of `resolve_landing` ends; dormant fixed/per-run
+  settings on existing remote agents begin steering their runs at the
+  next fire. Accepted behavior change, called out in the spec.
+- **UI parity.** The hidden chip and empty endpoints become live;
+  host-offline states surface explicitly instead of vanishing.
+
+Supersedes the "remote workspaces stay out of scope v1" decision clause
+and the "Remote chats keep today's exposure" accepted loss, both above.
