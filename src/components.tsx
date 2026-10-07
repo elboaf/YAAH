@@ -8257,6 +8257,19 @@ export function GitChipCluster({
 
   if (!info) return null
 
+  // #333: a remote host that cannot be reached is an explicit state —
+  // the chip says so instead of the whole cluster silently vanishing.
+  if (info.offline) {
+    return (
+      <span
+        className="inline-flex shrink-0 items-center gap-1 rounded   border-amber-700/60 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
+        title="The workspace's remote host is unreachable — git state unavailable"
+      >
+        host offline
+      </span>
+    )
+  }
+
   const lockMutations = streaming || busyCheckout
 
   // #286: the chip is the chat's branch — the stored selection when the
