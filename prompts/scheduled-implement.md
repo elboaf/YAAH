@@ -65,7 +65,7 @@ can't resolve, an unfilled human decision):
 - **Never force-push, never rewrite history, never `reset --hard`.**
 - **Never modify issues you didn't claim** except removing a stale state label
   from your own claim target.
-- **Never merge someone else's branch or touch concurrent agents' worktrees.**
+- **Never merge or rebase someone else's branch.**
 - If the working tree is dirty at start with changes you didn't make, stop and
   report instead of stashing or discarding them.
 - Prefer the smallest change that satisfies the ticket. No speculative

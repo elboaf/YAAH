@@ -114,15 +114,15 @@ Design accepted; implementation is phased. The multi-host routing foundation and
 
 - [x] Keep the model/provider and agent loop local for local-owned conversations with remote workspaces.
 - [x] Resolve workspace tool schemas and platform capabilities from the selected workspace owner, independently of the legacy active remote device.
-- [x] Keep local filesystem snapshots and local worktree isolation from operating on remote-namespaced paths.
+- [x] Keep local filesystem snapshots from operating on remote-namespaced paths.
 - [x] Add the owner-qualified transcript adapter and integrate it with the agent loop, run/cancel controls, durable pending commits, and streaming for remote-owned conversations. (Runner + API wiring + tests landed; see the 2026-09-30 status note below.)
 - [ ] Verify simultaneous local/remote turns, same-chat exclusion, cancellation, reconnect/pending-commit recovery, and no local workspace regression.
 
-**Implementation notes (best-effort slice):** The workspace-owner schema selection and remote-path safeguards are implemented and covered by backend tests. An isolated `backend/agent/remote_turn.py` prototype covers explicit owner resolution plus lease/snapshot/commit lifecycle, but it is not integrated into `main.py` or `loop.py` and must not be treated as enabling remote-owned turns. The existing loop still couples transcript persistence, cancellation/queues, worktrees, compaction, title, and usage updates to local integer IDs. Authenticated remote peers therefore remain rejected from local `/api/conversations/...` and `/api/agent/...` routes; this fail-closed boundary stays until the complete owner-qualified runner is implemented. Best-effort verification: backend suite 622 passed, 2 skipped. Real multi-device reconnect and pending-commit recovery remain unverified.
+**Implementation notes (best-effort slice):** The workspace-owner schema selection and remote-path safeguards are implemented and covered by backend tests. An isolated `backend/agent/remote_turn.py` prototype covers explicit owner resolution plus lease/snapshot/commit lifecycle, but it is not integrated into `main.py` or `loop.py` and must not be treated as enabling remote-owned turns. The existing loop still couples transcript persistence, cancellation/queues, compaction, title, and usage updates to local integer IDs. Authenticated remote peers therefore remain rejected from local `/api/conversations/...` and `/api/agent/...` routes; this fail-closed boundary stays until the complete owner-qualified runner is implemented. Best-effort verification: backend suite 622 passed, 2 skipped. Real multi-device reconnect and pending-commit recovery remain unverified.
 
 #### Phase 6 hand-off (owner-qualified runner, 2026-02-14 session)
 
-**Done in the worktree (`agent/324/...` branch):**
+**Done on the `agent/324/...` branch:**
 
 - `backend/agent/remote_runner.py` (new, drafted): owner-qualified turn runner.
   - `run_remote_turn(owner_id, conversation_id, user_text, workspace, model_override, effort_override)` async generator; yields the same NDJSON event shapes as `loop.run_agent` (`text`, `thinking`, `model_call`, `tool_start`, `tool_result`, `stopped`, `error`, `done`, plus new `remote_turn_started` / `remote_turn_committed` / `remote_commit_pending`) so the existing frontend stream consumer works.

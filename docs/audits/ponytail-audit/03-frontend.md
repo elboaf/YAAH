@@ -37,7 +37,7 @@
 - `delete:` `connectRemote` + `disconnectRemote` — legacy single-host endpoints, definition-only; the device API (add/connect/disconnect/removeRemoteDevice) is the only remote path. Zero callers incl. tests. [src/api.ts:1318-1325] (~8 lines)
 - `shrink:` the "glyph · name ×count" call-summary JSX duplicated verbatim in `TraceLine` and `QuestionAnchor`, including the identical `byName` counting loop — one shared `CallNameCounts({calls})`. [src/components.tsx:1040-1060,1881-1916] (~8 lines)
 - `shrink:` `pick(...keys)` arg-picker defined twice with different fallbacks (`''` vs `undefined`) — one module-level `pickArg(args, ...keys)`. [src/components.tsx:468-476,748-756] (~8 lines)
-- `yagni:` `GitInfo.worktree_hash`/`worktree_ahead` — populated by the backend but the only frontend reads are the same fields in commented-out status-strip JSX and its test fixture. Drop from the type (backend orphaning is the merge pass's note). [src/api.ts:177-182] (~6 lines)
+- `yagni:` The former `GitInfo.worktree_hash`/`worktree_ahead` yagni item is moot — the worktree trio was removed from GitInfo by ADR-0017. [src/api.ts:177-182] (~6 lines)
 - `shrink:` `PreviewModal` re-implements `DialogShell`'s scrim/backdrop/panel chrome — build on `DialogShell` with `panelClassName`. [src/components.tsx:2308-2316] (~6 lines)
 - `delete:` `fetchQueue` + `removeQueued` — definition-only; the queue pill works entirely from stream events + queueEchoByConv (`queueMessage`/`steerAgent` stay). [src/api.ts:730-734] (~5 lines)
 - `shrink:` `String((e as Error).message ?? e)` repeated 7× while `pttErrMsg` already exists as the shared helper — promote it to module scope and use it everywhere. [src/components.tsx:8774-11227] (~5 lines)
