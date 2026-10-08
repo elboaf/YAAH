@@ -352,7 +352,7 @@ async def test_spawn_batch_parallel_and_capped(fake_model, tmp_path):
 @pytest.mark.asyncio
 async def test_sub_agent_forwards_thinking_and_child_tool_progress(fake_model, tmp_path, monkeypatch):
     """Thinking and shell chunks are live events, not transcript content."""
-    async def fake_execute(name, args, workspace, on_chunk=None, conversation_id=None):
+    async def fake_execute(name, args, workspace, on_chunk=None, conversation_id=None, memory_workspace=None):
         assert name == "bash"
         if on_chunk:
             on_chunk("first chunk\n")
@@ -393,7 +393,7 @@ async def test_sub_agent_forwards_thinking_and_child_tool_progress(fake_model, t
 
 @pytest.mark.asyncio
 async def test_spawn_batch_keeps_spawn_and_child_tool_ids_separate(fake_model, tmp_path, monkeypatch):
-    async def fake_execute(name, args, workspace, on_chunk=None, conversation_id=None):
+    async def fake_execute(name, args, workspace, on_chunk=None, conversation_id=None, memory_workspace=None):
         if on_chunk:
             on_chunk("chunk")
         return {"content": "read"}
