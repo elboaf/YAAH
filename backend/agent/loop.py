@@ -35,8 +35,10 @@ from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
 from backend.agent.tools import (
     CONTEXT_TOOLS,
+    MEMORY_TOOLS,
     execute_tool,
     get_schemas,
+    memory_workspace_for,
     sandbox_enabled,
     tool_risk,
     workspace_root,
@@ -1697,6 +1699,7 @@ async def _execute_with_progress(
     cancel_ev: asyncio.Event | None = None,
     steer_ev: asyncio.Event | None = None,
     conversation_id: int | None = None,
+    memory_workspace: str | None = None,
 ):
     """Run a tool, yielding tool_progress events with live output while it
     runs (only the shell executors actually stream; everything else emits
@@ -1719,6 +1722,12 @@ async def _execute_with_progress(
         # injection itself lives in execute_tool (#303) so every path
         # (direct, gate re-exec, sub-agents) gets it — this kwarg feeds it.
         tool_kwargs["conversation_id"] = conversation_id
+    if name in MEMORY_TOOLS:
+        # #346: the canonical workspace root this turn resolved for
+        # memory (see memory_workspace in _run_agent_claimed). The
+        # injection itself lives in execute_tool — this kwarg feeds it
+        # on the direct AND the gate-approved re-exec path.
+        tool_kwargs["memory_workspace"] = memory_workspace
     task = asyncio.create_task(
         execute_tool(name, args, workspace, **tool_kwargs)
     )
@@ -2157,6 +2166,12 @@ async def _run_agent_claimed(
             worktree_error = str(_wt.get("error") or "unavailable")
 
     remote_workspace = remote_mod.parse_ns(turn_workspace) is not None
+    # #346: the canonical memory key resolves ONCE per turn, from the
+    # pre-rebind workspace - the same string the prompt's injected index
+    # reads below - so a memory tool call and the prompt block can never
+    # disagree about the store. Remote namespacing rides along (the
+    # remote:<host>:<path> string IS the key; memories stay client-local).
+    memory_workspace = memory_workspace_for(str(workspace))
     change_baseline = (
         None if remote_workspace else await file_changes.snapshot_workspace(turn_workspace)
     )
@@ -2808,6 +2823,9 @@ async def _run_agent_claimed(
                                     cancel_ev=cancel_ev,
                                     steer_ev=steer_ev,
                                     conversation_id=conversation_id,
+                                    # #346: the canonical memory key this
+                                    # turn resolved (pre-rebind workspace).
+                                    memory_workspace=memory_workspace,
                                 ):
                                     yield _ndjson(pev)
                                 result = box.get("result")
@@ -2859,6 +2877,9 @@ async def _run_agent_claimed(
                                         # the COMMON path for mutating tools
                                         # under ask mode).
                                         conversation_id=conversation_id,
+                                        # #346: and the same canonical
+                                        # memory key as the direct path.
+                                        memory_workspace=memory_workspace,
                                     ):
                                         yield _ndjson(pev)
                                     result = box.get("result")
@@ -3022,6 +3043,9 @@ async def _run_agent_claimed(
                         # #303: chat-scoped tools inside sub-agents resolve
                         # to this (the parent) conversation.
                         conversation_id=conversation_id,
+                        # #346: sub-agent memory calls resolve to the same
+                        # canonical root the parent's prompt block used.
+                        memory_workspace=memory_workspace,
                     )
                 )
 

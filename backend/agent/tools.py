@@ -668,15 +668,41 @@ async def get_help(workspace: str = "", tool_name: str = "") -> dict:
 
 TOOLS_SCHEMA += [GET_HELP_SCHEMA, BRANCH_SELECT_SCHEMA]
 
+# #346: tools keyed to the LOGICAL workspace. The run rebinds its tool
+# workspace to the chat worktree (<workspace>/.scratch/chat-<id>/), but
+# the prompt's injected memory index reads the pre-rebind workspace - so
+# without help, a save in a branch-pinned chat lands in a per-chat store
+# the prompt never reads. The funnel injects the canonical root the run
+# resolved, exactly like conversation_id above. One spelling, shared by
+# the funnel gate, the loop's kwarg feed and the sub-agent runner:
+MEMORY_TOOLS = ("memory_save", "memory_read", "memory_delete")
+
 # Issue #169: the persistent-memory tool names, used by the Settings toggle
 # (memory.enabled, default OFF) to filter the schema and gate execution.
-_MEMORY_TOOL_NAMES = {"memory_save", "memory_read", "memory_delete"}
+# Derived from MEMORY_TOOLS so the two can never drift.
+_MEMORY_TOOL_NAMES = set(MEMORY_TOOLS)
 
 # #303: tools whose execution is scoped to the calling chat. The harness
 # injects conversation_id at the single dispatch funnel (execute_tool);
 # the model never passes it, and the executor signatures take it
 # optionally so direct calls (tests, other harness code) still work.
 CONTEXT_TOOLS = ("search_conversation_history", "branch_select")
+
+
+def memory_workspace_for(workspace: str | None) -> str | None:
+    """The canonical memory key input for `workspace`: the workspace
+    string itself. Non-empty local paths and remote namespaces pass
+    through untouched (remote keeps its raw ``remote:<host>:<path>``
+    form - memories stay client-local by design). Blank/Default (`''`
+    or `'.',` the home pseudo-workspace) returns None: those can never
+    materialize a chat worktree (worktrees.chat_worktree_path refuses
+    them), so no rebind ever diverges them and the executor's fallback
+    to the call workspace is exact. Direct local callers (tests, other
+    harness code) resolve from the call workspace as they always have."""
+    ws = (workspace or "").strip()
+    if not ws or ws == ".":
+        return None
+    return ws
 
 TOOLS_SCHEMA += [
     {
@@ -1557,9 +1583,17 @@ async def _install_git_executor(workspace: str) -> dict:
 
 
 def _memory_executor(op: str):
-    async def _run(workspace: str, **arguments) -> dict:
-        from backend.agent import memory
+    """The memory_save / memory_read / memory_delete executor factory.
 
+    `memory_workspace` (#346) is the harness-injected canonical key (see
+    memory_workspace_for): present on every dispatched call, None for
+    direct local callers, which keep resolving from `workspace` as
+    before."""
+    from backend.agent import memory
+
+    async def _run(
+        workspace: str, memory_workspace: str | None = None, **arguments
+    ) -> dict:
         args = dict(arguments)
         if op == "save":
             # the schema's key is "type"; the module kwarg is mtype
@@ -1569,7 +1603,8 @@ def _memory_executor(op: str):
             "read": memory.read_memory,
             "delete": memory.delete_memory,
         }[op]
-        return fn(workspace, **args)
+        canonical = memory_workspace or workspace
+        return fn(canonical, **args)
 
     return _run
 
@@ -1688,6 +1723,7 @@ def _with_help_nudge(name: str, result: dict) -> dict:
 async def execute_tool(
     name: str, arguments: dict, workspace: str, on_chunk=None,
     conversation_id: int | None = None,
+    memory_workspace: str | None = None,
 ) -> dict:
     """Execute a tool by name with a dict of arguments. Never raises.
 
@@ -1695,6 +1731,12 @@ async def execute_tool(
     forwarded to the host (see backend/agent/remote.py); everything else
     runs locally. on_chunk, when given, is forwarded to the local shell
     executors for incremental output (remote/MCP tools ignore it).
+
+    memory_workspace (#346): the harness-resolved canonical memory key
+    for the calling turn (its pre-rebind workspace root). None derives
+    it from the call workspace — identical for non-pinned chats, and
+    the same shape direct callers (tests, other harness code) had
+    before the injection existed.
 
 """
     from backend.agent import remote as remote_mod
@@ -1740,6 +1782,20 @@ async def execute_tool(
         # pass its own conversation id, and every dispatch path (direct,
         # gate-approved re-exec, sub-agent) funnels through execute_tool.
         arguments = {**arguments, "conversation_id": conversation_id}
+    if name in _MEMORY_TOOL_NAMES:
+        # #346: one injection point for the canonical memory key — the
+        # run resolves it once per turn (pre-rebind) and every dispatch
+        # path (direct, gate re-exec, sub-agent) funnels through here,
+        # so a save and the prompt's injected index resolve the SAME
+        # store. The model never passes it; an explicitly handed-down
+        # key (sub-agent runner) wins over deriving from the call
+        # workspace, and without either the executor falls back to the
+        # call workspace (today's shape).
+        arguments = {
+            **arguments,
+            "memory_workspace": memory_workspace
+            or memory_workspace_for(workspace),
+        }
     try:
         if on_chunk is not None and name in ("bash", "powershell"):
             result = await fn(workspace=workspace, on_chunk=on_chunk, **arguments)

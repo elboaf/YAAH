@@ -193,6 +193,70 @@ async def test_executors_route_through_execute_tool():
     assert "error" not in r
 
 
+# ---- #346: the injected-root path --------------------------------------------
+
+@pytest.fixture()
+def _mem_on(tmp_path, monkeypatch):
+    """Memory enabled (#169 opt-in): the injected-root tests assert file
+    effects, so the toggle must be ON - the graceful disabled-info dict
+    would satisfy an `error not in result` check while saving nothing."""
+    monkeypatch.setenv("YAAH_CONFIG_PATH", str(tmp_path / "config.json"))
+    import importlib
+
+    from backend.agent import config
+
+    saved = dict(vars(config))
+    importlib.reload(config)
+    config.save_config({"memory": {"enabled": True}})
+    yield
+    monkeypatch.delenv("YAAH_CONFIG_PATH")
+    for key, value in saved.items():
+        setattr(config, key, value)
+
+
+@pytest.mark.asyncio
+async def test_save_resolves_injected_memory_workspace(_mem_on):
+    """A dispatched memory call carries the harness-injected canonical
+    root and resolves its store from THAT, not from the call workspace
+    (the post-rebind chat tree the run actually executes in). Exercised
+    through execute_tool, the funnel the injection lives behind (#346)."""
+    from backend.agent.tools import execute_tool
+
+    chat_tree = WS + "-chat"  # never created on disk; only hashed
+    r = await execute_tool("memory_save",
+                           {"name": "injected", "title": "Injected",
+                            "description": "d", "type": "project",
+                            "content": "body"},
+                           chat_tree, memory_workspace=WS)
+    assert "error" not in r
+    d = memory.memory_dir(WS)
+    assert (d / "injected.md").exists()
+    assert not (memory.memory_dir(chat_tree) / "injected.md").exists()
+    # Index maintenance follows the same canonical root.
+    assert "](injected.md)" in (d / "MEMORY.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_injects_canonical_root_for_memory_tools(_mem_on):
+    """The funnel injects the canonical key for every memory tool;
+    other tools keep resolving from their own workspace argument."""
+    from backend.agent.tools import execute_tool, memory_workspace_for
+
+    chat_tree = WS + "-chat2"
+    r = await execute_tool("memory_save",
+                           {"name": "funnel", "title": "F", "description": "d",
+                            "type": "project", "content": "c"},
+                           chat_tree, memory_workspace=WS)
+    assert "error" not in r
+    assert (memory.memory_dir(WS) / "funnel.md").exists()
+    # Remote namespaces ride through untouched (client-local memories).
+    assert memory_workspace_for("remote:h1:C:\\proj") == "remote:h1:C:\\proj"
+    # Default pseudo-workspace: None -> executor falls back to the call
+    # workspace (the never-rebinds shape, same store either way).
+    assert memory_workspace_for("") is None
+    assert memory_workspace_for(".") is None
+
+
 def test_schemas_registered_platform_neutral():
     from backend.agent.tools import SCHEMAS
 

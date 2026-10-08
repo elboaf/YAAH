@@ -31,7 +31,13 @@ from pathlib import Path
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
-from backend.agent.tools import execute_tool, get_schemas, workspace_root
+from backend.agent.tools import (
+    MEMORY_TOOLS,
+    execute_tool,
+    get_schemas,
+    memory_workspace_for,
+    workspace_root,
+)
 
 # ------------------------------------------------------------------ registry
 
@@ -329,13 +335,18 @@ def _sub_agent_system_prompt(
     workspace: str,
     branch_note: str = "",
     workspace_notes: str = "",
+    memory_workspace: str | None = None,
 ) -> str:
     """System prompt for a sub-agent run: its definition body plus the
     same environment grounding the parent gets (env line, workspace
     notes, skills index) so commands and paths are valid for the host.
     branch_note: the parent's #277 selector note, appended verbatim so
     delegation cannot silently drop branch context (ADR-0010
-    amendment, decision 5)."""
+    amendment, decision 5).
+    memory_workspace (#346): the parent turn's canonical memory key —
+    the pre-rebind workspace root — so the injected index reads the
+    same store the sub's memory tool calls resolve to. None falls back
+    to `workspace` (direct renders, tests)."""
     from backend.agent import remote as remote_mod
     from backend.agent.loop import (
         _agents_notes,
@@ -411,11 +422,15 @@ def _sub_agent_system_prompt(
     # into and empty for a fresh project (matching the parent).
     from backend.agent import memory as memory_mod
 
-    memory_names = {"memory_save", "memory_read", "memory_delete"}
     resolved_names = {s["function"]["name"] for s in resolved}
-    if memory_names & resolved_names:
+    if set(MEMORY_TOOLS) & resolved_names:
         try:
-            memory_block = memory_mod.index_for_prompt(workspace)
+            # #346: key the index to the canonical root the parent
+            # resolved (pre-rebind), matching what the sub's memory
+            # tool calls resolve to through the funnel injection.
+            memory_block = memory_mod.index_for_prompt(
+                memory_workspace or workspace
+            )
         except Exception:  # noqa: BLE001 — optional context never breaks a turn
             memory_block = ""
         if memory_block:
@@ -434,6 +449,7 @@ async def run_sub_agent(
     branch_note: str = "",
     conversation_id: int | None = None,
     workspace_notes: str = "",
+    memory_workspace: str | None = None,
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
@@ -449,6 +465,11 @@ async def run_sub_agent(
     # The sub-agent starts on the workspace it was handed.
     run_workspace = str(workspace)
 
+    # #346: the sub's memory calls resolve to the parent's canonical
+    # root (handed down pre-rebind) when present; funnel injection from
+    # the run workspace covers every other shape.
+    sub_memory_workspace = memory_workspace or memory_workspace_for(run_workspace)
+
     async def _exec(name: str, args: dict, tool_call_id: str = "") -> dict:
         def on_chunk(chunk: str) -> None:
             if on_event and chunk:
@@ -461,6 +482,10 @@ async def run_sub_agent(
                 # #303: chat-scoped tools (branch_select,
                 # search_conversation_history) need the calling chat's id.
                 conversation_id=conversation_id,
+                # #346: memory calls resolve to the parent turn's
+                # canonical root (handed down pre-rebind); the funnel
+                # ignores the kwarg for every other tool.
+                memory_workspace=sub_memory_workspace,
             )
         result = await execute(name, args, run_workspace)
         return result
@@ -471,6 +496,7 @@ async def run_sub_agent(
             "content": _sub_agent_system_prompt(
                 defn, workspace, branch_note=branch_note,
                 workspace_notes=workspace_notes,
+                memory_workspace=memory_workspace,
             ),
         },
         {"role": "user", "content": prompt},
@@ -883,6 +909,7 @@ async def spawn_batch(
     branch_note: str = "",
     conversation_id: int | None = None,
     workspace_notes: str = "",
+    memory_workspace: str | None = None,
 ) -> dict[str, dict]:
     """Run every spawn_agent call in one parent turn in parallel (capped
     by MAX_CONCURRENT via a semaphore). Returns {call_id: result}.
@@ -891,6 +918,10 @@ async def spawn_batch(
     bad agent_type or prompt returns a structured error result so the
     parent's turn survives. `gate` threads the access-mode gate (see
     run_sub_agent) into every sub-agent of the batch.
+    `memory_workspace` (#346) threads the parent turn's canonical memory
+    key (its pre-rebind workspace root) into every sub-agent, so a
+    sub's save/read resolves the same store the parent's prompt block
+    injected.
     """
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
@@ -965,6 +996,8 @@ async def spawn_batch(
                 # #303: chat-scoped tools resolve to the PARENT chat.
                 conversation_id=conversation_id,
                 workspace_notes=workspace_notes,
+                # #346: memory resolves to the parent's canonical root.
+                memory_workspace=memory_workspace,
             )
             if on_event:
                 on_event(
