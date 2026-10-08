@@ -333,16 +333,12 @@ def _resolve_tools(defn: AgentDef, workspace: str | None = None) -> list[dict]:
 def _sub_agent_system_prompt(
     defn: AgentDef,
     workspace: str,
-    branch_note: str = "",
     workspace_notes: str = "",
     memory_workspace: str | None = None,
 ) -> str:
     """System prompt for a sub-agent run: its definition body plus the
     same environment grounding the parent gets (env line, workspace
     notes, skills index) so commands and paths are valid for the host.
-    branch_note: the parent's #277 selector note, appended verbatim so
-    delegation cannot silently drop branch context (ADR-0010
-    amendment, decision 5).
     memory_workspace (#346): the parent turn's canonical memory key —
     the pre-rebind workspace root — so the injected index reads the
     same store the sub's memory tool calls resolve to. None falls back
@@ -351,7 +347,6 @@ def _sub_agent_system_prompt(
     from backend.agent.loop import (
         _agents_notes,
         _local_env_line,
-        _note_without_landing_ask,
     )
 
     # #188: ONE host resolution for the whole prompt — the env line, the
@@ -403,12 +398,6 @@ def _sub_agent_system_prompt(
     # #334: the notes arrive from the parent (which fetched them already —
     # remotely through the channel); the sync fallback covers direct calls.
     notes = workspace_notes if workspace_notes else _agents_notes(workspace)
-    # #349: the parent's note carries the landing-ask block, but
-    # sub-agents have no ask_user - strip it here, at the seam, so every
-    # spawn path inherits the rule. Branch context survives the strip.
-    if branch_note:
-        branch_note = _note_without_landing_ask(branch_note)
-        prompt += f"\n\n---\n\n{branch_note}"
     if notes:
         prompt += f"\n\n---\n\n{notes}"
     skill_index = skill_registry.index_for_prompt()
@@ -446,7 +435,6 @@ async def run_sub_agent(
     on_event=None,
     gate=None,
     run_label: str = "",
-    branch_note: str = "",
     conversation_id: int | None = None,
     workspace_notes: str = "",
     memory_workspace: str | None = None,
@@ -494,7 +482,7 @@ async def run_sub_agent(
         {
             "role": "system",
             "content": _sub_agent_system_prompt(
-                defn, workspace, branch_note=branch_note,
+                defn, workspace,
                 workspace_notes=workspace_notes,
                 memory_workspace=memory_workspace,
             ),
@@ -906,7 +894,6 @@ async def spawn_batch(
     cancel_ev: asyncio.Event,
     on_event=None,
     gate=None,
-    branch_note: str = "",
     conversation_id: int | None = None,
     workspace_notes: str = "",
     memory_workspace: str | None = None,
@@ -992,7 +979,6 @@ async def spawn_batch(
                 on_event=_forward if on_event else None,
                 gate=agent_gate,
                 run_label=call_id,
-                branch_note=branch_note,
                 # #303: chat-scoped tools resolve to the PARENT chat.
                 conversation_id=conversation_id,
                 workspace_notes=workspace_notes,

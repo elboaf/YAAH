@@ -477,13 +477,8 @@ async def test_legacy_pin_materializes_on_next_run(
         if c.startswith("git worktree add") and f"chat-{cid}" in c
     ]
     assert adds, f"legacy chat's worktree must materialize on its next run: {session.commands}"
-    assert f".scratch/chat-{cid}/run" in _fake_model["system"], (
-        "the run SOP must reach the prompt with the chat-tree-relative recipe"
-    )
-    assert "# Branch selector: feature" in _fake_model["system"]
-    assert f".scratch/remote/chat-{cid}" in _fake_model["system"], (
-        "the selector note must name the remote namespace geometry"
-    )
+    # #360 (ADR-0017): the run SOP and selector note no longer reach the
+    # prompt; the physical materialization asserts above still pin that.
     remote_ws = [
         c for c in session.tool_calls
         if c[0] == "bash" and str(c[2]).startswith("remote:")
@@ -497,9 +492,9 @@ async def test_legacy_pin_materializes_on_next_run(
 async def test_offline_materialization_degrades_the_run(
     _sessions, _quiet_notes, _fake_model, tmp_path,
 ):
-    """AC: materialization failure over the channel -> the run proceeds
-    under the universal degraded-mode rule (#322): the degraded note
-    states the failure, never crashes, never references AGENTS.md."""
+    """AC: materialization failure over the channel never crashes the
+    run (#360/ADR-0017: the degraded-note contract is gone; only the
+    no-crash behavior remains to pin)."""
     from backend.db.database import create_conversation, update_conversation
     from backend.agent import loop
 
@@ -512,13 +507,10 @@ async def test_offline_materialization_degrades_the_run(
     async for _ in loop.run_agent(cid, "go", ws):
         pass
 
-    system = _fake_model["system"]
-    assert "could not be materialized" in system
-    assert "host unreachable" in system or "unreachable" in system
-    # The universal rule stands alone (#322): no AGENTS.md reference.
-    assert "AGENTS.md" not in system.split("# Branch selector")[-1]
-    # The run still produced its answer — degraded, not dead.
-    assert True
+    # #360 (ADR-0017): the degraded-mode note no longer reaches the
+    # prompt; the physical contract left is that an offline host fails
+    # materialization without crashing the run.
+    assert _fake_model["system"], "the run still completed"
 
 
 @pytest.mark.asyncio

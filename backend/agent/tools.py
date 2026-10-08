@@ -425,13 +425,9 @@ BRANCH_SELECT_SCHEMA = {
     "function": {
         "name": "branch_select",
         "description": (
-            "Point this chat's branch selector at a branch, on the user's "
-            "request (ADR-0010/#277). Creates the branch first when it "
-            "does not exist, derived from the chat's currently selected "
-            "branch - never from the primary worktree's HEAD - then "
-            "records the selection. Refuses while the chat's worktree has "
-            "uncommitted changes: commit or discard first. Never checks "
-            "out or moves the primary worktree."
+            "Point this chat's work at a branch, on the user's request "
+            "(#359, ADR-0017 direction). Creates the branch first when it does not exist. "
+            "Git's own refusals surface as the error."
         ),
         "parameters": {
             "type": "object",

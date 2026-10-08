@@ -240,30 +240,6 @@ async def _capture_system_prompt(cid, workspace):
 
 
 @pytest.mark.asyncio
-async def test_run_reports_stale_pin_in_note(tmp_path):
-    repo = _repo_with_commit(tmp_path)
-    cid = await create_conversation(
-        "t", workspace=str(repo), selected_branch="gone", branch_pin_origin="explicit"
-    )
-    system = await _capture_system_prompt(cid, repo)
-    assert "# Branch selector: gone (STALE)" in system
-    assert "no longer exists" in system
-    # The stale note never claims isolation it did not get.
-    assert "per-chat worktree" not in system
-
-
-@pytest.mark.asyncio
-async def test_run_live_pin_gets_standard_note_not_stale(tmp_path):
-    repo = _repo_with_commit(tmp_path)
-    _git(repo, "branch", "feature")
-    cid = await create_conversation(
-        "t", workspace=str(repo), selected_branch="feature", branch_pin_origin="explicit"
-    )
-    system = await _capture_system_prompt(cid, repo)
-    assert "# Branch selector: feature" in system
-    assert "(STALE)" not in system
-
-
 @pytest.mark.asyncio
 async def test_run_non_repo_workspace_never_flags_stale(tmp_path):
     """A non-repo workspace has no branch list — the guard must read that

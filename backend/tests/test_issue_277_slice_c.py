@@ -69,8 +69,10 @@ def test_create_without_branch_pins_the_workspace_branch(client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_sub_agent_prompt_carries_branch_note(tmp_path, monkeypatch):
-    from backend.agent.subagents import _sub_agent_system_prompt, run_sub_agent
+async def test_sub_agent_prompt_carries_no_branch_note(tmp_path, monkeypatch):
+    """#360 (ADR-0017): the branch note is gone - the seam takes no
+    branch_note argument, and a sub-agent prompt carries none."""
+    from backend.agent.subagents import _sub_agent_system_prompt
     from backend.agent.subagents import get_agent_def, list_agents
 
     names = [d["name"] for d in list_agents()]
@@ -78,28 +80,8 @@ async def test_sub_agent_prompt_carries_branch_note(tmp_path, monkeypatch):
         pytest.skip("no agent definitions available")
     defn = get_agent_def(names[0])
     assert defn is not None
-    note = _sub_agent_system_prompt(
-        defn, str(tmp_path),
-        branch_note="# Branch selector: bigtest\n\ndetached variant",
-    )
-    assert "# Branch selector: bigtest" in note
-
-    # run_sub_agent threads the note into the prompt (never raises).
-    captured = {}
-
-    async def fake_chat(messages, tools=None, stream=True, model="", effort=""):
-        captured["system"] = messages[0]["content"]
-
-        async def _stream():
-            yield {"type": "content", "text": "ok"}
-            yield {"type": "finish"}
-        return _stream()
-
-    from backend.agent import subagents as sub_mod
-
-    monkeypatch.setattr(sub_mod.model_client, "chat", fake_chat)
-    result = await run_sub_agent(
-        defn, "do things", str(tmp_path), branch_note="# Branch selector: pin"
-    )
-    assert "# Branch selector: pin" in captured.get("system", "")
-    assert result["status"] == "completed"
+    with pytest.raises(TypeError):
+        _sub_agent_system_prompt(
+            defn, str(tmp_path),
+            branch_note="# Branch selector: bigtest",
+        )

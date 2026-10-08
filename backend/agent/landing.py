@@ -759,7 +759,26 @@ async def _land_locked(
     )
 
     # 2. scoped wip sweep
-    from backend.agent.loop import _wip_branch_name
+    # Frozen copy: the branch-naming helper lived in loop.py until
+    # #360 (ADR-0017 direction, spec #359) removed the SOP prompt machinery. landing.py is
+    # itself scheduled for deletion (#362); this copy keeps it green
+    # until then.
+    import re as _re
+
+    def _wip_branch_name(title, chat_id=None) -> str:
+        cid = (
+            str(chat_id).strip()
+            if chat_id is not None and str(chat_id).strip()
+            else "<id>"
+        )
+        slug = (
+            _re.sub(r"[^a-z0-9]+", "-", str(title or "").strip().lower())
+            .strip("-")[:40]
+            .rstrip("-")
+        )
+        if not slug or slug == "new-task":
+            return f"wip/chat-{cid}"
+        return f"wip/{slug}-{cid}"
 
     wip_branch = _wip_branch_name(title, chat_id)
     sweep_step, swept, untracked = await _wip_sweep(

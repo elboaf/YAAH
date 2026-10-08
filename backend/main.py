@@ -1787,7 +1787,11 @@ async def api_agents_add(body: AgentBody):
         raise HTTPException(status_code=400, detail="prompt is required")
     if body.approval_policy not in scheduler_mod.VALID_POLICIES:
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
-    if body.landing_mode not in scheduler_mod.VALID_LANDING_MODES:
+    # #360: frozen copy of the old scheduler constant. The landing columns
+    # are inert (resolve_landing is gone) and die with their columns in
+    # #365; validation lives here until then so scheduler.py stays clean.
+    # ADR-0017 is the direction; its record is issue #359 until it lands.
+    if body.landing_mode not in ("off", "fixed", "per-run"):
         raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
     if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
         raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
@@ -1880,7 +1884,11 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         raise HTTPException(status_code=404, detail="agent not found")
     if body.approval_policy not in scheduler_mod.VALID_POLICIES:
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
-    if body.landing_mode not in scheduler_mod.VALID_LANDING_MODES:
+    # #360: frozen copy of the old scheduler constant. The landing columns
+    # are inert (resolve_landing is gone) and die with their columns in
+    # #365; validation lives here until then so scheduler.py stays clean.
+    # ADR-0017 is the direction; its record is issue #359 until it lands.
+    if body.landing_mode not in ("off", "fixed", "per-run"):
         raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
     if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
         raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
