@@ -54,14 +54,30 @@ steps in order and any violation fails loudly in the report:
 
 Git I/O goes through the gitexec seam (``run_git``); merge/plumbing
 legs widen the read-poll timeout and the temp-index sweep rides a
-merged env (GIT_INDEX_FILE). This module covers the LOCAL safe-sync
-case only - target checked out in the primary worktree. Remote/gateway,
-tool wiring, and the fossil probe are follow-up tickets (#333/#356,
-#355).
+merged env (GIT_INDEX_FILE).
+
+Fossil probe (#355, ADR-0016 section 5): ``fossil_probe(primary) ->
+Verdict`` answers "is the primary's staged index live WIP or a landing
+fossil?" in one command. The index tree (``git write-tree``, read-only
+over the real index) is compared to the HEAD tree; when they differ,
+each differing blob is traced to the repo's refs (local branches -
+which include ``wip/`` and ``run/`` names - plus tags). All blobs
+reachable => ``fossil-candidate`` (the staged content is already
+committed somewhere: a landing leftover); any blob reachable from no
+ref => ``live-wip`` (content that exists only because someone typed it
+into the index: do NOT reset it away). The verdict is a serializable
+dict usable by any chat. One-command invocation: ``python -m
+backend.agent.landing <workspace>`` (prints the JSON verdict) - see
+``docs/agents/fossil-probe.md``.
+
+This module covers the LOCAL safe-sync case only - target checked out
+in the primary worktree. Remote/gateway and tool wiring are the
+follow-up ticket (#356).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -1037,3 +1053,240 @@ def _final_report(
             )
         )
     return report
+
+
+# --- fossil probe (ADR-0016 section 5, #355) --------------------------------
+
+
+def _verdict(v: str, workspace: str, detail: str, **extra) -> dict:
+    """One serializable Verdict dict (the report convention)."""
+    base = {"verdict": v, "workspace": workspace, "detail": detail}
+    base.update(extra)
+    return base
+
+
+# gitexec.run_git may return None (no executor could run git at all); the
+# probe maps that to an error verdict - data, never read as absence.
+async def _git_or_none(workspace: str, *args: str, timeout: float = 60.0):
+    return await gitexec.run_git(workspace, *args, timeout=timeout)
+
+
+def _reachable_refs(root: str, timeout: float) -> list[str] | None:
+    """The ref universe the probe traces blobs against: local branches
+    (which include wip/ and run/ names) plus tags. None => git failed.
+    Synchronous by design: a pure read that must not be awaited per-ref
+    (the async legs below stay on the gitexec seam)."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname)"],
+        cwd=root,
+        capture_output=True,
+        timeout=max(timeout, 5.0),
+        check=False,
+        creationflags=0x08000000 if os.name == "nt" else 0,
+    )
+    if proc.returncode != 0:
+        return None
+    return [
+        ln.strip()
+        for ln in proc.stdout.decode("utf-8", "replace").splitlines()
+        if ln.startswith(("refs/heads/", "refs/tags/"))
+    ]
+
+
+async def fossil_probe(workspace: str, *, timeout: float = 60.0) -> dict:
+    """One-command index-provenance answer for the primary's staged index
+    (ADR-0016 section 5, #355; the #353 nine-handoff diagnosis class).
+
+    READ-ONLY: ``write-tree`` hashes the real index without touching it.
+    Returns a serializable Verdict:
+
+    - ``clean``            - index tree == HEAD tree (nothing staged
+                             beyond HEAD)
+    - ``fossil-candidate`` - every differing blob lives in some local
+                             branch/tag: content already committed
+                             somewhere (evidence: blob -> containing
+                             refs) - a landing fossil shape
+    - ``live-wip``         - at least one differing blob reachable from
+                             NO ref: content typed only into the index;
+                             resetting it away would lose real work
+                             (evidence: the unreachable blobs)
+    - ``error``            - git failed (not a repo, channel down) -
+                             data, not absence; never read as ``clean``
+    """
+    rc, head_tree = await _git_or_none(
+        workspace, "rev-parse", "HEAD^{tree}", timeout=timeout
+    )
+    if rc != 0:
+        return _verdict(
+            "error", workspace, "HEAD tree resolve failed", evidence=_evidence(head_tree)
+        )
+    head_tree = head_tree.strip().splitlines()[0].strip()
+
+    rc, idx_tree = await _git_or_none(workspace, "write-tree", timeout=timeout)
+    if rc != 0:
+        return _verdict(
+            "error",
+            workspace,
+            "write-tree failed (unmerged index?)",
+            evidence=_evidence(idx_tree),
+        )
+    idx_tree = idx_tree.strip().splitlines()[0].strip()
+
+    if idx_tree == head_tree:
+        return _verdict(
+            "clean",
+            workspace,
+            "index tree equals HEAD tree - nothing staged beyond HEAD",
+            index_tree=idx_tree,
+        )
+
+    # Differing trees: enumerate changed blobs with diff-tree -r over the
+    # two tree oids. New blobs are DESTINATION-side (index tree) entries;
+    # a staged DELETION has no destination blob and is classified by tree
+    # membership below.
+    rc, dt = await _git_or_none(
+        workspace, "diff-tree", "-r", head_tree, idx_tree, timeout=timeout
+    )
+    if rc != 0:
+        return _verdict("error", workspace, "diff-tree failed", evidence=_evidence(dt))
+    # diff-tree A B diffs A -> B: the DESTINATION side (dst oid) is the
+    # index tree's content, the side the probe traces to refs.
+    new_blobs: list[dict] = []
+    hexdigits = set("0123456789abcdef")
+    # Two tree oids produce NO commit-id header line (unlike diff-tree
+    # over commits) - every line is a record.
+    for ln in (dt or "").splitlines():
+        ln = ln.rstrip("\r")
+        if "\t" not in ln:
+            continue
+        meta, path = ln.split("\t", 1)
+        parts = meta.split(" ")
+        # <mode_src> <mode_dst> <oid_src> <oid_dst> <status>; the meta
+        # side starts with a colon (':100644'), and a pure staged
+        # DELETION has dst mode 000000 and an all-zeros dst oid - not a
+        # traceable blob; it falls to the tree-membership check below.
+        if (
+            len(parts) == 5
+            and parts[1] not in ("0", "000000")
+            and len(parts[3]) == 40
+            and set(parts[3]) <= hexdigits
+            and set(parts[3]) != {"0"}
+            and parts[3] != parts[2]
+        ):
+            new_blobs.append({"oid": parts[3], "path": path})
+
+    refs = _reachable_refs(workspace, timeout)
+    if refs is None:
+        return _verdict(
+            "error",
+            workspace,
+            "for-each-ref failed",
+            index_tree=idx_tree,
+            head_tree=head_tree,
+        )
+
+    # Bounded trace: one rev-list --objects --all over the ref universe
+    # answers "reachable from any ref" in one round-trip; a per-ref walk
+    # then builds the blob -> containing-refs evidence.
+    rc, out = await _git_or_none(
+        workspace, "rev-list", "--objects", "--all", timeout=timeout
+    )
+    if rc != 0:
+        return _verdict(
+            "error",
+            workspace,
+            "rev-list failed",
+            index_tree=idx_tree,
+            head_tree=head_tree,
+        )
+    reachable = {
+        ln.split(" ", 1)[0].strip() for ln in (out or "").splitlines() if ln.strip()
+    }
+
+    blob_refs: dict[str, list[str]] = {}
+    for ref in refs:
+        rc, out = await _git_or_none(
+            workspace, "rev-list", "--objects", ref, timeout=timeout
+        )
+        if rc != 0:
+            continue
+        oids = {
+            ln.split(" ", 1)[0].strip() for ln in (out or "").splitlines() if ln.strip()
+        }
+        for b in new_blobs:
+            if b["oid"] in oids:
+                blob_refs.setdefault(b["oid"], []).append(ref)
+
+    orphans = [b for b in new_blobs if b["oid"] not in reachable]
+    if orphans:
+        return _verdict(
+            "live-wip",
+            workspace,
+            (
+                f"{len(orphans)} of {len(new_blobs)} differing blob(s) reachable "
+                "from no ref - the index holds content that exists nowhere "
+                "else; do NOT reset it away without saving"
+            ),
+            index_tree=idx_tree,
+            head_tree=head_tree,
+            unreachable_blobs=[b["path"] + " " + b["oid"] for b in orphans],
+        )
+    if new_blobs:
+        return _verdict(
+            "fossil-candidate",
+            workspace,
+            (
+                "all " + str(len(new_blobs)) + " differing blob(s) already committed "
+                "in refs - the staged content looks like a landing fossil, "
+                "not live WIP"
+            ),
+            index_tree=idx_tree,
+            head_tree=head_tree,
+            blob_evidence=[
+                b["path"] + " in " + ", ".join(blob_refs.get(b["oid"], [])[:5])
+                for b in new_blobs
+            ],
+        )
+    # Trees differ but no new-blob line parsed: a staged DELETION (the
+    # index tree is missing content HEAD has, and no destination blob
+    # exists to trace). The removal is a fossil only if some ref's tree
+    # equals the index tree exactly; otherwise it is uncommitted live WIP.
+    for ref in refs:
+        rc, ref_tree = await _git_or_none(
+            workspace, "rev-parse", ref + "^{tree}", timeout=timeout
+        )
+        if rc == 0 and ref_tree.strip() == idx_tree:
+            return _verdict(
+                "fossil-candidate",
+                workspace,
+                "staged removal's exact tree is committed on " + ref,
+                index_tree=idx_tree,
+                head_tree=head_tree,
+                blob_evidence=["(staged deletion) tree matches " + ref],
+            )
+    return _verdict(
+        "live-wip",
+        workspace,
+        (
+            "index tree differs from HEAD tree (a staged removal with no "
+            "committed counterpart anywhere) - do NOT reset it away"
+        ),
+        index_tree=idx_tree,
+        head_tree=head_tree,
+    )
+
+
+def _cli() -> int:
+    """The one-command invocation for agent chats (no git expertise):
+    ``python -m backend.agent.landing <workspace>`` - prints the JSON verdict."""
+    import sys
+
+    ws = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    print(json.dumps(asyncio.run(fossil_probe(ws)), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
