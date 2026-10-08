@@ -163,7 +163,11 @@ async def test_save_in_pinned_chat_lands_in_prompt_store(
         "memory_save in a branch-pinned chat wrote a per-chat store; "
         "it must resolve to the canonical workspace root (#346)"
     )
-    # The prompt's injected index reads exactly this store.
+    # Negative half of AC1: the per-chat store the old bug wrote to must
+    # NOT have been created.
+    chat_store = memory.memory_dir(str(repo / ".scratch" / f"chat-{cid}"))
+    assert not (chat_store / "prefers-dark-ui.md").exists()
+    # The prompt's injected index reads exactly the canonical store.
     assert "prefers-dark-ui" in memory.index_for_prompt(str(repo))
 
 
@@ -332,10 +336,12 @@ async def test_non_git_workspace_unchanged(fake_model, mem_cfg, tmp_path, monkey
 def test_remote_namespacing_not_collapsed(mem_cfg, tmp_path):
     """The canonical key is the LOGICAL workspace string: remote
     namespaces still hash their raw `remote:<host>:<path>` form so a
-    remote project's memories stay client-local (#346 constraint)."""
+    remote project's memories stay client-local (#346 constraint) - and
+    differently from ANY local path of the same spelling."""
     ns = "remote:h1:C:\\proj"
-    assert memory.project_key(ns) == memory.project_key(ns)
-    assert memory.project_key(ns) != memory.project_key("C:\\proj")
+    local = "C:\\proj"
+    assert memory.project_key(ns) != memory.project_key(local)
+    assert memory.memory_dir(ns) != memory.memory_dir(local)
     # ...and the injection resolves the SAME string for a remote workspace:
     from backend.agent.tools import memory_workspace_for
 

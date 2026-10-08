@@ -35,6 +35,7 @@ from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
 from backend.agent.tools import (
     CONTEXT_TOOLS,
+    MEMORY_TOOLS,
     execute_tool,
     get_schemas,
     memory_workspace_for,
@@ -1721,7 +1722,7 @@ async def _execute_with_progress(
         # injection itself lives in execute_tool (#303) so every path
         # (direct, gate re-exec, sub-agents) gets it — this kwarg feeds it.
         tool_kwargs["conversation_id"] = conversation_id
-    if name in ("memory_save", "memory_read", "memory_delete"):
+    if name in MEMORY_TOOLS:
         # #346: the canonical workspace root this turn resolved for
         # memory (see memory_workspace in _run_agent_claimed). The
         # injection itself lives in execute_tool — this kwarg feeds it

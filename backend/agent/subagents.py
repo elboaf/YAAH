@@ -32,6 +32,7 @@ from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
 from backend.agent.tools import (
+    MEMORY_TOOLS,
     execute_tool,
     get_schemas,
     memory_workspace_for,
@@ -421,9 +422,8 @@ def _sub_agent_system_prompt(
     # into and empty for a fresh project (matching the parent).
     from backend.agent import memory as memory_mod
 
-    memory_names = {"memory_save", "memory_read", "memory_delete"}
     resolved_names = {s["function"]["name"] for s in resolved}
-    if memory_names & resolved_names:
+    if set(MEMORY_TOOLS) & resolved_names:
         try:
             # #346: key the index to the canonical root the parent
             # resolved (pre-rebind), matching what the sub's memory
@@ -483,11 +483,9 @@ async def run_sub_agent(
                 # search_conversation_history) need the calling chat's id.
                 conversation_id=conversation_id,
                 # #346: memory calls resolve to the parent turn's
-                # canonical root — the funnel injects it for memory
-                # tools, this hands the parent's pre-rebind key down.
-                memory_workspace=sub_memory_workspace
-                if name in ("memory_save", "memory_read", "memory_delete")
-                else None,
+                # canonical root (handed down pre-rebind); the funnel
+                # ignores the kwarg for every other tool.
+                memory_workspace=sub_memory_workspace,
             )
         result = await execute(name, args, run_workspace)
         return result

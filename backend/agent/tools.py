@@ -668,9 +668,19 @@ async def get_help(workspace: str = "", tool_name: str = "") -> dict:
 
 TOOLS_SCHEMA += [GET_HELP_SCHEMA, BRANCH_SELECT_SCHEMA]
 
+# #346: tools keyed to the LOGICAL workspace. The run rebinds its tool
+# workspace to the chat worktree (<workspace>/.scratch/chat-<id>/), but
+# the prompt's injected memory index reads the pre-rebind workspace - so
+# without help, a save in a branch-pinned chat lands in a per-chat store
+# the prompt never reads. The funnel injects the canonical root the run
+# resolved, exactly like conversation_id above. One spelling, shared by
+# the funnel gate, the loop's kwarg feed and the sub-agent runner:
+MEMORY_TOOLS = ("memory_save", "memory_read", "memory_delete")
+
 # Issue #169: the persistent-memory tool names, used by the Settings toggle
 # (memory.enabled, default OFF) to filter the schema and gate execution.
-_MEMORY_TOOL_NAMES = {"memory_save", "memory_read", "memory_delete"}
+# Derived from MEMORY_TOOLS so the two can never drift.
+_MEMORY_TOOL_NAMES = set(MEMORY_TOOLS)
 
 # #303: tools whose execution is scoped to the calling chat. The harness
 # injects conversation_id at the single dispatch funnel (execute_tool);
@@ -678,28 +688,17 @@ _MEMORY_TOOL_NAMES = {"memory_save", "memory_read", "memory_delete"}
 # optionally so direct calls (tests, other harness code) still work.
 CONTEXT_TOOLS = ("search_conversation_history", "branch_select")
 
-# #346: tools keyed to the LOGICAL workspace. The run rebinds its tool
-# workspace to the chat worktree (<workspace>/.scratch/chat-<id>/), but
-# the prompt's injected memory index reads the pre-rebind workspace - so
-# without help, a save in a branch-pinned chat lands in a per-chat store
-# the prompt never reads. The funnel injects the canonical root the run
-# resolved, exactly like conversation_id above.
-MEMORY_TOOLS = ("memory_save", "memory_read", "memory_delete")
-
 
 def memory_workspace_for(workspace: str | None) -> str | None:
     """The canonical memory key input for `workspace`: the workspace
     string itself. Non-empty local paths and remote namespaces pass
     through untouched (remote keeps its raw ``remote:<host>:<path>``
-    form - memories stay client-local by design). Blank/Default runs
-    home: None means "resolve from the call workspace" - the executor
-    falls back to workspace_root(''), today's behavior.
-
-    #346 used to re-derive this from the call workspace, which after
-    the #277 worktree re-point is the chat tree - a DIFFERENT hash than
-    the prompt's index. The run loop now resolves this once per turn
-    (pre-rebind) and the funnel injects it, so save and injected index
-    agree on one store per workspace."""
+    form - memories stay client-local by design). Blank/Default (`''`
+    or `'.',` the home pseudo-workspace) returns None: those can never
+    materialize a chat worktree (worktrees.chat_worktree_path refuses
+    them), so no rebind ever diverges them and the executor's fallback
+    to the call workspace is exact. Direct local callers (tests, other
+    harness code) resolve from the call workspace as they always have."""
     ws = (workspace or "").strip()
     if not ws or ws == ".":
         return None
