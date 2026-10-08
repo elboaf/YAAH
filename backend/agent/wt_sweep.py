@@ -20,6 +20,8 @@ Pre-#277 standalone clones (``.git`` a directory, not worktree-registered)
 are retirably visible too: the same per-chat checks run, and removal
 falls back to plain rmtree when ``git worktree remove`` refuses them.
 """
+import asyncio
+import logging
 import os
 import shutil
 import time
@@ -36,8 +38,26 @@ from backend.agent.worktrees import (
 # age is auto-pruned. Idle trees cost disk; this bounds it.
 MAX_IDLE_SECONDS = 30 * 24 * 3600  # 30 days
 
+log = logging.getLogger(__name__)
+
 _last_sweep = 0.0
 _MIN_INTERVAL = 3600.0  # once per process start, then at most hourly
+
+# #357: chat worktrees whose post-run retirement was missed (teardown
+# cancelled or timed out, git failure, unreachable remote host) are
+# enqueued here and retried on every sweep tick - no age gate and no
+# dead-chat gate (the post-run hook retires a live chat's tree by
+# design; only the clean/no-residue gates decide). Keyed
+# workspace -> chat ids.
+_enqueued: dict[str, set[str]] = {}
+
+# Refusals that are POLICY, not misses: the residue protocol owns
+# surfacing these and the sweep would refuse them again anyway.
+RETIRE_POLICY_REFUSALS = frozenset(
+    {"no chat worktree", "dirty", "run residue present"}
+)
+
+_ticker_task: asyncio.Task | None = None
 
 
 def _rmtree_readonly(path: Path) -> None:
@@ -164,3 +184,163 @@ def should_sweep(now: float | None = None) -> bool:
         _last_sweep = now
         return True
     return False
+
+
+def enqueue_missed_retirement(workspace: str, chat_id: int | str) -> None:
+    """Record a chat worktree whose post-run retirement did not happen.
+
+    Called from teardown when retirement was skipped or refused for a
+    NON-policy reason (cancellation, timeout, git failure, unreachable
+    host). The tree retires on the next sweep tick without the age or
+    dead-chat gates - the post-run hook retires live chats' trees by
+    design, so only the clean/no-residue gates still decide (#357).
+    """
+    ws = (workspace or "").strip()
+    if not ws or ws.startswith("remote:"):
+        return
+    _enqueued.setdefault(ws, set()).add(str(chat_id))
+
+
+def _take_enqueued_local() -> list[tuple[str, str]]:
+    """Pop the LOCAL-namespace enqueue entries (snapshot-and-clear)."""
+    items = [
+        (ws, cid) for ws, ids in _enqueued.items() if not ws.startswith("remote:")
+        for cid in ids
+    ]
+    for ws, cid in items:
+        ids = _enqueued.get(ws)
+        if ids is not None:
+            ids.discard(cid)
+            if not ids:
+                _enqueued.pop(ws, None)
+    return items
+
+
+def _snapshot_enqueued_remote() -> list[tuple[str, str]]:
+    """Read the REMOTE-namespace enqueue entries without clearing them.
+
+    A remote tree that stays dirty (or the host stays unreachable) keeps
+    its entry and is retried on the next tick; 'no chat worktree'
+    retires it from the queue below.
+    """
+    return [
+        (ws, cid) for ws, ids in _enqueued.items() if ws.startswith("remote:")
+        for cid in ids
+    ]
+
+
+def _drop_enqueued(workspace: str, chat_id: str) -> None:
+    ids = _enqueued.get(workspace)
+    if ids is not None:
+        ids.discard(chat_id)
+        if not ids:
+            _enqueued.pop(workspace, None)
+
+
+async def sweep_enqueued_retirements() -> dict:
+    """Retry the missed retirements (#357): local trees through the
+    #329 hook (no age gate - enqueued trees were in use moments ago),
+    remote trees through the gateway twin (#334). Policy refusals leave
+    the queue untouched (the residue protocol owns those); 'no chat
+    worktree' drops the entry - there is nothing left to retire.
+    Never raises over an individual tree."""
+    from backend.agent.worktrees import retire_chat_worktree
+
+    swept: list[str] = []
+    dropped: list[str] = []
+    kept: list[str] = []
+
+    for ws, cid in _take_enqueued_local():
+        try:
+            res = await retire_chat_worktree(ws, cid)
+        except Exception:  # noqa: BLE001 - re-enqueue, try again next tick
+            log.exception("enqueued retirement failed: %s chat-%s", ws, cid)
+            enqueue_missed_retirement(ws, cid)
+            kept.append(f"{ws} chat-{cid}")
+            continue
+        if res.get("retired"):
+            swept.append(str(res.get("path") or f"{ws} chat-{cid}"))
+        elif res.get("reason") in RETIRE_POLICY_REFUSALS:
+            _drop_enqueued(ws, cid)
+            dropped.append(f"{ws} chat-{cid}")
+        else:
+            # transient miss (git failure, gone mid-flight): retry next tick
+            enqueue_missed_retirement(ws, cid)
+            kept.append(f"{ws} chat-{cid}")
+
+    from backend.agent import wt_remote
+
+    for ws, cid in _snapshot_enqueued_remote():
+        try:
+            res = await wt_remote.retire_chat_worktree(ws, cid)
+        except Exception:  # noqa: BLE001 - entry stays, retried next tick
+            log.exception("enqueued remote retirement failed: %s chat-%s", ws, cid)
+            kept.append(f"{ws} chat-{cid}")
+            continue
+        if res.get("retired"):
+            _drop_enqueued(ws, cid)
+            swept.append(f"{ws} chat-{cid}")
+        elif res.get("reason") in RETIRE_POLICY_REFUSALS:
+            _drop_enqueued(ws, cid)
+            dropped.append(f"{ws} chat-{cid}")
+        else:
+            # unreachable host / transient git failure: entry stays
+            kept.append(f"{ws} chat-{cid}")
+
+    return {"swept": swept, "dropped": dropped, "kept": kept}
+
+
+async def _sweep_ticker_tick() -> None:
+    """One sweep opportunity, shared by the boot hook and the ticker."""
+    if not should_sweep():
+        return
+    try:
+        result = await sweep_stale_chat_worktrees()
+        if result.get("swept") or result.get("error"):
+            log.info("chat-worktree sweep: %s", result)
+        enq = await sweep_enqueued_retirements()
+        if enq.get("swept") or enq.get("dropped"):
+            log.info("enqueued retirement sweep (#357): %s", enq)
+    except Exception:  # noqa: BLE001 - maintenance never blocks serving
+        log.exception("chat-worktree sweep failed")
+
+
+async def _sweep_ticker() -> None:
+    """Hourly sweep opportunist (#357): 'should_sweep' promises at most
+    hourly after the boot sweep; the boot hook alone left long-lived
+    backend processes with exactly one sweep per boot. Sleeps first:
+    boot just swept; a short-lived process never ticks at all."""
+    while True:
+        await asyncio.sleep(_MIN_INTERVAL)
+        await _sweep_ticker_tick()
+
+
+def start_sweep_ticker() -> None:
+    """Start the hourly sweep ticker (idempotent; a running ticker is
+    left alone - a second one would only double no-op rate-limited
+    ticks). Best-effort: without a running loop this is a no-op and
+    boot's single sweep still happened."""
+    global _ticker_task
+    if _ticker_task is not None and not _ticker_task.done():
+        return
+    try:
+        _ticker_task = asyncio.get_running_loop().create_task(_sweep_ticker())
+    except RuntimeError:
+        _ticker_task = None
+
+
+async def stop_sweep_ticker() -> None:
+    """Stop the ticker. The pending sleep is awaited to completion (not
+    cancelled) so no asyncio 'task destroyed while pending' noise is
+    emitted at shutdown."""
+    global _ticker_task
+    task, _ticker_task = _ticker_task, None
+    if task is not None and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        except BaseException:  # noqa: BLE001 - shutdown never blocks here
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001
+                pass

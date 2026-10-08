@@ -65,6 +65,11 @@ AUTO_TITLE_MAX_CHARS = 60  # hard clamp the consumer enforces; word count
 # backend compare must match it exactly (loop.py:100 guard, issue #60).
 AUTO_TITLE_SLICE_CHARS = 40
 
+# #357: bounded shield window for post-run chat-worktree retirement.
+# Generous - the git calls are quick and local - but finite, and a
+# timeout enqueues the tree for the sweep instead of a silent stand.
+TEARDOWN_RETIREMENT_GRACE_SECONDS = 30.0
+
 
 def _strip_provider_markup(text: str) -> str:
     """Strip a leading run of provider-injected `<system_*>…</system_*>`
@@ -114,6 +119,144 @@ async def _emit_file_changes(
         # File accounting must never turn an otherwise successful run into an
         # error; the agent's actual filesystem changes remain untouched.
         return None
+
+
+async def _retire_local_chat_worktree_shielded(
+    turn_workspace: str | None, conversation_id: int
+) -> None:
+    """Post-run retirement of the LOCAL chat worktree (#329), under a
+    bounded shield (#357): a Stop-press cancellation of the run task
+    raises CancelledError HERE - the teardown caller dies on schedule -
+    while the git calls inside the shielded task run to completion.
+    Timeout or exception enqueues the tree for the hourly sweep
+    (#357) instead of leaving it standing silently."""
+    from backend.agent import wt_sweep
+    from backend.agent.worktrees import retire_chat_worktree
+
+    async def _do() -> dict:
+        return await retire_chat_worktree(turn_workspace, conversation_id)
+
+    def _report(ret: dict) -> None:
+        if ret.get("retired"):
+            log.info(
+                "chat worktree retired after run (#329): %s",
+                ret.get("path"),
+            )
+        elif ret.get("reason") not in wt_sweep.RETIRE_POLICY_REFUSALS:
+            wt_sweep.enqueue_missed_retirement(
+                turn_workspace or "", conversation_id
+            )
+
+    task = asyncio.ensure_future(_do())
+    try:
+        ret = await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=TEARDOWN_RETIREMENT_GRACE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "post-run chat worktree retirement timed out (#357); "
+            "enqueued for the sweep: %s chat-%s",
+            turn_workspace,
+            conversation_id,
+        )
+        wt_sweep.enqueue_missed_retirement(turn_workspace or "", conversation_id)
+    except asyncio.CancelledError as exc:
+        # The run task was cancelled (Stop press). The shield keeps the
+        # first CancelledError out of the git calls, but asyncio
+        # RE-DELIVERS into the inner task at its next await point -
+        # cancelling mid-git-call is exactly the #353-class loss this
+        # pattern exists to prevent. So: absorb the delivery (uncancel),
+        # let the git region finish, report its outcome, and only then
+        # re-raise - from OUTSIDE the git region - so the teardown keeps
+        # unwinding exactly as before.
+        task.uncancel()
+        try:
+            ret = await asyncio.shield(task)
+        except BaseException:  # the miss is the headline, not the cancel
+            log.exception(
+                "post-run chat worktree retirement aborted (#357); "
+                "enqueued for the sweep: %s chat-%s",
+                turn_workspace,
+                conversation_id,
+            )
+            wt_sweep.enqueue_missed_retirement(
+                turn_workspace or "", conversation_id
+            )
+            raise exc from None
+        _report(ret)
+        raise exc from None
+    except Exception:  # noqa: BLE001 - teardown never blocks
+        log.exception("post-run chat worktree retirement failed")
+        wt_sweep.enqueue_missed_retirement(turn_workspace or "", conversation_id)
+    else:
+        _report(ret)
+
+
+async def _retire_remote_chat_worktree_shielded(
+    workspace: str, conversation_id: int
+) -> None:
+    """Remote twin (#334/#357): same bounded-shield pattern; an
+    unreachable host or a lost race against teardown enqueues the tree
+    for the sweep's remote leg, which retires via the gateway."""
+    from backend.agent import wt_remote, wt_sweep
+
+    async def _do() -> dict:
+        return await wt_remote.retire_chat_worktree(workspace, conversation_id)
+
+    def _report(ret: dict) -> None:
+        if ret.get("retired"):
+            log.info(
+                "remote chat worktree retired after run (#329/#334): %s",
+                ret.get("path"),
+            )
+        elif ret.get("reason") == "no chat worktree":
+            pass
+        else:
+            log.info(
+                "remote chat worktree kept after run (%s): %s",
+                ret.get("reason"),
+                wt_remote.chat_worktree_path(workspace, conversation_id),
+            )
+            wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
+
+    task = asyncio.ensure_future(_do())
+    try:
+        ret = await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=TEARDOWN_RETIREMENT_GRACE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "remote chat worktree retirement timed out (#357); "
+            "enqueued for the sweep: %s chat-%s",
+            workspace,
+            conversation_id,
+        )
+        wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
+    except asyncio.CancelledError as exc:
+        # Same absorb-then-finish-then-reraise shape as the local twin
+        # (#357): asyncio re-delivers cancellation into the inner task
+        # at its next await; the gateway call must finish first.
+        task.uncancel()
+        try:
+            ret = await asyncio.shield(task)
+        except BaseException:  # the miss is the headline, not the cancel
+            log.exception(
+                "remote chat worktree retirement aborted (#357); "
+                "enqueued for the sweep: %s chat-%s",
+                workspace,
+                conversation_id,
+            )
+            wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
+            raise exc from None
+        _report(ret)
+        raise exc from None
+    except Exception:  # noqa: BLE001 - teardown never blocks
+        log.exception("post-run remote chat worktree retirement failed")
+        wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
+    else:
+        _report(ret)
 
 
 async def _persist_file_change_summary(conversation_id: int, summary: dict) -> None:
@@ -3087,38 +3230,19 @@ async def _run_agent_claimed(
         # keyed on the WORKSPACE NAMESPACE (the gateway's cwd), not on
         # turn_workspace. Host offline at teardown: refused explicitly,
         # the tree stands, the next run retries.
+        # #357: retirement runs inside a bounded shield window (the
+        # sub-agent grace pattern, loop.py's batch cleanup). The old
+        # code awaited the git calls directly; its `except Exception`
+        # does not catch CancelledError, so a Stop press killed
+        # retirement mid-git-call with no log and no retry path.
         if worktree_error == "" and not remote_workspace:
-            try:
-                from backend.agent.worktrees import retire_chat_worktree
-
-                _ret = await retire_chat_worktree(turn_workspace, conversation_id)
-                if _ret.get("retired"):
-                    log.info(
-                        "chat worktree retired after run (#329): %s",
-                        _ret.get("path"),
-                    )
-            except Exception:  # noqa: BLE001 - teardown never blocks
-                log.exception("post-run chat worktree retirement failed")
+            await _retire_local_chat_worktree_shielded(
+                turn_workspace, conversation_id
+            )
         elif worktree_error == "" and remote_workspace and worktree_materialized:
-            try:
-                from backend.agent import wt_remote
-
-                _ret = await wt_remote.retire_chat_worktree(
-                    str(workspace), conversation_id
-                )
-                if _ret.get("retired"):
-                    log.info(
-                        "remote chat worktree retired after run (#329/#334): %s",
-                        _ret.get("path"),
-                    )
-                elif _ret.get("reason") not in ("no chat worktree",):
-                    log.info(
-                        "remote chat worktree kept after run (%s): %s",
-                        _ret.get("reason"),
-                        wt_remote.chat_worktree_path(str(workspace), conversation_id),
-                    )
-            except Exception:  # noqa: BLE001 - teardown never blocks
-                log.exception("post-run remote chat worktree retirement failed")
+            await _retire_remote_chat_worktree_shielded(
+                str(workspace), conversation_id
+            )
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

@@ -69,16 +69,15 @@ async def lifespan(app: FastAPI):
     # #277 (ADR-0010 pruning): retire clean chat worktrees of dead chats
     # past the idle threshold. Best-effort and logged, never fatal; the
     # rate limiter makes this once-per-boot (then hourly at most).
+    # #357: the hourly promise is now kept by a ticker task, and missed
+    # post-run retirements retry on every tick (should_sweep still
+    # rate-limits the age-gated sweep; enqueued trees skip the gates).
     from backend.agent import wt_sweep
 
-    if wt_sweep.should_sweep():
-        try:
-            _swept = await wt_sweep.sweep_stale_chat_worktrees()
-            if _swept.get("swept"):
-                log.info("chat-worktree sweep: %s", _swept)
-        except Exception:  # noqa: BLE001 - maintenance never blocks serving
-            log.exception("chat-worktree sweep failed")
+    await wt_sweep._sweep_ticker_tick()
+    wt_sweep.start_sweep_ticker()
     yield
+    await wt_sweep.stop_sweep_ticker()
     await mcp_client.manager.shutdown()
     scheduler.stop_scheduler()
     discovery.stop_advertising()
