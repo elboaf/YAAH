@@ -841,3 +841,78 @@ async def test_stop_then_play_resumes_schedule_without_firing(tmp_path, monkeypa
     assert datetime.fromisoformat(row["next_fire_at"]) > datetime.now()
     await drain_pending()
     assert fired["n"] == 0, "play must not fire anything"
+
+
+# --------------------------------------------- bare fires run in the tree (#361)
+
+
+@pytest.mark.asyncio
+async def test_bare_fire_runs_in_the_tree_without_landing_settings(fake_model, tmp_path):
+    """#361: an unattended fire works in the workspace tree like any chat -
+    no landing-mode resolution, no per-run branch, no worktree anywhere.
+    The agent's write lands in the real checkout, and the run's file-changes
+    summary carries in-tree provenance (no worktree location fields)."""
+    import json as _json
+    import subprocess
+
+    repo = tmp_path / "fire-tree"
+    repo.mkdir()
+
+    def _g(*a):
+        proc = subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        assert proc.returncode == 0, f"git {a}: {proc.stderr}"
+        return proc.stdout.strip()
+
+    _g("init", "-q", "-b", "master")
+    _g("config", "user.email", "t@example.com")
+    _g("config", "user.name", "T")
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _g("add", "-A")
+    _g("commit", "-q", "-m", "seed")
+
+    conv = await create_conversation("fire chat", workspace=str(repo), chat_type="agent")
+    agent_row = await create_agent(make_agent(
+        workspace=str(repo), conversation_id=conv, approval_policy="autonomous"))
+
+    scripts = [
+        [{"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "bash", "arguments": _json.dumps(
+                {"command": "echo fired-edit >> seed.txt"})},
+        }]}],
+        [{"type": "content", "text": "done"}, {"type": "finish"}],
+    ]
+
+    async def scripted_chat(messages, tools=None, stream=True, model="", effort=""):
+        return FakeStream(scripts.pop(0) if scripts else [{"type": "finish"}])
+
+    loop.model_client.chat = scripted_chat
+
+    agent = await get_agent(agent_row["id"])
+    assert await sched.fire_agent(agent) == "started"
+
+    async def wait_for_settle():
+        while (await get_agent(agent_row["id"]))["last_status"] == "running":
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(wait_for_settle(), timeout=30)
+    assert (await get_agent(agent_row["id"]))["last_status"] == "ok"
+
+    # The edit landed in the REAL tree - no worktree, no run branch.
+    assert "fired-edit" in (repo / "seed.txt").read_text(encoding="utf-8")
+    branches = subprocess.run(
+        ["git", "branch", "--list"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert "run/" not in branches and "wip/" not in branches
+    assert not (repo / ".scratch").exists(), "no chat worktree may materialize"
+
+    # The run's file-changes summary: in-tree provenance only.
+    msgs = await get_messages(conv)
+    summaries = [
+        m for m in msgs
+        if m["role"] == "system" and m["content"].startswith('{"file_changes"')
+    ]
+    assert summaries, "the fire must report its net file changes"
+    summary = _json.loads(summaries[-1]["content"])["file_changes"]
+    assert summary["commit"] is None  # uncommitted: the agent chose not to
+    assert "worktree" not in _json.dumps(summary)

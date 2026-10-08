@@ -425,16 +425,18 @@ BRANCH_SELECT_SCHEMA = {
     "function": {
         "name": "branch_select",
         "description": (
-            "Point this chat's work at a branch, on the user's request "
-            "(#359, ADR-0017 direction). Creates the branch first when it does not exist. "
-            "Git's own refusals surface as the error."
+            "Switch the workspace to a branch, on the user's request. A "
+            "plain checkout of the workspace: the branch is created first "
+            "when it does not exist. Git's own refusals (uncommitted "
+            "changes that would be clobbered, unknown branch, a branch "
+            "checked out in another worktree) surface as the error."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "branch": {
                     "type": "string",
-                    "description": "Branch name to select (created when missing)",
+                    "description": "Branch name to switch to (created when missing)",
                 },
                 "create": {
                     "type": "boolean",
@@ -447,111 +449,6 @@ BRANCH_SELECT_SCHEMA = {
 }
 
 
-async def _remote_selector_flip(
-    ws: str, conversation_id: int, branch: str, create: bool = True
-) -> dict:
-    """The remote twin of the selector flip (#335, spec #332): one arm
-    serving both the agent tool and the HTTP endpoint, so they cannot
-    drift. Same contract as the local flow, hop for hop over the #333
-    gateway:
-
-    - empty/option-like names refused (mirroring the local guards);
-    - the branch must exist on the host, or be created from the chat's
-      current pin (`create`, default true) — never from the primary's
-      HEAD;
-    - a dirty chat worktree refuses the flip (the ADR-0010 guard),
-      checked BEFORE anything moves;
-    - the flip is a REAL checkout inside the chat's own worktree on the
-      host (#334's tree, materialized when it does not exist yet);
-    - the explicit pin is stored only after the flip succeeded.
-    """
-    branch = (branch or "").strip()
-    if not branch or branch.startswith("-"):
-        return {"ok": False, "error": "branch must be a local branch name"}
-
-    from backend.agent import gitexec, gitinfo, wt_remote
-    from backend.db import database as db
-
-    # The branch list rides the raw gateway answer, not the collapsing
-    # helper: None (host unreachable) must surface as unreachability,
-    # never read as "the branch list is empty" (the distinguishability
-    # contract — absence of contact is not absence of branches).
-    listing = await wt_remote._run(ws, "branch")
-    if listing is None:
-        return {"ok": False, "error": "host unreachable"}
-    rc_l, out_l = listing
-    host_branches = gitinfo._plain_branch_names(out_l) if rc_l == 0 else []
-    exists = branch in host_branches
-    created = not exists
-    if not exists:
-        if not create:
-            return {"ok": False, "error": f"not a local branch: {branch}"}
-        # Server-enforced start point: derived from the chat's own pin
-        # (never the primary's HEAD — the amendment's start-point rule),
-        # over the gateway: one `git branch <new> <start>` hop. With no
-        # start derivable the creation is refused — falling through to
-        # materialization would detach the tree at the primary's HEAD
-        # and call that a selection.
-        conv = await db.get_conversation(conversation_id)
-        start = str(conv.get("selected_branch") or "").strip() if conv else ""
-        if not start:
-            return {
-                "ok": False,
-                "error": (
-                    f"not a local branch: {branch} (no chat branch to "
-                    "derive it from - the host's HEAD is detached or "
-                    "unborn)"
-                ),
-            }
-        res = await gitexec.run_git(ws, "branch", branch, start)
-        if res is None or res[0] != 0:
-            return {
-                "ok": False,
-                "error": (res[1] if res else "").strip()
-                or "branch creation failed",
-            }
-
-    # Dirty-flip guard FIRST (ADR-0010): an existing chat tree that
-    # carries uncommitted changes refuses before anything moves, and a
-    # git refusal FAILS CLOSED — the flip never proceeds unchecked; a
-    # missing tree falls through to materialization (which performs the
-    # checkout at the branch).
-    state = await wt_remote.chat_tree_state(ws, conversation_id)
-    if state is None:
-        return {"ok": False, "error": "host unreachable"}
-    verdict, detail = state
-    if verdict == "error":
-        return {"ok": False, "error": detail}
-    if verdict == "dirty":
-        return {
-            "ok": False,
-            "error": (
-                "this chat's worktree has uncommitted changes - "
-                "commit or discard before switching branches"
-            ),
-        }
-
-    # The flip itself: materialization creates the tree AT the branch
-    # (first flip before any run), an existing tree flips in place —
-    # wt_remote's flip is the same checkout the local flow performs.
-    mat = await wt_remote.ensure_chat_worktree(ws, conversation_id, branch)
-    if mat.get("path") is None:
-        return {"ok": False, "error": mat.get("error") or "worktree flip failed"}
-
-    # #302: a branch_select pick is by definition an explicit pick —
-    # stored only after the flip succeeded, exactly like local.
-    await db.update_conversation(
-        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
-    )
-    gitinfo.invalidate_git_caches(ws)
-    return {
-        "ok": True,
-        "selected_branch": branch,
-        "created": created,
-        "pin_origin": "explicit",
-    }
-
-
 async def branch_select(
     workspace: str = "",
     branch: str = "",
@@ -559,36 +456,23 @@ async def branch_select(
     conversation_id: int | None = None,
     on_chunk=None,
 ) -> dict:
-    """The ADR-0010 selector tool: create-if-missing from the chat's own
-    selection, then store. The primary worktree is never touched; the
-    stored pick is applied by worktrees.ensure_chat_worktree on the next
-    run (and by the flip guard, which refuses over a dirty chat
-    worktree)."""
+    """The direct-world switch (#359/ADR-0017): one plain checkout of the
+    workspace on the named branch, creating the branch first when asked.
+    No pins, no per-chat branch identity, no guarded flip - git's own
+    refusals are the guard, and nothing is stored anywhere."""
     from backend.agent import gitinfo
-    from backend.db import database as db
 
     branch = (branch or "").strip()
     if not branch or branch.startswith("-"):
         return {"ok": False, "error": "branch must be a local branch name"}
-    if conversation_id is None:
-        return {"ok": False, "error": "no conversation context for a branch selection"}
-    conv = await db.get_conversation(conversation_id)
-    if conv is None:
-        return {"ok": False, "error": "conversation not found"}
-    ws = (conv.get("workspace") or workspace or "").strip()
-    if not ws:
-        return {"ok": False, "error": "no local git workspace"}
     from backend.agent.remote import parse_ns
 
-    # #335 (selector parity): remote chats flip for real — the same
-    # dirty-refusing checkout inside the chat's own worktree, through
-    # the gateway. One arm, so the endpoint and the tool cannot drift.
-    if parse_ns(ws) is not None:
-        return await _remote_selector_flip(
-            ws, conversation_id, branch, create=create
-        )
+    if parse_ns(workspace) is not None:
+        # remote:<host>:<path> namespaces have no local checkout to
+        # switch; the host tree is switched with plain git on the host.
+        return {"ok": False, "error": "remote workspace: switch the branch on the host checkout"}
     try:
-        root = workspace_root(ws)
+        root = workspace_root(workspace)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
 
@@ -596,43 +480,20 @@ async def branch_select(
     if not exists and not create:
         return {"ok": False, "error": f"not a local branch: {branch}"}
     if not exists:
-        # Server-enforced start point: derive from the chat's currently
-        # selected branch, falling back to the primary's checked-out
-        # branch. The primary's HEAD is never consulted while a
-        # selection exists (amendment: pin at creation, start point).
-        start = str(conv.get("selected_branch") or "").strip()
-        if start:
-            rc, out = await gitinfo._run_git(root, "branch", branch, start)
-        else:
-            rc, out = await gitinfo._run_git(root, "branch", branch)
+        # Created from the current HEAD - git's own default start point;
+        # no per-chat start-point rule survives the direct world.
+        rc, out = await gitinfo._run_git(root, "branch", branch)
         if rc != 0:
             return {"ok": False, "error": (out or "").strip() or "branch creation failed"}
 
-    # Dirty-flip guard (ADR-0010): refuse while the chat's own worktree
-    # has uncommitted changes. A flip with dirty state would strand those
-    # changes relative to the landing target.
-    from backend.agent import worktrees as _worktrees
-
-    chat_dir = _worktrees.chat_worktree_path(ws, conversation_id)
-    if chat_dir is not None and chat_dir.exists():
-        rc, out = await gitinfo._run_git(chat_dir, "status", "--porcelain")
-        if rc != 0 or (out or "").strip():
-            return {
-                "ok": False,
-                "error": (
-                    "this chat's worktree has uncommitted changes - "
-                    "commit or discard before switching branches"
-                ),
-            }
-
-    # #302: a branch_select pick is by definition an explicit pick.
-    await db.update_conversation(
-        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
-    )
-    from backend.agent.gitinfo import invalidate_git_caches
-
-    invalidate_git_caches(root)
-    return {"ok": True, "selected_branch": branch, "created": not exists, "pin_origin": "explicit"}
+    # The switch itself. Git's refusals surface verbatim as the error:
+    # a checkout that would clobber uncommitted work, an unknown branch,
+    # or a branch checked out in another registered worktree.
+    rc, out = await gitinfo._run_git(root, "checkout", branch)
+    if rc != 0:
+        return {"ok": False, "error": (out or "").strip() or "checkout failed"}
+    gitinfo.invalidate_git_caches(root)
+    return {"ok": True, "branch": branch, "created": not exists}
 
 
 async def get_help(workspace: str = "", tool_name: str = "") -> dict:
@@ -664,13 +525,13 @@ async def get_help(workspace: str = "", tool_name: str = "") -> dict:
 
 TOOLS_SCHEMA += [GET_HELP_SCHEMA, BRANCH_SELECT_SCHEMA]
 
-# #346: tools keyed to the LOGICAL workspace. The run rebinds its tool
-# workspace to the chat worktree (<workspace>/.scratch/chat-<id>/), but
-# the prompt's injected memory index reads the pre-rebind workspace - so
-# without help, a save in a branch-pinned chat lands in a per-chat store
-# the prompt never reads. The funnel injects the canonical root the run
-# resolved, exactly like conversation_id above. One spelling, shared by
-# the funnel gate, the loop's kwarg feed and the sub-agent runner:
+# #346: tools keyed to the LOGICAL workspace. The run resolves the
+# canonical memory key ONCE, from the same workspace string the prompt's
+# injected index reads, and the funnel injects it here - so a memory tool
+# call and the prompt block can never disagree about the store (the run
+# no longer rebinds its tool workspace; the direct world has one tree).
+# One spelling, shared by the funnel gate, the loop's kwarg feed and the
+# sub-agent runner:
 MEMORY_TOOLS = ("memory_save", "memory_read", "memory_delete")
 
 # Issue #169: the persistent-memory tool names, used by the Settings toggle
@@ -682,7 +543,7 @@ _MEMORY_TOOL_NAMES = set(MEMORY_TOOLS)
 # injects conversation_id at the single dispatch funnel (execute_tool);
 # the model never passes it, and the executor signatures take it
 # optionally so direct calls (tests, other harness code) still work.
-CONTEXT_TOOLS = ("search_conversation_history", "branch_select")
+CONTEXT_TOOLS = ("search_conversation_history",)
 
 
 def memory_workspace_for(workspace: str | None) -> str | None:
@@ -691,10 +552,9 @@ def memory_workspace_for(workspace: str | None) -> str | None:
     through untouched (remote keeps its raw ``remote:<host>:<path>``
     form - memories stay client-local by design). Blank/Default (`''`
     or `'.',` the home pseudo-workspace) returns None: those can never
-    materialize a chat worktree (worktrees.chat_worktree_path refuses
-    them), so no rebind ever diverges them and the executor's fallback
-    to the call workspace is exact. Direct local callers (tests, other
-    harness code) resolve from the call workspace as they always have."""
+    be a real store, so the executor's fallback to the call workspace
+    is exact. Direct local callers (tests, other harness code) resolve
+    from the call workspace as they always have."""
     ws = (workspace or "").strip()
     if not ws or ws == ".":
         return None
@@ -1675,8 +1535,8 @@ _MUTATING_TOOLS = {
     # persistent memory lives outside the workspace (~/.yaah/memory) but
     # is model-authored content, so it gates like a file write
     "memory_save", "memory_delete",
-    # creates a git branch ref (selector write); the flip itself moves no
-    # tree, but ref creation is a repo mutation - gate like a file write
+    # moves the workspace's checked-out branch (checkout + possible ref
+    # creation) - a repo mutation, gated like a file write
     "branch_select",
 }
 _SHELL_TOOLS = {

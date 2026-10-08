@@ -323,10 +323,9 @@ LOCAL_WS = str(Path(tempfile.gettempdir()) / "yaah-manifest-local-ws")
 # rendered sub-agent prompt output, so committed fixtures (and their
 # bytes/sha256 fields) are machine-independent (#182 return trip).
 LOCAL_WS_TOKEN = "<LOCAL_WS>"
-# #301: the pinned branch note embeds the fixture conversation's id in its
-# deterministic run paths (`.scratch/chat-<id>/run`). That id is a DB
-# autoincrement counter — it drifts between renders in one process — so it
-# is canonicalized out here too, to the same end: reproducible manifests.
+# The fixture conversation's id is a DB autoincrement counter — it
+# drifts between renders in one process — so it is canonicalized out
+# here, to the same end as LOCAL_WS: reproducible manifests.
 CHAT_ID_TOKEN = "<CHAT_ID>"
 
 _FIXTURE_INFO = {
@@ -683,9 +682,8 @@ def _drive_turn(flags: dict) -> dict:
             ws_dir = Path(LOCAL_WS)
             ws_dir.mkdir(parents=True, exist_ok=True)
             workspace = str(ws_dir)
-            # #301: the branch note renders only for a pinned chat, and a
-            # pin needs a real local git repo — seed one once (idempotent)
-            # so the render matrix carries the widened trigger.
+            # the fixture workspace is a real local git repo — seed one
+            # once (idempotent) so git reads in the render matrix work.
             if not (ws_dir / ".git").exists():
                 import subprocess
 
@@ -989,30 +987,10 @@ def render_combo(combo: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _canonicalize_chat_ids(text: str) -> str:
-    """Replace every `chat-<id>` spelling (the branch note's deterministic
-    `.scratch/chat-<id>/run` paths) - and, since #312, the id suffix of
-    every `run/<title-slug>-<id>` branch name - with the `<CHAT_ID>`
-    token before sizing/hashing/splitting: the fixture id is a DB
-    counter, not data."""
-    text = re.sub(r"chat-\d+", CHAT_ID_TOKEN, text)
-    # #312: the run branch carries the id as its LAST dash
-    # segment (run/<slug>-<id>); the slug itself may contain
-    # digits (a title like "version 2 fix"), so only the
-    # trailing run is scrubbed. The lookbehind pins this to
-    # run/-prefixed names, leaving residue leaves like
-    # `.../run-2` (no slash before run) untouched.
-    # ADR-0015: wip branches share the shape and the fixture-id
-    # discipline - wip/<slug>-<id> canonicalizes the same way.
-    text = re.sub(
-        r"(?<=wip/)([a-z0-9][a-z0-9-]*)-(\d+)\b",
-        lambda m: f"{m.group(1)}-{CHAT_ID_TOKEN}",
-        text,
-    )
-    return re.sub(
-        r"(?<=run/)([a-z0-9][a-z0-9-]*)-(\d+)\b",
-        lambda m: f"{m.group(1)}-{CHAT_ID_TOKEN}",
-        text,
-    )
+    """Replace every `chat-<id>` spelling (the fixture conversation id is
+    a DB autoincrement counter, not data) with the `<CHAT_ID>` token
+    before sizing/hashing/splitting: reproducible manifests."""
+    return re.sub(r"chat-\d+", CHAT_ID_TOKEN, text)
 
 
 def manifest_to_json(manifest: dict) -> str:

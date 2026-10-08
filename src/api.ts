@@ -134,8 +134,6 @@ export interface ConversationRow {
    *  effort: '' = Default (reasoning_effort param not sent). */
   model?: string
   effort?: string
-  /** #277: the chat's pinned branch selector (draft card pre-store). */
-  selected_branch?: string | null
 }
 
 export interface ContextInfo {
@@ -152,16 +150,9 @@ export interface ContextInfo {
 export const getContext = (id: number) =>
   api<ContextInfo>(`/api/conversations/${id}/context`)
 
-/** #302 (ADR-0010 amendment, decision 1): the chip's tri-state feed.
- *  pin_origin — 'explicit' (draft card / selector pick), 'inherited' (the
- *  workspace's branch at creation; also the fallback when no pin exists,
- *  since the shown branch IS the workspace's), or null (no pin; the
- *  fallback branch still names the workspace's). stale — the selected
- *  branch no longer exists locally. */
+/** The workspace's checked-out branch - the one tree's truth (#361). */
 export interface GitBranchInfo {
   branch: string | null
-  pin_origin?: 'explicit' | 'inherited' | null
-  stale?: boolean
 }
 
 export const getGitBranch = (id: number) =>
@@ -174,12 +165,6 @@ export interface GitInfo {
   upstream: string | null
   local_hash: string | null
   remote_hash: string | null
-  /** #350: HEAD of the chat's own worktree (.scratch/chat-<id>); null when
-      the chat has no tree - the UI omits the hash, never zero-fills. */
-  worktree_hash?: string | null
-  /** #350: commits the chat worktree has that the primary worktree lacks (diverged
-      counts as ahead; unrelated histories read 0). */
-  worktree_ahead?: number
   ahead: number
   behind: number
   added: number
@@ -214,12 +199,12 @@ export const runGitCommand = (id: number, action: GitAction, opts?: { message?: 
     body: JSON.stringify({ action, message: opts?.message, branch: opts?.branch }),
   })
 
-/** #286: flip the chat's branch selector (stored per-chat value — runs no
- *  git checkout; other chats' trees never move). */
+/** #361: switch the workspace to a branch - a plain checkout of the ONE
+ *  tree; git's own refusals arrive as the error. */
 export interface BranchSelectResult {
   ok: boolean
-  selected_branch?: string
-  pin_origin?: 'explicit'
+  branch?: string
+  created?: boolean
   error?: string
 }
 
@@ -228,25 +213,6 @@ export const selectConversationBranch = (id: number, branch: string) =>
     method: 'POST',
     body: JSON.stringify({ branch }),
   })
-
-/** #290: run-in-flight state for the badge — derived from polled git
- *  state (`git worktree list`), never agent-reported. Residue: "clean" =
- *  landed-and-forgotten (a run start may auto-remove), "dirty" /
- *  "unmerged" = surfaced for the user to land or scrap. */
-export interface RunWorktree {
-  branch: string
-  chat_id: string
-  leaf: string
-  path: string
-  dirty: boolean
-  merged: boolean
-  residue: 'clean' | 'dirty' | 'unmerged'
-}
-
-export const getRunWorktrees = (id: number) =>
-  api<{ runs: RunWorktree[]; target: string | null }>(
-    `/api/conversations/${id}/run-worktrees`,
-  )
 
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
@@ -258,7 +224,7 @@ export const getConversation = (id: number) =>
 export const createConversation = (
   title: string,
   workspace?: string | null,
-  scope?: { model?: string; effort?: string; branch?: string | null },
+  scope?: { model?: string; effort?: string },
 ) =>
   api<{ id: number }>('/api/conversations', {
     method: 'POST',
@@ -267,7 +233,6 @@ export const createConversation = (
       workspace: workspace ?? null,
       model: scope?.model ?? '',
       effort: scope?.effort ?? '',
-      selected_branch: scope?.branch ?? null,
     }),
   })
 
@@ -680,9 +645,9 @@ export interface WorkspaceGitBranches {
 export const getWorkspaceGitBranches = (workspace: string) =>
   api<WorkspaceGitBranches>(`/api/workspaces/git-branches?workspace=${encodeURIComponent(workspace)}`)
 
-// #301: checkoutWorkspaceBranch is gone with /api/workspaces/git-checkout —
-// no in-YAAH control moves the primary worktree; a draft pick pre-stores
-// selected_branch at creation instead.
+// #361: the direct world - the workspace's branch is switched by a plain
+// checkout (the chip's dropdown or an agent's branch_select); drafts carry
+// no branch pick anymore.
 
 export const deleteWorkspace = (id: number, ownerId?: string) =>
   api<{ ok: boolean; relocated: number }>(
@@ -826,10 +791,6 @@ export const checkMcpCommand = (command: string) =>
 
 export type AgentPolicy = 'sandbox-only' | 'autonomous'
 export type AgentScheduleType = 'interval' | 'daily' | 'weekly'
-/** #278: off = the pinned chat's own branch (today's behavior); fixed =
- *  every fire lands on landing_branch; per-run = a branch per fire, left
- *  unmerged for manual integration. */
-export type AgentLandingMode = 'off' | 'fixed' | 'per-run'
 /** #296: when a fired run's spoken briefing gets spoken. */
 export type AgentSayMode = 'arrival' | 'visible'
 export interface AgentScheduleSpec {
@@ -854,15 +815,6 @@ export interface ScheduledAgent {
   schedule_spec: AgentScheduleSpec
   schedule_text: string
   approval_policy: AgentPolicy
-  /** #278: where each fire's work lands. */
-  landing_mode: AgentLandingMode
-  landing_branch: string
-  /** #314: the pinned chat's effective landing target — with landing mode
-   *  off, this is where every fire lands. Read-only chip data for the
-   *  agent editor; the branch itself lives on the conversation row. */
-  chat_selected_branch: string | null
-  chat_branch_pin_origin: 'explicit' | 'inherited' | null
-  /** #296: when a fire's spoken briefing gets spoken. */
   say_mode: AgentSayMode
   model: string
   effort: string
@@ -888,15 +840,12 @@ export interface AgentsPayload {
   retry: { retry_count: number; retry_backoff_minutes: number }
 }
 
-/** The edit/create form payload — the dialogue edits the whole record.
- *  #314: selected_branch is the form's optional branch pick for the pinned
- *  chat — absent/blank = the inherit default (a PATCH no-op on the chat). */
+/** The edit/create form payload — the dialogue edits the whole record. */
 export type AgentBody = Omit<
   ScheduledAgent,
   'id' | 'schedule_spec' | 'schedule_text' | 'running' | 'instructions' | 'chat_title' |
-    'chat_selected_branch' | 'chat_branch_pin_origin' |
     'conversation_id' | 'next_fire_at' | 'last_fired_at' | 'last_finished_at' | 'last_status'
-> & { schedule_spec: AgentScheduleSpec; selected_branch?: string }
+> & { schedule_spec: AgentScheduleSpec }
 
 export const listAgents = (workspace?: string) =>
   api<AgentsPayload>(
@@ -1398,14 +1347,6 @@ export interface AgentEvent {
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number
   deleted?: number
-  /** Where those changes landed (issue: the report must say WHERE):
-   *  tree kind per the glossary, absolute tree path, tree path relative
-   *  to the workspace root (null when it IS the root), and the branch
-   *  the run worked toward. Absent on legacy backends. */
-  worktree_role?: 'chat' | 'primary' | null
-  worktree?: string | null
-  worktree_rel?: string | null
-  branch?: string | null
   /** The provider+model this turn's chat call is waiting on (model_call).
    *  Unset between the response arriving and the next call of the turn. */
   modelCall?: { provider: string; model: string; startedAt: number }

@@ -467,8 +467,9 @@ async def run_sub_agent(
             return await execute_tool(
                 name, args, path,
                 on_chunk=on_chunk if on_event else None,
-                # #303: chat-scoped tools (branch_select,
-                # search_conversation_history) need the calling chat's id.
+                # #303: chat-scoped tools (search_conversation_history)
+                # need the calling chat's id. branch_select left the
+                # chat-scoped set with the direct world (#361).
                 conversation_id=conversation_id,
                 # #346: memory calls resolve to the parent turn's
                 # canonical root (handed down pre-rebind); the funnel

@@ -1,25 +1,19 @@
-"""Issue #350: the branch chip's sync readout must show three commit
-hashes - the selected branch's tip, its upstream's tip, and the chat's own
-worktree HEAD - with divergence derivable for the per-hash colors.
+"""Issue #350: the branch chip's sync readout shows the branch tip and its
+upstream's tip, with divergence derivable for the per-hash colors.
 
-The regression this fixes: the chip reads the chat worktree (#277), which
-usually sits DETACHED at the branch tip, and `@{upstream}` is unresolvable
-from a detached HEAD - so remote_hash came back None and the second hash
-vanished whenever a chat had materialized its tree. Semantics (agreed on
-the issue):
+The regression this fixed: `@{upstream}` is unresolvable from a detached
+HEAD, so remote_hash came back None whenever the read tree sat detached.
+Semantics (agreed on the issue):
 
-  local_hash     short hash of the SELECTED BRANCH TIP (stable across
-                 checkouts/detachments - no longer the read tree's HEAD)
+  local_hash     short hash of the checked-out branch's TIP (stable across
+                 the read tree's state)
   remote_hash    short hash of that branch's @{upstream} - resolved from
-                 the BRANCH, so detachment no longer hides it
-  worktree_hash  HEAD of the chat's own worktree; None when the chat has
-                 no tree (omitted in the UI, never zero-filled)
-  worktree_ahead       commits the chat tree has that the primary tree lacks
-                 (diverged counts as ahead; unrelated histories -> 0)
+                 the BRANCH, so a detached tree no longer hides it
 
-Remote chats (#333) get parity: one extra multi-ref rev-parse burst
-through the gateway fills local/remote hashes; worktree_hash stays a
-local-only concept (the host-side chat-tree substitution is #334).
+The direct world (#361) removed the worktree hash trio: there is ONE tree,
+its HEAD is the branch tip, and dirty/ahead-behind describe it directly.
+Remote chats (#333) keep parity: one multi-ref rev-parse burst through the
+gateway fills both hashes.
 """
 import subprocess
 import sys
@@ -71,32 +65,45 @@ def _info(root, **kw):
     return gitinfo.git_workspace_info(root, **kw)
 
 
-# ---- local path: three hashes with distinct semantics ----
+# ---- local path: the branch-tip pair ----
 
 
 @pytest.mark.asyncio
-async def test_local_hash_is_branch_tip_even_when_tree_detached(fresh):
+async def test_local_hash_reports_the_checked_out_commit(fresh):
+    """local_hash is the tip of the tree's own checked-out branch."""
     repo = _repo(fresh)
     _commit(repo, "a.txt", "1")
     _commit(repo, "b.txt", "2")
-    # The #277 common case: the chat's tree is detached at the FIRST commit
-    # while master already moved on.
-    chat = fresh / "chat"
-    _git(repo, "worktree", "add", "--detach", str(chat), "HEAD~1")
 
-    info = await _info(repo, chat_root=chat, branch="master")
+    info = await _info(repo)
 
     assert info is not None
-    # local = the branch TIP, not the (detached) read-tree HEAD...
     assert info["local_hash"] == _short(repo, "master")
-    # ...which is exactly what keeps upstream resolvable from the branch.
     assert info["remote_hash"] is None  # no upstream configured
-    # worktree = where the chat's tree actually sits.
-    assert info["worktree_hash"] == _short(repo, "HEAD~1")
+    # The direct world (#361): the worktree hash trio is gone.
+    assert "worktree_hash" not in info
+    assert "worktree_ahead" not in info
 
 
 @pytest.mark.asyncio
-async def test_upstream_hash_survives_detached_chat_tree(fresh):
+async def test_detached_tree_reports_its_own_commit(fresh):
+    """A detached read tree reports the commit it sits on - there is no
+    branch name to name, and the direct world fabricates none."""
+    repo = _repo(fresh)
+    _commit(repo, "a.txt", "1")
+    _commit(repo, "b.txt", "2")
+    _git(repo, "checkout", "--quiet", "--detach", "HEAD~1")
+
+    info = await _info(repo)
+
+    assert info is not None
+    assert info["local_hash"] == _short(repo, "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_upstream_hash_resolved_from_the_branch(fresh):
+    """remote_hash resolves from the branch, not from HEAD - the original
+    #350 fix, which detachment used to defeat."""
     repo = _repo(fresh)
     _commit(repo, "a.txt", "1")
     bare = fresh / "origin.git"
@@ -105,117 +112,14 @@ async def test_upstream_hash_survives_detached_chat_tree(fresh):
     _git(repo, "fetch", "--quiet", "origin")
     _git(repo, "branch", "--set-upstream-to=origin/master", "master")
     _commit(repo, "b.txt", "2")  # local ahead of upstream by 1
-    chat = fresh / "chat"
-    _git(repo, "worktree", "add", "--detach", str(chat), "HEAD~1")
 
-    info = await _info(repo, chat_root=chat, branch="master")
+    info = await _info(repo)
 
     assert info is not None
     assert info["upstream"] == "origin/master"
     assert info["remote_hash"] == _short(bare, "master")
     assert info["local_hash"] == _short(repo, "master")
     assert info["ahead"] == 1 and info["behind"] == 0
-
-
-@pytest.mark.asyncio
-async def test_worktree_hash_absent_without_chat_tree(fresh):
-    repo = _repo(fresh)
-    _commit(repo, "a.txt", "1")
-
-    info = await _info(repo)
-
-    assert info is not None
-    assert info["worktree_hash"] is None
-    assert info["worktree_ahead"] == 0
-    assert info["local_hash"] == _short(repo, "master")
-
-
-@pytest.mark.asyncio
-async def test_worktree_ahead_counts_commits_not_in_primary(fresh):
-    repo = _repo(fresh)
-    _commit(repo, "a.txt", "1")
-    chat = fresh / "chat"
-    _git(repo, "worktree", "add", "--detach", str(chat), "HEAD")
-    _commit(chat, "wip.txt", "run work")  # a commit only the chat tree has
-
-    info = await _info(repo, chat_root=chat, branch="master")
-
-    assert info is not None
-    assert info["worktree_hash"] == _short(chat, "HEAD")
-    assert info["worktree_ahead"] == 1
-
-
-@pytest.mark.asyncio
-async def test_worktree_ahead_diverged_still_counts_as_ahead(fresh):
-    repo = _repo(fresh)
-    _commit(repo, "a.txt", "1")
-    chat = fresh / "chat"
-    _git(repo, "worktree", "add", "--detach", str(chat), "HEAD")
-    _commit(chat, "wip.txt", "run work")     # chat tree diverges...
-    _commit(repo, "main.txt", "human work")  # ...while master moved on
-
-    info = await _info(repo, chat_root=chat, branch="master")
-
-    assert info is not None
-    assert info["worktree_ahead"] == 1
-
-
-@pytest.mark.asyncio
-async def test_worktree_ahead_zero_for_unrelated_histories(fresh):
-    repo = _repo(fresh)
-    _commit(repo, "a.txt", "1")
-    _git(repo, "checkout", "--orphan", "side")
-    _git(repo, "rm", "-rf", "--quiet", ".")
-    _commit(repo, "other.txt", "orphan root")
-    _git(repo, "checkout", "--quiet", "master")
-    chat = fresh / "chat"
-    _git(repo, "worktree", "add", "--detach", str(chat), "side")
-
-    info = await _info(repo, chat_root=chat, branch="master")
-
-    assert info is not None
-    assert info["worktree_hash"] == _short(chat, "HEAD")
-    # rev-list cannot count unrelated histories (rc 128) -> never claim a
-    # direction the count cannot back.
-    assert info["worktree_ahead"] == 0
-
-
-@pytest.mark.asyncio
-async def test_info_cache_does_not_bleed_across_chats(fresh):
-    """#350 review: the info cache is keyed per chat (root + chat tree +
-    branch), not per workspace - two chats sharing a workspace must never
-    serve each other's worktree hash within the TTL."""
-    repo = _repo(fresh)
-    _commit(repo, "a.txt", "1")
-    chat_a = fresh / "chatA"
-    chat_b = fresh / "chatB"
-    _git(repo, "worktree", "add", "--detach", str(chat_a), "HEAD")
-    _git(repo, "worktree", "add", "--detach", str(chat_b), "HEAD")
-    _commit(chat_a, "wip.txt", "a work")  # a commit only chat A's tree has
-
-    info_a = await _info(repo, chat_root=chat_a, branch="master")
-    info_b = await _info(repo, chat_root=chat_b, branch="master")
-
-    assert info_a["worktree_hash"] == _short(chat_a, "HEAD")
-    # A shared cache entry would leak A's tree state into B's readout.
-    assert info_b["worktree_hash"] == _short(chat_b, "HEAD")
-    assert info_b["worktree_hash"] != info_a["worktree_hash"]
-    assert info_b["worktree_ahead"] == 0
-
-
-@pytest.mark.asyncio
-async def test_dirty_describes_chat_tree_when_it_exists(fresh):
-    repo = _repo(fresh)
-    _commit(repo, "a.txt", "1")
-    chat = fresh / "chat"
-    _git(repo, "worktree", "add", "--detach", str(chat), "HEAD")
-    (chat / "dirty.txt").write_text("x\n", encoding="utf-8")
-
-    info = await _info(repo, chat_root=chat, branch="master")
-
-    assert info is not None
-    assert info["dirty"] is True
-    assert info["untracked"] == 1
 
 
 # ---- remote parity (#333): hashes through the gateway ----
@@ -266,7 +170,7 @@ async def test_remote_info_fills_branch_tip_and_upstream_hashes(
     _commit(repo, "b.txt", "2")
     register_remote(_FakeHostSession(repo))
 
-    info = await _info(ns_path("h-fake", str(repo)), branch="master")
+    info = await _info(ns_path("h-fake", str(repo)))
 
     assert info is not None and not info.get("offline")
     assert info["local_hash"] == _short(repo, "master")
@@ -282,7 +186,7 @@ async def test_remote_info_hash_without_upstream(fresh, _clear_sessions):
     _commit(repo, "a.txt", "1")
     register_remote(_FakeHostSession(repo))
 
-    info = await _info(ns_path("h-fake", str(repo)), branch="master")
+    info = await _info(ns_path("h-fake", str(repo)))
 
     assert info is not None
     assert info["local_hash"] == _short(repo, "master")
@@ -290,9 +194,11 @@ async def test_remote_info_hash_without_upstream(fresh, _clear_sessions):
 
 
 @pytest.mark.asyncio
-async def test_remote_info_local_hash_uses_branch_not_detached_head(
+async def test_remote_info_reports_detached_head_commit(
     fresh, _clear_sessions
 ):
+    """Porcelain cannot name a detached HEAD; the readout falls back to the
+    short SHA of the commit the tree sits on."""
     from backend.agent.remote import ns_path, register_remote
 
     repo = _repo(fresh)
@@ -301,11 +207,10 @@ async def test_remote_info_local_hash_uses_branch_not_detached_head(
     _git(repo, "checkout", "--quiet", "--detach", "HEAD~1")
     register_remote(_FakeHostSession(repo))
 
-    info = await _info(ns_path("h-fake", str(repo)), branch="master")
+    info = await _info(ns_path("h-fake", str(repo)))
 
     assert info is not None
-    assert info["local_hash"] == _short(repo, "master")
-    assert info["local_hash"] != _short(repo, "HEAD")
+    assert info["local_hash"] == _short(repo, "HEAD")
 
 
 @pytest.mark.asyncio
@@ -319,5 +224,5 @@ async def test_remote_offline_stays_explicit(fresh, _clear_sessions):
             return {"error": "remote host unreachable: boom"}
 
     register_remote(_Offline())
-    info = await _info(ns_path("h-off", "C:/repo"), branch="master")
+    info = await _info(ns_path("h-off", "C:/repo"))
     assert info == {"offline": True}

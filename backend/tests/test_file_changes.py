@@ -42,29 +42,16 @@ async def test_git_snapshot_reports_net_changes_in_subdirectory(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_summary_reports_location_where_changes_were_made():
-    """The files-changed report carries location provenance.
-
-    Unknown stays unknown when the caller supplies nothing; whatever the
-    caller knows about the tree and branch passes through verbatim (the
-    run loop computes the real geometry - this layer only records it).
-    """
+async def test_summary_carries_no_location_provenance():
+    """The direct world (#361): there is ONE tree, so the files-changed
+    report says nothing about WHERE - the location keys are gone."""
     rows = [{"path": "a.txt", "added": 1, "deleted": 0, "binary": False}]
 
     bare = await summarize_file_changes(rows)
-    assert bare["worktree_role"] is None
-    assert bare["worktree"] is None
-    assert bare["worktree_rel"] is None
-    assert bare["branch"] is None
-
-    told = await summarize_file_changes(
-        rows, worktree_role="chat", worktree="C:/some/tree",
-        worktree_rel=".scratch/chat-7", branch="feature-x",
-    )
-    assert told["worktree_role"] == "chat"
-    assert told["worktree"] == "C:/some/tree"
-    assert told["worktree_rel"] == ".scratch/chat-7"
-    assert told["branch"] == "feature-x"
+    assert "worktree_role" not in bare
+    assert "worktree" not in bare
+    assert "worktree_rel" not in bare
+    assert "branch" not in bare
 
 
 def _sha(repo, *args: str) -> str:

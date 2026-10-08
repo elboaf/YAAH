@@ -28,13 +28,10 @@ import {
   listSkills,
   refreshSkills,
   getContext,
-  getGitBranch,
   getGitInfo,
   getGitBranches,
-  getRunWorktrees,
   selectConversationBranch,
   type GitInfo,
-  type RunWorktree,
   listMcpServers,
   addMcpServer,
   removeMcpServer,
@@ -54,7 +51,6 @@ import {
   deleteAgentInstruction,
   type ScheduledAgent,
   type AgentPolicy,
-  type AgentLandingMode,
   type AgentSayMode,
   type AgentScheduleType,
   type AgentBody,
@@ -1311,14 +1307,6 @@ type FileChangeSummary = {
   commit?: string | null
   /** Commits made during the run beyond the latest one. */
   extra_commits?: number
-  /** Where the changes were made: tree kind per the glossary, the tree's
-   *  absolute path, its workspace-relative display path (null when it IS
-   *  the workspace root), and the branch the run worked toward. Absent on
-   *  legacy rows - the chip renders no location segment for them. */
-  worktree_role?: 'chat' | 'primary' | null
-  worktree?: string | null
-  worktree_rel?: string | null
-  branch?: string | null
 }
 
 /** Collapsible per-turn file-change summary (files added/removed + counts). */
@@ -1349,19 +1337,6 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
               : ''}
           </span>
         )}
-        {/* Location provenance: WHERE the changes were made. Absent on
-            legacy rows; the primary worktree is the workspace root, so
-            only chat trees carry a relative path on the chip. The full
-            absolute path lives in the expanded panel footer. */}
-        {summary.worktree_role !== undefined && (
-          <span className="whitespace-nowrap text-zinc-500">
-            · {summary.worktree_role === 'chat' ? 'chat worktree' : 'primary worktree'}
-            {summary.branch ? ` · ${summary.branch}` : ''}
-            {summary.worktree_role === 'chat' && summary.worktree_rel
-              ? ` · ${summary.worktree_rel}`
-              : ''}
-          </span>
-        )}
       </button>
       {open && (
         <div id={panelId} className=" " role="list" aria-label="Changed files">
@@ -1379,12 +1354,6 @@ function FileChangesSummary({ summary }: { summary: FileChangeSummary }) {
               )}
             </div>
           ))}
-          {summary.worktree_role !== undefined && summary.worktree && (
-            <div className="truncate px-2 py-1 text-zinc-500" title={summary.worktree}>
-              {summary.worktree}
-              {summary.branch ? ` · ${summary.branch}` : ''}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -5419,22 +5388,6 @@ export function AgentForm({
   const [time, setTime] = useState(agent?.schedule_spec?.time ?? '09:00')
   const [weekday, setWeekday] = useState(String(agent?.schedule_spec?.weekday ?? 0))
   const [policy, setPolicy] = useState<AgentPolicy>(agent?.approval_policy ?? 'sandbox-only')
-  // #278: where each fire's work lands (off mirrors today's chat behavior).
-  const [landingMode, setLandingMode] = useState<AgentLandingMode>(agent?.landing_mode ?? 'off')
-  const [landingBranch, setLandingBranch] = useState(agent?.landing_branch ?? '')
-  // #314: the pinned chat's branch — '' = the inherit default ("inherit
-  // workspace's current branch"), which sends NO selected_branch so the
-  // #301 fallback runs exactly as before. An explicit pick pins the chat
-  // at creation (origin 'explicit'); on edit it writes through to the
-  // chat's selector (it matters mainly in off mode — fixed/per-run
-  // overwrite the selector at every fire anyway).
-  // Rests on '' (the inherit default) on edit too: preselecting the chat's
-  // current branch would silently re-stamp an inherited pin as explicit on
-  // every untouched save. The current target shows in the caption instead.
-  const [pinBranch, setPinBranch] = useState('')
-  // #314: the workspace's branch list for the picker (null while loading,
-  // [] when the workspace contributes none — non-git/remote/disabled).
-  const [wsBranches, setWsBranches] = useState<string[] | null>(null)
   // #296: when a fire's spoken briefing gets spoken (default arrival).
   const [sayMode, setSayMode] = useState<AgentSayMode>(agent?.say_mode ?? 'arrival')
   const [model, setModel] = useState(agent?.model ?? '')
@@ -5464,20 +5417,6 @@ export function AgentForm({
         setActiveProvider(r.active_provider)
       })
       .catch(() => {})
-    // #314: the branch picker feeds from the same workspace branch read the
-    // draft destination card uses. No list (non-git/remote) disables the
-    // picker into its inherit placeholder.
-    if (wsPath) {
-      getWorkspaceGitBranches(wsPath)
-        .then((r) => {
-          if (alive) setWsBranches(r.branches ?? [])
-        })
-        .catch(() => {
-          if (alive) setWsBranches([])
-        })
-    } else {
-      setWsBranches([])
-    }
     return () => {
       alive = false
     }
@@ -5503,11 +5442,6 @@ export function AgentForm({
               ? { time }
               : { weekday: parseInt(weekday, 10) || 0, time },
         approval_policy: policy,
-        landing_mode: landingMode,
-        landing_branch: landingMode === 'fixed' ? landingBranch.trim() : '',
-        // #314: only an explicit pick travels; the inherit default sends
-        // nothing so the backend's #301 fallback runs unchanged.
-        ...(pinBranch.trim() ? { selected_branch: pinBranch.trim() } : {}),
         say_mode: sayMode,
         model: model.trim(),
         effort,
@@ -5542,34 +5476,6 @@ export function AgentForm({
             disabled
           />
         </label>
-      </div>
-      <div className="flex gap-2">
-        <label className="min-w-0 flex-1">
-          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">
-            Initial branch — where this agent's chat starts
-          </span>
-          <select
-            className={`w-full ${agentInputCls}`}
-            value={pinBranch}
-            disabled={!wsBranches || wsBranches.length === 0}
-            aria-label="Initial branch"
-            onChange={(e) => setPinBranch(e.target.value)}
-          >
-            <option value="">
-              {wsPath
-                ? agent && pinBranch
-                  ? `keep current — ${pinBranch}`
-                  : 'inherit workspace\u2019s current branch'
-                : 'no workspace — no branch pin'}
-            </option>
-            {(wsBranches ?? []).map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="w-44 shrink-0" />
       </div>
       <label className="block">
         <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">
@@ -5627,18 +5533,6 @@ export function AgentForm({
           </select>
         </label>
         <label>
-          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Landing</span>
-          <select
-            className={agentInputCls}
-            value={landingMode}
-            onChange={(e) => setLandingMode(e.target.value as AgentLandingMode)}
-          >
-            <option value="off">off — follows the chat&apos;s branch selector</option>
-            <option value="fixed">fixed — one branch</option>
-            <option value="per-run">per-run — branch per fire</option>
-          </select>
-        </label>
-        <label>
           <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Voice</span>
           <select
             className={agentInputCls}
@@ -5650,35 +5544,6 @@ export function AgentForm({
           </select>
         </label>
       </div>
-      {landingMode === 'fixed' && (
-        <label>
-          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-zinc-500">Landing branch</span>
-          <input
-            className={`w-full ${agentInputCls}`}
-            value={landingBranch}
-            onChange={(e) => setLandingBranch(e.target.value)}
-            placeholder="e.g. nightly-refactor"
-          />
-        </label>
-      )}
-      <p className="text-[10px] leading-relaxed text-zinc-600">
-        {landingMode === 'off' &&
-          `Off (default): each fire runs in the pinned chat’s own branch — ${
-            agent
-              ? `currently lands on ${agent.chat_selected_branch ?? 'no branch (no pin)'}${
-                  agent.chat_branch_pin_origin
-                    ? ` (${agent.chat_branch_pin_origin === 'explicit' ? 'explicit pick' : 'inherited from workspace'})`
-                    : ''
-                }; the picker rests on the inherit default — an explicit pick writes through to the chat`
-              : `a new chat will inherit the workspace's current branch at creation`
-          }.`}
-        {landingMode === 'fixed'
-          ? 'Fixed: every fire lands on the branch above (it must exist in the workspace). The primary worktree is never touched.'
-          : ''}
-        {landingMode === 'per-run'
-          ? 'Per-run: every fire gets its own branch (<agent>-<date>-<time>), left unmerged for you to integrate manually.'
-          : ''}
-      </p>
       <p className="text-[10px] leading-relaxed text-zinc-600">
         {policy === 'sandbox-only'
           ? 'Sandbox-only (default): tools that would need approval are skipped ("skipped: approval required") and the run continues — safe unattended.'
@@ -6021,8 +5886,6 @@ function agentToBody(a: ScheduledAgent, enabled: boolean): AgentBody {
     schedule_type: a.schedule_type,
     schedule_spec: a.schedule_spec,
     approval_policy: a.approval_policy,
-    landing_mode: a.landing_mode,
-    landing_branch: a.landing_branch,
     say_mode: a.say_mode,
     model: a.model,
     effort: a.effort,
@@ -8168,30 +8031,18 @@ export function GitChipCluster({
   info,
   streaming,
   conversationId,
-  selectedBranch,
-  selectedOrigin,
-  selectedStale,
   onCommandDone,
 }: {
   info: GitInfo | null
   streaming: boolean
   conversationId: number | null
-  selectedBranch: string | null
-  /** #302: why the branch is pinned — 'inherited' | 'explicit' | null
-      (no pin; the fallback branch names the workspace's). */
-  selectedOrigin?: 'explicit' | 'inherited' | null
-  /** #302: the pinned branch no longer exists locally. */
-  selectedStale?: boolean
   onCommandDone: () => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [branches, setBranches] = useState<string[]>([])
   const [branchesLoaded, setBranchesLoaded] = useState(false)
   const [busyCheckout, setBusyCheckout] = useState(false)
-  const [copied, setCopied] = useState<'local' | 'remote' | 'worktree' | null>(null)
-  // #290: run-in-flight state — POLLED from the backend's git derivation
-  // (`git worktree list` over `.scratch/chat-<id>/`), never agent-reported.
-  const [runs, setRuns] = useState<RunWorktree[]>([])
+  const [copied, setCopied] = useState<'local' | 'remote' | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
   const appendRawMessage = useAgent((s) => s.appendRawMessage)
 
@@ -8202,27 +8053,6 @@ export function GitChipCluster({
     setMenuOpen(false)
   }, [conversationId])
 
-  // #290: poll the run-in-flight state on the same cadence as git-info —
-  // badge lights while a run worktree exists, clears on removal, and
-  // survives reload because the state lives in git, not in the UI.
-  useEffect(() => {
-    setRuns([])
-    if (conversationId === null) return
-    let cancelled = false
-    const tick = () => {
-      getRunWorktrees(conversationId)
-        .then((r) => {
-          if (!cancelled) setRuns(r.runs)
-        })
-        .catch(() => {}) // banner owns HTTP-level failures
-    }
-    tick()
-    const poll = window.setInterval(tick, 2000)
-    return () => {
-      cancelled = true
-      window.clearInterval(poll)
-    }
-  }, [conversationId])
 
   // Click-outside closes the checkout dropdown.
   useEffect(() => {
@@ -8253,24 +8083,8 @@ export function GitChipCluster({
 
   const lockMutations = streaming || busyCheckout
 
-  // #286: the chip is the chat's branch — the stored selection when the
-  // chat has one, else the workspace's checked-out branch (info.branch).
-  // The checkout flip records that pick per chat and moves no tree.
-  const chipBranch = selectedBranch || info.branch
-  // #302 (ADR-0010 amendment, decision 1): the tri-state. stale wins the
-  // flag slot; the "· workspace" marker names the inherited origin. The
-  // endpoint reports origin null both for a stored inherited pin and for
-  // no pin at all (the fallback branch IS the workspace's — api.ts's
-  // contract), so anything not explicitly a pick renders inherited.
-  const stale = Boolean(selectedStale)
-  const inherited = !stale && selectedOrigin !== 'explicit'
-
-  // #290: this chat's run worktrees only — chip attribution is arithmetic
-  // (the chat id on the `.scratch/chat-<id>/` path), not heuristics. The
-  // badge names the run branch and the landing target (stored pick, else
-  // the workspace's checked-out branch — same rule as chipBranch).
-  const myRuns = runs.filter((r) => String(conversationId) === r.chat_id)
-  const landingTarget = selectedBranch || info.branch
+  // #361: the chip is the ONE workspace tree's checked-out branch
+  // (info.branch); the dropdown's checkout moves that tree.
 
   const openMenu = () => {
     setMenuOpen((o) => !o)
@@ -8307,7 +8121,7 @@ export function GitChipCluster({
     }
   }
 
-  const copyHash = (h: string, which: 'local' | 'remote' | 'worktree') => {
+  const copyHash = (h: string, which: 'local' | 'remote') => {
     navigator.clipboard
       ?.writeText(h)
       .then(() => {
@@ -8317,22 +8131,15 @@ export function GitChipCluster({
       .catch(() => {})
   }
 
-  // #350 sync readout: three hashes, each colored by its own divergence.
-  // local = the selected branch's TIP (neutral; the branch itself never
-  // moves); upstream = its upstream tip (blue when ahead of local, red
-  // when behind or diverged, zinc in sync; unrelated histories stay zinc
-  // - no color claim we cannot back); worktree = the chat worktree's
-  // HEAD, amber when it carries commits the primary worktree lacks. The
-  // old whole-pair coloring is gone: per-hash color owns the divergence
-  // signal now; the counters keep magnitude.
+  // #350 sync readout: two hashes, each colored by its own divergence.
+  // local = the checked-out branch's tip (neutral); upstream = its
+  // upstream tip (blue when ahead of local, red when behind or diverged,
+  // zinc in sync; unrelated histories stay zinc - no color claim we
+  // cannot back). The counters keep magnitude.
   const upColor =
     info.behind > 0 ? 'text-red-400' : info.ahead > 0 ? 'text-blue-400' : 'text-zinc-400'
-  const wtAhead = info.worktree_ahead ?? 0
-  const wtColor = wtAhead > 0 ? 'text-yellow-400' : 'text-zinc-400'
-  const wtTitle =
-    `worktree — HEAD of this chat's worktree${wtAhead > 0 ? ` — ↑${wtAhead} ahead of the primary worktree` : ' — in sync with the primary worktree'}`
   const sep = <span className="px-0.5 text-zinc-700">·</span>
-  type HashSlot = { which: 'local' | 'remote' | 'worktree'; label: string; hash: string; title: string | null; color: string }
+  type HashSlot = { which: 'local' | 'remote'; label: string; hash: string; title: string | null; color: string }
   const slots: HashSlot[] = [
     info.local_hash && {
       which: 'local' as const,
@@ -8347,13 +8154,6 @@ export function GitChipCluster({
       hash: info.remote_hash,
       title: copied === 'remote' ? null : `${info.upstream ?? 'upstream'} — copy ${info.remote_hash}`,
       color: upColor,
-    },
-    info.worktree_hash && {
-      which: 'worktree' as const,
-      label: 'worktree',
-      hash: info.worktree_hash,
-      title: copied === 'worktree' ? null : `${wtTitle} — copy ${info.worktree_hash}`,
-      color: wtColor,
     },
   ].filter((s): s is HashSlot => Boolean(s))
 
@@ -8377,23 +8177,7 @@ export function GitChipCluster({
           className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${info.dirty ? 'bg-amber-400' : 'bg-transparent'}`}
           title={info.dirty ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)` : undefined}
         />
-        <span className="min-w-0 max-w-[10rem] truncate">{chipBranch}</span>
-        {/* #302 tri-state: the inherited marker names the origin; a stale
-            pin is flagged instead of silently rendering a dead name. */}
-        {stale ? (
-          <span className="shrink-0 rounded bg-red-500/15 px-1 font-mono text-[9px] uppercase tracking-wide text-red-400">
-            stale
-          </span>
-        ) : (
-          inherited && (
-            <span
-              className="shrink-0 font-mono text-[9px] text-zinc-500"
-              title="Inherited from the workspace's branch — no explicit pick for this chat yet"
-            >
-              · workspace
-            </span>
-          )
-        )}
+        <span className="min-w-0 max-w-[10rem] truncate">{info.branch}</span>
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
@@ -8416,19 +8200,14 @@ export function GitChipCluster({
                 key={b}
                 disabled={lockMutations}
                 className={`flex w-full items-center gap-2 px-3 py-1 text-left font-mono text-[11px] hover:bg-zinc-800/60 ${
-                  b === chipBranch ? 'text-zinc-200' : 'text-zinc-400'
+                  b === info.branch ? 'text-zinc-200' : 'text-zinc-400'
                 } ${lockMutations ? 'cursor-not-allowed opacity-40' : ''}`}
                 onClick={() => {
                   setMenuOpen(false)
-                  // #301: an inherited pin (or no pin) adopts into an
-                  // explicit pick on the same click — only a live explicit
-                  // pick makes the same-branch click a no-op. A stale
-                  // explicit pin also stays click-locked: re-picking a
-                  // dead branch name must not silently re-create it.
-                  if (b !== chipBranch || selectedOrigin !== 'explicit') run(b)
+                  if (b !== info.branch) run(b)
                 }}
               >
-                <span className="w-3 shrink-0 text-blue-400">{b === chipBranch ? '✓' : ''}</span>
+                <span className="w-3 shrink-0 text-blue-400">{b === info.branch ? '✓' : ''}</span>
                 <span className="truncate">{b}</span>
               </button>
             ))}
@@ -8441,36 +8220,9 @@ export function GitChipCluster({
         </div>
       )}
 
-      {/* Run-in-flight badge (#290): lit while this chat's run worktree
-          exists. Derived from polled git state — reload-safe, never an
-          agent announcement. Name > color: the badge text names the run
-          branch and its landing target. The selector chip above keeps
-          meaning "the user's pick" and is never recolored for run state. */}
-      {myRuns.map((r) => {
-        const residueTitle =
-          r.residue === 'clean'
-            ? 'Run work in flight. Branch is clean and fully landed — residue from a finished run; a run start may remove it (removable).'
-            : r.residue === 'dirty'
-              ? `Run work in flight. ${r.path} has uncommitted changes — run work is untouched and surfaced; the agent asks (land / another branch / leave / scrap); typed "land it"/"scrap it" still work.`
-              : `Run work in flight. ${r.branch} has commits not yet landed — the agent asks (land / another branch / leave / scrap); typed "land it"/"scrap it" still work.`
-        return (
-          <span
-            key={r.path}
-            role="status"
-            aria-label="run in flight"
-            title={residueTitle}
-            className="flex shrink-0 items-center gap-1 rounded bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-sky-300"
-          >
-            <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" />
-            <span className="max-w-[14rem] truncate">
-              {r.branch} → {landingTarget}
-            </span>
-          </span>
-        )
-      })}
 
-      {/* Sync readout (#350): three short hashes — the selected branch's
-          tip, its upstream's tip, the chat worktree's HEAD — click = copy,
+      {/* Sync readout (#350): two short hashes — the checked-out branch's
+          tip, its upstream's tip — click = copy,
           each colored by its own divergence; ahead/behind counters kept.
           Each hash sits in a column with its role named above it (plain
           text, always visible — name > hover-only title). items-end: the
@@ -8671,14 +8423,6 @@ function DraftDestinationCard() {
   const [remoteAdd, setRemoteAdd] = useState(false)
   const [remotePath, setRemotePath] = useState('')
   const [err, setErr] = useState<string | null>(null)
-  const [gitBranch, setGitBranch] = useState<string | null>(null)
-  const [gitBranches, setGitBranches] = useState<string[]>([])
-  const [gitMenuOpen, setGitMenuOpen] = useState(false)
-  const [gitLoading, setGitLoading] = useState(false)
-  const [gitBusy, setGitBusy] = useState(false)
-  const [gitError, setGitError] = useState<string | null>(null)
-  // #335: the remote host is unreachable — an explicit state on the card.
-  const [gitOffline, setGitOffline] = useState(false)
 
   // The live destination: pinned value, else the active workspace ('' =
   // Default, the no-root pseudo-workspace).
@@ -8686,37 +8430,6 @@ function DraftDestinationCard() {
   const destRef = useRef(dest)
   destRef.current = dest
 
-  useEffect(() => {
-    let cancelled = false
-    setGitBranch(null)
-    setGitBranches([])
-    setGitMenuOpen(false)
-    setGitLoading(false)
-    setGitBusy(false)
-    setGitError(null)
-    setGitOffline(false)
-    // #335 (selector parity): remote destinations read the HOST's
-    // branches through the gateway — the picker is live for remote
-    // drafts; an unreachable host is an EXPLICIT state on the card
-    // (never a silent vanish, per the #332 UI-parity decision).
-    if (!dest) return
-    getWorkspaceGitBranches(dest)
-      .then((result) => {
-        if (!cancelled) {
-          setGitBranch(result.branch)
-          setGitBranches(result.branches)
-          setGitOffline(result.offline === true)
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setGitBranch(null)
-          setGitBranches([])
-          setGitOffline(false)
-        }
-      })
-    return () => { cancelled = true }
-  }, [dest])
 
   useEffect(() => {
     let cancelled = false
@@ -8794,46 +8507,6 @@ function DraftDestinationCard() {
 
   const destinationInRows = rows.some((w) => w.path === dest)
 
-  const openGitBranches = async () => {
-    if (!dest) return
-    setGitMenuOpen(true)
-    setGitLoading(true)
-    setGitError(null)
-    try {
-      const result = await getWorkspaceGitBranches(dest)
-      if (destRef.current !== dest) return
-      setGitBranch(result.branch)
-      setGitBranches(result.branches)
-    } catch (e) {
-      if (destRef.current === dest) {
-        setGitError(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
-        setGitBranches([])
-      }
-    } finally {
-      if (destRef.current === dest) setGitLoading(false)
-    }
-  }
-
-  /** #277: the draft card's pick records intent only - the branch is
-   *  pre-stored on the conversation at creation; no primary-tree
-   *  checkout runs (ADR-0010 amendment). */
-  const checkoutDraftBranch = async (branch: string) => {
-    if (!dest || gitBusy) return
-    setGitBusy(true)
-    setGitError(null)
-    try {
-      setGitBranch(branch)
-      setDraftScope({ branch })
-      setGitMenuOpen(false)
-    } catch (e) {
-      if (destRef.current === dest) {
-        setGitError(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
-      }
-    } finally {
-      if (destRef.current === dest) setGitBusy(false)
-    }
-  }
-
   return (
     <div className="mx-auto mt-3 w-full max-w-md rounded   bg-zinc-900/60 px-3 py-2">
       <div className="flex items-center gap-2">
@@ -8856,41 +8529,6 @@ function DraftDestinationCard() {
             <option key={w.path} value={w.path!}>{w.owner_id ? `${devices.find((d) => d.host_id === w.owner_id)?.name ?? 'Device'} · ${w.label}` : w.label}</option>
           ))}
         </select>
-        {/* #335: live for remote destinations too — the branch read is
-            the host's, through the gateway; an unreachable host renders
-            the explicit offline state below. */}
-        {gitBranch && (
-          <div className="relative shrink-0">
-            <button
-              type="button"
-              aria-label={`Branch ${gitBranch}`}
-              title={`⎇ ${gitBranch} — a pick below saves this chat's own branch; nothing moves the workspace`}
-              disabled={gitBusy}
-              onClick={() => gitMenuOpen ? setGitMenuOpen(false) : void openGitBranches()}
-              className="rounded   px-2 py-1 font-mono text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
-            >
-              ⎇ <span className="min-w-0 max-w-[10rem] truncate">{gitBranch}</span>
-            </button>
-            {gitMenuOpen && (
-              <div role="menu" aria-label="Git branches" className="absolute right-0 top-full z-30 mt-1 max-h-48 min-w-36 overflow-auto rounded   bg-zinc-900 p-1 shadow-xl">
-                {gitLoading ? <div className="px-2 py-1 text-[10px] text-zinc-500">Loading branches…</div> :
-                  gitBranches.map((branch) => (
-                    <button
-                      key={branch}
-                      type="button"
-                      role="menuitem"
-                      disabled={gitBusy || branch === gitBranch}
-                      onClick={() => void checkoutDraftBranch(branch)}
-                      className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left font-mono text-[10px] text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-                    >
-                      <span>{branch}</span><span>{branch === gitBranch ? '✓' : ''}</span>
-                    </button>
-                  ))}
-                {!gitLoading && gitBranches.length === 0 && <div className="px-2 py-1 text-[10px] text-zinc-500">No local branches</div>}
-              </div>
-            )}
-          </div>
-        )}
         {!remoteAdd && (
           <button
             className="shrink-0 rounded border border-dashed border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
@@ -8931,12 +8569,6 @@ function DraftDestinationCard() {
         </div>
       )}
       {err && <p className="mt-1 text-[10px] text-red-400">{err}</p>}
-      {gitError && <p role="alert" className="mt-1 text-[10px] text-red-400">{gitError}</p>}
-      {gitOffline && (
-        <p role="status" className="mt-1 text-[10px] text-amber-400">
-          Host offline — branch selection unavailable until it reconnects.
-        </p>
-      )}
     </div>
   )
 }
@@ -9262,30 +8894,10 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     s.conversationId === null ? undefined : s.contextByConv[String(s.conversationId)],
   )
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null)
-  // #286: the chat's stored branch selection (null = follow the workspace's
-  // checked-out branch). Refetched after UI git actions so a flip reflects
-  // immediately.
-  const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
-  // #302: the pin's origin and staleness — the chip's tri-state beyond the
-  // name. Refetched with the branch after UI git actions.
-  const [selectedOrigin, setSelectedOrigin] = useState<'explicit' | 'inherited' | null>(null)
-  const [selectedStale, setSelectedStale] = useState(false)
   useEffect(() => {
     setGitInfo(null)
-    setSelectedBranch(null)
-    setSelectedOrigin(null)
-    setSelectedStale(false)
     if (conversationId === null) return
     let cancelled = false
-    getGitBranch(conversationId)
-      .then((r) => {
-        if (!cancelled) {
-          setSelectedBranch(r.branch)
-          setSelectedOrigin(r.pin_origin ?? null)
-          setSelectedStale(r.stale ?? false)
-        }
-      })
-      .catch(() => {})
     // Exact context readout: persisted by the backend at every model call.
     getContext(conversationId)
       .then((c) => {
@@ -9295,22 +8907,11 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       .catch(() => {})
     // Git cluster readout: TTL-cached backend read (branch, dirty, counts,
     // hashes), re-polled every 2s while this session is on screen so
-    // terminal activity reflects without any push channel. #302: the same
-    // tick carries the selector tri-state (origin + stale) so a branch
-    // deleted in a terminal flips the chip within a poll.
+    // terminal activity reflects without any push channel.
     const tick = () => {
       getGitInfo(conversationId)
         .then((r) => {
           if (!cancelled) setGitInfo(r.info)
-        })
-        .catch(() => {})
-      getGitBranch(conversationId)
-        .then((r) => {
-          if (!cancelled) {
-            setSelectedBranch(r.branch)
-            setSelectedOrigin(r.pin_origin ?? null)
-            setSelectedStale(r.stale ?? false)
-          }
         })
         .catch(() => {})
     }
@@ -9321,22 +8922,14 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       window.clearInterval(poll)
     }
   }, [conversationId, setContext])
-  // After a UI-driven git command, refresh the readouts immediately (the
+  // After a UI-driven git command, refresh the readout immediately (the
   // backend already invalidated its caches) instead of waiting for the poll.
   const refreshGitInfo = useCallback(() => {
     if (conversationId === null) return
     getGitInfo(conversationId)
       .then((r) => setGitInfo(r.info))
       .catch(() => {})
-    getGitBranch(conversationId)
-      .then((r) => {
-        setSelectedBranch(r.branch)
-        setSelectedOrigin(r.pin_origin ?? null)
-        setSelectedStale(r.stale ?? false)
-      })
-      .catch(() => {})
   }, [conversationId])
-
   // ---- read-aloud (TTS) ----
   const ttsEnabled = useTts((s) => s.enabled)
   const ttsReady = useTts((s) => s.ready)
@@ -9675,9 +9268,6 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           info={gitInfo}
           streaming={streaming}
           conversationId={conversationId}
-          selectedBranch={selectedBranch}
-          selectedOrigin={selectedOrigin}
-          selectedStale={selectedStale}
           onCommandDone={refreshGitInfo}
         />
         {/* Access mode lives in the composer toolbar now. Plan approval is a
@@ -10655,16 +10245,6 @@ export function Composer() {
             files: ev.files ?? [],
             added: ev.added ?? 0,
             deleted: ev.deleted ?? 0,
-            // Pass location through when the backend sent it (legacy
-            // backends omit it; the chip then renders no segment).
-            ...(ev.worktree_role !== undefined
-              ? {
-                  worktree_role: ev.worktree_role,
-                  worktree: ev.worktree ?? null,
-                  worktree_rel: ev.worktree_rel ?? null,
-                  branch: ev.branch ?? null,
-                }
-              : {}),
           },
         }),
       })
@@ -11022,7 +10602,6 @@ export function Composer() {
         const created = await createConversation(stripProviderMarkup(displayText).slice(0, 40) || 'New chat', dest, {
           model: ds?.model ?? useAgent.getState().globalModel,
           effort: ds?.effort ?? useAgent.getState().globalEffort,
-          branch: ds?.branch ?? null,
         })
         cid = created.id
         // Atomic: re-key the draft buffer (optimistic messages included).

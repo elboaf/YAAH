@@ -66,18 +66,7 @@ async def lifespan(app: FastAPI):
     from backend.agent import scheduler
 
     await scheduler.ensure_scheduled()
-    # #277 (ADR-0010 pruning): retire clean chat worktrees of dead chats
-    # past the idle threshold. Best-effort and logged, never fatal; the
-    # rate limiter makes this once-per-boot (then hourly at most).
-    # #357: the hourly promise is now kept by a ticker task, and missed
-    # post-run retirements retry on every tick (should_sweep still
-    # rate-limits the age-gated sweep; enqueued trees skip the gates).
-    from backend.agent import wt_sweep
-
-    await wt_sweep._sweep_ticker_tick()
-    wt_sweep.start_sweep_ticker()
     yield
-    await wt_sweep.stop_sweep_ticker()
     await mcp_client.manager.shutdown()
     scheduler.stop_scheduler()
     discovery.stop_advertising()
@@ -251,8 +240,6 @@ class NewConversation(BaseModel):
     # distinct from "unspecified".
     model: str = ""
     effort: str = ""
-    # #277: the draft destination card's branch pick, pinned at creation
-    selected_branch: str | None = None
 
 
 class ConversationUpdate(BaseModel):
@@ -283,7 +270,6 @@ class NewMessage(BaseModel):
 async def api_create_conversation(body: NewConversation):
     cid = await create_conversation(
         body.title, body.workspace, model=body.model, effort=body.effort,
-        selected_branch=body.selected_branch,
     )
     return {"id": cid}
 
@@ -564,13 +550,13 @@ async def api_workspace_git_branches(workspace: str = ""):
         "branches": branches,
     }
 
+# /api/workspaces/git-checkout is GONE (#361, the direct world): the
+# UI checkout action moved into the per-conversation git-command body.
 
-
-# #301 (ADR-0010 amendment): /api/workspaces/git-checkout is GONE — it was
-# the last in-YAAH control that moved the primary worktree. "Switch to X"
-# before a chat exists is now purely a selector write (the draft card's
-# pick pre-stores selected_branch at creation); the human's primary tree
-# is moved only by the human's own terminal git.
+class GitCommandBody(BaseModel):
+    action: str  # status | commit | push | pull | checkout
+    message: str | None = None  # commit message
+    branch: str | None = None  # checkout target
 
 
 class BranchSelectBody(BaseModel):
@@ -579,137 +565,72 @@ class BranchSelectBody(BaseModel):
 
 @app.post("/api/conversations/{conversation_id}/branch-select")
 async def api_conversation_branch_select(conversation_id: int, body: BranchSelectBody):
-    """Set the chat's branch selector (#286, ADR-0010 slice 1).
-
-    The selector is a stored per-chat value — the chat's user-intended
-    branch. With no chat worktree yet (this slice), a flip only records
-    intent: no `git checkout` runs, the shared tree never moves, and the
-    flip is invisible to other chats. Guards mirror the checkout paths:
-    empty, option-like (`-…`), and non-local branch names are refused.
-    """
+    """Switch the conversation's workspace to a branch (the direct world,
+    #359/ADR-0017): one plain checkout. The stored per-chat branch
+    selector is gone; this moves the ONE tree. Git's own refusals surface
+    verbatim - nothing is stashed or discarded by harness code."""
     from fastapi import HTTPException
-
-    from backend.agent.gitinfo import list_local_branches
-    from backend.agent.tools import workspace_root
 
     conv = await get_conversation(conversation_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-
     branch = body.branch.strip()
     if not branch:
         return {"ok": False, "error": "checkout target is empty"}
     if branch.startswith("-"):
         return {"ok": False, "error": "checkout target must be a local branch name"}
-
     ws = conv.get("workspace") or ""
-    # #335 (selector parity): remote chats flip for real — the same
-    # dirty-refusing checkout inside the chat's own worktree that the
-    # agent tool performs, through the gateway. The pin is stored only
-    # when the flip (or the branch creation) succeeded.
-    from backend.agent.remote import parse_ns
-
-    if parse_ns(ws) is not None:
-        from backend.agent.tools import _remote_selector_flip
-
-        # The endpoint has no create flag: a flip to a branch the host
-        # does not have is refused, exactly like the local arm.
-        return await _remote_selector_flip(
-            ws, conversation_id, branch, create=False
-        )
     if not ws.strip():
         return {"ok": False, "error": "no local git workspace"}
-    try:
-        root = workspace_root(ws)
-    except ValueError as e:
-        return {"ok": False, "error": str(e)}
-    if branch not in await list_local_branches(root):
-        return {"ok": False, "error": f"not a local branch: {branch}"}
+    if ws.startswith("remote:"):
+        return {"ok": False, "error": "remote workspace: switch the branch on the host checkout"}
+    from backend.agent.tools import branch_select as _tool_branch_select
 
-    # #302: a selector flip is by definition an explicit pick.
-    await update_conversation(
-        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
-    )
-    return {"ok": True, "selected_branch": branch, "pin_origin": "explicit"}
+    res = await _tool_branch_select(workspace=ws, branch=branch, create=True)
+    if not res.get("ok"):
+        return res
+    return {"ok": True, "branch": branch, "created": bool(res.get("created"))}
 
 
 @app.get("/api/conversations/{conversation_id}/git-branch")
 async def api_conversation_git_branch(conversation_id: int):
-    """The chat's branch for the status-strip chip (#286): the stored
-    selection when the chat has one, else the workspace's checked-out
-    branch. #302 (ADR-0010 amendment, decision 1): the response also
-    carries the pin's origin — 'explicit' or 'inherited' (None = no pin;
-    the fallback branch IS the workspace's, so the UI marks it inherited)
-    — and a stale flag: the selected branch no longer exists locally,
-    deleted upstream of the chat. Cheap by design: the stale check rides
-    the TTL-cached branch list, so a poll spawns no more git than before.
-    """
+    """The workspace's checked-out branch for the status-strip chip. The
+    direct world has one tree and no per-chat picks: the endpoint reads
+    the workspace truth (None when blank, offline, or non-git; a remote
+    chat reads the host through the gateway, #333)."""
     conv = await get_conversation(conversation_id)
     if conv is None:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
-    stored = conv.get("selected_branch")  # #286: per-chat pick wins
-    if stored:
-        # #302: a pre-#302 pick (origin NULL) was only ever a user pick —
-        # reporting explicit keeps legacy rows honest instead of suddenly
-        # growing inherited markers.
-        reported_origin = conv.get("branch_pin_origin") or "explicit"
-        stale = False
-        ws = conv.get("workspace") or ""
-        if ws.strip() and not ws.startswith("remote:"):
-            from backend.agent.gitinfo import is_git_repo, list_local_branches
-            from backend.agent.tools import workspace_root
-
-            try:
-                root = workspace_root(ws)
-            except ValueError:
-                stale = False
-            else:
-                # Non-repo guard (mirrors the run path in loop.py): an
-                # empty branch list for a vanished workspace means "no
-                # repo", not "the branch was deleted".
-                if is_git_repo(root):
-                    stale = stored not in await list_local_branches(root)
-        elif ws.strip():
-            # #335: the staleness check reads the HOST's branch list
-            # through the gateway. An unreachable host is not "the branch
-            # was deleted" — the empty list there means cannot-know, the
-            # same reading the non-repo guard gives locally.
-            from backend.agent.gitinfo import list_local_branches
-
-            branches = await list_local_branches(ws)
-            stale = bool(branches) and stored not in branches
-        return {"branch": stored, "pin_origin": reported_origin, "stale": stale}
     from backend.agent.gitinfo import current_git_branch
     from backend.agent.tools import workspace_root
 
     from backend.agent.remote import parse_ns
 
     ws = conv.get("workspace") or ""
-    # #335: with no pin, remote chats report the host's checked-out
-    # branch through the gateway (offline -> None, the offline posture).
+    # #333/#335: a remote chat reads the HOST's checked-out branch through
+    # the gateway (offline -> None, the explicit offline posture) - never
+    # through workspace_root, whose Path.resolve() mangles the namespaced
+    # string into a client-local path.
     if parse_ns(ws) is not None:
-        return {
-            "branch": await current_git_branch(ws),
-            "pin_origin": None,
-            "stale": False,
-        }
+        return {"branch": await current_git_branch(ws)}
     if not ws.strip():
-        return {"branch": None, "pin_origin": None, "stale": False}
+        return {"branch": None}
     try:
         root = workspace_root(ws)
     except ValueError:
-        return {"branch": None, "pin_origin": None, "stale": False}
-    return {"branch": await current_git_branch(root), "pin_origin": None, "stale": False}
+        return {"branch": None}
+    return {"branch": await current_git_branch(root)}
 
 
 @app.get("/api/conversations/{conversation_id}/git-info")
 async def api_conversation_git_info(conversation_id: int):
     """Full git readout for the status strip: branch, dirty state, +N −N
-    line counts, local vs upstream hashes and ahead/behind. TTL-cached in
-    gitinfo (one git burst per ~2s per workspace) — the UI polls this while
-    a session is open."""
+    line counts, local vs upstream hashes and ahead/behind - read from the
+    ONE workspace tree (the direct world; #359). TTL-cached in gitinfo
+    (one git burst per ~2s per workspace) - the UI polls this while a
+    session is open."""
     conv = await get_conversation(conversation_id)
     if conv is None:
         from fastapi import HTTPException
@@ -721,40 +642,19 @@ async def api_conversation_git_info(conversation_id: int):
     ws = conv.get("workspace") or ""
     if not ws.strip():
         return {"info": None}
-    # #333: remote chats read through the gateway with the raw namespaced
-    # string — workspace_root's Path.resolve() would mangle it into a
-    # client-local path. When remote chats grow host-side chat worktrees
-    # (ticket #334), the root substitution happens on the host side the
-    # same way the local branch substitutes below.
     from backend.agent.remote import parse_ns
 
     if parse_ns(ws) is not None:
-        info = await git_workspace_info(ws)
-        # #333: info is None only for a blank workspace (handled above);
-        # offline (with the channel's error detail, when git itself
-        # refused) passes through — the strip renders the explicit state.
-        # #350: the stored pick rides along, so the remote local hash is
-        # the selected branch's tip even when the host tree is detached.
-        return {"info": await git_workspace_info(ws, branch=conv.get("selected_branch"))}
+        # #333: remote chats read through the gateway with the raw
+        # namespaced string - workspace_root's Path.resolve() would
+        # mangle it into a client-local path. Offline passes through as
+        # the explicit state the strip renders.
+        return {"info": await git_workspace_info(ws)}
     try:
         root = workspace_root(ws)
     except ValueError:
         return {"info": None}
-    # #350: the chat's stored branch pick names the branch whose tip the
-    # local hash reports; None falls back to the read tree's own branch.
-    stored = conv.get("selected_branch")
-    # #277 + #350: when the chat's own worktree exists, the worktree hash
-    # and the dirty/line counts describe THAT tree - the substitution now
-    # happens inside gitinfo, so the hash trio and the counts describe one
-    # instant instead of two.
-    from backend.agent import worktrees as _worktrees
-
-    chat_dir = _worktrees.chat_worktree_path(ws, conversation_id)
-    if chat_dir is None or not chat_dir.exists():
-        chat_dir = None
-    return {
-        "info": await git_workspace_info(root, chat_root=chat_dir, branch=stored)
-    }
+    return {"info": await git_workspace_info(root)}
 
 
 @app.get("/api/conversations/{conversation_id}/git-branches")
@@ -786,75 +686,28 @@ async def api_conversation_git_branches(conversation_id: int):
     return {"branches": branches}
 
 
-@app.get("/api/conversations/{conversation_id}/run-worktrees")
-async def api_conversation_run_worktrees(conversation_id: int):
-    """Run-in-flight state for the status-strip badge (#290): the
-    `.scratch/chat-<id>/` run worktrees of the chat's workspace, each with
-    its residue state against the landing target. Derived from polled git
-    state (survives reload); never agent-reported. The landing target is
-    the chat's stored branch selection when it has one, else the
-    workspace's checked-out branch. Shape: {runs: [{branch, chat_id,
-    leaf, path, dirty, merged, residue}], target}."""
+async def _conversation_git_root(conversation_id: int):
+    """The conversation's git root: the workspace checkout itself (the
+    direct world - one tree, no per-chat worktree remap), or None when
+    the session has no local git workspace (remote:/empty handled by
+    callers; non-repo workspaces surface git's own failure)."""
+    from backend.agent.tools import workspace_root
+
     conv = await get_conversation(conversation_id)
     if conv is None:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
-    from backend.agent.gitinfo import current_git_branch
-    from backend.agent.runwatch import run_worktrees
-    from backend.agent.tools import workspace_root
-
     ws = conv.get("workspace") or ""
     if not ws.strip() or ws.startswith("remote:"):
-        return {"runs": [], "target": None}
+        return None
     try:
-        root = workspace_root(ws)
+        return workspace_root(ws)
     except ValueError:
-        return {"runs": [], "target": None}
-    # Landing target: the chat's stored pick (#286) wins, else the
-    # workspace's checked-out branch — same rule the selector chip uses.
-    target = conv.get("selected_branch") or await current_git_branch(root)
-    runs = await run_worktrees(root, target)
-    return {"runs": runs, "target": target}
-
-
-class GitCommandBody(BaseModel):
-    action: str  # status | commit | push | pull | checkout
-    message: str | None = None  # commit message
-    branch: str | None = None  # checkout target
+        return None
 
 
 _GIT_ACTIONS = {"status", "commit", "push", "pull", "checkout"}
-
-
-async def _conversation_git_root(conversation_id: int):
-    """Resolved git root for a conversation — the CHAT worktree when one
-    exists, else the workspace root (#328; the same remap git-info has
-    made since #277) — or None when the session has no local git
-    workspace (remote:/empty/non-repo handled by callers). The status
-    strip acts on the tree the chat works in: commit/push/pull mutate
-    where the agent commits, and the run/* refusal guards the worktree
-    HEAD where it actually lives."""
-    from backend.agent.tools import workspace_root
-
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=404, detail="conversation not found")
-    ws = conv.get("workspace") or ""
-    if not ws.strip() or ws.startswith("remote:"):
-        return None
-    try:
-        root = workspace_root(ws)
-    except ValueError:
-        return None
-    from backend.agent import worktrees as _worktrees
-
-    chat_dir = _worktrees.chat_worktree_path(ws, conversation_id)
-    if chat_dir is not None and chat_dir.exists():
-        return chat_dir
-    return root
 
 
 async def _run_ui_git(root, *args: str) -> dict:
@@ -939,10 +792,10 @@ async def api_conversation_git_command(conversation_id: int, body: GitCommandBod
 async def _ui_git_locked(root, conversation_id: int, action: str, body: GitCommandBody, invalidate) -> dict:
     """The git-command body, ending with the standard invalidate+trace+return.
 
-    The ADR-0008 merge-mutex wording is retired: since #286 the UI checkout
-    writes the chat's stored branch selector instead of moving the tree, so
-    no UI git action relocates the shared workspace (commit/push/pull still
-    mutate it, and stay user-initiated)."""
+    The ADR-0008 merge-mutex wording is retired. #286's stored-selector
+    checkout died with the direct world (#359): checkout moves the ONE
+    workspace tree like every other git action here (commit/push/pull
+    still mutate it, and stay user-initiated)."""
     if action == "status":
         result = await _run_ui_git(root, "status", "--short", "--branch")
     elif action == "commit":
@@ -955,70 +808,30 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
         else:
             result = await _run_ui_git(root, "commit", "-m", msg)
     elif action == "push":
-        # #320 (ADR-0010): run branches (`run/*`, per-chat worktree HEADs)
-        # are private scratch - the status strip never publishes them, and
-        # the --set-upstream fallback below would create a brand-new origin
-        # ref for one. Refuse before any git call; the refusal is traced
-        # like every other result.
-        head = await _run_ui_git(root, "rev-parse", "--abbrev-ref", "HEAD")
-        branch = head.get("output", "").strip() if "output" in head else ""
-        if branch.startswith("run/"):
-            result = {
-                "ok": False,
-                "error": (
-                    f"refusing to push `{branch}`: run/* branches stay "
-                    "local until landed on a primary branch (ADR-0010); "
-                    "switch the workspace to the landed branch and push "
-                    "that instead"
-                ),
-            }
-        else:
-            result = await _run_ui_git(root, "push")
-            err = result.get("error", "").lower()
-            if "error" in result and ("upstream" in err or "push destination" in err):
-                # No upstream (new branch) or no remote configured yet: retry
-                # with --set-upstream and say so in the recorded output.
-                probe = await _run_ui_git(root, "rev-parse", "--abbrev-ref", "HEAD")
-                branch = probe.get("output", "").strip() if "output" in probe else ""
-                if branch:
-                    retried = await _run_ui_git(
-                        root, "push", "--set-upstream", "origin", branch
-                    )
-                    retried.setdefault("note", f"set upstream to origin/{branch}")
-                    result = retried
+        result = await _run_ui_git(root, "push")
+        err = result.get("error", "").lower()
+        if "error" in result and ("upstream" in err or "push destination" in err):
+            # No upstream (new branch) or no remote configured yet: retry
+            # with --set-upstream and say so in the recorded output.
+            probe = await _run_ui_git(root, "rev-parse", "--abbrev-ref", "HEAD")
+            branch = probe.get("output", "").strip() if "output" in probe else ""
+            if branch:
+                retried = await _run_ui_git(
+                    root, "push", "--set-upstream", "origin", branch
+                )
+                retried.setdefault("note", f"set upstream to origin/{branch}")
+                result = retried
     elif action == "pull":
         result = await _run_ui_git(root, "pull")
     elif action == "checkout":
-        # #286 (ADR-0010 slice 1): checkout no longer moves the shared
-        # workspace tree — that yanked it out from under every other chat.
-        # It records the chat's intended branch instead; on a worktree-less
-        # chat this is pure intent, touching nothing physical.
+        # The direct world (#359): checkout moves the ONE workspace tree,
+        # a plain git checkout. Git's own refusals surface verbatim.
         branch = (body.branch or "").strip()
         if not branch:
             return {"ok": False, "error": "checkout target is empty"}
         if branch.startswith("-"):
             return {"ok": False, "error": "checkout target must be a local branch name"}
-        conv = await get_conversation(conversation_id)
-        ws = (conv or {}).get("workspace") or ""
-        if not ws.strip() or ws.startswith("remote:"):
-            result = {"ok": False, "error": "no local git workspace"}
-        else:
-            from backend.agent.gitinfo import list_local_branches
-            from backend.agent.tools import workspace_root
-
-            try:
-                ws_root = workspace_root(ws)
-            except ValueError as e:
-                result = {"ok": False, "error": str(e)}
-            else:
-                if branch not in await list_local_branches(ws_root):
-                    result = {"ok": False, "error": f"not a local branch: {branch}"}
-                else:
-                    # #302: a checkout through the UI is an explicit pick.
-                    await update_conversation(
-                        conversation_id, selected_branch=branch, branch_pin_origin="explicit"
-                    )
-                    result = {"output": branch}
+        result = await _run_ui_git(root, "checkout", branch)
 
     invalidate(root)
     await _post_git_trace(conversation_id, action, result)
@@ -1705,14 +1518,6 @@ async def _agent_view(agent: dict) -> dict:
         "allow_ask_user": bool(agent.get("allow_ask_user")),
         "notify_on_success": bool(agent.get("notify_on_success")),
         "retention": int(agent.get("retention") or 0),
-        # #278: landing settings surface to the editor verbatim.
-        "landing_mode": str(agent.get("landing_mode") or "off"),
-        "landing_branch": str(agent.get("landing_branch") or ""),
-        # #314: the pinned chat's effective landing target — with landing
-        # mode off, this is where every fire lands. The editor names it
-        # read-only instead of leaving the value invisible.
-        "chat_selected_branch": (conv or {}).get("selected_branch"),
-        "chat_branch_pin_origin": (conv or {}).get("branch_pin_origin"),
         # #296: fire-time speech policy surfaces to the editor verbatim.
         "say_mode": str(agent.get("say_mode") or "arrival"),
         "schedule_spec": scheduler_mod.parse_schedule_spec(agent["schedule_spec"]),
@@ -1732,16 +1537,6 @@ class AgentBody(BaseModel):
     schedule_type: str = "interval"          # interval | daily | weekly
     schedule_spec: dict = {}                 # see database.SCHEMA agents comment
     approval_policy: str = "sandbox-only"    # sandbox-only | autonomous
-    # #314: the form's branch pick for the agent's pinned chat. None/blank
-    # = the inherit default (the #301 fallback stamps the workspace's
-    # then-current branch, origin 'inherited'); an explicit pick pins the
-    # chat at creation with origin 'explicit' — same contract as the draft
-    # destination card's NewConversation.selected_branch.
-    selected_branch: str | None = None
-    # #278: where each fire's work lands — off (chat's own branch),
-    # fixed (landing_branch), per-run (a branch per fire, unmerged).
-    landing_mode: str = "off"
-    landing_branch: str = ""
     # #296: when a fired run's spoken briefing gets spoken (default arrival).
     say_mode: str = "arrival"
     model: str = ""                          # '' = active global model
@@ -1787,26 +1582,15 @@ async def api_agents_add(body: AgentBody):
         raise HTTPException(status_code=400, detail="prompt is required")
     if body.approval_policy not in scheduler_mod.VALID_POLICIES:
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
-    # #360: frozen copy of the old scheduler constant. The landing columns
-    # are inert (resolve_landing is gone) and die with their columns in
-    # #365; validation lives here until then so scheduler.py stays clean.
-    # ADR-0017 is the direction; its record is issue #359 until it lands.
-    if body.landing_mode not in ("off", "fixed", "per-run"):
-        raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
     if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
         raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
-    landing_branch = body.landing_branch.strip()
-    if body.landing_mode == "fixed" and not landing_branch:
-        raise HTTPException(status_code=400, detail="fixed landing_mode requires landing_branch")
     stype, spec = _validate_schedule(body.schedule_type, body.schedule_spec)
-    # #314: the form's explicit pick pre-stores the pinned chat's branch at
-    # creation — create_conversation derives origin 'explicit' when a branch
-    # is given, and runs the #301 workspace fallback when none is.
+    # Direct world (#361): the pinned chat has no branch of its own - it runs
+    # in the workspace tree.
     conv_id = await create_conversation(
         title=body.name.strip(),
         workspace=body.workspace or None,
         chat_type="agent",
-        selected_branch=(body.selected_branch or "").strip() or None,
     )
     record = await db_create_agent({
         "id": _new_agent_id(),
@@ -1816,10 +1600,6 @@ async def api_agents_add(body: AgentBody):
         "schedule_type": stype,
         "schedule_spec": spec,
         "approval_policy": body.approval_policy,
-        "landing_mode": body.landing_mode,
-        # #278: the named target only travels in fixed mode — other modes
-        # must not wake up with a stale branch name if the mode flips later.
-        "landing_branch": landing_branch if body.landing_mode == "fixed" else "",
         # #296: fire-time speech policy.
         "say_mode": body.say_mode,
         # #132: qualify a bare id — the agent's row must be self-describing
@@ -1884,17 +1664,8 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         raise HTTPException(status_code=404, detail="agent not found")
     if body.approval_policy not in scheduler_mod.VALID_POLICIES:
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
-    # #360: frozen copy of the old scheduler constant. The landing columns
-    # are inert (resolve_landing is gone) and die with their columns in
-    # #365; validation lives here until then so scheduler.py stays clean.
-    # ADR-0017 is the direction; its record is issue #359 until it lands.
-    if body.landing_mode not in ("off", "fixed", "per-run"):
-        raise HTTPException(status_code=400, detail="landing_mode must be off, fixed, or per-run")
     if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
         raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
-    landing_branch = body.landing_branch.strip()
-    if body.landing_mode == "fixed" and not landing_branch:
-        raise HTTPException(status_code=400, detail="fixed landing_mode requires landing_branch")
     stype, spec = _validate_schedule(body.schedule_type, body.schedule_spec)
     fields = {
         "workspace": body.workspace,
@@ -1903,10 +1674,6 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         "schedule_type": stype,
         "schedule_spec": spec,
         "approval_policy": body.approval_policy,
-        "landing_mode": body.landing_mode,
-        # #278: the named target only travels in fixed mode — other modes
-        # must not wake up with a stale branch name if the mode flips later.
-        "landing_branch": landing_branch if body.landing_mode == "fixed" else "",
         # #296: fire-time speech policy (full-record replace write path).
         "say_mode": body.say_mode,
         # #132: qualify a bare id (full-record replace write path).
@@ -1924,49 +1691,6 @@ async def api_agents_update(agent_id: str, body: AgentBody):
     if record["name"] != existing["name"] and existing.get("conversation_id"):
         # Keep the pinned chat's title in sync with the agent name.
         await update_conversation(existing["conversation_id"], title=record["name"])
-    # #314: an explicit branch pick on edit writes through to the pinned
-    # chat's selector — the same conversation-row write fire_agent performs
-    # for fixed/per-run at fire time. The inherit default is a deliberate
-    # NO-OP: the selector matters mainly in off mode, and switching the
-    # agent back to off should keep the chat where the last explicit pick
-    # (or the last fire) left it. The flip guards mirror the branch_select
-    # tool (ADR-0010): a stored pick must be a local branch of the chat's
-    # workspace, and a flip refuses while the chat's own worktree has
-    # uncommitted changes — stranding them relative to the new landing
-    # target is the exact failure the dirty-flip guard exists to kill.
-    picked = (body.selected_branch or "").strip()
-    conv_id = existing.get("conversation_id")
-    if picked and conv_id:
-        from backend.agent import worktrees as _worktrees
-        from backend.agent.gitinfo import _run_git, list_local_branches
-        from backend.agent.tools import workspace_root
-
-        conv = await get_conversation(conv_id)
-        ws = (conv or {}).get("workspace") or ""
-        if not ws.strip() or ws.startswith("remote:"):
-            raise HTTPException(status_code=400, detail="no local git workspace")
-        try:
-            root = workspace_root(ws)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if picked not in await list_local_branches(root):
-            raise HTTPException(status_code=400, detail=f"not a local branch: {picked}")
-        chat_dir = _worktrees.chat_worktree_path(ws, conv_id)
-        if chat_dir is not None and chat_dir.exists():
-            rc, out = await _run_git(chat_dir, "status", "--porcelain")
-            if rc != 0 or (out or "").strip():
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "this chat's worktree has uncommitted changes - "
-                        "commit or discard before switching branches"
-                    ),
-                )
-        await update_conversation(
-            conv_id,
-            selected_branch=picked,
-            branch_pin_origin="explicit",
-        )
     if existing.get("enabled") and not record.get("enabled"):
         # Pausing a mid-run agent stops that run too: the user unchecking
         # "enabled" expects the agent to go quiet now, not after the current

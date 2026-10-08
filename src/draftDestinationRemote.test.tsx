@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
-const { listLocalWorkspaces, listWorkspaces, getWorkspaceGitBranches } = vi.hoisted(() => ({
+const { listLocalWorkspaces, listWorkspaces } = vi.hoisted(() => ({
   listLocalWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
-  getWorkspaceGitBranches: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
@@ -13,7 +12,6 @@ vi.mock('./api', async (importOriginal) => {
     ...actual,
     listLocalWorkspaces,
     listWorkspaces,
-    getWorkspaceGitBranches,
   }
 })
 
@@ -59,51 +57,10 @@ describe('draft destination card on a remote workspace (#335)', () => {
     vi.clearAllMocks()
   })
 
-  it('lists host branches and records the pick without any checkout', async () => {
-    getWorkspaceGitBranches.mockResolvedValue({
-      branch: 'master',
-      branches: ['feature', 'master'],
-    })
-    render(<DraftDestinationCard />)
-
-    // The chip renders for a remote destination (previously remote-gated off).
-    fireEvent.click(await screen.findByRole('button', { name: /branch master/i }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: /feature/ }))
-
-    expect(
-      await screen.findByRole('button', { name: /branch feature/i }),
-    ).toBeInTheDocument()
-    // The pick is intent only: it rides draftScope to creation — no
-    // checkout endpoint is involved (the api mock would fail the test
-    // if the card called one; getWorkspaceGitBranches was the only call).
-    expect(useAgent.getState().draftScope?.branch).toBe('feature')
-  })
-
-  it('hides the picker when the host answers empty (offline posture)', async () => {
-    getWorkspaceGitBranches.mockResolvedValue({ branch: null, branches: [] })
-    render(<DraftDestinationCard />)
-
-    await waitFor(() => expect(getWorkspaceGitBranches).toHaveBeenCalled())
-    expect(screen.queryByRole('button', { name: /branch /i })).not.toBeInTheDocument()
-  })
-
-  it('renders the explicit offline state when the host is unreachable (#332 UI parity)', async () => {
-    getWorkspaceGitBranches.mockResolvedValue({
-      branch: null,
-      branches: [],
-      offline: true,
-    })
-    render(<DraftDestinationCard />)
-
-    expect(await screen.findByRole('status')).toHaveTextContent(/host offline/i)
-    expect(screen.queryByRole('button', { name: /branch /i })).not.toBeInTheDocument()
-  })
-
   it('does not preload host branches when no destination is pinned', async () => {
     // The dest-less draft (Default) reads nothing — unchanged rule.
     useAgent.setState({ workspace: '', draftDestination: null })
     render(<DraftDestinationCard />)
     await waitFor(() => expect(listLocalWorkspaces).toHaveBeenCalledOnce())
-    expect(getWorkspaceGitBranches).not.toHaveBeenCalled()
   })
 })

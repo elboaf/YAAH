@@ -40,10 +40,6 @@ DB_PATH = Path(
 # per process (module global), not on every get_db() call — see the comment in
 # migrate_workspaces.
 _last_workspace_seeded = False
-# #301: one lazy-pin ATTEMPT per row per process (see get_conversation) —
-# rows that can't pin (detached HEAD, branch deleted) don't pay the git
-# probes on every read; the next process retries once.
-_lazy_pin_attempted: dict[float, tuple[str, int]] = {}
 
 
 def basename(path: str) -> str:
@@ -63,15 +59,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     system_prompt_override TEXT,
     model TEXT NOT NULL DEFAULT '',
     effort TEXT NOT NULL DEFAULT '',
-    selected_branch TEXT,     -- #286: the chat's branch selector (ADR-0010) --
-                              -- user-intended branch, NULL = follow the
-                              -- workspace's checked-out branch
-    branch_pin_origin TEXT,   -- #302 (ADR-0010 amendment, decision 1): WHY
-                              -- the branch is pinned — 'inherited' (the
-                              -- workspace's branch at creation) or 'explicit'
-                              -- (draft card / selector / branch_select pick).
-                              -- NULL = no pin at all. Chip state only; the
-                              -- pin-at-creation semantics are #301's.
     remote_revision_counter INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -178,8 +165,6 @@ CREATE TABLE IF NOT EXISTS agents (
     schedule_type TEXT NOT NULL DEFAULT 'interval',
     schedule_spec TEXT NOT NULL DEFAULT '{}',
     approval_policy TEXT NOT NULL DEFAULT 'sandbox-only',
-    landing_mode TEXT NOT NULL DEFAULT 'off', -- #278: off | fixed | per-run
-    landing_branch TEXT NOT NULL DEFAULT '',  -- #278: fixed mode's target branch
     say_mode TEXT NOT NULL DEFAULT 'arrival', -- #296: arrival | visible
     model TEXT NOT NULL DEFAULT '',           -- '' = the active global model
     effort TEXT NOT NULL DEFAULT '',          -- '' = don't send reasoning_effort
@@ -279,39 +264,12 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN remote_revision_counter INTEGER NOT NULL DEFAULT 1"
         )
-    if "selected_branch" not in conv_cols:
-        # #286 (ADR-0010 slice 1): the branch selector is a per-chat stored
-        # value — the chat's user-intended branch. NULL = no explicit pick:
-        # readers fall back to the workspace's checked-out branch. No worktree
-        # exists yet in this slice, so a write only records intent and touches
-        # nothing physical.
-        await db.execute(
-            "ALTER TABLE conversations ADD COLUMN selected_branch TEXT"
-        )
-    if "branch_pin_origin" not in conv_cols:
-        # #302 (ADR-0010 amendment, decision 1): the pin's origin —
-        # 'inherited' (workspace branch at creation) vs 'explicit' (draft
-        # card / selector / branch_select pick). Chip state only: existing
-        # rows keep NULL until a pick or creation stamps them, and the
-        # read endpoint reports NULL-origin picks as explicit (every pick
-        # this schema knew how to record was a user pick).
-        await db.execute(
-            "ALTER TABLE conversations ADD COLUMN branch_pin_origin TEXT"
-        )
     cur = await db.execute("PRAGMA table_info(agents)")
     agent_cols = {r[1] for r in await cur.fetchall()}
     if "allow_ask_user" not in agent_cols:
         # #93: per-agent opt-in letting a scheduled run block on ask_user.
         # Default 0 preserves the unattended contract for existing agents.
         await db.execute("ALTER TABLE agents ADD COLUMN allow_ask_user INTEGER NOT NULL DEFAULT 0")
-    if "landing_mode" not in agent_cols:
-        # #278: where a scheduled fire's work lands. 'off' (the default)
-        # preserves today's behavior exactly: the pinned chat runs on its
-        # own selected branch and landing follows the chat SOP.
-        await db.execute("ALTER TABLE agents ADD COLUMN landing_mode TEXT NOT NULL DEFAULT 'off'")
-    if "landing_branch" not in agent_cols:
-        # #278: fixed mode's named target ('' with any other mode).
-        await db.execute("ALTER TABLE agents ADD COLUMN landing_branch TEXT NOT NULL DEFAULT ''")
     if "say_mode" not in agent_cols:
         # #296: when a fire's spoken briefing gets spoken. 'arrival' (the
         # default) speaks it as the fire emits it; 'visible' holds it until
@@ -703,77 +661,17 @@ async def init_db():
 
 # ---- Conversation CRUD ----
 
-async def _pin_from_workspace(workspace: str | None) -> tuple[str, str] | None:
-    """#301 (pin at creation, decision 1): the (branch, 'inherited') pin a
-    local git workspace contributes, or None when there is nothing sane to
-    pin — remote:/empty workspaces, non-repos, and a detached HEAD (which
-    reports a short SHA: a pin born stale; local branch names only)."""
-    ws = (workspace or "").strip()
-    if not ws:
-        return None
-    from backend.agent.gitinfo import (
-        current_git_branch,
-        head_branch,
-        is_git_repo,
-        list_local_branches,
-    )
-    from backend.agent.remote import parse_ns
-
-    # #335 (selector parity): a remote workspace pins the HOST's
-    # then-current branch, read through the gateway — the local rule,
-    # remote twin. Detached HEAD reports a short SHA and pins nothing
-    # (same "pin born stale" rule as local); an unreachable host pins
-    # nothing here so creation never blocks on the channel — the
-    # lazy-pin-on-first-read path covers it when the host is back.
-    if parse_ns(ws) is not None:
-        branch = await current_git_branch(ws) or await head_branch(ws)
-        if branch and branch in await list_local_branches(ws):
-            return branch, "inherited"
-        return None
-
-    from backend.agent.tools import workspace_root
-
-    try:
-        root = workspace_root(ws)
-    except ValueError:
-        return None
-    if not is_git_repo(root):
-        return None
-    branch = await current_git_branch(root)
-    if branch and branch in await list_local_branches(root):
-        return branch, "inherited"
-    return None
-
-
 async def create_conversation(
     title: str = "New Task",
     workspace: str | None = None,
     chat_type: str = "chat",
     model: str | None = None,
     effort: str | None = None,
-    selected_branch: str | None = None,
-    branch_pin_origin: str | None = None,
 ):
     """Create a conversation. model/effort: the chat's pinned scope (#51/#76).
     Blank strings are legal writes (the chat's deliberate Default); None
     stamps the current global default (drafts already carry explicit picks,
     so None is the "unspecified" path for API callers).
-    #277/#301 (ADR-0010 amendment: pin at creation): the draft destination
-    card's branch pick pre-stores selected_branch at creation (origin
-    'explicit'), so the first run materializes the chat worktree on the
-    right branch. With NO pick, a local git workspace pins its
-    then-current branch instead (origin 'inherited'): the unset state
-    disappears for git-workspace chats, and an external `git switch` on
-    the primary tree no longer changes what new chats aim at (decision
-    2, semantic immunity). remote:/non-git workspaces keep no pin
-    (branch stays None). A detached-HEAD workspace pins nothing — a
-    short SHA would be a pin born stale (decision: local names only).
-
-    #302: branch_pin_origin is chip state for that pin — 'inherited' or
-    'explicit'. Only stored alongside a selected_branch; when the caller
-    passes a branch without an origin, 'explicit' is derived (every pick
-    this schema could record pre-#302 was a user pick).
-
     #132: an explicit-but-BARE model id is qualified with the active
     provider at write time — the row must be self-describing, or a later
     sidebar default change silently re-routes the chat ("model not found")."""
@@ -790,34 +688,12 @@ async def create_conversation(
     # No provider arg: qualify_model_scope resolves the active provider
     # itself (the load_config above only ran when a default was needed).
     model = qualify_model_scope(model or "")
-    # #302/#301: origin is state OF the pin — never stored without one,
-    # and a branch without an origin is derived explicit (every pick this
-    # schema could record pre-#302 was a user pick). #301 (pin at
-    # creation, decision 1): with no caller branch, a local git workspace
-    # contributes its then-current branch as an 'inherited' pin — the
-    # unset state disappears for git-workspace chats. remote:/non-git
-    # workspaces keep no pin, and a detached HEAD reports a short SHA,
-    # which would be a pin born stale — local branch names only.
-    if selected_branch:
-        if not branch_pin_origin:
-            branch_pin_origin = "explicit"
-    else:
-        pin = await _pin_from_workspace(workspace)
-        if pin is not None:
-            selected_branch, branch_pin_origin = pin
-        else:
-            # Origin is state OF the pin (#302): when no pin results, a
-            # caller-passed origin is an orphan and is dropped, never
-            # stored. (Restored — the #301 rewrite lost the #302 guard
-            # from 2e0584d; tri-state test test_origin_without_a_pin_is_
-            # not_stored caught it.)
-            branch_pin_origin = None
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO conversations (title, workspace, chat_type, model, effort,"
-            " selected_branch, branch_pin_origin) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (title, workspace, chat_type, model, effort, selected_branch, branch_pin_origin),
+            "INSERT INTO conversations (title, workspace, chat_type, model, effort)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (title, workspace, chat_type, model, effort),
         )
         await db.commit()
         return cur.lastrowid
@@ -844,41 +720,11 @@ async def get_conversation(conversation_id: int) -> dict | None:
     result = await _get_conversation_row(conversation_id)
     if result is None:
         return None
-    # #301 (lazy pin, amendment decision 1): a legacy NULL row has no
-    # other sane value than the workspace's then-current branch — pin it
-    # 'inherited' on first read instead of running a blocking backfill.
-    # The write happens at most once per chat: the pin freezes at the
-    # first read and every later read is a pure SELECT, so a workspace
-    # that moves on after the upgrade doesn't drag old chats along. The
-    # per-process flag keeps rows that CAN'T pin (detached HEAD, branch
-    # deleted) from paying the git probes on every read — the next
-    # process retries once.
-    now = time.monotonic()
-    for stamp in [t for t, key in _lazy_pin_attempted.items() if now - t > 2.0]:
-        _lazy_pin_attempted.pop(stamp, None)
-    if (
-        not result.get("selected_branch")
-        and not result.get("branch_pin_origin")
-        and (str(DB_PATH), conversation_id) not in _lazy_pin_attempted.values()
-    ):
-        attempted_at = time.monotonic()
-        pin = await _pin_from_workspace(result.get("workspace"))
-        if pin is not None:
-            await update_conversation(
-                conversation_id,
-                selected_branch=pin[0],
-                branch_pin_origin=pin[1],
-            )
-            result["selected_branch"] = pin[0]
-            result["branch_pin_origin"] = pin[1]
-        _lazy_pin_attempted[attempted_at] = (str(DB_PATH), conversation_id)
     return result
 
 
 async def _get_conversation_row(conversation_id: int) -> dict | None:
-    """The raw row read: one SELECT, no lazy-pin side effects. The lazy
-    pin's write path goes through update_conversation (whose own row
-    reads must not recurse)."""
+    """The raw row read: one SELECT."""
     db = await get_db()
     try:
         cur = await db.execute(
@@ -940,26 +786,19 @@ async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
 
 async def update_conversation(conversation_id: int, **fields):
     """Update allowed conversation fields (title, workspace,
-    system_prompt_override, model, effort, selected_branch,
-    branch_pin_origin). #132: a bare model write is qualified with the
-    active provider — '' stays '' (deliberate Default)."""
+    system_prompt_override, model, effort). #132: a bare model write is
+    qualified with the active provider — '' stays '' (deliberate
+    Default)."""
     allowed = {
         "title",
         "workspace",
         "system_prompt_override",
         "model",
         "effort",
-        "selected_branch",  # #286: per-chat branch selector (ADR-0010)
-        "branch_pin_origin",  # #302: chip state for that pin — 'inherited'/'explicit'
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
-    # #302: origin is state OF the pin — never stored without one. An
-    # origin-only update is an orphan and is dropped (to re-origin an
-    # existing pin, pass selected_branch and branch_pin_origin together).
-    if updates.get("branch_pin_origin") and not updates.get("selected_branch"):
-        updates.pop("branch_pin_origin")
     if updates.get("model"):
         from backend.agent.config import load_config, qualify_model_scope
 
@@ -1789,7 +1628,7 @@ async def search_conversation_history(
 
 AGENT_FIELDS = (
     "workspace", "name", "prompt", "schedule_type", "schedule_spec",
-    "approval_policy", "landing_mode", "landing_branch", "say_mode",
+    "approval_policy", "say_mode",
     "model", "effort", "memory_enabled",
     "allow_ask_user", "retention",
     "notify_on_success", "enabled", "conversation_id",

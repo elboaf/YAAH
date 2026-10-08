@@ -38,7 +38,7 @@ describe('persisted system rows', () => {
     expect(screen.getByText('src/App.tsx')).toBeTruthy()
   })
 
-  it('says where the changes were made: role, branch, tree on the chip; full path on expand', () => {
+  it('renders no location segment - the direct world has ONE tree (#361)', () => {
     render(
       <MessageView
         msg={sys(
@@ -49,46 +49,12 @@ describe('persisted system rows', () => {
               deleted: 1,
               commit: '821438d',
               extra_commits: 0,
-              worktree_role: 'chat',
-              worktree: 'C:\\proj\\.scratch\\chat-7',
-              worktree_rel: '.scratch/chat-7',
-              branch: 'feature-x',
             },
           }),
         )}
       />,
     )
-    const chip = screen.getByRole('button', { name: /chat worktree/ })
-    expect(chip.textContent).toContain('feature-x')
-    expect(chip.textContent).toContain('.scratch/chat-7')
-    fireEvent.click(chip)
-    expect(screen.getByTitle('C:\\proj\\.scratch\\chat-7').textContent).toMatch(
-      /^C:\\proj\\\.scratch\\chat-7 · feature-x$/,
-    )
-  })
-
-  it('names the primary worktree when the run had no chat tree', () => {
-    render(
-      <MessageView
-        msg={sys(
-          JSON.stringify({
-            file_changes: {
-              files: [{ path: 'notes.txt', added: 1, deleted: 0 }],
-              added: 1,
-              deleted: 0,
-              commit: null,
-              extra_commits: 0,
-              worktree_role: 'primary',
-              worktree: 'C:\\proj',
-              worktree_rel: null,
-              branch: null,
-            },
-          }),
-        )}
-      />,
-    )
-    const chip = screen.getByRole('button', { name: /primary worktree/ })
-    expect(chip.textContent).not.toContain('.scratch')
+    expect(screen.queryByText(/worktree/)).toBeNull()
   })
 
   it('legacy summaries without location fields still render', () => {

@@ -24,7 +24,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import AsyncIterator
 
 from backend.agent import model_client
 from backend.agent.prompt_manifest import compact_summary_message
@@ -43,6 +43,7 @@ from backend.agent.tools import (
     tool_risk,
     workspace_root,
 )
+from backend.agent import remote as remote_mod
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.agent.shell import resolve_git_bash, windows_bash_note
 from backend.db.database import (
@@ -67,10 +68,6 @@ AUTO_TITLE_MAX_CHARS = 60  # hard clamp the consumer enforces; word count
 # backend compare must match it exactly (loop.py:100 guard, issue #60).
 AUTO_TITLE_SLICE_CHARS = 40
 
-# #357: bounded shield window for post-run chat-worktree retirement.
-# Generous - the git calls are quick and local - but finite, and a
-# timeout enqueues the tree for the sweep instead of a silent stand.
-TEARDOWN_RETIREMENT_GRACE_SECONDS = 30.0
 
 
 def _strip_provider_markup(text: str) -> str:
@@ -98,9 +95,6 @@ async def _emit_file_changes(
     _conversation_id: int,
     workspace: str,
     baseline: file_changes.WorkspaceSnapshot,
-    worktree_role: str | None = None,
-    worktree_rel: str | None = None,
-    branch: str | None = None,
 ) -> dict | None:
     """Persist the run's net file changes and return its stream payload."""
     if baseline is None:
@@ -111,154 +105,12 @@ async def _emit_file_changes(
             await file_changes.diff_snapshots(baseline, current),
             baseline=baseline,
             current=current,
-            worktree_role=worktree_role,
-            worktree=workspace,
-            worktree_rel=worktree_rel,
-            branch=branch,
         )
         return summary
     except Exception:
         # File accounting must never turn an otherwise successful run into an
         # error; the agent's actual filesystem changes remain untouched.
         return None
-
-
-async def _retire_local_chat_worktree_shielded(
-    turn_workspace: str | None, conversation_id: int
-) -> None:
-    """Post-run retirement of the LOCAL chat worktree (#329), under a
-    bounded shield (#357): a Stop-press cancellation of the run task
-    raises CancelledError HERE - the teardown caller dies on schedule -
-    while the git calls inside the shielded task run to completion.
-    Timeout or exception enqueues the tree for the hourly sweep
-    (#357) instead of leaving it standing silently."""
-    from backend.agent import wt_sweep
-    from backend.agent.worktrees import retire_chat_worktree
-
-    async def _do() -> dict:
-        return await retire_chat_worktree(turn_workspace, conversation_id)
-
-    def _report(ret: dict) -> None:
-        if ret.get("retired"):
-            log.info(
-                "chat worktree retired after run (#329): %s",
-                ret.get("path"),
-            )
-        elif ret.get("reason") not in wt_sweep.RETIRE_POLICY_REFUSALS:
-            wt_sweep.enqueue_missed_retirement(
-                turn_workspace or "", conversation_id
-            )
-
-    task = asyncio.ensure_future(_do())
-    try:
-        ret = await asyncio.wait_for(
-            asyncio.shield(task),
-            timeout=TEARDOWN_RETIREMENT_GRACE_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        log.warning(
-            "post-run chat worktree retirement timed out (#357); "
-            "enqueued for the sweep: %s chat-%s",
-            turn_workspace,
-            conversation_id,
-        )
-        wt_sweep.enqueue_missed_retirement(turn_workspace or "", conversation_id)
-    except asyncio.CancelledError as exc:
-        # The run task was cancelled (Stop press). The shield keeps the
-        # first CancelledError out of the git calls, but asyncio
-        # RE-DELIVERS into the inner task at its next await point -
-        # cancelling mid-git-call is exactly the #353-class loss this
-        # pattern exists to prevent. So: absorb the delivery (uncancel),
-        # let the git region finish, report its outcome, and only then
-        # re-raise - from OUTSIDE the git region - so the teardown keeps
-        # unwinding exactly as before.
-        task.uncancel()
-        try:
-            ret = await asyncio.shield(task)
-        except BaseException:  # the miss is the headline, not the cancel
-            log.exception(
-                "post-run chat worktree retirement aborted (#357); "
-                "enqueued for the sweep: %s chat-%s",
-                turn_workspace,
-                conversation_id,
-            )
-            wt_sweep.enqueue_missed_retirement(
-                turn_workspace or "", conversation_id
-            )
-            raise exc from None
-        _report(ret)
-        raise exc from None
-    except Exception:  # noqa: BLE001 - teardown never blocks
-        log.exception("post-run chat worktree retirement failed")
-        wt_sweep.enqueue_missed_retirement(turn_workspace or "", conversation_id)
-    else:
-        _report(ret)
-
-
-async def _retire_remote_chat_worktree_shielded(
-    workspace: str, conversation_id: int
-) -> None:
-    """Remote twin (#334/#357): same bounded-shield pattern; an
-    unreachable host or a lost race against teardown enqueues the tree
-    for the sweep's remote leg, which retires via the gateway."""
-    from backend.agent import wt_remote, wt_sweep
-
-    async def _do() -> dict:
-        return await wt_remote.retire_chat_worktree(workspace, conversation_id)
-
-    def _report(ret: dict) -> None:
-        if ret.get("retired"):
-            log.info(
-                "remote chat worktree retired after run (#329/#334): %s",
-                ret.get("path"),
-            )
-        elif ret.get("reason") == "no chat worktree":
-            pass
-        else:
-            log.info(
-                "remote chat worktree kept after run (%s): %s",
-                ret.get("reason"),
-                wt_remote.chat_worktree_path(workspace, conversation_id),
-            )
-            wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
-
-    task = asyncio.ensure_future(_do())
-    try:
-        ret = await asyncio.wait_for(
-            asyncio.shield(task),
-            timeout=TEARDOWN_RETIREMENT_GRACE_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        log.warning(
-            "remote chat worktree retirement timed out (#357); "
-            "enqueued for the sweep: %s chat-%s",
-            workspace,
-            conversation_id,
-        )
-        wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
-    except asyncio.CancelledError as exc:
-        # Same absorb-then-finish-then-reraise shape as the local twin
-        # (#357): asyncio re-delivers cancellation into the inner task
-        # at its next await; the gateway call must finish first.
-        task.uncancel()
-        try:
-            ret = await asyncio.shield(task)
-        except BaseException:  # the miss is the headline, not the cancel
-            log.exception(
-                "remote chat worktree retirement aborted (#357); "
-                "enqueued for the sweep: %s chat-%s",
-                workspace,
-                conversation_id,
-            )
-            wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
-            raise exc from None
-        _report(ret)
-        raise exc from None
-    except Exception:  # noqa: BLE001 - teardown never blocks
-        log.exception("post-run remote chat worktree retirement failed")
-        wt_sweep.enqueue_missed_retirement(workspace, conversation_id)
-    else:
-        _report(ret)
 
 
 async def _persist_file_change_summary(conversation_id: int, summary: dict) -> None:
@@ -665,7 +517,7 @@ def _default_system_prompt(workspace: str = "") -> str:
         "sub-agents index below)",
         "ask_user",
         "load_skill",
-        "branch_select (point this chat's work at a branch, on the user's "
+        "branch_select (switch the workspace to a branch, on the user's "
         "request; creates it when missing)",
         "memory_save", "memory_read", "memory_delete",
         "search_conversation_history",
@@ -1649,135 +1501,26 @@ async def _run_agent_claimed(
     # it even if cancellation arrives during this setup or finalization.
 
     # Issue #58: nothing is created up front — the shared workspace stays
-    # untouched until the first write-capable tool call (read-only turns
-    # never pay for isolation). `turn_workspace` is the (possibly rebound)
-    # workspace every tool call and spawn_batch sees from then on.
+    # untouched until the first write-capable tool call. In the direct
+    # world (#359/ADR-0017) the run never rebinds it: `turn_workspace`
+    # IS the workspace checkout, and every tool call and spawn_batch
+    # resolves from it.
     turn_workspace = str(workspace)
-
-    # #277 (ADR-0010): a chat with a selected branch runs inside its own
-    # per-chat worktree, materialized HERE — at the first run, not on chat
-    # creation or branch pick, so idle and read-only chats cost nothing.
-    # Everything tool-shaped (bash, file tools, change summaries,
-    # spawn_batch) resolves from turn_workspace, so this one re-point is
-    # the whole isolation story; the primary worktree is the human's and
-    # is never moved. #334: remote chats get the same treatment — their
-    # worktree materializes ON THE HOST (client-owned namespace) and the
-    # re-point stays namespaced so tools keep routing there. Chats
-    # without a pick keep running in the primary exactly as before.
-    conv = await get_conversation(conversation_id)
-    selected_branch = str((conv or {}).get("selected_branch") or "").strip()
-    # #301: the note must not claim a selection the user never made - an
-    # inherited pin reads as inherited, not as "the user selected".
-    pin_origin = str((conv or {}).get("branch_pin_origin") or "explicit").strip()
-    # #312: the run branch is named after the work, so `git branch` reads
-    # like a changelog instead of a phone book. The title rides along here
-    # (fetched up top for the #277 worktree re-point).
-    conv_title = str((conv or {}).get("title") or "").strip()
-    worktree_detached = False
-    worktree_error = ""
-    worktree_flip_failed = False
-    # #334: the remote teardown path only pays a channel round-trip when
-    # this run actually materialized/used a host chat worktree.
-    worktree_materialized = False
-    wt_remote_workspace = None
-    from backend.agent import remote as remote_mod
-    # #302: a pin whose branch no longer exists locally (deleted upstream
-    # of the chat) must reach the run as a stale note, not as a generic
-    # worktree failure — checked before materialization so the failure
-    # names the actual problem. Same TTL-cached branch list the chip's
-    # staleness flag reads, so chip and note agree.
-    branch_pin_stale = False
-    if selected_branch:
-        from backend.agent.gitinfo import is_git_repo, list_local_branches
-        from backend.agent.tools import workspace_root
-
-        try:
-            ws_root = workspace_root(workspace)
-        except ValueError:
-            ws_root = None  # remote:/invalid: no local branch list to check
-        # Non-repo workspaces skip the check too — an empty branch list
-        # there means "no repo", not "the branch was deleted".
-        if ws_root is not None and is_git_repo(ws_root):
-            branch_pin_stale = selected_branch not in await list_local_branches(ws_root)
-    if selected_branch and not branch_pin_stale:
-        # #334: remote chats materialize their chat worktree ON THE HOST
-        # (client-owned namespace `.scratch/remote/chat-<id>/`, through
-        # the #333 gateway) instead of refusing; local keeps the local
-        # module. The failure path is shared shape: worktree_error turns
-        # into the degraded note (#322) either way.
-        wt_remote_workspace = remote_mod.parse_ns(turn_workspace)
-        if wt_remote_workspace is not None:
-            from backend.agent import wt_remote as _worktrees
-        else:
-            from backend.agent import worktrees as _worktrees
-        _wt = await _worktrees.ensure_chat_worktree(
-            turn_workspace, conversation_id, selected_branch
-        )
-        if _wt.get("path") is not None:
-            # #334: the remote path is ABSOLUTE ON THE HOST — it must stay
-            # namespaced (`remote:<hid>:...`) so every tool call keeps
-            # routing to the host and the host strips it to the raw path.
-            if wt_remote_workspace is not None:
-                turn_workspace = remote_mod.ns_path(
-                    wt_remote_workspace[0], str(_wt["path"])
-                )
-            else:
-                turn_workspace = str(_wt["path"])
-            worktree_detached = bool(_wt.get("detached"))
-            worktree_materialized = True
-            # A failed retarget leaves the tree on its PREVIOUS branch; the
-            # run proceeds there, so the file-changes report must resolve
-            # the branch from the tree, not repeat the stale pick.
-            worktree_flip_failed = bool(_wt.get("error"))
-        else:
-            worktree_error = str(_wt.get("error") or "unavailable")
-
-    remote_workspace = remote_mod.parse_ns(turn_workspace) is not None
-    # #346: the canonical memory key resolves ONCE per turn, from the
-    # pre-rebind workspace - the same string the prompt's injected index
+    # #346: the canonical memory key resolves ONCE per turn, from this
+    # workspace string - the same string the prompt's injected index
     # reads below - so a memory tool call and the prompt block can never
     # disagree about the store. Remote namespacing rides along (the
     # remote:<host>:<path> string IS the key; memories stay client-local).
     memory_workspace = memory_workspace_for(str(workspace))
-    change_baseline = (
-        None if remote_workspace else await file_changes.snapshot_workspace(turn_workspace)
-    )
     file_summary_emitted = False
-
-    # Location provenance for the file-changes summary: name the tree the
-    # run actually executes in (chat worktree when materialized, primary
-    # otherwise) and the branch that run works toward - the selected branch
-    # when a worktree was materialized on it (detached-at-tip included:
-    # identical tip, per ADR-0010 that is the same branch; a FAILED flip
-    # leaves the old branch, so the tree's own HEAD is reported instead),
-    # else the primary's current branch. Reported even when unresolvable,
-    # so the chip always says where; remote runs emit no summary at all.
-    worktree_role: Literal["chat", "primary"] = (
-        "chat" if worktree_materialized else "primary"
+    # Remote runs snapshot nothing: file accounting is a local-tree concept,
+    # the namespace string is not a client path, and master's baseline guard
+    # must survive the direct world or every remote turn pays dead spawns.
+    change_baseline = (
+        None
+        if remote_mod.parse_ns(turn_workspace) is not None
+        else await file_changes.snapshot_workspace(turn_workspace)
     )
-    worktree_rel: str | None = None
-    if worktree_role == "chat" and not remote_workspace:
-        # Chip display form: the chat tree relative to the workspace root
-        # (e.g. ".scratch/chat-7"); the absolute path rides along in the
-        # summary's `worktree` for the expanded panel footer. Remote chat
-        # trees carry a host namespace path that has no local relative form.
-        from backend.agent.tools import workspace_root as _workspace_root
-
-        try:
-            worktree_rel = (
-                Path(turn_workspace).resolve()
-                .relative_to(_workspace_root(workspace).resolve())
-                .as_posix()
-            )
-        except ValueError:
-            worktree_rel = None
-    report_branch: str | None = None
-    if selected_branch and worktree_role == "chat" and not worktree_flip_failed:
-        report_branch = selected_branch
-    elif not remote_workspace:
-        from backend.agent.gitinfo import current_git_branch
-
-        report_branch = await current_git_branch(turn_workspace)
 
     if persist_user:
         await add_message(
@@ -1786,7 +1529,8 @@ async def _run_agent_claimed(
         )
 
     # Per-conversation system prompt override (Q17) wins over the global
-    # one (conv fetched up top for the #277 worktree re-point).
+    # one.
+    conv = await get_conversation(conversation_id)
     system_prompt = (conv or {}).get("system_prompt_override") or _default_system_prompt(workspace)
 
     # Explicitly invoked skills (/s name or a chip): their instruction
@@ -1922,9 +1666,6 @@ async def _run_agent_claimed(
                     conversation_id,
                     turn_workspace,
                     change_baseline,
-                    worktree_role=worktree_role,
-                    worktree_rel=worktree_rel,
-                    branch=report_branch,
                 )
                 file_summary_emitted = True
                 if file_summary:
@@ -2084,9 +1825,6 @@ async def _run_agent_claimed(
                     conversation_id,
                     turn_workspace,
                     change_baseline,
-                    worktree_role=worktree_role,
-                    worktree_rel=worktree_rel,
-                    branch=report_branch,
                 )
                 file_summary_emitted = True
                 if file_summary:
@@ -2205,9 +1943,6 @@ async def _run_agent_claimed(
                     conversation_id,
                     turn_workspace,
                     change_baseline,
-                    worktree_role=worktree_role,
-                    worktree_rel=worktree_rel,
-                    branch=report_branch,
                 )
                 file_summary_emitted = True
                 if file_summary:
@@ -2249,9 +1984,6 @@ async def _run_agent_claimed(
                         conversation_id,
                         turn_workspace,
                         change_baseline,
-                        worktree_role=worktree_role,
-                        worktree_rel=worktree_rel,
-                        branch=report_branch,
                     )
                     file_summary_emitted = True
                     if file_summary:
@@ -2684,9 +2416,6 @@ async def _run_agent_claimed(
             conversation_id,
             turn_workspace,
             change_baseline,
-            worktree_role=worktree_role,
-            worktree_rel=worktree_rel,
-            branch=report_branch,
         )
         file_summary_emitted = True
         if file_summary:
@@ -2724,9 +2453,6 @@ async def _run_agent_claimed(
             conversation_id,
             turn_workspace,
             change_baseline,
-            worktree_role=worktree_role,
-            worktree_rel=worktree_rel,
-            branch=report_branch,
         )
         file_summary_emitted = True
         if file_summary:
@@ -2745,9 +2471,6 @@ async def _run_agent_claimed(
             conversation_id,
             turn_workspace,
             change_baseline,
-            worktree_role=worktree_role,
-            worktree_rel=worktree_rel,
-            branch=report_branch,
         )
         file_summary_emitted = True
         if file_summary:
@@ -2768,39 +2491,9 @@ async def _run_agent_claimed(
                 conversation_id,
                 turn_workspace,
                 change_baseline,
-                worktree_role=worktree_role,
-                worktree_rel=worktree_rel,
-                branch=report_branch,
             )
             if file_summary:
                 await _persist_file_change_summary(conversation_id, file_summary)
-        # #329 (land-means-clean): the run is over — if the chat worktree
-        # is clean and holds no run residue, retire it now. This frees
-        # any branch checkout a finished chat's tree was holding and
-        # keeps worktrees from piling up per chat that ever wrote. The
-        # tree was in use moments ago, so no age gate here; dirt and
-        # residue make retirement a no-op and surface via the residue
-        # protocol instead. Never fatal: teardown must not mask the turn
-        # result. Skipped when the turn degraded out of the worktree (a
-        # failed materialization has nothing to retire).
-        # #334: remote chats retire too, through the gateway — but the
-        # turn ran in the HOST-ABSOLUTE worktree path, so retirement is
-        # keyed on the WORKSPACE NAMESPACE (the gateway's cwd), not on
-        # turn_workspace. Host offline at teardown: refused explicitly,
-        # the tree stands, the next run retries.
-        # #357: retirement runs inside a bounded shield window (the
-        # sub-agent grace pattern, loop.py's batch cleanup). The old
-        # code awaited the git calls directly; its `except Exception`
-        # does not catch CancelledError, so a Stop press killed
-        # retirement mid-git-call with no log and no retry path.
-        if worktree_error == "" and not remote_workspace:
-            await _retire_local_chat_worktree_shielded(
-                turn_workspace, conversation_id
-            )
-        elif worktree_error == "" and remote_workspace and worktree_materialized:
-            await _retire_remote_chat_worktree_shielded(
-                str(workspace), conversation_id
-            )
         _cancel_events.pop(conversation_id, None)
         _steer_flags.pop(conversation_id, None)
         _running_convs.discard(conversation_id)

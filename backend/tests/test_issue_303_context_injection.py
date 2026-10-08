@@ -1,16 +1,16 @@
 """Tool context injection on every dispatch path (issue #303).
 
 `conversation_id` is injected per-tool where the context is only known
-to the harness (search_conversation_history scopes history; branch_select
-stores the chat's own selector, #277). The injection used to live at a
-single call site — the main loop's direct dispatch — so two paths
-silently ran those tools WITHOUT the chat id:
+to the harness (search_conversation_history scopes history). Since the
+direct world (#361), branch_select carries NO chat context at all — it
+is a plain checkout of the workspace — but the two dispatch shapes
+#303 hardened must still execute a mutating tool correctly:
 
 1. the ask-mode gate's approved re-execution, and
-2. every sub-agent tool execution (general-purpose sub-agents can call
-   branch_select, and the slice-C note tells them the SOP).
+2. every sub-agent tool execution.
 
-Both turn shapes below go red before the fix and green after.
+Both turn shapes below go red before the fix and green after, now
+asserting the tool's real effect: the workspace tree moves.
 """
 import asyncio
 import json
@@ -19,7 +19,7 @@ import subprocess
 import pytest
 
 from backend.agent import loop
-from backend.db.database import create_conversation, get_conversation
+from backend.db.database import create_conversation
 
 
 class FakeStream:
@@ -124,14 +124,14 @@ async def test_gate_approved_branch_select_stores_pin(fake_model, tmp_path, monk
     tr = _tool_result(events)
     assert tr["name"] == "branch_select"
     assert tr["result"].get("ok") is True, tr["result"]
-    conv = await get_conversation(cid)
-    assert (conv["selected_branch"], conv["branch_pin_origin"]) == ("feature", "explicit"), (
-        "the approved branch_select ran without conversation context "
-        "(#303): the pin was never stored"
+    # The direct world (#361): the approved call really switched the tree.
+    assert _git(repo, "branch", "--show-current") == "feature", (
+        "the gate-approved branch_select ran but the workspace did not "
+        "move (#361 semantics)"
     )
 
 
-# ---- 2. the sub-agent path: a sub's branch_select stores the parent pin ----
+# ---- 2. the sub-agent path: a sub's branch_select moves the workspace ----
 
 
 @pytest.mark.asyncio
@@ -148,7 +148,7 @@ async def test_sub_agent_branch_select_stores_parent_pin(fake_model, tmp_path):
                     "name": "spawn_agent",
                     "arguments": json.dumps({
                         "agent_type": "general-purpose",
-                        "prompt": "Point this chat's selector at feature: call branch_select with branch=feature.",
+                        "prompt": "Call branch_select with branch=feature.",
                     }),
                 },
             }],
@@ -163,8 +163,9 @@ async def test_sub_agent_branch_select_stores_parent_pin(fake_model, tmp_path):
 
     events = await collect(loop.run_agent(cid, "delegate the flip", str(repo)))
 
-    conv = await get_conversation(cid)
-    assert (conv["selected_branch"], conv["branch_pin_origin"]) == ("feature", "explicit"), (
-        "the sub-agent's branch_select ran without conversation context "
-        "(#303): the parent chat's pin was never stored"
+    # The direct world (#361): the sub's call really switched the tree -
+    # the tool needs no chat context to do its one job.
+    assert _git(repo, "branch", "--show-current") == "feature", (
+        "the sub-agent's branch_select ran but the workspace did not "
+        "move (#361 semantics)"
     )

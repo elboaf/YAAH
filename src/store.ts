@@ -235,8 +235,8 @@ interface AgentState {
    * draft creation, editable by the header pickers, written into the
    * conversation row at createConversation, cleared on adopt.
    */
-  draftScope: { model: string; effort: string; branch?: string | null } | null
-  setDraftScope: (scope: { model?: string; effort?: string; branch?: string | null }) => void
+  draftScope: { model: string; effort: string } | null
+  setDraftScope: (scope: { model?: string; effort?: string }) => void
   log: LogEntry[]
   /** File currently open in the preview side panel (Q44). */
   previewPath: string | null
@@ -578,7 +578,7 @@ export const useAgent = create<AgentState>((set, get) => ({
     }
   },
   setDraftScope: (scope) =>
-    set((s) => ({ draftScope: { ...(s.draftScope ?? { model: '', effort: '', branch: null as string | null }), ...scope } })),
+    set((s) => ({ draftScope: { ...(s.draftScope ?? { model: '', effort: '' }), ...scope } })),
   setStatus: (key, status) =>
     set((s) => {
       const prev = s.statusByConv[key]

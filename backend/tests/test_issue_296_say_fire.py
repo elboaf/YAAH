@@ -13,9 +13,8 @@ These tests lock the backend half:
   would reintroduce #296's "bare type tag" drop — the exact bug the
   maintainer's correction ruled out, so it stays guarded);
 - the per-agent say_mode setting (arrival | visible, default arrival —
-  the maintainer decision recorded on the issue) rides the same rails
-  as #278's landing_mode: column migration, API validation, and the
-  editor round-trip.
+  the maintainer decision recorded on the issue): column migration, API
+  validation, and the editor round-trip.
 
 The frontend consumption (tape render + speak-on-arrival watcher) is
 covered by src/issue296SayFire.test.tsx.

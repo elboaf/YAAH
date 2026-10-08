@@ -5,25 +5,24 @@ import { GitChipCluster } from './components'
 import type { GitInfo } from './api'
 import { baseGitInfo } from './gitInfoFixture'
 
-// Issue #350: the sync readout shows three short hashes - the selected
-// branch's tip (local), its upstream's tip, and the chat tree's HEAD
-// (worktree) - each colored by its own divergence instead of the old
-// whole-pair color. The regression being pinned: local chats whose tree
-// sits detached used to lose the upstream hash entirely (unresolvable
-// @{upstream}); the backend now resolves from the branch, and the UI
-// renders every hash the data carries.
+// Issue #350: the sync readout shows two short hashes - the checked-out
+// branch's tip (local) and its upstream's tip - each colored by its own
+// divergence instead of the old whole-pair color. The regression being
+// pinned: a detached tree used to lose the upstream hash entirely
+// (unresolvable @{upstream}); the backend resolves from the branch, and
+// the UI renders every hash the data carries. #361: the worktree hash
+// trio is gone - one tree, two hashes.
 function info(overrides: Partial<GitInfo> = {}): GitInfo {
   return baseGitInfo(overrides)
 
 }
 
-function mountCluster(opts: { info: GitInfo; selectedBranch?: string | null }) {
+function mountCluster(opts: { info: GitInfo }) {
   return render(
     <GitChipCluster
       info={opts.info}
       streaming={false}
       conversationId={7}
-      selectedBranch={opts.selectedBranch ?? null}
       onCommandDone={() => {}}
     />,
   )
@@ -32,7 +31,7 @@ function mountCluster(opts: { info: GitInfo; selectedBranch?: string | null }) {
 const hashButton = (hash: string) =>
   screen.getByTitle(new RegExp(`copy ${hash}`))
 
-describe('three-hash sync readout (#350)', () => {
+describe('two-hash sync readout (#350, direct world)', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
@@ -46,28 +45,9 @@ describe('three-hash sync readout (#350)', () => {
     expect(hashButton('def5678')).toBeTruthy()
   })
 
-  it('omits the worktree hash when the chat has no tree (never zero-filled)', () => {
+  it('renders no worktree hash - the direct world has ONE tree (#361)', () => {
     mountCluster({ info: info() })
     expect(screen.queryByTitle(/worktree/)).toBeNull()
-  })
-
-  it('shows the worktree hash, amber when ahead of the primary tree', () => {
-    const { rerender } = mountCluster({
-      info: info({ worktree_hash: 'wip1234', worktree_ahead: 0 }),
-    })
-    const sync = hashButton('wip1234')
-    expect(sync.className).toContain('text-zinc-400')
-
-    rerender(
-      <GitChipCluster
-        info={info({ worktree_hash: 'wip1234', worktree_ahead: 2 })}
-        streaming={false}
-        conversationId={7}
-        selectedBranch={null}
-        onCommandDone={() => {}}
-      />,
-    )
-    expect(hashButton('wip1234').className).toContain('text-yellow-400')
   })
 
   it('paints the upstream hash blue when ahead, red when behind', () => {
@@ -81,7 +61,6 @@ describe('three-hash sync readout (#350)', () => {
         info={info({ upstream: 'origin/master', remote_hash: 'def5678', behind: 1 })}
         streaming={false}
         conversationId={7}
-        selectedBranch={null}
         onCommandDone={() => {}}
       />,
     )
@@ -128,7 +107,6 @@ describe('always-visible column labels above each hash', () => {
       info: info({
         upstream: 'origin/master',
         remote_hash: 'def5678',
-        worktree_hash: 'wip1234',
       }),
     })
 
@@ -136,19 +114,17 @@ describe('always-visible column labels above each hash', () => {
     mountAll()
     expect(screen.getByText('local')).toBeTruthy()
     expect(screen.getByText('origin')).toBeTruthy()
-    expect(screen.getByText('worktree')).toBeTruthy()
   })
 
   it('keeps the labels when a hash drops out — every rendered slot is named', () => {
     mountCluster({ info: info() })
     expect(screen.getByText('local')).toBeTruthy()
     expect(screen.queryByText('origin')).toBeNull()
-    expect(screen.queryByText('worktree')).toBeNull()
   })
 
   it('the label is plain text — the hover/copy affordance stays on the hash below it', () => {
     mountAll()
-    for (const label of ['local', 'origin', 'worktree']) {
+    for (const label of ['local', 'origin']) {
       expect(screen.getByText(label).getAttribute('title') ?? '').not.toMatch(/copy/)
     }
     expect(hashButton('def5678').getAttribute('title')).toMatch(/copy def5678/)

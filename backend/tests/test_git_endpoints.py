@@ -1,9 +1,11 @@
 """Status-strip git endpoints: git-info readout, branch list, and the
 whitelisted git-command executor (checkout / status / commit / push).
 
-The command endpoint is the UI's way to run git without an agent turn; its
-results must land in the conversation as synthetic tool rows that survive
-reload but never reach model context (load_history drops orphaned tool rows).
+The direct world (#359/ADR-0017): there is ONE tree - the workspace
+checkout - and every endpoint reads or acts on it. The command endpoint is
+the UI's way to run git without an agent turn; its results land in the
+conversation as synthetic tool rows that survive reload but never reach
+model context (load_history drops orphaned tool rows).
 """
 import json
 import subprocess
@@ -43,8 +45,64 @@ def client():
         yield c
 
 
+def _divergent_content(repo, branch_with_commit):
+    """Make hello.txt differ between the two branches: commit one version on
+    branch_with_commit, so an uncommitted master edit on the other branch
+    blocks the checkout."""
+    _git(repo, "branch", branch_with_commit) if branch_with_commit not in _git(repo, "branch", "--list").split() else None
+    _git(repo, "checkout", branch_with_commit)
+    (repo / "hello.txt").write_text("uncommitted master edit\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "feature content")
+    _git(repo, "checkout", "master")
+
+
 def _conversation(client, workspace):
     return client.post("/api/conversations", json={"workspace": str(workspace)}).json()["id"]
+
+
+class _FakeHostSession:
+    """A host whose repository is a real local repo the test prepared;
+    git commands ship through exec_tool and run against it (the wire
+    shape is run_bash's: {exit_code, output, ...})."""
+
+    host_id = "h-fake"
+
+    def __init__(self, host_repo):
+        self.host_repo = str(host_repo)
+        self.commands = []
+
+    async def exec_tool(self, name, args, workspace=""):
+        assert name == "bash", f"gateway must only ship bash, got {name}"
+        self.commands.append(args["command"])
+        proc = subprocess.run(
+            args["command"], shell=True, cwd=self.host_repo,
+            capture_output=True, text=True, timeout=30,
+        )
+        return {
+            "exit_code": proc.returncode,
+            "output": proc.stdout + proc.stderr,
+            "timed_out": False,
+            "truncated": False,
+        }
+
+
+class _OfflineSession:
+    """A host that cannot be reached, the way RemoteSession.exec_tool
+    surfaces a failed connection."""
+
+    host_id = "h-offline"
+
+    async def exec_tool(self, name, args, workspace=""):
+        return {"error": "remote host unreachable: ConnectError: boom"}
+
+
+@pytest.fixture()
+def _clear_sessions():
+    from backend.agent import remote as remote_mod
+
+    remote_mod.clear_remote()
+    yield
+    remote_mod.clear_remote()
 
 
 def _info(client, conv_id, repo):
@@ -68,6 +126,9 @@ def test_git_info_clean_repo(client, tmp_path):
     assert info["ahead"] == 0 and info["behind"] == 0
     assert info["remote_hash"] is None  # no upstream configured
     assert info["local_hash"], "short hash present"
+    # #361: the worktree hash trio is gone - one tree, one hash.
+    assert "worktree_hash" not in info
+    assert "worktree_ahead" not in info
 
 
 def test_git_info_dirty_counts_and_untracked(client, tmp_path):
@@ -125,39 +186,33 @@ def test_git_branches_lists_local(client, tmp_path):
     assert r.json()["branches"] == ["feature", "master"]
 
 
-def test_workspace_git_branches_and_pin_at_creation(client, tmp_path):
-    """#301: with the draft-card endpoint gone, "switch to X" before a chat
-    exists is a selector write. A no-pick creation pins the workspace's
-    branch as 'inherited', and a terminal `git switch` afterwards changes
-    nothing the chat aims at (semantic primary-tree immunity)."""
+def test_git_branch_reports_workspace_truth(client, tmp_path):
+    """#361: the chip endpoint reads the ONE tree's checked-out branch - no
+    per-chat pin, no origin, no staleness state."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+    conv_id = _conversation(client, repo)
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
+        "branch": "master"
+    }
+
+    # The human (or the checkout action) moves the tree; the chip follows.
+    _git(repo, "checkout", "feature")
+    invalidate_git_caches(repo)
+    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
+        "branch": "feature"
+    }
+
+
+def test_workspace_git_branches_lists_the_destination(client, tmp_path):
+    """Draft-card read: the destination workspace's branch list. The direct
+    world carries no pin-at-creation - the chat follows the one tree."""
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
 
     r = client.get("/api/workspaces/git-branches", params={"workspace": str(repo)})
     assert r.status_code == 200, r.text
     assert r.json() == {"branch": "master", "branches": ["feature", "master"]}
-
-    conv_id = _conversation(client, repo)
-    g = client.get(f"/api/conversations/{conv_id}/git-branch").json()
-    assert g == {"branch": "master", "pin_origin": "inherited", "stale": False}
-
-
-def test_workspace_git_checkout_endpoint_is_gone(client, tmp_path):
-    """#301: no in-YAAH control moves the primary worktree anymore."""
-    repo = _repo_with_commit(tmp_path)
-    _git(repo, "branch", "feature")
-    from backend.main import app
-
-    assert all(
-        getattr(rt, "path", "") != "/api/workspaces/git-checkout"
-        for rt in app.routes
-    )
-    r = client.post(
-        "/api/workspaces/git-checkout",
-        json={"workspace": str(repo), "branch": "feature"},
-    )
-    assert r.status_code in (404, 405)  # no handler either way
-    assert _git(repo, "branch", "--show-current") == "master"
 
 
 def test_workspace_git_endpoints_hide_nonrepo_default_and_remote(client, tmp_path):
@@ -170,16 +225,16 @@ def test_workspace_git_endpoints_hide_nonrepo_default_and_remote(client, tmp_pat
         "/api/workspaces/git-branches", params={"workspace": ""}
     ).json() == {"branch": None, "branches": []}
     # #335: a remote destination is served through the gateway; with no
-    # session for the host the answer is the explicit offline state —
+    # session for the host the answer is the explicit offline state -
     # the old silent-hide ({branch: None, branches: []}) is gone.
     assert client.get(
         "/api/workspaces/git-branches", params={"workspace": "remote:host"}
     ).json() == {"branch": None, "branches": [], "offline": True}
 
 
-def test_git_command_checkout_writes_selector_not_tree(client, tmp_path):
-    """#286: the UI checkout action records the chat's intended branch; the
-    shared workspace tree stays put (no other chat may be standing on it)."""
+def test_git_command_checkout_moves_the_workspace_tree(client, tmp_path):
+    """#361: the UI checkout action is a plain checkout of the ONE tree -
+    git's own dirty-tree refusals are the guard."""
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
     conv_id = _conversation(client, repo)
@@ -190,17 +245,27 @@ def test_git_command_checkout_writes_selector_not_tree(client, tmp_path):
     body = r.json()
     assert body["ok"] is True
 
-    # The tree did not move.
+    # The tree moved.
     invalidate_git_caches(repo)
     info = client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]
-    assert info["branch"] == "master"
-
-    # The chat's stored selection did.
-    assert client.get(f"/api/conversations/{conv_id}").json()["selected_branch"] == "feature"
+    assert info["branch"] == "feature"
 
     # The action still lands as a trace row (existing contract).
     msgs = client.get(f"/api/conversations/{conv_id}/messages").json()
     assert msgs[-1]["tool_call_id"].startswith("ui-git-checkout-")
+
+    # Git's own refusal surfaces verbatim: a checkout that would clobber
+    # uncommitted work fails with git's message, and nothing is stashed.
+    _divergent_content(repo, "feature")
+    (repo / "hello.txt").write_text("uncommitted master edit\n", encoding="utf-8")
+    r2 = client.post(
+        f"/api/conversations/{conv_id}/git-command", json={"action": "checkout", "branch": "feature"}
+    )
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    assert body2["ok"] is False
+    assert "local changes" in body2["error"] or "would be overwritten" in body2["error"]
+    assert _git(repo, "branch", "--show-current") == "master"  # tree unmoved
 
 
 def test_git_command_commit_stages_all_and_posts_trace_row(client, tmp_path):
@@ -208,51 +273,43 @@ def test_git_command_commit_stages_all_and_posts_trace_row(client, tmp_path):
     conv_id = _conversation(client, repo)
     (repo / "hello.txt").write_text("hi\nmore\n", encoding="utf-8")
     (repo / "new.txt").write_text("n", encoding="utf-8")
-
     r = client.post(
-        f"/api/conversations/{conv_id}/git-command",
-        json={"action": "commit", "message": "ui commit"},
+        f"/api/conversations/{conv_id}/git-command", json={"action": "commit", "message": "wip"}
     )
     assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True
-    assert "ui commit" in r.json()["output"]
-
-    # Both files landed (stage-all semantics).
-    assert "more" in (repo / "hello.txt").read_text(encoding="utf-8")
-    assert (repo / "new.txt").exists()
-    info = client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]
-    assert info["dirty"] is False
-
-    # The command is recorded as a synthetic tool row.
+    body = r.json()
+    assert body["ok"] is True
     msgs = client.get(f"/api/conversations/{conv_id}/messages").json()
     row = msgs[-1]
-    assert row["role"] == "tool"
     assert row["tool_call_id"].startswith("ui-git-commit-")
-    assert row["tool_calls"][0]["function"]["name"] == "git commit"
-    assert "ui commit" in json.loads(row["content"])["output"]
+    assert "wip" in row["content"]
 
 
 def test_git_command_commit_requires_message(client, tmp_path):
     repo = _repo_with_commit(tmp_path)
     conv_id = _conversation(client, repo)
-    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "commit", "message": "  "})
-    assert r.status_code == 200
+    r = client.post(
+        f"/api/conversations/{conv_id}/git-command", json={"action": "commit", "message": "  "}
+    )
+    assert r.status_code == 200, r.text
     assert r.json() == {"ok": False, "error": "commit message is empty"}
 
 
 def test_git_command_status(client, tmp_path):
     repo = _repo_with_commit(tmp_path)
     conv_id = _conversation(client, repo)
-    (repo / "dirty.txt").write_text("d", encoding="utf-8")
+    (repo / "dirty.txt").write_text("x", encoding="utf-8")
     r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "status"})
     assert r.status_code == 200, r.text
-    assert "?? dirty.txt" in r.json()["output"]
+    body = r.json()
+    assert body["ok"] is True
+    assert "?? dirty.txt" in body["output"]
 
 
 def test_git_command_push_without_upstream_falls_back(client, tmp_path):
     """Bare push on an upstream-less repo fails; the endpoint retries with
-    --set-upstream and records the note (the push itself fails again here —
-    origin points nowhere — but the fallback path is what's under test)."""
+    --set-upstream and records the note (the push itself fails again here -
+    origin points nowhere - but the fallback path is what's under test)."""
     repo = _repo_with_commit(tmp_path)
     conv_id = _conversation(client, repo)
     r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "push"})
@@ -265,130 +322,19 @@ def test_git_command_push_without_upstream_falls_back(client, tmp_path):
     assert row["tool_call_id"].startswith("ui-git-push-")
 
 
-def test_git_command_push_refuses_run_branch_head(client, tmp_path):
-    """#320: when HEAD is a run/* branch, push is refused BEFORE any push
-    is attempted - the --set-upstream fallback must never publish a run
-    branch as a brand-new origin ref (ADR-0010: run branches stay local
-    until landed on a primary branch)."""
+def test_git_command_push_follows_the_workspace_tree(client, tmp_path):
+    """#361: the run/* push refusal is gone - branches are branches. Push
+    acts on the workspace's checked-out branch, whatever it is named."""
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "master", str(origin))
     repo = _repo_with_commit(tmp_path)
-    _git(repo, "checkout", "-b", "run/chat-999")
-    conv_id = _conversation(client, repo)
-    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "push"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] is False
-    assert "run/* branches stay local" in body["error"]
-    assert "note" not in body  # the --set-upstream fallback never ran
-    msgs = client.get(f"/api/conversations/{conv_id}/messages").json()
-    row = msgs[-1]
-    assert row["tool_call_id"].startswith("ui-git-push-")
-
-
-# ---- #328: git-command follows the chat worktree, like git-info ----
-
-
-def _chat_worktree(repo, conv_id):
-    """Materialize the chat worktree synchronously (the endpoint under
-    test is sync; ensure_chat_worktree is async)."""
-    import asyncio
-
-    from backend.agent.worktrees import ensure_chat_worktree
-
-    return asyncio.run(ensure_chat_worktree(str(repo), conv_id, "master"))["path"]
-
-
-def test_git_command_push_refuses_run_branch_in_chat_worktree(client, tmp_path):
-    """#328: the standard config — the chat works in .scratch/chat-N/run
-    on a run/* branch while the primary tree sits on master. The refusal
-    must guard the WORKTREE head, where it actually lives; on the
-    unmapped root this guard is dead code."""
-    repo = _repo_with_commit(tmp_path)
-    conv_id = _conversation(client, repo)
-    chat_dir = _chat_worktree(repo, conv_id)
-    _git(repo, "branch", "run/fix-whine-999")  # the worktree's start point
-    _git(str(chat_dir), "checkout", "-q", "run/fix-whine-999")
-
-    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "push"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] is False
-    assert "run/* branches stay local" in body["error"]
-
-
-def test_git_command_commit_lands_in_chat_worktree(client, tmp_path):
-    """#328: chip commit mutates the tree the chat works in, not the
-    primary tree the agent may have left on another branch."""
-    repo = _repo_with_commit(tmp_path)
-    conv_id = _conversation(client, repo)
-    chat_dir = _chat_worktree(repo, conv_id)
-    (chat_dir / "work.txt").write_text("agent work", encoding="utf-8")
-
-    r = client.post(
-        f"/api/conversations/{conv_id}/git-command",
-        json={"action": "commit", "message": "chip commit"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True
-
-    # The commit landed in the worktree...
-    out = _git(str(chat_dir), "show", "--stat", "--format=%s")
-    assert "chip commit" in out
-    assert "work.txt" in out
-    # ...and the primary tree is untouched.
-    assert "chip commit" not in _git(repo, "log", "--format=%s", "-5")
-
-
-def test_git_command_status_reads_chat_worktree(client, tmp_path):
-    """#328: status describes the worktree's dirt, not the primary's —
-    the strip must not contradict the git-info chip beside it."""
-    repo = _repo_with_commit(tmp_path)
-    conv_id = _conversation(client, repo)
-    chat_dir = _chat_worktree(repo, conv_id)
-    # Dirt ONLY in the chat worktree; the primary stays clean.
-    (chat_dir / "scratch.txt").write_text("wip", encoding="utf-8")
-
-    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "status"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] is True
-    assert "?? scratch.txt" in body["output"]
-
-
-def test_git_command_pull_fast_forwards_in_chat_worktree(client, tmp_path):
-    """#328: pull operates on the chat worktree — the fetch/merge against
-    the worktree branch's upstream lands in the worktree, not the
-    primary tree."""
-    repo = _repo_with_commit(tmp_path)
-    # A local clone acts as "origin"; the source repo gets it as its
-    # remote so every worktree shares the fetch configuration.
-    origin = tmp_path / "origin"
-    _git(tmp_path, "clone", "-q", str(repo), str(origin))
-    _git(origin, "config", "user.email", "test@example.com")
-    _git(origin, "config", "user.name", "Test")
-    # Advance the clone on a feature branch by one commit.
-    _git(origin, "checkout", "-q", "-b", "feature")
-    (origin / "hello.txt").write_text("from origin\n", encoding="utf-8")
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-q", "-m", "origin work")
-    # The source repo: feature exists locally at the base, tracking the
-    # clone's advanced branch.
     _git(repo, "remote", "add", "origin", str(origin))
-    _git(repo, "fetch", "-q", "origin")
-    _git(repo, "branch", "feature")
-    _git(repo, "branch", "-u", "origin/feature", "feature")
-
+    _git(repo, "checkout", "-q", "-b", "run/named-whatever")
     conv_id = _conversation(client, repo)
-    chat_dir = _chat_worktree(repo, conv_id)
-    _git(str(chat_dir), "checkout", "-q", "feature")
-    assert "from origin" not in (chat_dir / "hello.txt").read_text(encoding="utf-8")
-
-    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "pull"})
+    r = client.post(f"/api/conversations/{conv_id}/git-command", json={"action": "push"})
     assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True, r.json()
-    # The fast-forward landed in the WORKTREE...
-    assert "from origin" in (chat_dir / "hello.txt").read_text(encoding="utf-8")
-    # ...and the primary tree (master, no upstream) is untouched.
-    assert "from origin" not in (repo / "hello.txt").read_text(encoding="utf-8")
+    body = r.json()
+    assert body["ok"] is True, body
 
 
 def test_git_command_whitelist_rejects_arbitrary_actions(client, tmp_path):
@@ -405,7 +351,7 @@ def test_git_command_whitelist_rejects_arbitrary_actions(client, tmp_path):
 
 def test_git_command_non_repo_workspace(client, tmp_path):
     """A non-repo workspace still answers (git's own 'not a repository'
-    error) — the UI hides the whole cluster for non-repos, so this path is
+    error) - the UI hides the whole cluster for non-repos, so this path is
     defense-in-depth, not a UX surface."""
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -417,61 +363,41 @@ def test_git_command_non_repo_workspace(client, tmp_path):
     assert "not a git repository" in body["error"]
 
 
-# ---- #286: the branch selector becomes a per-chat stored branch value ----
+# ---- #361: branch-select is a plain checkout of the workspace ----
 
 
-def test_branch_select_updates_stored_value_without_tree_move(client, tmp_path):
-    """The core slice: flipping the selector runs no git checkout — the
-    shared tree stays where it is, and the pick is stored on the chat row."""
+def test_branch_select_switches_the_workspace_tree(client, tmp_path):
+    """The direct world: one tree, and the switch moves it. Response shape
+    {ok, branch, created}; the tree really checks out."""
     repo = _repo_with_commit(tmp_path)
     _git(repo, "branch", "feature")
     conv_id = _conversation(client, repo)
 
     r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": "feature"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "selected_branch": "feature", "pin_origin": "explicit"}
+    body = r.json()
+    assert body == {"ok": True, "branch": "feature", "created": False}
 
-    # The stored value updated…
-    assert client.get(f"/api/conversations/{conv_id}").json()["selected_branch"] == "feature"
-
-    # …and the physical tree did not move.
     invalidate_git_caches(repo)
     info = client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]
-    assert info["branch"] == "master"
-    assert info["dirty"] is False
+    assert info["branch"] == "feature"
 
 
-def test_branch_select_flips_are_private_per_chat(client, tmp_path):
-    """Two chats on one workspace flip selectors independently; neither
-    moves the shared tree the other chat reads."""
+def test_branch_select_creates_a_missing_branch(client, tmp_path):
+    """create defaults true: an unknown name is created from HEAD and
+    checked out."""
     repo = _repo_with_commit(tmp_path)
-    _git(repo, "branch", "feature")
-    conv_a = _conversation(client, repo)
-    conv_b = _conversation(client, repo)
-
-    assert client.post(
-        f"/api/conversations/{conv_a}/branch-select", json={"branch": "feature"}
-    ).json()["ok"] is True
-    assert client.post(
-        f"/api/conversations/{conv_b}/branch-select", json={"branch": "master"}
-    ).json()["ok"] is True
-
-    # Each chat reads its own pick (#302: explicit origin, not stale)…
-    assert client.get(f"/api/conversations/{conv_a}/git-branch").json() == {
-        "branch": "feature", "pin_origin": "explicit", "stale": False,
-    }
-    assert client.get(f"/api/conversations/{conv_b}/git-branch").json() == {
-        "branch": "master", "pin_origin": "explicit", "stale": False,
-    }
-
-    # …and the single physical tree is untouched throughout.
-    invalidate_git_caches(repo)
-    assert _git(repo, "branch", "--show-current") == "master"
+    conv_id = _conversation(client, repo)
+    r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": "fresh"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "branch": "fresh", "created": True}
+    assert _git(repo, "branch", "--show-current") == "fresh"
 
 
-def test_branch_select_validates_like_checkout(client, tmp_path):
-    """Empty, option-like, and non-local names are refused; unknown
-    conversations 404."""
+def test_branch_select_refusals_surface_verbatim(client, tmp_path):
+    """Empty, option-like names are refused; git's own dirty-tree refusal
+    arrives as the error text; nothing is stashed or discarded by the
+    harness. Unknown conversations 404."""
     repo = _repo_with_commit(tmp_path)
     conv_id = _conversation(client, repo)
 
@@ -482,9 +408,18 @@ def test_branch_select_validates_like_checkout(client, tmp_path):
         assert body["ok"] is False
         assert body.get("error")
 
-    r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": "no-such-branch"})
+    # Git's refusal: an uncommitted change to a file that DIFFERS between
+    # the branches blocks the checkout (same content on both would carry
+    # over harmlessly - nothing to clobber).
+    _divergent_content(repo, "feature")
+    (repo / "hello.txt").write_text("uncommitted master edit\n", encoding="utf-8")
+    r = client.post(f"/api/conversations/{conv_id}/branch-select", json={"branch": "feature"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"ok": False, "error": "not a local branch: no-such-branch"}
+    body = r.json()
+    assert body["ok"] is False
+    assert "local changes" in body["error"] or "would be overwritten" in body["error"]
+    assert _git(repo, "branch", "--show-current") == "master"  # unmoved
+    assert _git(repo, "stash", "list") == ""  # nothing stashed behind the user's back
 
     assert client.post(
         f"/api/conversations/{conv_id}/branch-select", json={"branch": None}
@@ -494,96 +429,73 @@ def test_branch_select_validates_like_checkout(client, tmp_path):
         "/api/conversations/999999/branch-select", json={"branch": "master"}
     ).status_code == 404
 
-    # Nothing was written by the refused calls: the chat keeps the pin it
-    # was born with (#301: creation already stamped the workspace branch).
-    conv = client.get(f"/api/conversations/{conv_id}").json()
-    assert conv["selected_branch"] == "master"
-    assert conv["branch_pin_origin"] == "inherited"
 
-
-def test_chat_pinned_at_creation_does_not_follow_the_tree(client, tmp_path):
-    """#301 supersedes the pre-#301 fallback: a git-workspace chat is born
-    pinned to the workspace's then-current branch ('inherited'), so a
-    terminal `git switch` on the primary tree afterwards changes nothing
-    the chat aims at (semantic primary-tree immunity). An explicit pick
-    still overrides, and git-info keeps reporting the physical tree."""
+def test_branch_select_refuses_remote_and_blank_workspaces(client, tmp_path):
+    """remote: namespaces and the blank pseudo-workspace have no local
+    checkout to switch."""
     repo = _repo_with_commit(tmp_path)
-    _git(repo, "branch", "feature")
     conv_id = _conversation(client, repo)
 
-    # Born pinned: the workspace's branch at creation, marked inherited.
-    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
-        "branch": "master", "pin_origin": "inherited", "stale": False,
-    }
-
-    # The human checks out feature in the shared tree (their tool); the
-    # chat's inherited pin does not follow along.
-    _git(repo, "checkout", "feature")
-    invalidate_git_caches(repo)
-    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
-        "branch": "master", "pin_origin": "inherited", "stale": False,
-    }
-
-    # The chat flips: its explicit pick now wins over everything…
-    assert client.post(
+    r = client.post(
         f"/api/conversations/{conv_id}/branch-select", json={"branch": "master"}
-    ).json()["ok"] is True
-    assert client.get(f"/api/conversations/{conv_id}/git-branch").json() == {
-        "branch": "master", "pin_origin": "explicit", "stale": False,
-    }
+    )
+    assert r.status_code == 200
 
-    # …while git-info keeps reporting the physical tree.
-    invalidate_git_caches(repo)
-    assert client.get(f"/api/conversations/{conv_id}/git-info").json()["info"]["branch"] == "feature"
-
-
-async def test_no_path_moves_the_primary_tree(client, tmp_path):
-    """#301: the selector flip records intent and moves nothing — the tree
-    is the human's. The endpoint that used to move it is gone entirely."""
-    repo = _repo_with_commit(tmp_path)
-    _git(repo, "branch", "feature")
-    conv_id = _conversation(client, repo)
-    assert client.post(
-        f"/api/conversations/{conv_id}/branch-select", json={"branch": "feature"}
-    ).json()["ok"] is True
-
-    assert _git(repo, "branch", "--show-current") == "master"  # the tree stayed
+    # A remote conversation is refused with a clear message.
+    rid = client.post(
+        "/api/conversations", json={"workspace": "remote:host:C:/x"}
+    ).json()["id"]
+    r2 = client.post(f"/api/conversations/{rid}/branch-select", json={"branch": "master"})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["ok"] is False
+    assert "remote" in r2.json()["error"]
 
 
-async def test_selected_branch_migration_on_legacy_db(monkeypatch, tmp_path):
-    """A pre-#286 database (conversations without selected_branch) upgrades
-    in place; existing rows read NULL and fall back to the workspace branch."""
-    import aiosqlite
+def test_git_branch_remote_reads_the_host_through_the_gateway(client, tmp_path, _clear_sessions):
+    """#361 keeps #333's remote leg: a remote conversation's chip reads the
+    HOST's checked-out branch through the gateway, never workspace_root
+    (its Path.resolve would mangle the namespace into a client-local path).
+    An unreachable host reports None - the offline posture, not a crash."""
+    from backend.agent import remote as remote_mod
+    from backend.agent.gitinfo import invalidate_git_caches
 
-    import backend.db.database as database
+    host_repo = _repo_with_commit(tmp_path, name="host-repo")
+    _git(host_repo, "checkout", "-q", "-b", "host-branch")
 
-    old_db = tmp_path / "legacy286.db"
-    async with aiosqlite.connect(old_db) as db:
-        await db.execute(
-            """CREATE TABLE conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL DEFAULT 'New Task',
-                workspace TEXT,
-                system_prompt_override TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )"""
-        )
-        await db.execute(
-            "INSERT INTO conversations (title, workspace) VALUES ('old', '/somewhere')"
-        )
-        await db.commit()
+    session = _FakeHostSession(host_repo)
+    remote_mod.register_remote(session)
 
-    monkeypatch.setattr(database, "DB_PATH", old_db)
-    await database.init_db()
-    db = await database.get_db()
-    try:
-        cur = await db.execute("PRAGMA table_info(conversations)")
-        cols = {r[1] for r in await cur.fetchall()}
-        assert "selected_branch" in cols
-        cur = await db.execute("SELECT title, selected_branch FROM conversations")
-        row = await cur.fetchone()
-        assert row["title"] == "old"
-        assert row["selected_branch"] is None
-    finally:
-        await db.close()
+    rid = client.post(
+        "/api/conversations", json={"workspace": "remote:h-fake:C:/repo"}
+    ).json()["id"]
+    r = client.get(f"/api/conversations/{rid}/git-branch")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"branch": "host-branch"}
+    assert any("rev-parse" in c for c in session.commands), "must ship through the channel"
+
+    # Offline host: explicit None, still a 200 - never a raise.
+    remote_mod.register_remote(_OfflineSession())
+    invalidate_git_caches("remote:h-offline:C:/repo")
+    oid = client.post(
+        "/api/conversations", json={"workspace": "remote:h-offline:C:/repo"}
+    ).json()["id"]
+    r2 = client.get(f"/api/conversations/{oid}/git-branch")
+    assert r2.status_code == 200, r2.text
+    assert r2.json() == {"branch": None}
+
+
+def test_branch_select_refuses_a_branch_held_by_a_registered_worktree(client, tmp_path):
+    """The third verbatim refusal the spec names: the branch lives in a
+    still-registered worktree, and git's own error is the whole guard."""
+    main_repo = _repo_with_commit(tmp_path, name="main")
+    linked = tmp_path / "linked"
+    _git(main_repo, "worktree", "add", str(linked), "-b", "held")
+    r = client.post(
+        f"/api/conversations/{_conversation(client, main_repo)}/branch-select",
+        json={"branch": "held"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert "worktree" in body["error"] or "used by" in body["error"] or "checkout" in body["error"]
+    assert _git(main_repo, "branch", "--show-current") == "master"

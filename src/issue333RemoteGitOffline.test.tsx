@@ -44,9 +44,6 @@ function renderCluster(gitInfo: GitInfo | null) {
       info={gitInfo}
       streaming={false}
       conversationId={1}
-      selectedBranch={null}
-      selectedOrigin={null}
-      selectedStale={false}
       onCommandDone={() => {}}
     />,
   )

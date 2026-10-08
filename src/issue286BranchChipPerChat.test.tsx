@@ -13,94 +13,77 @@ vi.mock('./api', async (importOriginal) => {
     ...actual,
     selectConversationBranch,
     getGitBranches,
+    appendRawMessage,
   }
 })
 
-vi.mock('./store', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./store')>()
-  return {
-    ...actual,
-    useAgent: Object.assign(
-      (selector: (s: Record<string, unknown>) => unknown) => selector({ appendRawMessage }),
-      { getState: () => ({ appendRawMessage }) },
-    ),
-  }
-})
+vi.mock('./store', () => ({
+  useAgent: (selector: (s: Record<string, unknown>) => unknown) =>
+    selector({
+      appendRawMessage,
+      workspace: '',
+      conversationId: 7,
+    }),
+}))
 
 import { GitChipCluster } from './components'
 import type { GitInfo } from './api'
 import { baseGitInfo } from './gitInfoFixture'
 
-// #286: the status-strip branch chip is the chat's own branch. Flipping it
-// calls the per-chat branch-select endpoint (which stores the pick and runs
-// no git checkout). #301: the workspace checkout endpoint is gone entirely —
-// no in-YAAH control moves the primary worktree anymore.
-function info(overrides: Partial<GitInfo> = {}): GitInfo {
-  return baseGitInfo(overrides)
+// #361: the branch chip is the ONE workspace tree's checked-out branch.
+// The dropdown's checkout calls the branch-select endpoint - a plain
+// checkout of the workspace - and the action lands as a trace row.
 
-}
-
-function mountCluster(opts: { info: GitInfo; selectedBranch: string | null }) {
+function mountCluster() {
   return render(
     <GitChipCluster
-      info={opts.info}
+      info={baseGitInfo()}
       streaming={false}
       conversationId={7}
-      selectedBranch={opts.selectedBranch}
       onCommandDone={() => {}}
     />,
   )
 }
 
-describe('per-chat branch chip (#286)', () => {
+describe('workspace branch chip (#361 direct world)', () => {
   beforeEach(() => {
-    selectConversationBranch.mockResolvedValue({ ok: true, selected_branch: 'feature' })
-    getGitBranches.mockResolvedValue({ branches: ['feature', 'master'] })
+    selectConversationBranch.mockReset()
+    getGitBranches.mockReset()
+    appendRawMessage.mockReset()
   })
 
-  afterEach(() => {
-    cleanup()
-    vi.clearAllMocks()
-  })
+  afterEach(cleanup)
 
-  it('shows the stored per-chat selection over the workspace branch', () => {
-    mountCluster({ info: info(), selectedBranch: 'feature' })
-    expect(screen.getByRole('button', { name: /branch for this chat/i }).textContent).toContain('feature')
-  })
-
-  it('falls back to the workspace branch when the chat has no stored pick', () => {
-    mountCluster({ info: info({ branch: 'master' }), selectedBranch: null })
+  it('shows the workspace branch from git-info', () => {
+    mountCluster()
     expect(screen.getByRole('button', { name: /branch for this chat/i }).textContent).toContain('master')
   })
 
-  it('flip goes to the per-chat branch-select endpoint, not a workspace checkout', async () => {
-    const { container } = mountCluster({ info: info(), selectedBranch: null })
-
+  it('the dropdown checkout calls the branch-select endpoint and traces the action', async () => {
+    getGitBranches.mockResolvedValue({ branches: ['feature', 'master'] })
+    selectConversationBranch.mockResolvedValue({ ok: true, branch: 'feature', created: false })
+    mountCluster()
     fireEvent.click(screen.getByRole('button', { name: /branch for this chat/i }))
-    await screen.findByText('feature') // dropdown lists local branches
-
-    const items = container.querySelectorAll('.max-h-56 button')
-    const featureItem = Array.from(items).find((b) => b.textContent?.includes('feature'))
+    await waitFor(() => expect(getGitBranches).toHaveBeenCalledTimes(1))
+    const featureItem = screen.getByRole('button', { name: /feature/ })
     expect(featureItem, 'feature item in the dropdown').toBeTruthy()
-    fireEvent.click(featureItem!)
-
+    fireEvent.click(featureItem)
     await waitFor(() => expect(selectConversationBranch).toHaveBeenCalledTimes(1))
     expect(selectConversationBranch).toHaveBeenCalledWith(7, 'feature')
-    // The flip still lands in the transcript as a checkout trace row.
     expect(appendRawMessage).toHaveBeenCalledWith(
       '7',
       expect.objectContaining({ role: 'tool' }),
     )
   })
 
-  it('marks the stored pick — not the checked-out branch — in the dropdown', async () => {
-    const { container } = mountCluster({ info: info({ branch: 'master' }), selectedBranch: 'feature' })
-
+  it('marks the checked-out branch in the dropdown', async () => {
+    getGitBranches.mockResolvedValue({ branches: ['feature', 'master'] })
+    mountCluster()
     fireEvent.click(screen.getByRole('button', { name: /branch for this chat/i }))
-    await screen.findByText('feature')
-    const checkmark = container.querySelector('.text-blue-400')!
+    await waitFor(() => expect(getGitBranches).toHaveBeenCalledTimes(1))
+    const item = screen.getByRole('button', { name: /master/ })
+    const checkmark = item.querySelector('span')
     expect(checkmark).toBeTruthy()
-    const item = checkmark.closest('button')!
-    expect(item.textContent).toContain('feature')
+    expect(item.textContent).toContain('master')
   })
 })

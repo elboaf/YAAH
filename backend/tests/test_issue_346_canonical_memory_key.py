@@ -128,19 +128,15 @@ def _pinned_store(tmp_path, ws):
 async def test_save_in_pinned_chat_lands_in_prompt_store(
     fake_model, mem_cfg, tmp_path, monkeypatch
 ):
-    """Red shape for #346: a branch-pinned chat's memory_save must write
-    the store the turn's injected index was read from (the pre-rebind
-    workspace root), not a per-chat-worktree store."""
+    """A branch-pinned chat's memory_save must write the store the turn's
+    injected index was read from (the workspace root). Under the direct
+    world (#361) no rebind exists at all - the funnel injection is the
+    guarantee that saves resolve the prompt's store."""
     repo = _repo_with_branch(tmp_path)
     monkeypatch.setattr(loop, "_agents_notes", lambda ws: "")
     monkeypatch.setattr(loop, "_agents_notes_async", _async_blank)
     monkeypatch.setattr(loop, "_memory_notes", lambda ws: "")
     cid = await create_conversation("pinned save")
-    # Pin the branch: the turn materializes .scratch/chat-<id>/ and
-    # rebinds turn_workspace before any tool call runs.
-    from backend.db.database import update_conversation
-
-    await update_conversation(cid, selected_branch="feature")
 
     fake_model.append([
         {"type": "tool_calls", "tool_calls": [
@@ -163,10 +159,6 @@ async def test_save_in_pinned_chat_lands_in_prompt_store(
         "memory_save in a branch-pinned chat wrote a per-chat store; "
         "it must resolve to the canonical workspace root (#346)"
     )
-    # Negative half of AC1: the per-chat store the old bug wrote to must
-    # NOT have been created.
-    chat_store = memory.memory_dir(str(repo / ".scratch" / f"chat-{cid}"))
-    assert not (chat_store / "prefers-dark-ui.md").exists()
     # The prompt's injected index reads exactly the canonical store.
     assert "prefers-dark-ui" in memory.index_for_prompt(str(repo))
 
@@ -178,14 +170,12 @@ async def test_pinned_read_and_prompt_index_agree(
     """A memory saved by ANOTHER chat of the same workspace surfaces in
     this pinned chat's injected index AND is readable by its tool calls
     - one store per workspace, not per chat tree."""
-    from backend.db.database import update_conversation
 
     repo = _repo_with_branch(tmp_path)
     monkeypatch.setattr(loop, "_agents_notes", lambda ws: "")
     monkeypatch.setattr(loop, "_agents_notes_async", _async_blank)
     monkeypatch.setattr(loop, "_memory_notes", lambda ws: "")
     cid = await create_conversation("pinned read")
-    await update_conversation(cid, selected_branch="feature")
 
     memory.save_memory(
         str(repo), "deploys-via-blue-green", "Deploys via blue-green",
@@ -213,17 +203,15 @@ async def test_pinned_read_and_prompt_index_agree(
 async def test_sub_agent_save_in_pinned_chat_uses_prompt_store(
     fake_model, mem_cfg, tmp_path, monkeypatch
 ):
-    """Mid-turn sub-agents receive the rebound turn_workspace too, so
-    their memory calls diverged identically. The funnel injection must
-    cover them: a sub-agent's save lands in the prompt's store."""
-    from backend.db.database import update_conversation
+    """Mid-turn sub-agents receive the turn's workspace resolution too.
+    The funnel injection must cover them: a sub-agent's save lands in
+    the prompt's store."""
 
     repo = _repo_with_branch(tmp_path)
     monkeypatch.setattr(loop, "_agents_notes", lambda ws: "")
     monkeypatch.setattr(loop, "_agents_notes_async", _async_blank)
     monkeypatch.setattr(loop, "_memory_notes", lambda ws: "")
     cid = await create_conversation("sub save")
-    await update_conversation(cid, selected_branch="feature")
 
     fake_model.append([
         {"type": "tool_calls", "tool_calls": [{
@@ -273,8 +261,8 @@ async def test_sub_agent_save_in_pinned_chat_uses_prompt_store(
 
 @pytest.mark.asyncio
 async def test_non_pinned_chat_unchanged(fake_model, mem_cfg, tmp_path, monkeypatch):
-    """No branch pin: no worktree, no rebind - and the injection must be
-    a no-op there: same store, same behavior as before the fix."""
+    """No branch pin anywhere - the injection is a no-op: same store,
+    same behavior as before the fix."""
     repo = _repo_with_branch(tmp_path)
     monkeypatch.setattr(loop, "_agents_notes", lambda ws: "")
     monkeypatch.setattr(loop, "_agents_notes_async", _async_blank)
@@ -300,18 +288,14 @@ async def test_non_pinned_chat_unchanged(fake_model, mem_cfg, tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_non_git_workspace_unchanged(fake_model, mem_cfg, tmp_path, monkeypatch):
-    """A pinned branch in a NON-git workspace materializes no worktree
-    (ensure_chat_worktree refuses); memory keeps resolving to the
-    workspace itself - no store migration, no error."""
+    """A NON-git workspace keeps memory resolving to the workspace
+    itself - no store migration, no error."""
     plain = tmp_path / "plain"
     plain.mkdir()
     monkeypatch.setattr(loop, "_agents_notes", lambda ws: "")
     monkeypatch.setattr(loop, "_agents_notes_async", _async_blank)
     monkeypatch.setattr(loop, "_memory_notes", lambda ws: "")
     cid = await create_conversation("non-git pin")
-    from backend.db.database import update_conversation
-
-    await update_conversation(cid, selected_branch="feature")
 
     fake_model.append([
         {"type": "tool_calls", "tool_calls": [

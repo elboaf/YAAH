@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
-const { listLocalWorkspaces, listWorkspaces, addWorkspace, getWorkspaceGitBranches } = vi.hoisted(() => ({
+const { listLocalWorkspaces, listWorkspaces, addWorkspace } = vi.hoisted(() => ({
   listLocalWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
-  getWorkspaceGitBranches: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
@@ -15,7 +14,6 @@ vi.mock('./api', async (importOriginal) => {
     listLocalWorkspaces,
     listWorkspaces,
     addWorkspace,
-    getWorkspaceGitBranches,
   }
 })
 
@@ -39,10 +37,6 @@ describe('draft destination card (#90)', () => {
     listLocalWorkspaces.mockResolvedValue(workspaces)
     listWorkspaces.mockResolvedValue(workspaces)
     addWorkspace.mockResolvedValue(workspaces[0])
-    getWorkspaceGitBranches.mockResolvedValue({
-      branch: 'main',
-      branches: ['feature', 'main'],
-    })
     useAgent.setState({
       conversationId: null,
       workspace: 'C:/repos/project',
@@ -69,17 +63,6 @@ describe('draft destination card (#90)', () => {
 
     fireEvent.change(select, { target: { value: 'C:/repos/project' } })
     expect(useAgent.getState().draftDestination).toBe('C:/repos/project')
-  })
-
-  it('records the branch pick without any checkout (#277/#301)', async () => {
-    // The first draft of this test expected a workspace checkout; #277 made
-    // the pick intent-only and #301 deleted the checkout endpoint entirely.
-    render(<DraftDestinationCard />)
-
-    fireEvent.click(await screen.findByRole('button', { name: /branch main/i }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: /feature/ }))
-
-    expect(await screen.findByRole('button', { name: /branch feature/i })).toBeInTheDocument()
   })
 
   it('does not offer cached workspaces as destinations while their device is offline', async () => {
