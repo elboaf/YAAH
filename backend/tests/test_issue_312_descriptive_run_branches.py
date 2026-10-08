@@ -72,7 +72,11 @@ def test_degraded_note_landing_rule_is_universal():
     note = loop._selected_branch_note_degraded("bigtest", 7, "non-repo")
     assert "git worktree list" in note
     assert "NO other worktree" in note
-    assert "do NOT land" in note
+    # ADR-0015: a checked-out-elsewhere target no longer dead-ends the
+    # landing - it lands through the checkout (wip sweep + resolution);
+    # only a mid merge/rebase/cherry-pick checkout stays manual-only.
+    assert "MERGE_HEAD" in note
+    assert "manual-only" in note.lower()
     assert "worktree remove" in note
 
 

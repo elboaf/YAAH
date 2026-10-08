@@ -1,7 +1,10 @@
 # ADR 0014: Agent-executed landing into the selected branch — the master boundary becomes the safe-sync SOP
 
 Date: 2026-10-07
-Status: Accepted (amends ADR-0010's landing contract)
+Status: Accepted (amends ADR-0010's landing contract; landing
+outcomes amended by ADR-0015 - dirty-primary WIP sweeps to a wip
+branch and conflicts resolve with the run branch's side winning
+instead of freezing/aborting)
 Driven by: #349 (proactive end-of-work landing ask), maintainer decision
 
 ## Context
@@ -55,13 +58,17 @@ offered and performed, including when that branch is `master`.
      its own; a dirty tree must never be reset — so a dirty primary
      freezes the landing: ref unmoved, landing reported as
      manual-only).
-   - A diverged run branch lands via a plumbing merge
-     (`git merge-tree --write-tree` → `git commit-tree` → ref move):
-     **merge commits written by agents into the landing target are
-     now allowed** — this expressly supersedes ADR-0010's assumption
-     that master history stays linear and human-merged. On merge
-     conflict the agent aborts cleanly and offers a rebase of the
-     run branch.
+   - A diverged run branch lands via a plumbing merge; since
+     ADR-0015 the invocation is
+     `git merge-tree --write-tree --merge-base=<run base> <run branch> <target>`
+     (the `--merge-base` form is required — positional base-as-branch1
+     would merge the wrong sides), conflicts resolve with the
+     run branch's side winning, and the resolved tree is committed
+     with `git commit-tree` before the ref move: **merge commits
+     written by agents into the landing target are now allowed** —
+     this expressly supersedes ADR-0010's assumption that master
+     history stays linear and human-merged. (ADR-0015 removed the
+     former abort-and-offer-a-rebase outcome on conflict.)
 
 5. **Typed commands remain the fallback.** "Land it" / "scrap it"
    keep working in every surface that mentions them; the ask adds

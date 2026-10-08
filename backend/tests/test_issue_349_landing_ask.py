@@ -10,8 +10,11 @@ leave for now / scrap it), and that block appears only where ask_user
 exists - never in a sub-agent's copy of the note (sub-agents have no
 ask_user). Landing into a branch checked out in the primary tree
 (master pin) becomes agent-executable under the ADR-0014 safe-sync
-SOP: clean primary first, then update-ref + reset; dirty primary
-refuses the move.
+SOP: land in plumbing first, then update-ref + reset. Since #351
+(ADR-0015) a dirty primary no longer refuses the move - its WIP is
+swept to a local wip branch (checkout-free) and conflicts resolve
+with the run branch's side winning; only a primary mid
+merge/rebase/cherry-pick still freezes.
 """
 
 import pytest
@@ -55,9 +58,10 @@ def test_detached_note_carries_master_safe_sync():
     # Safe-sync SOP: clean-check BEFORE the ref move, reset AFTER.
     assert "update-ref refs/heads/master" in note
     assert "reset --hard master" in note
-    # The guarded refusal: a dirty primary freezes the landing.
-    assert "dirty" in note.lower()
-    assert "do not move the ref" in note.lower()
+    # The guarded refusal, narrowed by ADR-0015: a primary mid
+    # merge/rebase/cherry-pick freezes the landing (dirty WIP is swept).
+    assert "MERGE_HEAD" in note
+    assert "manual-only" in note.lower()
     # The plumbing guard: branch -f cannot move a checked-out branch.
     assert "branch -f" in note
     # Diverged master lands via plumbing merge, not a checkout.
