@@ -64,15 +64,24 @@ primary worktree
 **Landing**:
 A run's merge of its scratch-worktree branch onto the chat's selected
 branch, inside the chat's worktree. On the user's explicit choice at
-the #349 end-of-work landing ask, agents execute the landing —
-including into a branch checked out in the primary tree (e.g. master)
-under ADR-0015's resolution contract: dirty-primary WIP is preserved
-on a local `wip/` branch (never pushed), merge conflicts resolve with
-the run-branch side winning, every touched file reported; only a
+the #349 end-of-work landing ask, agents execute the landing with the
+**verified landing module** (ADR-0016, the `land` tool): one
+interface for every landing path — including into a branch checked
+out in the primary tree (e.g. master) — executing ADR-0015's
+resolution contract in code: dirty-primary WIP is preserved on a
+local `wip/` branch (never pushed, tracked + staged paths only),
+merge conflicts resolve with the run-branch side winning, lineage
+freshness is re-checked under the landing lock before every ref
+move, the primary-sync leg runs and is verified (HEAD == target,
+clean tree), every touched file reported; only a
 mid-merge/rebase/cherry-pick primary still freezes as manual-only.
-Typed "land it" / "scrap it" remain the manual fallback.
+The **fossil probe** (same module) answers in one command whether a
+staged index is live WIP or a landing fossil. Agents never hand-run
+git against the primary; a failed tool landing is relayed as
+manual-only. Typed "land it" / "scrap it" remain the manual fallback.
 _Avoid_: merge-back, auto-merge, landing without an explicit user
-choice, `git branch -f` on a checked-out branch
+choice, `git branch -f` on a checked-out branch, prose-SOP landings
+into the primary
 
 ### Conversation history
 

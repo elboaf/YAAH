@@ -4,7 +4,9 @@ Date: 2026-10-07
 Status: Accepted (amends ADR-0010's landing contract; landing
 outcomes amended by ADR-0015 - dirty-primary WIP sweeps to a wip
 branch and conflicts resolve with the run branch's side winning
-instead of freezing/aborting)
+instead of freezing/aborting; execution
+amended by ADR-0016 - the SOP runs as verified code, not
+model-typed git)
 Driven by: #349 (proactive end-of-work landing ask), maintainer decision
 
 ## Context
