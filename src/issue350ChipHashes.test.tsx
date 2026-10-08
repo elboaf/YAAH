@@ -116,3 +116,41 @@ describe('three-hash sync readout (#350)', () => {
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('def5678'))
   })
 })
+
+describe('always-visible column labels above each hash', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  const mountAll = () =>
+    mountCluster({
+      info: info({
+        upstream: 'origin/master',
+        remote_hash: 'def5678',
+        worktree_hash: 'wip1234',
+      }),
+    })
+
+  it('labels each hash with its role as visible text (not hover-only)', () => {
+    mountAll()
+    expect(screen.getByText('local')).toBeTruthy()
+    expect(screen.getByText('origin')).toBeTruthy()
+    expect(screen.getByText('worktree')).toBeTruthy()
+  })
+
+  it('keeps the labels when a hash drops out — every rendered slot is named', () => {
+    mountCluster({ info: info() })
+    expect(screen.getByText('local')).toBeTruthy()
+    expect(screen.queryByText('origin')).toBeNull()
+    expect(screen.queryByText('worktree')).toBeNull()
+  })
+
+  it('the label is plain text — the hover/copy affordance stays on the hash below it', () => {
+    mountAll()
+    for (const label of ['local', 'origin', 'worktree']) {
+      expect(screen.getByText(label).getAttribute('title') ?? '').not.toMatch(/copy/)
+    }
+    expect(hashButton('def5678').getAttribute('title')).toMatch(/copy def5678/)
+  })
+})
