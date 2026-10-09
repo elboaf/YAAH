@@ -270,6 +270,12 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN remote_revision_counter INTEGER NOT NULL DEFAULT 1"
         )
+    # #365: databases from before the isolation removal (#359, ADR-0017)
+    # still carry the dead branch-pin columns; drop them in place so an
+    # upgraded database matches a fresh one. Guarded set-intersection =
+    # no-op on fresh databases.
+    for col in sorted({"selected_branch", "branch_pin_origin"} & conv_cols):
+        await db.execute(f"ALTER TABLE conversations DROP COLUMN {col}")
     cur = await db.execute("PRAGMA table_info(agents)")
     agent_cols = {r[1] for r in await cur.fetchall()}
     if "allow_ask_user" not in agent_cols:
@@ -281,6 +287,9 @@ async def get_db() -> aiosqlite.Connection:
         # default) speaks it as the fire emits it; 'visible' holds it until
         # the conversation becomes the on-screen one.
         await db.execute("ALTER TABLE agents ADD COLUMN say_mode TEXT NOT NULL DEFAULT 'arrival'")
+    # #365: same in-place drop for the dead landing columns (#359).
+    for col in sorted({"landing_mode", "landing_branch"} & agent_cols):
+        await db.execute(f"ALTER TABLE agents DROP COLUMN {col}")
     cur = await db.execute("PRAGMA table_info(workspaces)")
     ws_cols = {r[1] for r in await cur.fetchall()}
     if "position" not in ws_cols:

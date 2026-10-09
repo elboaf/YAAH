@@ -370,7 +370,7 @@ def _info_from_status(out: str) -> dict:
         # Forms: "branch...upstream [ahead N, behind M]", "branch...upstream",
         # "branch" (no upstream), "HEAD (no branch)" — detached, which the
         # local path reports as the short SHA; porcelain cannot, so the
-        # branch reads None there (the chip falls back to the stored pin).
+        # branch reads None there (the chip shows the offline posture).
         marker = ""
         if "..." in head:
             b, _, rest = head.partition("...")
