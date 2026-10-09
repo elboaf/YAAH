@@ -499,3 +499,40 @@ def test_branch_select_refuses_a_branch_held_by_a_registered_worktree(client, tm
     assert body["ok"] is False
     assert "worktree" in body["error"] or "used by" in body["error"] or "checkout" in body["error"]
     assert _git(main_repo, "branch", "--show-current") == "master"
+
+
+def test_workspace_branch_select_checks_out_and_refuses_remote(client, tmp_path):
+    """Draft-card checkout (restored after #361): the same branch_select
+    tool the per-conversation endpoint uses - one plain checkout, git's
+    own refusals verbatim; remote destinations refused."""
+    repo = _repo_with_commit(tmp_path)
+    _git(repo, "branch", "feature")
+
+    r = client.post(
+        "/api/workspaces/branch-select",
+        params={"workspace": str(repo)},
+        json={"branch": "feature"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "branch": "feature", "created": False}
+    assert _git(repo, "branch", "--show-current") == "feature"
+
+    # create=True matches the per-conversation chip: an unknown name is
+    # created from HEAD, so the refusal cases that remain are remote
+    # destinations (no local tree to move) and empty names.
+
+    # Refusal: remote destination has no local tree to move.
+    r = client.post(
+        "/api/workspaces/branch-select",
+        params={"workspace": "remote:host:C:/repo"},
+        json={"branch": "feature"},
+    )
+    assert r.json()["ok"] is False
+
+    # Refusal: empty name.
+    r = client.post(
+        "/api/workspaces/branch-select",
+        params={"workspace": str(repo)},
+        json={"branch": "  "},
+    )
+    assert r.json()["ok"] is False

@@ -191,6 +191,13 @@ export const selectConversationBranch = (id: number, branch: string) =>
     body: JSON.stringify({ branch }),
   })
 
+/** Draft card: checkout on an unsaved chat's local destination workspace. */
+export const selectWorkspaceBranch = (workspace: string, branch: string) =>
+  api<BranchSelectResult>(`/api/workspaces/branch-select?workspace=${encodeURIComponent(workspace)}`, {
+    method: 'POST',
+    body: JSON.stringify({ branch }),
+  })
+
 export const listConversations = () =>
   api<ConversationRow[]>('/api/conversations')
 
@@ -590,6 +597,18 @@ export interface WorkspaceRow {
 }
 
 export const listWorkspaces = () => api<WorkspaceRow[]>('/api/workspaces')
+
+/** Draft card: current branch + local branch names for an unsaved chat's
+ *  destination workspace (backend: /api/workspaces/git-branches). */
+export interface WorkspaceBranches {
+  branch: string | null
+  branches: string[]
+  offline?: boolean
+  error?: string
+}
+
+export const getWorkspaceBranches = (workspace: string) =>
+  api<WorkspaceBranches>(`/api/workspaces/git-branches?workspace=${encodeURIComponent(workspace)}`)
 
 /** This machine's registry only. */
 export const listLocalWorkspaces = () =>

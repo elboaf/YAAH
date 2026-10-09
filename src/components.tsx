@@ -64,6 +64,8 @@ import {
   ttsVoices,
   imageUrl,
   listWorkspaces,
+  getWorkspaceBranches,
+  selectWorkspaceBranch,
   reorderWorkspaces,
   listLocalWorkspaces,
   addWorkspace,
@@ -8502,6 +8504,65 @@ function DraftDestinationCard() {
 
   const destinationInRows = rows.some((w) => w.path === dest)
 
+  // Draft branch chip: the destination workspace's checked-out branch,
+  // click = dropdown, picking one checks the ONE workspace tree out on
+  // it (same truth as the status-strip chip on a saved chat). Local
+  // destinations only - the backend refuses remote checkouts, and a
+  // remote host's branches are not this machine's to move.
+  const [gitBranch, setGitBranch] = useState<string | null>(null)
+  const [gitBranches, setGitBranches] = useState<string[]>([])
+  const [gitMenuOpen, setGitMenuOpen] = useState(false)
+  const [gitBusy, setGitBusy] = useState(false)
+  const [gitError, setGitError] = useState<string | null>(null)
+  const isLocalDest = dest !== '' && !parseNsWorkspace(dest)
+
+  useEffect(() => {
+    let cancelled = false
+    destRef.current = dest
+    setGitBranch(null)
+    setGitBranches([])
+    setGitMenuOpen(false)
+    setGitError(null)
+    if (!isLocalDest) return
+    getWorkspaceBranches(dest)
+      .then((r) => {
+        if (cancelled || destRef.current !== dest) return
+        setGitBranch(r.branch)
+        setGitBranches(r.branches)
+        if (r.error) setGitError(r.error)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [dest, isLocalDest])
+
+  const openGitBranches = () => {
+    setGitMenuOpen((open) => !open)
+  }
+
+  const checkoutDraftBranch = async (branch: string) => {
+    if (!dest || gitBusy) return
+    setGitBusy(true)
+    setGitError(null)
+    try {
+      const res = await selectWorkspaceBranch(dest, branch)
+      if (destRef.current !== dest) return
+      if (!res.ok) {
+        setGitError(res.error ?? 'checkout failed')
+      } else {
+        setGitBranch(branch)
+        setGitMenuOpen(false)
+      }
+    } catch (e) {
+      if (destRef.current === dest) {
+        setGitError(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
+      }
+    } finally {
+      if (destRef.current === dest) setGitBusy(false)
+    }
+  }
+
   return (
     <div className="mx-auto mt-3 w-full max-w-md rounded   bg-zinc-900/60 px-3 py-2">
       <div className="flex items-center gap-2">
@@ -8524,6 +8585,38 @@ function DraftDestinationCard() {
             <option key={w.path} value={w.path!}>{w.owner_id ? `${devices.find((d) => d.host_id === w.owner_id)?.name ?? 'Device'} · ${w.label}` : w.label}</option>
           ))}
         </select>
+        {isLocalDest && gitBranch && (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              aria-label={`Branch ${gitBranch}; switch branch`}
+              title={`⎇ ${gitBranch} — picking a branch checks the workspace out on it`}
+              disabled={gitBusy}
+              aria-expanded={gitMenuOpen}
+              onClick={openGitBranches}
+              className="rounded   px-2 py-1 font-mono text-[10px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            >
+              ⎇ <span className="min-w-0 max-w-[10rem] truncate">{gitBranch}</span>
+            </button>
+            {gitMenuOpen && (
+              <div role="menu" aria-label="Git branches" className="absolute right-0 top-full z-30 mt-1 max-h-48 min-w-36 overflow-auto rounded   bg-zinc-900 p-1 shadow-xl">
+                {gitBranches.map((branch) => (
+                  <button
+                    key={branch}
+                    type="button"
+                    role="menuitem"
+                    disabled={gitBusy || branch === gitBranch}
+                    onClick={() => void checkoutDraftBranch(branch)}
+                    className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left font-mono text-[10px] text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                  >
+                    <span>{branch}</span><span>{branch === gitBranch ? '✓' : ''}</span>
+                  </button>
+                ))}
+                {gitBranches.length === 0 && <div className="px-2 py-1 text-[10px] text-zinc-500">No local branches</div>}
+              </div>
+            )}
+          </div>
+        )}
         {!remoteAdd && (
           <button
             className="shrink-0 rounded border border-dashed border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200"
@@ -8564,6 +8657,7 @@ function DraftDestinationCard() {
         </div>
       )}
       {err && <p className="mt-1 text-[10px] text-red-400">{err}</p>}
+      {gitError && <p role="alert" className="mt-1 text-[10px] text-red-400">{gitError}</p>}
     </div>
   )
 }

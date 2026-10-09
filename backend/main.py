@@ -560,6 +560,27 @@ async def api_workspace_git_branches(workspace: str = ""):
         "branches": branches,
     }
 
+class WorkspaceBranchSelectBody(BaseModel):
+    branch: str
+
+
+@app.post("/api/workspaces/branch-select")
+async def api_workspace_branch_select(body: WorkspaceBranchSelectBody, workspace: str = ""):
+    """Checkout for the draft card's branch chip (restored after #361): a
+    thin wrapper around the same branch_select tool the per-conversation
+    endpoint uses - git's own refusals surface verbatim. Remote
+    destinations are refused there (no local tree to move)."""
+    from backend.agent.tools import branch_select as _tool_branch_select
+
+    ws = workspace.strip()
+    if not ws:
+        return {"ok": False, "error": "no local git workspace"}
+    branch = body.branch.strip()
+    if not branch:
+        return {"ok": False, "error": "checkout target is empty"}
+    return await _tool_branch_select(workspace=ws, branch=branch, create=True)
+
+
 # /api/workspaces/git-checkout is GONE (#361, the direct world): the
 # UI checkout action moved into the per-conversation git-command body.
 
