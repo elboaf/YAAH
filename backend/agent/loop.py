@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
+from backend.agent import extract as extract_mod
 from backend.agent.prompt_manifest import compact_summary_message
 from backend.agent import file_changes
 from backend.agent.config import load_config, save_config
@@ -59,6 +60,22 @@ from backend.db.database import (
 )
 
 log = logging.getLogger("yaah.loop")
+
+# Strong references to fire-and-forget background extraction tasks
+# (#341/#345) - the scheduler's precedent: an unreferenced create_task can
+# be garbage-collected mid-run.
+_extract_tasks: set[asyncio.Task] = set()
+
+
+def _extract_done(task: asyncio.Task) -> None:
+    """done_callback for extraction tasks: drop the strong ref and retrieve
+    the exception (schedule() swallows its own, but this belt keeps any
+    future raise from surfacing as an unraisable-warning failure)."""
+    _extract_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        log.warning(
+            "memory extraction task failed: %s", task.exception()
+        )
 
 
 AUTO_TITLE_MAX_CHARS = 60  # hard clamp the consumer enforces; word count
@@ -1934,6 +1951,17 @@ async def _run_agent_claimed(
                 title = await _generate_conversation_title(conversation_id, user_text)
                 if title:
                     yield _ndjson({"type": "title", "title": title})
+                # Background memory extraction (#341/#345): detached beside
+                # the title call - never delays or fails the turn (the
+                # scheduler swallows its own errors; the callback below
+                # retrieves any that still escape). Strong-ref set follows
+                # the scheduler's precedent: an unreferenced create_task
+                # can be garbage-collected mid-run.
+                _ext = asyncio.create_task(
+                    extract_mod.schedule(conversation_id, turn_workspace)
+                )
+                _extract_tasks.add(_ext)
+                _ext.add_done_callback(_extract_done)
                 # Natural-completion auto-send (#7): anything still queued
                 # rides home as a queued_autosend hand-off before done.
                 remaining = _drain_queue(conversation_id)
