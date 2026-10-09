@@ -501,6 +501,16 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
 
   const commandLike = approval.tool === 'bash' || approval.tool === 'powershell'
 
+  // Blast-radius tiering (trust transaction): mutating tools get a red-family
+  // Approve so the button itself prices the risk; read-only tools keep the
+  // calm blue reserved for benign human actions.
+  const MUTATING_TOOLS = new Set(['bash', 'powershell', 'edit_file', 'write_file', 'git_push', 'delete_file', 'move_file'])
+  const mutating = MUTATING_TOOLS.has(approval.tool)
+  // The workspace the command would run in (shell tools run at the workspace
+  // root; file tools carry their own path).cwd shown so the user can judge
+  // relative paths in the command.
+  const approvalWorkspace = useAgent((s) => s.workspace)
+
   return (
     <div className="rounded-lg border border-orange-700/60 bg-zinc-900 p-3 shadow-lg">
       <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
@@ -510,18 +520,27 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
         <span className="text-orange-300">{approval.tool}</span>
         {summary && <span className="truncate text-zinc-400">{summary}</span>}
       </p>
+      {approvalWorkspace && commandLike && (
+        <p className="mb-1.5 font-mono text-[10px] text-zinc-500">
+          in {approvalWorkspace || 'workspace root'}
+        </p>
+      )}
       {commandLike && (
-        <pre className="mb-2 max-h-32 overflow-y-auto whitespace-pre-wrap rounded   bg-zinc-950 p-2 font-mono text-[11px] text-zinc-300">
+        // Shell commands render uncapped: the whole command is the thing
+        // being judged, so it must be visible without digging.
+        <pre className="mb-2 overflow-y-auto whitespace-pre-wrap rounded   bg-zinc-950 p-2 font-mono text-[11px] text-zinc-300">
           {String(approval.args?.command ?? '')}
         </pre>
       )}
       <div className="flex gap-1.5">
         <button
-          className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          className={`rounded px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 ${
+            mutating ? 'bg-red-700 hover:bg-red-600' : 'bg-blue-600 hover:bg-blue-500'
+          }`}
           disabled={submitting}
           onClick={() => respond('approve')}
         >
-          {submitting ? '…' : 'Approve'}
+          {submitting ? '…' : mutating ? 'Approve (runs shell / writes files)' : 'Approve'}
         </button>
         <button
           className="rounded   px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
@@ -2475,12 +2494,34 @@ function DialogShell({ children, onClose, panelClassName, panelRole, panelLabel 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+  // Focus trap: Tab cycles inside the panel so keyboard focus can't wander
+  // to controls hidden under the scrim.
+  const trapRef = useRef<HTMLDivElement | null>(null)
+  const trapTab = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Tab' || !trapRef.current) return
+    const focusables = trapRef.current.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    )
+    if (focusables.length === 0) return
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    const active = document.activeElement
+    if (e.shiftKey && (active === first || !trapRef.current.contains(active))) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && (active === last || !trapRef.current.contains(active))) {
+      e.preventDefault()
+      first.focus()
+    }
+  }
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8"
       onClick={onClose}
     >
       <div
+        ref={trapRef}
+        onKeyDown={trapTab}
         className={panelClassName ?? "w-full max-w-sm rounded-lg   bg-zinc-900 shadow-2xl"}
         role={panelRole}
         aria-label={panelLabel}
@@ -2514,13 +2555,16 @@ function ConfirmDialog({
         <p className="mb-4 break-words text-xs leading-relaxed text-zinc-400">{body}</p>
         <div className="flex justify-end gap-2">
           <button
+            // autoFocus lands on Cancel, never on the destructive button:
+            // Enter on an open confirm must be the safe action. Reaching
+            // Delete is a deliberate Tab, not an absent-minded keystroke.
+            autoFocus
             className="rounded   px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
             onClick={onCancel}
           >
             Cancel
           </button>
           <button
-            autoFocus
             className="rounded border border-red-700 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950"
             onClick={onConfirm}
           >
@@ -4099,7 +4143,7 @@ export function ConversationRow({
   return (
     <div className="group relative flex items-center">
       <button
-        className={`flex min-w-0 flex-1 items-center rounded px-2 py-1.5 text-left text-xs ${
+        className={`flex min-w-0 flex-1 items-center rounded px-2 py-1.5 text-left text-xs group-focus-within:bg-zinc-800/60 ${
           active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/60'
         }`}
         onClick={onOpen}
@@ -4176,7 +4220,7 @@ export function ConversationRow({
           {relTime(conv.updated_at)}
         </span>
       </button>
-      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onRunOnce && running) ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+      <div className={`absolute right-1 flex items-center gap-1 ${menuOpen || (onRunOnce && running) ? '' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'}`}>
         {onRunOnce && (
           <button
             className={`flex h-[18px] w-[18px] items-center justify-center rounded transition-opacity ${
@@ -6735,7 +6779,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [active, setActive] = useState('')
   const [newName, setNewName] = useState('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
-  const [activeTab, setActiveTab] = useState<'general' | 'providers' | 'voice' | 'mcp'>('general')
+  const [activeTab, setActiveTab] = useState<'connect' | 'talk' | 'automate' | 'advanced'>('connect')
   // Per-model compaction: model id -> settings (per-provider editors).
   const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
   // Per-model step budgets (issue #111): model id -> draft ('' = untouched,
@@ -7242,10 +7286,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           aria-label="Settings sections"
         >
           {([
-            ['general', 'General'],
-            ['providers', 'Providers'],
-            ['voice', 'Voice'],
-            ['mcp', 'MCP'],
+            // Task-organized tabs, not implementation dumps: the three
+            // questions a new user actually asks in order.
+            ['connect', 'Connect a model'],
+            ['talk', 'Make it talk'],
+            ['automate', 'Automate'],
+            ['advanced', 'Advanced'],
           ] as const).map(([tab, label]) => (
             <button
               key={tab}
@@ -7257,7 +7303,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               tabIndex={activeTab === tab ? 0 : -1}
               onClick={() => setActiveTab(tab)}
               onKeyDown={(e) => {
-                const tabs = ['general', 'providers', 'voice', 'mcp'] as const
+                const tabs = ['connect', 'talk', 'automate', 'advanced'] as const
                 const index = tabs.indexOf(tab)
                 const next = e.key === 'ArrowRight'
                   ? (index + 1) % tabs.length
@@ -7295,7 +7341,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         >
           <div className="grid grid-cols-4 gap-3">
             {/* providers: collapsed rows, active first; fields behind one open row */}
-            {activeTab === 'providers' && (
+            {activeTab === 'connect' && (
               <SettingsCard title="Providers" className="col-span-4">
               {providerOrder.length === 0 && (
                 <p className="text-[11px] text-zinc-600">
@@ -7472,7 +7518,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             )}
 
 
-            {activeTab === 'voice' && (
+            {activeTab === 'talk' && (
               <>
                 <SettingsCard title="Voice dictation" className="col-span-2">
               <div className="mb-2.5 flex gap-1.5" role="radiogroup" aria-label="Transcription engine">
@@ -7824,7 +7870,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </>
             )}
 
-            {activeTab === 'general' && (
+            {activeTab === 'advanced' && (
               <>
                 <SettingsCard title="Windows Sandbox" className="col-span-2">
                   <SandboxSettingsCard />
@@ -7890,17 +7936,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 }}
               />
             </SettingsCard>
-
-            <SettingsCard title="Scheduled agents" className="col-span-4">
-              <AgentsSettingsSection />
-            </SettingsCard>
             </>
             )}
 
-            {activeTab === 'mcp' && (
+            {activeTab === 'automate' && (
+              <>
+            <SettingsCard title="Scheduled agents" className="col-span-4">
+              <AgentsSettingsSection />
+            </SettingsCard>
               <SettingsCard title="MCP tool servers" className="col-span-4">
               <McpSection />
             </SettingsCard>
+              </>
             )}
           </div>
         </div>

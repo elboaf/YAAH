@@ -59,6 +59,8 @@ describe('settings modal restores the persisted zoom synchronously (#171 return 
   it('re-emits the persisted scale on unmount after an unsaved drag — synchronously, without re-fetching config', async () => {
     listen()
     const { unmount } = render(<SettingsModal onClose={() => {}} />)
+    // Interface lives on the Advanced tab (task-organized settings)
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
     await waitFor(() =>
       expect(screen.getByRole('slider', { name: /interface scale/i })).toBeTruthy(),
     )
@@ -77,6 +79,8 @@ describe('settings modal restores the persisted zoom synchronously (#171 return 
   it('does not re-emit a stale restore after Save → close', async () => {
     listen()
     const { unmount } = render(<SettingsModal onClose={() => {}} />)
+    // Interface lives on the Advanced tab (task-organized settings)
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
     await waitFor(() =>
       expect(screen.getByRole('slider', { name: /interface scale/i })).toBeTruthy(),
     )

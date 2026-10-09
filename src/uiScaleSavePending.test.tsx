@@ -43,6 +43,8 @@ describe('scale slider is inert while Save is pending (#171 return trip)', () =>
     window.addEventListener('ui-scale-changed', onEvt)
     try {
       render(<SettingsModal onClose={() => {}} />)
+      // Interface lives on the Advanced tab (task-organized settings)
+      fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
       const slider = () =>
         screen.getByRole('slider', { name: /interface scale/i }) as HTMLInputElement
       await waitFor(() => expect(slider().disabled).toBe(false)) // loaded
