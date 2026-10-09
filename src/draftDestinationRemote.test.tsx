@@ -19,10 +19,9 @@ import { DraftDestinationCard } from './components'
 import { useAgent } from './store'
 import { useRemote } from './remoteStore'
 
-// #335 (selector parity, spec #332): the draft destination card's branch
-// picker is live for remote workspaces — the HOST's branches through the
-// gateway — and a pick records intent (draftScope.branch), exactly like
-// the local card. Offline hosts keep the picker hidden (empty answers).
+// #363: the draft destination card carries no branch picker — the draft
+// picks a workspace, nothing else. #361 removed the branch pick; the card
+// just lists workspaces (local + remote, offline hosts hidden).
 describe('draft destination card on a remote workspace (#335)', () => {
   beforeEach(() => {
     listLocalWorkspaces.mockResolvedValue([])

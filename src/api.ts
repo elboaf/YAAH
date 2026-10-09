@@ -150,14 +150,6 @@ export interface ContextInfo {
 export const getContext = (id: number) =>
   api<ContextInfo>(`/api/conversations/${id}/context`)
 
-/** The workspace's checked-out branch - the one tree's truth (#361). */
-export interface GitBranchInfo {
-  branch: string | null
-}
-
-export const getGitBranch = (id: number) =>
-  api<GitBranchInfo>(`/api/conversations/${id}/git-branch`)
-
 /** Everything the status strip's git cluster reads: branch, dirty state,
  *  +N −N line counts, local vs upstream hashes, ahead/behind, file counts. */
 export interface GitInfo {
@@ -183,21 +175,6 @@ export const getGitInfo = (id: number) =>
 
 export const getGitBranches = (id: number) =>
   api<{ branches: string[] }>(`/api/conversations/${id}/git-branches`)
-
-export type GitAction = 'status' | 'commit' | 'push' | 'pull' | 'checkout'
-
-export interface GitCommandResult {
-  ok: boolean
-  output?: string
-  error?: string
-  note?: string
-}
-
-export const runGitCommand = (id: number, action: GitAction, opts?: { message?: string; branch?: string }) =>
-  api<GitCommandResult>(`/api/conversations/${id}/git-command`, {
-    method: 'POST',
-    body: JSON.stringify({ action, message: opts?.message, branch: opts?.branch }),
-  })
 
 /** #361: switch the workspace to a branch - a plain checkout of the ONE
  *  tree; git's own refusals arrive as the error. */
@@ -630,20 +607,6 @@ export const reorderWorkspaces = (orderedIds: number[]) =>
     method: 'POST',
     body: JSON.stringify({ ordered_ids: orderedIds }),
   })
-
-/** Git state for a draft's chosen workspace, before a conversation exists. */
-export interface WorkspaceGitBranches {
-  branch: string | null
-  branches: string[]
-  // #335: explicit remote states — the host could not be reached
-  // (offline), or it answered and git refused (error). Local reads
-  // never set them.
-  offline?: boolean
-  error?: string
-}
-
-export const getWorkspaceGitBranches = (workspace: string) =>
-  api<WorkspaceGitBranches>(`/api/workspaces/git-branches?workspace=${encodeURIComponent(workspace)}`)
 
 // #361: the direct world - the workspace's branch is switched by a plain
 // checkout (the chip's dropdown or an agent's branch_select); drafts carry

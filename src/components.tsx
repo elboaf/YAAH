@@ -67,7 +67,6 @@ import {
   reorderWorkspaces,
   listLocalWorkspaces,
   addWorkspace,
-  getWorkspaceGitBranches,
   deleteWorkspace,
   discoverHosts,
   localInstanceInfo,
@@ -3195,7 +3194,6 @@ export function DeviceGroups({
   const selectDeviceWorkspace = (workspacePath: string) => {
     useAgent.getState().setWorkspace(workspacePath)
     useAgent.getState().newConversation()
-    void getWorkspaceGitBranches(workspacePath).catch(() => {})
   }
   return (
     <section className="mb-2   pb-2" aria-label="Remote devices">
@@ -8016,17 +8014,15 @@ function AccessModeControl() {
   )
 }
 
-/** Git cluster for the status strip: the chat's branch selector chip (click
- *  = branch dropdown), a compact Git control that opens detailed sync state
- *  and Git commands. Hidden entirely for non-repos.
+/** The status strip's git cluster: the workspace's branch chip (click =
+ *  branch dropdown, picking one checks the ONE workspace tree out on it)
+ *  + the sync readout (local/origin hashes, ahead/behind). Hidden entirely
+ *  for non-repos.
  *
- *  Since #286 the branch chip is per chat: flipping it records the chat's
- *  intended branch (a stored value on the conversation row) and runs no git
- *  checkout, so the shared workspace tree never moves. Commands run directly
- *  against git (no agent turn, no tokens) and land in the conversation as
- *  synthetic tool rows; mutating actions are disabled while the agent is
- *  mid-turn (status stays readable), push/pull confirm inline first, commit
- *  opens a small popover with a visible file count. */
+ *  #361/#363: one tree, no per-chat branch identity. The checkout goes to
+ *  the branch-select endpoint — a plain git checkout of the workspace, no
+ *  stored state — and lands in the conversation as a synthetic tool row.
+ *  Checkout is disabled while the agent is mid-turn. */
 export function GitChipCluster({
   info,
   streaming,
@@ -8102,9 +8098,9 @@ export function GitChipCluster({
     if (conversationId === null || busyCheckout) return
     setBusyCheckout(true)
     try {
-      // #286: the flip goes to the per-chat selector endpoint — no git
-      // checkout runs, so no shared tree moves. Trace row kept so the
-      // action shows in the transcript exactly as before.
+      // #361: a plain checkout of the ONE workspace tree; git's own
+      // refusals arrive as the error. Trace row kept so the action shows
+      // in the transcript.
       const res = await selectConversationBranch(conversationId, branch)
       const callId = `ui-checkout-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
       appendRawMessage(String(conversationId), {
@@ -8159,17 +8155,16 @@ export function GitChipCluster({
 
   return (
     <span ref={wrapRef} className="relative flex min-w-0 items-end gap-2">
-      {/* Branch selector: the chat's own branch (#286) — the stored pick
-          when the chat has one, else the workspace's checked-out branch.
-          Flipping it records the pick for this chat only. */}
+      {/* The workspace's branch: the ONE tree's checked-out branch.
+          Click = dropdown; picking a branch checks the workspace out. */}
       <button
         className="flex shrink-0 items-center gap-1 rounded   bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-zinc-500"
         title={
           info.dirty
-            ? `Branch for this chat. ${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked) in the shared workspace tree. Click to pick this chat's branch.`
-            : 'Branch for this chat — click to pick'
+            ? `Workspace branch. ${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked). Click to switch branch.`
+            : 'Workspace branch — click to switch'
         }
-        aria-label="Branch for this chat; pick branch"
+        aria-label="Workspace branch; switch branch"
         aria-expanded={menuOpen}
         onClick={openMenu}
       >
