@@ -735,6 +735,25 @@ def _drive_turn(flags: dict) -> dict:
             loop.model_client.chat = orig_chat
             if cid is not None:
                 await delete_conversation(cid)
+            # The turn's fire-and-forget memory-extraction task (#341) is
+            # detached: asyncio.run() closes this loop the moment we return,
+            # killing the task mid-DB-call. Its aiosqlite connection then
+            # never closes - it holds the SQLite lock ("database is locked"
+            # in every later render test) and its non-daemon worker thread
+            # hangs the process at exit. Join the stragglers while the loop
+            # is still alive.
+            import asyncio as _aio
+
+            from backend.agent import extract as _extract
+
+            pending = [
+                t for t in (*loop._extract_tasks, *_extract._tasks)
+                if not t.done()
+            ]
+            if pending:
+                await _aio.gather(*pending, return_exceptions=True)
+            loop._extract_tasks.clear()
+            _extract._reset_state()
         return captured
 
     return asyncio.run(_run())
