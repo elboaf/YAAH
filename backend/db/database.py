@@ -190,6 +190,12 @@ CREATE TABLE IF NOT EXISTS agent_instructions (
     content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- One-time markers for boot passes (#132-style repairs); value = 'done'.
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 

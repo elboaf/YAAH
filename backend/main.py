@@ -32,6 +32,16 @@ async def lifespan(app: FastAPI):
     _repair = await repair_bare_model_scopes()
     if _repair.get("repaired") or _repair.get("error"):
         log.info("model-scope repair: %s", _repair)
+    # #364 one-time residue pass: removes the dead isolation design's
+    # chat worktrees and merged run/wip branches, once per database (the
+    # marker row is recorded in the DB, so it can never run twice).
+    # Runs BEFORE the scheduler so a firing agent never races a tree
+    # removal.
+    from backend.agent.legacy_residue import run_legacy_residue_cleanup
+
+    _residue = await run_legacy_residue_cleanup()
+    if not _residue.get("skipped"):
+        log.info("legacy residue cleanup: %s", _residue)
     # Skills are scanned once at startup; the UI can force a rescan via
     # POST /api/skills/refresh. The directory is created on first run so
     # there is an obvious place to drop skills.
