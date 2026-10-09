@@ -3087,6 +3087,9 @@ export function DeviceGroups({
   const [deviceChatStatus, setDeviceChatStatus] = useState<Record<string, 'online' | 'cached'>>({})
   const [loadingDeviceChats, setLoadingDeviceChats] = useState<Record<string, boolean>>({})
   const [deviceChatErrors, setDeviceChatErrors] = useState<Record<string, string | null>>({})
+  // Per-device operation errors (connect/remove), rendered next to the device
+  // row that caused them instead of orphaned at the section's bottom.
+  const [deviceErrors, setDeviceErrors] = useState<Record<string, string | null>>({})
   const deviceChatRequestRef = useRef<Record<string, number>>({})
   // Issue #308: liveness for the remote device chat rows (working dots,
   // finished bar/pill) reads the same per-conversation status maps the local
@@ -3127,18 +3130,29 @@ export function DeviceGroups({
       if (!hostIds.has(hostId)) deviceChatRequestRef.current[hostId] = (deviceChatRequestRef.current[hostId] ?? 0) + 1
     }
   }, [devices, refreshDeviceChats])
+  // Typed connect/add errors: name the problem and the recovery instead of
+  // dumping a raw backend string at the user.
+  const connectError = (raw: string): string => {
+    const message = raw.replace(/^\d+:\s*/, '')
+    const lower = message.toLowerCase()
+    if (lower.includes('passphrase') || lower.includes('auth') || lower.includes('401') || lower.includes('403'))
+      return 'Wrong passphrase. Check the passphrase set on that device’s YAAH instance, then retry.'
+    if (lower.includes('econnrefused') || lower.includes('timeout') || lower.includes('unreachable') || lower.includes('network') || lower.includes('fetch'))
+      return `Device unreachable. Make sure YAAH is running on that machine, then retry. (${message})`
+    return message
+  }
   const [folderPath, setFolderPath] = useState('')
-  const askToConnect = async (device: RemoteDevice) => {
-    const secret = passByDevice[device.host_id] ?? ''
+  const askToConnect = async (device: RemoteDevice, secret?: string) => {
+    const passphrase = secret ?? passByDevice[device.host_id] ?? ''
     setWorking(device.host_id)
-    setError(null)
+    setDeviceErrors((current) => ({ ...current, [device.host_id]: null }))
     try {
-      await connectRemoteDevice(device.host_id, secret)
+      await connectRemoteDevice(device.host_id, passphrase)
       setPassByDevice((current) => ({ ...current, [device.host_id]: '' }))
       await useRemote.getState().refreshDevices()
       onChange()
     } catch (e) {
-      setError(String((e as Error).message ?? e).replace(/^\\d+:\\s*/, ''))
+      setDeviceErrors((current) => ({ ...current, [device.host_id]: connectError(String((e as Error).message ?? e)) }))
     } finally {
       setWorking(null)
     }
@@ -3160,7 +3174,17 @@ export function DeviceGroups({
     setWorking('add')
     setError(null)
     try {
-      await addRemoteDevice(deviceUrl.trim(), secret)
+      const device = await addRemoteDevice(deviceUrl.trim(), secret)
+      // Adding and connecting are one task in the user's mind: connect
+      // immediately instead of dropping the new row into offline limbo.
+      if (secret.trim() || device.status !== 'online') {
+        try {
+          await connectRemoteDevice(device.host_id, secret)
+        } catch {
+          // Best-effort; the offline row's Connect... affordance picks it up
+          // with a typed error rather than a dead end.
+        }
+      }
       setPassphrase('')
       setUrl('')
       setAdding(false)
@@ -3174,12 +3198,13 @@ export function DeviceGroups({
   }
   const remove = async (device: RemoteDevice) => {
     setWorking(device.host_id)
+    setDeviceErrors((current) => ({ ...current, [device.host_id]: null }))
     try {
       await removeRemoteDevice(device.host_id)
       await useRemote.getState().refreshDevices()
       onChange()
     } catch (e) {
-      setError(String((e as Error).message ?? e))
+      setDeviceErrors((current) => ({ ...current, [device.host_id]: `Could not remove ${device.name}: ${String((e as Error).message ?? e)}` }))
     } finally {
       setWorking(null)
     }
@@ -3241,7 +3266,7 @@ export function DeviceGroups({
             await useRemote.getState().refreshDevices()
             onChange()
           } catch (e) {
-            setError(String((e as Error).message ?? e))
+            setDeviceErrors((current) => ({ ...current, [device.host_id]: `Could not add folder on ${device.name}: ${String((e as Error).message ?? e)}` }))
           } finally {
             setWorking(null)
           }
@@ -3252,27 +3277,52 @@ export function DeviceGroups({
               <button className="rounded px-1 text-[10px] text-zinc-600 hover:text-zinc-200" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${device.name}`} aria-expanded={expanded} onClick={() => setExpandedDevices((current) => ({ ...current, [device.host_id]: !expanded }))}>{expanded ? '⌄' : '›'}</button>
               <button className="min-w-0 flex-1 truncate text-left text-xs text-zinc-300" title={`${device.url} · ${statusLabel}`} onClick={() => setExpandedDevices((current) => ({ ...current, [device.host_id]: true }))}>{device.name}</button>
               <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${connected ? 'bg-emerald-500' : device.status === 'error' ? 'bg-red-500' : 'bg-zinc-600'}`} title={statusLabel} aria-label={statusLabel} />
-              <button className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50" aria-label={connected ? `Disconnect ${device.name}` : `Reconnect ${device.name}`} title={connected ? 'Disconnect device' : 'Reconnect device'} disabled={working !== null || (!connected && !(passByDevice[device.host_id] ?? ''))} onClick={() => connected ? setDisconnectConfirmId(device.host_id) : void askToConnect(device)}>{working === device.host_id ? '…' : connected ? '−' : '↻'}</button>
-              {!connected && <input className="w-20 rounded   bg-zinc-800 px-1 py-0.5 font-mono text-[9px] text-zinc-300 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none" type="password" autoComplete="new-password" aria-label={`Passphrase for ${device.name}`} placeholder="passphrase" value={passByDevice[device.host_id] ?? ''} onChange={(event) => setPassByDevice((current) => ({ ...current, [device.host_id]: event.target.value }))} />}
-              <button className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover/device:opacity-100 focus:opacity-100" aria-label={`Remove ${device.name}`} title="Remove device profile" disabled={working !== null} onClick={() => setRemoveConfirmId(device.host_id)}>×</button>
+              <button className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50" aria-label={connected ? `Disconnect ${device.name}` : `Disconnect ${device.name} (currently offline)`} title={connected ? 'Disconnect device' : 'Disconnect (device is offline)'} disabled={working !== null || !connected} onClick={() => setDisconnectConfirmId(device.host_id)}>{working === device.host_id ? '…' : '−'}</button>
+              {!connected && <span className="shrink-0 text-[10px] text-zinc-500" title={`Full status: ${statusLabel}`}>{device.status === 'error' ? 'connection error' : 'offline · cached'}</span>}
+              <button className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover/device:opacity-100 focus:opacity-100" aria-label={`Remove ${device.name}`} title={`Remove ${device.name}`} disabled={working !== null} onClick={() => setRemoveConfirmId(device.host_id)}>×</button>
             </div>
+            {/* Reconnect lives on its own sub-row (not wedged into the header):
+                a labelled passphrase field with a visible Connect action. The
+                button no longer requires a passphrase, so auth-less devices can
+                reconnect too. Enter submits. */}
+            {!connected && (
+              <div className="flex items-center gap-1 px-6 pb-1 pt-0.5">
+                <input
+                  className="min-w-0 flex-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-200 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                  type="password"
+                  autoComplete="new-password"
+                  aria-label={`Passphrase for ${device.name}`}
+                  placeholder="Passphrase (set on that device’s YAAH instance)"
+                  value={passByDevice[device.host_id] ?? ''}
+                  onChange={(event) => setPassByDevice((current) => ({ ...current, [device.host_id]: event.target.value }))}
+                  onKeyDown={(event) => { if (event.key === 'Enter' && working === null) void askToConnect(device) }}
+                />
+                <button className="shrink-0 rounded bg-zinc-700 px-2 py-0.5 text-[10px] text-zinc-100 hover:bg-zinc-600 disabled:opacity-50" disabled={working !== null} onClick={() => void askToConnect(device)}>{working === device.host_id ? 'Connecting…' : 'Connect…'}</button>
+              </div>
+            )}
+            {deviceErrors[device.host_id] && (
+              <div role="alert" className="flex items-center justify-between gap-2 px-6 py-1 text-[10px] text-red-400">
+                <span className="min-w-0">{deviceErrors[device.host_id]}</span>
+                <button className="shrink-0 rounded px-1 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50" disabled={working !== null} onClick={() => void askToConnect(device)}>Retry</button>
+              </div>
+            )}
             {expanded && <>
               {deviceWorkspaces.map((row) => (
                 <div key={row.path ?? `${device.host_id}:default`}>
-                  <button className="flex w-full items-center gap-1.5 truncate rounded py-1 pl-6 pr-1 text-left font-mono text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:opacity-50" disabled={!connected} title={connected ? row.path ?? 'Device home folder' : 'Offline — cached workspace name; reconnect to use'} onClick={() => selectDeviceWorkspace(row.path ?? '')}><span className="truncate">{row.label}</span><span className="ml-auto shrink-0 text-[9px] text-zinc-600" aria-hidden="true">›</span></button>
+                  <button className="flex w-full items-center gap-1.5 truncate rounded py-1 pl-6 pr-1 text-left font-mono text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:opacity-50" disabled={!connected} title={connected ? row.path ?? 'Device home folder' : 'Offline — cached workspace name; reconnect to use'} onClick={() => selectDeviceWorkspace(row.path ?? '')}><span className="truncate">{row.label}</span><span className="ml-auto shrink-0 text-[10px] text-zinc-600" aria-hidden="true">›</span></button>
                   {localDeviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => (
-                    <button key={`local:${conversation.id}`} className="block w-full truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · locally owned chat using this device's workspace`} onClick={() => onOpenConversation(conversation)}>{conversation.title}<span className="ml-1 font-mono text-[9px] text-zinc-600">local chat</span></button>
+                    <button key={`local:${conversation.id}`} className="block w-full truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · locally owned chat using this device's workspace`} onClick={() => onOpenConversation(conversation)}>{conversation.title}<span className="ml-1 font-mono text-[10px] text-zinc-600">local chat</span></button>
                   ))}
                 </div>
               ))}
-              {!connected && deviceWorkspaces.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">No cached workspaces</p>}
+              {!connected && deviceWorkspaces.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-500">No cached workspaces</p>}
               <div className="mt-1   pt-1">
                 <div className="flex items-center justify-between px-6 py-0.5">
-                  <span className="font-mono text-[9px] uppercase tracking-wider text-zinc-600">Device chats</span>
-                  <button className="rounded px-1 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-50" aria-label={`Refresh chats from ${device.name}`} title="Refresh cached transcripts from this device" disabled={loadingDeviceChats[device.host_id]} onClick={() => void refreshDeviceChats(device.host_id)}>{loadingDeviceChats[device.host_id] ? '…' : '↻'}</button>
+                  <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Device chats</span>
+                  <button className="rounded px-1 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-50" aria-label={`Refresh chats from ${device.name}`} title="Refresh cached transcripts from this device" disabled={loadingDeviceChats[device.host_id] || working !== null} onClick={() => void refreshDeviceChats(device.host_id)}>{loadingDeviceChats[device.host_id] ? '…' : '↻'}</button>
                 </div>
-                {loadingDeviceChats[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">Loading device chats…</p>}
-                {deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <div role="alert" className="flex items-center justify-between gap-2 px-6 py-1 text-[10px] text-red-400"><span>Could not load device chats</span><button className="rounded px-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onClick={() => void refreshDeviceChats(device.host_id)}>Retry</button></div>}
+                {loadingDeviceChats[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-500">Loading device chats…</p>}
+                {deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <div role="alert" className="flex items-center justify-between gap-2 px-6 py-1 text-[10px] text-red-400"><span>Could not load device chats</span><button className="rounded px-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50" disabled={working !== null} onClick={() => void refreshDeviceChats(device.host_id)}>Retry</button></div>}
                 {ownedConversations.map((conversation) => {
                   const transcriptOnline = connected && deviceChatStatus[device.host_id] === 'online'
                   // Issue #308: liveness signals for remote rows, same slot
@@ -3289,9 +3339,9 @@ export function DeviceGroups({
                       : running
                         ? <span aria-hidden="true" className="run-dots mr-1.5 shrink-0" title="Working…"><i /><i /><i /></span>
                         : null
-                  return <button key={`remote:${device.host_id}:${conversation.conversation_id}`} className="block w-full truncate rounded py-1 pl-6 pr-2 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · ${transcriptOnline ? 'remote chat' : 'cached · read-only offline'}`} onClick={() => setRemoteConversation({ hostId: device.host_id, conversationId: conversation.conversation_id, title: conversation.title, online: transcriptOnline, workspace: conversation.workspace })}>{statusSlot}{conversation.title}<span className={`ml-1 font-mono text-[9px] ${transcriptOnline ? 'text-zinc-600' : 'text-zinc-500'}`}>{transcriptOnline ? 'remote' : 'cached · read-only'}</span></button>
+                  return <button key={`remote:${device.host_id}:${conversation.conversation_id}`} className="block w-full truncate rounded py-1 pl-6 pr-2 text-left text-[11px] text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · ${transcriptOnline ? 'remote chat' : 'cached · read-only offline'}`} onClick={() => setRemoteConversation({ hostId: device.host_id, conversationId: conversation.conversation_id, title: conversation.title, online: transcriptOnline, workspace: conversation.workspace })}>{statusSlot}{conversation.title}<span className={`ml-1 font-mono text-[10px] ${transcriptOnline ? 'text-zinc-600' : 'text-zinc-500'}`}>{transcriptOnline ? 'remote' : 'cached · read-only'}</span></button>
                 })}
-                {!loadingDeviceChats[device.host_id] && !deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-600">No cached device chats</p>}
+                {!loadingDeviceChats[device.host_id] && !deviceChatErrors[device.host_id] && ownedConversations.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-500">No cached device chats</p>}
               </div>
               {connected && <button className="ml-6 mt-0.5 rounded px-1 py-0.5 text-[10px] text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" onClick={() => { setAddingFolderFor(addingFolderFor === device.host_id ? null : device.host_id); setFolderPath('') }}>+ Add folder</button>}
               {addingFolderFor === device.host_id && connected && <div className="ml-6 mt-1   pl-2"><input autoFocus className="w-full rounded   bg-zinc-800 px-1.5 py-1 font-mono text-[10px] text-zinc-200 focus:border-zinc-500 focus:outline-none" aria-label={`Folder path on ${device.name}`} placeholder="path on device" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void addFolder(); if (event.key === 'Escape') setAddingFolderFor(null) }} /><button className="mt-1 rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-500 disabled:opacity-50" disabled={!folderPath.trim() || working !== null} onClick={() => void addFolder()}>{working === device.host_id ? 'Adding…' : 'Add folder'}</button></div>}
@@ -3299,7 +3349,6 @@ export function DeviceGroups({
           </div>
         )
       })}
-      {devices.length > 0 && <div aria-hidden="true" />}
       {!adding && error && <p role="alert" className="px-2 py-1 text-[10px] text-red-400">{error}</p>}
       {disconnectConfirmId && (
         <ConfirmDialog title={`Disconnect ${devices.find((device) => device.host_id === disconnectConfirmId)?.name ?? 'device'}?`} body="Chats and device metadata stay here. Any open remote conversation will stop working until you reconnect with the device passphrase. Local workspaces and chats are unaffected." confirmLabel="Disconnect" onCancel={() => setDisconnectConfirmId(null)} onConfirm={() => {
