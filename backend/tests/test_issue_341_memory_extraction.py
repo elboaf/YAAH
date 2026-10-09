@@ -295,6 +295,35 @@ def test_writer_prompt_carries_manifest_window_and_charter():
     assert "user:" in prompt
     assert "(none yet)" in prompt
     assert prompt.endswith(memory._WHEN_TO_SAVE)
+    # #348: the charter constant is imported by identity, not re-typed -
+    # the prompt text contains the constant object's exact value and the
+    # writer must never see a workflow/project-knowledge invitation
+    # beyond what the store itself prescribes.
+    assert "issue tracker owns this" in prompt
+    assert "the repo owns this" in prompt
+    # The two-turn strategy is stated with the read turn explicitly
+    # write-free, so the writer stays inside its budget.
+    assert "two turns" in prompt
+    assert "no writing" in prompt
+    # Update-don't-duplicate and the cheap no-writes convention.
+    assert "near-duplicate" in prompt
+    assert extract.NOTHING_TO_SAVE in prompt
+    # No repo investigation, including verification greps.
+    assert "verification greps" in prompt
+
+
+def test_charter_text_is_the_store_constant_not_a_copy():
+    """The prompt imports the charter - if the store's text changes, the
+    extraction prompt follows automatically (no drifted second copy)."""
+    ws = "/tmp/fake-ws"
+    prompt = extract._writer_prompt(
+        _window(("user", "anything at all")), extract._manifest(ws)
+    )
+    assert memory._WHEN_TO_SAVE in prompt
+    # The restated prefix must not duplicate any charter sentence.
+    prefix = prompt.split("---", 1)[0]
+    for sentence in [ln for ln in memory._WHEN_TO_SAVE.splitlines() if len(ln) > 40]:
+        assert sentence not in prefix, f"charter restated: {sentence!r}"
 
 
 def test_manifest_lists_existing_memories(tmp_path):
