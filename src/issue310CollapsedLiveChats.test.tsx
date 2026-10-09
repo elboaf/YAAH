@@ -177,8 +177,6 @@ function agentRow() {
     schedule_spec: { time: '09:00' },
     schedule_text: 'daily at 09:00',
     approval_policy: 'autonomous' as const,
-    landing_mode: 'fixed' as const,
-    landing_branch: 'run/nightly',
     say_mode: 'arrival' as const,
     model: '',
     effort: '',
@@ -195,8 +193,6 @@ function agentRow() {
     last_status: '',
     instructions: [],
     chat_title: 'nightly agent',
-    chat_selected_branch: null,
-    chat_branch_pin_origin: null,
   }
 }
 

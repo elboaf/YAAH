@@ -14,14 +14,13 @@ Spec decisions implemented here:
 - Failed fires retry per the GLOBAL retry setting (config "agents":
   retry_count / retry_backoff_minutes), not per-agent.
 - Runs fire in parallel with the user's turn and each other, unlimited.
-  The one guard that remains is per-conversation: a fire landing while that
+  The one guard that remains is per-conversation: a fire while that
   same chat is mid-turn is postponed briefly rather than dropped on the
   run-lock error (the spec's accepted collision risk is about the shared
   working tree, not double-firing one chat).
 """
 import asyncio
 import contextlib
-import asyncio
 import json
 import logging
 from datetime import datetime, timedelta

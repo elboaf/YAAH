@@ -51,23 +51,12 @@ _UNSAFE_CHARS = set("\"'`;&|()<>*?[]{}~$\\^%!#,")
 async def run_git(
     workspace: str | os.PathLike,
     *args: str,
-    timeout: float | None = None,
-    env: dict | None = None,
 ) -> tuple[int, str] | None:
     """One git invocation in `workspace`, local or remote; (rc, output) or
-    None when no executor could run git at all. Never raises.
-
-    #354 additions, local executor only: `timeout` widens the read poll
-    for content legs (merge/plumbing/index rebuild; default stays the
-    5s read poll), and `env` is merged over os.environ to carry
-    GIT_INDEX_FILE for the landing module's temp-index sweep. The remote
-    gateway ignores both until a remote landing path exists (wiring is
-    the follow-up ticket's)."""
+    None when no executor could run git at all. Never raises."""
     ws = str(workspace)
     if parse_ns(ws) is None:
-        return await _run_git_local(
-            ws, *args, timeout=5.0 if timeout is None else timeout, env=env
-        )
+        return await _run_git_local(ws, *args)
     return await _run_git_remote(ws, *args)
 
 
@@ -75,18 +64,12 @@ async def _run_git_local(
     root: str,
     *args: str,
     merge_stderr: bool = True,
-    timeout: float = 5.0,
-    env: dict | None = None,
 ) -> tuple[int, str]:
     """The local executor: the subprocess shape gitinfo.py has always had
     (--no-optional-locks so a read-only poll never contends with the
     agent's own git writes, issue #279; merged stderr by default; the
     127/124 rc conventions). merge_stderr=False discards stderr — the
-    branch-lookup ambiguity guard (a local branch named HEAD).
-    #354 (landing module): `timeout` widens the 5s read poll for the
-    merge/plumbing legs, and `env` carries GIT_INDEX_FILE for the
-    temp-index wip sweep — both additive; the gitinfo shape (5s, no
-    extra env) is every existing caller's unchanged default."""
+    branch-lookup ambiguity guard (a local branch named HEAD)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "git", "--no-optional-locks", "-C", root, *args,
@@ -96,13 +79,12 @@ async def _run_git_local(
                 if merge_stderr
                 else asyncio.subprocess.DEVNULL
             ),
-            env=({**os.environ, **env} if env else None),
             **_SUBPROCESS_FLAGS,
         )
     except OSError:
         return 127, "git not found"
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()

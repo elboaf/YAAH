@@ -64,8 +64,6 @@ function agentFixture(partial: Partial<ScheduledAgent>): ScheduledAgent {
     schedule_spec: { minutes: 30 },
     schedule_text: 'every 30m',
     approval_policy: 'sandbox-only',
-    landing_mode: 'off',
-    landing_branch: '',
     model: '',
     effort: '',
     memory_enabled: true,

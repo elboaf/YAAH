@@ -66,8 +66,6 @@ def test_landing_ask_block_is_gone_from_the_codebase():
         text = path.read_text(encoding="utf-8", errors="replace")
         if "End-of-work landing ask" in text or "_landing_ask" in text:
             offenders.append(path.name)
-    # landing.py is scheduled for deletion (#362) and keeps a frozen
-    # branch-naming copy until then; it must not carry the ask.
     assert offenders == []
 
 
