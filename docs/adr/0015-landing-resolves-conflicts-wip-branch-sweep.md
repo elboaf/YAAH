@@ -1,9 +1,9 @@
 # ADR 0015: Landing resolves conflicts and sweeps dirty-primary WIP to a wip branch
 
 Date: 2026-10-08
-Status: Accepted (amends ADR-0014's landing contract; execution
-amended by ADR-0016 - the SOP runs as verified code, not
-model-typed git; the wip sweep is scoped to tracked + staged paths)
+Status: Superseded by ADR-0017 (the direct world) - resolution and
+sweep semantics die with the landing contract; ADR-0014 is likewise
+superseded.
 Driven by: maintainer decision in the ask-matt flow ("land (merge with
 conflict resolution) should be a default option"); stranded-residue
 case #337 (dirty primary touching the run branch's files froze the

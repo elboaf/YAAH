@@ -1,9 +1,10 @@
 # Per-chat worktrees: each chat lands on its own selected branch
 
 Date: 2026-10-03
-Status: Accepted — supersedes ADR-0008 (worktree isolation removed),
-firing the revisit condition 0008 wrote for itself. ADR-0003/0005/0007
-remain superseded history.
+Status: Superseded by ADR-0017 (the direct world closes the isolation
+question) — including all five amendments below. Kept as history: the
+revisit condition 0008 wrote for itself was fired here, and ADR-0017
+reversed the decision and closed the question with no revisit condition.
 Amended 2026-10-04: selector pinning semantics (pin at creation,
 primary-tree immunity, switch-request translation, sub-agent
 injection) — see the amendment section below.

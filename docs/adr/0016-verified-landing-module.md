@@ -1,9 +1,10 @@
 # ADR 0016: The landing SOP becomes a verified landing module (agent tool)
 
 Date: 2026-10-08
-Status: Accepted (amends ADR-0014's safe-sync SOP: verification is
-mandatory and executed in code; amends ADR-0015: the wip sweep is
-scoped to tracked + staged paths and the prose contract is retired)
+Status: Superseded by ADR-0017 (the direct world) - the verified
+landing module and fossil probe are deleted; the decision that
+harness-critical work must execute as verified code rather than
+prompt prose remains a standing design lesson.
 Driven by: #353 (2026-10-07 primary-tree tangle), maintainer decision
 in the ask-matt architecture-review flow
 

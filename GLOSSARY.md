@@ -1,38 +1,38 @@
 # YAAH
 
 An agent harness where multiple chats and sub-agents can work in the
-same workspace. The vocabulary below is about how their work lands in per-chat
-worktrees (ADR-0010).
+same workspace. The vocabulary below is the direct world (ADR-0017):
+runs execute directly in the workspace's checkout — one tree, no
+isolation machinery.
 
 ## Language
 
 ### Workspace
 
-**Primary worktree**:
-The workspace's checkout as the human opened it — the only tree agents
-never touch. The draft/workspace-level git endpoints remain its tools.
-_Avoid_: main tree, shared tree, "the checkout" unqualified
+**Workspace checkout**:
+The workspace's one git checkout, exactly as the human opened it. Every
+run, chat, and sub-agent works directly in it; there is no second tree,
+no per-chat copy, and no tree agents are forbidden to touch. Concurrent
+writers on one checkout can clobber each other's uncommitted edits —
+a risk accepted with eyes open (ADR-0017).
+_Avoid_: primary worktree, main tree, chat worktree (isolation-era
+terms, dead with ADR-0010)
 
-**Chat worktree**:
-The per-chat git worktree a chat's runs work in, materialized on first
-write at the chat's selected branch. Selector flips and landing merges
-happen inside it, so conflicts are that chat's private problem.
-For a chat aimed at a remote workspace, the worktree
-materializes on the remote host — same lifecycle, client-driven
-(#305).
-Retired when its work lands and the tree is clean — a worktree exists
-only while its work is in flight; branches are never held open by
-finished work. Trees of dead chats retire the same way past an age
-threshold. See ADR-0010 (supersedes ADR-0008; land-means-clean
-lifecycle per #329).
-_Avoid_: session worktree, `agent/*` branch
+**Branch switch**:
+A plain `git checkout` of the workspace, on the user's request, via the
+`branch_select` tool. Git's own refusals are the guard (uncommitted
+changes that would be clobbered, unknown branch, a branch checked out
+in another worktree); the branch is created first when asked. Nothing
+is stored: no per-chat branch identity, no pin, no origin.
+_Avoid_: branch selector, branch pin (stored per-chat value, removed
+with ADR-0010); "switches the branch for every chat" (there is one
+checkout and it belongs to no chat)
 
 **Remote workspace**:
 A workspace whose tree lives on another host — a second YAAH instance
 reached through its exec channel (`remote:<host>:<path>`). Everything
 about the chat is local except the tree: workspace tools execute
-there, and the chat's worktree materializes there too (ADR-0010,
-#305).
+there (#305).
 _Avoid_: treating it as metadata-only; assuming the repo exists on the
 client; hiding features instead of stating where they run
 
@@ -42,46 +42,6 @@ cannot be reached over the channel (#333) — rendered as its own chip,
 never read as data (a missing repo is data; unreachability is not).
 _Avoid_: silent absence; conflating a non-repo workspace with an
 unreachable host
-
-**Branch selector**:
-The per-chat stored value naming the branch a chat's work lands on —
-the single source of truth for landing. Set at chat creation from the
-destination card's pick or the workspace's current branch; it never
-follows the primary worktree afterward. Every pin carries an **origin**:
-_explicit_ (a user pick — destination card, chip, or the branch_select
-tool) or _inherited_ (the workspace's branch at creation; also what
-legacy NULL rows lazily pin as on first read). Picking the inherited
-branch from the chip adopts it into an explicit pick. A pin whose
-branch no longer exists in the workspace's repository is **stale** — surfaced, never silently
-re-created. Flipping it checks out inside
-the chat's own worktree and refuses while that worktree is dirty.
-Agents update it via a tool on user request; a switch request to an
-agent is a selector change, never a primary-tree checkout.
-_Avoid_: global checkout, "switches the branch for every chat", unset
-(every chat in a git workspace has a branch), inheriting from the
-primary worktree
-
-**Landing**:
-A run's merge of its scratch-worktree branch onto the chat's selected
-branch, inside the chat's worktree. On the user's explicit choice at
-the #349 end-of-work landing ask, agents execute the landing with the
-**verified landing module** (ADR-0016, the `land` tool): one
-interface for every landing path — including into a branch checked
-out in the primary tree (e.g. master) — executing ADR-0015's
-resolution contract in code: dirty-primary WIP is preserved on a
-local `wip/` branch (never pushed, tracked + staged paths only),
-merge conflicts resolve with the run-branch side winning, lineage
-freshness is re-checked under the landing lock before every ref
-move, the primary-sync leg runs and is verified (HEAD == target,
-clean tree), every touched file reported; only a
-mid-merge/rebase/cherry-pick primary still freezes as manual-only.
-The **fossil probe** (same module) answers in one command whether a
-staged index is live WIP or a landing fossil. Agents never hand-run
-git against the primary; a failed tool landing is relayed as
-manual-only. Typed "land it" / "scrap it" remain the manual fallback.
-_Avoid_: merge-back, auto-merge, landing without an explicit user
-choice, `git branch -f` on a checked-out branch, prose-SOP landings
-into the primary
 
 ### Conversation history
 

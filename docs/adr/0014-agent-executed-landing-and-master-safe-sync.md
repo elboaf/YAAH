@@ -1,12 +1,9 @@
 # ADR 0014: Agent-executed landing into the selected branch — the master boundary becomes the safe-sync SOP
 
 Date: 2026-10-07
-Status: Accepted (amends ADR-0010's landing contract; landing
-outcomes amended by ADR-0015 - dirty-primary WIP sweeps to a wip
-branch and conflicts resolve with the run branch's side winning
-instead of freezing/aborting; execution
-amended by ADR-0016 - the SOP runs as verified code, not
-model-typed git)
+Status: Superseded by ADR-0017 (the direct world) - the landing
+contract this ADR built (as amended by ADR-0015 and executed by
+ADR-0016) is deleted with the per-chat worktree machinery it served.
 Driven by: #349 (proactive end-of-work landing ask), maintainer decision
 
 ## Context
