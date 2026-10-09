@@ -28,6 +28,37 @@ def _gc_after_test():
     # PytestUnraisableExceptionWarning -> error escalation in pytest.ini.
     gc.collect()
 
+
+@pytest.fixture(autouse=True)
+async def _join_extraction_tasks():
+    """The turn-completion hook (#341) fires memory extraction as a
+    DETACHED task; a test that drives a real turn with memory enabled
+    ends with that task still pending. pytest-asyncio then closes the
+    loop out from under it: the task dies mid-DB-call, its aiosqlite
+    connection never closes (holding the shared suite DB's lock - later
+    tests fail with 'database is locked') and the connection's
+    non-daemon worker thread blocks interpreter exit (pytest 'finishes'
+    then hangs for hours). Await or cancel the stragglers HERE, while
+    the test's loop is still alive - one sweep covers every turn-driving
+    test instead of each harness patching itself."""
+    yield
+    import asyncio
+
+    from backend.agent import extract as _extract
+    from backend.agent import loop as _loop
+
+    pending = [
+        t for t in (*_loop._extract_tasks, *_extract._tasks) if not t.done()
+    ]
+    for task in pending:
+        # The scheduler swallows its own exceptions; awaiting is safe.
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            task.cancel()
+    _loop._extract_tasks.clear()
+    _extract._reset_state()
+
 # The suite's loop tests exercise tool MECHANICS (bash, file writes) with no
 # user present to answer approval prompts; under the product default ("ask")
 # the access-mode gate would block them forever. Run the suite with the gate
