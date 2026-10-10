@@ -18,11 +18,7 @@ async def demo_server():
     )
     mcp_client.manager.servers["demo"] = st
     st._task = asyncio.create_task(mcp_client.manager._session_loop(st))
-    for _ in range(60):
-        await asyncio.sleep(0.25)
-        if st.status != "starting":
-            break
-    if st.status != "connected":
+    if not await st.wait_connected(15.0):
         await mcp_client.manager.shutdown()
         pytest.fail(f"demo server failed to connect: {st.error}")
     yield st

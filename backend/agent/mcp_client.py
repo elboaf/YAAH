@@ -122,6 +122,15 @@ class McpServerState:
         self._session = None
         self._task: asyncio.Task | None = None
         self._generation = 0  # invalidates stale sessions after restarts
+        self._connected = asyncio.Event()  # set when status -> connected
+
+    async def wait_connected(self, timeout: float = 15.0) -> bool:
+        """Await the connect event instead of polling status."""
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout)
+        except asyncio.TimeoutError:
+            return False
+        return self.status == "connected"
 
     def prefix(self, tool: str) -> str:
         return f"mcp_{self.name}_{tool}"
@@ -227,6 +236,7 @@ class McpManager:
                             await self._discover(state, session)
                             state.status = "connected"
                             state.error = ""
+                            state._connected.set()
                             # Park until the process exits or we're cancelled;
                             # any closed-transport error drops us to reconnect.
                             while state._generation == gen:

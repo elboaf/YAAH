@@ -155,11 +155,7 @@ async def test_streamable_http_roundtrip(http_server):
     mcp_client.manager.servers["rmt"] = st
     st._task = asyncio.create_task(mcp_client.manager._session_loop(st))
     try:
-        for _ in range(60):
-            await asyncio.sleep(0.25)
-            if st.status != "starting":
-                break
-        assert st.status == "connected", st.error
+        assert await st.wait_connected(15.0), st.error
         assert [t["function"]["name"] for t in st.tools] == ["mcp_rmt_echo"]
         assert await mcp_client.manager.call("mcp_rmt_echo", {"text": "hi"}) == {"result": "echo: hi"}
         # negotiated protocol version is surfaced
@@ -173,11 +169,7 @@ async def test_legacy_sse_fallback(http_server):
     mcp_client.manager.servers["old"] = st
     st._task = asyncio.create_task(mcp_client.manager._session_loop(st))
     try:
-        for _ in range(60):
-            await asyncio.sleep(0.25)
-            if st.status != "starting":
-                break
-        assert st.status == "connected", st.error
+        assert await st.wait_connected(15.0), st.error
         assert await mcp_client.manager.call("mcp_old_echo", {"text": "yo"}) == {"result": "echo: yo"}
     finally:
         await mcp_client.manager.shutdown()
@@ -190,10 +182,6 @@ async def test_url_with_headers_reaches_server(http_server):
     mcp_client.manager.servers["hdr"] = st
     st._task = asyncio.create_task(mcp_client.manager._session_loop(st))
     try:
-        for _ in range(60):
-            await asyncio.sleep(0.25)
-            if st.status != "starting":
-                break
-        assert st.status == "connected", st.error
+        assert await st.wait_connected(15.0), st.error
     finally:
         await mcp_client.manager.shutdown()

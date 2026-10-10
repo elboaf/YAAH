@@ -16,6 +16,10 @@ os.environ["YAAH_DB_PATH"] = os.path.join(_TMP, "agent.db")
 os.environ["YAAH_CONFIG_PATH"] = os.path.join(_TMP, "config.json")
 os.environ["YAAH_SKILLS_PATH"] = os.path.join(_TMP, "skills")
 os.environ["YAAH_MEMORY_PATH"] = os.path.join(_TMP, "memory")
+# Skip mDNS LAN advertising: every TestClient(app) runs the app lifespan,
+# and Zeroconf registration costs ~10s per boot (verified by profiling).
+# No test exercises advertising; YAAH_NO_HOSTING is the supported switch.
+os.environ["YAAH_NO_HOSTING"] = "1"
 
 
 @pytest.fixture(autouse=True)
