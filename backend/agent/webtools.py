@@ -287,7 +287,6 @@ async def view_image(url, workspace=None):
     (host absolute path, or a path resolved against the workspace root).
     The returned dict carries the stored image's rel path; the agent loop
     turns that into an image_url part."""
-    import base64
     import re
     import urllib.parse
     import urllib.request

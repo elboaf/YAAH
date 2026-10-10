@@ -41,18 +41,6 @@ PRESETS = {
 }
 
 
-def detect_preset(api_base: str) -> str | None:
-    """Guess which preset an api_base belongs to."""
-    base = (api_base or "").lower()
-    for name, p in PRESETS.items():
-        if p["api_base"].lower().rstrip("/v1") in base or p["api_base"].lower() in base:
-            return name
-    return None
-
-
-LIST_TIMEOUT = 4.0  # seconds per provider (Q8 lean)
-
-
 def _model_info(models: object) -> list[dict]:
     """Normalize model ids and reasoning effort metadata from /models.
 

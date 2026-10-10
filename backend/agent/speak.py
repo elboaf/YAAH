@@ -1136,9 +1136,3 @@ def normalize_for_speech(text: str) -> str:
 
     # 6. Acronyms letter-spelled.
     return _acronyms(t).strip()
-
-
-def normalize_prose_for_speech(md: str, max_chars: int = 4000) -> str:
-    """The composition TTS input receives: markdown → prose, then the
-    #206 normalization pass."""
-    return normalize_for_speech(prose_for_speech(md, max_chars=max_chars))

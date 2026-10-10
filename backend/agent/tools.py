@@ -10,12 +10,10 @@ import fnmatch
 import json
 import os
 import re
-import shlex
 import signal
 import subprocess
 from pathlib import Path
 
-from backend.agent.ghenv import command_env
 from backend.agent.shell import resolve_git_bash
 
 
@@ -1426,35 +1424,6 @@ async def search_files(
 
 
 # ---------------------------------------------------------------- git tools
-
-async def _git(workspace: str, *args: str) -> dict:
-    """Run a git command in the workspace; return structured result."""
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args,
-        cwd=workspace_root(workspace),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        **_NO_WINDOW, **_NEW_SESSION,
-    )
-    job = _job_create()
-    if job:
-        _job_assign(job, proc.pid)
-    try:
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        except asyncio.TimeoutError:
-            _kill_tree(proc, job)
-            await _reap(proc)
-            return {"error": "git timed out"}
-    finally:
-        _job_close(job)
-    output = out.decode("utf-8", errors="replace")
-    if proc.returncode != 0:
-        return {"error": output.strip()[:2000], "exit_code": proc.returncode}
-    return {"output": output.strip()[:MAX_OUTPUT_CHARS], "exit_code": 0}
-
-
-
 
 # ---------------------------------------------------------------- dispatch
 

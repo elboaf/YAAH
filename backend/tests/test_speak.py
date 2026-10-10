@@ -403,7 +403,7 @@ def test_extract_say_drops_unclosed_or_partial_tag(tag):
     chat, said = speak.extract_say(f"Answer first. {tag}")
     assert chat == "Answer first."
     assert said is None
-    assert "<say" not in speak.strip_say_tags(f"Answer first. {tag}").lower()
+    assert "<say" not in speak._strip_say_tags(f"Answer first. {tag}").lower()
 
 
 def test_extract_say_accepts_whitespace_in_closed_tag():

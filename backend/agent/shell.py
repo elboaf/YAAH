@@ -60,10 +60,6 @@ def resolve_git_bash(env: dict | None = None) -> str | None:
     return find_git_bash(environment.get(path_key, ""))
 
 
-def windows_bash_kind() -> str:
-    return "git-bash" if resolve_git_bash() else "system"
-
-
 def windows_bash_note(git_bash: bool) -> str:
     if git_bash:
         return "POSIX shell syntax and utilities."
