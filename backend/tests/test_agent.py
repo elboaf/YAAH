@@ -53,7 +53,7 @@ async def test_bash_stream_timeout_kills_tree(tmp_path):
     r = await asyncio.wait_for(
         execute_tool(
             "bash",
-            {"command": command, "timeout_seconds": 2},
+            {"command": command, "timeout_seconds": 0.2},
             str(tmp_path),
             on_chunk=chunks.append,
         ),
@@ -95,7 +95,7 @@ async def test_bash_timeout_returns_partial_output(tmp_path):
     r = await asyncio.wait_for(
         execute_tool(
             "bash",
-            {"command": "echo progress-marker; sleep 30", "timeout_seconds": 2},
+            {"command": "echo progress-marker; sleep 30", "timeout_seconds": 0.2},
             str(tmp_path),
         ),
         timeout=15,
@@ -129,7 +129,7 @@ async def test_bash_timeout_kills_backgrounded_child(tmp_path):
     # path) and the detached child it spawns are both wrong here.
     command = "sleep 30 &"
     r = await asyncio.wait_for(
-        execute_tool("bash", {"command": command, "timeout_seconds": 2}, str(tmp_path)),
+        execute_tool("bash", {"command": command, "timeout_seconds": 0.2}, str(tmp_path)),
         timeout=15,
     )
     assert r["timed_out"] is True

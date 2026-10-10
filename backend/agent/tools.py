@@ -1126,7 +1126,9 @@ async def run_bash(
 ) -> dict:
     """Run a shell command in the workspace; return structured result.
     on_chunk, when given, receives output incrementally while it runs."""
-    timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
+    # Fractional timeouts are accepted (floored at 0.1) so tests can wait
+    # out a real deadline in milliseconds; the schema stays integer.
+    timeout = max(0.1, min(float(timeout_seconds or 60), MAX_BASH_TIMEOUT))
     note = _clamp_note(timeout_seconds)
     try:
         proc = await _create_bash_process(
@@ -1161,7 +1163,9 @@ async def run_powershell(
 ) -> dict:
     """Run a Windows PowerShell command in the workspace; same structured
     result shape as run_bash. on_chunk receives output incrementally."""
-    timeout = max(1, min(int(timeout_seconds or 60), MAX_BASH_TIMEOUT))
+    # Fractional timeouts are accepted (floored at 0.1) so tests can wait
+    # out a real deadline in milliseconds; the schema stays integer.
+    timeout = max(0.1, min(float(timeout_seconds or 60), MAX_BASH_TIMEOUT))
     note = _clamp_note(timeout_seconds)
     try:
         proc = await asyncio.create_subprocess_exec(
