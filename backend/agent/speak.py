@@ -631,11 +631,6 @@ def extract_say(content: str) -> tuple[str, str | None]:
     return _strip_say_tags(content), said
 
 
-def strip_say_tags(content: str) -> str:
-    """Chat-transcript view of a message: <say> tags removed."""
-    return _strip_say_tags(content)
-
-
 def heuristic_briefing(md: str, max_chars: int = _BRIEFING_MAX) -> str:
     """Fallback briefing without a model call: the first paragraph's first
     sentence plus the final sentence of the prose, whichever fits the
