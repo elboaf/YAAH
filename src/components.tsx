@@ -6014,7 +6014,7 @@ function AgentsDialog({
           onCancel={() => setDeleteTarget(null)}
           onConfirm={async () => {
             setDeleteTarget(null)
-            await deleteAgent(deleteTarget.id, true)
+            await deleteAgent(deleteTarget.id)
             await refreshAgents()
           }}
         />

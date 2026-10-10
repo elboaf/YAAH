@@ -836,10 +836,7 @@ export type AgentBody = Omit<
     'conversation_id' | 'next_fire_at' | 'last_fired_at' | 'last_finished_at' | 'last_status'
 > & { schedule_spec: AgentScheduleSpec }
 
-export const listAgents = (workspace?: string) =>
-  api<AgentsPayload>(
-    '/api/agents' + (workspace !== undefined ? `?workspace=${encodeURIComponent(workspace)}` : ''),
-  )
+export const listAgents = () => api<AgentsPayload>('/api/agents')
 
 /** One live UI-stream event of a scheduled agent run (see getAgentTape). */
 export interface AgentTapeEvent {
@@ -882,11 +879,8 @@ export const updateAgentModelEffort = (id: string, model: string, effort: string
     body: JSON.stringify({ model, effort }),
   })
 
-export const deleteAgent = (id: string, deleteChat = true) =>
-  api<{ ok: boolean }>(
-    `/api/agents/${encodeURIComponent(id)}?delete_chat=${deleteChat ? 'true' : 'false'}`,
-    { method: 'DELETE' },
-  )
+export const deleteAgent = (id: string) =>
+  api<{ ok: boolean }>(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 export const runAgentNow = (
   id: string,

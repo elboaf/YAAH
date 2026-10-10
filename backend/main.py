@@ -6,9 +6,12 @@ flow through this server.
 """
 from contextlib import asynccontextmanager
 
+import asyncio
 import httpx
+import json
 import logging
 import os
+import re
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,12 +57,10 @@ async def lifespan(app: FastAPI):
     # is still reachable by direct IP; failures are logged, never fatal.
     # YAAH_NO_HOSTING (the headless server's --no-hosting) skips the
     # beacon for that run without touching the stored setting.
-    import os as _os
-
     from backend.agent import discovery
     from backend.agent.config import load_config
 
-    if _os.environ.get("YAAH_NO_HOSTING") != "1" and (
+    if os.environ.get("YAAH_NO_HOSTING") != "1" and (
         load_config().get("remote") or {}
     ).get("hosting_enabled", True):
         discovery.start_advertising(API_PORT)
@@ -186,17 +187,6 @@ async def remote_auth_guard(request, call_next):
         return JSONResponse(
             {"detail": {"code": "remote_turns_not_enabled",
                          "message": "remote-owned turns are not enabled"}},
-            status_code=409,
-        )
-    writes_conversation = (
-        len(parts) >= 3
-        and parts[:2] == ["api", "conversations"]
-        and request.method in {"POST", "PATCH", "PUT", "DELETE"}
-    )
-    if remote_peer and writes_conversation:
-        return JSONResponse(
-            {"detail": {"code": "remote_write_requires_lease",
-                         "message": "use the revision-aware remote conversation commit endpoint"}},
             status_code=409,
         )
     return await call_next(request)
@@ -427,7 +417,6 @@ async def api_add_workspace(body: NewWorkspace):
 async def api_delete_workspace(workspace_id: int, owner_id: str | None = None):
     """Remove a workspace; its conversations relocate to Default (host-side
     registry and host-side relocation while connected)."""
-    from fastapi import HTTPException
 
     host = _workspace_host("", owner_id)
     if host is not None:
@@ -456,7 +445,6 @@ async def api_list_conversations():
 async def api_get_conversation(conversation_id: int):
     conv = await get_conversation(conversation_id)
     if conv is None:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
     return conv
@@ -471,7 +459,6 @@ async def api_conversation_context(conversation_id: int):
     without the %/bar)."""
     conv = await get_conversation(conversation_id)
     if conv is None:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
     from backend.agent.context_window import get_context_window
@@ -600,7 +587,6 @@ async def api_conversation_branch_select(conversation_id: int, body: BranchSelec
     #359/ADR-0017): one plain checkout. The stored per-chat branch
     selector is gone; this moves the ONE tree. Git's own refusals surface
     verbatim - nothing is stashed or discarded by harness code."""
-    from fastapi import HTTPException
 
     conv = await get_conversation(conversation_id)
     if conv is None:
@@ -631,7 +617,6 @@ async def api_conversation_git_branch(conversation_id: int):
     chat reads the host through the gateway, #333)."""
     conv = await get_conversation(conversation_id)
     if conv is None:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
     from backend.agent.gitinfo import current_git_branch
@@ -664,7 +649,6 @@ async def api_conversation_git_info(conversation_id: int):
     session is open."""
     conv = await get_conversation(conversation_id)
     if conv is None:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
     from backend.agent.gitinfo import git_workspace_info
@@ -693,7 +677,6 @@ async def api_conversation_git_branches(conversation_id: int):
     """Local branch names for the chip's checkout dropdown (not a repo -> [])."""
     conv = await get_conversation(conversation_id)
     if conv is None:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
     from backend.agent.gitinfo import list_local_branches
@@ -726,7 +709,6 @@ async def _conversation_git_root(conversation_id: int):
 
     conv = await get_conversation(conversation_id)
     if conv is None:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
     ws = conv.get("workspace") or ""
@@ -776,20 +758,18 @@ async def _post_git_trace(conversation_id: int, action: str, result: dict) -> No
     renders through the normal tool-trace UI, survives reloads, and is never
     replayed into model context (load_history drops rows whose tool_call_id
     has no matching assistant call)."""
-    import json as _json
-
     call_id = f"ui-git-{action}-{os.urandom(4).hex()}"
     await add_message(
         conversation_id,
         "tool",
-        _json.dumps(result),
+        json.dumps(result),
         tool_calls=[
             {
                 "id": call_id,
                 "type": "function",
                 "function": {
                     "name": f"git {action}",
-                    "arguments": _json.dumps({}),
+                    "arguments": json.dumps({}),
                 },
             }
         ],
@@ -807,7 +787,6 @@ async def api_conversation_git_command(conversation_id: int, body: GitCommandBod
 
     action = body.action
     if action not in _GIT_ACTIONS:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=400, detail=f"unsupported git action: {action}")
 
@@ -871,7 +850,6 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
 
 @app.patch("/api/conversations/{conversation_id}")
 async def api_update_conversation(conversation_id: int, body: ConversationUpdate):
-    from fastapi import HTTPException
 
     conv = await get_conversation(conversation_id)
     if conv is None:
@@ -911,7 +889,6 @@ async def api_move_conversation(conversation_id: int, body: ConversationMove):
     mid-run would strand the merge-back in the wrong tree) or while
     messages sit queued on that run (they were written against the old
     workspace's context)."""
-    from fastapi import HTTPException
 
     from backend.agent.loop import agent_is_running, queue_items
 
@@ -950,7 +927,6 @@ async def api_delete_conversation(conversation_id: int):
     except RemoteProtocolError as error:
         raise _remote_protocol_error(error)
     if not ok:
-        from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="conversation not found")
     return {"ok": True}
@@ -1111,7 +1087,6 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
     # Remember it so the sidebar restores the same folder after an app
     # restart, and touch the registry row so the dropdown/group order
     # reflects recent activity.
-    set_last_workspace(turn_workspace)
     await touch_workspace(turn_workspace or None)
     # Attached images: decode data URLs to files on disk up front; only the
     # rel paths travel into the agent loop and the database.
@@ -1315,8 +1290,6 @@ async def api_refresh_skills():
 
 # ---- MCP tool servers ----
 
-import re as _re
-
 from backend.agent import mcp_client as _mcp
 from backend.agent.config import save_config as _save_config
 
@@ -1406,7 +1379,7 @@ async def api_mcp_add_server(body: McpServerBody):
     # Charset check first (same rule the UI has always shown), then the
     # reserved-prefix rules shared with config-side registration (#194):
     # mcp_* names would mint tool names that shadow the built-in namespace.
-    if not _re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name):
         raise HTTPException(status_code=400, detail="name: letters/digits/-/_ only")
     invalid = _mcp.validate_server_name(name)
     if invalid:
@@ -1416,7 +1389,7 @@ async def api_mcp_add_server(body: McpServerBody):
         raise HTTPException(
             status_code=400, detail="exactly one of command or url is required"
         )
-    if url and not _re.match(r"^https?://", url):
+    if url and not re.match(r"^https?://", url):
         raise HTTPException(status_code=400, detail="url must start with http(s)://")
     spec: dict = {}
     if command:
@@ -1529,11 +1502,6 @@ def _new_agent_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def _validate_schedule(schedule_type: str, schedule_spec: dict) -> tuple[str, str]:
-    stype, spec = scheduler_mod.normalize_schedule(schedule_type, schedule_spec or {})
-    return stype, spec
-
-
 async def _agent_view(agent: dict) -> dict:
     from backend.agent.loop import agent_is_running
 
@@ -1590,11 +1558,11 @@ async def api_agents_tape(conversation_id: int, after: int = 0):
 
 
 @app.get("/api/agents")
-async def api_agents(workspace: str | None = None):
+async def api_agents():
     """All agents (or one workspace's), each with its standing instructions
     and live run state (last_status drives the failure/success toasts)."""
     views = []
-    for a in await db_list_agents(workspace):
+    for a in await db_list_agents():
         views.append(await _agent_view(a))
     rc, rb = scheduler_mod.get_retry_settings()
     return {"agents": views, "retry": {"retry_count": rc, "retry_backoff_minutes": rb}}
@@ -1615,7 +1583,7 @@ async def api_agents_add(body: AgentBody):
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
     if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
         raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
-    stype, spec = _validate_schedule(body.schedule_type, body.schedule_spec)
+    stype, spec = scheduler_mod.normalize_schedule(body.schedule_type, body.schedule_spec or {})
     # Direct world (#361): the pinned chat has no branch of its own - it runs
     # in the workspace tree.
     conv_id = await create_conversation(
@@ -1697,7 +1665,7 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         raise HTTPException(status_code=400, detail="approval_policy must be sandbox-only or autonomous")
     if body.say_mode not in scheduler_mod.VALID_SAY_MODES:
         raise HTTPException(status_code=400, detail="say_mode must be arrival or visible")
-    stype, spec = _validate_schedule(body.schedule_type, body.schedule_spec)
+    stype, spec = scheduler_mod.normalize_schedule(body.schedule_type, body.schedule_spec or {})
     fields = {
         "workspace": body.workspace,
         "name": body.name.strip(),
@@ -1735,16 +1703,15 @@ async def api_agents_update(agent_id: str, body: AgentBody):
 
 
 @app.delete("/api/agents/{agent_id}")
-async def api_agents_remove(agent_id: str, delete_chat: bool = True):
-    """Delete an agent. Per spec the pinned chat goes too — but only when
-    the caller asked (the UI confirms first); delete_chat=false keeps the
-    transcript as a normal chat."""
+async def api_agents_remove(agent_id: str):
+    """Delete an agent. Per spec the pinned chat goes too (the UI confirms
+    first); no client ever asks to keep the transcript."""
     existing = await db_get_agent(agent_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="agent not found")
     await db_delete_agent(agent_id)
     conv_id = existing.get("conversation_id")
-    if delete_chat and conv_id:
+    if conv_id:
         await delete_conversation(conv_id)
     return {"ok": True}
 
@@ -1823,7 +1790,6 @@ async def api_agents_retry(body: AgentRetryBody):
 
 # ---- Provider / model discovery ----
 
-from fastapi import HTTPException
 
 from backend.agent import providers
 
@@ -1835,17 +1801,6 @@ async def api_providers():
         name: {**preset, "api_key": "***" if preset["needs_api_key"] else ""}
         for name, preset in providers.PRESETS.items()
     }
-
-
-class ModelsRequest(BaseModel):
-    api_base: str
-    api_key: str | None = None
-
-
-@app.post("/api/models")
-async def api_list_models(body: ModelsRequest):
-    """List models from an OpenAI-compatible endpoint."""
-    return await providers.list_models(body.api_base, body.api_key or "")
 
 
 @app.get("/api/models/available")
@@ -1898,12 +1853,6 @@ def _list_dir(dirpath: _Path, root: _Path, depth: int) -> list:
     return entries
 
 
-def _walk_in_thread(fn, *args):
-    import asyncio
-
-    return asyncio.to_thread(fn, *args)
-
-
 @app.get("/api/files")
 async def api_file_tree(workspace: str):
     """Workspace file tree, TREE_DEPTH levels eager (lazy beyond).
@@ -1920,7 +1869,7 @@ async def api_file_tree(workspace: str):
     root = workspace_root(workspace)
     if not root.exists():
         raise HTTPException(status_code=400, detail="workspace does not exist")
-    tree = await _walk_in_thread(_list_dir, root, root, TREE_DEPTH)
+    tree = await asyncio.to_thread(_list_dir, root, root, TREE_DEPTH)
     return {"root": str(root), "tree": tree}
 
 
@@ -1941,14 +1890,13 @@ async def api_file_children(workspace: str, path: str):
     dirpath = (root / path).resolve()
     if dirpath != root and root not in dirpath.parents:
         raise HTTPException(status_code=400, detail="path escapes workspace")
-    entries = await _walk_in_thread(_list_dir, dirpath, root, 1)
+    entries = await asyncio.to_thread(_list_dir, dirpath, root, 1)
     return {"entries": entries}
 
 
 class PreviewRequest(BaseModel):
     workspace: str
     path: str
-    owner_id: str | None = None
     start_line: int | None = None
     end_line: int | None = None
 
@@ -2056,8 +2004,6 @@ def _proxy_result(res):
 
 # ---- Markdown export ----
 
-import json as _json
-
 
 @app.get("/api/conversations/{conversation_id}/export")
 async def api_export_conversation(conversation_id: int):
@@ -2091,8 +2037,8 @@ async def api_export_conversation(conversation_id: int):
                 if isinstance(tc, dict) and tc.get("id") and not tc.get("name"):
                     fn = tc.get("function") or {}
                     try:
-                        args = _json.dumps(_json.loads(fn.get("arguments") or "{}"), indent=2)
-                    except _json.JSONDecodeError:
+                        args = json.dumps(json.loads(fn.get("arguments") or "{}"), indent=2)
+                    except json.JSONDecodeError:
                         args = fn.get("arguments", "")
                     lines += [f"**🤖 tool call: {fn.get('name', '?')}**", "", "```json", args, "```", ""]
         else:
@@ -2787,6 +2733,8 @@ class RemoteLeaseRequest(BaseModel):
     holder_id: str = ""
     lease_token: str | None = None
 
+RemoteDeviceLease = RemoteLeaseRequest  # identical model, single definition
+
 
 class RemoteCommitRequest(BaseModel):
     lease_token: str
@@ -2964,12 +2912,6 @@ async def api_remote_device_snapshot(host_id: str, conversation_id: str):
         raise HTTPException(status_code=503, detail="could not refresh remote conversation") from exc
 
 
-class RemoteDeviceLease(BaseModel):
-    revision: str | None = None
-    holder_id: str = ""
-    lease_token: str | None = None
-
-
 class RemoteDeviceCommit(BaseModel):
     lease_token: str
     revision: str
@@ -2989,7 +2931,7 @@ async def api_remote_device_lease(host_id: str, conversation_id: str, body: Remo
     session = _remote_device_session(host_id)
     if session is None:
         raise HTTPException(status_code=503, detail="remote device is offline; edits require a live owner")
-    method = "POST" if body.revision else "POST"
+    method = "POST"
     request = {"lease_token": body.lease_token} if body.lease_token else {"revision": body.revision, "holder_id": body.holder_id}
     try:
         return _proxy_result(await session.proxy(method, f"/api/remote/conversations/{conversation_id}/lease", json_body=request))

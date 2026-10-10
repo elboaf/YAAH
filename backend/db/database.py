@@ -785,7 +785,6 @@ class RemoteProtocolError(Exception):
 
 async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
     """Refuse host-local writes while a remote editor holds this conversation."""
-    import time
 
     cur = await db.execute(
         "SELECT holder_id, expires_at FROM remote_edit_leases"
@@ -1179,7 +1178,6 @@ async def acquire_remote_edit_lease(
 ) -> dict:
     """Atomically check the revision and acquire a bounded host-side lease."""
     import secrets
-    import time
 
     lease_seconds = 120
     db = await get_db()
@@ -1238,7 +1236,6 @@ async def acquire_remote_edit_lease(
 
 
 async def renew_remote_edit_lease(conversation_id: int, lease_token: str) -> dict:
-    import time
 
     lease_seconds = 120
     db = await get_db()
@@ -1281,7 +1278,6 @@ async def release_remote_edit_lease(conversation_id: int, lease_token: str) -> b
         if lease is None:
             await db.commit()
             return False
-        import time
         if lease["lease_token"] != lease_token or lease["expires_at"] <= int(time.time()):
             await db.rollback()
             raise RemoteProtocolError("lease_invalid_or_expired")
@@ -1341,7 +1337,6 @@ async def commit_remote_conversation(
 ) -> dict:
     """Validate lease+revision and atomically replace a snapshot exactly once."""
     import hashlib
-    import time
 
     request = {"revision": revision, "conversation": conversation, "messages": messages}
     request_hash = hashlib.sha256(
@@ -1591,6 +1586,17 @@ async def search_conversation_history(
     needle = query.casefold()
     rows = await get_messages(conversation_id)
     state = await get_prompt_summary(conversation_id)
+
+    def _excerpt(text: str, pos: int) -> str:
+        """±160 chars around the match, with ellipses at the clipped ends."""
+        start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
+        excerpt = text[start:end]
+        if start:
+            excerpt = "…" + excerpt
+        if end < len(text):
+            excerpt += "…"
+        return excerpt
+
     candidates = []
     stopped = False
     for row in rows:
@@ -1604,12 +1610,7 @@ async def search_conversation_history(
             text = str(value)
             pos = text.casefold().find(needle)
             if pos >= 0:
-                start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
-                excerpt = text[start:end]
-                if start:
-                    excerpt = "…" + excerpt
-                if end < len(text):
-                    excerpt += "…"
+                excerpt = _excerpt(text, pos)
                 candidates.append({
                     "message_id": row["id"],
                     "role": row["role"],
@@ -1624,12 +1625,7 @@ async def search_conversation_history(
     summary = state["summary"]
     summary_pos = summary.casefold().find(needle)
     if summary_pos >= 0:
-        start, end = max(0, summary_pos - 160), min(len(summary), summary_pos + len(query) + 160)
-        excerpt = summary[start:end]
-        if start:
-            excerpt = "…" + excerpt
-        if end < len(summary):
-            excerpt += "…"
+        excerpt = _excerpt(summary, summary_pos)
         candidates.append({"message_id": None, "role": "prompt_summary", "field": "prompt_summary", "excerpt": excerpt})
         if len(candidates) > max_results:
             stopped = True
@@ -1652,14 +1648,9 @@ AGENT_FIELDS = (
 
 
 async def create_agent(fields: dict) -> dict:
-    """Insert one agent row; returns it as a dict. `id` may be supplied
-    (tests) or omitted (the API layer generates one)."""
+    """Insert one agent row; returns it as a dict. `id` is required."""
     allowed = {"id", *AGENT_FIELDS}
     fields = {k: v for k, v in fields.items() if k in allowed}
-    if not fields.get("id"):
-        import uuid
-
-        fields["id"] = uuid.uuid4().hex[:12]
     cols = ", ".join(fields)
     marks = ", ".join("?" for _ in fields)
     db = await get_db()
