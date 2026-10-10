@@ -55,6 +55,9 @@ POLL_INTERVAL = 0.5
 # How long start_sync waits for the adoption nonce handshake before
 # concluding a running sandbox is not ours.
 ADOPT_TIMEOUT = 30
+# Grace window past a command's own deadline before the host declares the
+# channel dead. Module-level knob so tests can shrink the wall wait.
+ACK_GRACE = 30
 
 MAX_RUN_TIMEOUT = 900
 
@@ -1059,7 +1062,7 @@ def _run_command(command: str, timeout: int) -> dict:
         # The sandbox enforces the deadline itself and still reports partial
         # output; the host waits out that timeout plus a grace window before
         # declaring the channel dead.
-        deadline = time.time() + timeout + 30
+        deadline = time.time() + timeout + ACK_GRACE
         while time.time() < deadline:
             if done_file.exists():
                 break

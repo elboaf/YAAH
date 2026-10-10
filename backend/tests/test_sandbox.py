@@ -791,6 +791,7 @@ def test_run_hung_vm_ack_timeout_is_not_crash_class(isolated, monkeypatch):
     monkeypatch.setattr(sb.config_mod, "load_config",
                         lambda: {"sandbox": {}})
     _start_session(isolated, monkeypatch, _FakeProc())
+    monkeypatch.setattr(sb, "ACK_GRACE", 0.05)  # shrink the 30s grace window
     monkeypatch.setattr(sb, "_sandbox_pids", lambda: [999])  # VM alive
     result = sb.run_sync("Start-Sleep 999", 1)
     assert "crashed" not in result
