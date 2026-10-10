@@ -738,3 +738,98 @@ async def test_plan_block_result_remote_does_not_reference_exit_plan(_plan_mode)
     text = json.dumps(_plan_block_result("write_file"))
     assert "exit_plan" not in text
     assert "plan mode" in text
+
+
+# --------------------------------------------- remote ask_user (#308 follow-up)
+
+
+@pytest.mark.asyncio
+async def test_remote_ask_user_blocks_until_answer_resolves(_isolate_db):
+    """The model calling ask_user on a remote turn must block on the loop's
+    answer future keyed by the REMOTE conversation id, yield tool_start
+    first (the card renders on it), and resume with the user's answer as
+    the tool result once the answer endpoint machinery resolves it."""
+    from backend.agent import loop
+
+    session = FakeSession("host-owner")
+    _register(session)
+    host_ws = FakeSession("host-ws")
+    _register(host_ws)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "ask_user",
+                         "arguments": json.dumps({"question": "which?", "options": []})},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    )
+    _script_events(
+        {"type": "content", "text": "answer"},
+        {"type": "finish", "reason": "stop"},
+    )
+
+    async def _answer_later():
+        for _ in range(400):
+            key = next((k for k in loop._pending_answers
+                        if k.startswith("731:")), None)
+            if key is not None:
+                # Exactly what the /answer endpoint's resolve_answer does.
+                assert loop.resolve_answer("731", key.split(":", 1)[1], "the blue one")
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("ask_user never registered a pending answer")
+
+    answer_task = asyncio.create_task(_answer_later())
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "go", "remote:host-ws:C:/repo"))
+    await answer_task
+
+    events = _events(stream)
+    start = next(e for e in events if e["type"] == "tool_start")
+    assert start["name"] == "ask_user" and start["call_id"] == "c1"
+    result = next(e for e in events if e["type"] == "tool_result"
+                  and e["name"] == "ask_user")
+    assert result["result"] == {"answer": "the blue one"}
+
+
+@pytest.mark.asyncio
+async def test_remote_ask_user_cancelled_run_returns_not_answered(_isolate_db):
+    """A cancelled run must not wedge on the pending future: the cancel
+    event resolves the wait with the same not-answered result the local
+    loop produces."""
+    from backend.agent import loop
+
+    session = FakeSession("host-owner")
+    _register(session)
+    host_ws = FakeSession("host-ws")
+    _register(host_ws)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "ask_user",
+                         "arguments": json.dumps({"question": "which?"})},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    )
+    _script_events(
+        {"type": "content", "text": "after cancel"},
+        {"type": "finish", "reason": "stop"},
+    )
+
+    async def _cancel_later():
+        for _ in range(400):
+            if any(k.startswith("731:") for k in loop._pending_answers):
+                from backend.agent.remote_runner import remote_runs_cancel
+                await remote_runs_cancel("host-owner", "731")
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("ask_user never registered a pending answer")
+
+    cancel_task = asyncio.create_task(_cancel_later())
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "go", "remote:host-ws:C:/repo"))
+    await cancel_task
+
+    result = next(e for e in _events(stream) if e["type"] == "tool_result"
+                  and e["name"] == "ask_user")
+    assert result["result"]["answer"] is None

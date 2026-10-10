@@ -3083,6 +3083,21 @@ async def api_remote_device_turn(host_id: str, conversation_id: str, body: Remot
     )
 
 
+@app.post("/api/remote/devices/{host_id}/turns/{conversation_id}/answer")
+async def api_remote_device_turn_answer(host_id: str, conversation_id: str, body: AnswerBody):
+    """Deliver the user's answer to a pending ask_user call in a remote
+    turn (issue #308 follow-up). The pending future is keyed on the
+    remote conversation ID (the opaque string), so resolution routes
+    through the same loop machinery the local numeric path uses."""
+    from backend.agent.loop import resolve_answer
+
+    if not resolve_answer(conversation_id, body.call_id, body.answer):
+        raise HTTPException(
+            status_code=409, detail="no pending question for this remote conversation"
+        )
+    return {"ok": True}
+
+
 @app.post("/api/remote/devices/{host_id}/turns/{conversation_id}/cancel")
 async def api_remote_device_turn_cancel(host_id: str, conversation_id: str):
     """Signal the remote runner to stop after its current step."""

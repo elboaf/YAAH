@@ -695,6 +695,13 @@ export const submitAnswer = (id: number, callId: string, answer: string) =>
     body: JSON.stringify({ call_id: callId, answer }),
   })
 
+/** Answer a pending ask_user question in a remote-device turn (#308 follow-up). */
+export const submitRemoteAnswer = (hostId: string, conversationId: string, callId: string, answer: string) =>
+  api<{ ok: boolean }>(`/api/remote/devices/${encodeURIComponent(hostId)}/turns/${encodeURIComponent(conversationId)}/answer`, {
+    method: 'POST',
+    body: JSON.stringify({ call_id: callId, answer }),
+  })
+
 // ---------------------------------------------------------------- skills
 
 export interface SkillInfo {

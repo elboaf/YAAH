@@ -428,7 +428,21 @@ async def _run_claimed(
                     )
                     from backend.agent.tools import tool_risk
 
-                    if name == "exit_plan":
+                    if name == "ask_user":
+                        # Remote ask_user (issue #308 follow-up): the tool is
+                        # client-local, so it blocks on the loop's answer-future
+                        # machinery exactly like exit_plan below — the owner's
+                        # remote answer endpoint resolves it and the card
+                        # renders in the remote transcript dialog. Handled
+                        # BEFORE the plan-mode gate: asking the user a question
+                        # is not a mutating action (mirrors the local loop).
+                        yield _ndjson({"type": "tool_start", "name": name,
+                                       "args": args, "call_id": tc.get("id", "")})
+                        from backend.agent.loop import _ask_user
+                        result = await _ask_user(
+                            conversation_id, tc.get("id", ""), args, cancel_event
+                        )
+                    elif name == "exit_plan":
                         # Route to the loop's handler BEFORE the risk gate
                         # (issue #178 return trip #2): tool_risk("exit_plan")
                         # is not "read", so without this the plan session can

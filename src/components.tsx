@@ -25,6 +25,7 @@ import {
   moveConversation,
   updateConversation,
   submitAnswer,
+  submitRemoteAnswer,
   listSkills,
   refreshSkills,
   getContext,
@@ -293,7 +294,7 @@ function levenshtein(a: string, b: string): number {
   return prev[n]
 }
 
-function AskUserCard({ pending }: { pending: PendingQuestion }) {
+function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: { hostId: string; conversationId: string } }) {
   const conversationId = useAgent((s) => s.conversationId)
   const setPendingQuestion = useAgent((s) => s.setPendingQuestion)
   const [customOpen, setCustomOpen] = useState(false)
@@ -305,10 +306,17 @@ function AskUserCard({ pending }: { pending: PendingQuestion }) {
   const [voiceSeeded, setVoiceSeeded] = useState(false)
 
   const answer = (text: string) => {
-    if (conversationId === null || submitting) return
+    if (submitting) return
+    // Remote ask_user (#308 follow-up): the pending future lives under the
+    // remote conversation ID on the device turn answer endpoint.
+    const send = remote
+      ? submitRemoteAnswer(remote.hostId, remote.conversationId, pending.callId, text)
+      : conversationId === null
+        ? Promise.reject(new Error('no conversation'))
+        : submitAnswer(conversationId, pending.callId, text)
     setSubmitting(true)
     setErr(null)
-    submitAnswer(conversationId, pending.callId, text)
+    send
       .then(() => {
         // Clear only if this is still the same question (a newer ask in
         // another conversation may have replaced it meanwhile).
@@ -2922,6 +2930,9 @@ export function RemoteTranscriptDialog({
   // key keeps it collision-safe against same-ID local chats.
   const remoteKey = remoteConversationKey(hostId, conversationId)
   const remoteStatus = useAgent((s) => s.statusByConv[remoteKey] ?? 'idle')
+  // #308 follow-up: the remote ask_user card renders only while this chat is
+  // the one asking (a hidden remote turn's question must not leak here).
+  const pendingRemoteQuestion = useAgent((s) => s.pendingQuestions[remoteKey] ?? null)
   // Issue #308: this dialog IS the on-screen remote chat — tell the store so
   // the #25 finish-signal rule knows which remote chat is being watched, and
   // clear any stale signal from a turn that ended while it was closed.
@@ -2961,7 +2972,7 @@ export function RemoteTranscriptDialog({
     useAgent.getState().setStatus(remoteKey, 'thinking')
     setComposerText('')
     const ac = new AbortController()
-    const applyEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown }) => {
+    const applyEvent = (ev: { type: string; text?: string; say?: string; name?: string; result?: unknown; args?: unknown; call_id?: string }) => {
       if (ev.type === 'text' && ev.text) {
         useAgent.getState().appendTextDelta(remoteKey, asstId, ev.text)
       } else if (ev.type === 'say') {
@@ -2973,8 +2984,26 @@ export function RemoteTranscriptDialog({
       } else if (ev.type === 'tool_start') {
         useAgent.getState().startToolCall(remoteKey, asstId, `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
         useAgent.getState().setStatus(remoteKey, 'running-tool')
+        // #308 follow-up: a remote ask_user call parks the turn on the same
+        // answer future the local loop uses; render the card against the
+        // remote key so the user can answer and the row shows the yellow bar.
+        if (ev.name === 'ask_user') {
+          const a = (ev.args ?? {}) as {
+            question?: string
+            options?: Array<{ label: string; description?: string }>
+          }
+          useAgent.getState().setPendingQuestion({
+            callId: ev.call_id ?? '',
+            question: a.question ?? '',
+            options: a.options ?? [],
+            convKey: remoteKey,
+          })
+        }
       } else if (ev.type === 'tool_result') {
         useAgent.getState().finishToolCall(remoteKey, asstId, '', typeof ev.result === 'string' ? ev.result : JSON.stringify(ev.result ?? {}))
+        if (ev.name === 'ask_user') {
+          useAgent.getState().setPendingQuestion((q) => (q && q.convKey === remoteKey && q.callId === (ev.call_id ?? '') ? null : q))
+        }
       } else if (ev.type === 'error') {
         useAgent.getState().setStatus(remoteKey, 'error')
       }
@@ -3009,6 +3038,8 @@ export function RemoteTranscriptDialog({
         // The stream failed mid-turn: preserve what was streamed and mark the
         // row with an error signal instead of silently going idle.
         useAgent.getState().setStatus(remoteKey, 'error')
+        // A question parked when the stream died can never be answered.
+        useAgent.getState().setPendingQuestion((q) => (q && q.convKey === remoteKey ? null : q))
         setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
         setSendNote(`Turn failed — ${String((error as Error).message ?? error)}`)
       } else {
@@ -3052,7 +3083,22 @@ export function RemoteTranscriptDialog({
           {!editing && sendNote && <p role="status" className="mb-2 text-xs text-red-400">{sendNote}</p>}
           {renderedMessages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
+          {pendingRemoteQuestion && (
+            <div className="rounded border border-orange-800/60 bg-orange-950/20 px-3 py-2">
+              <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
+                <span className="run-pulse">?</span> agent asks
+              </div>
+              <p className="whitespace-pre-wrap text-sm text-zinc-100">{pendingRemoteQuestion.question}</p>
+            </div>
+          )}
         </div>
+      {/* #308 follow-up: the remote ask_user card — answers route to the
+          device turn answer endpoint so the blocked runner resumes. */}
+      {pendingRemoteQuestion && (
+        <div className="border-t border-orange-800/60 px-4 pb-3 pt-3">
+          <AskUserCard key={pendingRemoteQuestion.callId} pending={pendingRemoteQuestion} remote={{ hostId, conversationId }} />
+        </div>
+      )}
       {!editing && (
         <footer className="flex items-end gap-2 border-t border-zinc-800 px-4 py-2">
           <textarea
@@ -3140,6 +3186,9 @@ export function DeviceGroups({
   // rows use — remote keys live in statusByConv/finishedByConv too.
   const statusByConv = useAgent((s) => s.statusByConv)
   const finishedByConv = useAgent((s) => s.finishedByConv)
+  // #308 follow-up: the blocked (needs-you) yellow bar keys off pending
+  // questions too — a remote ask_user parks its turn on an answer future.
+  const pendingQuestions = useAgent((s) => s.pendingQuestions)
   const [remoteConversation, setRemoteConversation] = useState<{
     hostId: string
     conversationId: string
@@ -3376,7 +3425,11 @@ export function DeviceGroups({
                   const rowKey = remoteConversationKey(device.host_id, conversation.conversation_id)
                   const finished = finishedByConv[rowKey] ?? null
                   const running = statusByConv[rowKey] === 'thinking' || statusByConv[rowKey] === 'running-tool'
-                  const statusSlot = finished === 'error'
+                  // Same precedence as ConversationRow (#25): blocked > finished > running.
+                  const blocked = pendingQuestions[rowKey] != null
+                  const statusSlot = blocked
+                    ? <span aria-hidden="true" className="run-bar run-bar-orange mr-1.5 shrink-0" title="Waiting for you — a question is pausing this run" />
+                    : finished === 'error'
                     ? <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
                     : finished === 'ok'
                       ? <span aria-hidden="true" className="run-bar run-bar-green mr-1.5 shrink-0" title="Run finished" />
