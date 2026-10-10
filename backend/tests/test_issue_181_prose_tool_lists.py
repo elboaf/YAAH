@@ -116,7 +116,7 @@ def test_general_purpose_prompt_mentions_every_resolved_tool():
     # search_conversation_history is ALWAYS_EXCLUDED for sub-agents (it
     # searches the parent's conversation); the others must resolve.
     assert {"get_help", "memory_save", "memory_read",
-            "memory_delete"} <= resolved
+            "memory_search", "memory_delete"} <= resolved
     assert "search_conversation_history" not in resolved
     assert "search_conversation_history" not in prompt
     assert prose == resolved

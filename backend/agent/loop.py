@@ -536,7 +536,7 @@ def _default_system_prompt(workspace: str = "") -> str:
         "load_skill",
         "branch_select (switch the workspace to a branch, on the user's "
         "request; creates it when missing)",
-        "memory_save", "memory_read", "memory_delete",
+        "memory_save", "memory_read", "memory_search", "memory_delete",
         "search_conversation_history",
     ]
     prompt = f"""You are an expert AI coding agent working inside a user's project workspace.

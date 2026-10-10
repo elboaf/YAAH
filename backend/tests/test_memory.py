@@ -400,3 +400,33 @@ def test_read_memory_body_not_eaten_by_frontmatter_slack():
     memory.save_memory(WS, "slack", long_title, "d", "project", body)
     r = memory.read_memory(WS, "slack")
     assert body in r["content"]
+
+
+# ---- #367: search memory ---------------------------------------------------
+
+def test_search_memory_finds_trimmed_entries():
+    memory.save_memory(WS, "dark-ui", "Prefers dark UI", "theme choice",
+                       "user", "User prefers dark interface.")
+    memory.save_memory(WS, "unrelated", "Other", "d", "project", "Nothing here.")
+    r = memory.search_memory(WS, "dark")
+    assert r["count"] == 1
+    m = r["matches"][0]
+    assert m["name"] == "dark-ui"
+    assert "dark" in m["snippet"].lower()
+
+
+def test_search_memory_empty_query_errors():
+    assert "error" in memory.search_memory(WS, "  ")
+
+
+def test_search_memory_no_match_returns_zero():
+    memory.save_memory(WS, "a", "A", "d", "project", "hello")
+    assert memory.search_memory(WS, "zzz")["count"] == 0
+
+
+def test_truncated_index_marker_points_at_memory_search(monkeypatch):
+    memory.save_memory(WS, "a", "A", "d", "project", "x")
+    memory.save_memory(WS, "b", "B", "d", "project", "y")
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 10)
+    block = memory.index_for_prompt(WS)
+    assert "memory_search" in block

@@ -17,7 +17,7 @@ Mechanics, mirroring zcode:
   the pending one, so a fast conversation drains as one run per idle
   moment, never a queue;
 - the writer is a confined sub-agent: its tool catalogue is exactly the
-  three memory tools, which resolve slugs inside the memory root and
+  memory tools, which resolve slugs inside the memory root and
   cannot express a path outside it. It runs without the access-mode gate
   (auto-allowed writes - memory maintenance never nags), standalone with
   no event streaming; the saved memories are the visible artifact.
@@ -65,10 +65,10 @@ WRITER_DEF = AgentDef(
         "truthful: apply the retention test, update instead of "
         "duplicating, delete what turned out wrong, and stay silent "
         "(output only 'Nothing to save.') when nothing qualifies. Your "
-        "only tools are the three memory tools; the window is your "
+        "only tools are the memory tools; the window is your "
         "entire input - never investigate the repository."
     ),
-    tools=["memory_save", "memory_read", "memory_delete"],
+    tools=["memory_save", "memory_read", "memory_search", "memory_delete"],
     max_turns=WRITER_MAX_TURNS,
     builtin=True,
 )

@@ -7,7 +7,7 @@ prompt every turn. The model decides what is worth remembering — by
 charter (ADR-0009), memory models the OWNER: user facts and working
 feedback only, never workflow/project state (the tracker and repo own
 those; see _WHEN_TO_SAVE) — and maintains both the files and the index
-itself via the memory_save / memory_read / memory_delete tools.
+itself via the memory_save / memory_read / memory_search / memory_delete tools.
 
 Memory is scoped per workspace — a stable hash of the workspace path
 (remote-namespaced workspaces hash their raw ``remote:<host>:<path>``
@@ -196,6 +196,43 @@ def read_memory(workspace: str | None, name: str) -> dict:
     return {"name": slug, "path": str(path), "content": text[:MAX_MEMORY_BODY_CHARS]}
 
 
+def search_memory(workspace: str | None, query: str) -> dict:
+    """List memories matching `query` across the project's whole store
+    (#367): the prompt index drops entries when it exceeds
+    MAX_INDEX_CHARS, and a dropped slug is otherwise undiscoverable —
+    memory_read needs the name and nothing else enumerates the store.
+    Simple case-insensitive substring match over each file's frontmatter
+    description, title and body; ponytail: linear scan, a real retrieval
+    index only if the store ever grows past a few hundred files."""
+    q = (query or "").strip().lower()
+    if not q:
+        return {"error": "query is required."}
+    d = memory_dir(workspace)
+    try:
+        paths = sorted(p for p in d.glob("*.md") if p.name != "MEMORY.md")
+    except OSError:
+        paths = []
+    matches = []
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        hay = text.lower()
+        if q not in hay:
+            continue
+        fm = re.match(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
+        desc = ""
+        if fm:
+            dm = re.search(r'^description:\s*"?(.*?)"?\s*$', fm.group(1), re.M)
+            if dm:
+                desc = dm.group(1).strip()
+        i = hay.find(q)
+        snippet = " ".join(text[max(0, i - 60):i + 100].split())
+        matches.append({"name": p.stem, "description": desc, "snippet": snippet})
+    return {"query": q, "count": len(matches), "matches": matches}
+
+
 def delete_memory(workspace: str | None, name: str) -> dict:
     slug = _slug(name)
     if slug is None:
@@ -347,13 +384,17 @@ def index_for_prompt(workspace: str | None) -> str:
         if len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
             while pinned and len("\n".join(pinned + rest)) > MAX_INDEX_CHARS:
                 pinned.pop(0)
-        body = "\n".join(pinned + rest) + "\n…[truncated]"
+        body = "\n".join(pinned + rest) + (
+            "\n…[truncated] — older entries were trimmed from this "
+            "index but still exist on disk; use memory_search to find "
+            "them by topic, then memory_read the slug."
+        )
     return (
         "# Persistent memory (yours — for THIS project)\n\n"
         "Durable facts you have saved about this user and project; each "
         "line links a file you can read with the memory_read tool:\n\n"
         f"{body}\n\n"
-        "Maintain this memory with the memory_save, memory_read and "
+        "Maintain this memory with the memory_save, memory_read, "
         "memory_delete tools.\n\n"
         f"{_WHEN_TO_SAVE}"
     )

@@ -532,7 +532,7 @@ TOOLS_SCHEMA += [GET_HELP_SCHEMA, BRANCH_SELECT_SCHEMA]
 # no longer rebinds its tool workspace; the direct world has one tree).
 # One spelling, shared by the funnel gate, the loop's kwarg feed and the
 # sub-agent runner:
-MEMORY_TOOLS = ("memory_save", "memory_read", "memory_delete")
+MEMORY_TOOLS = ("memory_save", "memory_read", "memory_search", "memory_delete")
 
 # Issue #169: the persistent-memory tool names, used by the Settings toggle
 # (memory.enabled, default OFF) to filter the schema and gate execution.
@@ -942,6 +942,31 @@ TOOLS_SCHEMA += [
                     "name": {"type": "string", "description": "The memory's slug."},
                 },
                 "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_search",
+            "description": (
+                "List saved memories matching a query, across the whole "
+                "store — including entries trimmed out of the prompt "
+                "index when it exceeded its cap (their slug is otherwise "
+                "undiscoverable)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Case-insensitive substring to match against "
+                            "each memory's content."
+                        ),
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
@@ -1461,6 +1486,7 @@ def _memory_executor(op: str):
         fn = {
             "save": memory.save_memory,
             "read": memory.read_memory,
+            "search": memory.search_memory,
             "delete": memory.delete_memory,
         }[op]
         canonical = memory_workspace or workspace
@@ -1488,6 +1514,7 @@ EXECUTORS = {
     "branch_select": branch_select,
     "memory_save": _memory_executor("save"),
     "memory_read": _memory_executor("read"),
+    "memory_search": _memory_executor("search"),
     "memory_delete": _memory_executor("delete"),
 }
 
@@ -1526,7 +1553,7 @@ _READ_TOOLS = {
     # conversation history is a read-only transcript query
     "search_conversation_history",
     # memory reads live outside the workspace but change nothing
-    "memory_read",
+    "memory_read", "memory_search",
 }
 _MUTATING_TOOLS = {
     "write_file", "edit_file", "create_file", "delete_file", "move_file",

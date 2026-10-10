@@ -15,7 +15,7 @@ import pytest
 
 from backend.agent import config, tools
 
-_MEMORY_TOOLS = {"memory_save", "memory_read", "memory_delete"}
+_MEMORY_TOOLS = {"memory_save", "memory_read", "memory_search", "memory_delete"}
 
 
 @pytest.fixture()
