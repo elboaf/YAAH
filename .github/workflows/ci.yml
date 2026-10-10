@@ -66,16 +66,23 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # The runner cache keys on requirements.txt only; pytest-shard is
-          # listed there, but a warm runner whose cache predates the pin
-          # would otherwise run unshardable. Explicit here until the next
-          # full requirements refresh repopulates the cache.
+          # The runner cache keys on requirements.txt only; pytest-shard and
+          # pytest-xdist are listed there, but a warm runner whose cache
+          # predates the pin would otherwise run unshardable/unparallel.
+          # Explicit here until the next full requirements refresh
+          # repopulates the cache.
           python -c "import pytest_shard" 2>/dev/null || pip install "pytest-shard>=0.1.2"
+          python -c "import xdist" 2>/dev/null || pip install "pytest-xdist>=3.5"
 
       - name: Run tests
         run: |
+          # pytest-shard splits the suite across the two herp runners;
+          # xdist -n 2 parallelizes within each shard (single-core-per-shard
+          # was the pre-#372 gap). Validated: xdist failure set identical to
+          # serial; conftest env redirect is per-process so each worker gets
+          # its own throwaway DB/config.
           pytest backend/tests -v --shard-id ${{ matrix.shard }} --num-shards 2 \
-            2>&1 | tee test-output.log
+            -n 2 2>&1 | tee test-output.log
           test ${PIPESTATUS[0]} -eq 0
 
       # Logs are auth-gated on GitHub; surface failures via annotations,

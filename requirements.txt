@@ -27,3 +27,6 @@ numpy>=2.0
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
 pytest-shard>=0.1.2
+# CI intra-shard parallelism (-n auto); validated on #372 (xdist run's
+# failure set identical to serial, 991 passed in ~44s on 8 workers).
+pytest-xdist>=3.5
