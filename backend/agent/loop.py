@@ -1536,6 +1536,20 @@ async def _run_agent_claimed(
         else await file_changes.snapshot_workspace(turn_workspace)
     )
 
+    # Shared 6-site tail (emit → persist → stream event) for every early
+    # exit / completion path that closes out file accounting. The finally
+    # block keeps its own persist-only variant (no yield possible there).
+    async def _finalize_file_changes() -> AsyncIterator[str]:
+        file_summary = await _emit_file_changes(
+            conversation_id,
+            turn_workspace,
+            change_baseline,
+        )
+        file_summary_emitted = True
+        if file_summary:
+            await _persist_file_change_summary(conversation_id, file_summary)
+            yield _ndjson({"type": "file_changes", **file_summary})
+
     if persist_user:
         await add_message(
             conversation_id, "user", user_text, images=image_paths or None,
@@ -1676,15 +1690,8 @@ async def _run_agent_claimed(
     try:
         for _step in range(max_steps) if max_steps > 0 else itertools.count():
             if cancel_ev.is_set():
-                file_summary = await _emit_file_changes(
-                    conversation_id,
-                    turn_workspace,
-                    change_baseline,
-                )
-                file_summary_emitted = True
-                if file_summary:
-                    await _persist_file_change_summary(conversation_id, file_summary)
-                    yield _ndjson({"type": "file_changes", **file_summary})
+                async for _fev in _finalize_file_changes():
+                    yield _fev
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
@@ -1835,15 +1842,8 @@ async def _run_agent_claimed(
                     )
 
             if cancel_ev.is_set():
-                file_summary = await _emit_file_changes(
-                    conversation_id,
-                    turn_workspace,
-                    change_baseline,
-                )
-                file_summary_emitted = True
-                if file_summary:
-                    await _persist_file_change_summary(conversation_id, file_summary)
-                    yield _ndjson({"type": "file_changes", **file_summary})
+                async for _fev in _finalize_file_changes():
+                    yield _fev
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
@@ -1964,15 +1964,8 @@ async def _run_agent_claimed(
                 remaining = _drain_queue(conversation_id)
                 if remaining:
                     yield _ndjson({"type": "queued_autosend", "items": remaining})
-                file_summary = await _emit_file_changes(
-                    conversation_id,
-                    turn_workspace,
-                    change_baseline,
-                )
-                file_summary_emitted = True
-                if file_summary:
-                    await _persist_file_change_summary(conversation_id, file_summary)
-                    yield _ndjson({"type": "file_changes", **file_summary})
+                async for _fev in _finalize_file_changes():
+                    yield _fev
                 yield _ndjson({"type": "done"})
                 return
 
@@ -2005,15 +1998,8 @@ async def _run_agent_claimed(
             # Execute each regular tool call in order
             for tc in regular_calls:
                 if cancel_ev.is_set():
-                    file_summary = await _emit_file_changes(
-                        conversation_id,
-                        turn_workspace,
-                        change_baseline,
-                    )
-                    file_summary_emitted = True
-                    if file_summary:
-                        await _persist_file_change_summary(conversation_id, file_summary)
-                        yield _ndjson({"type": "file_changes", **file_summary})
+                    async for _fev in _finalize_file_changes():
+                        yield _fev
                     yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                     return
                 name = tc["function"]["name"]
@@ -2437,15 +2423,8 @@ async def _run_agent_claimed(
             "Settings → General → Max steps (or config.json `max_steps`; 0 = unlimited)"
         )
         await add_message(conversation_id, "system", f"turn failed: {budget_msg}")
-        file_summary = await _emit_file_changes(
-            conversation_id,
-            turn_workspace,
-            change_baseline,
-        )
-        file_summary_emitted = True
-        if file_summary:
-            await _persist_file_change_summary(conversation_id, file_summary)
-            yield _ndjson({"type": "file_changes", **file_summary})
+        async for _fev in _finalize_file_changes():
+            yield _fev
         yield _ndjson({
             "type": "error",
             "message": budget_msg,
@@ -2474,15 +2453,8 @@ async def _run_agent_claimed(
         # The user message is already stored; without a record of the
         # failure the transcript would read as if the turn never happened.
         await add_message(conversation_id, "system", f"turn failed: {e}")
-        file_summary = await _emit_file_changes(
-            conversation_id,
-            turn_workspace,
-            change_baseline,
-        )
-        file_summary_emitted = True
-        if file_summary:
-            await _persist_file_change_summary(conversation_id, file_summary)
-            yield _ndjson({"type": "file_changes", **file_summary})
+        async for _fev in _finalize_file_changes():
+            yield _fev
         yield _ndjson({"type": "error", "message": str(e)})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
@@ -2492,15 +2464,8 @@ async def _run_agent_claimed(
         await add_message(
             conversation_id, "system", f"turn failed: {type(e).__name__}: {e}"
         )
-        file_summary = await _emit_file_changes(
-            conversation_id,
-            turn_workspace,
-            change_baseline,
-        )
-        file_summary_emitted = True
-        if file_summary:
-            await _persist_file_change_summary(conversation_id, file_summary)
-            yield _ndjson({"type": "file_changes", **file_summary})
+        async for _fev in _finalize_file_changes():
+            yield _fev
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
