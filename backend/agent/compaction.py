@@ -50,9 +50,6 @@ _DEFAULTS = {
     "per_model_enabled": True,
     "per_model_trigger_tokens": 300_000,
     "model_compaction": {},
-    "keep_fraction": COMPACTION_KEEP_FRACTION,
-    "keep_recent_messages": COMPACTION_MIN_TAIL_MESSAGES,
-    "default_window": COMPACTION_DEFAULT_WINDOW,
     # "" = summarize with the session's own provider/model; or a
     # "provider::model" / bare model id to route the summary call
     # somewhere cheaper.
@@ -69,21 +66,9 @@ def _compaction_cfg() -> dict:
         cfg.update(section)
     # Clamp numeric knobs into sane ranges; garbage falls back.
     try:
-        cfg["keep_fraction"] = min(max(float(cfg["keep_fraction"]), 0.05), 0.95)
-    except (TypeError, ValueError):
-        cfg["keep_fraction"] = COMPACTION_KEEP_FRACTION
-    try:
         cfg["trigger_tokens"] = max(int(cfg["trigger_tokens"] or 0), 0)
     except (TypeError, ValueError):
         cfg["trigger_tokens"] = COMPACTION_TRIGGER_TOKENS
-    try:
-        cfg["keep_recent_messages"] = max(int(cfg["keep_recent_messages"]), 2)
-    except (TypeError, ValueError):
-        cfg["keep_recent_messages"] = COMPACTION_MIN_TAIL_MESSAGES
-    try:
-        cfg["default_window"] = max(int(cfg["default_window"]), 4_000)
-    except (TypeError, ValueError):
-        cfg["default_window"] = COMPACTION_DEFAULT_WINDOW
     pm = load_config().get("model_compaction") or {}
     cfg["model_compaction"] = pm if isinstance(pm, dict) else {}
     return cfg
@@ -163,7 +148,7 @@ async def resolve_window(model: str | None, cfg: dict | None = None) -> int:
         window = await get_context_window(bare, cfg or load_config())
         if window:
             return int(window)
-    return ccfg["default_window"]
+    return COMPACTION_DEFAULT_WINDOW
 
 
 def should_compact(context_tokens: int | None, context_window: int, model: str | None = None) -> bool:
@@ -363,8 +348,8 @@ async def compact_history_for_context(
     # Only unsummarized transcript rows participate in the next cut. The
     # transcript itself remains untouched; the watermark affects prompt replay.
     pending = [r for r in rows if r["id"] > watermark]
-    keep_budget = int(window * ccfg["keep_fraction"])
-    cut = find_cut_index(pending, keep_budget, ccfg["keep_recent_messages"])
+    keep_budget = int(window * COMPACTION_KEEP_FRACTION)
+    cut = find_cut_index(pending, keep_budget, COMPACTION_MIN_TAIL_MESSAGES)
     if cut <= 0:
         log.info(
             "compaction skipped for conv %s: no safe cut (%d pending msgs, %s/%s tokens)",

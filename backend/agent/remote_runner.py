@@ -205,7 +205,6 @@ class _InMemoryTranscript:
 async def _commit_via_owner(
     turn: RemoteTurn,
     transcript: _InMemoryTranscript,
-    holder_host_id: str,
 ) -> dict:
     """Durable-then-network commit of the full snapshot to the owner."""
     owner_id = turn.identity.owner_id
@@ -326,8 +325,7 @@ async def _run_claimed(
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
-            state: dict = {"content": "", "tool_calls": None, "finish": None,
-                           "usage": None}
+            state: dict = {"content": "", "tool_calls": None, "usage": None}
             async def _consume() -> None:
                 stream = await model_client.chat(
                     messages, tools=tools, stream=True,
@@ -347,8 +345,6 @@ async def _run_claimed(
                             k: ev.get(k, "") for k in ("provider", "model")}})
                     elif kind == "tool_calls":
                         state["tool_calls"] = ev["tool_calls"]
-                    elif kind == "finish":
-                        state["finish"] = ev.get("reason")
                     elif kind == "usage":
                         state["usage"] = ev.get("usage")
 
@@ -468,10 +464,6 @@ async def _run_claimed(
                             )
                         except RemoteTurnError as exc:
                             result = {"error": str(exc)}
-                    if name in remote_mod.REMOTE_TOOLS and isinstance(result, dict):
-                        # Shell tools return no chunk stream remotely; emit
-                        # the final result exactly like a completed local run.
-                        pass
                 yield _ndjson({"type": "tool_result", "name": name,
                                "result": result, "call_id": tc.get("id", "")})
                 messages.append({
@@ -489,7 +481,7 @@ async def _run_claimed(
 
         # Turn body complete (final answer or cancel): commit the snapshot.
         try:
-            result = await _commit_via_owner(turn, transcript, owner_id)
+            result = await _commit_via_owner(turn, transcript)
         except RemoteTurnError as exc:
             # The pending commit stays durable; the transcript update reaches
             # the owner on the next sync-pending replay.

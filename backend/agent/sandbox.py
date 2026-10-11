@@ -1215,13 +1215,8 @@ def stop_sync() -> dict:
 
 # ---------------------------------------------------------------- executors
 
-async def sandbox_test(workspace: str, timeout_seconds: int = None) -> dict:
+async def sandbox_test(workspace: str) -> dict:
     """Start or reuse the sandbox (model entry point)."""
-    if timeout_seconds is not None:
-        try:
-            int(timeout_seconds)
-        except (TypeError, ValueError):
-            return {"error": "timeout_seconds must be an integer"}
     return await asyncio.to_thread(start_sync, workspace)
 
 
@@ -1488,18 +1483,7 @@ SANDBOX_TOOLS_SCHEMA = [
                 "ask mode. Returns once the sandbox is ready (first boot is "
                 "a slow cold start)."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": (
-                            "Max seconds to wait for sandbox boot "
-                            "(default: config, 180s)"
-                        ),
-                    },
-                },
-            },
+            "parameters": {"type": "object", "properties": {}}
         },
     },
     {

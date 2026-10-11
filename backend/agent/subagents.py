@@ -31,6 +31,7 @@ from pathlib import Path
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
+from backend.agent.skills import _yaml_load
 from backend.agent.tools import (
     MEMORY_TOOLS,
     execute_tool,
@@ -71,7 +72,6 @@ class AgentDef:
     tools: list[str] | None = None          # None = inherit all
     disallowed_tools: list[str] = field(default_factory=list)
     max_turns: int = DEFAULT_MAX_TURNS
-    model: str | None = None                # parsed but deferred (v1.1)
     builtin: bool = False
 
 
@@ -152,19 +152,6 @@ _agents: dict[str, AgentDef] = {}
 _scanned = False
 
 
-def _yaml_load(raw: str) -> object:
-    try:
-        import yaml
-
-        return yaml.safe_load(raw)
-    except ImportError:
-        out: dict = {}
-        for line in raw.splitlines():
-            if ":" in line and not line.strip().startswith("#"):
-                k, _, v = line.partition(":")
-                out[k.strip()] = v.strip().strip("'\"")
-        return out
-
 
 def parse_agent_md(path: Path) -> AgentDef | None:
     """Parse one agent definition file. Returns None when the file is not
@@ -209,9 +196,7 @@ def parse_agent_md(path: Path) -> AgentDef | None:
         body=body.strip(),
         tools=_str_list(meta.get("tools")) or None,
         disallowed_tools=_str_list(meta.get("disallowedTools")),
-        max_turns=max_turns,
-        model=str(meta.get("model") or "").strip() or None,
-    )
+        max_turns=max_turns,    )
 
 
 def scan_agents() -> dict[str, AgentDef]:

@@ -157,7 +157,6 @@ SECTION_OPENINGS = [
 ]
 
 SEPARATOR = "\n\n---\n\n"
-BASE_JOIN = "\n\n\n\n"
 COMPACT_SUMMARY_PREFIX = (
     "Earlier conversation summary (decisions and state to continue from;"
     " the full transcript is preserved separately):"
@@ -373,11 +372,6 @@ def _reset_remotes() -> None:
 # Render matrix: 192 local + 14 remote + 4 remote-offline + 6 kind combos.
 # ---------------------------------------------------------------------------
 
-def _local_flags() -> list:
-    flags = ["plan", "skills", "memory"]
-    flags += ["override", "compaction", "policy"]
-    return flags
-
 
 def _iter_local(windows: bool) -> list:
     """Every local combo id, generated from toggles (2^6 on each platform:
@@ -557,17 +551,8 @@ def _platform_os_name(windows: bool):
             mod.Path = orig
 
 
-def _isolated_roots() -> dict:
-    """Throwaway DB/config/memory roots (already redirected by conftest under
-    pytest; by _bootstrap_env under the CLI)."""
-    _ensure_backend()
-    from backend.agent.config import CONFIG_PATH
-    from backend.db.database import DB_PATH
 
-    return {"config": CONFIG_PATH, "db": DB_PATH}
-
-
-def _prep_flags(flags: dict, tmp: Path) -> None:
+def _prep_flags(flags: dict) -> None:
     """Materialize one combination's environment in the redirected seams."""
     _ensure_backend()
     import backend.agent.loop, backend.agent.subagents  # noqa: F401
@@ -993,11 +978,11 @@ def render_combo(combo: str) -> dict:
     flags = _split_combo(combo)
     kind = flags["kind"]
     if kind in ("subagents", "auxiliary"):
-        _prep_flags(flags, None)
+        _prep_flags(flags)
         if kind == "auxiliary":
             return render_auxiliary(combo, flags)
         return render_subagents(combo, flags)
-    _prep_flags(flags, None)
+    _prep_flags(flags)
     return render_local_family(combo, flags)
 
 

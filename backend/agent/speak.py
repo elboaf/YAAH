@@ -199,8 +199,6 @@ def download_model(progress) -> None:
 
 
 def _download_model_inner(progress) -> None:
-    import httpx
-
     target = _data_root() / MODEL_NAME
     if _pack_complete(target):
         progress({"stage": "done"})
@@ -603,9 +601,6 @@ SAY_TAG_CLOSE = re.compile(r"</\s*say\s*>", re.I)
 # ~400 chars ≈ 20–30 s of audio, far under the old 4000-char verbatim cap.
 SAY_MAX_CHARS = 400
 
-# Char budget the heuristic (and the cap on a model-emitted line) aims for.
-_BRIEFING_MAX = SAY_MAX_CHARS
-
 
 def _strip_say_tags(content: str) -> str:
     """Remove complete tags anywhere and a trailing truncated briefing."""
@@ -631,7 +626,7 @@ def extract_say(content: str) -> tuple[str, str | None]:
     return _strip_say_tags(content), said
 
 
-def heuristic_briefing(md: str, max_chars: int = _BRIEFING_MAX) -> str:
+def heuristic_briefing(md: str, max_chars: int = SAY_MAX_CHARS) -> str:
     """Fallback briefing without a model call: the first paragraph's first
     sentence plus the final sentence of the prose, whichever fits the
     budget. Semantic but cheap — 'what did this turn conclude' approximated
@@ -677,7 +672,7 @@ def heuristic_briefing(md: str, max_chars: int = _BRIEFING_MAX) -> str:
     return cut.strip()
 
 
-def spoken_line(briefing: str | None, md: str, max_chars: int = _BRIEFING_MAX) -> str:
+def spoken_line(briefing: str | None, md: str, max_chars: int = SAY_MAX_CHARS) -> str:
     """The final TTS input for a turn: the model-emitted briefing when
     usable, else the heuristic, else the old truncated verbatim prose (the
     fallback is today's behavior, never silence). Everything passes through

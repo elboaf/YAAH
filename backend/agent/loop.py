@@ -289,9 +289,9 @@ DEFAULT_MAX_STEPS = 200
 
 def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
     """Step budget for one turn: the model's own entry (config.model_steps)
-    wins, then the legacy per-provider value, then the global; missing or
-    invalid values fall through, and nothing at all means the shipped
-    default. 0 at any level means unlimited and is honored, not skipped."""
+    wins, then the global; missing or invalid values fall through, and
+    nothing at all means the shipped default. 0 at any level means
+    unlimited and is honored, not skipped."""
     model = model_override or ""
     provider = model.partition("::")[0] if "::" in model else ""
     if not provider:
@@ -305,9 +305,6 @@ def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
 
     entry = (cfg.get("model_steps") or {}).get(model)
     steps = _int(entry) if entry is not None else None
-    if steps is None:
-        prov = (cfg.get("providers") or {}).get(provider) or {}
-        steps = _int(prov.get("max_steps"))
     if steps is None:
         steps = _int(cfg.get("max_steps"))
     return steps if steps is not None else DEFAULT_MAX_STEPS
