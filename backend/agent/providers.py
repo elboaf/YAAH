@@ -41,6 +41,9 @@ PRESETS = {
 }
 
 
+LIST_TIMEOUT = 4.0  # seconds per provider (Q8 lean)
+
+
 def _model_info(models: object) -> list[dict]:
     """Normalize model ids and reasoning effort metadata from /models.
 
