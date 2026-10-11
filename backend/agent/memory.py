@@ -311,27 +311,17 @@ def _entry_type(idx_dir: Path, line: str, _cache: dict | None = None) -> str:
     fm = re.match(r"^---\s*\n(.*?)\n---", text, re.DOTALL)
     if not fm:
         return _finish("project")
-    # Line-parse the frontmatter: only a `type:` key nested under
-    # `metadata:` classifies the entry. A bare `^\s*type:` MULTILINE regex
-    # also anchors on a top-level `type:` key (or any line starting with
-    # one), shadowing the authoritative metadata value (CodeRabbit return
-    # trip #1 on PR #251).
-    meta_type: str | None = None
-    in_meta = False
-    for raw in fm.group(1).splitlines():
-        if not raw.strip():
-            continue
-        indented = raw[0] in (" ", "\t")
-        km = re.match(r"^\s+([\w-]+):\s*(\S*)", raw) if indented else re.match(
-            r"^([\w-]+):", raw
-        )
-        if not km:
-            continue
-        if not indented:
-            in_meta = km.group(1) == "metadata"
-        elif in_meta and km.group(1) == "type":
-            meta_type = km.group(2).strip().lower()
-    t = meta_type or "project"
+    # pyyaml reads the frontmatter; only metadata.type classifies the
+    # entry. (Bare top-level `type:` keys do NOT shadow it — the line
+    # parser here once did, CodeRabbit return trip #1 on PR #251.)
+    try:
+        import yaml
+
+        meta = yaml.safe_load(fm.group(1)) or {}
+    except Exception:
+        return _finish("project")
+    t = ((meta or {}).get("metadata") or {}).get("type") if isinstance(meta, dict) else None
+    t = (t or "project").strip().lower()
     return _finish(
         t if t in ("user", "feedback", "project", "reference") else "project"
     )
