@@ -129,58 +129,14 @@ def _system_prompt(workspace: str, host: remote_mod.RemoteSession | None) -> str
 def _history_from_snapshot(messages: list[dict]) -> list[dict]:
     """Replay the fetched owner transcript into OpenAI-format model context.
 
-    Mirrors loop.load_history's shape rules (orphaned tool rows dropped,
-    image-bearing rows as parts lists) without touching the local DB.
+    Delegates to loop._replay_rows (shared shape rules: orphaned tool rows
+    dropped, image-bearing rows as parts lists) with image URLs kept
+    verbatim — they arrive as ready URLs, not rel paths to read from disk.
+    No local DB touched.
     """
-    out: list[dict] = []
-    valid_call_ids: set[str] = set()
-    answered_call_ids: set[str] = set()
-    for row in messages:
-        role = row.get("role")
-        if role == "user":
-            content = row.get("content") or ""
-            images = row.get("images")
-            if images:
-                content = [
-                    {"type": "text", "text": content},
-                    *[
-                        {"type": "image_url", "image_url": {"url": image}}
-                        for image in images
-                        if isinstance(image, str)
-                    ],
-                ]
-            out.append({"role": "user", "content": content})
-        elif role == "assistant":
-            m = {"role": "assistant", "content": row.get("content") or ""}
-            tcs = row.get("tool_calls")
-            if (
-                isinstance(tcs, list)
-                and tcs
-                and isinstance(tcs[0], dict)
-                and tcs[0].get("id")
-                and tcs[0].get("function")
-            ):
-                m["tool_calls"] = tcs
-                valid_call_ids.update(
-                    tc.get("id", "") for tc in tcs if tc.get("id")
-                )
-            out.append(m)
-        elif role == "tool":
-            tc_id = row.get("tool_call_id")
-            if not tc_id:
-                meta = (row.get("tool_calls") or [{}])[0]
-                tc_id = meta.get("id", "") if isinstance(meta, dict) else ""
-            if tc_id and tc_id not in valid_call_ids:
-                continue  # orphaned tool result; skip to keep history valid
-            answered_call_ids.add(tc_id)
-            out.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc_id or "",
-                    "content": row.get("content") or "",
-                }
-            )
-    return out
+    from backend.agent import loop  # local import: loop imports heavy deps
+
+    return loop._replay_rows(messages, images_from_rel=False)
 
 
 class _InMemoryTranscript:

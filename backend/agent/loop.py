@@ -1278,14 +1278,19 @@ def _parts_with_images(text: str, image_rels: list) -> list | str:
     return parts or text
 
 
-async def load_history(
-    conversation_id: int, through_message_id: int = 0
-) -> list:
-    """Load transcript rows after the prompt-compaction watermark."""
-    rows = await get_messages(conversation_id)
-    if through_message_id:
-        rows = [r for r in rows if int(r["id"]) > through_message_id]
-    out = []
+def _replay_rows(
+    rows: list[dict],
+    *,
+    images_from_rel: bool = True,
+) -> list[dict]:
+    """Shared transcript→OpenAI replay rules (loop.load_history and
+    remote_runner._history_from_snapshot): well-formed assistant tool_calls
+    only, orphaned tool rows dropped, image-bearing rows as parts lists.
+
+    `images_from_rel=False` (the remote runner) keeps image URLs verbatim —
+    they arrive as ready URLs, not rel paths to read from disk.
+    """
+    out: list[dict] = []
     # Track which assistant tool_call ids actually made it into the replayed
     # history, so we can drop orphaned 'tool' rows (e.g. when a malformed
     # assistant tool_calls payload was stripped above). Most OpenAI-compatible
@@ -1303,15 +1308,28 @@ async def load_history(
                 from backend.agent.attachments import reinline_attachments
 
                 content = reinline_attachments(content, r["attachments"])
-            if r.get("images"):
-                content = _parts_with_images(content, r["images"])
+            images = r.get("images")
+            if images:
+                content = (
+                    _parts_with_images(content, images)
+                    if images_from_rel
+                    else [
+                        {"type": "text", "text": content or ""},
+                        *[
+                            {"type": "image_url", "image_url": {"url": image}}
+                            for image in images
+                            if isinstance(image, str)
+                        ],
+                    ]
+                )
             out.append({"role": "user", "content": content})
         elif role == "assistant":
-            m = {"role": "assistant", "content": r["content"]}
+            m = {"role": "assistant", "content": r["content"] or ""}
             tcs = r.get("tool_calls")
             # Only replay well-formed OpenAI tool calls (id + function.name)
             if (
-                tcs
+                isinstance(tcs, list)
+                and tcs
                 and isinstance(tcs[0], dict)
                 and tcs[0].get("id")
                 and tcs[0].get("function")
@@ -1325,7 +1343,7 @@ async def load_history(
             tc_id = r.get("tool_call_id")
             if not tc_id:
                 meta = (r.get("tool_calls") or [{}])[0]
-                tc_id = meta.get("id", "")
+                tc_id = meta.get("id", "") if isinstance(meta, dict) else ""
             if tc_id and tc_id not in valid_call_ids:
                 continue  # orphaned tool result; skip to keep history valid
             if not tc_id:
@@ -1335,8 +1353,8 @@ async def load_history(
                 # tool_call_id") — skip it instead of poisoning every turn.
                 continue
             answered_call_ids.add(tc_id)
-            content = r["content"]
-            if r.get("images"):
+            content = r["content"] or ""
+            if r.get("images") and images_from_rel:
                 # tool-attached image (view_image): replay as parts so a
                 # vision model still sees it on resume
                 try:
@@ -1367,7 +1385,17 @@ async def load_history(
                 ),
             }
         )
-    return _prune_old_images(out)
+    return out
+
+
+async def load_history(
+    conversation_id: int, through_message_id: int = 0
+) -> list:
+    """Load transcript rows after the prompt-compaction watermark."""
+    rows = await get_messages(conversation_id)
+    if through_message_id:
+        rows = [r for r in rows if int(r["id"]) > through_message_id]
+    return _prune_old_images(_replay_rows(rows))
 
 
 # Providers cap vision inputs (and price every one of them): a long
