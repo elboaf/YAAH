@@ -244,6 +244,12 @@ def _seed_locked(src: Path, tk: Path, written: list[str]) -> None:
 # read that races a live VM's install must not write its older merged
 # snapshot afterward and drop the freshly installed entry.
 _TOOLKIT_MUTEX_NAME = "Global\\yaah-toolkit-manifest"
+# ponytail: a hand-rolled ctypes mutex looks replaceable with
+# msvcrt.locking, but the name is a cross-language contract —
+# bundled_toolkit/bin/toolkit.ps1 (`toolkit install` inside the VM) takes
+# the SAME named mutex via System.Threading.Mutex. A file lock on the
+# Python side would not exclude the PowerShell side. Unify only by
+# changing both at once.
 
 
 def _acquire_toolkit_manifest_lock() -> object | None:
