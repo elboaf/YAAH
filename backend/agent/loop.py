@@ -1029,28 +1029,17 @@ async def _await_approval(
     """Ask mode: block until the user approves or denies this tool call
     (same future machinery as ask_user; the frontend renders an approval
     card). None = approved; dict = denial error result for the model."""
-    key = f"{conversation_id}:{call_id}"
-    fut: asyncio.Future = asyncio.get_running_loop().create_future()
-    _pending_answers[key] = fut
-    cancel_task = asyncio.create_task(cancel_ev.wait())
     try:
-        done, _ = await asyncio.wait(
-            {fut, cancel_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if fut in done:
-            answer = fut.result()
-            if answer == _APPROVE:
-                return None
-            if answer == _DENY:
-                return {"error": f"user denied the {name} tool call"}
-            # Free-text answer: a denial carrying guidance for the model.
-            return {"error": f"user denied the {name} tool call: {answer}"}
+        fut = await _wait_answer(conversation_id, call_id, cancel_ev)
+    except asyncio.CancelledError:
         return {"error": "user did not answer the approval request (run stopped)"}
-    finally:
-        cancel_task.cancel()
-        _pending_answers.pop(key, None)
-        if not fut.done():
-            fut.cancel()
+    answer = fut.result()
+    if answer == _APPROVE:
+        return None
+    if answer == _DENY:
+        return {"error": f"user denied the {name} tool call"}
+    # Free-text answer: a denial carrying guidance for the model.
+    return {"error": f"user denied the {name} tool call: {answer}"}
 
 
 async def run_gate(
@@ -2318,18 +2307,18 @@ async def _run_agent_claimed(
                 # straight through (auto-approve, no gate events).
                 if policy == "sandbox-only":
 
-                    def _sub_gate(name: str, args: dict, call_id: str):
-                        return asyncio.sleep(0, result=_policy_skip_result(name))  # type: ignore[arg-type]
+                    async def _sub_gate(name: str, args: dict, call_id: str):
+                        return _policy_skip_result(name)
 
                 elif policy == "autonomous":
 
-                    def _sub_gate(name: str, args: dict, call_id: str):
-                        return asyncio.sleep(0, result=None)  # type: ignore[arg-type]
+                    async def _sub_gate(name: str, args: dict, call_id: str):
+                        return None
 
                 else:
 
-                    def _sub_gate(name: str, args: dict, call_id: str):
-                        return run_gate(
+                    async def _sub_gate(name: str, args: dict, call_id: str):
+                        return await run_gate(
                             name,
                             args,
                             call_id,
