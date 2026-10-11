@@ -41,6 +41,13 @@ DB_PATH = Path(
 # migrate_workspaces.
 _last_workspace_seeded = False
 
+# get_db() runs the schema/migration pass once per (process, database file).
+# Keyed by path, not a bare bool: tests repoint YAAH_DB_PATH at fresh files
+# between cases and each must get a full migrate. #374 — without this, every
+# API call's migrate UPDATE contended for the write lock under the UI's
+# polling (1000+ 'database is locked' errors per session).
+_migrated: set[str] = set()
+
 
 def basename(path: str) -> str:
     """Display label for a workspace path (its final segment).
@@ -203,11 +210,16 @@ async def get_db() -> aiosqlite.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA foreign_keys = ON")
     # WAL allows concurrent readers during writes; busy_timeout avoids
     # spurious "database is locked" errors under overlapping requests.
     await db.execute("PRAGMA journal_mode = WAL")
     await db.execute("PRAGMA busy_timeout = 5000")
+    await db.execute("PRAGMA foreign_keys = ON")
+    if str(DB_PATH) in _migrated:
+        # Schema + migrations already applied this process (see #374): skip
+        # the write pass below entirely — it is per-request write-lock
+        # contention for a result that cannot change.
+        return db
     # Idempotent: ensures schema exists even for direct calls outside app lifespan
     await db.executescript(SCHEMA)
     # Migrations: CREATE TABLE IF NOT EXISTS won't touch an existing table.
@@ -326,6 +338,7 @@ async def get_db() -> aiosqlite.Connection:
     END;
     """)
     await migrate_workspaces(db)
+    _migrated.add(str(DB_PATH))
     return db
 
 

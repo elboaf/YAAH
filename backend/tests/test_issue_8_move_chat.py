@@ -42,6 +42,9 @@ def fresh_db_and_config():
     # the same defaults the rest of the suite runs with.
     CONFIG_PATH.write_text('{"access_mode": "full"}', encoding="utf-8")
     database._last_workspace_seeded = False
+    # DB file was just deleted: the next get_db() must re-run the schema
+    # pass even though the path is unchanged.
+    database._migrated.discard(str(database.DB_PATH))
     loop_mod._message_queues.clear()
     yield
     loop_mod._message_queues.clear()
