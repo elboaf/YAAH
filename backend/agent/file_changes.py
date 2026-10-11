@@ -20,6 +20,10 @@ class WorkspaceSnapshot:
 
 
 async def _run_git(workspace: str, *args: str) -> tuple[int, bytes]:
+    # Not gitexec._run_git_local on purpose: that one is a 5s str-returning
+    # `-C root --no-optional-locks` reader; this is a 30s bytes-returning
+    # cwd=workspace spawn (status --porcelain over a big tree, diff bytes).
+    # ponytail: revisit if gitexec ever grows a bytes/long-timeout mode.
     # Portable Git discovery (gitproc), shared across the codebase.
     from backend.agent.gitproc import git_exe
 
