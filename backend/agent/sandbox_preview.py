@@ -335,21 +335,15 @@ class _PreviewManager:
             wintypes.WPARAM,
             wintypes.LPARAM,
         )
-        class POINT(ctypes.Structure):
-            _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+        POINT = wintypes.POINT
+        MSG = wintypes.MSG
+        RECT = wintypes.RECT
+
+        class SIZE(ctypes.Structure):
+            _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
 
         user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(POINT)]
         user32.ClientToScreen.restype = wintypes.BOOL
-
-        class MSG(ctypes.Structure):
-            _fields_ = [
-                ("hwnd", wintypes.HWND),
-                ("message", wintypes.UINT),
-                ("wParam", wintypes.WPARAM),
-                ("lParam", wintypes.LPARAM),
-                ("time", wintypes.DWORD),
-                ("pt", POINT),
-            ]
 
         class WNDCLASSEXW(ctypes.Structure):
             _fields_ = [
@@ -367,17 +361,6 @@ class _PreviewManager:
                 ("hIconSm", wintypes.HICON),
             ]
 
-        class RECT(ctypes.Structure):
-            _fields_ = [
-                ("left", wintypes.LONG),
-                ("top", wintypes.LONG),
-                ("right", wintypes.LONG),
-                ("bottom", wintypes.LONG),
-            ]
-
-        class SIZE(ctypes.Structure):
-            _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
-
         class THUMBNAIL_PROPERTIES(ctypes.Structure):
             _fields_ = [
                 ("dwFlags", wintypes.DWORD),
@@ -392,8 +375,6 @@ class _PreviewManager:
         # and the thumbnail handle can be silently truncated.
         kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-        user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
-        user32.RegisterClassExW.restype = wintypes.ATOM
         user32.CreateWindowExW.argtypes = [
             wintypes.DWORD,
             wintypes.LPCWSTR,
@@ -416,16 +397,14 @@ class _PreviewManager:
             wintypes.LPARAM,
         ]
         user32.DefWindowProcW.restype = LRESULT
-        user32.PeekMessageW.argtypes = [
-            ctypes.POINTER(MSG),
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.UINT,
-            wintypes.UINT,
-        ]
-        user32.PeekMessageW.restype = wintypes.BOOL
-        user32.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
-        user32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
+        # Gesture plumbing (#122): declared or the 64-bit HWND truncates and
+        # GetCapture()==hwnd can silently never be true (finish_gesture then
+        # skips ReleaseCapture). PeekMessageW/TranslateMessage/
+        # DispatchMessageW/RegisterClassExW/GetCursorPos/ReleaseCapture/
+        # GetSystemMetrics are safe undeclared — pointer args ride byref.
+        user32.SetCapture.argtypes = [wintypes.HWND]
+        user32.SetCapture.restype = wintypes.HWND
+        user32.GetCapture.restype = wintypes.HWND
         user32.DestroyWindow.argtypes = [wintypes.HWND]
         user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         user32.SetWindowPos.argtypes = [
@@ -438,7 +417,6 @@ class _PreviewManager:
             wintypes.UINT,
         ]
         user32.SetWindowPos.restype = wintypes.BOOL
-        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
         user32.IsWindow.argtypes = [wintypes.HWND]
         user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
         user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
@@ -456,24 +434,6 @@ class _PreviewManager:
         user32.AppendMenuW.restype = wintypes.BOOL
         user32.CheckMenuItem.argtypes = [wintypes.HMENU, ctypes.c_size_t, wintypes.UINT]
         user32.CheckMenuItem.restype = wintypes.DWORD
-        # Gesture/interaction plumbing (#122). Pointer-sized signatures are
-        # declared for the same truncation reason as above.
-        user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
-        user32.GetCursorPos.restype = wintypes.BOOL
-        user32.SetCapture.argtypes = [wintypes.HWND]
-        user32.SetCapture.restype = wintypes.HWND
-        user32.ReleaseCapture.argtypes = []
-        user32.ReleaseCapture.restype = wintypes.BOOL
-        # Pointer-sized or the 64-bit HWND truncates and GetCapture()==hwnd
-        # can silently never be true (finish_gesture then skips ReleaseCapture).
-        user32.GetCapture.argtypes = []
-        user32.GetCapture.restype = wintypes.HWND
-        user32.GetSystemMetrics.restype = ctypes.c_int
-        try:
-            user32.SetProcessDPIAware.argtypes = []
-            user32.SetProcessDPIAware.restype = wintypes.BOOL
-        except AttributeError:  # very old Windows; per-monitor fallback below
-            pass
 
         dwmapi.DwmRegisterThumbnail.argtypes = [
             wintypes.HWND,
