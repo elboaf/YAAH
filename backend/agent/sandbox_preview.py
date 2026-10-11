@@ -39,10 +39,6 @@ _PREVIEW_HEIGHT = 236
 # defaults in its code are 192x108 .. 960x540, but #122 chose these).
 _PREVIEW_MIN_WIDTH = 100
 _PREVIEW_MIN_HEIGHT = 80
-# EventFireModes / event constants for the SetWinEventHook pin-follow hook.
-_EVENT_OBJECT_LOCATIONCHANGE = 0x800B
-_WINEVENT_OUTOFCONTEXT = 0x0
-_WINEVENT_SKIPOWNTHREAD = 0x2
 _DISCOVERY_TIMEOUT = 60.0
 _DISCOVERY_INTERVAL = 0.5
 _CHECK_INTERVAL = 0.25
@@ -339,18 +335,6 @@ class _PreviewManager:
             wintypes.WPARAM,
             wintypes.LPARAM,
         )
-        # SetWinEventHook callback (pin-follow #116): out-of-context, no DLL.
-        WINEVENTPROC = ctypes.WINFUNCTYPE(
-            None,
-            wintypes.HANDLE,  # hHook
-            wintypes.DWORD,  # event
-            wintypes.HWND,  # hwnd
-            ctypes.c_long,  # idObject
-            ctypes.c_long,  # idChild
-            wintypes.DWORD,  # dwEventThread
-            wintypes.DWORD,  # dwmsEventTime
-        )
-
         class POINT(ctypes.Structure):
             _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
@@ -472,18 +456,6 @@ class _PreviewManager:
         user32.AppendMenuW.restype = wintypes.BOOL
         user32.CheckMenuItem.argtypes = [wintypes.HMENU, ctypes.c_size_t, wintypes.UINT]
         user32.CheckMenuItem.restype = wintypes.DWORD
-        user32.SetWinEventHook.argtypes = [
-            wintypes.DWORD,  # eventMin
-            wintypes.DWORD,  # eventMax
-            wintypes.HMODULE,  # hmodWinEventProc
-            WINEVENTPROC,  # pfnWinEventProc
-            wintypes.DWORD,  # idProcess
-            wintypes.DWORD,  # idThread
-            wintypes.DWORD,  # dwFlags
-        ]
-        user32.SetWinEventHook.restype = wintypes.HANDLE
-        user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
-        user32.UnhookWinEvent.restype = wintypes.BOOL
         # Gesture/interaction plumbing (#122). Pointer-sized signatures are
         # declared for the same truncation reason as above.
         user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
@@ -541,7 +513,6 @@ class _PreviewManager:
         SWP_NOMOVE = 0x0002
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
-        OBJID_WINDOW = 0
 
         class_name = f"YAAHSandboxPreview_{uuid.uuid4().hex}"
         instance = kernel32.GetModuleHandleW(None)
@@ -555,7 +526,6 @@ class _PreviewManager:
         # last-seen yaah client top-left: the follow delta (user round 3).
         state = {
             "yaah_origin": None,
-            "hook": None,
             "drag": {
                 "active": False,
                 "button": 0,
@@ -764,34 +734,6 @@ class _PreviewManager:
                 _follow_and_confine()
 
 
-        def _win_event_proc(_hook, _event, event_hwnd, id_object, _child, _t1, _t2):
-            # Only the yaah main window's window-object moves matter.
-            if (
-                id_object == OBJID_WINDOW
-                and _find_yaah_window(user32) == int(event_hwnd or 0)
-            ):
-                _follow_and_confine()
-
-        win_event_proc = WINEVENTPROC(_win_event_proc)
-
-        def _install_follow_hook() -> None:
-            # Always-on follow (user round 3): track yaah's client origin and
-            # confine. WinEvents are opportunistic under a Python loop; the
-            # throttled tick in the pump loop guarantees follow reliability.
-            hook = user32.SetWinEventHook(
-                _EVENT_OBJECT_LOCATIONCHANGE,
-                _EVENT_OBJECT_LOCATIONCHANGE,
-                None,
-                win_event_proc,
-                0,
-                0,
-                _WINEVENT_OUTOFCONTEXT | _WINEVENT_SKIPOWNTHREAD,
-            )
-            if hook:
-                state["hook"] = hook
-            else:
-                log.warning("could not install follow WinEvent hook")
-
         @WNDPROC
         def wnd_proc(window, message, wparam, lparam):
             if message == WM_SIZE:
@@ -946,7 +888,6 @@ class _PreviewManager:
             user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
             if not _update_thumbnail():
                 return
-            _install_follow_hook()
 
             def _pump_messages() -> bool:
                 """Drain the message queue; False when WM_QUIT arrived."""
@@ -965,11 +906,9 @@ class _PreviewManager:
                     return
                 now = time.monotonic()
                 if now >= next_follow:
-                    # Guaranteed follow+confine: a WINEVENT_LOCATIONCHANGE
-                    # hook fires only when WinEvents reach this thread's
-                    # queue, which is not guaranteed for a Python message
-                    # loop; a throttled pass piggybacking this loop keeps
-                    # follow reliable at negligible cost.
+                    # Guaranteed follow+confine: a throttled pass
+                    # piggybacking the pump loop keeps follow reliable at
+                    # negligible cost.
                     _follow_and_confine()
                     next_follow = now + 0.06
                 if now >= next_check:
@@ -980,12 +919,6 @@ class _PreviewManager:
                     next_check = now + _CHECK_INTERVAL
                 self._stop.wait(0.05)
         finally:
-            hook = state.get("hook")
-            if hook:
-                try:
-                    user32.UnhookWinEvent(hook)
-                except Exception:
-                    log.debug("could not unhook pin-follow event", exc_info=True)
             if thumbnail.value:
                 try:
                     dwmapi.DwmUnregisterThumbnail(thumbnail)
