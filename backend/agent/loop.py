@@ -119,7 +119,7 @@ async def _emit_file_changes(
     try:
         current = await file_changes.snapshot_workspace(workspace)
         summary = await file_changes.summarize_file_changes(
-            await file_changes.diff_snapshots(baseline, current),
+            file_changes.diff_snapshots(baseline, current),
             baseline=baseline,
             current=current,
         )

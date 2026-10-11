@@ -168,10 +168,11 @@ def _filesystem_diff(before: dict[str, bytes], after: dict[str, bytes]) -> list[
     return rows
 
 
-async def diff_snapshots(
+def diff_snapshots(
     before: WorkspaceSnapshot, after: WorkspaceSnapshot
 ) -> list[dict]:
-    """Return per-file net line changes between two run snapshots."""
+    """Return per-file net line changes between two run snapshots (pure
+    dict diff — sync; callers just await-free call it)."""
     return _filesystem_diff(before.files, after.files)
 
 

@@ -31,7 +31,7 @@ async def test_git_snapshot_reports_net_changes_in_subdirectory(tmp_path):
     outside.write_text("unrelated change\n", encoding="utf-8")
     after = await snapshot_workspace(str(project))
 
-    rows = await diff_snapshots(before, after)
+    rows = diff_snapshots(before, after)
     assert {row["path"] for row in rows} == {"edit.txt", "delete.txt", "added.txt"}
     by_path = {row["path"]: row for row in rows}
     assert (by_path["edit.txt"]["added"], by_path["edit.txt"]["deleted"]) == (2, 1)
@@ -78,7 +78,7 @@ async def test_commit_provenance_reports_latest_sha_when_run_committed(tmp_path)
     run_git(repo, "commit", "-q", "-m", "second during run")
     after = await snapshot_workspace(str(repo))
 
-    rows = await diff_snapshots(before, after)
+    rows = diff_snapshots(before, after)
     summary = await summarize_file_changes(rows, baseline=before, current=after)
     latest = _sha(repo, "rev-parse", "HEAD")
     assert summary["commit"] == latest[:7]
@@ -102,7 +102,7 @@ async def test_commit_provenance_reports_not_committed_when_head_unchanged(tmp_p
     run_git(repo, "add", "-A")  # staged but uncommitted
     after = await snapshot_workspace(str(repo))
 
-    rows = await diff_snapshots(before, after)
+    rows = diff_snapshots(before, after)
     summary = await summarize_file_changes(rows, baseline=before, current=after)
     assert summary["commit"] is None
     assert summary["extra_commits"] == 0
@@ -123,7 +123,7 @@ async def test_commit_provenance_first_commit_in_empty_repo_counts(tmp_path):
     run_git(repo, "commit", "-q", "-m", "first ever")
     after = await snapshot_workspace(str(repo))
 
-    rows = await diff_snapshots(before, after)
+    rows = diff_snapshots(before, after)
     summary = await summarize_file_changes(rows, baseline=before, current=after)
     assert summary["commit"] == _sha(repo, "rev-parse", "HEAD")[:7]
 
@@ -137,7 +137,7 @@ async def test_commit_provenance_non_git_workspace_is_not_committed(tmp_path):
     (root / "note.txt").write_text("after\n", encoding="utf-8")
     after = await snapshot_workspace(str(root))
 
-    rows = await diff_snapshots(before, after)
+    rows = diff_snapshots(before, after)
     summary = await summarize_file_changes(rows, baseline=before, current=after)
     assert summary["commit"] is None
 
@@ -152,7 +152,7 @@ async def test_non_git_snapshot_reports_binary_and_text_changes(tmp_path):
     (root / "image.bin").write_bytes(b"\x00\x01")
     after = await snapshot_workspace(str(root))
 
-    rows = await diff_snapshots(before, after)
+    rows = diff_snapshots(before, after)
     by_path = {row["path"]: row for row in rows}
     assert by_path["note.txt"]["added"] == 1
     assert by_path["note.txt"]["deleted"] == 1
