@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 from backend.agent import gitproc
+from backend.agent import speak
 
 # Windows: console children of the windowed app pop up a visible console
 # window; suppress it. POSIX subprocess has no creationflags parameter.
@@ -214,15 +215,10 @@ async def transcribe_cloud(wav_path: str, endpoint: str, api_key: str, model: st
 
 def save_wav(pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
     """Wrap raw 16-bit mono PCM in a WAV file for the engines."""
-    import wave
-
     if not pcm16_bytes:
         raise ValueError("Recording contained no audio")
     fd, path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
-    with wave.open(path, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(sample_rate)
-        w.writeframes(pcm16_bytes)
+    with open(path, "wb") as f:
+        f.write(speak.wav_bytes(pcm16_bytes, sample_rate))
     return path

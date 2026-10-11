@@ -247,17 +247,10 @@ class McpManager:
                     if state._generation != gen:
                         superseded = True
                     else:
-                        # ExceptionGroups bury the real error; surface every leaf.
-                        leaves: list[str] = []
-                        for exc in eg.exceptions:
-                            if isinstance(exc, ExceptionGroup):
-                                leaves.extend(
-                                    f"{type(s).__name__}: {s}" for s in exc.exceptions
-                                )
-                            else:
-                                leaves.append(f"{type(exc).__name__}: {exc}")
+                        # ExceptionGroups bury the real error; str(eg) already
+                        # renders every nested leaf, and this is display-only.
                         state.status = "failed"
-                        state.error = "; ".join(leaves) or "unknown error"
+                        state.error = str(eg) or "unknown error"
                         state._session = None
                         state.failures += 1
                         give_up = state.will_stop_retrying()
