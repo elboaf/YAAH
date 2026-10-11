@@ -10,8 +10,9 @@ classified mutating, so the access-mode gate prompts in ask mode.
 
 import os
 import shutil
-import sys
 from pathlib import Path
+
+from backend.agent import gitproc
 
 # Pinned by build_sidecar.sh; keep in sync there.
 GIT_INSTALLER_VERSION = "2.51.0"
@@ -29,19 +30,11 @@ def find_git() -> str | None:
     return shutil.which("git")
 
 
-def _exe_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent.parent  # backend/
-
-
 def _installer_dirs() -> list[Path]:
     dirs = []
     if os.environ.get(_GIT_INSTALLER_ENV):
         dirs.append(Path(os.environ[_GIT_INSTALLER_ENV]).parent)
-    exe = _exe_dir()
-    for base in (exe, exe / "_up_", Path.cwd()):
-        dirs += [base / "installers", base / "backend" / "installers"]
+    dirs += gitproc.bundle_dirs("installers")
     dirs.append(Path(__file__).parent.parent / "installers")  # repo checkout
     return dirs
 

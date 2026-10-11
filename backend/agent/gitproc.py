@@ -23,6 +23,30 @@ NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
 # the whole tree. Windows uses a kill-on-terminate Job Object instead.
 NEW_SESSION = {} if os.name == "nt" else {"start_new_session": True}
 
+
+def exe_dir() -> Path:
+    """Directory of the running interpreter: backend.exe's folder when
+    frozen (PyInstaller one-file/one-dir) or backend/ in dev."""
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent.parent  # backend/
+
+
+def bundle_dirs(*parts: str) -> list[Path]:
+    """Candidate dirs for a bundled resource: <sub-path> under each of the
+    base dirs the packaged layouts use. Tauri turns the `../` resource
+    glob prefix into a literal `_up_` dir next to the exe, so the
+    installed layout is <exe>/_up_/backend/...; the sidecar's cwd varies
+    with how the app was launched, so anchor on the exe dir, never just
+    cwd."""
+    exe = exe_dir()
+    out: list[Path] = []
+    for base in (exe, exe / "_up_", Path.cwd()):
+        out += [base.joinpath(*parts), base / "backend" / Path(*parts)]
+    return out
+
 _GIT_EXE: str | None = None
 
 

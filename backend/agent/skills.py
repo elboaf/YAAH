@@ -17,9 +17,10 @@ invocable by the user.
 import os
 import re
 import shutil
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from backend.agent import gitproc
 
 # YAAH_SKILLS_PATH lets the test suite redirect this (default is the
 # user's real ~/.yaah/skills).
@@ -82,12 +83,9 @@ def bundled_source_dir() -> Path | None:
     (backend/bundled_skills in the repo; <exe>/_up_/backend/bundled_skills
     in the installed layout — Tauri turns the `../` resource glob prefix
     into a literal `_up_` dir next to the exe, mirroring whisper)."""
-    candidates: list[Path] = []
-    if getattr(sys, "frozen", False):
-        exe = Path(sys.executable).parent
-        candidates += [exe / "_up_" / "backend" / "bundled_skills",
-                       exe / "bundled_skills",
-                       Path.cwd() / "backend" / "bundled_skills"]
+    # Packaged layouts via the shared scan (see gitproc.bundle_dirs);
+    # repo checkout keeps the Path(__file__) anchor.
+    candidates: list[Path] = gitproc.bundle_dirs("bundled_skills")
     candidates.append(Path(__file__).parent.parent / "bundled_skills")  # repo
     for c in candidates:
         if c.is_dir():

@@ -14,10 +14,11 @@ the repo layout, and YAAH_WHISPER_BIN / YAAH_WHISPER_MODEL override
 everything (used by tests and by anyone pointing at their own build).
 """
 import os
-import sys
 import subprocess
 import tempfile
 from pathlib import Path
+
+from backend.agent import gitproc
 
 # Windows: console children of the windowed app pop up a visible console
 # window; suppress it. POSIX subprocess has no creationflags parameter.
@@ -35,24 +36,10 @@ PREFERRED_MODELS = (
 _LOCAL_TIMEOUT = 300  # seconds; small models on CPU do ~10x realtime
 
 
-def _exe_dir() -> Path:
-    """Directory of the running interpreter: backend.exe's folder when
-    frozen (PyInstaller one-file/one-dir) or backend/ in dev."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent.parent  # backend/
-
-
 def _bundle_dirs(sub: str) -> list[Path]:
-    """whisper/<sub> under packaged layouts. Tauri turns the `../` resource
-    glob prefix into a literal `_up_` dir next to the exe, so the installed
-    layout is <exe>/_up_/backend/whisper/<sub>; the sidecar's cwd varies with
-    how the app was launched, so anchor on the exe dir, never just cwd."""
-    exe = _exe_dir()
-    out: list[Path] = []
-    for base in (exe, exe / "_up_", Path.cwd()):
-        out += [base / "whisper" / sub, base / "backend" / "whisper" / sub]
-    return out
+    """whisper/<sub> under packaged layouts. See gitproc.bundle_dirs —
+    the shared `_up_`/exe/cwd scan lives there."""
+    return gitproc.bundle_dirs("whisper", sub)
 
 
 def _binary_dirs() -> list[Path]:

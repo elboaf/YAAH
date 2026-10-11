@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from backend.agent import gitenv, tools
+from backend.agent import gitenv, gitproc, tools
 
 
 def test_find_git_returns_none_without_git(monkeypatch):
@@ -31,13 +31,13 @@ def test_find_installer_repo_layout_fallback(monkeypatch, tmp_path):
     fake = tmp_path / "installers" / "Git-2.51.0-64-bit.exe"
     fake.parent.mkdir()
     fake.write_bytes(b"MZ fake")
-    monkeypatch.setattr(gitenv, "_exe_dir", lambda: tmp_path)
+    monkeypatch.setattr(gitproc, "exe_dir", lambda: tmp_path)
     assert gitenv.find_installer() == fake
 
 
 def test_find_installer_none_when_absent(monkeypatch, tmp_path):
     monkeypatch.delenv("YAAH_GIT_INSTALLER", raising=False)
-    monkeypatch.setattr(gitenv, "_exe_dir", lambda: tmp_path / "nothing")
+    monkeypatch.setattr(gitproc, "exe_dir", lambda: tmp_path / "nothing")
     monkeypatch.setattr(os, "getcwd", lambda: str(tmp_path / "nothing"))
     # repo-checkout fallback may still find a real installer in a dev
     # checkout, so only assert "not the temp dirs" — emptiness is covered

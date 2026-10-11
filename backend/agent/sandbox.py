@@ -42,6 +42,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
 from backend.agent import config as config_mod
+from backend.agent import gitproc
 
 # Fixed mount points inside the sandbox (the container user is always
 # WDAGUtilityAccount). The bootstrap template depends on these constants.
@@ -121,12 +122,9 @@ def bundled_toolkit_source() -> Path | None:
     (backend/bundled_toolkit in the repo; <exe>/_up_/backend/
     bundled_toolkit in the installed layout — same _up_ convention as
     bundled_skills, see skills.bundled_source_dir)."""
-    candidates: list[Path] = []
-    if getattr(sys, "frozen", False):
-        exe = Path(sys.executable).parent
-        candidates += [exe / "_up_" / "backend" / "bundled_toolkit",
-                       exe / "bundled_toolkit",
-                       Path.cwd() / "backend" / "bundled_toolkit"]
+    # Packaged layouts via the shared scan (see gitproc.bundle_dirs);
+    # repo checkout keeps the Path(__file__) anchor.
+    candidates: list[Path] = gitproc.bundle_dirs("bundled_toolkit")
     candidates.append(Path(__file__).parent.parent / "bundled_toolkit")
     for c in candidates:
         if c.is_dir():

@@ -25,6 +25,8 @@ from pathlib import Path
 
 import httpx
 
+from backend.agent import gitproc
+
 # ---- Voice table -----------------------------------------------------------
 # Authoritative sid -> name order for the sherpa-onnx kokoro multi-lang v1.0
 # voices.bin (scripts/kokoro/v1.0/generate_voices_bin.py in sherpa-onnx; the
@@ -88,28 +90,17 @@ def _pack_complete(model_dir: Path) -> bool:
 
 # ---- Model resolution ------------------------------------------------------
 
-def _exe_dir() -> Path:
-    """Directory of the running interpreter: backend.exe's folder when
-    frozen (PyInstaller) or backend/ in dev."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent.parent  # backend/
-
 
 def _model_dir_candidates() -> list[Path]:
-    """Where the kokoro model dir may live, best first. Tauri turns the
-    `../` resource glob prefix into a literal `_up_` dir next to the exe
-    (same layout quirk transcribe.py handles). YAAH_TTS_MODEL_DIR is
-    authoritative when set — tests and custom builds point it at one dir
-    and nothing else may shadow it. The download target (~/.yaah/tts or
-    backend/data/tts) is always a candidate, so a freshly downloaded model
-    resolves without a restart."""
+    """Where the kokoro model dir may live, best first. See
+    gitproc.bundle_dirs for the packaged `_up_` layout. YAAH_TTS_MODEL_DIR
+    is authoritative when set — tests and custom builds point it at one
+    dir and nothing else may shadow it. The download target (~/.yaah/tts
+    or backend/data/tts) is always a candidate, so a freshly downloaded
+    model resolves without a restart."""
     if os.environ.get("YAAH_TTS_MODEL_DIR"):
         return [Path(os.environ["YAAH_TTS_MODEL_DIR"])]
-    exe = _exe_dir()
-    out: list[Path] = []
-    for base in (exe, exe / "_up_", Path.cwd()):
-        out += [base / "tts" / MODEL_NAME, base / "backend" / "tts" / MODEL_NAME]
+    out: list[Path] = gitproc.bundle_dirs("tts", MODEL_NAME)
     out += [
         _data_root() / MODEL_NAME,  # where download_model() puts it
         Path(__file__).parent.parent / "data" / "tts" / MODEL_NAME,  # dev
