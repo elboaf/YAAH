@@ -26,9 +26,9 @@ def inline_attachment_text(record: dict) -> str:
     content = record.get("content")
     if content is not None:
         if len(content.encode("utf-8")) > INLINE_LIMIT_BYTES:
-            cut = content
-            while len(cut.encode("utf-8")) > INLINE_LIMIT_BYTES:
-                cut = cut[:-1]
+            cut = content.encode("utf-8")[:INLINE_LIMIT_BYTES].decode(
+                "utf-8", errors="ignore"
+            )
             content = cut + "\n" + _TRUNCATION_MARKER
         return f"\n\n--- attached file: {name} ---\n```\n{content}\n```"
     path = record.get("path") or ""
