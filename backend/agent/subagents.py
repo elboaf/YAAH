@@ -486,6 +486,119 @@ async def run_sub_agent(
 
     _record("user", prompt)
 
+    async def _consume_stream(stream) -> None:
+        # Consume one model stream into the per-turn acc/state closures.
+        async for ev in stream:
+            if cancel_ev.is_set():
+                return
+            if ev["type"] == "content":
+                acc.append(ev["text"])
+                if on_event:
+                    on_event({"type": "text", "text": ev["text"]})
+            elif ev["type"] == "thinking":
+                # UI-only telemetry; never record reasoning in the transcript.
+                if on_event:
+                    on_event({"type": "thinking", "text": ev.get("text", "")})
+            elif ev["type"] == "tool_calls":
+                state["tool_calls"] = ev["tool_calls"]
+            elif ev["type"] == "finish":
+                state["finish"] = ev.get("reason")
+
+    async def _exec_tool_calls(tool_calls, *, interruptible: bool) -> bool:
+        """Execute a turn's tool calls, appending tool results to messages.
+
+        Returns True when cancellation interrupted the batch (the pending
+        call is recorded as intent, not result) — only possible when
+        `interruptible`; the grace turn runs its calls to completion.
+        """
+        nonlocal status, final_text
+        for tc in tool_calls:
+            if interruptible and cancel_ev.is_set():
+                status = "cancelled"
+                # The model streamed this call but the parent stopped
+                # before it executed: record the intent, not a result.
+                _record(
+                    "assistant",
+                    "".join(acc),
+                    tool_calls=[tc],
+                    note="tool call interrupted before execution",
+                )
+                final_text = "".join(acc)
+                return True
+            name = tc["function"]["name"]
+            args = {}
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+            except json.JSONDecodeError as e:
+                result = {"error": f"Invalid JSON arguments: {e}"}
+            else:
+                if on_event:
+                    on_event(
+                        {
+                            "type": "tool_start",
+                            "tool_call_id": tc.get("id", ""),
+                            "name": name,
+                            "args": args,
+                        }
+                    )
+                if name == "load_skill":
+                    result = skill_registry.load_skill_into_messages(
+                        args, loaded_skills, messages
+                    )
+                else:
+                    # #188 belt-and-braces: the allowlist is enforced at
+                    # execution time too, not only when the schemas were
+                    # listed — normal and grace turns alike get no wider
+                    # tool access than the agent's tool set.
+                    allowed_names = {
+                        s["function"]["name"] for s in tools
+                    }
+                    if name not in allowed_names:
+                        result = {
+                            "error": (
+                                f"Tool '{name}' is not in agent "
+                                f"'{defn.name}'s allowed tool set."
+                            )
+                        }
+                    elif gate is not None:
+                        # Access mode applies to sub-agents too: the
+                        # parent's gate decides before anything runs.
+                        # None = approved (execute below); a dict is the
+                        # denial/plan-block error result.
+                        result = await gate(name, args, tc.get("id", ""))
+                    else:
+                        result = None
+                    if result is None:
+                        result = await _exec(name, args, tc.get("id", ""))
+                if on_event:
+                    on_event(
+                        {
+                            "type": "tool_result",
+                            "tool_call_id": tc.get("id", ""),
+                            "name": name,
+                            "result": result,
+                        }
+                    )
+
+            result_str = json.dumps(result)
+            if len(result_str) > MAX_RESULT_CHARS:
+                result_str = result_str[:MAX_RESULT_CHARS] + "…[truncated]"
+            _record(
+                "tool",
+                result_str,
+                tool_call_id=tc.get("id", ""),
+                name=name,
+                args=args,
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": result_str,
+                }
+            )
+        return False
+
     final_text = ""
     status = "completed"
     error: str | None = None
@@ -541,21 +654,7 @@ async def run_sub_agent(
 
             async def _consume():
                 stream = await model_client.chat(messages, tools=tools, stream=True)
-                async for ev in stream:
-                    if cancel_ev.is_set():
-                        return
-                    if ev["type"] == "content":
-                        acc.append(ev["text"])
-                        if on_event:
-                            on_event({"type": "text", "text": ev["text"]})
-                    elif ev["type"] == "thinking":
-                        # UI-only telemetry; never record reasoning in the transcript.
-                        if on_event:
-                            on_event({"type": "thinking", "text": ev.get("text", "")})
-                    elif ev["type"] == "tool_calls":
-                        state["tool_calls"] = ev["tool_calls"]
-                    elif ev["type"] == "finish":
-                        state["finish"] = ev.get("reason")
+                await _consume_stream(stream)
 
             # Race the model call against cancellation: a parent Stop must
             # interrupt an in-flight sub-agent model call promptly, not wait
@@ -611,92 +710,7 @@ async def run_sub_agent(
                 }
             )
 
-            for tc in tool_calls:
-                if cancel_ev.is_set():
-                    status = "cancelled"
-                    # The model streamed this call but the parent stopped
-                    # before it executed: record the intent, not a result.
-                    _record(
-                        "assistant",
-                        "".join(acc),
-                        tool_calls=[tc],
-                        note="tool call interrupted before execution",
-                    )
-                    final_text = "".join(acc)
-                    break
-                name = tc["function"]["name"]
-                args = {}
-                try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except json.JSONDecodeError as e:
-                    result = {"error": f"Invalid JSON arguments: {e}"}
-                else:
-                    if on_event:
-                        on_event(
-                            {
-                                "type": "tool_start",
-                                "tool_call_id": tc.get("id", ""),
-                                "name": name,
-                                "args": args,
-                            }
-                        )
-                    if name == "load_skill":
-                        result = skill_registry.load_skill_into_messages(
-                            args, loaded_skills, messages
-                        )
-                    else:
-                        # #188 belt-and-braces: the allowlist is enforced
-                        # at execution time too, not only when the schemas
-                        # were listed — a future regression that leaks a
-                        # schema hits this structured error, not a write.
-                        allowed_names = {
-                            s["function"]["name"] for s in tools
-                        }
-                        if name not in allowed_names:
-                            result = {
-                                "error": (
-                                    f"Tool '{name}' is not in agent "
-                                    f"'{defn.name}'s allowed tool set."
-                                )
-                            }
-                        elif gate is not None:
-                            # Access mode applies to sub-agents too: the
-                            # parent's gate decides before anything runs.
-                            # None = approved (execute below); a dict is the
-                            # denial/plan-block error result.
-                            result = await gate(name, args, tc.get("id", ""))
-                        else:
-                            result = None
-                        if result is None:
-                            result = await _exec(name, args, tc.get("id", ""))
-                    if on_event:
-                        on_event(
-                            {
-                                "type": "tool_result",
-                                "tool_call_id": tc.get("id", ""),
-                                "name": name,
-                                "result": result,
-                            }
-                        )
-
-                result_str = json.dumps(result)
-                if len(result_str) > MAX_RESULT_CHARS:
-                    result_str = result_str[:MAX_RESULT_CHARS] + "…[truncated]"
-                _record(
-                    "tool",
-                    result_str,
-                    tool_call_id=tc.get("id", ""),
-                    name=name,
-                    args=args,
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "content": result_str,
-                    }
-                )
-            if status == "cancelled":
+            if await _exec_tool_calls(tool_calls, interruptible=True):
                 break
         else:
             # for-else: loop exhausted the turn budget without a final answer.
@@ -722,21 +736,7 @@ async def run_sub_agent(
                 acc = []
                 try:
                     stream = await model_client.chat(messages, tools=tools, stream=True)
-                    async for ev in stream:
-                        if cancel_ev.is_set():
-                            break
-                        if ev["type"] == "content":
-                            acc.append(ev["text"])
-                            if on_event:
-                                on_event({"type": "text", "text": ev["text"]})
-                        elif ev["type"] == "thinking":
-                            # UI-only telemetry; never record reasoning in the transcript.
-                            if on_event:
-                                on_event({"type": "thinking", "text": ev.get("text", "")})
-                        elif ev["type"] == "tool_calls":
-                            state["tool_calls"] = ev["tool_calls"]
-                        elif ev["type"] == "finish":
-                            state["finish"] = ev.get("reason")
+                    await _consume_stream(stream)
                 except model_client.ModelError as e:
                     status = "error"
                     error = f"{type(e).__name__}: {e}"
@@ -756,74 +756,9 @@ async def run_sub_agent(
                             "tool_calls": tool_calls,
                         }
                     )
-                    for tc in tool_calls:
-                        name = tc["function"]["name"]
-                        args = {}
-                        try:
-                            args = json.loads(tc["function"]["arguments"] or "{}")
-                        except json.JSONDecodeError as e:
-                            result = {"error": f"Invalid JSON arguments: {e}"}
-                        else:
-                            if on_event:
-                                on_event(
-                                    {
-                                        "type": "tool_start",
-                                        "tool_call_id": tc.get("id", ""),
-                                        "name": name,
-                                        "args": args,
-                                    }
-                                )
-                            if name == "load_skill":
-                                result = skill_registry.load_skill_into_messages(
-                                    args, loaded_skills, messages
-                                )
-                            else:
-                                # #188 belt-and-braces: the grace-turn
-                                # loop enforces the allowlist too — a
-                                # budget-exhausted turn gets no wider
-                                # tool access than a normal one.
-                                allowed_names = {
-                                    s["function"]["name"] for s in tools
-                                }
-                                if name not in allowed_names:
-                                    result = {
-                                        "error": (
-                                            f"Tool '{name}' is not in agent "
-                                            f"'{defn.name}'s allowed tool set."
-                                        )
-                                    }
-                                elif gate is not None:
-                                    result = await gate(name, args, tc.get("id", ""))
-                                else:
-                                    result = None
-                                if result is None:
-                                    result = await _exec(name, args, tc.get("id", ""))
-                            if on_event:
-                                on_event(
-                                    {
-                                        "type": "tool_result",
-                                        "tool_call_id": tc.get("id", ""),
-                                        "name": name,
-                                        "result": result,
-                                    }
-                                )
-                        result_str = json.dumps(result)
-                        if len(result_str) > MAX_RESULT_CHARS:
-                            result_str = result_str[:MAX_RESULT_CHARS] + "…[truncated]"
-                        _record(
-                            "tool",
-                            result_str,
-                            tool_call_id=tc.get("id", ""),
-                            name=name,
-                            args=args,
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", ""),
-                                "content": result_str,
-                            }
-                        )
+                    # Not interruptible: the grace turn is the final call,
+                    # its tool calls run to completion.
+                    await _exec_tool_calls(tool_calls, interruptible=False)
                     status = "max_turns"
                     final_text = content or (
                         "[sub-agent hit its turn budget; grace turn ended on "
