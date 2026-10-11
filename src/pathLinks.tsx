@@ -19,7 +19,7 @@
 // included) stays the link label. Scrolling to the line is deferred — the
 // PreviewModal has no line targeting yet, so the link must simply not break.
 
-import { Fragment, useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { checkFileExists } from './api'
 
 /**
@@ -254,21 +254,6 @@ export function usePathTokens(raw: string, workspace: string | null): ReadonlySe
   return confirmed
 }
 
-/** Plain text with remark-breaks semantics: a literal \n renders as a break. */
-function withBreaks(s: string, keyBase: string): ReactNode {
-  const segs = s.split('\n')
-  return (
-    <Fragment key={keyBase}>
-      {segs.map((seg, i) => (
-        <Fragment key={`${keyBase}.${i}`}>
-          {i > 0 && <br />}
-          {seg}
-        </Fragment>
-      ))}
-    </Fragment>
-  )
-}
-
 /** #275: shared with markdown.tsx — a confirmed path link inside streamed
  *  text must render between (not inside) the append-only StreamText runs. */
 export function fileAnchor(
@@ -291,30 +276,4 @@ export function fileAnchor(
       {t.raw}
     </a>
   )
-}
-
-/**
- * The synchronous text renderer: plain text (with line breaks) where the
- * candidates confirmed to exist become anchors. Used by AgentMarkdown's
- * `p`/`li`/`td` renderers — code spans and fenced blocks never reach it
- * (react-markdown routes those to their own components). With an empty
- * `confirmed` set the output is the message's ordinary rendering.
- */
-export function renderTextWithPaths(
-  text: string,
-  confirmed: ReadonlySet<string>,
-  onOpen: (path: string, line: number | null) => void,
-): ReactNode {
-  const toks = tokenizePathCandidates(text).filter((t) => confirmed.has(t.path))
-  if (toks.length === 0) return withBreaks(text, 't')
-  const parts: ReactNode[] = []
-  let pos = 0
-  for (let k = 0; k < toks.length; k++) {
-    const t = toks[k]
-    if (t.start > pos) parts.push(withBreaks(text.slice(pos, t.start), `p${k}`))
-    parts.push(fileAnchor({ raw: text.slice(t.start, t.end), path: t.path, line: t.line }, `a${k}`, onOpen))
-    pos = t.end
-  }
-  if (pos < text.length) parts.push(withBreaks(text.slice(pos), `p${toks.length}`))
-  return parts
 }

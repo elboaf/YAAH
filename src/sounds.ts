@@ -33,14 +33,20 @@ function getCtx(): AudioContext | null {
   return ctx
 }
 
-/** Two-tone "run finished" chime: C6 -> E6, ~0.45s, soft attack/decay. */
-export function playRunFinished(): void {
+/** getCtx + one resume attempt; null when unusable or still suspended. */
+function readyCtx(): AudioContext | null {
   const c = getCtx()
-  if (!c) return
+  if (!c) return null
   if (c.state === 'suspended') {
     void c.resume().catch(() => {})
-    if (c.state === 'suspended') return
+    if (c.state === 'suspended') return null
   }
+  return c
+}
+
+/** One synthesized two-tone chime. `tones` is [freq, start, dur] triples on
+ *  a shared master gain (0.12), sine oscillators with soft attack/decay. */
+function chime(c: AudioContext, tones: Array<[number, number, number]>): void {
   const t = c.currentTime
   const master = c.createGain()
   master.gain.value = 0.12
@@ -58,35 +64,17 @@ export function playRunFinished(): void {
     osc.start(t + start)
     osc.stop(t + start + dur + 0.05)
   }
-  tone(1046.5, 0, 0.35) // C6
-  tone(1318.5, 0.12, 0.35) // E6
+  for (const [freq, start, dur] of tones) tone(freq, start, dur)
+}
+
+/** Two-tone "run finished" chime: C6 -> E6, ~0.45s, soft attack/decay. */
+export function playRunFinished(): void {
+  const c = readyCtx()
+  if (c) chime(c, [[1046.5, 0, 0.35], [1318.5, 0.12, 0.35]]) // C6 -> E6
 }
 
 /** Two-tone "question pending" chime: E6 -> C6 (inverted), slightly longer. */
 export function playQuestionPending(): void {
-  const c = getCtx()
-  if (!c) return
-  if (c.state === 'suspended') {
-    void c.resume().catch(() => {})
-    if (c.state === 'suspended') return
-  }
-  const t = c.currentTime
-  const master = c.createGain()
-  master.gain.value = 0.12
-  master.connect(c.destination)
-  const tone = (freq: number, start: number, dur: number) => {
-    const osc = c.createOscillator()
-    const gain = c.createGain()
-    osc.type = 'sine'
-    osc.frequency.value = freq
-    gain.gain.setValueAtTime(0, t + start)
-    gain.gain.linearRampToValueAtTime(1, t + start + 0.02)
-    gain.gain.exponentialRampToValueAtTime(0.001, t + start + dur)
-    osc.connect(gain)
-    gain.connect(master)
-    osc.start(t + start)
-    osc.stop(t + start + dur + 0.05)
-  }
-  tone(1318.5, 0, 0.4) // E6
-  tone(1046.5, 0.16, 0.4) // C6
+  const c = readyCtx()
+  if (c) chime(c, [[1318.5, 0, 0.4], [1046.5, 0.16, 0.4]]) // E6 -> C6
 }

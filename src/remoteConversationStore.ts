@@ -9,7 +9,6 @@ interface RemoteConversationState {
   transcripts: Record<string, ChatMessage[]>
   getTranscript: (hostId: string, conversationId: string) => ChatMessage[] | undefined
   setTranscript: (hostId: string, conversationId: string, messages: ChatMessage[]) => void
-  clearTranscript: (hostId: string, conversationId: string) => void
   clearHost: (hostId: string) => void
 }
 
@@ -25,12 +24,6 @@ export const useRemoteConversations = create<RemoteConversationState>((set, get)
         [remoteConversationKey(hostId, conversationId)]: messages,
       },
     })),
-  clearTranscript: (hostId, conversationId) =>
-    set((state) => {
-      const transcripts = { ...state.transcripts }
-      delete transcripts[remoteConversationKey(hostId, conversationId)]
-      return { transcripts }
-    }),
   clearHost: (hostId) =>
     set((state) => {
       const prefix = `remote:${encodeURIComponent(hostId)}:`

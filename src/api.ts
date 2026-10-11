@@ -387,38 +387,10 @@ export const updateConfig = (
     }>
     /** Per-model step budgets: authoritative map when present (#111). */
     model_steps?: Record<string, number>
-    voice: {
-      engine?: 'local' | 'cloud'
-      cloud_endpoint?: string
-      cloud_api_key?: string
-      cloud_model?: string
-      ptt_hotkey?: string
-      tts_enabled?: boolean
-      tts_voice?: string
-      tts_speed?: number
-      /** #207: spoken-briefing (<say>) generation on/off (default on). */
-      say_emissions?: boolean
-      /** #207: show captured briefings on their messages in chat. */
-      say_in_chat?: boolean
-      /** #295: narrator persona for spoken briefings. */
-      say_persona?: string
-      tts_engine?: 'local' | 'remote'
-      tts_endpoint?: string
-      tts_api_key?: string
-      tts_model?: string
-      sounds_enabled?: boolean
-    }
-    remote?: {
-      hosting_enabled?: boolean
-      passphrase?: string
-      display_name?: string
-    }
-    sandbox?: {
-      enabled?: boolean
-    }
-    memory?: {
-      enabled?: boolean
-    }
+    voice?: Partial<AgentConfig['voice']>
+    remote?: Partial<AgentConfig['remote']>
+    sandbox?: Partial<AgentConfig['sandbox']>
+    memory?: Partial<AgentConfig['memory']>
   }>,
 ) =>
   api<{ ok: boolean }>('/api/config', {
@@ -543,9 +515,6 @@ export const previewFile = (
       end_line: endLine ?? null,
     }),
   })
-
-export const exportConversationUrl = (id: number) =>
-  url(`/api/conversations/${id}/export`)
 
 export const updateConversation = (
   id: number,
@@ -678,12 +647,6 @@ export const queueMessage = (
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, skills, images, attachments }),
   })
-
-export const fetchQueue = (id: number) =>
-  api<{ items: QueuedItem[] }>(`/api/agent/${id}/queue`)
-
-export const removeQueued = (id: number, itemId: number) =>
-  api<{ ok: boolean }>(`/api/agent/${id}/queue/${itemId}`, { method: 'DELETE' })
 
 export const steerAgent = (id: number) =>
   api<{ ok: boolean }>(`/api/agent/${id}/steer`, { method: 'POST' })
@@ -1251,15 +1214,6 @@ export const syncPendingRemoteDeviceCommits = (hostId: string, conversationId: s
   api<{ synced: number; pending: number; conflict?: unknown }>(`${remoteChatPath(hostId, conversationId)}/sync-pending`, { method: 'POST' })
 
 export const remoteStatus = () => api<RemoteStatus>('/api/remote/status')
-
-export const connectRemote = (url: string, passphrase: string) =>
-  api<RemoteStatus>('/api/remote/connect', {
-    method: 'POST',
-    body: JSON.stringify({ url, passphrase }),
-  })
-
-export const disconnectRemote = () =>
-  api<{ ok: boolean }>('/api/remote/disconnect', { method: 'POST' })
 
 // ---------------------------------------------------------------- agent stream
 

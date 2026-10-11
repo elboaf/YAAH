@@ -133,7 +133,8 @@ const MarkdownContext = createContext<MarkdownScope>({
 })
 
 /** Plain-text node(s) with #258 linkification applied. Renders ordinary
- *  markdown text nodes through renderTextWithPaths; non-text children
+ *  markdown text nodes through markdown.tsx's own path-aware rendering;
+ *  non-text children
  *  (emphasis, nested links, chips...) are passed through untouched — the
  *  scanner only ever sees top-level plain runs, so formatting survives and
  *  a markdown link's label/target can never be rewritten. */

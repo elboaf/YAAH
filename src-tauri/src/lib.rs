@@ -631,12 +631,12 @@ fn prepare_update(_app: tauri::AppHandle, installer_path: String) -> Result<(), 
 }
 
 /// Open a URL in the OS default browser from Rust (#59). The opener
-/// plugin's JS binding fails in the packaged app (the #59 toast proved the
-/// failure is in the JS->plugin IPC layer), while this shell-free path is
-/// what open_releases_page has used successfully since the update chip
-/// shipped. ShellExecuteW directly — no cmd.exe, no metacharacter surface —
-/// with a scheme allowlist, because chat links are model-generated and
-/// unlike open_releases_page's github-only gate, cannot be trusted.
+/// plugin's JS binding used to fail in the packaged app (the #59 toast
+/// proved the failure is in the JS->plugin IPC layer), so this bypasses the
+/// plugin entirely: ShellExecuteW directly — no cmd.exe, no metacharacter
+/// surface — with a scheme allowlist, because chat links are
+/// model-generated and, unlike open_releases_page's github-only gate,
+/// cannot be trusted.
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
     let allowed = url.starts_with("https://")
@@ -710,7 +710,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(BackendShared {
             child: Mutex::new(None),
             restart_requested: AtomicBool::new(false),

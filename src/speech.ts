@@ -890,7 +890,7 @@ export function normalizeForSpeech(text: string): string {
   return acronyms(t).trim()
 }
 
-/** The composition TTS input receives: markdown → prose, then the #206
+/** #295 helper: markdown → plain prose (see proseForSpeech), then the #206
  *  normalization pass. */
 export function normalizeProseForSpeech(md: string, maxChars = 4000): string {
   return normalizeForSpeech(proseForSpeech(md, maxChars))

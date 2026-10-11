@@ -79,6 +79,3 @@ export function emissionSegments(msg: ChatMessage): EmissionSegment[] | null {
   }
   return segments
 }
-
-/** Render helper type shim: the caller maps anchors to nodes. */
-export type SegmentAnchorRenderer = (anchor: ToolCall) => ReactNode
