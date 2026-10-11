@@ -84,6 +84,8 @@ def _find_chrome():
         if found:
             return found
     cands = [
+        # which("msedge") misses both Program Files variants on typical
+        # installs (no PATH entry); the explicit candidates cover them.
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
@@ -215,32 +217,24 @@ async def web_fetch(url, max_chars=20000, workspace=None):
     import re
     if not re.match(r"^https?://", url):
         url = "https://" + url
-    via = "Chrome"
-    text = None
     html = None
-    try:
-        html = await _browser_get(url)
-        text = strip_html(html)
+    via = None
+    text = None
+    for route, via_name in (
+        (lambda: _browser_get(url), "Chrome"),
+        (lambda: asyncio.to_thread(_curl_get, url), "curl"),
+        (lambda: asyncio.to_thread(_http_get, url), "direct"),
+    ):
+        try:
+            html = await route()
+            text = strip_html(html)
+        except Exception:
+            text = None
         if text and any(m in text[:600].lower() for m in _BLOCK_MARKERS):
             text = None  # bot-wall page; try the next route
-    except Exception:
-        pass
-    if text is None:
-        try:
-            html = await asyncio.to_thread(_curl_get, url)
-            text = strip_html(html)
-            via = "curl"
-            if text and any(m in text[:600].lower() for m in _BLOCK_MARKERS):
-                text = None  # still bot-walled; try plain HTTP
-        except Exception:
-            text = None
-    if text is None:
-        try:
-            html = await asyncio.to_thread(_http_get, url)
-            text = strip_html(html)
-            via = "direct"
-        except Exception:
-            text = None
+        if text is not None:
+            via = via_name
+            break
     if text is None:
         return (f"[BLOCKED] {url} could not be fetched (bot protection "
                 f"defeated both the headless browser and direct HTTP "
