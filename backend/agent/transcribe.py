@@ -68,28 +68,34 @@ def _model_dirs() -> list[Path]:
     return dirs
 
 
-def find_binary() -> Path | None:
-    """Locate a whisper.cpp CLI (whisper-cli / main, .exe on Windows)."""
-    names = ("whisper-cli", "main")
-    for d in _binary_dirs():
+def _first_file(dirs, names_with_exts) -> Path | None:
+    """First existing <dir>/<name><ext> across the candidate dirs, in
+    order. The shared probe for find_binary/find_model."""
+    for d in dirs:
         if not d.is_dir():
             continue
-        for name in names:
-            for ext in (".exe", ""):
+        for name, exts in names_with_exts:
+            for ext in exts:
                 p = d / f"{name}{ext}"
                 if p.is_file():
                     return p
     return None
 
 
+def find_binary() -> Path | None:
+    """Locate a whisper.cpp CLI (whisper-cli / main, .exe on Windows)."""
+    return _first_file(
+        _binary_dirs(),
+        [("whisper-cli", (".exe", "")), ("main", (".exe", ""))],
+    )
+
+
 def find_model() -> Path | None:
     """Best bundled/downloaded ggml model: preferred names first, then any
     ggml-*.bin the user dropped into a model dir."""
-    for name in PREFERRED_MODELS:
-        for d in _model_dirs():
-            p = d / name
-            if p.is_file():
-                return p
+    hit = _first_file(_model_dirs(), [(n, ()) for n in PREFERRED_MODELS])
+    if hit:
+        return hit
     for d in _model_dirs():
         if d.is_dir():
             for p in sorted(d.glob("ggml-*.bin")):
