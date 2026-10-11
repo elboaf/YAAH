@@ -1144,19 +1144,17 @@ async def _create_bash_process(
     )
 
 
-async def run_bash(
-    workspace: str, command: str, timeout_seconds: int = 60, on_chunk=None
+async def _run_shell(
+    spawn, workspace: str, command: str, timeout_seconds, on_chunk
 ) -> dict:
-    """Run a shell command in the workspace; return structured result.
-    on_chunk, when given, receives output incrementally while it runs."""
+    """Shared spawn/capture/truncate body of run_bash/run_powershell.
+    `spawn` builds the (already-configured) subprocess."""
     # Fractional timeouts are accepted (floored at 0.1) so tests can wait
     # out a real deadline in milliseconds; the schema stays integer.
     timeout = max(0.1, min(float(timeout_seconds or 60), MAX_BASH_TIMEOUT))
     note = _clamp_note(timeout_seconds)
     try:
-        proc = await _create_bash_process(
-            command, workspace_root(workspace), _tool_env()
-        )
+        proc = await spawn(command)
         job = _job_create()
         if job:
             _job_assign(job, proc.pid)
@@ -1179,6 +1177,18 @@ async def run_bash(
         }
     except Exception as e:  # noqa: BLE001
         return {"exit_code": -1, "output": f"error: {e}", "timed_out": False, "truncated": False}
+
+
+async def run_bash(
+    workspace: str, command: str, timeout_seconds: int = 60, on_chunk=None
+) -> dict:
+    """Run a shell command in the workspace; return structured result.
+    on_chunk, when given, receives output incrementally while it runs."""
+
+    async def spawn(cmd: str):
+        return await _create_bash_process(cmd, workspace_root(workspace), _tool_env())
+
+    return await _run_shell(spawn, workspace, command, timeout_seconds, on_chunk)
 
 
 async def run_powershell(
@@ -1186,42 +1196,19 @@ async def run_powershell(
 ) -> dict:
     """Run a Windows PowerShell command in the workspace; same structured
     result shape as run_bash. on_chunk receives output incrementally."""
-    # Fractional timeouts are accepted (floored at 0.1) so tests can wait
-    # out a real deadline in milliseconds; the schema stays integer.
-    timeout = max(0.1, min(float(timeout_seconds or 60), MAX_BASH_TIMEOUT))
-    note = _clamp_note(timeout_seconds)
-    try:
-        proc = await asyncio.create_subprocess_exec(
+
+    async def spawn(cmd: str):
+        return await asyncio.create_subprocess_exec(
             "powershell.exe", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-Command", command,
+            "-ExecutionPolicy", "Bypass", "-Command", cmd,
             cwd=workspace_root(workspace),
             env=_tool_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_NO_WINDOW, **_NEW_SESSION,
         )
-        job = _job_create()
-        if job:
-            _job_assign(job, proc.pid)
-        try:
-            output, timed_out = await _run_capturing(proc, job, timeout, on_chunk)
-        finally:
-            _job_close(job)
 
-        truncated = False
-        if len(output) > MAX_OUTPUT_CHARS:
-            output = output[:MAX_OUTPUT_CHARS]
-            truncated = True
-
-        return {
-            "exit_code": proc.returncode,
-            "output": output,
-            "timed_out": timed_out,
-            "truncated": truncated,
-            **({"note": note} if note else {}),
-        }
-    except Exception as e:  # noqa: BLE001
-        return {"exit_code": -1, "output": f"error: {e}", "timed_out": False, "truncated": False}
+    return await _run_shell(spawn, workspace, command, timeout_seconds, on_chunk)
 
 
 async def read_file(
