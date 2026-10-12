@@ -1104,10 +1104,15 @@ async def _load_skill(
     args: dict,
     loaded_skills: list[str],
     messages: list,
+    tail: bool = False,
 ) -> dict:
     """Handle the model's load_skill call. The real logic lives in
-    skills.load_skill_into_messages so the sub-agent runner shares it."""
-    return skill_registry.load_skill_into_messages(args, loaded_skills, messages)
+    skills.load_skill_into_messages so the sub-agent runner shares it.
+    tail=True rides through in static-prompt mode: skill bodies go to a
+    tail system message, the frozen head stays byte-stable."""
+    return skill_registry.load_skill_into_messages(
+        args, loaded_skills, messages, tail=tail
+    )
 
 
 def _cancelled(conversation_id: int) -> bool:
@@ -1583,12 +1588,44 @@ async def _run_agent_claimed(
     # Per-conversation system prompt override (Q17) wins over the global
     # one.
     conv = await get_conversation(conversation_id)
-    system_prompt = (conv or {}).get("system_prompt_override") or _default_system_prompt(workspace)
+    conv = conv or {}
+    system_prompt = conv.get("system_prompt_override") or _default_system_prompt(workspace)
+
+    # Effective call routing (#51/#76): a provider::model override targets
+    # that provider, everything else chats through the active one. The
+    # static-prompt decision must match where the call actually goes.
+    cfg = load_config()
+    provider_name = (
+        model_override.partition("::")[0]
+        if "::" in (model_override or "")
+        else (cfg.get("active_provider") or "")
+    )
+    static_mode = bool(
+        (cfg.get("providers") or {}).get(provider_name, {}).get("static_system_prompt")
+    )
+    # Frozen head (static mode): this conversation's byte-exact prompt head
+    # from the turn that froze it, valid only for the workspace the freeze
+    # was made under — the head embeds the workspace path and that project's
+    # AGENTS.md, so a conversation later moved elsewhere must refreeze, not
+    # replay stale bytes. A missing/stale freeze means THIS turn builds the
+    # head and freezes it.
+    frozen_ws = conv.get("frozen_system_prompt_ws")
+    frozen_prompt = (
+        conv.get("frozen_system_prompt")
+        if static_mode and frozen_ws == (workspace or "")
+        else None
+    )
+    frozen_turn = static_mode and bool(frozen_prompt)
+    if frozen_turn:
+        system_prompt = frozen_prompt
 
     # Explicitly invoked skills (/s name or a chip): their instruction
     # bodies are appended to the system prompt for THIS turn only — never
     # persisted, so later turns don't replay them.
+    # Static mode keeps that promise by moving the bodies OUT of the prompt
+    # head (which must stay byte-stable across turns) into a tail message.
     invoked = [n for n in (skill_names or []) if isinstance(n, str) and n.strip()]
+    invoked_skill_block = ""
     if invoked:
         # Unknown skill names must be visible to the USER, not just injected
         # as "# Skill not found" into the prompt: the chip still renders from
@@ -1601,36 +1638,51 @@ async def _run_agent_claimed(
             yield _ndjson({"type": "skill_not_found", "skills": not_found})
         skill_block = skill_registry.bodies_for_prompt(invoked)
         if skill_block:
+            # Static mode: tail message (frozen on the freeze turn too, or
+            # this turn's skill bodies would replay on every later turn —
+            # the appends are this-turn-only by contract).
+            if static_mode:
+                invoked_skill_block = invoked_skills_wrapper(skill_block)
+            else:
+                system_prompt = (
+                    f"{system_prompt}\n\n---\n\n"
+                    f"{invoked_skills_wrapper(skill_block)}"
+                )
+
+    if not frozen_turn:
+        # Dynamic per-turn appends below live in the prompt head. In static
+        # mode the head was frozen on the first model call — replaying fresh
+        # reads of AGENTS.md/memory/plan state here would mutate it and kill
+        # the prefix cache; the frozen bytes already carry what the
+        # conversation started with.
+        # The project's own agent instructions (baseline failures, shell
+        # quirks, prerequisites) travel with the workspace, so read them
+        # fresh each turn.
+        # #334: async twin — a remote workspace's AGENTS.md is fetched
+        # through the channel (same cap, same missing-file degradation as
+        # local).
+        notes = await _agents_notes_async(workspace)
+        if notes:
+            system_prompt = f"{system_prompt}\n\n---\n\n{notes}"
+
+        # Persistent per-project memory: the saved-memory index travels with
+        # the workspace across conversations, so read it fresh each turn too.
+        memory_notes = _memory_notes(workspace)
+        if memory_notes:
+            system_prompt = f"{system_prompt}\n\n---\n\n{memory_notes}"
+
+        # Plan mode tells the model what it cannot do, so it plans instead of
+        # hitting blocked-tool errors all turn.
+        if current_access_mode() == "plan":
+            system_prompt = f"{system_prompt}\n\n---\n\n{_plan_mode_note()}"
+
+        # Scheduled-run policy note: same idea — say up front what is
+        # off-limits so the model doesn't burn steps discovering it via skip
+        # errors.
+        if policy == "sandbox-only":
             system_prompt = (
-                f"{system_prompt}\n\n---\n\n"
-                f"{invoked_skills_wrapper(skill_block)}"
+                f"{system_prompt}\n\n---\n\n{_sandbox_only_note()}"
             )
-
-    # The project's own agent instructions (baseline failures, shell quirks,
-    # prerequisites) travel with the workspace, so read them fresh each turn.
-    # #334: async twin — a remote workspace's AGENTS.md is fetched through
-    # the channel (same cap, same missing-file degradation as local).
-    notes = await _agents_notes_async(workspace)
-    if notes:
-        system_prompt = f"{system_prompt}\n\n---\n\n{notes}"
-
-    # Persistent per-project memory: the saved-memory index travels with
-    # the workspace across conversations, so read it fresh each turn too.
-    memory_notes = _memory_notes(workspace)
-    if memory_notes:
-        system_prompt = f"{system_prompt}\n\n---\n\n{memory_notes}"
-
-    # Plan mode tells the model what it cannot do, so it plans instead of
-    # hitting blocked-tool errors all turn.
-    if current_access_mode() == "plan":
-        system_prompt = f"{system_prompt}\n\n---\n\n{_plan_mode_note()}"
-
-    # Scheduled-run policy note: same idea — say up front what is off-limits
-    # so the model doesn't burn steps discovering it via skip errors.
-    if policy == "sandbox-only":
-        system_prompt = (
-            f"{system_prompt}\n\n---\n\n{_sandbox_only_note()}"
-        )
 
     # Full context each turn: system prompt + persisted history. An agent
     # with its memory toggle off (issue #41) gets a fresh context instead —
@@ -1667,7 +1719,34 @@ async def _run_agent_claimed(
     )
     if compact_msg is not None:
         messages.append(compact_msg)
+    # Static mode, invoked skills: the this-turn-only instruction bodies ride
+    # in a tail message instead of the head — the head stays byte-identical
+    # to what previous turns cached (and the freeze turn must not bake the
+    # skill bodies into the frozen bytes either). Placed before history so
+    # instructions precede the conversation; being later in the prompt than
+    # the head only costs a tail re-prefill, never the cached head.
+    if static_mode and invoked_skill_block:
+        messages.append(
+            {"role": "system", "content": invoked_skill_block}
+        )
     messages.extend(history)
+    # Static mode, freeze turn: persist the head exactly as this turn's
+    # model call sends it, alongside the workspace it was built under, awaited
+    # inline so a race with the NEXT turn's read is impossible (a detached
+    # task could lose the freeze to a fast follow-up turn reading the row
+    # before the write lands). In-memory only — no log ever carries prompt
+    # bytes.
+    if static_mode and not frozen_turn:
+        try:
+            await update_conversation(
+                conversation_id,
+                frozen_system_prompt=system_prompt,
+                frozen_system_prompt_ws=workspace or "",
+            )
+        except Exception as e:  # noqa: BLE001 — freezing must not break the turn
+            log.warning("frozen_system_prompt write failed: %s", e)
+            static_mode = False
+            frozen_turn = False
     if not include_history:
         # Fresh-context agent: this turn's text rides in explicitly, with
         # its structured attachments re-inlined (#142).
@@ -1849,21 +1928,27 @@ async def _run_agent_claimed(
                     async for line in _model_step():
                         yield line
                     break
-                except model_client.ModelError as e:
+                except model_client.ModelTimeout:
+                    # A read timeout means the provider was still working
+                    # (local servers prefill silently — no bytes flow until
+                    # the first token). A retry would re-send into the busy
+                    # slot; with any prompt mutation it re-prefills from zero
+                    # and the two loops feed each other until the server just
+                    # grinds forever. The read timeout is already long enough
+                    # to cover a worst-case cold prefill, so reaching here
+                    # means the provider is genuinely stuck: surface it.
+                    raise
+                except model_client.ModelError:
                     if attempt >= 2 or cancel_ev.is_set():
                         raise
-                    # Auto-recovery (Q23): retry once with corrective context.
-                    # Text already streamed before the failure may repeat in
-                    # the UI — cosmetic next to losing the whole turn.
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": (
-                                f"Your previous request failed with: {e}. "
-                                "Retry with a corrected request."
-                            ),
-                        }
-                    )
+                    # Auto-recovery (Q23): retry once, byte-identical. The
+                    # old corrective-context append mutated the prompt
+                    # between attempts — an infra failure never reached the
+                    # model, so the note bought nothing, and on
+                    # prefix-caching providers the mutated prompt re-prefills
+                    # its whole grown tail (the retry treadmill). Text
+                    # already streamed before the failure may repeat in the
+                    # UI — cosmetic next to losing the whole turn.
 
             if cancel_ev.is_set():
                 async for _fev in _finalize_file_changes():
@@ -2098,7 +2183,9 @@ async def _run_agent_claimed(
                                 conversation_id, tc.get("id", ""), args, cancel_ev
                             )
                     elif name == "load_skill":
-                        result = await _load_skill(args, loaded_skills, messages)
+                        result = await _load_skill(
+                            args, loaded_skills, messages, tail=static_mode
+                        )
                     else:
                         # Access-mode gate (PLAN-access-modes.md). The mode is
                         # read ONCE here and passed in, so the request event

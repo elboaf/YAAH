@@ -97,7 +97,7 @@ async def test_length_finish_on_text_answer_appends_note(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_midstream_model_error_retries_once(monkeypatch):
+async def test_midstream_model_error_retries_byte_identical(monkeypatch):
     class ExplodingThenFine(FakeChat):
         async def __call__(self, messages, tools=None, stream=False):
             self.calls.append(messages)
@@ -115,9 +115,40 @@ async def test_midstream_model_error_retries_once(monkeypatch):
     cid = await create_conversation("t", ".")
     out = [json.loads(l) async for l in agent_loop.run_agent(cid, "hello", ".")]
     assert len(fake.calls) == 2, "retry must happen after a mid-stream failure"
-    # the corrective system message was sent on the retry
-    assert fake.calls[1][-1]["role"] == "system"
+    # Byte-stable retry: the retry re-sends the identical prompt. Appending
+    # corrective context between attempts mutated the prompt — the model
+    # never saw it (infra failure), and on prefix-caching providers the
+    # mutation killed the cache and re-prefilled the whole grown tail.
+    assert [dict(m) for m in fake.calls[0]] == [dict(m) for m in fake.calls[1]]
     assert any(event["type"] == "done" for event in out)
+
+
+@pytest.mark.asyncio
+async def test_model_timeout_is_not_retried(monkeypatch):
+    """A read timeout fires while the provider is still prefilling (local
+    servers stream no bytes until the first token). Retrying would re-send
+    into the busy slot — and any prompt mutation makes the next prefill even
+    longer (the retry treadmill). The timeout must surface instead."""
+
+    class TimeoutsOnceThenWouldBeFine(FakeChat):
+        async def __call__(self, messages, tools=None, stream=False):
+            self.calls.append(messages)
+            async def slow():
+                raise agent_loop.model_client.ModelTimeout(
+                    "no response from local after 3600s (timeout)"
+                )
+                yield  # pragma: no cover
+            return slow()
+
+    fake = TimeoutsOnceThenWouldBeFine(
+        [[{"type": "content", "text": "fine"}, {"type": "finish", "reason": "stop"}]]
+    )
+    monkeypatch.setattr(agent_loop.model_client, "chat", fake)
+    cid = await create_conversation("t", ".")
+    out = [json.loads(l) async for l in agent_loop.run_agent(cid, "hello", ".")]
+    assert len(fake.calls) == 1, "a timeout must never be retried"
+    assert any(event["type"] == "error" for event in out)
+    assert not any(event["type"] == "done" for event in out)
 
 
 @pytest.mark.asyncio

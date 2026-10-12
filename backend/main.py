@@ -1021,6 +1021,11 @@ class ProviderEntry(BaseModel):
     api_key: str | None = None
     model: str | None = None
     max_steps: int | None = None
+    # Per-provider static system prompt: freeze each conversation's prompt
+    # head for local prefix-caching providers (llama.cpp). A False survives
+    # save_config's merge (False is neither None nor ""), so turning the
+    # flag off persists; None = untouched.
+    static_system_prompt: bool | None = None
 
 
 class ConfigUpdate(BaseModel):

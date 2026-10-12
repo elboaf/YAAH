@@ -273,6 +273,8 @@ export interface ProviderConfig {
   api_base: string
   api_key: string // masked from server: 'set' or ''
   model: string
+  /** Freeze each conversation's prompt head (local prefix-caching providers). */
+  static_system_prompt?: boolean
 }
 
 export interface AgentConfig {

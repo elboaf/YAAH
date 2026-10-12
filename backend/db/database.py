@@ -282,6 +282,22 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN remote_revision_counter INTEGER NOT NULL DEFAULT 1"
         )
+    if "frozen_system_prompt" not in conv_cols:
+        # Per-provider static system prompt (local-model prompt caching):
+        # the byte-exact prompt head the conversation froze on its first
+        # model call; later turns replay it verbatim instead of rebuilding
+        # the head from live AGENTS.md/memory/skill state. Written only by
+        # the agent loop, never exposed through the PATCH API.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN frozen_system_prompt TEXT"
+        )
+    if "frozen_system_prompt_ws" not in conv_cols:
+        # The workspace the freeze was made under. The head embeds the
+        # workspace path and that project's AGENTS.md, so a conversation
+        # later moved to another workspace must refreeze, not replay.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN frozen_system_prompt_ws TEXT"
+        )
     # #365: databases from before the isolation removal (#359, ADR-0017)
     # still carry the dead branch-pin columns; drop them in place so an
     # upgraded database matches a fresh one. Guarded set-intersection =
@@ -820,6 +836,8 @@ async def update_conversation(conversation_id: int, **fields):
         "title",
         "workspace",
         "system_prompt_override",
+        "frozen_system_prompt",
+        "frozen_system_prompt_ws",
         "model",
         "effort",
     }

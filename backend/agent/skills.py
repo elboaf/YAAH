@@ -305,13 +305,20 @@ def bodies_for_prompt(names: list[str]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def load_skill_into_messages(args: dict, loaded_skills: list[str], messages: list) -> dict:
+def load_skill_into_messages(
+    args: dict, loaded_skills: list[str], messages: list, tail: bool = False
+) -> dict:
     """Handle a load_skill tool call: append the skill's body to the system
     prompt message so the rest of the turn follows it. Returns the tool
     result dict. Never raises.
 
     Shared by the parent loop and the sub-agent runner (a sub-agent loads
-    skills into its OWN context the same way the parent does)."""
+    skills into its OWN context the same way the parent does).
+
+    tail=True (static-prompt mode): the head must stay byte-stable across
+    every model call, so the skill body lands in a dedicated system message
+    at messages[1] (created on first load, accumulated after) instead of
+    growing messages[0]."""
     name = str(args.get("name") or "").strip()
     skill = get_skill(name)
     if skill is None:
@@ -330,12 +337,32 @@ def load_skill_into_messages(args: dict, loaded_skills: list[str], messages: lis
     # model call in this turn sees the skill's instructions. The folder
     # path lets the model read the skill's own supporting files.
     if messages and messages[0].get("role") == "system":
-        messages[0]["content"] = (
-            f"{messages[0]['content']}\n\n---\n\n"
+        block = (
             f"# Loaded skill: {skill.name}\n\n"
             f"The skill's folder (any supporting files it references live "
             f"here) is: {Path(skill.path).parent}\n\n{skill.body}"
         )
+        if tail:
+            if len(messages) > 1 and isinstance(messages[1], dict) \
+                    and messages[1].get("role") == "system" \
+                    and str(messages[1].get("content", "")).startswith("# Loaded skill:"):
+                messages[1]["content"] = (
+                    f"{messages[1]['content']}\n\n---\n\n{block}"
+                )
+            else:
+                messages.insert(1, {"role": "system", "content": block})
+        else:
+            messages[0]["content"] = (
+                f"{messages[0]['content']}\n\n---\n\n{block}"
+            )
+    result = {
+        "loaded": skill.name,
+        "description": skill.description,
+        "folder": str(Path(skill.path).parent),
+    }
+    if skill.truncated:
+        result["truncated"] = True
+    return result
     result = {
         "loaded": skill.name,
         "description": skill.description,

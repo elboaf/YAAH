@@ -165,6 +165,13 @@ DEFAULT_PROVIDER = {
     "api_base": "https://api.openai.com/v1",
     "api_key": "",
     "model": "gpt-4o",
+    # Per-provider static system prompt: when True, each conversation
+    # freezes its system prompt on the first model call and replays the
+    # same bytes on every later turn (per-turn dynamic appends move out of
+    # the prompt). For local prefix-caching providers (llama.cpp) this is
+    # the difference between seconds and a ~45-minute re-prefill — the
+    # cache is strict-prefix, so any head mutation kills it.
+    "static_system_prompt": False,
 }
 
 

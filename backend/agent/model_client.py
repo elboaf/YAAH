@@ -29,6 +29,29 @@ class ModelTimeout(ModelError):
     API failure."""
 
 
+# llama.cpp (and friends) send zero response bytes until prompt prefill
+# finishes, so the httpx READ timeout must cover the whole prefill, not the
+# inter-chunk gap: at ~40 tok/s a 128k-token cold prefill runs ~55 minutes.
+# A short read timeout doesn't just fail the request — when the caller
+# retries, the server gets a new prompt mid-prefill and never converges.
+# 3600 s reads are still bounded so a dead socket eventually surfaces;
+# connect/write/pool stay tight.
+CHAT_CONNECT_TIMEOUT = 10
+CHAT_READ_TIMEOUT = 3600
+CHAT_WRITE_TIMEOUT = 60
+CHAT_POOL_TIMEOUT = 10
+
+
+def _chat_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=CHAT_CONNECT_TIMEOUT,
+        read=CHAT_READ_TIMEOUT,
+        write=CHAT_WRITE_TIMEOUT,
+        pool=CHAT_POOL_TIMEOUT,
+    )
+
+
+
 def _provider_from_base(api_base: str) -> str:
     """A short provider label for UI readouts, derived from the API base."""
     try:
@@ -157,7 +180,7 @@ async def chat(
     if not stream:
         started = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=_chat_timeout()) as client:
                 r = await client.post(
                     f"{cfg['api_base'].rstrip('/')}/chat/completions",
                     json=payload,
@@ -218,7 +241,7 @@ async def _stream_response(
     n_content_chars = 0
     saw_done = False
     try:
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(timeout=_chat_timeout()) as client:
             async with client.stream(
                 "POST",
                 f"{api_base.rstrip('/')}/chat/completions",

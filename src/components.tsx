@@ -6522,7 +6522,7 @@ export function InterfaceScaleCard({
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
-  const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean }>>({})
+  const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean; staticSystemPrompt: boolean }>>({})
   const [active, setActive] = useState('')
   const [newName, setNewName] = useState('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
@@ -6665,6 +6665,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               model: p.model,
               apiKeyInput: '',
               savedKey: p.api_key === 'set',
+              staticSystemPrompt: p.static_system_prompt === true,
             }
           }
           setProviders(next)
@@ -6775,7 +6776,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ttsEngine, ttsEndpoint, ttsKey])
 
-  const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string }>) =>
+  const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string; staticSystemPrompt: boolean }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
 
   // Per-provider editor hydration: when a provider is expanded, seed its
@@ -6864,6 +6865,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         model: p?.model ?? '',
         apiKeyInput: '',
         savedKey: false,
+        staticSystemPrompt: false,
       },
     }))
     setNewName('')
@@ -6895,11 +6897,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setErr(null)
     try {
       // Send only providers that still exist; blank key fields keep saved keys
-      const out: Record<string, { api_base: string; model: string; api_key?: string; max_steps?: number }> = {}
+      const out: Record<string, { api_base: string; model: string; api_key?: string; max_steps?: number; static_system_prompt?: boolean }> = {}
       for (const [name, p] of Object.entries(providers)) {
         out[name] = {
           api_base: p.api_base,
           model: p.model,
+          static_system_prompt: p.staticSystemPrompt === true,
           ...(p.apiKeyInput ? { api_key: p.apiKeyInput } : {}),
         }
       }
@@ -7169,6 +7172,20 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                             onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
                             aria-label={`${name} API key`}
                           />
+                          <label className="mt-1.5 flex items-center gap-2 text-[10px] text-zinc-400">
+                            <input
+                              type="checkbox"
+                              className="h-3 w-3 shrink-0 accent-blue-600"
+                              checked={p.staticSystemPrompt}
+                              onChange={(e) => patchProvider(name, { staticSystemPrompt: e.target.checked })}
+                              aria-label={`${name} static system prompt`}
+                            />
+                            <span>
+                              Static system prompt (local models): freeze each
+                              conversation's prompt so repeat requests reuse the
+                              server's prompt cache instead of re-prefilling.
+                            </span>
+                          </label>
                           {/* Per-provider agent & context: one entry per
                               configured model, each with its own max steps
                               + compaction (issue #111). */}
