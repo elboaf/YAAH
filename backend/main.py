@@ -240,6 +240,8 @@ class NewConversation(BaseModel):
     # distinct from "unspecified".
     model: str = ""
     effort: str = ""
+    # #383: the chat's pinned sub-agent scope ('' = sub-agent: auto).
+    subagent_model: str = ""
 
 
 class ConversationUpdate(BaseModel):
@@ -249,6 +251,8 @@ class ConversationUpdate(BaseModel):
     # #51/#76: the header pickers write these; '' = Default (param not sent).
     model: str | None = None
     effort: str | None = None
+    # #383: the chat's pinned sub-agent scope; '' = sub-agent: auto.
+    subagent_model: str | None = None
 
 
 class ConversationMove(BaseModel):
@@ -270,6 +274,7 @@ class NewMessage(BaseModel):
 async def api_create_conversation(body: NewConversation):
     cid = await create_conversation(
         body.title, body.workspace, model=body.model, effort=body.effort,
+        subagent_model=body.subagent_model,
     )
     return {"id": cid}
 
@@ -859,14 +864,15 @@ async def api_update_conversation(conversation_id: int, body: ConversationUpdate
     # instead (the UI routes them; a stale client gets told where to write).
     if (conv.get("chat_type") or "chat") == "agent" and (
         body.model is not None or body.effort is not None
+        or body.subagent_model is not None
     ):
         raise HTTPException(
             status_code=409,
             detail="this chat is owned by a scheduled agent — change the "
-            "agent's model/effort, not the chat's",
+            "agent's model/effort/sub-agent scope, not the chat's",
         )
     fields = {}
-    for name in ("title", "workspace", "system_prompt_override", "model", "effort"):
+    for name in ("title", "workspace", "system_prompt_override", "model", "effort", "subagent_model"):
         val = getattr(body, name)
         if val is not None:
             fields[name] = val
@@ -978,15 +984,18 @@ class AgentTurn(BaseModel):
 
 def _resolve_turn_scope(
     conv: dict | None, agent: dict | None = None
-) -> tuple[str, str | None]:
-    """Per-chat model + effort resolution (#51/#76): what a turn in this
-    conversation runs on, before any streaming starts.
+) -> tuple[str, str | None, str]:
+    """Per-chat model + effort + sub-agent scope resolution (#51/#76, #383):
+    what a turn in this conversation runs on, and where its spawn_agent
+    delegations run, before any streaming starts.
 
-    - Normal chat: the conversation row pins both — the sidebar defaults
-      were stamped in at first send and only change when the chat's own
-      pickers change them. effort '' (the chat's explicit Default) becomes
-      the None sentinel so reasoning_effort is not sent even if a global
-      default is configured.
+    - Normal chat: the conversation row pins all three — the sidebar
+      defaults were stamped in at first send and only change when the
+      chat's own pickers change them. effort '' (the chat's explicit
+      Default) becomes the None sentinel so reasoning_effort is not sent
+      even if a global default is configured. The sub-agent scope stays ''
+      when unpinned ("sub-agent: auto") — its own fallback chain (global
+      subagent_provider > inherit) resolves at spawn time.
     - Agent-pinned chat: resolve through the owning agent — the header
       selectors write through to the agent, so its values ARE the chat's.
       Agent effort '' means inherit-global here, matching the semantics the
@@ -995,10 +1004,11 @@ def _resolve_turn_scope(
     - Unstamped rows (conv.model blank from a pre-upgrade row the stamp
       never reached) resolve to the global defaults: "" model, None effort.
 
-    Returns (model_override, effort_override) for run_agent. Provider-down
-    fails the turn visibly in model_client — no fallback is substituted.
+    Returns (model_override, effort_override, subagent_scope) for
+    run_agent. Provider-down fails the turn visibly in model_client — no
+    fallback is substituted.
 
-    #132: both returned values are provider-qualified or empty — a bare
+    #132: all returned values are provider-qualified or empty — a bare
     legacy id is qualified against the CURRENT config at resolve time (the
     write paths and the boot repair normally guarantee this already; this
     is the last-resort backstop so a turn can never half-resolve)."""
@@ -1008,12 +1018,15 @@ def _resolve_turn_scope(
         return (
             qualify_model_scope(agent.get("model") or ""),
             (agent.get("effort") or "").strip().lower(),
+            qualify_model_scope(agent.get("subagent_model") or ""),
         )
     if conv is not None:
         model = qualify_model_scope(conv.get("model") or "")
         raw_effort = (conv.get("effort") or "").strip().lower()
-        return model, (raw_effort or None)
-    return "", None
+        # #383: the chat's sub-agent pin qualifies like model itself.
+        sub_scope = qualify_model_scope(conv.get("subagent_model") or "")
+        return model, (raw_effort or None), sub_scope
+    return "", None, ""
 
 
 class ProviderEntry(BaseModel):
@@ -1091,7 +1104,7 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
     agent = None
     if conv is not None and (conv.get("chat_type") or "chat") == "agent":
         agent = await get_agent_for_conversation(conversation_id)
-    turn_model, turn_effort = _resolve_turn_scope(conv, agent)
+    turn_model, turn_effort, subagent_scope = _resolve_turn_scope(conv, agent)
     set_last_workspace(turn_workspace)
     # Remember it so the sidebar restores the same folder after an app
     # restart, and touch the registry row so the dropdown/group order
@@ -1118,7 +1131,8 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
                   image_paths=image_paths, skill_names=body.skills,
                   attachments=body.attachments,
                   persist_user=not body.resume,
-                  model_override=turn_model, effort_override=turn_effort),
+                  model_override=turn_model, effort_override=turn_effort,
+                  subagent_scope=subagent_scope),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -1549,6 +1563,8 @@ class AgentBody(BaseModel):
     say_mode: str = "arrival"
     model: str = ""                          # '' = active global model
     effort: str = ""                         # '' | provider-advertised effort
+    # #383: the agent's pinned sub-agent scope ('' = sub-agent: auto).
+    subagent_model: str = ""
     memory_enabled: bool = True
     # #93: agent-level opt-in — a scheduled run may ask the user a question
     # (ask_user) and wait for the answer in its pinned chat.
@@ -1614,6 +1630,8 @@ async def api_agents_add(body: AgentBody):
         # too (scheduler fires resolve through the same bare branch).
         "model": qualify_model_scope(body.model.strip()),
         "effort": body.effort.strip(),
+        # #383: the pinned sub-agent scope, same complete-or-empty rule.
+        "subagent_model": qualify_model_scope(body.subagent_model.strip()),
         "memory_enabled": int(body.memory_enabled),
         "allow_ask_user": int(body.allow_ask_user),
         "retention": max(0, int(body.retention or 0)),
@@ -1630,6 +1648,8 @@ class AgentModelEffort(BaseModel):
     """#51/#76 write-through body: the pinned chat's header selectors."""
     model: str = ""
     effort: str = ""
+    # #383: the sub-agent picker in the same bar writes its scope here.
+    subagent_model: str = ""
 
 
 @app.patch("/api/agents/{agent_id}/model-effort")
@@ -1648,7 +1668,7 @@ async def api_agents_model_effort(agent_id: str, body: AgentModelEffort):
     if conv_id and agent_is_running(conv_id):
         raise HTTPException(
             status_code=409,
-            detail="the agent is running — stop it before changing its model/effort",
+            detail="the agent is running — stop it before changing its model/effort/sub-agent scope",
         )
     record = await db_update_agent(
         agent_id,
@@ -1656,6 +1676,8 @@ async def api_agents_model_effort(agent_id: str, body: AgentModelEffort):
             # #132: qualify a bare id at the write-through path too.
             "model": qualify_model_scope(body.model.strip()),
             "effort": body.effort.strip(),
+            # #383: the sub-agent scope qualifies the same way.
+            "subagent_model": qualify_model_scope(body.subagent_model.strip()),
         },
     )
     return await _agent_view(record)
@@ -1687,6 +1709,8 @@ async def api_agents_update(agent_id: str, body: AgentBody):
         # #132: qualify a bare id (full-record replace write path).
         "model": qualify_model_scope(body.model.strip()),
         "effort": body.effort.strip(),
+        # #383: same rule on the full-record replace path.
+        "subagent_model": qualify_model_scope(body.subagent_model.strip()),
         "memory_enabled": int(body.memory_enabled),
         "allow_ask_user": int(body.allow_ask_user),
         "retention": max(0, int(body.retention or 0)),
@@ -2119,8 +2143,11 @@ async def api_get_config():
         # PLAN-access-modes.md).
         "access_mode": cfg.get("access_mode", "ask"),
         # Sub-agent routing ("" = inherit the parent's provider).
-        "subagent_provider": cfg.get("subagent_provider") or "",
-    }
+        # Sub-agent routing (#383): a provider name or complete
+        # "provider::model"; "" = inherit the parent's model. Bare values
+        # (older configs) qualify against the provider's configured model
+        # at resolve time — the #132 back-compat branch.
+        "subagent_provider": cfg.get("subagent_provider") or "",    }
 
 
 @app.put("/api/config")

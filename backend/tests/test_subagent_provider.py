@@ -1,9 +1,9 @@
-"""Sub-agent provider routing (handoff: keep the local KV cache hot).
+"""Sub-agent model scope (#383): where spawn_agent children run.
 
-The global ``subagent_provider`` setting (and per-agent ``provider``
-frontmatter) routes a sub-agent's model calls at a different provider than
-the parent conversation's — so spawns stop competing for a single-slot
-local server's slot and evicting its prompt cache. Only ROUTING changes:
+Resolution: the spawning chat's pin (per-chat sub-agent dropdown, complete
+"provider::model") > the global ``subagent_provider`` setting > the parent
+conversation's own model. The per-agent ``provider:`` frontmatter layer was
+removed with #383 (no user agent files ever used it). Only ROUTING changes:
 prompt construction stays exactly as-is (owner's explicit non-goal).
 """
 import asyncio
@@ -65,15 +65,29 @@ def capture(monkeypatch):
 
 def test_default_inherits_parent_provider(cfg):
     cfg()
-    assert _resolve_subagent_model(AgentDef(name="x", description="", body="")) == ("", "")
+    assert _resolve_subagent_model() == ("", "")
+
+
+def test_chat_pin_wins_over_global(cfg):
+    cfg(subagent_provider="lfm25")
+    model, err = _resolve_subagent_model("main::big")
+    assert err == ""
+    assert model == "main::big"
+
+
+def test_empty_pin_falls_through_to_global(cfg):
+    cfg(subagent_provider="lfm25")
+    model, err = _resolve_subagent_model("")
+    assert err == ""
+    # A bare provider name is qualified with that provider's model — chat's
+    # bare-id branch would otherwise keep the AMBIENT (parent's) provider.
+    assert model == "lfm25::lfm-8b"
 
 
 def test_global_setting_routes_provider_model(cfg):
     cfg(subagent_provider="lfm25")
-    model, err = _resolve_subagent_model(AgentDef(name="x", description="", body=""))
+    model, err = _resolve_subagent_model(None)
     assert err == ""
-    # A bare provider name is qualified with that provider's model — chat's
-    # bare-id branch would otherwise keep the AMBIENT (parent's) provider.
     assert model == "lfm25::lfm-8b"
 
 
@@ -84,18 +98,6 @@ def test_global_setting_provider_model_pins_model(cfg):
     assert model == "lfm25::other-model"
 
 
-def test_agentdef_provider_beats_global(cfg):
-    cfg(subagent_provider="lfm25")
-    d = AgentDef(name="x", description="", body="", provider="main::big")
-    assert _resolve_subagent_model(d) == ("main::big", "")
-
-
-def test_agentdef_provider_none_falls_through_to_global(cfg):
-    cfg(subagent_provider="lfm25")
-    model, _ = _resolve_subagent_model(AgentDef(name="x", description="", body=""))
-    assert model == "lfm25::lfm-8b"
-
-
 def test_unknown_provider_is_a_structured_error(cfg):
     cfg(subagent_provider="nope")
     model, err = _resolve_subagent_model(None)
@@ -103,10 +105,9 @@ def test_unknown_provider_is_a_structured_error(cfg):
     assert "Unknown provider 'nope'" in err
 
 
-def test_unknown_agentdef_provider_beats_global_and_errors(cfg):
+def test_unknown_provider_in_chat_pin_errors(cfg):
     cfg(subagent_provider="lfm25")
-    d = AgentDef(name="x", description="", body="", provider="ghost")
-    _, err = _resolve_subagent_model(d)
+    _, err = _resolve_subagent_model("ghost::big")
     assert "Unknown provider 'ghost'" in err
 
 
@@ -114,7 +115,18 @@ def test_unknown_agentdef_provider_beats_global_and_errors(cfg):
 
 
 @pytest.mark.asyncio
-async def test_routing_reaches_chat_main_loop(cfg, capture, tmp_path):
+async def test_chat_pin_reaches_chat_main_loop(cfg, capture, tmp_path):
+    cfg(subagent_provider="lfm25")
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "look", str(tmp_path),
+        chat_scope="main::big",
+    )
+    assert result["status"] == "completed"
+    assert capture.models == ["main::big"]
+
+
+@pytest.mark.asyncio
+async def test_global_routing_reaches_chat_main_loop(cfg, capture, tmp_path):
     cfg(subagent_provider="lfm25")
     result = await subagents.run_sub_agent(
         subagents.get_agent_def("explore"), "look", str(tmp_path)
@@ -144,11 +156,33 @@ async def test_unknown_provider_errors_spawn_without_model_call(cfg, capture, tm
 
 
 @pytest.mark.asyncio
-async def test_agentdef_provider_used_at_runtime(cfg, capture, tmp_path):
+async def test_unknown_provider_in_chat_pin_errors_spawn(cfg, capture, tmp_path):
+    cfg()
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "look", str(tmp_path),
+        chat_scope="ghost::big",
+    )
+    assert result["status"] == "error"
+    assert "Unknown provider 'ghost'" in result["error"]
+    assert capture.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_batch_threads_chat_scope(cfg, capture, tmp_path):
+    """#383: the chat's pin hands down to every sub-agent of the batch."""
     cfg(subagent_provider="lfm25")
-    d = AgentDef(name="pinned", description="", body="", provider="main::big")
-    await subagents.run_sub_agent(d, "look", str(tmp_path))
-    assert capture.models == ["main::big"]
+    results = await subagents.spawn_batch(
+        [
+            {"call_id": "c1", "agent_type": "explore", "prompt": "one"},
+            {"call_id": "c2", "agent_type": "general-purpose", "prompt": "two"},
+        ],
+        str(tmp_path),
+        asyncio.Event(),
+        chat_scope="main::big",
+    )
+    assert results["c1"]["status"] == "completed"
+    assert results["c2"]["status"] == "completed"
+    assert capture.models == ["main::big", "main::big"]
 
 
 @pytest.mark.asyncio
@@ -168,35 +202,3 @@ async def test_spawn_batch_isolates_routing_error(cfg, capture, tmp_path):
     assert "Unknown provider 'ghost'" in results["c1"]["error"]
     assert "Unknown agent_type" in results["c2"]["error"]
     assert capture.calls == 0
-
-
-# ------------------------------------------------------------ frontmatter
-
-
-def test_frontmatter_provider_parsed(tmp_path, monkeypatch):
-    (tmp_path / "routed.md").write_text(
-        "---\n"
-        "name: routed\n"
-        "description: pinned routing.\n"
-        "provider: lfm25::lfm-8b\n"
-        "---\n"
-        "body",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(subagents, "AGENTS_DIR", tmp_path)
-    subagents.scan_agents()
-    d = subagents.get_agent_def("routed")
-    assert d is not None
-    assert d.provider == "lfm25::lfm-8b"
-
-
-def test_frontmatter_provider_blank_is_none(tmp_path, monkeypatch):
-    (tmp_path / "plain.md").write_text(
-        "---\nname: plain\ndescription: d.\nprovider: \n---\nbody",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(subagents, "AGENTS_DIR", tmp_path)
-    subagents.scan_agents()
-    d = subagents.get_agent_def("plain")
-    assert d is not None
-    assert d.provider is None

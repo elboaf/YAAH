@@ -235,8 +235,8 @@ interface AgentState {
    * draft creation, editable by the header pickers, written into the
    * conversation row at createConversation, cleared on adopt.
    */
-  draftScope: { model: string; effort: string } | null
-  setDraftScope: (scope: { model?: string; effort?: string }) => void
+  draftScope: { model: string; effort: string; subagent_model: string } | null
+  setDraftScope: (scope: { model?: string; effort?: string; subagent_model?: string }) => void
   log: LogEntry[]
   /** File currently open in the preview side panel (Q44). */
   previewPath: string | null
@@ -578,7 +578,12 @@ export const useAgent = create<AgentState>((set, get) => ({
     }
   },
   setDraftScope: (scope) =>
-    set((s) => ({ draftScope: { ...(s.draftScope ?? { model: '', effort: '' }), ...scope } })),
+    set((s) => ({
+      draftScope: {
+        ...(s.draftScope ?? { model: '', effort: '', subagent_model: '' }),
+        ...scope,
+      },
+    })),
   setStatus: (key, status) =>
     set((s) => {
       const prev = s.statusByConv[key]
@@ -759,8 +764,9 @@ export const useAgent = create<AgentState>((set, get) => ({
       draftDestination: s.workspace,
       // #51/#76: the fresh draft inherits the CURRENT sidebar defaults —
       // the picker values it shows are what the first send will pin into the
-      // new conversation row.
-      draftScope: { model: get().globalModel, effort: get().globalEffort },
+      // new conversation row. The sub-agent scope starts empty ('' =
+      // sub-agent: auto) — there is no sidebar default for it (#383).
+      draftScope: { model: get().globalModel, effort: get().globalEffort, subagent_model: '' },
     }))
     persistConversationId(null)
   },

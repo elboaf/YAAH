@@ -88,30 +88,30 @@ def test_resolve_effort_none_still_gates_unknown_values():
 
 
 def test_scope_unstamped_row_falls_back_to_globals():
-    model, effort = _resolve_turn_scope({"model": "", "effort": ""})
+    model, effort, sub_scope = _resolve_turn_scope({"model": "", "effort": ""})
     assert model == ""
     assert effort is None
 
 
 def test_scope_normal_chat_stamped_effort_empty_means_no_param():
     """'' in a normal chat row is a DELIBERATE Default -> None sentinel."""
-    model, effort = _resolve_turn_scope({"model": "p1::m", "effort": ""})
+    model, effort, sub_scope = _resolve_turn_scope({"model": "p1::m", "effort": ""})
     assert model == "p1::m"
     assert effort is None
 
 
 def test_scope_normal_chat_level_applies():
-    model, effort = _resolve_turn_scope({"model": "m", "effort": " Medium "})
+    model, effort, sub_scope = _resolve_turn_scope({"model": "m", "effort": " Medium "})
     assert (model, effort) == ("m", "medium")
 
 
 def test_scope_agent_chat_resolves_through_agent_inherit_global():
-    model, effort = _resolve_turn_scope(None, {"model": "p2::m9", "effort": ""})
+    model, effort, sub_scope = _resolve_turn_scope(None, {"model": "p2::m9", "effort": ""})
     assert (model, effort) == ("p2::m9", "")
 
 
 def test_scope_agent_chat_level():
-    model, effort = _resolve_turn_scope(None, {"model": "", "effort": "high"})
+    model, effort, sub_scope = _resolve_turn_scope(None, {"model": "", "effort": "high"})
     assert (model, effort) == ("", "high")
 
 

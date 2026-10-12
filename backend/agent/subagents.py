@@ -73,11 +73,6 @@ class AgentDef:
     disallowed_tools: list[str] = field(default_factory=list)
     max_turns: int = DEFAULT_MAX_TURNS
     builtin: bool = False
-    # Per-agent routing override: a provider name (or "provider::model")
-    # this agent always chats through, regardless of the global
-    # subagent_provider setting. None = fall through to the global
-    # setting, then the parent's provider (current behavior).
-    provider: str | None = None
 
 
 # Tool sets for the built-ins. Sub-agents never get ask_user (they cannot
@@ -202,10 +197,6 @@ def parse_agent_md(path: Path) -> AgentDef | None:
         tools=_str_list(meta.get("tools")) or None,
         disallowed_tools=_str_list(meta.get("disallowedTools")),
         max_turns=max_turns,
-        # Per-agent routing override (frontmatter `provider:`): a provider
-        # name or "provider::model"; blank/absent = inherit (AgentDef
-        # default None reads the same).
-        provider=(str(meta.get("provider") or "").strip() or None),
     )
 
 
@@ -422,23 +413,23 @@ def _sub_agent_system_prompt(
     return prompt
 
 
-def _resolve_subagent_model(defn: AgentDef | None = None) -> tuple[str, str]:
-    """Resolve the routing override for a sub-agent's model calls.
+def _resolve_subagent_model(chat_scope: str | None = None) -> tuple[str, str]:
+    """Resolve the model scope a sub-agent's model calls run on (#383).
 
-    Precedence: AgentDef.provider > global ``subagent_provider`` setting >
-    the parent's provider ("" = inherit, today's behavior). The value is
-    passed straight through as model_client.chat's per-call ``model``
-    override — a bare provider name routes at that provider's configured
-    model, "provider::model" also pins the model (same syntax the parent
-    loop uses; unknown providers raise ModelError inside chat, but we
-    pre-validate here so a misconfigured setting fails the spawn with a
-    structured error instead of mid-stream). Returns (model, error): error
-    "" means go, non-empty means the spawn should fail with it.
+    Precedence: the spawning chat's pin (``chat_scope``, complete
+    "provider::model" — the per-chat sub-agent dropdown) > the global
+    ``subagent_provider`` setting > the parent's model ("" = inherit,
+    the original behavior). The value is passed straight through as
+    model_client.chat's per-call ``model`` override — a bare provider
+    name routes at that provider's configured model, "provider::model"
+    also pins the model (same syntax the parent loop uses; unknown
+    providers raise ModelError inside chat, but we pre-validate here so
+    a misconfigured scope fails the spawn with a structured error
+    instead of mid-stream). Returns (model, error): error "" means go,
+    non-empty means the spawn should fail with it.
     """
-    raw = ""
-    if defn is not None and defn.provider:
-        raw = defn.provider
-    else:
+    raw = (chat_scope or "").strip()
+    if not raw:
         raw = (load_config().get("subagent_provider") or "").strip()
     if not raw:
         return "", ""
@@ -468,6 +459,10 @@ async def run_sub_agent(
     conversation_id: int | None = None,
     workspace_notes: str = "",
     memory_workspace: str | None = None,
+    # #383: the spawning chat's pinned sub-agent scope (complete
+    # "provider::model" or "" = no pin). Empty falls through to the global
+    # subagent_provider setting, then the parent's model.
+    chat_scope: str = "",
 ) -> dict:
     """Run one sub-agent to completion. Returns the tool-result dict for
     the parent: final message, status, and a transcript snapshot.
@@ -483,12 +478,12 @@ async def run_sub_agent(
     # The sub-agent starts on the workspace it was handed.
     run_workspace = str(workspace)
 
-    # Routing: resolve the provider override once per spawn (AgentDef >
-    # global subagent_provider > inherit the parent's provider). A bad
+    # Routing: resolve the model scope once per spawn (#383: the chat's
+    # pin > global subagent_provider > inherit the parent's model). A bad
     # provider name errors the spawn with a structured result — the
     # parent's turn survives (spawn_batch isolates per call) — and no
     # model call is ever made.
-    sub_model, routing_error = _resolve_subagent_model(defn)
+    sub_model, routing_error = _resolve_subagent_model(chat_scope)
     if routing_error:
         return {
             "agent_type": defn.name,
@@ -891,6 +886,10 @@ async def spawn_batch(
     conversation_id: int | None = None,
     workspace_notes: str = "",
     memory_workspace: str | None = None,
+    # #383: the spawning chat's pinned sub-agent scope, resolved once per
+    # parent turn; handed to every sub-agent of the batch. Empty = no pin
+    # (the sub resolves global > inherit).
+    chat_scope: str = "",
 ) -> dict[str, dict]:
     """Run every spawn_agent call in one parent turn in parallel (capped
     by MAX_CONCURRENT via a semaphore). Returns {call_id: result}.
@@ -978,6 +977,8 @@ async def spawn_batch(
                 workspace_notes=workspace_notes,
                 # #346: memory resolves to the parent's canonical root.
                 memory_workspace=memory_workspace,
+                # #383: the spawning chat's sub-agent model pin.
+                chat_scope=chat_scope,
             )
             if on_event:
                 on_event(
