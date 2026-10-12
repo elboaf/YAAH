@@ -535,7 +535,10 @@ async def test_injected_summary_label_matches_source():
         {"summary": "s", "through_message_id": 1, "source": "prompt"}
     )
     assert prompt_msg is not None
-    assert prompt_msg["role"] == "system"
+    # User role, not system: strict chat templates (some llama.cpp builds)
+    # reject a second system message, which 500-ed every post-compaction
+    # turn on affected providers.
+    assert prompt_msg["role"] == "user"
     assert prompt_msg["content"].startswith("Earlier conversation summary")
     assert "preserved separately" in prompt_msg["content"]
 

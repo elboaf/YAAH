@@ -34,7 +34,7 @@
       "sha256": "5f80da325a47971bf485300a5d218a5f5c6eeab9d5b527dedc45f4b9787d6ade"
     },
     {
-      "role": "system",
+      "role": "user",
       "bytes": 158,
       "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397"
     }

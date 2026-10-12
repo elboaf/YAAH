@@ -88,7 +88,7 @@
       "sha256": "43d28a0104d584383495bc34f307c45c6f9d6bdbc870be26b8fa96d0cd4586a1"
     },
     {
-      "role": "system",
+      "role": "user",
       "bytes": 158,
       "sha256": "00af45873c5ddb1af90ec478d7e17b715dd7641ef9bc24c96349ecac98f6f397"
     }

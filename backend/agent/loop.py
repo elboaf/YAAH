@@ -872,13 +872,15 @@ def invoked_skills_wrapper(block: str) -> str:
 
 
 def _apply_injected_skills(
-    item: dict, loaded_skills: list[str], messages: list
+    item: dict, loaded_skills: list[str], messages: list,
+    static_mode: bool = False,
 ) -> list[dict]:
     """Add explicitly selected queued-message skills to the active run.
     Returns skill_not_found event dicts the caller must yield (#193: the
     queued/steer path surfaces unknown skill names to the user exactly like
     the turn path, instead of silently injecting a "# Skill not found"
-    heading into model context)."""
+    heading into model context). static_mode=True rides a tail user message
+    after the head instead of mutating it (frozen-head byte-stability)."""
     names = [
         name
         for name in item.get("skills", [])
@@ -891,10 +893,17 @@ def _apply_injected_skills(
     events = [{"type": "skill_not_found", "skills": unknown}] if unknown else []
     block = skill_registry.bodies_for_prompt(known)
     if block and messages and messages[0].get("role") == "system":
-        messages[0]["content"] = (
-            f"{messages[0]['content']}\n\n---\n\n"
-            f"{invoked_skills_wrapper(block)}"
-        )
+        # Static mode: ride a tail user message right after the head instead
+        # of mutating the head (byte-stability) — and user, not system,
+        # because strict templates reject any system message after the first
+        # ("System message must be at the beginning" 500).
+        if static_mode:
+            messages.insert(1, {"role": "user", "content": invoked_skills_wrapper(block)})
+        else:
+            messages[0]["content"] = (
+                f"{messages[0]['content']}\n\n---\n\n"
+                f"{invoked_skills_wrapper(block)}"
+            )
     return events
 
 
@@ -1618,6 +1627,31 @@ async def _run_agent_claimed(
     frozen_turn = static_mode and bool(frozen_prompt)
     if frozen_turn:
         system_prompt = frozen_prompt
+        # The frozen bytes already carry the project notes; nothing fresh to
+        # read this turn. Bound empty so the spawn path can always hand the
+        # sub-agents the parent's notes (#346 regression: UnboundLocalError
+        # on every spawn_agent call of a frozen-head turn).
+        notes = ""
+        # Self-heal for rows frozen by the pre-guard bug: an invoked-skill
+        # turn could persist its "# Invoked skills" block permanently into
+        # the head (reached via the frozen-replay freeze-write). Those bytes
+        # make every later turn replay turn-of-freeze skills as permanent
+        # instructions — detect and clear so the next turn refreezes clean.
+        if "# Invoked skills" in frozen_prompt:
+            try:
+                await update_conversation(
+                    conversation_id,
+                    frozen_system_prompt="",
+                    frozen_system_prompt_ws="",
+                )
+            except Exception as e:  # noqa: BLE001 — healing must not break the turn
+                log.warning("frozen_system_prompt_heal_failed: %s", e)
+            frozen_prompt = None
+            frozen_turn = False
+            system_prompt = (
+                conv.get("system_prompt_override")
+                or _default_system_prompt(workspace)
+            )
 
     # Explicitly invoked skills (/s name or a chip): their instruction
     # bodies are appended to the system prompt for THIS turn only — never
@@ -1725,9 +1759,11 @@ async def _run_agent_claimed(
     # skill bodies into the frozen bytes either). Placed before history so
     # instructions precede the conversation; being later in the prompt than
     # the head only costs a tail re-prefill, never the cached head.
+    # Role: user — strict templates reject a second system message
+    # (see load_skill_into_messages; this is the same tail-message class).
     if static_mode and invoked_skill_block:
         messages.append(
-            {"role": "system", "content": invoked_skill_block}
+            {"role": "user", "content": invoked_skill_block}
         )
     messages.extend(history)
     # Static mode, freeze turn: persist the head exactly as this turn's
@@ -1736,7 +1772,15 @@ async def _run_agent_claimed(
     # task could lose the freeze to a fast follow-up turn reading the row
     # before the write lands). In-memory only — no log ever carries prompt
     # bytes.
-    if static_mode and not frozen_turn:
+    # Refreeze guard: an invoked-skill skill_block is deliberately absent
+    # here — in static mode those bodies ride a tail message (#375), so a
+    # `$skill`-invoked turn never reaches this write with mutated head bytes.
+    # Freeze turns must come from an unmutated system_prompt; replayed frozen
+    # bytes land further down and nothing reaches into them. (A freeze-write
+    # after a frozen replay was REACHED on a `$skill` turn, persisting a
+    # handoff block permanently into the head — self-healing below clears
+    # such a poisoned row so the next turn refreezes clean bytes.)
+    if static_mode and not frozen_turn and not invoked_skill_block:
         try:
             await update_conversation(
                 conversation_id,
@@ -1744,7 +1788,7 @@ async def _run_agent_claimed(
                 frozen_system_prompt_ws=workspace or "",
             )
         except Exception as e:  # noqa: BLE001 — freezing must not break the turn
-            log.warning("frozen_system_prompt write failed: %s", e)
+            log.warning("frozen_system_prompt_write_failed: %s", e)
             static_mode = False
             frozen_turn = False
     if not include_history:
@@ -2094,7 +2138,9 @@ async def _run_agent_claimed(
                 yield _ndjson(
                     {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "attachments": inj.get("attachments", []), "skills": inj.get("skills", [])}
                 )
-                for ev in _apply_injected_skills(inj, loaded_skills, messages):
+                for ev in _apply_injected_skills(
+                    inj, loaded_skills, messages, static_mode=static_mode
+                ):
                     yield _ndjson(ev)
                 messages.append({"role": "user", "content": _parts_with_images(_reinline(inj), inj.get("images", []))})
 
@@ -2345,7 +2391,9 @@ async def _run_agent_claimed(
                             "skills": inj.get("skills", []),
                         }
                     )
-                    for ev in _apply_injected_skills(inj, loaded_skills, messages):
+                    for ev in _apply_injected_skills(
+                        inj, loaded_skills, messages, static_mode=static_mode
+                    ):
                         yield _ndjson(ev)
                     messages.append(
                         {

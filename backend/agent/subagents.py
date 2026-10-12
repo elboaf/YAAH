@@ -705,9 +705,10 @@ async def run_sub_agent(
                         "deliverable and produce your final answer."
                     )
                 if nudge_idx is not None:
-                    messages[nudge_idx] = {"role": "system", "content": note}
+                    # #190: replace, don't accumulate.
+                    messages[nudge_idx] = {"role": "user", "content": note}
                 else:
-                    messages.append({"role": "system", "content": note})
+                    messages.append({"role": "user", "content": note})
                     nudge_idx = len(messages) - 1
 
             state: dict = {"content": "", "tool_calls": None, "finish": None}
@@ -766,10 +767,13 @@ async def run_sub_agent(
                 final_text = content
                 break
 
+            # Empty assistant text + tool_calls: some strict templates
+            # reject the following user/tool message unless an assistant
+            # message precedes it — emit "" explicitly rather than None.
             messages.append(
                 {
                     "role": "assistant",
-                    "content": content,
+                    "content": content or "",
                     "tool_calls": tool_calls,
                 }
             )
@@ -785,9 +789,11 @@ async def run_sub_agent(
                 status = "max_turns"
                 grace = True
                 turns += 1
+                # User role: strict templates reject a system message after
+                # the first ("System message must be at the beginning").
                 messages.append(
                     {
-                        "role": "system",
+                        "role": "user",
                         "content": (
                             "Turn budget exhausted. Produce your final answer "
                             "NOW — finish/complete any pending deliverable "

@@ -183,7 +183,12 @@ def compact_summary_message(prompt_state: dict) -> dict | None:
     prefix = (
         COMPACT_SUMMARY_PREFIX if source == "prompt" else COMPACT_SUMMARY_PREFIX_LEGACY
     )
-    return {"role": "system", "content": prefix + "\n" + summary}
+    # Role user, not system: strict chat templates (some llama.cpp builds'
+    # qwen template) raise "System message must be at the beginning" for any
+    # system message after the first — a conversation that crossed the
+    # compaction boundary would 500 on EVERY later turn. A user-role summary
+    # message is template-legal and precedes the replayed history either way.
+    return {"role": "user", "content": prefix + "\n" + summary}
 
 
 def _name_section(text: str) -> str:
@@ -790,31 +795,46 @@ def render_local_family(combo: str, flags: dict) -> dict:
         ]
     messages = captured["messages"]
     system_messages = [m for m in messages if m.get("role") == "system"]
+    # The compaction summary rides a USER-role message right after the head
+    # (strict templates reject any second system message), so identify it by
+    # its known opening — never by role, and never let replayed history rows
+    # into the manifest surface.
+    tail_injections = [
+        m for m in messages[1:]
+        if m.get("role") == "user"
+        and str(m.get("content") or "").startswith(
+            ("Earlier conversation summary (",)
+        )
+    ]
+    manifest_messages = (
+        system_messages[:1] + tail_injections + system_messages[1:]
+    )
     sep = chr(10) * 2 + "====" + chr(10) * 2
     rendered = _canonicalize_chat_ids(
-        sep.join(str(m.get("content") or "") for m in system_messages)
+        sep.join(str(m.get("content") or "") for m in manifest_messages)
     )
     tools = captured["tools"]
     return {
         "combo": combo,
         "kind": flags["kind"],
-        # Sections across ALL system messages: the compaction summary is
-        # injected as its own system message (loop.py), so slicing only
-        # the first one hid it from every manifest (#184).
+        # Sections across ALL prompt-head messages: the compaction summary
+        # rides its own message after the head (loop.py; user role for
+        # template compatibility), so slicing only the first one hid it from
+        # every manifest (#184).
         "sections": [
             section
-            for m in system_messages
+            for m in manifest_messages
             for section in _split_sections(
                 _canonicalize_chat_ids(str(m.get("content") or ""))
             )
         ],
         "system_messages": [
             {
-                "role": "system",
+                "role": m.get("role") or "system",
                 "bytes": len(_canonicalize_chat_ids(str(m.get("content") or "")).encode("utf-8")),
                 "sha256": _sha256_text(_canonicalize_chat_ids(str(m.get("content") or ""))),
             }
-            for m in system_messages
+            for m in manifest_messages
         ],
         "total_bytes": len(rendered.encode("utf-8")),
         "rendered_sha256": _sha256_text(rendered),

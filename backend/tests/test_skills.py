@@ -112,6 +112,31 @@ def test_load_skill_tool(skills_dir):
     assert "review" in result["available"]
 
 
+def test_load_skill_tail_mode_uses_user_role_not_system(skills_dir):
+    """tail=True (static-prompt mode) must inject a SECOND-MESSAGE user role,
+    never system: strict templates (some llama.cpp chat templates) reject any
+    system message after the first — 'System message must be at the
+    beginning' — which turned every static-mode skill load into a 500."""
+    skill_registry.scan_skills()
+    loaded: list[str] = []
+    messages = [
+        {"role": "system", "content": "frozen head"},
+        {"role": "user", "content": "hi"},
+    ]
+    result = asyncio.run(
+        _load_skill({"name": "review"}, loaded, messages, tail=True)
+    )
+    assert result["loaded"] == "review"
+    assert messages[0]["content"] == "frozen head", "head untouched"
+    assert messages[1]["role"] == "user"
+    assert "# Loaded skill: review" in messages[1]["content"]
+    assert messages[2]["role"] == "user"
+    # A second skill accumulates into the same tail message.
+    asyncio.run(_load_skill({"name": "manual-only"}, loaded, messages, tail=True))
+    assert messages[1]["content"].count("# Loaded skill:") == 2
+    assert all(m["role"] != "system" for m in messages[1:])
+
+
 def test_load_skill_schema_registered():
     from backend.agent.tools import get_schemas
 

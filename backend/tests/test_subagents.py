@@ -793,12 +793,16 @@ async def test_final_budget_turn_message_is_honest_about_grace(fake_model, tmp_p
     result = await subagents.run_sub_agent(defn, "loop", str(tmp_path))
     assert result["status"] == "max_turns"
     assert result["turns"] == 3  # 2 budgeted + 1 grace
+    # Nudges ride the user role now: strict templates reject a system
+    # message after the first ("System message must be at the beginning").
     all_notes = [
         m["content"]
         for messages in fake_model.messages for m in messages
-        if m["role"] == "system" and m.get("content")
+        if m["role"] == "user" and m.get("content")
+        and ("budget" in m["content"].lower() or "converge" in m["content"].lower()
+             or "wrap-up" in m["content"].lower())
     ]
-    final_note = all_notes[-2]  # grace-turn note is appended last
+    final_note = all_notes[-1]  # grace-turn note is appended last
     assert "final budgeted turn" not in final_note
     # It must not claim THIS turn is the last chance to act...
     assert "this is the final" not in final_note.lower()
@@ -832,9 +836,12 @@ async def test_convergence_nudges_collapse_to_one(fake_model, tmp_path):
     # Per-call snapshots are real copies now, so each call can be asserted
     # against the state it actually saw.
     def nudges(messages):
+        # The #190 convergence nudge only (the grace call's separate
+        # "Turn budget exhausted." note is asserted below) — now on the
+        # user role: strict templates reject a late system message.
         return [
             m["content"] for m in messages
-            if m["role"] == "system"
+            if m["role"] == "user"
             and ("converging now" in m["content"] or "wrap-up" in m["content"])
         ]
 
@@ -858,7 +865,7 @@ async def test_convergence_nudges_collapse_to_one(fake_model, tmp_path):
     grace_msgs = snapshots[6]
     assert any(
         "Turn budget exhausted" in m["content"]
-        for m in grace_msgs if m["role"] == "system"
+        for m in grace_msgs if m["role"] == "user"
     )
     assert "wrap-up" in nudges(grace_msgs)[0]
 
@@ -886,8 +893,9 @@ async def test_budget_warning_note_near_end(fake_model, tmp_path):
     assert result["status"] == "max_turns"
     assert result["output"] == "converged"
     messages_arg = fake_model.messages
-    # The grace turn's system note is the last message fed to the model.
-    assert messages_arg[-1][-1]["role"] == "system"
+    # The grace turn's budget note is the last message fed to the model —
+    # user role now (strict templates reject a late system message).
+    assert messages_arg[-1][-1]["role"] == "user"
     assert "budget" in messages_arg[-1][-1]["content"].lower()
 
 

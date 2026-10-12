@@ -197,16 +197,27 @@ async def test_invoked_skills_ride_tail_not_head(
 
     assert len(chat.calls) == 2
     assert chat.calls[0][0]["content"] == chat.calls[1][0]["content"]
-    # Turn 1 carried the skill body in a tail system message (after the
-    # head, never inside it).
+    # Turn 1 carried the skill body in a tail message after the head, never
+    # inside it. Role is user, not system: strict templates (the qwen
+    # template behind llama.cpp /v1) reject any system message after the
+    # first with "System message must be at the beginning".
     assert "Invoked skills" not in chat.calls[0][0]["content"]
     tail_systems = [
         m["content"]
         for m in chat.calls[0][1:]
         if m["role"] == "system"
     ]
-    assert any("Invoked skills" in c for c in tail_systems), (
-        "invoked skills ride a tail system message"
+    assert tail_systems == [], (
+        "tail messages must never use the system role — strict templates "
+        "500 on a second system message"
+    )
+    tail_users = [
+        m["content"]
+        for m in chat.calls[0][1:]
+        if m["role"] == "user"
+    ]
+    assert any("Invoked skills" in c for c in tail_users), (
+        "invoked skills ride a tail user message"
     )
     # And turn 2 did not replay it.
     assert all("Invoked skills" not in m["content"] for m in chat.calls[1])
@@ -251,6 +262,33 @@ async def test_frozen_head_replays_without_provider_flag_yet_frozen(
     assert chat.calls[0][0]["content"] == chat.calls[1][0]["content"], (
         "an existing frozen head must keep replaying"
     )
+
+
+@pytest.mark.asyncio
+async def test_invoked_skills_turn_does_not_poison_frozen_head(
+    monkeypatch, static_provider, one_skill
+):
+    """Freeze-write guard: a `$skill` turn in static mode must never persist
+    the skill block into the frozen head. Regression: the frozen-replay path
+    reached the freeze-write with mutated bytes, permanently baking that
+    turn's skills into the head and later 500-ing every turn on strict
+    templates (second system message)."""
+    chat = HeadCapture()
+    monkeypatch.setattr(agent_loop.model_client, "chat", chat)
+    cid = await create_conversation("t", ".")
+
+    await run_turn(cid)                      # freezes a clean head
+    clean_head = chat.calls[0][0]["content"]
+    await run_turn(cid, skill_names=[one_skill])   # frozen replay + skill
+    await run_turn(cid)                      # must still replay the clean head
+
+    assert len(chat.calls) == 3
+    assert chat.calls[1][0]["content"] == clean_head
+    assert chat.calls[2][0]["content"] == clean_head, (
+        "a $skill turn must not poison the frozen head"
+    )
+    conv = await get_conversation(cid)
+    assert "Invoked skills" not in (conv["frozen_system_prompt"] or "")
 
 
 @pytest.mark.asyncio
@@ -377,12 +415,14 @@ async def test_load_skill_midturn_grows_tail_not_head(
     assert len(calls) == 2
     # Head identical across the mid-turn boundary:
     assert calls[0][0]["content"] == calls[1][0]["content"]
-    # The skill body reached the model through the tail slot.
+    # The skill body reached the model through the tail slot — user role
+    # (strict templates reject a second system message).
     assert any(
         "Helper body." in m["content"]
         for m in calls[1][1:]
-        if m["role"] == "system"
+        if m["role"] == "user"
     )
+    assert not any(m["role"] == "system" for m in calls[1][1:])
     # And the row's frozen bytes never gained the skill body.
     conv = await get_conversation(cid)
     assert "Helper body." not in (conv["frozen_system_prompt"] or "")

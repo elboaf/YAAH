@@ -316,9 +316,13 @@ def load_skill_into_messages(
     skills into its OWN context the same way the parent does).
 
     tail=True (static-prompt mode): the head must stay byte-stable across
-    every model call, so the skill body lands in a dedicated system message
-    at messages[1] (created on first load, accumulated after) instead of
-    growing messages[0]."""
+    every model call, so the skill body lands in a dedicated message right
+    after the head (created on first load, accumulated after) instead of
+    growing messages[0]. Role: user, NOT system — strict chat templates
+    (e.g. the qwen template on some llama.cpp builds) raise "System message
+    must be at the beginning" for any system message after the first, which
+    turned every $skill turn into a 500. A user-role instruction message is
+    template-legal and carries the same authority in practice."""
     name = str(args.get("name") or "").strip()
     skill = get_skill(name)
     if skill is None:
@@ -344,13 +348,13 @@ def load_skill_into_messages(
         )
         if tail:
             if len(messages) > 1 and isinstance(messages[1], dict) \
-                    and messages[1].get("role") == "system" \
+                    and messages[1].get("role") == "user" \
                     and str(messages[1].get("content", "")).startswith("# Loaded skill:"):
                 messages[1]["content"] = (
                     f"{messages[1]['content']}\n\n---\n\n{block}"
                 )
             else:
-                messages.insert(1, {"role": "system", "content": block})
+                messages.insert(1, {"role": "user", "content": block})
         else:
             messages[0]["content"] = (
                 f"{messages[0]['content']}\n\n---\n\n{block}"
