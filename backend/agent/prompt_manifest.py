@@ -647,9 +647,16 @@ def _drive_turn(flags: dict) -> dict:
     captured: dict = {}
 
     async def fake_chat(messages, tools=None, stream=True, **kwargs):
-        captured["messages"] = [dict(m) for m in messages]
-        captured["tools"] = list(tools or [])
-        captured["kwargs"] = dict(kwargs)
+        # Capture ONLY the first call -- the main turn's. Later model calls
+        # in the same render (the title regeneration, then the detached
+        # memory-extraction drain joined in the finally below) used to
+        # overwrite `captured`, poisoning every manifest rendered since
+        # #341 with the memory-extractor's sub-agent prompt in place of the
+        # main turn's (windows-sandbox/identity sections silently lost).
+        if "messages" not in captured:
+            captured["messages"] = [dict(m) for m in messages]
+            captured["tools"] = list(tools or [])
+            captured["kwargs"] = dict(kwargs)
 
         async def _stream():
             yield {"type": "content", "text": "fixture turn complete."}

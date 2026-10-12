@@ -154,8 +154,8 @@
     },
     {
       "name": "sandbox_test",
-      "bytes": 774,
-      "sha256": "ed2202bf0216711c6b9302c6a68e4194c0c9898dbb3a5ebbf22d527674bf8033"
+      "bytes": 657,
+      "sha256": "8bfd3aac420d263df924e7aa066427d5d7e0bc2801868191467b98f4dba1b142"
     },
     {
       "name": "sandbox_run",
