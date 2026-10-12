@@ -180,6 +180,7 @@ function agentRow() {
     say_mode: 'arrival' as const,
     model: '',
     effort: '',
+    subagent_model: '',
     memory_enabled: false,
     allow_ask_user: false,
     retention: 5,

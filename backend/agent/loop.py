@@ -1450,6 +1450,9 @@ async def run_agent(
     include_history: bool = True,
     model_override: str = "",
     effort_override: str | None = None,
+    # #383: this chat's pinned sub-agent scope — every spawn_agent call of
+    # the turn runs there. '' = sub-agent: auto (global setting > parent).
+    subagent_scope: str = "",
     user_meta: dict | None = None,
 ) -> AsyncIterator[str]:
     """Claim a conversation and always release it when its stream ends."""
@@ -1495,6 +1498,7 @@ async def run_agent(
             include_history=include_history,
             model_override=model_override,
             effort_override=effort_override,
+            subagent_scope=subagent_scope,
             user_meta=user_meta,
         ):
             yield event
@@ -1517,6 +1521,9 @@ async def _run_agent_claimed(
     include_history: bool = True,
     model_override: str = "",
     effort_override: str | None = None,
+    # #383: this chat's pinned sub-agent scope — every spawn_agent call of
+    # the turn runs there. '' = sub-agent: auto (global setting > parent).
+    subagent_scope: str = "",
     user_meta: dict | None = None,
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
@@ -2482,6 +2489,9 @@ async def _run_agent_claimed(
                         # #346: sub-agent memory calls resolve to the same
                         # canonical root the parent's prompt block used.
                         memory_workspace=memory_workspace,
+                        # #383: this chat's pinned sub-agent scope — every
+                        # delegation of the turn streams there ('' = auto).
+                        chat_scope=subagent_scope,
                     )
                 )
 

@@ -41,7 +41,7 @@ describe('draft destination card on a remote workspace (#335)', () => {
       conversationId: null,
       workspace: 'remote:h:C:/repo',
       draftDestination: null,
-      draftScope: { model: '', effort: '' },
+      draftScope: { model: '', effort: '', subagent_model: '' },
     })
     useRemote.setState({
       scope: { connected: false },

@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     system_prompt_override TEXT,
     model TEXT NOT NULL DEFAULT '',
     effort TEXT NOT NULL DEFAULT '',
+    subagent_model TEXT NOT NULL DEFAULT '', -- #383: pinned sub-agent scope, '' = sub-agent: auto
     remote_revision_counter INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -175,6 +176,7 @@ CREATE TABLE IF NOT EXISTS agents (
     say_mode TEXT NOT NULL DEFAULT 'arrival', -- #296: arrival | visible
     model TEXT NOT NULL DEFAULT '',           -- '' = the active global model
     effort TEXT NOT NULL DEFAULT '',          -- '' = don't send reasoning_effort
+    subagent_model TEXT NOT NULL DEFAULT '',  -- #383: pinned sub-agent scope, '' = sub-agent: auto
     memory_enabled INTEGER NOT NULL DEFAULT 1,
     allow_ask_user INTEGER NOT NULL DEFAULT 0, -- #93: scheduled run may ask and wait
     retention INTEGER NOT NULL DEFAULT 0,     -- runs kept; 0 = unlimited
@@ -275,6 +277,13 @@ async def get_db() -> aiosqlite.Connection:
             await db.execute(
                 "ALTER TABLE conversations ADD COLUMN effort TEXT NOT NULL DEFAULT ''"
             )
+        if "subagent_model" not in conv_cols:
+            # #383: the chat's pinned sub-agent scope — complete
+            # "provider::model" or '' (sub-agent: auto: global setting
+            # falls through, then the parent's own model).
+            await db.execute(
+                "ALTER TABLE conversations ADD COLUMN subagent_model TEXT NOT NULL DEFAULT ''"
+            )
         await _stamp_conversation_scopes(db)
     if "remote_revision_counter" not in conv_cols:
         # Revision 1 is a stable baseline token for conversations created
@@ -315,6 +324,12 @@ async def get_db() -> aiosqlite.Connection:
         # default) speaks it as the fire emits it; 'visible' holds it until
         # the conversation becomes the on-screen one.
         await db.execute("ALTER TABLE agents ADD COLUMN say_mode TEXT NOT NULL DEFAULT 'arrival'")
+    if "subagent_model" not in agent_cols:
+        # #383: the agent's pinned sub-agent scope — complete
+        # "provider::model" or '' (sub-agent: auto). Written through the
+        # model-effort endpoint from the pinned chat's sub-agent picker,
+        # same contract as model/effort.
+        await db.execute("ALTER TABLE agents ADD COLUMN subagent_model TEXT NOT NULL DEFAULT ''")
     # #365: same in-place drop for the dead landing columns (#359).
     for col in sorted({"landing_mode", "landing_branch"} & agent_cols):
         await db.execute(f"ALTER TABLE agents DROP COLUMN {col}")
@@ -330,7 +345,7 @@ async def get_db() -> aiosqlite.Connection:
     # including legacy local routes, not just commits through the new API.
     await db.executescript("""
     CREATE TRIGGER IF NOT EXISTS conversations_remote_revision_update
-    AFTER UPDATE OF title, workspace, system_prompt_override, model, effort
+    AFTER UPDATE OF title, workspace, system_prompt_override, model, effort, subagent_model
     ON conversations
     BEGIN
         UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
@@ -451,31 +466,39 @@ async def repair_bare_model_scopes() -> dict:
     try:
         repaired = 0
         found = 0
-        for table in ("conversations", "agents"):
-            cur = await db.execute(
-                f"SELECT id, model FROM {table}"
-                " WHERE model != '' AND model NOT LIKE '%::%'"
-            )
-            rows = await cur.fetchall()
-            found += len(rows)
-            for row in rows:
-                model_id = row["model"]
-                hosts = _hosting_providers(model_id)
-                provider = (
-                    active if active in hosts
-                    else (hosts[0] if len(hosts) == 1 else active)
+        # #383: subagent_model columns follow the same complete-or-empty
+        # rule, so bare values there repair through the identical catalog
+        # resolution (a scope's bare branch routes at the AMBIENT provider,
+        # silently defeating the pin — qualify it like model itself).
+        for table, cols in (
+            ("conversations", ("model", "subagent_model")),
+            ("agents", ("model", "subagent_model")),
+        ):
+            for col in cols:
+                cur = await db.execute(
+                    f"SELECT id, {col} AS scope FROM {table}"
+                    f" WHERE {col} != '' AND {col} NOT LIKE '%::%'"
                 )
-                if not provider:
-                    # No catalogs and no active provider to fall back on:
-                    # leave the row alone rather than write a value we can't
-                    # stand behind (a later boot with providers reachable
-                    # retries).
-                    continue
-                await db.execute(
-                    f"UPDATE {table} SET model = ? WHERE id = ?",
-                    (f"{provider}::{model_id}", row["id"]),
-                )
-                repaired += 1
+                rows = await cur.fetchall()
+                found += len(rows)
+                for row in rows:
+                    model_id = row["scope"]
+                    hosts = _hosting_providers(model_id)
+                    provider = (
+                        active if active in hosts
+                        else (hosts[0] if len(hosts) == 1 else active)
+                    )
+                    if not provider:
+                        # No catalogs and no active provider to fall back on:
+                        # leave the row alone rather than write a value we can't
+                        # stand behind (a later boot with providers reachable
+                        # retries).
+                        continue
+                    await db.execute(
+                        f"UPDATE {table} SET {col} = ? WHERE id = ?",
+                        (f"{provider}::{model_id}", row["id"]),
+                    )
+                    repaired += 1
         await db.commit()
         return {"repaired": repaired, "found": found}
     finally:
@@ -711,11 +734,15 @@ async def create_conversation(
     chat_type: str = "chat",
     model: str | None = None,
     effort: str | None = None,
+    subagent_model: str = "",
 ):
     """Create a conversation. model/effort: the chat's pinned scope (#51/#76).
     Blank strings are legal writes (the chat's deliberate Default); None
     stamps the current global default (drafts already carry explicit picks,
     so None is the "unspecified" path for API callers).
+    subagent_model (#383): the chat's pinned sub-agent scope — '' (auto) is
+    the normal write; an explicit value qualifies complete-or-empty like
+    model does.
     #132: an explicit-but-BARE model id is qualified with the active
     provider at write time — the row must be self-describing, or a later
     sidebar default change silently re-routes the chat ("model not found")."""
@@ -732,12 +759,13 @@ async def create_conversation(
     # No provider arg: qualify_model_scope resolves the active provider
     # itself (the load_config above only ran when a default was needed).
     model = qualify_model_scope(model or "")
+    subagent_model = qualify_model_scope(subagent_model or "")
     db = await get_db()
     try:
         cur = await db.execute(
-            "INSERT INTO conversations (title, workspace, chat_type, model, effort)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (title, workspace, chat_type, model, effort),
+            "INSERT INTO conversations (title, workspace, chat_type, model, effort, subagent_model)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (title, workspace, chat_type, model, effort, subagent_model),
         )
         await db.commit()
         return cur.lastrowid
@@ -829,9 +857,9 @@ async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
 
 async def update_conversation(conversation_id: int, **fields):
     """Update allowed conversation fields (title, workspace,
-    system_prompt_override, model, effort). #132: a bare model write is
-    qualified with the active provider — '' stays '' (deliberate
-    Default)."""
+    system_prompt_override, model, effort, subagent_model). #132: a bare
+    model write is qualified with the active provider — '' stays ''
+    (deliberate Default)."""
     allowed = {
         "title",
         "workspace",
@@ -840,6 +868,7 @@ async def update_conversation(conversation_id: int, **fields):
         "frozen_system_prompt_ws",
         "model",
         "effort",
+        "subagent_model",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
@@ -849,6 +878,14 @@ async def update_conversation(conversation_id: int, **fields):
 
         updates["model"] = qualify_model_scope(
             updates["model"], load_config().get("active_provider") or ""
+        )
+    if updates.get("subagent_model"):
+        # #383: same complete-or-empty rule for the sub-agent scope — a
+        # bare id would route at today's active provider forever after.
+        from backend.agent.config import load_config, qualify_model_scope
+
+        updates["subagent_model"] = qualify_model_scope(
+            updates["subagent_model"], load_config().get("active_provider") or ""
         )
     sets = ", ".join(f"{k} = ?" for k in updates)
     db = await get_db()
@@ -1671,7 +1708,7 @@ async def search_conversation_history(
 AGENT_FIELDS = (
     "workspace", "name", "prompt", "schedule_type", "schedule_spec",
     "approval_policy", "say_mode",
-    "model", "effort", "memory_enabled",
+    "model", "effort", "subagent_model", "memory_enabled",
     "allow_ask_user", "retention",
     "notify_on_success", "enabled", "conversation_id",
     "next_fire_at", "last_fired_at", "last_finished_at", "last_status",

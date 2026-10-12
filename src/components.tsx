@@ -4239,6 +4239,11 @@ export function modelSupportsReasoning(
 
 export const EFFORT_HINT = 'Effort options are shown only when advertised by the model provider.'
 
+/** #383: where this chat's spawn_agent delegations (sub-agents) run. */
+export const SUBAGENT_AUTO_LABEL = 'sub-agent: auto'
+export const SUBAGENT_SCOPE_HINT =
+  'Model for sub-agents this chat spawns. Auto = the Settings sub-agent scope, or this chat\'s own model when none is set.'
+
 /** Default reasoning/thought level for new chats. Existing conversations keep
  *  their pinned effort, matching the default-model selector's scope. */
 export function DefaultThoughtLevelPicker() {
@@ -5285,6 +5290,9 @@ export function AgentForm({
         say_mode: sayMode,
         model: model.trim(),
         effort,
+        // #383: the editor form has no sub-agent field yet — an edit
+        // preserves the agent's stored scope (AgentBody requires it).
+        subagent_model: agent?.subagent_model ?? '',
         memory_enabled: memory,
         allow_ask_user: allowAsk,
         retention: Math.max(0, parseInt(retention, 10) || 0),
@@ -5729,6 +5737,7 @@ function agentToBody(a: ScheduledAgent, enabled: boolean): AgentBody {
     say_mode: a.say_mode,
     model: a.model,
     effort: a.effort,
+    subagent_model: a.subagent_model,
     memory_enabled: a.memory_enabled,
     allow_ask_user: a.allow_ask_user,
     retention: a.retention,
@@ -6526,8 +6535,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [active, setActive] = useState('')
   const [newName, setNewName] = useState('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
-  // Sub-agent routing draft ("" = inherit the parent's provider).
+  // Sub-agent routing draft (#383): '' = sub-agent: auto (the parent's
+  // model); a value is a complete "provider::model" scope.
   const [subagentProvider, setSubagentProvider] = useState('')
+  // #383: model discovery for the sub-agent scope — the same grouped list
+  // the primary selectors render from.
+  const { byProvider: subagentByProvider } = useModelList()
   const [activeTab, setActiveTab] = useState<'connect' | 'talk' | 'automate' | 'advanced'>('connect')
   // Per-model compaction: model id -> settings (per-provider editors).
   const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
@@ -7285,32 +7298,28 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </div>
             </SettingsCard>
 
-            {/* Sub-agent routing: which provider/model spawn_agent children
-                chat through. "" = inherit the parent conversation's
-                provider (default); routing children elsewhere keeps a local
-                parent's prompt cache hot. */}
+            {/* Sub-agent routing (#383): where spawn_agent children chat.
+                '' = sub-agent: auto (inherit the parent's model); a picked
+                value is a complete "provider::model" scope. Discovery comes
+                from the same grouped /models probe the chat pickers use. */}
             <SettingsCard title="Sub-agent routing" className="col-span-4">
               <div className="flex items-center gap-2">
                 <select
-                  className={`${settingsInputCls} w-64 shrink-0 px-1 text-[11px] text-zinc-300`}
+                  className={`${settingsInputCls} w-64 shrink-0 truncate px-1 font-mono text-[11px] text-zinc-300`}
                   value={subagentProvider}
                   onChange={(e) => setSubagentProvider(e.target.value)}
-                  aria-label="Sub-agent provider"
+                  aria-label="Sub-agent model"
+                  title={subagentProvider || 'Sub-agents inherit the parent chat model'}
                 >
-                  <option value="">inherit parent (default)</option>
-                  {Object.keys(providers).map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
+                  <option value="">{SUBAGENT_AUTO_LABEL}</option>
+                  <ModelOptions byProvider={subagentByProvider} value={subagentProvider} />
                 </select>
               </div>
               <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-600">
-                Route sub-agents (spawn_agent) at a different provider than the
-                parent conversation. On a local single-slot server this keeps the
-                parent's prompt cache hot instead of queueing every spawn behind
-                it. A per-agent frontmatter <span className="font-mono">provider:</span>{' '}
-                overrides this; unknown names fail the spawn with an error.
+                Model for sub-agents (spawn_agent) across all chats. Auto runs them
+                on the parent conversation's own model. A per-chat override in the
+                chat's model bar beats this; a scope naming a provider that is down
+                or removed fails that spawn with an error.
               </p>
             </SettingsCard>
               </>
@@ -8587,14 +8596,14 @@ export function ChatScopePickers() {
   const { byProvider, activeProvider, refresh } = useModelList()
   // The conversation row's pinned scope, refreshed on chat switch and after
   // each turn (an agent run may have written through the agent).
-  const [rowScope, setRowScope] = useState<{ model: string; effort: string } | null>(null)
+  const [rowScope, setRowScope] = useState<{ model: string; effort: string; subagent_model: string } | null>(null)
   useEffect(() => {
     setRowScope(null)
     if (conversationId === null) return
     let cancelled = false
     getConversation(conversationId)
       .then((c) => {
-        if (!cancelled) setRowScope({ model: c.model || '', effort: c.effort || '' })
+        if (!cancelled) setRowScope({ model: c.model || '', effort: c.effort || '', subagent_model: c.subagent_model || '' })
       })
       .catch(() => {})
     return () => {
@@ -8614,6 +8623,14 @@ export function ChatScopePickers() {
       : isAgentChat
         ? owner?.effort ?? ''
         : rowScope?.effort ?? globalEffort
+  // #383: the chat's sub-agent pin. No global default seeds it — '' (auto)
+  // is the resting value everywhere (drafts, rows, agents).
+  const subagentModel =
+    conversationId === null
+      ? draftScope?.subagent_model ?? ''
+      : isAgentChat
+        ? owner?.subagent_model ?? ''
+        : rowScope?.subagent_model ?? ''
 
   const activeProviderFor = (m: string) => {
     for (const [name, pm] of Object.entries(byProvider)) {
@@ -8630,6 +8647,7 @@ export function ChatScopePickers() {
 
   const [savingModel, setSavingModel] = useState(false)
   const [savingEffort, setSavingEffort] = useState(false)
+  const [savingSubagent, setSavingSubagent] = useState(false)
 
   const applyModel = (value: string) => {
     const idx = value.indexOf('::')
@@ -8675,7 +8693,27 @@ export function ChatScopePickers() {
       .finally(() => setSavingEffort(false))
   }
 
-  const saving = savingModel || savingEffort
+  // #383: the chat's sub-agent pin. Same three write paths as model/effort;
+  // the backend qualifies the scope complete-or-empty at every write.
+  const applySubagentModel = (value: string) => {
+    if (value === subagentModel) return
+    if (conversationId === null) {
+      setDraftScope({ subagent_model: value })
+      return
+    }
+    setSavingSubagent(true)
+    const write = isAgentChat
+      ? updateAgentModelEffort(owner.id, model, effort, value)
+      : updateConversation(conversationId, { subagent_model: value })
+    write
+      .then(() => {
+        if (isAgentChat) refreshAgents()
+      })
+      .catch(() => {})
+      .finally(() => setSavingSubagent(false))
+  }
+
+  const saving = savingModel || savingEffort || savingSubagent
   // "No provider" means the config has none — not that the /models probe
   // returned nothing (a configured llama.cpp/Ollama server whose catalog
   // endpoint errors or is slow is NOT an unconfigured setup). While the
@@ -8714,6 +8752,24 @@ export function ChatScopePickers() {
           title={`${EFFORT_HINT}${isAgentChat ? ' (writes through to the owning agent)' : ''}`}
         >
           <EffortOptions efforts={modelReasoningEfforts(byProvider, model)} />
+        </select>
+        {/* #383: where this chat's spawn_agent delegations run. '' =
+            sub-agent: auto — the global Settings scope, then this chat's
+            own model. Writes are complete "provider::model" or ''. */}
+        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">sub-agent</span>
+        <select
+          className="max-w-[14rem] rounded   bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
+          value={subagentModel}
+          onChange={(e) => applySubagentModel(e.target.value)}
+          disabled={locked || saving || noProvider}
+          aria-label="Chat sub-agent model"
+          title={
+            SUBAGENT_SCOPE_HINT +
+            (isAgentChat ? ' (writes through to the owning agent)' : conversationId === null ? ' (pinned at first send)' : '')
+          }
+        >
+          <option value="">{SUBAGENT_AUTO_LABEL}</option>
+          <ModelOptions byProvider={byProvider} value={subagentModel} />
         </select>
         {isAgentChat && (
           <span
@@ -10575,6 +10631,8 @@ export function Composer() {
         const created = await createConversation(stripProviderMarkup(displayText).slice(0, 40) || 'New chat', dest, {
           model: ds?.model ?? useAgent.getState().globalModel,
           effort: ds?.effort ?? useAgent.getState().globalEffort,
+          // #383: the draft's sub-agent pin, when the user set one.
+          subagent_model: ds?.subagent_model ?? '',
         })
         cid = created.id
         // Atomic: re-key the draft buffer (optimistic messages included).

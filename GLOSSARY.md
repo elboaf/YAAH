@@ -71,6 +71,10 @@ _Avoid_: storing bare ids; treating bare as a legal stored scope
 The global default for NEW chats and for scopes that are empty — the active provider plus its remembered model. Changing it must never affect a chat whose scope is complete.
 _Avoid_: "current model" (which chats read as their own scope)
 
+**Sub-agent scope**:
+Where a chat's spawn_agent delegations run: a stored value that must be COMPLETE (`provider::model`) or EMPTY ("sub-agent: auto"). Resolution: the chat's pin > the global sub-agent scope (Settings) > the chat's own model. Same rules as any Model scope — never bare, dead-provider scopes fail the spawn. (#383, ADR-0018)
+_Avoid_: "sub-agent provider" (the global layer alone); routing per agent type (the frontmatter layer, removed)
+
 ### Prompt surface
 
 **Prompt surface**:

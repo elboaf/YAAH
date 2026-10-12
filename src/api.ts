@@ -134,6 +134,8 @@ export interface ConversationRow {
    *  effort: '' = Default (reasoning_effort param not sent). */
   model?: string
   effort?: string
+  /** #383: the chat's pinned sub-agent scope; '' = sub-agent: auto. */
+  subagent_model?: string
 }
 
 export interface ContextInfo {
@@ -208,7 +210,7 @@ export const getConversation = (id: number) =>
 export const createConversation = (
   title: string,
   workspace?: string | null,
-  scope?: { model?: string; effort?: string },
+  scope?: { model?: string; effort?: string; subagent_model?: string },
 ) =>
   api<{ id: number }>('/api/conversations', {
     method: 'POST',
@@ -217,6 +219,7 @@ export const createConversation = (
       workspace: workspace ?? null,
       model: scope?.model ?? '',
       effort: scope?.effort ?? '',
+      subagent_model: scope?.subagent_model ?? '',
     }),
   })
 
@@ -290,8 +293,9 @@ export interface AgentConfig {
   last_workspace?: string
   /** Access mode gating tool execution: ask | plan | full. */
   access_mode?: 'ask' | 'plan' | 'full'
-  /** Sub-agent routing: provider name or "provider::model"; "" = inherit
-   *  the parent conversation's provider (default). */
+  /** Sub-agent routing (#383): a provider name or complete
+   *  "provider::model"; "" = inherit the parent conversation's model.
+   *  Bare values (older configs) qualify at resolve time. */
   subagent_provider?: string
   /** Interface scale (CSS zoom on the app root); 1.0 = default ramp. */
   ui_scale?: number
@@ -378,7 +382,8 @@ export const updateConfig = (
     reasoning_effort: string
     ui_scale: number
     access_mode: 'ask' | 'plan' | 'full'
-    /** Sub-agent routing override ("" = inherit parent provider). */
+    /** Sub-agent routing override (#383): provider name or
+     *  "provider::model"; "" = inherit parent model. */
     subagent_provider?: string
     context_window_overrides: Record<string, number | null>
     /** Per-model context windows: the authoritative map when present. */
@@ -532,6 +537,8 @@ export const updateConversation = (
     /** #51/#76: the chat's pinned scope; '' = Default (param not sent). */
     model?: string
     effort?: string
+    /** #383: the chat's pinned sub-agent scope; '' = sub-agent: auto. */
+    subagent_model?: string
   },
 ) =>
   api<{ ok: boolean }>(`/api/conversations/${id}`, {
@@ -777,6 +784,8 @@ export interface ScheduledAgent {
   say_mode: AgentSayMode
   model: string
   effort: string
+  /** #383: the agent's pinned sub-agent scope; '' = sub-agent: auto. */
+  subagent_model: string
   memory_enabled: boolean
   /** #93: a scheduled run may ask the user a question and wait (its pinned
    *  chat renders the card via the tape poll). */
@@ -841,12 +850,18 @@ export const updateAgent = (id: string, body: AgentBody) =>
   })
 
 /** #51/#76: the header selectors of an agent-pinned chat write through to
- *  the owning agent (targeted field patch — no schedule-clock reset). */
-export const updateAgentModelEffort = (id: string, model: string, effort: string) =>
+ *  the owning agent (targeted field patch — no schedule-clock reset). #383:
+ *  the sub-agent picker rides the same endpoint. */
+export const updateAgentModelEffort = (
+  id: string,
+  model: string,
+  effort: string,
+  subagentModel = '',
+) =>
   api<ScheduledAgent>(`/api/agents/${encodeURIComponent(id)}/model-effort`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, effort }),
+    body: JSON.stringify({ model, effort, subagent_model: subagentModel }),
   })
 
 export const deleteAgent = (id: string) =>

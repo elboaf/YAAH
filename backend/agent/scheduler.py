@@ -334,6 +334,9 @@ async def fire_agent(
             agent.get("retention") or 0,
             bool(agent.get("allow_ask_user")),
             one_shot=one_shot,
+            # #383: fire through the agent's own sub-agent pin (qualified
+            # like model — same #132 bare-id reasoning as above).
+            subagent_model=qualify_model_scope(agent.get("subagent_model") or ""),
         )
     )
     _fire_tasks.add(task)
@@ -382,6 +385,8 @@ async def _run_and_settle(
     retention: int,
     allow_ask_user: bool = False,
     one_shot: bool = False,
+    # #383: the agent's pinned sub-agent scope ('' = sub-agent: auto).
+    subagent_model: str = "",
 ):
     """Consume one fire's run to completion, then settle the outcome:
     status recording (the toast source), global retry scheduling, and the
@@ -400,6 +405,7 @@ async def _run_and_settle(
             model_override=model,
             effort_override=effort,
             allow_ask_user=allow_ask_user,
+            subagent_scope=subagent_model,
             # #198: tag the persisted effective-prompt row so the UI can
             # collapse it to a chip; content stays the model input verbatim.
             user_meta={"agent_prompt": True},
