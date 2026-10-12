@@ -58,6 +58,27 @@ def basename(path: str) -> str:
     parts = [p for p in re.split(r"[\\/]", path) if p]
     return parts[-1] if parts else path
 
+
+def normalize_workspace(workspace: str | None) -> str | None:
+    """The at-rest contract for any `workspace` column write (#382).
+
+    '' and '.' mean the Default pseudo-workspace and must be stored as
+    NULL: the sidebar groups chats under Default by matching the registry
+    row's NULL path, so a stored '' matches NO group and the chat vanishes
+    from the sidebar (its messages stay in the DB, unreachable).
+
+    The legacy per-request migrate used to heal these rows silently; since
+    f6b05a4 (#374) it runs once per process, so every writer must enforce
+    the contract itself. Real paths and remote: namespaces pass through
+    untouched (stripped of surrounding whitespace).
+    """
+    if workspace is None:
+        return None
+    ws = workspace.strip()
+    if ws in ("", "."):
+        return None
+    return ws
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -760,6 +781,7 @@ async def create_conversation(
     # itself (the load_config above only ran when a default was needed).
     model = qualify_model_scope(model or "")
     subagent_model = qualify_model_scope(subagent_model or "")
+    workspace = normalize_workspace(workspace)
     db = await get_db()
     try:
         cur = await db.execute(
@@ -859,7 +881,9 @@ async def update_conversation(conversation_id: int, **fields):
     """Update allowed conversation fields (title, workspace,
     system_prompt_override, model, effort, subagent_model). #132: a bare
     model write is qualified with the active provider — '' stays ''
-    (deliberate Default)."""
+    (deliberate Default). #382: a ''/'.' workspace write is the Default
+    pseudo-workspace and lands as NULL — a stored '' would drop the chat
+    from the sidebar's NULL-matched Default group."""
     allowed = {
         "title",
         "workspace",
@@ -870,7 +894,11 @@ async def update_conversation(conversation_id: int, **fields):
         "effort",
         "subagent_model",
     }
-    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    updates = {
+        k: normalize_workspace(v) if k == "workspace" else v
+        for k, v in fields.items()
+        if k in allowed and v is not None
+    }
     if not updates:
         return False
     if updates.get("model"):
@@ -925,6 +953,9 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
     doesn't exist on disk it is still registered (the sidebar already shows
     a ⚠ for dead workspaces), so the move is never silently lost.
     """
+    # ''/'.' mean Default and must land as NULL, not '' (#382): the sidebar
+    # groups under Default by matching the registry's NULL path.
+    target = normalize_workspace(target)
     db = await get_db()
     try:
         await db.execute("BEGIN IMMEDIATE")

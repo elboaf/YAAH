@@ -3377,12 +3377,16 @@ export function ConversationList({
   // recent conversation activity in each group.
   const localWorkspaces = workspaces.filter((workspace) => !workspace.owner_id)
   const groups: Array<{ ws: WorkspaceRow; items: typeof convs }> = []
+  // #382: a legacy row stored with workspace='' (not NULL) matched no
+  // group and vanished from the sidebar. Backend writers normalize now,
+  // but rows written before the fix must still render — map '' to null.
+  const groupKeyOf = (ws: string | null | undefined) => (ws || null)
   for (const w of localWorkspaces) {
-    groups.push({ ws: w, items: visibleConvs.filter((c) => (c.workspace ?? null) === w.path) })
+    groups.push({ ws: w, items: visibleConvs.filter((c) => groupKeyOf(c.workspace) === w.path) })
   }
   const knownPaths = new Set(localWorkspaces.map((w) => w.path))
   for (const c of visibleConvs) {
-    const p = c.workspace ?? null
+    const p = groupKeyOf(c.workspace)
     if (!knownPaths.has(p)) {
       // A conversation filed under a path the registry doesn't know yet
       // (created between registry refreshes) still gets its group.

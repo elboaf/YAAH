@@ -216,7 +216,10 @@ export const createConversation = (
     method: 'POST',
     body: JSON.stringify({
       title,
-      workspace: workspace ?? null,
+      // #382: '' is the Default pseudo-workspace and must travel as null —
+      // the sidebar groups Default by NULL matching; a stored '' drops the
+      // chat from every group (the backend also normalizes, this is belt).
+      workspace: workspace || null,
       model: scope?.model ?? '',
       effort: scope?.effort ?? '',
       subagent_model: scope?.subagent_model ?? '',
@@ -559,7 +562,8 @@ export const moveConversation = (id: number, workspace: string | null) =>
     `/api/conversations/${id}/move`,
     {
       method: 'POST',
-      body: JSON.stringify({ workspace }),
+      // #382: '' (Default) must travel as null — see createConversation.
+      body: JSON.stringify({ workspace: workspace || null }),
     },
   )
 
