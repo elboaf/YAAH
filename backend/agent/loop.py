@@ -306,6 +306,13 @@ def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
     entry = (cfg.get("model_steps") or {}).get(model)
     steps = _int(entry) if entry is not None else None
     if steps is None:
+        # Provider-level fallback (#111): ProviderEntry.max_steps is still a
+        # validated, documented API field (Settings' ProviderEntry model) —
+        # the ponytail #269 stage-1 cut said nothing writes it, but the test
+        # contract pins the precedence, so honor it when present.
+        prov = (cfg.get("providers") or {}).get(provider) or {}
+        steps = _int(prov.get("max_steps")) if isinstance(prov, dict) else None
+    if steps is None:
         steps = _int(cfg.get("max_steps"))
     return steps if steps is not None else DEFAULT_MAX_STEPS
 
