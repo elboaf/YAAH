@@ -18,6 +18,21 @@ from backend.db.database import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_background_extraction(monkeypatch):
+    """The turn-completion hook (#341) fires a background memory-extraction
+    model call. memory_enabled() reads the real config file (not the
+    agent_loop.load_config stub), and xdist workers share that file across
+    tests — an earlier test enabling memory made the extractor race into
+    these tests' call counts. Extraction is off here, deterministically."""
+    from backend.agent import extract as extract_mod
+
+    async def _no_schedule(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(extract_mod, "schedule", _no_schedule)
+
+
 def sse_stream(*events):
     async def it():
         for e in events:
