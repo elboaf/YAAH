@@ -67,24 +67,55 @@ def _read_path(path: Path) -> bytes | None:
     return None
 
 
+# Directories that are dependency/cache stores, not user work: a non-repo
+# workspace (including Default = the home directory) must never walk into
+# these. The outer-YCode incident: a workspace whose only contents were
+# .pnpm-store + a nested clone made every turn's snapshot read a package
+# cache's thousands of files — synchronously, on the event loop — so the
+# whole backend froze mid-turn (no stream events, git chip dead, every
+# other chat dead). The inner clone (a real repo) never hits this path.
+_SKIP_DIRS = frozenset({
+    ".git", "node_modules", ".pnpm-store", ".venv", "venv", "__pycache__",
+    ".cache", ".npm", ".yarn", "target", "dist-cache", ".tox", ".mypy_cache",
+    ".pytest_cache", ".gradle", ".idea", ".vscode-server", "vendor",
+})
+
+# Per-file cap: snapshot content feeds a diff summary, not storage. Files
+# bigger than this contribute nothing useful and can be enormous (caches,
+# DBs, ISOs). 2 MB is far above any source file the diff cares about.
+_MAX_FILE_BYTES = 2_000_000
+
+# Total cap across the whole snapshot: past this the walk has long since
+# gathered everything the diff needs. Bounded memory for huge trees.
+_MAX_TOTAL_BYTES = 64_000_000
+
+
 def _filesystem_snapshot(workspace: str) -> dict[str, bytes]:
-    """Capture a non-Git folder without following symlinks or entering .git."""
+    """Capture a non-Git folder without following symlinks, entering .git,
+    or descending into dependency/cache stores. Per-file and total byte
+    caps keep a fat workspace from stalling the turn."""
     root = Path(workspace)
     files: dict[str, bytes] = {}
+    total = 0
     for current, dirs, names in os.walk(root, followlinks=False):
-        dirs[:] = [name for name in dirs if name != ".git"]
+        dirs[:] = [name for name in dirs if name not in _SKIP_DIRS]
         base = Path(current)
         for name in names:
             path = base / name
             content = _read_path(path)
-            if content is None:
+            if content is None or len(content) > _MAX_FILE_BYTES:
                 continue
+            total += len(content)
+            if total > _MAX_TOTAL_BYTES:
+                return files
             files[path.relative_to(root).as_posix()] = content
     return files
 
 
 async def _git_files_snapshot(workspace: str, repo_root: Path) -> dict[str, bytes]:
-    """Capture tracked plus non-ignored untracked files, scoped to workspace."""
+    """Capture tracked plus non-ignored untracked files, scoped to workspace.
+    The file reads run in a worker thread: a repo with big files must not
+    block the event loop mid-turn (the outer-YCode incident)."""
     rc, output = await _run_git(
         workspace,
         "ls-files",
@@ -97,7 +128,7 @@ async def _git_files_snapshot(workspace: str, repo_root: Path) -> dict[str, byte
         ".",
     )
     if rc != 0:
-        return _filesystem_snapshot(workspace)
+        return await asyncio.to_thread(_filesystem_snapshot, workspace)
 
     root = Path(workspace)
     files: dict[str, bytes] = {}
@@ -109,8 +140,8 @@ async def _git_files_snapshot(workspace: str, repo_root: Path) -> dict[str, byte
             relative = repo_path.relative_to(root)
         except ValueError:
             continue
-        content = _read_path(repo_path)
-        if content is not None:
+        content = await asyncio.to_thread(_read_path, repo_path)
+        if content is not None and len(content) <= _MAX_FILE_BYTES:
             files[relative.as_posix()] = content
     return files
 
@@ -133,7 +164,11 @@ async def snapshot_workspace(workspace: str) -> WorkspaceSnapshot:
         files = await _git_files_snapshot(workspace, repo_root)
         head_sha = await resolve_head_sha(workspace)
     else:
-        files = _filesystem_snapshot(workspace)
+        # Worker thread: this walk reads real bytes and can legitimately
+        # take a while on a fat non-repo folder — it must never block the
+        # event loop (a blocked loop freezes every concurrent chat, the
+        # git chip, and the stream itself; the outer-YCode incident).
+        files = await asyncio.to_thread(_filesystem_snapshot, workspace)
         head_sha = None
     return WorkspaceSnapshot(workspace=workspace, files=files, head_sha=head_sha)
 
