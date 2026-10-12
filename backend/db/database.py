@@ -298,14 +298,17 @@ async def get_db() -> aiosqlite.Connection:
             await db.execute(
                 "ALTER TABLE conversations ADD COLUMN effort TEXT NOT NULL DEFAULT ''"
             )
-        if "subagent_model" not in conv_cols:
-            # #383: the chat's pinned sub-agent scope — complete
-            # "provider::model" or '' (sub-agent: auto: global setting
-            # falls through, then the parent's own model).
-            await db.execute(
-                "ALTER TABLE conversations ADD COLUMN subagent_model TEXT NOT NULL DEFAULT ''"
-            )
         await _stamp_conversation_scopes(db)
+    if "subagent_model" not in conv_cols:
+        # #383: the chat's pinned sub-agent scope — complete
+        # "provider::model" or '' (sub-agent: auto: global setting
+        # falls through, then the parent's own model). Top-level guard:
+        # an upgraded database already has model/effort, so riding their
+        # migration block would leave this column missing and crash the
+        # boot repair.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN subagent_model TEXT NOT NULL DEFAULT ''"
+        )
     if "remote_revision_counter" not in conv_cols:
         # Revision 1 is a stable baseline token for conversations created
         # before the remote-edit protocol existed.
@@ -364,8 +367,12 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE workspaces ADD COLUMN position INTEGER")
     # Revision tokens change for every host-side metadata/transcript edit,
     # including legacy local routes, not just commits through the new API.
+    # The conversations trigger is dropped and recreated rather than
+    # IF NOT EXISTS: its UPDATE OF column list is code-owned, and IF NOT
+    # EXISTS would leave upgraded databases on the old list forever.
     await db.executescript("""
-    CREATE TRIGGER IF NOT EXISTS conversations_remote_revision_update
+    DROP TRIGGER IF EXISTS conversations_remote_revision_update;
+    CREATE TRIGGER conversations_remote_revision_update
     AFTER UPDATE OF title, workspace, system_prompt_override, model, effort, subagent_model
     ON conversations
     BEGIN
