@@ -290,6 +290,9 @@ export interface AgentConfig {
   last_workspace?: string
   /** Access mode gating tool execution: ask | plan | full. */
   access_mode?: 'ask' | 'plan' | 'full'
+  /** Sub-agent routing: provider name or "provider::model"; "" = inherit
+   *  the parent conversation's provider (default). */
+  subagent_provider?: string
   /** Interface scale (CSS zoom on the app root); 1.0 = default ramp. */
   ui_scale?: number
   /** Per-model context-window overrides (model id -> tokens). Legacy
@@ -375,6 +378,8 @@ export const updateConfig = (
     reasoning_effort: string
     ui_scale: number
     access_mode: 'ask' | 'plan' | 'full'
+    /** Sub-agent routing override ("" = inherit parent provider). */
+    subagent_provider?: string
     context_window_overrides: Record<string, number | null>
     /** Per-model context windows: the authoritative map when present. */
     model_context?: Record<string, { context_window: number | null }>

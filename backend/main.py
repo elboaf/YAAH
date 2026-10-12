@@ -1051,6 +1051,10 @@ class ConfigUpdate(BaseModel):
     # Per-model step budgets (issue #111): model id -> steps (0 = unlimited).
     # Values are validated in the merge (bad entries dropped, not a 422).
     model_steps: dict[str, object] | None = None
+    # Sub-agent routing: provider name or "provider::model"; "" = inherit
+    # the parent's provider (default). Validated at spawn time, not here —
+    # a stale name in the setting degrades to a structured spawn error.
+    subagent_provider: str | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -2114,6 +2118,8 @@ async def api_get_config():
         # Access mode: ask | plan | full (header control; see
         # PLAN-access-modes.md).
         "access_mode": cfg.get("access_mode", "ask"),
+        # Sub-agent routing ("" = inherit the parent's provider).
+        "subagent_provider": cfg.get("subagent_provider") or "",
     }
 
 

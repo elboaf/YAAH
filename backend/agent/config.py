@@ -127,6 +127,14 @@ DEFAULTS = {
     "access_mode": "ask",
     # Per-model compaction settings (model id -> {enabled, trigger_tokens}).
     "model_compaction": {},
+    # Sub-agent routing: which provider/model sub-agents (spawn_agent)
+    # chat through, independent of the parent conversation's provider.
+    # "" = inherit the parent's provider (today's behavior). Otherwise a
+    # provider name from `providers` (routes at that provider's model),
+    # optionally "provider::model" to pin a model — same override syntax
+    # as model_client._resolve_call_cfg. Keeps a local llama.cpp parent's
+    # KV cache hot: sub-agent spawns stop competing for the same slot.
+    "subagent_provider": "",
     # Scheduled agents (issue #41) GLOBAL settings: failed fires retry with
     # backoff up to retry_count times. Per-agent settings live in the
     # SQLite `agents` table, not here.

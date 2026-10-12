@@ -6526,6 +6526,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [active, setActive] = useState('')
   const [newName, setNewName] = useState('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
+  // Sub-agent routing draft ("" = inherit the parent's provider).
+  const [subagentProvider, setSubagentProvider] = useState('')
   const [activeTab, setActiveTab] = useState<'connect' | 'talk' | 'automate' | 'advanced'>('connect')
   // Per-model compaction: model id -> settings (per-provider editors).
   const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
@@ -6671,6 +6673,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setProviders(next)
           setActive(c.active_provider)
           setMaxSteps(c.max_steps ?? '')
+          setSubagentProvider(c.subagent_provider ?? '')
           setModelComp(c.model_compaction ?? {})
           setModelSteps(
             Object.fromEntries(
@@ -6932,6 +6935,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         providers: out,
         active_provider: active || undefined,
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
+        subagent_provider: subagentProvider,
         model_steps: outSteps,
         model_compaction: outComp,
         ui_scale: uiScale,
@@ -7092,6 +7096,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <div className="grid grid-cols-4 gap-3">
             {/* providers: collapsed rows, active first; fields behind one open row */}
             {activeTab === 'connect' && (
+              <>
               <SettingsCard title="Providers" className="col-span-4">
               {providerOrder.length === 0 && (
                 <p className="text-[11px] text-zinc-600">
@@ -7279,6 +7284,36 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
             </SettingsCard>
+
+            {/* Sub-agent routing: which provider/model spawn_agent children
+                chat through. "" = inherit the parent conversation's
+                provider (default); routing children elsewhere keeps a local
+                parent's prompt cache hot. */}
+            <SettingsCard title="Sub-agent routing" className="col-span-4">
+              <div className="flex items-center gap-2">
+                <select
+                  className={`${settingsInputCls} w-64 shrink-0 px-1 text-[11px] text-zinc-300`}
+                  value={subagentProvider}
+                  onChange={(e) => setSubagentProvider(e.target.value)}
+                  aria-label="Sub-agent provider"
+                >
+                  <option value="">inherit parent (default)</option>
+                  {Object.keys(providers).map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-600">
+                Route sub-agents (spawn_agent) at a different provider than the
+                parent conversation. On a local single-slot server this keeps the
+                parent's prompt cache hot instead of queueing every spawn behind
+                it. A per-agent frontmatter <span className="font-mono">provider:</span>{' '}
+                overrides this; unknown names fail the spawn with an error.
+              </p>
+            </SettingsCard>
+              </>
             )}
 
 

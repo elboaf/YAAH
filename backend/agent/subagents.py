@@ -73,6 +73,11 @@ class AgentDef:
     disallowed_tools: list[str] = field(default_factory=list)
     max_turns: int = DEFAULT_MAX_TURNS
     builtin: bool = False
+    # Per-agent routing override: a provider name (or "provider::model")
+    # this agent always chats through, regardless of the global
+    # subagent_provider setting. None = fall through to the global
+    # setting, then the parent's provider (current behavior).
+    provider: str | None = None
 
 
 # Tool sets for the built-ins. Sub-agents never get ask_user (they cannot
@@ -196,7 +201,12 @@ def parse_agent_md(path: Path) -> AgentDef | None:
         body=body.strip(),
         tools=_str_list(meta.get("tools")) or None,
         disallowed_tools=_str_list(meta.get("disallowedTools")),
-        max_turns=max_turns,    )
+        max_turns=max_turns,
+        # Per-agent routing override (frontmatter `provider:`): a provider
+        # name or "provider::model"; blank/absent = inherit (AgentDef
+        # default None reads the same).
+        provider=(str(meta.get("provider") or "").strip() or None),
+    )
 
 
 def scan_agents() -> dict[str, AgentDef]:
@@ -412,6 +422,41 @@ def _sub_agent_system_prompt(
     return prompt
 
 
+def _resolve_subagent_model(defn: AgentDef | None = None) -> tuple[str, str]:
+    """Resolve the routing override for a sub-agent's model calls.
+
+    Precedence: AgentDef.provider > global ``subagent_provider`` setting >
+    the parent's provider ("" = inherit, today's behavior). The value is
+    passed straight through as model_client.chat's per-call ``model``
+    override — a bare provider name routes at that provider's configured
+    model, "provider::model" also pins the model (same syntax the parent
+    loop uses; unknown providers raise ModelError inside chat, but we
+    pre-validate here so a misconfigured setting fails the spawn with a
+    structured error instead of mid-stream). Returns (model, error): error
+    "" means go, non-empty means the spawn should fail with it.
+    """
+    raw = ""
+    if defn is not None and defn.provider:
+        raw = defn.provider
+    else:
+        raw = (load_config().get("subagent_provider") or "").strip()
+    if not raw:
+        return "", ""
+    provider_name = raw.partition("::")[0]
+    if provider_name not in (load_config().get("providers") or {}):
+        return "", (
+            f"Unknown provider '{provider_name}' in subagent routing "
+            f"'{raw}'. Check Settings → Providers."
+        )
+    # Normalize: a bare provider name must carry its model — chat's bare-id
+    # branch would keep the AMBIENT (parent's) provider, silently defeating
+    # the routing. Qualify it so base+key+model all swap.
+    if "::" not in raw:
+        model = (load_config()["providers"][provider_name].get("model") or "")
+        raw = f"{provider_name}::{model}" if model else raw
+    return raw, ""
+
+
 async def run_sub_agent(
     defn: AgentDef,
     prompt: str,
@@ -437,6 +482,22 @@ async def run_sub_agent(
     cancel_ev = cancel_ev or asyncio.Event()
     # The sub-agent starts on the workspace it was handed.
     run_workspace = str(workspace)
+
+    # Routing: resolve the provider override once per spawn (AgentDef >
+    # global subagent_provider > inherit the parent's provider). A bad
+    # provider name errors the spawn with a structured result — the
+    # parent's turn survives (spawn_batch isolates per call) — and no
+    # model call is ever made.
+    sub_model, routing_error = _resolve_subagent_model(defn)
+    if routing_error:
+        return {
+            "agent_type": defn.name,
+            "status": "error",
+            "turns": 0,
+            "output": f"error: {routing_error}",
+            "error": routing_error,
+            "transcript": [],
+        }
 
     # #346: the sub's memory calls resolve to the parent's canonical
     # root (handed down pre-rebind) when present; funnel injection from
@@ -653,7 +714,10 @@ async def run_sub_agent(
             acc: list[str] = []
 
             async def _consume():
-                stream = await model_client.chat(messages, tools=tools, stream=True)
+                stream = await model_client.chat(
+                    messages, tools=tools, stream=True,
+                    **({"model": sub_model} if sub_model else {}),
+                )
                 await _consume_stream(stream)
 
             # Race the model call against cancellation: a parent Stop must
@@ -735,7 +799,10 @@ async def run_sub_agent(
                 state = {"content": "", "tool_calls": None, "finish": None}
                 acc = []
                 try:
-                    stream = await model_client.chat(messages, tools=tools, stream=True)
+                    stream = await model_client.chat(
+                        messages, tools=tools, stream=True,
+                        **({"model": sub_model} if sub_model else {}),
+                    )
                     await _consume_stream(stream)
                 except model_client.ModelError as e:
                     status = "error"
