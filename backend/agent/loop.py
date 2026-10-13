@@ -1749,18 +1749,12 @@ async def _run_agent_claimed(
     conv = conv or {}
     system_prompt = conv.get("system_prompt_override") or _default_system_prompt(workspace)
 
-    # Effective call routing (#51/#76): a provider::model override targets
-    # that provider, everything else chats through the active one. The
-    # static-prompt decision must match where the call actually goes.
-    cfg = load_config()
-    provider_name = (
-        model_override.partition("::")[0]
-        if "::" in (model_override or "")
-        else (cfg.get("active_provider") or "")
-    )
-    static_mode = bool(
-        (cfg.get("providers") or {}).get(provider_name, {}).get("static_system_prompt")
-    )
+    # Static system prompt is now unconditional for all providers
+    # (issue #390): always freeze the head on the first model call and
+    # replay the same bytes every later turn.  The per-provider flag and
+    # the Settings checkbox were removed — legacy config files that still
+    # carry "static_system_prompt" are tolerated (the value is ignored).
+    static_mode = True
     # Frozen head (static mode): this conversation's byte-exact prompt head
     # from the turn that froze it, valid only for the workspace the freeze
     # was made under — the head embeds the workspace path and that project's

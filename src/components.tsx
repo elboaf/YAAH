@@ -6684,7 +6684,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               model: p.model,
               apiKeyInput: '',
               savedKey: p.api_key === 'set',
-              staticSystemPrompt: p.static_system_prompt === true,
+              staticSystemPrompt: true, // unconditional (issue #390)
             }
           }
           setProviders(next)
@@ -6885,7 +6885,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         model: p?.model ?? '',
         apiKeyInput: '',
         savedKey: false,
-        staticSystemPrompt: false,
+        staticSystemPrompt: true, // unconditional (issue #390)
       },
     }))
     setNewName('')
@@ -7194,20 +7194,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                             onChange={(e) => patchProvider(name, { apiKeyInput: e.target.value })}
                             aria-label={`${name} API key`}
                           />
-                          <label className="mt-1.5 flex items-center gap-2 text-[10px] text-zinc-400">
-                            <input
-                              type="checkbox"
-                              className="h-3 w-3 shrink-0 accent-blue-600"
-                              checked={p.staticSystemPrompt}
-                              onChange={(e) => patchProvider(name, { staticSystemPrompt: e.target.checked })}
-                              aria-label={`${name} static system prompt`}
-                            />
-                            <span>
-                              Static system prompt (local models): freeze each
-                              conversation's prompt so repeat requests reuse the
-                              server's prompt cache instead of re-prefilling.
-                            </span>
-                          </label>
+                          {/* Static system prompt is now unconditional for all providers (issue #390). */}
                           {/* Per-provider agent & context: one entry per
                               configured model, each with its own max steps
                               + compaction (issue #111). */}

@@ -143,9 +143,10 @@ async def test_frozen_head_is_byte_identical_across_turns(
 
 
 @pytest.mark.asyncio
-async def test_flag_off_rebuilds_head_each_turn(monkeypatch, tmp_path):
-    """Without the flag, behavior is unchanged: the head re-reads live state
-    (the default path must not regress)."""
+async def test_flag_off_is_now_noop_static_always_on(monkeypatch, tmp_path):
+    """Issue #390: the per-provider flag was removed \u2014 static mode is now
+    unconditional.  Even when legacy config says static_system_prompt: False,
+    the head stays byte-stable and the prompt is frozen."""
     ws = str(tmp_path)
     (tmp_path / "AGENTS.md").write_text("version one instructions", encoding="utf-8")
 
@@ -175,11 +176,12 @@ async def test_flag_off_rebuilds_head_each_turn(monkeypatch, tmp_path):
     await run_turn(cid, workspace=ws)
 
     assert len(chat.calls) == 2
-    assert chat.calls[1][0]["content"] != chat.calls[0][0]["content"], (
-        "non-static mode must keep re-reading live state"
+    assert chat.calls[1][0]["content"] == chat.calls[0][0]["content"], (
+        "static mode is now unconditional: head must stay byte-stable"
     )
+    # The first call froze the head; it should be persisted.
     conv = await get_conversation(cid)
-    assert conv["frozen_system_prompt"] is None
+    assert "version one instructions" in conv.get("frozen_system_prompt", "")
 
 
 @pytest.mark.asyncio
