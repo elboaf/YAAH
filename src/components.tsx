@@ -8673,7 +8673,23 @@ export function ChatScopePickers() {
       : updateConversation(conversationId, { model: newModel, effort: nextEffort })
     write
       .then(() => {
-        if (isAgentChat) refreshAgents()
+        if (isAgentChat) {
+          refreshAgents()
+        } else {
+          // Update rowScope so the picker reflects the change immediately
+          // (without this the select keeps showing the old value until
+          // you switch away and back, which re-triggers the useEffect).
+          setRowScope((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  model: newModel,
+                  effort: nextEffort,
+                  subagent_model: prev.subagent_model,
+                }
+              : prev,
+          )
+        }
       })
       .catch(() => {})
       .finally(() => setSavingModel(false))
@@ -8691,7 +8707,15 @@ export function ChatScopePickers() {
       : updateConversation(conversationId, { effort: e })
     write
       .then(() => {
-        if (isAgentChat) refreshAgents()
+        if (isAgentChat) {
+          refreshAgents()
+        } else {
+          setRowScope((prev) =>
+            prev
+              ? { ...prev, effort: e, model: prev.model, subagent_model: prev.subagent_model }
+              : prev,
+          )
+        }
       })
       .catch(() => {})
       .finally(() => setSavingEffort(false))
@@ -8711,7 +8735,15 @@ export function ChatScopePickers() {
       : updateConversation(conversationId, { subagent_model: value })
     write
       .then(() => {
-        if (isAgentChat) refreshAgents()
+        if (isAgentChat) {
+          refreshAgents()
+        } else {
+          setRowScope((prev) =>
+            prev
+              ? { ...prev, subagent_model: value, model: prev.model, effort: prev.effort }
+              : prev,
+          )
+        }
       })
       .catch(() => {})
       .finally(() => setSavingSubagent(false))
