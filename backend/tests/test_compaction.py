@@ -66,7 +66,7 @@ def _patch_cfg(monkeypatch, **over):
 @pytest.fixture(autouse=True)
 def _fake_summarizer(monkeypatch):
     """Deterministic summarizer: marker + folded count."""
-    async def fake_summarize(cut_messages, model_override=""):
+    async def fake_summarize(cut_messages, model_override="", cancel_event=None):
         return f"SYNTHETIC SUMMARY of {len(cut_messages)} messages"
 
     monkeypatch.setattr(comp, "summarize_messages", fake_summarize)
@@ -313,7 +313,7 @@ async def test_repeated_compaction_carries_previous_summary(monkeypatch):
     monkeypatch.setattr(comp, "resolve_window", fake_resolve_window)
     summarized_inputs = []
 
-    async def record_summary(messages, model_override=""):
+    async def record_summary(messages, model_override="", cancel_event=None):
         summarized_inputs.append(messages)
         return f"cumulative-{len(summarized_inputs)}"
 

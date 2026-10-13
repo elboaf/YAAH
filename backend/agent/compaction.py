@@ -6,6 +6,7 @@ The summary watermark controls model replay; transcript reads, exports, and
 agent search retain access to the original messages.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -258,17 +259,28 @@ _SUMMARIZER_PROMPT = (
 )
 
 
-async def summarize_messages(cut_messages: list, model_override: str = "") -> str:
+async def summarize_messages(
+    cut_messages: list, model_override: str = "", cancel_event=None
+) -> str:
     """One tool-free, non-streaming model call over the excerpt. Returns
     the summary text (never empty — falls back to a truncated raw replay
-    if the model misbehaves)."""
+    if the model misbehaves). cancel_event: Stop event (#389) — when it
+    fires mid-call the request task is cancelled and ModelCancelled
+    propagates to the turn's settle path."""
     excerpt = _excerpt(cut_messages)
     messages = [
         {"role": "system", "content": _SUMMARIZER_PROMPT},
         {"role": "user", "content": excerpt},
     ]
-    data = await model_client.chat(
-        messages, tools=None, stream=False, model=model_override or ""
+    from backend.agent import loop as _loop
+
+    data = await _loop._race_model_call(
+        asyncio.ensure_future(
+            model_client.chat(
+                messages, tools=None, stream=False, model=model_override or ""
+            )
+        ),
+        cancel_event,
     )
     try:
         content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
@@ -309,10 +321,14 @@ async def compact_history_for_context(
     model_window: int | None = None,
     *,
     model_id: str | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> dict | None:
     """The whole pass, run once per turn before the first model call:
     measured tokens vs window -> cut -> cumulatively summarize -> persist
     prompt-only state, leaving every transcript message untouched.
+
+    cancel_event: the turn's Stop event (#389) — raced against the
+    summarizer's model call so Stop cuts a slow compaction too.
 
     Returns a `compacted` event payload when compaction happened, else
     None. Never raises: any failure logs and leaves the conversation
@@ -370,7 +386,19 @@ async def compact_history_for_context(
     # cannot discard the continuity facts needed for cumulative compaction.
     if prior_summary:
         summary_input.append({"role": "previous summary", "content": prior_summary})
-    summary = await summarize_messages(summary_input, ccfg.get("model") or "")
+    # Back-compat: only pass cancel_event when there is one — callers (and
+    # test fakes) with the old signature keep working when cancellation is
+    # not wired.
+    if cancel_event is not None:
+        summary = await summarize_messages(
+            summary_input, ccfg.get("model") or "", cancel_event=cancel_event
+        )
+    else:
+        summary = await summarize_messages(summary_input, ccfg.get("model") or "")
+    if cancel_event is not None and cancel_event.is_set():
+        # Stop fired between the summarizer and the DB write (#389):
+        # persist nothing — a cancelled turn must not mutate prompt state.
+        raise model_client.ModelCancelled("cancelled by user")
     summarized = await db.compact_conversation(
         conversation_id, summary, through_message_id=through_message_id
     )

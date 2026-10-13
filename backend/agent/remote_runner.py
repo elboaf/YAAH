@@ -237,6 +237,7 @@ async def _run_claimed(
     model_override: str,
     effort_override: str | None,
 ) -> AsyncIterator[str]:
+    from backend.agent import loop as agent_loop
     from backend.agent import model_client
 
     cancel_event = await remote_runs.cancel_event(owner_id, conversation_id)
@@ -282,14 +283,22 @@ async def _run_claimed(
                 return
 
             state: dict = {"content": "", "tool_calls": None, "usage": None}
-            async def _consume() -> None:
-                stream = await model_client.chat(
-                    messages, tools=tools, stream=True,
-                    model=model_override, effort=effort_override,
+            async def _consume() -> AsyncIterator[str]:
+                # Issue #389 (remote twin): the call dispatch AND the stream
+                # drain are raced against the cancel event, so Stop closes
+                # the in-flight provider connection instead of waiting out a
+                # quiet prefill (the read timeout deliberately covers the
+                # whole prefill, up to the 3600 s cap).
+                stream = await agent_loop._race_model_call(
+                    asyncio.create_task(
+                        model_client.chat(
+                            messages, tools=tools, stream=True,
+                            model=model_override, effort=effort_override,
+                        )
+                    ),
+                    cancel_event,
                 )
-                async for ev in stream:
-                    if cancel_event is not None and cancel_event.is_set():
-                        return
+                async for ev in agent_loop._race_stream_iter(stream, cancel_event):
                     kind = ev["type"]
                     if kind == "content":
                         state["content"] += ev.get("text", "")
@@ -321,6 +330,13 @@ async def _run_claimed(
             try:
                 async for line in _consume():
                     yield line
+            except model_client.ModelCancelled:
+                # Stop mid-call (#389): settle as a user stop, not an API
+                # error. The post-loop cancel_event check below would emit
+                # the same, but only after appending the partial assistant
+                # message — a stop mid-call appends nothing.
+                yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
+                return
             except Exception as exc:  # ModelError and transport failures
                 yield _ndjson({"type": "error",
                                "message": f"{type(exc).__name__}: {exc}"})

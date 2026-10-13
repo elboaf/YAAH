@@ -29,6 +29,12 @@ class ModelTimeout(ModelError):
     API failure."""
 
 
+class ModelCancelled(ModelError):
+    """The in-flight provider call was cancelled by the user (Stop button,
+    issue #389). Distinguished from a provider failure so the run loop can
+    settle the turn as 'stopped' instead of surfacing an API error."""
+
+
 # llama.cpp (and friends) send zero response bytes until prompt prefill
 # finishes, so the httpx READ timeout must cover the whole prefill, not the
 # inter-chunk gap: at ~40 tok/s a 128k-token cold prefill runs ~55 minutes.
@@ -209,22 +215,57 @@ async def chat(
     )
 
 
-async def _stream_response(
+def _stream_response(
     payload: dict,
     headers: dict,
     api_base: str | None = None,
     provider: str | None = None,
     model: str | None = None,
-) -> AsyncIterator[dict]:
-    """Yield parsed SSE chunks: content deltas, tool_call deltas, and a final
-    assembled message. api_base None = resolve from the live config (legacy
-    direct callers). Opens with a model_call event (issue #43) so the UI can
-    show "waiting for <provider>" between send and first token.
+) -> "CancellableStream":
+    """Closable async iterator of parsed SSE chunks: content deltas,
+    tool_call deltas, and a final assembled message. api_base None = resolve
+    from the live config (legacy direct callers). Opens with a model_call
+    event (issue #43) so the UI can show "waiting for <provider>" between
+    send and first token.
 
-    provider/model: the RESOLVED call scope (per-chat override applied, #51/#76).
-    The event must report what this call actually targets — re-reading the
-    global config here made the waiting readout follow the sidebar default
-    instead of the chat's pinned model."""
+    provider/model: the RESOLVED call scope (per-chat override applied,
+    #51/#76). The event must report what this call actually targets —
+    re-reading the global config here made the waiting readout follow the
+    sidebar default instead of the chat's pinned model.
+
+    Issue #389: the iterator carries aclose() so a Stop can tear down the
+    HTTP stream without draining it — the httpx client/stream `async with`
+    exits only run when the generator body unwinds."""
+    gen = _stream_gen(payload, headers, api_base, provider, model)
+    return CancellableStream(gen)
+
+
+class CancellableStream:
+    """Async iterator delegating to an inner generator, with an explicit
+    aclose() (issue #389): Stop must be able to release the provider
+    connection immediately instead of waiting for the stream (or a GC
+    finalizer) to end it."""
+
+    def __init__(self, gen):
+        self._gen = gen
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self._gen.__anext__()
+
+    async def aclose(self):
+        await self._gen.aclose()
+
+
+async def _stream_gen(
+    payload: dict,
+    headers: dict,
+    api_base: str | None,
+    provider: str | None,
+    model: str | None,
+):
     if api_base is None:
         api_base = load_config()["api_base"]
     if provider is None or model is None:
@@ -328,7 +369,7 @@ async def _stream_response(
     if tool_calls:
         # A provider glitch (or a hung stream that emitted only the slot
         # initializer) can leave a call with an empty id or name. Persisting
-        # or replaying it poisons the history — every later turn then fails
+        # or replaying it poisons the history \u2014 every later turn then fails
         # with "tool messages must include a non-empty string tool_call_id".
         # Drop degenerate slots; an emission that becomes empty becomes a
         # normal no-tool-call reply.

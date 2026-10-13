@@ -1,4 +1,4 @@
-﻿"""Tests for the agent loop and tools (model is faked)."""
+"""Tests for the agent loop and tools (model is faked)."""
 import asyncio
 import json
 
@@ -1498,3 +1498,123 @@ def test_title_prompt_matches_enforced_contract():
     assert "3-6 words" not in src
     # the enforced clamp is interpolated into the prompt text
     assert "{AUTO_TITLE_MAX_CHARS}" in src
+
+
+# ------------------------------------------------- stop interrupts in-flight call (#389)
+
+
+class BlockingStream:
+    """Yields one event, then blocks forever on the provider read — the
+    hung/quiet-provider shape where Stop used to be discovered only at the
+    3600 s read timeout (issue #389)."""
+
+    def __init__(self):
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not getattr(self, "_opened", False):
+            self._opened = True
+            return {"type": "model_call", "provider": "local", "model": "m"}
+        ev = asyncio.Event()
+        await ev.wait()  # never: simulates a quiet provider read
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_cancel_interrupts_inflight_stream(tmp_path, monkeypatch):
+    """Stop mid-stream closes the provider connection and settles the turn
+    as stopped promptly — not at stream end, not at the read timeout."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-389-stream")
+    blocking = BlockingStream()
+
+    async def first_then_block(messages, tools=None, stream=True):
+        return blocking
+
+    monkeypatch.setattr(loop.model_client, "chat", first_then_block)
+    agent_gen = loop.run_agent(cid, "go", str(tmp_path))
+    got = await agent_gen.__anext__()
+    assert json.loads(got)["type"] == "model_call"
+    await asyncio.sleep(0.05)  # the stream is now parked inside the quiet read
+
+    # The Stop button's endpoint body: set the cancel event.
+    loop.cancel_agent(cid)
+
+    events = await collect(agent_gen)
+    types = [e["type"] for e in events]
+    assert "stopped" in types, types
+    assert "error" not in types, types
+    assert "done" not in types, types
+    assert blocking.closed, "in-flight provider stream was never closed"
+    assert not loop.agent_is_running(cid), "run must settle after Stop"
+    # Settle must be prompt (the whole point of #389); a generous bound
+    # still fails if the read had to time out first.
+    assert sum(1 for _ in types) < 10
+
+
+@pytest.mark.asyncio
+async def test_cancel_interrupts_inflight_tool_free_answer(tmp_path, monkeypatch):
+    """Same guarantee mid-answer: a stream blocked between text deltas
+    (slow token generation) stops promptly instead of running on."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("t-389-answer")
+    gate = asyncio.Event()
+
+    async def slow_answer(messages, tools=None, stream=True):
+        async def gen():
+            yield {"type": "model_call", "provider": "local", "model": "m"}
+            yield {"type": "content", "text": "partial answer before stop"}
+            await gate.wait()  # provider keeps generating for a long time
+            yield {"type": "finish"}
+        return gen()
+
+    monkeypatch.setattr(loop.model_client, "chat", slow_answer)
+    agent_gen = loop.run_agent(cid, "go", str(tmp_path))
+    events = []
+    for _ in range(2):  # model_call + text; the next read parks at the gate
+        events.append(json.loads(await agent_gen.__anext__()))
+    await asyncio.sleep(0.05)
+    loop.cancel_agent(cid)
+    events.extend(await collect(agent_gen))
+    types = [e["type"] for e in events]
+    assert "stopped" in types, types
+    assert "done" not in types, types
+    assert not loop.agent_is_running(cid)
+
+
+@pytest.mark.asyncio
+async def test_compaction_summarizer_cancelled_mid_call(monkeypatch):
+    """Stop during the pre-turn compaction summarizer cuts that call too
+    (#389): ModelCancelled propagates (settling the turn as stopped
+    upstream), the call task is actually cancelled, and no summary text is
+    invented from a cancelled call."""
+    import backend.agent.compaction as comp
+    from backend.agent.model_client import ModelCancelled
+
+    started = asyncio.Event()
+
+    async def hung_chat(messages, tools=None, stream=False, model=""):
+        started.set()
+        await asyncio.Event().wait()  # the summarizer call never returns
+
+    monkeypatch.setattr(comp.model_client, "chat", hung_chat)
+    cancel_ev = asyncio.Event()
+    task = asyncio.create_task(
+        comp.summarize_messages(
+            [{"role": "user", "content": "x" * 100}], "", cancel_event=cancel_ev
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0.05)
+    cancel_ev.set()
+    with pytest.raises(ModelCancelled):
+        await asyncio.wait_for(task, timeout=5)
+
+

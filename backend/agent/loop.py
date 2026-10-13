@@ -258,8 +258,143 @@ async def _generate_conversation_title(
     return title
 
 
+# Issue #389 helpers -------------------------------------------------------
+#
+# Stop used to be discovered only at step boundaries: the in-flight
+# provider stream (or a non-streaming call — compaction's summarizer) kept
+# running to completion, still burning tokens against a run the user had
+# already stopped. These helpers race model calls against the cancel
+# event, close the abandoned stream immediately (releasing the provider
+# connection), and translate the cancel into ModelCancelled so the run
+# loop settles the turn as `stopped` instead of surfacing a bogus API
+# error. Sub-agents already raced their own model calls; these bring the
+# parent loop (and compaction) in line.
+
+
+def _cancel_wait_task(cancel_ev: asyncio.Event | None):
+    """A never-settling awaitable when cancel_ev is None (racing is then a
+    no-op and the model call runs to completion), else a task that fires
+    the moment the user hits Stop. The None case exists so the racing
+    helpers can be used with OPTIONAL cancellation (compaction) without
+    branchy call sites."""
+    if cancel_ev is None:
+        return asyncio.get_running_loop().create_future()
+    return asyncio.create_task(cancel_ev.wait())
+
+
+async def _race_model_call(call, cancel_ev: asyncio.Event | None):
+    """Run a non-streaming model call (an asyncio Task) and the cancel
+    event to the finish. Returns the call's result, or raises
+    ModelCancelled after tearing the call down (issue #389): the task's
+    httpx client `async with` unwinds on cancellation, closing the request
+    connection immediately instead of after the provider answers.
+
+    ModelTimeout raised during teardown re-raises untouched — the retry
+    loop treats a read timeout as terminal (a retry would re-prefill into
+    a busy server slot)."""
+    cancel_task = _cancel_wait_task(cancel_ev)
+    try:
+        done, _ = await asyncio.wait(
+            {cancel_task, call}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        if not cancel_task.done():
+            cancel_task.cancel()
+    if call in done:
+        return call.result()
+    # Cancel won: tear the in-flight request down before settling.
+    if not call.done():
+        call.cancel()
+    try:
+        await call
+    except asyncio.CancelledError:
+        pass
+    except model_client.ModelTimeout:
+        raise
+    except model_client.ModelError as e:
+        # A real API error raced with the Stop; the user's stop wins, but
+        # the failure is logged, not silently swallowed.
+        log.warning("model call failed during cancel teardown: %s", e)
+    raise model_client.ModelCancelled("cancelled by user")
+
+
+async def _race_stream_iter(stream, cancel_ev: asyncio.Event | None):
+    """Async generator over a streaming model call that answers Stop the
+    moment the cancel event fires (issue #389), not when the provider
+    stream ends on its own. Each next-event await is raced against the
+    event; on cancellation the stream is closed — its httpx `async with`
+    blocks unwind and the provider connection is released — and
+    ModelCancelled is raised. Without the race, a quiet read (the read
+    timeout deliberately covers a whole local-model prefill) kept the
+    connection and the token burn alive until the call finished itself."""
+    cancel_task = _cancel_wait_task(cancel_ev)
+    nxt = None
+    completed = False
+    try:
+        aiter = stream.__aiter__()
+        while True:
+            # A fake/sync __anext__ may raise StopAsyncIteration inline;
+            # plain `async for` tolerates that, so the race must too — a
+            # bare StopAsyncIteration inside an async generator would
+            # otherwise surface as "async generator raised
+            # StopAsyncIteration".
+            try:
+                nxt = asyncio.ensure_future(aiter.__anext__())
+            except StopAsyncIteration:
+                completed = True
+                return
+            done, _ = await asyncio.wait(
+                {cancel_task, nxt}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if nxt in done:
+                try:
+                    ev = nxt.result()
+                except StopAsyncIteration:
+                    completed = True
+                    return
+                yield ev
+                continue
+            # Cancel fired while the provider was quiet: abandon the read.
+            raise model_client.ModelCancelled("cancelled by user")
+    finally:
+        if not cancel_task.done():
+            cancel_task.cancel()
+        # Drain any in-flight __anext__ FIRST: aclose() on a generator whose
+        # __anext__ is still scheduled raises "asynchronous generator is
+        # already running". Cancelling the task throws CancelledError into
+        # the inner generator at its await point, which runs its finally
+        # blocks and closes it — for the httpx stream that unwinding is the
+        # connection release itself.
+        if nxt is not None and not nxt.done():
+            nxt.cancel()
+            try:
+                await nxt
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — reclaim, not handle
+                # The abandoned read died of something else (provider error
+                # racing the stop); it must not escape the settle path.
+                log.debug("abandoned stream read raised during teardown",
+                          exc_info=True)
+        if not completed:
+            # Abandoned mid-stream (cancel, consumer error, or generator
+            # teardown): release the provider connection now. A stream
+            # without aclose (test fakes) is left to its own finalizers.
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await asyncio.wait_for(close(), timeout=5)
+                except asyncio.CancelledError:
+                    raise
+                except (GeneratorExit, RuntimeError, Exception):
+                    # Teardown is best-effort; a failure here must never
+                    # replace the in-flight ModelCancelled (or, during
+                    # generator close, the propagating GeneratorExit).
+                    log.exception("stream teardown during cancel failed")
+
+
 async def _maybe_compact(
-    conversation_id: int, model_id: str | None = None
+    conversation_id: int, model_id: str | None = None, cancel_ev: asyncio.Event | None = None
 ) -> list[dict]:
     """Prompt-compaction pass (adr/0004) before the turn's first model call.
 
@@ -273,13 +408,20 @@ async def _maybe_compact(
     event (surfaced in the UI) and never fails the turn. Runs at most
     once per turn — after a pass, context_tokens is NULL, so a repeat
     call no-ops at the trigger until the next real measurement lands.
+
+    cancel_ev: the turn's Stop event (#389) — the summarizer's model call
+    is raced against it so Stop cuts a slow compaction call too.
     """
     from backend.agent import compaction as compaction_mod
 
     try:
         result = await compaction_mod.compact_history_for_context(
-            conversation_id, model_id=model_id
+            conversation_id, model_id=model_id, cancel_event=cancel_ev
         )
+    except model_client.ModelCancelled:
+        # Stop during compaction (#389): end the turn as a stop, not a
+        # compaction failure.
+        raise
     except Exception as e:  # never fail the turn over housekeeping
         return [{"type": "compaction_failed", "error": str(e)[:300]}]
     return [result] if result else []
@@ -1730,6 +1872,12 @@ async def _run_agent_claimed(
     # the transcript still exists in the chat, it just doesn't feed the
     # model, so the current turn's text is appended explicitly (it only
     # reaches the model through the replayed history otherwise).
+    # The cancel event is registered BEFORE compaction and any other setup
+    # awaits (issue #389): Stop during setup must find the event, and the
+    # compaction summarizer below races against it.
+    cancel_ev = asyncio.Event()
+    _cancel_events[conversation_id] = cancel_ev
+
     # Compaction (adr/0004): before rebuilding the context, check whether
     # the last MEASURED call outgrew the model's window; if so the oldest
     # messages are folded into one persisted summary. Any event surfaces
@@ -1737,7 +1885,7 @@ async def _run_agent_claimed(
     # (memory off) have no history to compact.
     if include_history:
         for _cev in await _maybe_compact(
-            conversation_id, model_id=model_override or None
+            conversation_id, model_id=model_override or None, cancel_ev=cancel_ev
         ):
             yield _ndjson(_cev)
 
@@ -1818,9 +1966,6 @@ async def _run_agent_claimed(
     # model learns it can ask for approval at all).
     if current_access_mode() == "plan":
         tools = tools + [EXIT_PLAN_SCHEMA]
-    cancel_ev = asyncio.Event()
-    _cancel_events[conversation_id] = cancel_ev
-
     async def _record_parent_tool(name: str, args: dict, result: object, tool_workspace: str) -> None:
         # Git-activity telemetry was removed with worktree isolation (ADR 0008).
         return None
@@ -1878,19 +2023,32 @@ async def _run_agent_claimed(
                 # anything patching chat with the base signature) is
                 # unchanged. effort None = explicitly send no reasoning_effort
                 # param this call; "" = inherit the global setting.
+                # Issue #389: both the call dispatch and the stream
+                # consumption are raced against the cancel event, so Stop
+                # closes the in-flight provider connection immediately
+                # instead of at the next event (or the 3600 s read
+                # timeout).
                 if model_override or effort_override is not None:
-                    stream = await model_client.chat(
-                        messages,
-                        tools=tools,
-                        stream=True,
-                        model=model_override,
-                        effort=effort_override,
+                    stream = await _race_model_call(
+                        asyncio.create_task(
+                            model_client.chat(
+                                messages,
+                                tools=tools,
+                                stream=True,
+                                model=model_override,
+                                effort=effort_override,
+                            )
+                        ),
+                        cancel_ev,
                     )
                 else:
-                    stream = await model_client.chat(messages, tools=tools, stream=True)
-                async for ev in stream:
-                    if cancel_ev.is_set():
-                        return
+                    stream = await _race_model_call(
+                        asyncio.create_task(
+                            model_client.chat(messages, tools=tools, stream=True)
+                        ),
+                        cancel_ev,
+                    )
+                async for ev in _race_stream_iter(stream, cancel_ev):
                     if ev["type"] == "model_call":
                         # Issue #43: the chat call is dispatched and nothing
                         # has come back yet — surface who we're waiting on.
@@ -1979,6 +2137,12 @@ async def _run_agent_claimed(
                     async for line in _model_step():
                         yield line
                     break
+                except model_client.ModelCancelled:
+                    # Stop mid-call (#389): not an API failure — never
+                    # retried. The boundary check right after settles the
+                    # turn as `stopped` (partial assistant output already
+                    # streamed/persisted stays).
+                    raise
                 except model_client.ModelTimeout:
                     # A read timeout means the provider was still working
                     # (local servers prefill silently — no bytes flow until
@@ -2618,6 +2782,14 @@ async def _run_agent_claimed(
         if remaining and not cancel_ev.is_set():
             yield _ndjson({"type": "queued_autosend", "items": remaining})
 
+    except model_client.ModelCancelled:
+        # Stop mid-call (#389): the turn ends as a user stop, not a
+        # failure — no "turn failed" row, no queue autosend (a hard Stop
+        # holds the queue; explicit silence wins, same as the boundary
+        # checks).
+        async for _fev in _finalize_file_changes():
+            yield _fev
+        yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
     except model_client.ModelError as e:
         # The user message is already stored; without a record of the
         # failure the transcript would read as if the turn never happened.
