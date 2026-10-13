@@ -426,3 +426,193 @@ async def test_load_skill_midturn_grows_tail_not_head(
     # And the row's frozen bytes never gained the skill body.
     conv = await get_conversation(cid)
     assert "Helper body." not in (conv["frozen_system_prompt"] or "")
+
+
+def _assert_strict_prefix_stable(prev: list, curr: list) -> None:
+    """llama.cpp prompt-cache proxy: every leading message must be
+    byte-identical (role + content); a divergence at index i means the
+    provider re-prefills everything from i onward."""
+    for i, (a, b) in enumerate(zip(prev, curr)):
+        ca, cb = a.get("content"), b.get("content")
+        if isinstance(ca, list):
+            ca = json.dumps(ca)
+        if isinstance(cb, list):
+            cb = json.dumps(cb)
+        assert (a.get("role"), ca) == (b.get("role"), cb), (
+            f"strict prefix diverges at message {i} "
+            f"({a.get('role')} vs {b.get('role')}) — the provider "
+            f"re-prefills everything from there"
+    )
+
+
+def _scripted_load_skill_chat(calls, skill_name, rounds: list):
+    """Chat stub: each round is either "skill" (one load_skill tool call
+    then a final answer) or "answer" (final answer only). Appends every
+    call's messages to `calls`.
+    """
+    def make_stream(events):
+        async def it():
+            for e in events:
+                yield e
+        return it()
+    async def scripted(messages, tools=None, stream=False, **kw):
+        calls.append([dict(m) for m in messages])
+        round = rounds.pop(0)
+        if round == "skill":
+            return make_stream([
+                {
+                    "type": "tool_calls",
+                    "tool_calls": [{
+                        "id": f"c{len(calls)}",
+                        "type": "function",
+                        "function": {
+                            "name": "load_skill",
+                            "arguments": json.dumps({"name": skill_name}),
+                        },
+                    }],
+                },
+                {"type": "finish", "reason": "tool_calls"},
+            ])
+        return make_stream(
+            [{"type": "content", "text": "ok"}, {"type": "finish", "reason": "stop"}]
+        )
+    return scripted
+
+@pytest.mark.asyncio
+async def test_persisted_skill_tail_keeps_prefix_cache_next_turn(
+        monkeypatch, static_provider, one_skill
+):
+    """Regression (load_skill cache collapse): the tail message that carries
+    a mid-turn load_skill body sits at messages[1], so a this-turn-only tail
+    VANISHED on the next turn — every history message shifted down a slot
+    and the strict prompt cache re-prefilled everything after the head
+    (observed 90+% -> ~20% hits on llama.cpp). The loaded tail must persist
+    and replay byte-identically at the same slot on every later turn."""
+    calls: list[list] = []
+    monkeypatch.setattr(
+        agent_loop.model_client,
+        "chat",
+        _scripted_load_skill_chat(calls, one_skill, ["skill", "answer", "answer"]),
+    )
+    cid = await create_conversation("t", ".")
+    async def run(text):
+        async for _line in agent_loop.run_agent(cid, text, "."):
+            pass
+    await run("use the helper")  # turn 1: load_skill mid-turn (2 model calls)
+    await run("thanks")          # turn 2: the next prompt (1 model call)
+    assert len(calls) == 3
+    _assert_strict_prefix_stable(calls[1], calls[2])
+    # The skill's instructions genuinely persist into the later turn —
+    # load_skill's contract is "into this conversation".
+    tail_2 = calls[2][1]
+    assert tail_2["role"] == "user" and "Helper body." in tail_2["content"]
+    # Persisted on the row (restart keeps the replay), head still clean.
+    conv = await get_conversation(cid)
+    assert "# Loaded skill: helper" in (conv["persisted_skill_tail"] or "")
+    # The row IS the source of truth: what turn 2 replayed equals the
+    # stored bytes byte-for-byte.
+    assert conv["persisted_skill_tail"] == tail_2["content"]
+    assert "Helper body." not in (conv["frozen_system_prompt"] or "")
+
+@pytest.mark.asyncio
+async def test_persisted_tail_not_duplicated_on_reload(
+        monkeypatch, static_provider, one_skill
+):
+    """Models re-call load_skill for an already-loaded skill; the dedupe
+    (seeded with the persisted tail's own names) must keep the replayed
+    prefix byte-identical — no duplicate block in the tail slot."""
+    calls: list[list] = []
+    monkeypatch.setattr(
+        agent_loop.model_client,
+        "chat",
+        _scripted_load_skill_chat(
+            calls, one_skill, ["skill", "answer", "skill", "answer"]
+        ),
+    )
+    cid = await create_conversation("t", ".")
+    async def run(text):
+        async for _line in agent_loop.run_agent(cid, text, "."):
+            pass
+    await run("use the helper")
+    await run("load it again")
+    assert len(calls) == 4
+    _assert_strict_prefix_stable(calls[1], calls[2])
+    _assert_strict_prefix_stable(calls[2], calls[3])
+    assert calls[2][1]["content"] == calls[3][1]["content"]
+    assert calls[2][1]["content"].count("# Loaded skill:") == 1
+    conv = await get_conversation(cid)
+    assert (conv["persisted_skill_tail"] or "").count("# Loaded skill:") == 1
+
+@pytest.mark.asyncio
+async def test_nonstatic_mode_writes_no_persisted_tail(
+        monkeypatch, one_skill
+):
+    """The persistence is a static-mode mechanism only: with the flag off
+    the head is rebuilt each turn anyway, so nothing is written and nothing
+    replays (the legacy behavior is unchanged)."""
+    monkeypatch.setattr(
+        agent_loop,
+        "load_config",
+        lambda: {
+            "active_provider": "llamacpp",
+            "providers": {
+                "llamacpp": {
+                    "api_base": "http://localhost:8080/v1",
+                    "api_key": "",
+                    "model": "local-model",
+                }
+            },
+            "model": "local-model",
+            "reasoning_effort": "",
+        },
+    )
+    calls: list[list] = []
+    monkeypatch.setattr(
+        agent_loop.model_client,
+        "chat",
+        _scripted_load_skill_chat(calls, one_skill, ["skill", "answer", "answer"]),
+    )
+    cid = await create_conversation("t", ".")
+    async def run(text):
+        async for _line in agent_loop.run_agent(cid, text, "."):
+            pass
+    await run("use the helper")
+    await run("thanks")
+    assert len(calls) == 3
+    conv = await get_conversation(cid)
+    assert not conv["persisted_skill_tail"]
+    # Legacy non-static behavior: the skill body rode inside the head on
+    # the turn that loaded it, and nothing rides after it later.
+    assert not any(
+        isinstance(m.get("content"), str)
+        and m["content"].startswith("# Loaded skill:")
+        for m in calls[2]
+    )
+
+
+@pytest.mark.asyncio
+async def test_poisoned_persisted_tail_is_preserved_not_healed(
+        static_provider, one_skill
+):
+    """The persisted tail is replayed byte-exact, never re-derived from
+    message contents: a poisoned row (however the poison got there — a
+    user message that looks like a skill block is indistinguishable
+    under strict prefix matching) replays unhealed, and a later
+    load_skill MERGES onto the stored bytes verbatim."""
+    cid = await create_conversation("t", ".")
+    poison = "# Loaded skill: not-a-skill" + chr(10) + chr(10) + "user prose"
+    await update_conversation(cid, persisted_skill_tail=poison)
+    messages = [
+        {"role": "system", "content": "head"},
+        {"role": "user", "content": poison},
+    ]
+    result = await agent_loop._load_skill(
+        cid, True, {"name": one_skill}, [], messages,
+        prev_tail=poison, tail=True,
+    )
+    assert result["loaded"] == one_skill
+    conv = await get_conversation(cid)
+    stored = conv["persisted_skill_tail"]
+    assert stored.startswith(poison + chr(10) + chr(10) + "---" + chr(10) + chr(10))
+    assert "Helper body." in stored
+    assert stored.count("# Loaded skill: not-a-skill") == 1

@@ -335,11 +335,13 @@ def load_skill_into_messages(
         return {
             "loaded": skill.name,
             "note": "already loaded this turn",
+            "already_loaded": True,
         }
     loaded_skills.append(skill.name)
     # messages[0] is the system prompt; extend it in place so every later
     # model call in this turn sees the skill's instructions. The folder
     # path lets the model read the skill's own supporting files.
+    tail_block: str | None = None
     if messages and messages[0].get("role") == "system":
         block = (
             f"# Loaded skill: {skill.name}\n\n"
@@ -355,6 +357,7 @@ def load_skill_into_messages(
                 )
             else:
                 messages.insert(1, {"role": "user", "content": block})
+            tail_block = block
         else:
             messages[0]["content"] = (
                 f"{messages[0]['content']}\n\n---\n\n{block}"
@@ -364,6 +367,12 @@ def load_skill_into_messages(
         "description": skill.description,
         "folder": str(Path(skill.path).parent),
     }
+    if tail_block is not None:
+        # The exact injected block, for the caller to persist: the
+        # conversation row, not the message list, is the tail's source
+        # of truth (a strict prefix cannot be re-derived from messages
+        # — a user-authored lookalike would be indistinguishable).
+        result["tail_block"] = tail_block
     if skill.truncated:
         result["truncated"] = True
     return result
