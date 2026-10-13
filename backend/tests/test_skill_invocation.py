@@ -31,7 +31,9 @@ def skills_dir(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_invoked_skill_reaches_model_context(fake_model, skills_dir, tmp_path, monkeypatch):
     """run_agent(skill_names=["ask-matt"]) must inject the skill body into
-    the system prompt the model sees."""
+    the context the model sees.  In static mode (issue #390), the body rides
+    a user-role tail message; in non-static mode it lives in the system
+    prompt — either way it must reach the model."""
     from backend.db.database import create_conversation
 
     captured: list[list] = []
@@ -50,9 +52,10 @@ async def test_invoked_skill_reaches_model_context(fake_model, skills_dir, tmp_p
 
     assert events[-1]["type"] == "done"
     assert captured, "model never called"
-    sys = captured[0][0]["content"]
-    assert "ROUTER-BODY-MARKER" in sys, "invoked skill body NOT in model system prompt"
-    assert "# Invoked skills" in sys
+    # In static mode (unconditional, issue #390) skill bodies ride a
+    # user-role tail message; verify the full message list.
+    all_text = " ".join(msg.get("content", "") for msg in captured[0])
+    assert "ROUTER-BODY-MARKER" in all_text, "invoked skill body NOT in model context"
 
 
 @pytest.mark.asyncio
@@ -99,9 +102,18 @@ async def test_unknown_skill_in_authoritative_block_is_excluded(
     events = await collect(
         loop.run_agent(cid, "go", str(tmp_path), skill_names=["ask-matt", "nope-matt"])
     )
-    sys = captured[0][0]["content"]
-    block = sys[sys.index("# Invoked skills"):]
-    assert "# Skill not found" not in block, "not-found heading inside the authoritative block"
+    # In static mode (unconditional, issue #390) the "Invoked skills" block
+    # rides a user-role tail message rather than being injected into the
+    # system prompt.  The #193 invariant (no "# Skill not found" inside the
+    # authoritative block) still holds — verify across the full message list.
+    all_text = " ".join(msg.get("content", "") for msg in captured[0])
+    # Find the invoked-skills section wherever it lives in the full text
+    block_start = all_text.find("# Invoked skills")
+    assert block_start >= 0, "invoked skills block missing from model context"
+    block = all_text[block_start:]
+    assert "# Skill not found" not in block, (
+        "not-found heading inside the authoritative block"
+    )
     assert "ROUTER-BODY-MARKER" in block, "known skill body must stay in the block"
     ev = next((e for e in events if e["type"] == "skill_not_found"), None)
     assert ev is not None and ev["skills"] == ["nope-matt"]
