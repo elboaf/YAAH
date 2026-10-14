@@ -331,6 +331,31 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN frozen_system_prompt_ws TEXT"
         )
+    if "persisted_skill_tail" not in conv_cols:
+        # Persisted load_skill tail: the byte-exact "# Loaded skill" tail
+        # message a static-mode conversation accumulated through the
+        # load_skill tool. It replays at messages[1] on every later turn so
+        # the strict prompt prefix (head + tail) keeps matching — a
+        # this-turn-only tail vanished on the next turn and shifted the
+        # whole history down a slot, re-prefilling everything after the
+        # head (observed 90+% -> ~20% cache hits on llama.cpp). Written
+        # only by the agent loop, never exposed through the PATCH API.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN persisted_skill_tail TEXT"
+    )
+    if "persisted_skill_tail_ws" not in conv_cols:
+        # The workspace the tail was accumulated under (NULL = never
+        # accumulated). A loaded block embeds the skill folder path of the
+        # workspace it was loaded under, so the tail must not replay after
+        # a conversation moves — same scoping rule as the frozen head. Its
+        # OWN column, not the head's: the head refreezes (and rewrites its
+        # ws) on the first turn after a move, which would retroactively
+        # bless a stale tail's bytes if the tail shared the column.
+        # Pre-upgrade tails keep ws NULL and stop replaying — a one-time
+        # cache loss; the next load_skill re-accumulates.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN persisted_skill_tail_ws TEXT"
+        )
     # #365: databases from before the isolation removal (#359, ADR-0017)
     # still carry the dead branch-pin columns; drop them in place so an
     # upgraded database matches a fresh one. Guarded set-intersection =
@@ -897,6 +922,8 @@ async def update_conversation(conversation_id: int, **fields):
         "system_prompt_override",
         "frozen_system_prompt",
         "frozen_system_prompt_ws",
+        "persisted_skill_tail",
+        "persisted_skill_tail_ws",
         "model",
         "effort",
         "subagent_model",

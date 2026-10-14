@@ -1,11 +1,10 @@
 """Skills registry: parsing, scanning, prompt injection, load_skill tool."""
-import asyncio
 import json
 
 import pytest
 
 from backend.agent import skills as skill_registry
-from backend.agent.loop import _default_system_prompt, _load_skill
+from backend.agent.loop import _default_system_prompt
 
 
 def make_skill(tmp_path, name, body="Do the thing.", **meta_lines):
@@ -94,20 +93,26 @@ def test_load_skill_tool(skills_dir):
     loaded: list[str] = []
     messages = [{"role": "system", "content": "base prompt"}]
 
-    result = asyncio.run(_load_skill({"name": "review"}, loaded, messages))
+    result = skill_registry.load_skill_into_messages(
+        {"name": "review"}, loaded, messages
+    )
     assert result["loaded"] == "review"
     assert "# Loaded skill: review" in messages[0]["content"]
     assert "Review code carefully." in messages[0]["content"]
 
     # Second load of the same skill is a no-op on the prompt
-    result = asyncio.run(_load_skill({"name": "review"}, loaded, messages))
+    result = skill_registry.load_skill_into_messages(
+        {"name": "review"}, loaded, messages
+    )
     assert result.get("note") == "already loaded this turn"
     assert messages[0]["content"].count("# Loaded skill: review") == 1
 
     # Unknown skill reports what IS available; manual-only stays loadable
     # by the model only insofar as it knows the name — the registry itself
     # permits it, matching "hidden from the index, not forbidden".
-    result = asyncio.run(_load_skill({"name": "zzz"}, loaded, messages))
+    result = skill_registry.load_skill_into_messages(
+        {"name": "zzz"}, loaded, messages
+    )
     assert result["error"].startswith("Unknown skill")
     assert "review" in result["available"]
 
@@ -123,8 +128,8 @@ def test_load_skill_tail_mode_uses_user_role_not_system(skills_dir):
         {"role": "system", "content": "frozen head"},
         {"role": "user", "content": "hi"},
     ]
-    result = asyncio.run(
-        _load_skill({"name": "review"}, loaded, messages, tail=True)
+    result = skill_registry.load_skill_into_messages(
+        {"name": "review"}, loaded, messages, tail=True
     )
     assert result["loaded"] == "review"
     assert messages[0]["content"] == "frozen head", "head untouched"
@@ -132,9 +137,49 @@ def test_load_skill_tail_mode_uses_user_role_not_system(skills_dir):
     assert "# Loaded skill: review" in messages[1]["content"]
     assert messages[2]["role"] == "user"
     # A second skill accumulates into the same tail message.
-    asyncio.run(_load_skill({"name": "manual-only"}, loaded, messages, tail=True))
+    skill_registry.load_skill_into_messages(
+        {"name": "manual-only"}, loaded, messages, tail=True
+    )
     assert messages[1]["content"].count("# Loaded skill:") == 2
     assert all(m["role"] != "system" for m in messages[1:])
+
+
+def test_load_skill_first_tail_goes_below_compaction_summary(skills_dir):
+    """The replay side builds head + summary + tail; the loader's FIRST
+    insert (no existing tail message yet) must use the same order. Before
+    this fix it inserted at index 1, ABOVE the summary — the prompt order
+    flipped between the loading turn and the next turn, re-prefilling the
+    cache from the tail slot."""
+    skill_registry.scan_skills()
+    loaded: list[str] = []
+    summary_msg = {
+        "role": "user",
+        "content": (
+            "Earlier conversation summary (decisions and state to continue"
+            " from; the full transcript is preserved separately):\n\nstuff"
+        ),
+    }
+    messages = [
+        {"role": "system", "content": "frozen head"},
+        summary_msg,
+        {"role": "user", "content": "hi"},
+    ]
+    skill_registry.load_skill_into_messages(
+        {"name": "review"}, loaded, messages, tail=True
+    )
+    # Tail landed BELOW the summary (index 2), summary untouched at [1].
+    assert messages[1] is summary_msg
+    assert "# Loaded skill: review" in messages[2]["content"]
+    # And without a summary the first tail still rides directly at [1].
+    messages2 = [
+        {"role": "system", "content": "frozen head"},
+        {"role": "user", "content": "hi"},
+    ]
+    skill_registry.load_skill_into_messages(
+        {"name": "review"}, [], messages2, tail=True
+    )
+    assert messages2[1]["content"].startswith("# Loaded skill:")
+    assert messages2[2]["role"] == "user"
 
 
 def test_load_skill_schema_registered():
@@ -258,7 +303,9 @@ def test_bodies_include_skill_folder(skills_dir):
 def test_load_skill_result_includes_folder(skills_dir):
     skill_registry.scan_skills()
     messages = [{"role": "system", "content": "base"}]
-    result = asyncio.run(_load_skill({"name": "review"}, [], messages))
+    result = skill_registry.load_skill_into_messages(
+        {"name": "review"}, [], messages
+    )
     assert result["folder"] == str(skills_dir / "review")
     assert str(skills_dir / "review") in messages[0]["content"]
 

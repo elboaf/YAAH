@@ -1251,19 +1251,71 @@ async def run_gate(
     return result
 
 
+def _skill_tail_ws_valid(row: dict, workspace: str) -> bool:
+    """Is the row's persisted skill tail replayable under `workspace`?
+
+    The tail's scope lives in its OWN column (persisted_skill_tail_ws),
+    not the frozen head's: the head refreezes — and rewrites its ws — on
+    the first turn after a workspace move, which would retroactively
+    bless the old tail's bytes if the tail shared the column. NULL ws =
+    never accumulated (or a pre-upgrade row): nothing to replay.
+    """
+    ws = row.get("persisted_skill_tail_ws")
+    return ws is not None and ws == (workspace or "")
+
+
 async def _load_skill(
+    conversation_id: int,
+    static_mode: bool,
     args: dict,
     loaded_skills: list[str],
     messages: list,
+    workspace: str = "",
     tail: bool = False,
 ) -> dict:
     """Handle the model's load_skill call. The real logic lives in
     skills.load_skill_into_messages so the sub-agent runner shares it.
     tail=True rides through in static-prompt mode: skill bodies go to a
-    tail system message, the frozen head stays byte-stable."""
-    return skill_registry.load_skill_into_messages(
+    tail message after the head, the frozen head stays byte-stable.
+
+    Static mode also MERGES the injected block onto the conversation
+    row's persisted tail, which replays at the tail slot on every later
+    turn. A this-turn-only tail vanished on the next prompt, shifted the
+    whole history down a slot, and the strict prefix cache re-prefilled
+    everything after the head (90+% -> ~20% hits). The row is the source
+    of truth — the block it reports is appended verbatim (merge, never
+    re-derivation). Persistence failure falls back to this-turn-only
+    behavior — the turn itself is unaffected. The merge re-reads the row
+    after each write: two load_skill calls in one turn read the same
+    turn-start snapshot, so a naive prev_tail merge would let the second
+    write silently drop the first skill's block from the row (it stayed
+    in this turn's prompt, then vanished next turn). Writes carry the
+    workspace, and the merge honors the replay gate: a block loaded in
+    workspace A never merges onto a tail accumulated in workspace B —
+    the first load after a move REPLACES the stale tail.
+    """
+    result = skill_registry.load_skill_into_messages(
         args, loaded_skills, messages, tail=tail
     )
+    block = result.pop("tail_block", None)
+    if tail and block:
+        try:
+            # Re-read past turn-start snapshots: sibling load_skill calls
+            # in the same turn already wrote their blocks.
+            row = await get_conversation(conversation_id) or {}
+            prev_valid = _skill_tail_ws_valid(row, workspace)
+            prev = str(row.get("persisted_skill_tail") or "") if prev_valid else ""
+            merged = (
+                f"{prev}{skill_registry.SEPARATOR}{block}" if prev else block
+            )
+            await update_conversation(
+                conversation_id,
+                persisted_skill_tail=merged,
+                persisted_skill_tail_ws=workspace or "",
+            )
+        except Exception as e:  # noqa: BLE001 — cache best-effort
+            log.warning("persisted_skill_tail_write_failed: %s", e)
+    return result
 
 
 def _cancelled(conversation_id: int) -> bool:
@@ -1768,6 +1820,23 @@ async def _run_agent_claimed(
         else None
     )
     frozen_turn = static_mode and bool(frozen_prompt)
+    # Persisted load_skill tail: the byte-exact "# Loaded skill" tail
+    # message(s) this conversation accumulated through the load_skill tool
+    # (static mode only — non-static rebuilds the head each turn anyway).
+    # They replay at the tail slot on EVERY later turn: a this-turn-only
+    # tail vanished on the next prompt, shifted the whole history down a
+    # slot, and the strict prompt cache re-prefilled everything after the
+    # head (observed 90+% -> ~20% hits on llama.cpp).
+    # Workspace-scoped like the frozen head, but on the tail's OWN column
+    # (persisted_skill_tail_ws — see _skill_tail_ws_valid): a conversation
+    # moved to another workspace drops its tail (the old blocks embed the
+    # old workspace's skill folder paths and instructions) instead of
+    # replaying it.
+    persisted_skill_tail = (
+        str(conv.get("persisted_skill_tail") or "")
+        if static_mode and _skill_tail_ws_valid(conv, workspace or "")
+        else ""
+    )
     if frozen_turn:
         system_prompt = frozen_prompt
         # The frozen bytes already carry the project notes; nothing fresh to
@@ -1910,6 +1979,23 @@ async def _run_agent_claimed(
     # the head only costs a tail re-prefill, never the cached head.
     # Role: user — strict templates reject a second system message
     # (see load_skill_into_messages; this is the same tail-message class).
+    # Persisted load_skill tail: replayed at the tail slot on every later
+    # turn, byte-identical to the turn whose load_skill call produced it,
+    # so the strict prompt prefix (head + tail + history) keeps matching
+    # across turns — and the skill's instructions genuinely stay "in this
+    # conversation", which is what the load_skill contract promises.
+    # The slot is found by marker (skill_tail_index), not hardcoded at
+    # messages[1]: a compacted conversation carries its compaction-summary
+    # message at [1], and the loader's merge must hit the SAME message the
+    # replay built, never a second tail next to it.
+    if persisted_skill_tail:
+        tail_slot = skill_registry.skill_tail_index(messages)
+        if tail_slot is None:
+            tail_slot = 1 + (1 if compact_msg is not None else 0)
+        messages.insert(
+            tail_slot,
+            {"role": "user", "content": persisted_skill_tail},
+        )
     if static_mode and invoked_skill_block:
         messages.append(
             {"role": "user", "content": invoked_skill_block}
@@ -1974,6 +2060,17 @@ async def _run_agent_claimed(
     # reports its own skill_not_found event.
     _, _invoked_unknown = skill_registry.split_known_unknown(invoked)
     loaded_skills: list[str] = [n for n in invoked if n not in _invoked_unknown]
+    # Skills already loaded in EARLIER turns (static mode): their bodies
+    # ride the persisted tail replayed at the tail slot, so the dedupe set
+    # must include them or a later load_skill call for the same skill
+    # would append a byte-different duplicate into the cached prefix.
+    _tail_names = [
+        n.strip()
+        for n in re.findall(
+            r"(?m)^# Loaded skill: (.+)$", persisted_skill_tail
+        )
+    ]
+    loaded_skills.extend(n for n in _tail_names if n not in loaded_skills)
 
     # Per-turn step budget; 0 or blank means unlimited (Stop button still ends
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
@@ -2395,7 +2492,13 @@ async def _run_agent_claimed(
                             )
                     elif name == "load_skill":
                         result = await _load_skill(
-                            args, loaded_skills, messages, tail=static_mode
+                            conversation_id,
+                            static_mode,
+                            args,
+                            loaded_skills,
+                            messages,
+                            workspace=workspace or "",
+                            tail=static_mode,
                         )
                     else:
                         # Access-mode gate (PLAN-access-modes.md). The mode is
