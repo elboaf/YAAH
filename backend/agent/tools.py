@@ -339,7 +339,14 @@ HELP_DOCS: dict = {
         "automatically; the result reports exactly what happened. "
         "negative_prompt and seed pass through. Generation runs as a "
         "server job: pressing Stop cancels it and returns immediately. "
-        "Remote (namespaced) workspaces save to the store only."
+        "Remote (namespaced) workspaces save to the store only. "
+        "EDITING (server-capability-gated): reference_images does "
+        "Flux-style reference-guided generation; control_lora + "
+        "depth_from does depth-pose control - the depth map MUST be "
+        "the FIRST reference ([depth, photo] order; reversed silently "
+        "does nothing) and the hires second pass is skipped for "
+        "reference renders to preserve fidelity; lora[] activates "
+        "server-side LoRAs; steps and guidance override sampling."
     ),
     "upscale_image": (
         "Detail-preserving enlargement of an EXISTING image via the "
@@ -1516,7 +1523,10 @@ GENERATE_IMAGE_SCHEMA = {
             "server's default size; larger sizes are reached via the "
             "server's hires fix (upscale + second diffusion pass) or "
             "plain upscaling, and the result reports what actually "
-            "happened."
+            "happened. When the server advertises them: reference-"
+            "guided editing (reference_images), depth-pose control "
+            "(control_lora / depth_from), LoRA activation (lora), and "
+            "steps/guidance overrides."
         ),
         "parameters": {
             "type": "object",
@@ -1560,6 +1570,80 @@ GENERATE_IMAGE_SCHEMA = {
                 "negative_prompt": {
                     "type": "string",
                     "description": "What to avoid in the image.",
+                },
+                "reference_images": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "1-4 image paths for reference-guided generation "
+                        "(Flux.2-style editing: the model reproduces the "
+                        "referenced scene or subject). Workspace paths "
+                        "like ai-images/x.png, or store rels. For "
+                        "depth-pose control use control_lora instead - "
+                        "reference ORDER matters there: [depth map, "
+                        "reference photo], depth FIRST."
+                    ),
+                },
+                "lora": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": (
+                                    "LoRA name from the server's "
+                                    "capabilities ('.safetensors' optional)."
+                                ),
+                            },
+                            "multiplier": {
+                                "type": "number",
+                                "description": "Strength 0-2; default 1.0.",
+                            },
+                        },
+                        "required": ["name"],
+                    },
+                    "description": (
+                        "LoRAs to activate for this generation, on top "
+                        "of the server's loaded model."
+                    ),
+                },
+                "control_lora": {
+                    "type": "string",
+                    "description": (
+                        "Depth-pose-controlled generation via a "
+                        "refcontrol-style LoRA (name-matched against the "
+                        "server's LoRA dir, activated at 1.0). Validates "
+                        "the reference contract: reference_images must "
+                        "be exactly [depth map, reference photo] - depth "
+                        "FIRST - or use depth_from. Depth guidance "
+                        "silently does nothing when the order is wrong, "
+                        "so prefer this over raw lora+ref_images."
+                    ),
+                },
+                "depth_from": {
+                    "type": "string",
+                    "description": (
+                        "Path to an image to derive a depth map from "
+                        "(computed locally, then placed FIRST in "
+                        "reference_images per the depth-control "
+                        "contract). With control_lora and no "
+                        "reference_images, the same image is used as "
+                        "both depth source and photo."
+                    ),
+                },
+                "steps": {
+                    "type": "integer",
+                    "description": (
+                        "Sampling steps; omit for the server default."
+                    ),
+                },
+                "guidance": {
+                    "type": "number",
+                    "description": (
+                        "Text guidance (CFG) scale, e.g. 4.0; omit for "
+                        "the server default."
+                    ),
                 },
                 "seed": {
                     "type": "integer",
@@ -1700,6 +1784,22 @@ def _native_bounds(caps: dict) -> dict:
         "max_up_h": int(limits.get("max_upscale_height") or 8192),
         "hires": bool(features.get("hires")),
         "vae_tiling": bool(features.get("vae_tiling")),
+        # #403: reference-guided editing + structured LoRA activation,
+        # gated the same way as hires (the SERVER's advertisement decides)
+        "ref_images": bool(features.get("ref_images")),
+        "lora": bool(features.get("lora")),
+        "loras": [
+            str(l.get("name"))
+            for l in (caps.get("loras") or [])
+            if isinstance(l, dict) and l.get("name")
+        ],
+        # name -> request path (the API's lora[].path is the FILE, the
+        # name is its stem; keep the server's own mapping verbatim)
+        "lora_by_name": {
+            str(l.get("name")): str(l.get("path") or l.get("name"))
+            for l in (caps.get("loras") or [])
+            if isinstance(l, dict) and l.get("name")
+        },
     }
 
 
@@ -2022,6 +2122,67 @@ def _hires_plan(want_w: int, want_h: int, b: dict):
     )
 
 
+def _resolve_lora_field(lora, control_lora, b, notes):
+    """Merge explicit lora[] + the control_lora shorthand into the
+    request's structured lora field. Returns (field, error); exactly
+    one is None. Names resolve against the server's LoRA dir (exact,
+    then with/without '.safetensors', then unique case-insensitive
+    substring); unresolved names pass through as-is so the server's
+    own 400 surfaces."""
+
+    def _resolve_name(name: str) -> str:
+        """Canonical NAME from the capabilities list (exact, with/without
+        the .safetensors extension, then unique substring)."""
+        names = b["loras"] or []
+        if name in names:
+            return name
+        stem = (
+            name[:-11] if name.lower().endswith(".safetensors") else name
+        )
+        for cand in (stem,):
+            if cand in names:
+                return cand
+        hits = [n for n in names if stem.lower() in n.lower()]
+        if len(hits) == 1:
+            return hits[0]
+        return name
+
+    def _name_to_path(name: str) -> str:
+        return (b.get("lora_by_name") or {}).get(name, name)
+
+    field: list = []
+    for item in lora or []:
+        if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+            return None, "each lora entry needs a name"
+        try:
+            mult = float(item.get("multiplier", 1.0))
+        except (TypeError, ValueError):
+            mult = 1.0
+        # float clamp, NOT _clamp (which casts int - 0.8 would become 0)
+        field.append(
+            {
+                "path": _name_to_path(_resolve_name(str(item["name"]).strip())),
+                "multiplier": max(0.0, min(2.0, mult)),
+            }
+        )
+    if control_lora:
+        ctl = str(control_lora).strip()
+        names = b["loras"] or []
+        hits = [n for n in names if ctl.lower() in n.lower()]
+        if not hits:
+            preview = ", ".join(names[:8]) or "(none found)"
+            return None, (
+                f"control_lora: no server LoRA matches '{ctl}' "
+                f"(known: {preview})"
+            )
+        name = hits[0]
+        path = _name_to_path(name)
+        if not any(x["path"] == path for x in field):
+            field.append({"path": path, "multiplier": 1.0})
+        notes.append(f"depth-control LoRA active: {name} @ 1.0")
+    return (field or None), None
+
+
 async def generate_image(
     prompt: str,
     workspace: str,
@@ -2030,6 +2191,12 @@ async def generate_image(
     negative_prompt: str | None = None,
     seed: int | None = None,
     hires_fix: bool | None = None,
+    reference_images: list | None = None,
+    lora: list | None = None,
+    control_lora: str | None = None,
+    depth_from: str | None = None,
+    steps: int | None = None,
+    guidance: float | None = None,
 ) -> dict:
     """Run text-to-image on the configured sd-server. The DIFFUSION model
     never renders above the server's default size (a 9B flux model can
@@ -2078,6 +2245,96 @@ async def generate_image(
     up_target: tuple[int, int] | None = None
     hires_body: dict | None = None
     body: dict = {"prompt": prompt}
+
+    # --- references, depth maps, lora (#403) --------------------------
+    refs: list[str] = []
+    depth_inserted = False
+    if reference_images or depth_from:
+        # Reference-guided generation rides the NATIVE job body: the
+        # legacy sync endpoint cannot carry images, and the feature is
+        # capability-gated like hires (the server must advertise
+        # features_by_mode.img_gen.ref_images).
+        if b is None:
+            return {
+                "error": (
+                    "reference-guided generation needs the server's "
+                    "capabilities (native job API); this server did "
+                    "not report them"
+                )
+            }
+        if not b["ref_images"]:
+            return {
+                "error": (
+                    "the server does not support reference images "
+                    "(capabilities report no ref_images feature)"
+                )
+            }
+        if len(reference_images or []) > 4:
+            return {"error": "reference_images accepts at most 4 images"}
+        for p in [str(x or "").strip() for x in (reference_images or [])]:
+            if not p:
+                return {"error": "reference_images entries must be non-empty paths"}
+            raw = _read_image_argument(p, workspace)
+            if isinstance(raw, str):
+                return {"error": f"reference image: {raw}"}
+            refs.append(
+                "data:image/png;base64," + base64.b64encode(raw).decode()
+            )
+    if depth_from:
+        # Depth-pose control: the map goes FIRST (the verified contract;
+        # reversed order silently drops the pose guidance).
+        df = str(depth_from).strip()
+        if not df:
+            return {"error": "depth_from must be a non-empty path"}
+        raw_src = _read_image_argument(df, workspace)
+        if isinstance(raw_src, str):
+            return {"error": f"depth_from: {raw_src}"}
+        from backend.agent import depthmap
+
+        depth_png, dnote = await depthmap.compute_depth(raw_src)
+        if depth_png:
+            refs.insert(
+                0,
+                "data:image/png;base64,"
+                + base64.b64encode(depth_png).decode(),
+            )
+            depth_inserted = True
+        notes.append(dnote or "depth map unavailable")
+
+    lora_field: list | None = None
+    if lora or control_lora:
+        if b is None:
+            return {
+                "error": (
+                    "lora activation needs the server's capabilities "
+                    "(native job API); this server did not report them"
+                )
+            }
+        lora_field, lerr = _resolve_lora_field(lora, control_lora, b, notes)
+        if lerr:
+            return {"error": lerr}
+
+    if control_lora:
+        # Contract validation AFTER depth insertion: refs[0] must be
+        # the depth map, 1-2 refs total. With depth_from, refs[0] IS
+        # the computed map ([depth] alone or [depth, photo]); without
+        # it, the caller supplies exactly [depth, photo] themselves.
+        if depth_inserted:
+            ok = 1 <= len(refs) <= 2
+        else:
+            ok = len(refs) == 2
+        if not ok:
+            return {
+                "error": (
+                    "control_lora needs exactly 2 reference_images: "
+                    "[depth map, reference photo] - depth FIRST; or "
+                    "pass depth_from to compute the map"
+                )
+            }
+        notes.append(
+            "depth-control contract: [depth map, reference photo] "
+            "reference order applied"
+        )
 
     if b is None:
         # Older server without capabilities: legacy passthrough, its call.
@@ -2136,6 +2393,18 @@ async def generate_image(
                 f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
                 "(within the server's default budget)"
             )
+        elif b["hires"] and b["upscale"] and want_hires and refs:
+            # A second diffusion pass can drift the subject away from
+            # the reference; ESRGAN enlargement re-diffuses nothing.
+            up_target = (
+                _clamp(tw, 64, b["max_up_w"]),
+                _clamp(th, 64, b["max_up_h"]),
+            )
+            notes.append(
+                f"reference-guided render stays at {gen_w}x{gen_h}; "
+                "the hires second diffusion pass is skipped to "
+                "preserve reference fidelity (upscale_image can enlarge)"
+            )
         elif b["hires"] and b["upscale"] and want_hires:
             # server-side hires fix: exact target via upscale + second
             # diffusion pass. Default-on (the user's explicit call: the
@@ -2185,6 +2454,23 @@ async def generate_image(
         body["negative_prompt"] = negative_prompt
     if seed is not None:
         body["seed"] = seed
+    if refs:
+        body["ref_images"] = refs
+    if lora_field:
+        body["lora"] = lora_field
+    if steps is not None or guidance is not None:
+        sp = body.setdefault("sample_params", {})
+        if steps is not None:
+            try:
+                sp["sample_steps"] = int(steps)
+            except (TypeError, ValueError):
+                return {"error": "steps must be an integer"}
+        if guidance is not None:
+            try:
+                g = float(guidance)
+            except (TypeError, ValueError):
+                return {"error": "guidance must be a number"}
+            sp.setdefault("guidance", {})["txt_cfg"] = g
 
     # --- transport: native job API (cancellable), sync fallback ---------
     submit_body = {**body, **hires_body} if hires_body else body
