@@ -1487,12 +1487,16 @@ def _memory_executor(op: str):
 # upscale_image (native ESRGAN endpoint over an existing image).
 #
 # Resolution policy (learned the hard way on a 12GB card): the DIFFUSION
-# model always renders at the server's default size - asking a 9B flux
+# model never renders ABOVE the server's default size - asking a 9B flux
 # model for 1024 native can thrash weights forever under VRAM pressure.
-# Anything larger than the default is produced by the ESRGAN upscale
-# chain (fast, detail-preserving, staged on the server's real scale
-# factor). The harness hard-codes no resolution; the server's
-# capabilities decide what "default" means.
+# Sizes beyond the default are reached by the server's HIRES FIX when it
+# is available (render small, ESRGAN-upscale, then a second diffusion
+# pass at the exact target: exact sizes, sharper detail, heavier second
+# pass - paired with per-request VAE tiling for memory relief). Without
+# hires support the ESRGAN upscale chain is used instead (fast,
+# detail-preserving, staged on the server's real scale factor, may
+# overshoot). The harness hard-codes no resolution; the server's
+# capabilities decide what "default" means and which routes exist.
 
 _IMAGE_GEN_TOOLS = ("generate_image", "upscale_image")
 
@@ -1507,9 +1511,11 @@ GENERATE_IMAGE_SCHEMA = {
             "conversation so the user sees it inline. Use for logos, "
             "mockups, illustrations, art assets. The image is not sent "
             "back to you; view_image the saved file only if inspection "
-            "is needed. The diffusion model renders at the server's "
-            "default size; larger sizes are reached by upscaling "
-            "automatically, and the result reports what actually happened."
+            "is needed. The diffusion model never renders above the "
+            "server's default size; larger sizes are reached via the "
+            "server's hires fix (upscale + second diffusion pass) or "
+            "plain upscaling, and the result reports what actually "
+            "happened."
         ),
         "parameters": {
             "type": "object",
@@ -1524,16 +1530,30 @@ GENERATE_IMAGE_SCHEMA = {
                 "width": {
                     "type": "integer",
                     "description": (
-                        "Desired image width in pixels. Bigger than the "
-                        "server default is fine: it renders at the default "
-                        "and upscales. Omit for the server default."
+                        "Desired final image width in pixels. Omit for "
+                        "the server default. Bigger than the default is "
+                        "fine: the render stays small and the size is "
+                        "reached via hires fix (default) or upscaling."
                     ),
                 },
                 "height": {
                     "type": "integer",
                     "description": (
-                        "Desired image height in pixels. Same rule as "
-                        "width. Omit for the server default."
+                        "Desired final image height in pixels. Same "
+                        "rule as width. Omit for the server default."
+                    ),
+                },
+                "hires_fix": {
+                    "type": "boolean",
+                    "description": (
+                        "Above-default sizes: run the server's hires "
+                        "fix (ESRGAN upscale + a second diffusion pass "
+                        "at the exact target - sharper, slower, heavier "
+                        "on VRAM; the server tiles the VAE to cope). "
+                        "false = ESRGAN upscale only (fast; may "
+                        "overshoot slightly). Default: true when the "
+                        "server supports it. Ignored when no size above "
+                        "the server default is requested."
                     ),
                 },
                 "negative_prompt": {
@@ -1655,10 +1675,18 @@ async def _capabilities(api_base: str) -> dict:
 
 
 def _native_bounds(caps: dict) -> dict:
-    """Size bounds + defaults + upscale availability from capabilities,
+    """Size bounds + defaults + route availability from capabilities,
     with safe fallbacks matching sd-server defaults for older builds."""
     limits = caps.get("limits") or {}
     defaults = (caps.get("defaults") or {}) if isinstance(caps.get("defaults"), dict) else {}
+    features = (
+        ((caps.get("features_by_mode") or {}).get("img_gen"))
+        if isinstance(caps.get("features_by_mode"), dict)
+        else None
+    )
+    if not isinstance(features, dict):
+        # deprecated top-level mirror (older builds)
+        features = caps.get("features") if isinstance(caps.get("features"), dict) else {}
     return {
         "min_w": int(limits.get("min_width") or 64),
         "min_h": int(limits.get("min_height") or 64),
@@ -1669,6 +1697,8 @@ def _native_bounds(caps: dict) -> dict:
         "upscale": bool(caps.get("upscale")),
         "max_up_w": int(limits.get("max_upscale_width") or 8192),
         "max_up_h": int(limits.get("max_upscale_height") or 8192),
+        "hires": bool(features.get("hires")),
+        "vae_tiling": bool(features.get("vae_tiling")),
     }
 
 
@@ -1923,6 +1953,36 @@ async def _upscale_to_target(
             return base64.b64decode(cur), last_meta, note
 
 
+def _hires_render_size(want_w: int, want_h: int, b: dict):
+    """Render dims for a hires-fix first pass: at or under the default's
+    pixel budget (what this model/VRAM handles comfortably), shaped to
+    the requested aspect ratio, never above the target itself. Returns
+    (gen_w, gen_h, within_budget)."""
+    budget = float(b["def_w"]) * float(b["def_h"])
+    ratio = float(want_w or want_h) / max(float(want_h or want_w), 1.0)
+    gw = (budget * ratio) ** 0.5
+    gh = gw / max(ratio, 0.0001)
+    within = gw * gh <= budget * 1.05
+    if not within:
+        gw, gh = float(b["def_w"]), float(b["def_h"])
+    return (
+        _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"]),
+        _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"]),
+        within,
+    )
+
+
+def _hires_plan(want_w: int, want_h: int, b: dict):
+    """Target for the hires second pass: the requested size 64-aligned
+    into the server's GENERATION limits (invalid hires targets 400 at
+    submit; generation max is the honest bound - the upscaler limit does
+    not apply to a diffusion pass). Returns (target_w, target_h)."""
+    return (
+        _clamp(_mult64(want_w), b["min_w"], b["max_w"]),
+        _clamp(_mult64(want_h), b["min_h"], b["max_h"]),
+    )
+
+
 async def generate_image(
     prompt: str,
     workspace: str,
@@ -1930,14 +1990,17 @@ async def generate_image(
     height: int | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    hires_fix: bool | None = None,
 ) -> dict:
     """Run text-to-image on the configured sd-server. The DIFFUSION model
-    always renders at the server's default size (a 9B flux model can
+    never renders above the server's default size (a 9B flux model can
     thrash VRAM for minutes above it); requested sizes beyond the default
-    are reached with the staged ESRGAN chain. Transport: the native async
-    job API when capabilities are available (Stop cancels the queued job
-    and stops waiting immediately), the sync OpenAI-compatible endpoint
-    as the fallback for older servers."""
+    go through the server's HIRES FIX when available (small render, ESRGAN
+    upscale, second diffusion pass at the exact target - the user's
+    explicit default) with the ESRGAN upscale chain as the fallback.
+    Transport: the native async job API when capabilities are available
+    (Stop cancels the queued job and stops waiting immediately), the sync
+    OpenAI-compatible endpoint as the fallback for older servers."""
     import asyncio
     import base64
 
@@ -1965,8 +2028,16 @@ async def generate_image(
 
     caps = await _capabilities(api_base)
     b = _native_bounds(caps) if caps else None
+    # the server's first ESRGAN-capable upscaler (used by the hires pass
+    # and the fallback chain); a sane default for caps-less replies
+    up_name = "RealESRGAN_x4plus"
+    for u in caps.get("upscalers") or []:
+        if isinstance(u, dict) and u.get("image_upscale") and u.get("name"):
+            up_name = str(u["name"])
+            break
     notes: list[str] = []
     up_target: tuple[int, int] | None = None
+    hires_body: dict | None = None
     body: dict = {"prompt": prompt}
 
     if b is None:
@@ -1997,52 +2068,114 @@ async def generate_image(
         )
 
     # --- size decision (capability-aware, conservative) ------------------
-    # Diffusion ALWAYS renders at the server default: that size is what
-    # the server operator's model/VRAM comfortably handles (a 9B flux at
-    # 1024 native can thrash weight paging for minutes). Requests bigger
-    # than the default get an aspect-preserving default-size render plus
-    # the staged ESRGAN chain up to the target.
+    # The diffusion render never exceeds the server default's pixel
+    # budget: that is what the operator's model/VRAM comfortably handles
+    # (a 9B flux at 1024 native can thrash weight paging for minutes).
+    # Sizes beyond the default go through the server's HIRES FIX (render
+    # small, ESRGAN-upscale, second diffusion pass at the exact target),
+    # with per-request VAE tiling on the second pass for memory; the
+    # ESRGAN upscale chain is the fallback when hires is unsupported or
+    # explicitly disabled (hires_fix=False).
     gen_w, gen_h = b["def_w"], b["def_h"]
     want_w = width or 0
     want_h = height or 0
     if want_w or want_h:
-        # Keep the default's pixel budget (what this model/VRAM handles
-        # comfortably) but match the requested aspect ratio.
+        # The render budget holds the requested aspect ratio; the render
+        # itself never exceeds the target (no rendering big to scale down).
         budget = float(b["def_w"]) * float(b["def_h"])
         ratio = (want_w or want_h) / max(want_h or want_w, 1.0)
         gw = max(64.0, (budget * ratio) ** 0.5)
         gh = max(64.0, gw / max(ratio, 0.0001))
-        gen_w = _clamp(_mult64(gw), b["min_w"], b["max_w"])
-        gen_h = _clamp(_mult64(gh), b["min_h"], b["max_h"])
-        over = max(want_w / gen_w, want_h / gen_h, 1.0)
-        if over > 1.0 and b["upscale"]:
-            up_target = (
-                _clamp(int(want_w or want_h), 64, b["max_up_w"]),
-                _clamp(int(want_h or want_w), 64, b["max_up_h"]),
+        gen_w = _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"])
+        gen_h = _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"])
+        tw, th = _hires_plan(int(want_w or want_h), int(want_h or want_w), b)
+        over = max(tw / gen_w, th / gen_h, 1.0)
+        want_hires = bool(hires_fix) if hires_fix is not None else True
+        if over <= 1.0:
+            # the render already meets the request
+            notes.append(
+                f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
+                "(within the server's default budget)"
             )
-        elif over > 1.0:
+        elif b["hires"] and b["upscale"] and want_hires:
+            # server-side hires fix: exact target via upscale + second
+            # diffusion pass. Default-on (the user's explicit call: the
+            # heavier second pass is accepted for exact sizes + detail);
+            # hires_fix=False escapes to the fast ESRGAN chain. VAE
+            # tiling rides along per-request for decode memory.
+            hires_body = {
+                "hires": {
+                    "enabled": True,
+                    "target_width": tw,
+                    "target_height": th,
+                    "upscaler": up_name,
+                    "denoising_strength": 0.7,
+                }
+            }
+            if b["vae_tiling"]:
+                hires_body["vae_tiling_params"] = {"enabled": True}
+            notes.append(
+                f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
+                f"(the model's default budget), then hires fix to "
+                f"{tw}x{th} (ESRGAN upscale + second diffusion pass"
+                + (
+                    ", VAE tiled for memory"
+                    if "vae_tiling_params" in hires_body
+                    else ""
+                )
+                + ")"
+            )
+        elif b["upscale"]:
+            # hires unsupported or explicitly off: ESRGAN chain (may
+            # overshoot; the chain stops as soon as the target is met)
+            up_target = (
+                _clamp(tw, 64, b["max_up_w"]),
+                _clamp(th, 64, b["max_up_h"]),
+            )
+        else:
             notes.append(
                 f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
                 "(no ESRGAN upscaler is loaded on the server, so it "
                 "cannot be enlarged)"
             )
-        else:
-            notes.append(
-                f"requested {want_w}x{want_h}: rendered at the server "
-                f"default {gen_w}x{gen_h}"
-            )
-    if width or height:
-        # native bodies take the explicit size; when the user gave none we
-        # omit it so the server default applies verbatim
-        body["width"], body["height"] = gen_w, gen_h
+        if width or height:
+            # native bodies take the explicit size; when the user gave
+            # none we omit it so the server default applies verbatim
+            body["width"], body["height"] = gen_w, gen_h
     if negative_prompt:
         body["negative_prompt"] = negative_prompt
     if seed is not None:
         body["seed"] = seed
 
     # --- transport: native job API (cancellable), sync fallback ---------
-    job_id, err = await _img_gen_job_submit(api_base, body)
+    submit_body = {**body, **hires_body} if hires_body else body
+    job_id, err = await _img_gen_job_submit(api_base, submit_body)
+    if err and hires_body and "HTTP 404" not in err:
+        # Server rejected the hires body (unknown field / bad upscaler /
+        # invalid target): one clean retry WITHOUT it, and the ESRGAN
+        # chain takes over the target. A 404 means no native job API at
+        # all - the legacy fallback below handles that, and "refused"
+        # would be the wrong story.
+        notes.append(
+            "hires fix was refused by the server; the ESRGAN upscale "
+            "chain is used instead"
+        )
+        hires_body = None
+        if not up_target:
+            up_target = (
+                _clamp(tw, 64, b["max_up_w"]),
+                _clamp(th, 64, b["max_up_h"]),
+            )
+        job_id, err = await _img_gen_job_submit(api_base, body)
     if err:
+        if hires_body:
+            # the native endpoint died and the legacy sync path cannot
+            # express hires - say so instead of silently dropping it
+            notes.append(
+                "hires fix could not be applied (native job API "
+                "unavailable); plain render used"
+            )
+            hires_body = None
         # native endpoint unavailable (older build): fall back to sync
         legacy = dict(body)
         legacy["n"] = 1
@@ -2269,10 +2402,11 @@ def _generation_result(
         out["width"], out["height"] = dims
     if b:
         out["native"] = (
-            f"the diffusion model renders at the server default "
-            f"{b['def_w']}x{b['def_h']}; larger sizes are produced by the "
-            "ESRGAN upscaler automatically (or call upscale_image on the "
-            "saved file)"
+            f"the diffusion model renders within the server default "
+            f"{b['def_w']}x{b['def_h']} budget; larger sizes are reached "
+            "via the server's hires fix (upscale + second diffusion "
+            "pass) when supported, otherwise by the ESRGAN upscaler "
+            "(or call upscale_image on the saved file)"
         )
     if notes:
         out["note"] = " ".join(notes)
