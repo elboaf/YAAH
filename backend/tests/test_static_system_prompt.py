@@ -430,19 +430,17 @@ async def test_load_skill_midturn_grows_tail_not_head(
 
 def _assert_strict_prefix_stable(prev: list, curr: list) -> None:
     """llama.cpp prompt-cache proxy: every leading message must be
-    byte-identical (role + content); a divergence at index i means the
-    provider re-prefills everything from i onward."""
+    byte-identical — the COMPLETE message dict (role + content, and
+    tool_calls/tool_call_id too: a changed call id invalidates the cached
+    prefix just as surely as changed text). A divergence at index i means
+    the provider re-prefills everything from i onward."""
     for i, (a, b) in enumerate(zip(prev, curr)):
-        ca, cb = a.get("content"), b.get("content")
-        if isinstance(ca, list):
-            ca = json.dumps(ca)
-        if isinstance(cb, list):
-            cb = json.dumps(cb)
-        assert (a.get("role"), ca) == (b.get("role"), cb), (
-            f"strict prefix diverges at message {i} "
-            f"({a.get('role')} vs {b.get('role')}) — the provider "
-            f"re-prefills everything from there"
-    )
+        assert a == b, (
+            f"strict prefix diverges at message {i}:\n"
+            f"  prev: {json.dumps(a, ensure_ascii=False)[:300]}\n"
+            f"  curr: {json.dumps(b, ensure_ascii=False)[:300]}\n"
+            f"— the provider re-prefills everything from there"
+        )
 
 
 def _scripted_load_skill_chat(calls, skill_name, rounds: list):
@@ -582,12 +580,16 @@ async def test_nonstatic_mode_writes_no_persisted_tail(
     conv = await get_conversation(cid)
     assert not conv["persisted_skill_tail"]
     # Legacy non-static behavior: the skill body rode inside the head on
-    # the turn that loaded it, and nothing rides after it later.
+    # the turn that loaded it, and nothing rides after it later. The
+    # CONTAINS check (not just the prefix) matters: a wrongly-retained
+    # block appended inside a rebuilt system head would still leave the
+    # prompt's first message starting with the system content.
     assert not any(
         isinstance(m.get("content"), str)
-        and m["content"].startswith("# Loaded skill:")
+        and "# Loaded skill:" in m["content"]
         for m in calls[2]
     )
+    assert "# Loaded skill:" not in (calls[2][0]["content"] or "")
 
 
 @pytest.mark.asyncio
@@ -601,14 +603,16 @@ async def test_poisoned_persisted_tail_is_preserved_not_healed(
     load_skill MERGES onto the stored bytes verbatim."""
     cid = await create_conversation("t", ".")
     poison = "# Loaded skill: not-a-skill" + chr(10) + chr(10) + "user prose"
-    await update_conversation(cid, persisted_skill_tail=poison)
+    await update_conversation(
+        cid, persisted_skill_tail=poison, persisted_skill_tail_ws="."
+    )
     messages = [
         {"role": "system", "content": "head"},
         {"role": "user", "content": poison},
     ]
     result = await agent_loop._load_skill(
         cid, True, {"name": one_skill}, [], messages,
-        prev_tail=poison, tail=True,
+        workspace=".", tail=True,
     )
     assert result["loaded"] == one_skill
     conv = await get_conversation(cid)
@@ -616,3 +620,226 @@ async def test_poisoned_persisted_tail_is_preserved_not_healed(
     assert stored.startswith(poison + chr(10) + chr(10) + "---" + chr(10) + chr(10))
     assert "Helper body." in stored
     assert stored.count("# Loaded skill: not-a-skill") == 1
+
+@pytest.mark.asyncio
+async def test_two_loads_in_one_turn_both_persist(
+        monkeypatch, static_provider, tmp_path
+):
+    """Two distinct skills loaded in ONE turn: each write merges against a
+    fresh re-read of the row, not the turn-start snapshot — the second
+    write must never drop the first skill's block (it stayed in this
+    turn's prompt and then vanished on the next turn under the old
+    prev_tail merge)."""
+    from backend.agent import skills as skill_registry
+
+    orig_dir = skill_registry.SKILLS_DIR
+    for name in ("helper", "second"):
+        d = tmp_path / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Does a thing\n---\n{name} body.",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(skill_registry, "SKILLS_DIR", tmp_path / "skills")
+    monkeypatch.setattr(skill_registry, "_scanned", False)
+    skill_registry.scan_skills()
+    try:
+        calls: list[list] = []
+        # A stub that loads a DIFFERENT skill each of the first two rounds,
+        # then answers.
+        async def two_skill_script(messages, tools=None, stream=False, **kw):
+            calls.append([dict(m) for m in messages])
+            if len(calls) == 1:
+                events = [
+                    {
+                        "type": "tool_calls",
+                        "tool_calls": [{
+                            "id": "c1",
+                            "type": "function",
+                            "function": {
+                                "name": "load_skill",
+                                "arguments": json.dumps({"name": "helper"}),
+                            },
+                        }],
+                    },
+                    {"type": "finish", "reason": "tool_calls"},
+                ]
+            elif len(calls) == 2:
+                events = [
+                    {
+                        "type": "tool_calls",
+                        "tool_calls": [{
+                            "id": "c2",
+                            "type": "function",
+                            "function": {
+                                "name": "load_skill",
+                                "arguments": json.dumps({"name": "second"}),
+                            },
+                        }],
+                    },
+                    {"type": "finish", "reason": "tool_calls"},
+                ]
+            else:
+                events = [
+                    {"type": "content", "text": "ok"},
+                    {"type": "finish", "reason": "stop"},
+                ]
+            async def it():
+                for e in events:
+                    yield e
+            return it()
+
+        monkeypatch.setattr(agent_loop.model_client, "chat", two_skill_script)
+        cid = await create_conversation("t", ".")
+        async def run(text):
+            async for _line in agent_loop.run_agent(cid, text, "."):
+                pass
+        await run("load both")
+        await run("thanks")
+        assert len(calls) == 4
+        # Turn 2's replay carries BOTH blocks, in one tail message.
+        tail_2 = calls[3][1]
+        assert tail_2["role"] == "user"
+        assert "# Loaded skill: helper" in tail_2["content"]
+        assert "# Loaded skill: second" in tail_2["content"]
+        _assert_strict_prefix_stable(calls[2], calls[3])
+        # The row is the source of truth and holds both blocks.
+        conv = await get_conversation(cid)
+        stored = conv["persisted_skill_tail"] or ""
+        assert "# Loaded skill: helper" in stored
+        assert "# Loaded skill: second" in stored
+        assert stored == tail_2["content"]
+    finally:
+        monkeypatch.setattr(
+            skill_registry, "SKILLS_DIR", orig_dir
+        )
+        monkeypatch.setattr(skill_registry, "_scanned", False)
+        skill_registry.scan_skills()
+
+@pytest.mark.asyncio
+async def test_workspace_move_drops_persisted_tail(
+        monkeypatch, static_provider, one_skill, tmp_path
+):
+    """A conversation moved to another workspace must not replay the old
+    workspace's tail: the loaded blocks embed the old workspace's skill
+    folder path and instructions. The move drops the replay (ws gate);
+    the first load in the new workspace REPLACES the stale bytes."""
+    calls: list[list] = []
+    monkeypatch.setattr(
+        agent_loop.model_client,
+        "chat",
+        _scripted_load_skill_chat(calls, one_skill, [
+            "skill", "answer",   # turn 1 in ws1: load helper
+            "answer",            # turn 2 in ws2: no replay of helper
+            "skill", "answer",   # turn 3 in ws2: fresh load replaces
+            "answer",            # turn 4 in ws2: steady-state replay
+        ]),
+    )
+    ws1 = str(tmp_path / "ws1")
+    ws2 = str(tmp_path / "ws2")
+    (tmp_path / "ws1").mkdir()
+    (tmp_path / "ws2").mkdir()
+    cid = await create_conversation("t", ws1)
+    async def run(text, ws):
+        async for _line in agent_loop.run_agent(cid, text, ws):
+            pass
+    await run("use the helper", ws1)
+    conv = await get_conversation(cid)
+    assert "# Loaded skill: helper" in (conv["persisted_skill_tail"] or "")
+    assert conv["persisted_skill_tail_ws"] == ws1
+
+    await run("thanks", ws2)
+    # The moved conversation drops the old tail from the replay entirely.
+    assert not any(
+        isinstance(m.get("content"), str) and "# Loaded skill:" in m["content"]
+        for m in calls[2]
+    )
+    # ...while the row keeps the stale bytes, still scoped to ws1 (harmless
+    # — the ws gate keeps them out of every ws2 prompt).
+    conv = await get_conversation(cid)
+    assert conv["persisted_skill_tail_ws"] == ws1
+
+    await run("use it again", ws2)
+    # A fresh load in ws2 REPLACES the stale ws1 bytes on the row.
+    conv = await get_conversation(cid)
+    stored = conv["persisted_skill_tail"] or ""
+    assert "# Loaded skill: helper" in stored
+    assert conv["persisted_skill_tail_ws"] == ws2
+    tail_3 = calls[4][1]
+    assert tail_3["role"] == "user" and "Helper body." in tail_3["content"]
+    assert stored == tail_3["content"]
+
+    await run("thanks again", ws2)
+    # Steady state in ws2: the ws2 tail replays byte-identically (the
+    # turn 3 -> 4 pair legitimately diverges — turn 3 REBUILDS the tail
+    # slot after the move dropped it, which is a one-time re-prefill).
+    conv = await get_conversation(cid)
+    assert (conv["persisted_skill_tail"] or "") == calls[5][1]["content"]
+    _assert_strict_prefix_stable(calls[4], calls[5])
+    # ...and the ws1 bytes are really gone from the row.
+    assert "ws1" not in (conv["persisted_skill_tail"] or "")
+
+@pytest.mark.asyncio
+async def test_tail_replays_after_compact_summary_not_over_it(
+        monkeypatch, static_provider, one_skill
+):
+    """Compacted conversation: the summary message rides at messages[1]
+    and the tail replay must land BELOW it (messages[2]) — never displace
+    the summary, never spawn a second tail message. The in-turn loader
+    must merge into that same message."""
+    from backend.agent.prompt_manifest import compact_summary_message
+    from backend.db.database import compact_conversation, get_messages
+
+    calls: list[list] = []
+    monkeypatch.setattr(
+        agent_loop.model_client,
+        "chat",
+        _scripted_load_skill_chat(calls, one_skill, ["skill", "answer", "answer"]),
+    )
+    cid = await create_conversation("t", ".")
+    async def run(text):
+        async for _line in agent_loop.run_agent(cid, text, "."):
+            pass
+    await run("use the helper")
+    # Compact: summarize through the first user message.
+    rows = await get_messages(cid)
+    n = await compact_conversation(
+        cid, "Earlier: helper was loaded.", through_message_id=rows[0]["id"]
+    )
+    assert n >= 1
+    # Loader side: with a summary at messages[1], the merge must hit the
+    # replayed tail's slot (messages[2]), not messages[1].
+    await run("thanks")
+    assert len(calls) == 3
+    summary_msg = calls[2][1]
+    assert summary_msg["role"] == "user"
+    assert summary_msg["content"].startswith("Earlier conversation summary")
+    tail_msg = calls[2][2]
+    assert tail_msg["role"] == "user"
+    assert tail_msg["content"].startswith("# Loaded skill:")
+    assert "Helper body." in tail_msg["content"]
+    # Exactly ONE tail message in the whole prompt.
+    assert sum(
+        1 for m in calls[2]
+        if isinstance(m.get("content"), str)
+        and m["content"].startswith("# Loaded skill:")
+    ) == 1
+    # The summary was not displaced or polluted.
+    assert "Helper body." not in summary_msg["content"]
+    # Replay bytes == stored bytes.
+    conv = await get_conversation(cid)
+    assert (conv["persisted_skill_tail"] or "") == tail_msg["content"]
+    # And the loader agrees with the replay: given the same layout, it
+    # merges into the tail slot, leaving the summary untouched.
+    messages = [
+        {"role": "system", "content": "head"},
+        compact_summary_message(
+            {"summary": "Earlier: helper was loaded.", "source": "prompt"}
+        ),
+    ]
+    result = await agent_loop._load_skill(
+        cid, True, {"name": "no-such-skill"}, [], messages,
+        workspace=".", tail=True,
+    )
+    assert "error" in result  # unknown skill: nothing injected
+    assert len(messages) == 2

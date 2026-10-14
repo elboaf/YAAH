@@ -22,6 +22,15 @@ from pathlib import Path
 
 from backend.agent import gitproc
 
+# Byte-exact block joiner for tail messages and the system prompt head.
+SEPARATOR = "\n\n---\n\n"
+
+# The persisted/replayed skill-tail message starts with this marker. Both
+# the agent loop (replay slot lookup) and this module (merge/insert) key
+# off it, so the tail always lands in ONE message no matter which side
+# builds the prompt first.
+SKILL_TAIL_MARKER = "# Loaded skill:"
+
 # YAAH_SKILLS_PATH lets the test suite redirect this (default is the
 # user's real ~/.yaah/skills).
 SKILLS_DIR = Path(
@@ -305,6 +314,27 @@ def bodies_for_prompt(names: list[str]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def skill_tail_index(messages: list) -> int | None:
+    """Index of the conversation's skill-tail message, or None.
+
+    The persisted tail replays at the first user message AFTER the head —
+    but a compacted conversation carries a compaction-summary message
+    there, and the tail replay then sits one slot further down (the
+    summary is prefix-stable and must never be displaced or merged into).
+    Keying on the marker instead of a fixed slot keeps the tail in exactly
+    one message, whichever side (this loader or the loop's replay) builds
+    the prompt first.
+    """
+    for i, m in enumerate(messages[:3]):
+        if (
+            isinstance(m, dict)
+            and m.get("role") == "user"
+            and str(m.get("content", "")).startswith(SKILL_TAIL_MARKER)
+        ):
+            return i
+    return None
+
+
 def load_skill_into_messages(
     args: dict, loaded_skills: list[str], messages: list, tail: bool = False
 ) -> dict:
@@ -349,11 +379,10 @@ def load_skill_into_messages(
             f"here) is: {Path(skill.path).parent}\n\n{skill.body}"
         )
         if tail:
-            if len(messages) > 1 and isinstance(messages[1], dict) \
-                    and messages[1].get("role") == "user" \
-                    and str(messages[1].get("content", "")).startswith("# Loaded skill:"):
-                messages[1]["content"] = (
-                    f"{messages[1]['content']}\n\n---\n\n{block}"
+            tail_idx = skill_tail_index(messages)
+            if tail_idx is not None:
+                messages[tail_idx]["content"] = (
+                    f"{messages[tail_idx]['content']}{SEPARATOR}{block}"
                 )
             else:
                 messages.insert(1, {"role": "user", "content": block})
@@ -373,14 +402,6 @@ def load_skill_into_messages(
         # of truth (a strict prefix cannot be re-derived from messages
         # — a user-authored lookalike would be indistinguishable).
         result["tail_block"] = tail_block
-    if skill.truncated:
-        result["truncated"] = True
-    return result
-    result = {
-        "loaded": skill.name,
-        "description": skill.description,
-        "folder": str(Path(skill.path).parent),
-    }
     if skill.truncated:
         result["truncated"] = True
     return result
