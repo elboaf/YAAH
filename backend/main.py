@@ -1068,6 +1068,9 @@ class ConfigUpdate(BaseModel):
     # the parent's provider (default). Validated at spawn time, not here —
     # a stale name in the setting degrades to a structured spawn error.
     subagent_provider: str | None = None
+    # Image generation block (sd-server): merged like remote/memory so a
+    # partial save never wipes sibling keys.
+    image_generation: dict | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -1836,6 +1839,30 @@ async def api_providers():
     }
 
 
+@app.post("/api/image-provider/probe")
+async def api_image_provider_probe(body: dict):
+    """Test-connection probe for the Image generation Settings block.
+
+    GETs {api_base}/v1/models on the user-supplied sd-server URL. The
+    URL is user-entered, never agent-supplied, so no SSRF hardening is
+    required; this is exactly what the browser 'Test' buttons for chat
+    providers do from the client side.
+    """
+    api_base = str((body or {}).get("api_base") or "").strip()
+    if not api_base:
+        return {"ok": False, "error": "api_base is empty"}
+    if not api_base.lower().startswith(("http://", "https://")):
+        return {"ok": False, "error": "api_base must start with http:// or https://"}
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(api_base.rstrip("/") + "/v1/models")
+        if r.status_code != 200:
+            return {"ok": False, "error": f"HTTP {r.status_code}"}
+        return {"ok": True, "models": ["sd-cpp-local"]}
+    except (httpx.HTTPError, ValueError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 @app.get("/api/models/available")
 async def api_available_models():
     """Models offered by every configured provider, queried in parallel.
@@ -2147,7 +2174,12 @@ async def api_get_config():
         # "provider::model"; "" = inherit the parent's model. Bare values
         # (older configs) qualify against the provider's configured model
         # at resolve time — the #132 back-compat branch.
-        "subagent_provider": cfg.get("subagent_provider") or "",    }
+        "subagent_provider": cfg.get("subagent_provider") or "",
+        # Image generation (sd-server): its own Settings block; api_base
+        # doubles as the configured flag for tool availability.
+        "image_generation": cfg.get("image_generation")
+        or {"provider": "sdcpp", "api_base": "", "size": "512x512"},
+    }
 
 
 @app.put("/api/config")
@@ -2196,7 +2228,26 @@ async def api_set_config(body: ConfigUpdate):
         if "allow_screenshot" in merged_cu:
             merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
         updates["computer_use"] = merged_cu
-    # Persistent-memory block merges the same way (#169): a Settings save
+    # Image-generation block merges the same way: a Settings save that
+    # only touches size must not reset api_base. The provider kind is
+    # fixed for this build (sdcpp only); the tool schema is derived from
+    # api_base alone. Blank api_base strips the block (unconfigure).
+    img = updates.get("image_generation")
+    if isinstance(img, dict):
+        existing_img = load_config().get("image_generation") or {}
+        img = {
+            **existing_img,
+            **{k: v for k, v in img.items() if v not in (None, "")},
+        }
+        if img.get("size") not in ("", None) and "x" not in str(img.get("size")).lower():
+            img["size"] = "512x512"
+        if not str(img.get("api_base") or "").strip():
+            updates.pop("image_generation", None)
+        else:
+            img["provider"] = "sdcpp"
+            img["api_base"] = str(img["api_base"]).strip()
+            updates["image_generation"] = img
+        # Persistent-memory block merges the same way (#169): a Settings save
     # that only touches enabled keeps any future sibling keys intact.
     # enabled must be a real boolean (CodeRabbit return trip): bool("false")
     # is True in Python, so a string "false" must be rejected, not coerced.

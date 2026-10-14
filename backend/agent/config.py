@@ -99,6 +99,13 @@ DEFAULTS = {
     # toggle. (NOT a bare flag: `memory_enabled` is taken by the
     # scheduled-agent history flag, #41.)
     "memory": {"enabled": False},
+    # Image generation via a stable-diffusion.cpp server (sd-server).
+    # Deliberately NOT an entry in the chat providers map: an sd-server
+    # can't serve chat turns, and load_config derives the chat connection
+    # from whichever providers entry is active — a shared map could route
+    # chats at it. The generate_image tool appears only while api_base is
+    # set; blank = unconfigured = no image tool.
+    "image_generation": {"provider": "sdcpp", "api_base": "", "size": "512x512"},
     # Saved remote device metadata. Passphrases are intentionally never
     # persisted here; users re-enter them after a backend restart.
     "remote_devices": [],
