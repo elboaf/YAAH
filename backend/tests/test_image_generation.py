@@ -50,6 +50,10 @@ class _FakeClient:
     upscale_calls = 0
     gen_sizes = []
     upscale_bodies = []
+    job_bodies = []
+    job_status = None  # None = complete normally
+    cancel_calls = 0
+    native_ok = True
 
     @classmethod
     def reset(cls):
@@ -60,6 +64,10 @@ class _FakeClient:
         cls.upscale_calls = 0
         cls.gen_sizes = []
         cls.upscale_bodies = []
+        cls.job_bodies = []
+        cls.job_status = None
+        cls.cancel_calls = 0
+        cls.native_ok = True
 
     def __init__(self, **kw):
         pass
@@ -71,19 +79,65 @@ class _FakeClient:
         return False
 
     async def get(self, url):
-        _FakeClient.caps_calls += 1
+        if "/capabilities" in url:
+            _FakeClient.caps_calls += 1
+            r = _FakeResp()
+            r.json = lambda: dict(_FakeClient.caps_payload)
+            return r
+        # job poll
+        if _FakeClient.job_status == "generating":
+            payload = {"status": "generating", "result": None, "error": None}
+        elif _FakeClient.job_status == "failed":
+            payload = {
+                "status": "failed",
+                "result": None,
+                "error": {"code": "generation_failed", "message": "boom"},
+            }
+        else:
+            job = _FakeClient.job_bodies[-1] if _FakeClient.job_bodies else {}
+            payload = {
+                "status": "completed",
+                "result": {
+                    "output_format": "png",
+                    "images": [
+                        {
+                            "index": 0,
+                            "b64_json": base64.b64encode(
+                                _png(job.get("width") or 512, job.get("height") or 512)
+                            ).decode(),
+                        }
+                    ],
+                },
+                "error": None,
+            }
         r = _FakeResp()
-        r.json = lambda: dict(_FakeClient.caps_payload)
+        r.json = lambda: dict(payload)
         return r
 
     async def post(self, url, json=None):
         _FakeClient.last = (url, json)
+        if url.endswith("/sdcpp/v1/img_gen"):
+            if not _FakeClient.native_ok:
+                r = _FakeResp()
+                r.status_code = 404
+                r.json = lambda: {"error": "not found"}
+                return r
+            _FakeClient.job_bodies.append(dict(json or {}))
+            r = _FakeResp()
+            r.json = lambda: {"id": "job_test1", "status": "queued"}
+            return r
+        if url.endswith("/cancel"):
+            _FakeClient.cancel_calls += 1
+            r = _FakeResp()
+            r.json = lambda: {"ok": True}
+            return r
         if url.endswith("/sdcpp/v1/upscale"):
             _FakeClient.upscale_calls += 1
             _FakeClient.upscale_bodies.append(json)
             r = _FakeResp()
             r.json = lambda: dict(_FakeClient.upscale_payload)
             return r
+        # legacy sync generation endpoint
         _FakeClient.gen_calls += 1
         _FakeClient.gen_sizes.append((json or {}).get("size"))
         return _FakeResp()
@@ -179,19 +233,20 @@ def test_no_size_requested_uses_server_default(configured, tmp_path, monkeypatch
     assert _FakeClient.gen_sizes == [None]
 
 
-def test_oversized_request_generates_native_and_upscales(configured, tmp_path, monkeypatch):
-    """1024x1024 on a 512-max model: one native gen (512x512, 64-aligned,
-    aspect-preserving) + a native-endpoint upscale with inferred repeats,
-    result reports dims + what happened + the native bounds."""
+def test_oversized_request_upscales_instead_of_diffusing(configured, tmp_path, monkeypatch):
+    """THE POLICY: a 1024x1024 request never asks the diffusion model for
+    1024 - it renders at the server's default (512) and reaches the
+    target with the ESRGAN chain. Protects 12GB-class cards from
+    weight-thrash at native sizes they can't comfortably render."""
     _FakeClient.caps_payload = {
-        "limits": {"min_width": 64, "min_height": 64, "max_width": 512, "max_height": 512,
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
                    "max_upscale_width": 8192, "max_upscale_height": 8192},
         "defaults": {"width": 512, "height": 512},
         "upscale": True,
     }
     _FakeClient.upscale_payload = {
         "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
-        "upscaler": "realesr-general", "scale": 2, "repeats": 2,
+        "upscaler": "RealESRGAN_x4plus", "scale": 4, "repeats": 1,
         "width": 1024, "height": 1024,
     }
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
@@ -202,36 +257,38 @@ def test_oversized_request_generates_native_and_upscales(configured, tmp_path, m
         )
     )
     assert not result.get("error"), result
-    assert _FakeClient.gen_sizes == ["512x512"]
+    # the diffusion job was 512x512, NEVER 1024
+    assert _FakeClient.job_bodies[0]["width"] == 512
+    assert _FakeClient.job_bodies[0]["height"] == 512
     assert _FakeClient.upscale_calls == 1
-    assert _FakeClient.upscale_bodies[0]["repeats"] == 1
     assert result["width"] == 1024 and result["height"] == 1024
-    assert "generated native 512x512" in result["note"]
-    assert "512" in result["native"] and "upscale_image" in result["native"]
-    assert result["display"] == "inline"
+    assert "default" in result["note"] and "upscaled" in result["note"]
 
 
-def test_within_native_limits_generates_directly(configured, tmp_path, monkeypatch):
+def test_within_default_request_still_renders_at_default(configured, tmp_path, monkeypatch):
+    """Any explicit size renders at the server default (the diffusion
+    model's comfortable size); the result says so."""
     _FakeClient.caps_payload = {
-        "limits": {"min_width": 64, "min_height": 64, "max_width": 1024, "max_height": 1024},
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
         "defaults": {"width": 512, "height": 512},
         "upscale": True,
     }
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(
         tools.execute_tool(
-            "generate_image", {"prompt": "x", "width": 768, "height": 768},
+            "generate_image", {"prompt": "x", "width": 512, "height": 512},
             workspace=str(tmp_path),
         )
     )
     assert not result.get("error"), result
-    assert _FakeClient.gen_sizes == ["768x768"]
+    assert _FakeClient.job_bodies[0]["width"] == 512
+    assert _FakeClient.job_bodies[0]["height"] == 512
     assert _FakeClient.upscale_calls == 0
 
 
-def test_oversized_without_esrgan_clamps_honestly(configured, tmp_path, monkeypatch):
+def test_oversized_without_esrgan_stays_at_default_and_says_so(configured, tmp_path, monkeypatch):
     _FakeClient.caps_payload = {
-        "limits": {"min_width": 64, "min_height": 64, "max_width": 512, "max_height": 512},
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
         "defaults": {"width": 512, "height": 512},
         "upscale": False,
     }
@@ -243,9 +300,37 @@ def test_oversized_without_esrgan_clamps_honestly(configured, tmp_path, monkeypa
         )
     )
     assert not result.get("error"), result
-    assert _FakeClient.gen_sizes == ["512x512"]
+    assert _FakeClient.job_bodies[0]["width"] == 512
     assert _FakeClient.upscale_calls == 0
-    assert "clamped" in result["note"] and "no ESRGAN" in result["note"]
+    assert "no ESRGAN" in result["note"]
+
+
+def test_non_square_request_aspect_fits_default_budget(configured, tmp_path, monkeypatch):
+    """1536x768 (2:1) on a 512-default server: render at the default's
+    pixel budget reshaped to the ratio (768x384 or similar), then upscale
+    to the target - the diffusion pixel count never grows."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
+                   "max_upscale_width": 8192, "max_upscale_height": 8192},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+    }
+    _FakeClient.upscale_payload = {
+        "images": [{"b64_json": base64.b64encode(_png(1536, 768)).decode()}],
+        "upscaler": "RealESRGAN_x4plus", "scale": 2, "repeats": 1,
+        "width": 1536, "height": 768,
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 1536, "height": 768},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    w, h = _FakeClient.job_bodies[0]["width"], _FakeClient.job_bodies[0]["height"]
+    assert w * h <= 512 * 512 * 1.1  # default budget, ~64-rounded
+    assert w / h > 1.5  # landscape ratio preserved
 
 
 def test_capabilities_failure_degrades_to_passthrough(configured, tmp_path, monkeypatch):
@@ -592,3 +677,81 @@ def test_config_get_exposes_block(configured, client):
     got = client.get("/api/config").json()
     assert got["image_generation"]["api_base"] == "http://127.0.0.1:1234"
     assert got["image_generation"]["provider"] == "sdcpp"
+
+
+# --------------------------------------------------- cancellable job transport
+
+
+def test_failed_job_reports_server_error(configured, tmp_path, monkeypatch):
+    """A failed native job surfaces the server's message, not a hang."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.job_status = "failed"
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert "failed: boom" in result["error"]
+
+
+def test_stop_cancels_the_job_and_reraises(configured, tmp_path, monkeypatch):
+    """The reason the job transport exists: Stop (CancelledError) must
+    fire a best-effort server-side cancel and re-raise immediately, so
+    the harness never waits out a thrashing server (rc.14 incident)."""
+    import asyncio as aio
+
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.job_status = "generating"  # never completes
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    async def run_and_cancel():
+        task = aio.create_task(
+            tools.execute_tool(
+                "generate_image", {"prompt": "x"}, workspace=str(tmp_path)
+            )
+        )
+        await aio.sleep(0.05)  # let it submit + enter the poll loop
+        task.cancel()
+        try:
+            await task
+            return None
+        except aio.CancelledError:
+            return "cancelled"
+
+    outcome = asyncio.run(run_and_cancel())
+    assert outcome == "cancelled"
+    assert _FakeClient.cancel_calls == 1
+
+
+def test_legacy_server_without_native_api_uses_sync_fallback(configured, tmp_path, monkeypatch):
+    """404 on /sdcpp/v1/img_gen (older sd-server build): fall back to the
+    sync OpenAI-compatible endpoint - generation still works, just not
+    cancellable (the old behavior)."""
+    _FakeClient.native_ok = False
+    _FakeClient.caps_payload = {"upscale": True}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert not result.get("error"), result
+    assert _FakeClient.gen_calls == 1
+    assert _FakeClient.gen_sizes == ["512x512"]
+    assert _FakeClient.job_bodies == []
+
+
+def test_native_body_carries_native_fields(configured, tmp_path, monkeypatch):
+    """negative_prompt/seed go as native body fields on the job path (no
+    sd_cpp_extra_args embedding - that's a compatibility-API mechanism)."""
+    _FakeClient.caps_payload = {"upscale": True}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image",
+            {"prompt": "x", "negative_prompt": "dogs", "seed": 42},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    body = _FakeClient.job_bodies[0]
+    assert body["negative_prompt"] == "dogs"
+    assert body["seed"] == 42
+    assert "sd_cpp_extra_args" not in body["prompt"]
