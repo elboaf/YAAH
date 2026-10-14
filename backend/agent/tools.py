@@ -647,11 +647,12 @@ TOOLS_SCHEMA += [
                 "it (requires a vision-capable model). Use after "
                 "web_search or web_fetch — web_fetch lists the page's "
                 "image URLs under 'IMAGES ON PAGE'. Also accepts LOCAL "
-                "images: a host file path, a file:/// URL, or a path "
-                "relative to the workspace root - e.g. a VM screenshot "
-                "written to the toolkit mount by sandbox_run "
-                "(~/.yaah/toolkit/vm-screen.png) or any chart/render "
-                "produced in the workspace."
+                "images: a host file path, a file:/// URL, a path relative "
+                "to the workspace root (a VM screenshot from sandbox_run, "
+                "a chart/render produced in the workspace), or an "
+                "image-store handle like generate_image/<hash>.png (the "
+                "images[] value returned by generate_image - prefer this "
+                "for your own generations)."
             ),
             "parameters": {
                 "type": "object",
@@ -2468,6 +2469,12 @@ def _generation_result(
         target.write_bytes(raw)
         out["path"] = f"{rel_dir}/{target.name}"
         out["saved_to"] = out["path"]
+        # Audit/inspection hint: the tool result renders in the tape, but
+        # if the agent wants to SEE the image, the store rel is the handle
+        # that always works for view_image - the workspace-relative path
+        # only exists in named workspaces (Default = home dir, where the
+        # ai-images copy sits next to unrelated user files).
+        out["view_hint"] = f"to inspect this image: view_image {store_rel}"
     except OSError as e:
         out["note"] = (out.get("note", "") + f" workspace copy failed: {e}").strip()
     return out

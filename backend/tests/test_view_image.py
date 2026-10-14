@@ -52,6 +52,34 @@ async def test_workspace_relative_path(images_root, tmp_path, monkeypatch):
     assert (images_root / out["image"]).read_bytes() == PNG
 
 
+async def test_default_workspace_relative_path(images_root, tmp_path, monkeypatch):
+    """THE BUG: the Default pseudo-workspace travels as '' (or '.'). The
+    old `and workspace` guard skipped resolution for exactly those, so
+    generate_image's ai-images/... copy could never be viewed by its own
+    relative path in the default chat. '' must resolve to HOME."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "ai-images").mkdir()
+    (tmp_path / "ai-images" / "gen.png").write_bytes(PNG)
+    for empty in ("", "."):
+        out = await webtools.view_image("ai-images/gen.png", workspace=empty)
+        assert "error" not in out, (empty, out)
+        assert (images_root / out["image"]).read_bytes() == PNG
+
+
+async def test_store_handle_resolves_regardless_of_workspace(images_root, tmp_path):
+    """generate_image results hand back store rels like
+    'generate_image/<hash>.png' - the one handle that works everywhere.
+    view_image must accept it verbatim, in any workspace."""
+    sub = images_root / "generate_image"
+    sub.mkdir(parents=True)
+    (sub / "abc.png").write_bytes(PNG)
+    for ws in ("", ".", str(tmp_path / "proj")):
+        out = await webtools.view_image("generate_image/abc.png", workspace=ws)
+        assert "error" not in out, (ws, out)
+        assert (images_root / out["image"]).read_bytes() == PNG
+
+
 async def test_file_url_form(images_root, tmp_path):
     p = tmp_path / "capture.png"
     p.write_bytes(PNG)

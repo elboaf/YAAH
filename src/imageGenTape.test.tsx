@@ -67,6 +67,34 @@ describe('generate_image tape rendering', () => {
     expect(screen.getByAltText('generated image')).toBeTruthy()
   })
 
+  it('exposes args + result behind the [+] expander (audit parity)', () => {
+    // The image IS the message, but the prompt that produced it must
+    // stay inspectable like every other tool call.
+    render(
+      <ToolCallRow
+        tc={tc({
+          args: { prompt: 'a cat', width: 768, height: 768, hires_fix: true },
+          result: inlineResult,
+        })}
+      />)
+    expect(screen.queryByText(/"prompt"/)).toBeNull() // hidden until expanded
+    fireEvent.click(screen.getByText('[+]'))
+    expect(screen.getByText(/"prompt"/)).toBeTruthy()
+    expect(screen.getByText(/a cat/)).toBeTruthy()
+    expect(screen.getByText(/"hires_fix": true/)).toBeTruthy()
+    expect(screen.getByText(/"saved_to"/)).toBeTruthy() // full result JSON
+    // image still inline after expanding
+    expect(screen.getByAltText('generated image')).toBeTruthy()
+  })
+
+  it('the expander toggles closed again', () => {
+    render(<ToolCallRow tc={tc({ result: inlineResult })} />)
+    fireEvent.click(screen.getByText('[+]'))
+    expect(screen.getByText(/"prompt"/)).toBeTruthy()
+    fireEvent.click(screen.getByText('[-]'))
+    expect(screen.queryByText(/"prompt"/)).toBeNull()
+  })
+
   it('falls back to the collapsed JSON trace for error results', () => {
     render(
       <ToolCallRow
