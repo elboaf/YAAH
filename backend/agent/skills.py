@@ -31,6 +31,17 @@ SEPARATOR = "\n\n---\n\n"
 # builds the prompt first.
 SKILL_TAIL_MARKER = "# Loaded skill:"
 
+# Compaction-summary messages start with one of these — imported from the
+# authoritative source (prompt_manifest) rather than duplicated literals;
+# the import is lazy because prompt_manifest imports this module lazily.
+def _summary_prefixes() -> tuple:
+    from backend.agent.prompt_manifest import (
+        COMPACT_SUMMARY_PREFIX,
+        COMPACT_SUMMARY_PREFIX_LEGACY,
+    )
+
+    return (COMPACT_SUMMARY_PREFIX, COMPACT_SUMMARY_PREFIX_LEGACY)
+
 # YAAH_SKILLS_PATH lets the test suite redirect this (default is the
 # user's real ~/.yaah/skills).
 SKILLS_DIR = Path(
@@ -385,7 +396,18 @@ def load_skill_into_messages(
                     f"{messages[tail_idx]['content']}{SEPARATOR}{block}"
                 )
             else:
-                messages.insert(1, {"role": "user", "content": block})
+                # No existing tail: insert BELOW a compaction summary if one
+                # is present — the replay side puts the persisted tail after
+                # the summary, and the two must agree or the prompt order
+                # flips between the loading turn and the next turn.
+                tail_slot = 1 if not any(
+                    isinstance(m, dict)
+                    and str(m.get("content", "")).startswith(
+                        _summary_prefixes()
+                    )
+                    for m in messages[1:3]
+                ) else 2
+                messages.insert(tail_slot, {"role": "user", "content": block})
             tail_block = block
         else:
             messages[0]["content"] = (

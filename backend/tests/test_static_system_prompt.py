@@ -547,9 +547,12 @@ async def test_persisted_tail_not_duplicated_on_reload(
 async def test_nonstatic_mode_writes_no_persisted_tail(
         monkeypatch, one_skill
 ):
-    """The persistence is a static-mode mechanism only: with the flag off
-    the head is rebuilt each turn anyway, so nothing is written and nothing
-    replays (the legacy behavior is unchanged)."""
+    """Issue #390 (merged to master after this PR branched): static mode is
+    UNCONDITIONAL — the per-provider flag is gone and a legacy
+    ``static_system_prompt: False`` in config is a no-op. The flag-off
+    "legacy non-static" contract this test used to assert no longer exists:
+    the load_skill tail now persists and replays even with the legacy flag
+    off, exactly as in static mode."""
     monkeypatch.setattr(
         agent_loop,
         "load_config",
@@ -560,6 +563,7 @@ async def test_nonstatic_mode_writes_no_persisted_tail(
                     "api_base": "http://localhost:8080/v1",
                     "api_key": "",
                     "model": "local-model",
+                    "static_system_prompt": False,
                 }
             },
             "model": "local-model",
@@ -580,18 +584,15 @@ async def test_nonstatic_mode_writes_no_persisted_tail(
     await run("thanks")
     assert len(calls) == 3
     conv = await get_conversation(cid)
-    assert not conv["persisted_skill_tail"]
-    # Legacy non-static behavior: the skill body rode inside the head on
-    # the turn that loaded it, and nothing rides after it later. The
-    # CONTAINS check (not just the prefix) matters: a wrongly-retained
-    # block appended inside a rebuilt system head would still leave the
-    # prompt's first message starting with the system content.
-    assert not any(
-        isinstance(m.get("content"), str)
-        and "# Loaded skill:" in m["content"]
-        for m in calls[2]
-    )
-    assert "# Loaded skill:" not in (calls[2][0]["content"] or "")
+    # Static is unconditional now: the tail persists and replays even with
+    # the legacy flag off.
+    assert "# Loaded skill: helper" in (conv["persisted_skill_tail"] or "")
+    tail_2 = calls[2][1]
+    assert tail_2["role"] == "user" and "Helper body." in tail_2["content"]
+    assert (conv["persisted_skill_tail"] or "") == tail_2["content"]
+    # The frozen head still never gains the skill body.
+    assert "Helper body." not in (conv["frozen_system_prompt"] or "")
+    _assert_strict_prefix_stable(calls[1], calls[2])
 
 
 @pytest.mark.asyncio
