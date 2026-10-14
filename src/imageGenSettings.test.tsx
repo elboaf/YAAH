@@ -13,7 +13,7 @@ vi.mock('./api', async (importOriginal) => {
 
 import { ImageGenSettingsCard } from './components'
 
-const base = { provider: 'sdcpp', api_base: '', size: '512x512' }
+const base = { provider: 'sdcpp', api_base: '' }
 
 describe('Image generation settings card', () => {
   beforeEach(() => {
@@ -27,13 +27,12 @@ describe('Image generation settings card', () => {
   it('renders the saved endpoint and size', () => {
     render(
       <ImageGenSettingsCard
-        imageGen={{ ...base, api_base: 'http://127.0.0.1:1234', size: '768x768' }}
+        imageGen={{ ...base, api_base: 'http://127.0.0.1:1234' }}
         onChange={() => {}}
       />,
     )
     const input = screen.getByPlaceholderText(/stable-diffusion\.cpp server/) as HTMLInputElement
     expect(input.value).toBe('http://127.0.0.1:1234')
-    expect((screen.getByDisplayValue('768x768') as HTMLInputElement).value).toBe('768x768')
     expect(screen.getByText(/tool is available/)).toBeTruthy()
   })
 
@@ -80,7 +79,6 @@ describe('Image generation settings card', () => {
     expect(onChange).toHaveBeenCalledWith({
       provider: 'sdcpp',
       api_base: 'http://localhost:1234',
-      size: '512x512',
     })
   })
 })

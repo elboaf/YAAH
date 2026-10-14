@@ -2249,8 +2249,6 @@ async def api_set_config(body: ConfigUpdate):
             # the stored endpoint, and leaving it would keep the tool
             # enabled after the user cleared the field (regression).
             img["api_base"] = incoming_base
-        size = str(img.get("size") or "").strip().lower()
-        img["size"] = size if "x" in size else "512x512"
         img["provider"] = "sdcpp"
         updates["image_generation"] = img
         # Persistent-memory block merges the same way (#169): a Settings save

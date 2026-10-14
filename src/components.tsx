@@ -1092,9 +1092,44 @@ function TraceLine({ calls }: { calls: ToolCall[] }) {
 }
 
 /** A single call: chip row, expandable to args/result detail. */
-function ToolCallRow({ tc }: { tc: ToolCall }) {
+export function ToolCallRow({ tc }: { tc: ToolCall }) {
   const [open, setOpen] = useState(false)
   const args = (tc.args ?? {}) as Record<string, unknown>
+
+  // Generated/enlarged images (generate_image, upscale_image): the image
+  // IS the message. Render it directly in the tape instead of behind the
+  // [+] expander - the user should see the artwork the moment it lands,
+  // not a collapsed tool row. Backend marks these results display:"inline";
+  // the fallback name check covers generate_image results streamed before
+  // the marker existed.
+  const resultObjInline = tc.result && typeof tc.result === 'object' ? (tc.result as Record<string, unknown>) : null
+  const inlineTool = tc.name === 'generate_image' || tc.name === 'upscale_image'
+  if (inlineTool && resultObjInline && !resultObjInline.error) {
+    const inlineRel = typeof resultObjInline.image === 'string' ? resultObjInline.image : ''
+    const inlineRels = Array.isArray(resultObjInline.images) ? resultObjInline.images.filter((v): v is string => typeof v === 'string' && !!v) : []
+    const inlineImages = inlineRel ? [inlineRel, ...inlineRels] : inlineRels
+    if (inlineImages.length > 0) {
+      const savedTo = typeof resultObjInline.saved_to === 'string' ? resultObjInline.saved_to : ''
+      return (
+        <div className="my-1 font-mono text-[11px]">
+          <ToolChip tc={tc} />
+          <div className="mt-1 flex flex-wrap gap-2">
+            {inlineImages.map((imgRel, i) => (
+              <img
+                key={i}
+                src={imageSrc(imgRel)}
+                alt="generated image"
+                title="click to open full size"
+                className="max-h-64 cursor-zoom-in rounded"
+                onClick={() => useAgent.getState().setLightboxSrc(imgRel)}
+              />
+            ))}
+          </div>
+          {savedTo && <div className="mt-1 text-zinc-600">saved to {savedTo}</div>}
+        </div>
+      )
+    }
+  }
 
   // Rich rendering per tool (Q43)
   const body = (() => {
@@ -6261,8 +6296,8 @@ export function ImageGenSettingsCard({
   imageGen,
   onChange,
 }: {
-  imageGen: { provider: string; api_base: string; size: string }
-  onChange: (next: { provider: string; api_base: string; size: string }) => void
+  imageGen: { provider: string; api_base: string }
+  onChange: (next: { provider: string; api_base: string }) => void
 }) {
   const [testState, setTestState] = useState<'idle' | 'busy'>('idle')
   const [testResult, setTestResult] = useState<string | null>(null)
@@ -6312,15 +6347,7 @@ export function ImageGenSettingsCard({
             ? 'generate_image tool is available to the agent.'
             : 'Blank = image generation off (no generate_image tool).'}
         </p>
-        <div className="flex items-center gap-1.5">
-          <label className="font-mono text-[10px] text-zinc-500">default size</label>
-          <input
-            className={`${settingsInputCls} w-24`}
-            value={imageGen.size}
-            placeholder="512x512"
-            onChange={(e) => onChange({ ...imageGen, size: e.target.value })}
-          />
-        </div>
+
       </div>
     </SettingsCard>
   )
@@ -6649,10 +6676,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   // Image generation (sd-server): endpoint + default size drafts; the
   // tool's availability is derived from api_base alone.
-  const [imageGen, setImageGen] = useState<{ provider: string; api_base: string; size: string }>({
+  const [imageGen, setImageGen] = useState<{ provider: string; api_base: string }>({
     provider: 'sdcpp',
     api_base: '',
-    size: '512x512',
   })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -6771,9 +6797,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setActive(c.active_provider)
           setMaxSteps(c.max_steps ?? '')
           setSubagentProvider(c.subagent_provider ?? '')
-          setImageGen(
-            c.image_generation ?? { provider: 'sdcpp', api_base: '', size: '512x512' },
-          )
+          setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
           setModelComp(c.model_compaction ?? {})
           setModelSteps(
             Object.fromEntries(
@@ -7068,11 +7092,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         image_generation: {
           provider: 'sdcpp',
           api_base: imageGen.api_base.trim(),
-          // Blank api_base strips the block server-side (unconfigure);
-          // otherwise a defaulted size saves through.
-          ...(imageGen.api_base.trim()
-            ? { size: imageGen.size.trim() || '512x512' }
-            : {}),
         },
       })
       // Hot-swap the live registration in the Composer; it reports failure

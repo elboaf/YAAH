@@ -1560,14 +1560,22 @@ def _replay_rows(
             content = r["content"] or ""
             if r.get("images") and images_from_rel:
                 # tool-attached image (view_image): replay as parts so a
-                # vision model still sees it on resume
+                # vision model still sees it on resume. Exception: results
+                # marked display:"inline" (generate_image) are user-facing
+                # artifacts, not observations - the UI shows them, but
+                # feeding every generated image back into context on every
+                # turn burns the window for nothing. The model that needs
+                # to inspect one calls view_image explicitly.
                 try:
                     text = json.loads(content)
                 except (json.JSONDecodeError, TypeError):
                     text = content
-                if not isinstance(text, str):
-                    text = json.dumps(text.get("note", "[image]"))
-                content = _parts_with_images(text, r["images"])
+                if isinstance(text, dict) and text.get("display") == "inline":
+                    pass  # keep text content; no image parts
+                else:
+                    if not isinstance(text, str):
+                        text = json.dumps(text.get("note", "[image]"))
+                    content = _parts_with_images(text, r["images"])
             out.append(
                 {
                     "role": "tool",

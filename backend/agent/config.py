@@ -105,7 +105,9 @@ DEFAULTS = {
     # from whichever providers entry is active — a shared map could route
     # chats at it. The generate_image tool appears only while api_base is
     # set; blank = unconfigured = no image tool.
-    "image_generation": {"provider": "sdcpp", "api_base": "", "size": "512x512"},
+    # No size field: the sd-server's own defaults/capabilities decide
+    # native resolution; oversized requests upscale server-side.
+    "image_generation": {"provider": "sdcpp", "api_base": ""},
     # Saved remote device metadata. Passphrases are intentionally never
     # persisted here; users re-enter them after a backend restart.
     "remote_devices": [],
