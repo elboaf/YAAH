@@ -36,6 +36,7 @@ def _png(w, h):
 
 class _FakeResp:
     status_code = 200
+    text = '{"error": "fake-response"}'
 
     def json(self):
         return {"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode()}]}
@@ -56,6 +57,10 @@ class _FakeClient:
     native_ok = True
     reject_hires_submit = False  # 400 any img_gen body carrying `hires`
     submit_calls = 0
+    submit_status = 202
+    submit_payload = None  # when set, the submit responds with this body
+    poll_queue = []  # poll payloads replayed before the normal status
+    poll_attempts = 0
 
     @classmethod
     def reset(cls):
@@ -72,6 +77,10 @@ class _FakeClient:
         cls.native_ok = True
         cls.reject_hires_submit = False
         cls.submit_calls = 0
+        cls.submit_status = 202
+        cls.submit_payload = None
+        cls.poll_queue = []
+        cls.poll_attempts = 0
 
     def __init__(self, **kw):
         pass
@@ -88,7 +97,20 @@ class _FakeClient:
             r = _FakeResp()
             r.json = lambda: dict(_FakeClient.caps_payload)
             return r
-        # job poll
+        # job poll: replay scripted payloads first (e.g. a transient
+        # hiccup before the real status), then the normal status machine
+        if _FakeClient.poll_queue:
+            _FakeClient.poll_attempts += 1
+            payload = _FakeClient.poll_queue.pop(0)
+            if isinstance(payload, int):  # a non-200 status code
+                r = _FakeResp()
+                r.status_code = payload
+                r.json = lambda: {"error": "boom"}
+                return r
+            r = _FakeResp()
+            r.status_code = 200
+            r.json = lambda: dict(payload)
+            return r
         if _FakeClient.job_status == "generating":
             payload = {"status": "generating", "result": None, "error": None}
         elif _FakeClient.job_status == "failed":
@@ -141,6 +163,12 @@ class _FakeClient:
                 r = _FakeResp()
                 r.status_code = 400
                 r.json = lambda: {"error": {"message": "invalid generation parameters"}}
+                return r
+            if _FakeClient.submit_payload is not None:
+                # scripted submit response (e.g. malformed 200 body)
+                r = _FakeResp()
+                r.status_code = _FakeClient.submit_status
+                r.json = lambda: _FakeClient.submit_payload
                 return r
             _FakeClient.job_bodies.append(dict(json or {}))
             r = _FakeResp()
@@ -848,6 +876,55 @@ def test_failed_job_reports_server_error(configured, tmp_path, monkeypatch):
         tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
     )
     assert "failed: boom" in result["error"]
+
+
+def test_transient_poll_errors_do_not_fail_the_job(configured, tmp_path, monkeypatch):
+    """CodeRabbit major: ONE dropped poll (15s timeout, 503, malformed
+    body) must not fail a job that is still running server-side - the
+    wait loop retries until its deadline and the image still lands."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.poll_queue = [
+        {"status": "generating", "result": None, "error": None},  # ok
+        503,                                        # server hiccup
+        {"status": "queued", "result": None, "error": None},
+        {"status": "generating", "result": None, "error": None},
+        "MALFORMED",                                # non-JSON body
+        {"status": "generating", "result": None, "error": None},
+    ]
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert not result.get("error"), result
+    assert result["width"] == 512 and result["height"] == 512
+    assert _FakeClient.cancel_calls == 0
+
+
+def test_gone_job_is_still_terminal(configured, tmp_path, monkeypatch):
+    """404/410 (TTL purge / cancelled server-side) stays terminal even
+    with retry-on-transient in place - no waiting out a dead job."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.poll_queue = [404]
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert "expired server-side" in result["error"]
+
+
+def test_malformed_submit_body_falls_back_to_legacy(configured, tmp_path, monkeypatch):
+    """CodeRabbit minor: a truthy non-mapping 200 submit body must not
+    raise AttributeError out of generate_image - it degrades to the
+    sync fallback like any other native-path failure."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.submit_status = 200
+    _FakeClient.submit_payload = ["not", "a", "mapping"]
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert not result.get("error"), result
+    assert _FakeClient.gen_calls == 1  # legacy endpoint was used
 
 
 def test_stop_cancels_the_job_and_reraises(configured, tmp_path, monkeypatch):

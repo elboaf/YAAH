@@ -1746,8 +1746,16 @@ async def _img_gen_job_submit(api_base: str, body: dict):
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(api_base.rstrip("/") + "/sdcpp/v1/img_gen", json=body)
         if r.status_code not in (200, 202):
-            return None, f"job submission failed: HTTP {r.status_code} {str(r.json())[:200]}".rstrip()
-        j = r.json() or {}
+            return None, f"job submission failed: HTTP {r.status_code} {r.text[:200]}".rstrip()
+        try:
+            j = r.json()
+        except ValueError:
+            return None, "job submission returned a malformed response"
+        if not isinstance(j, dict):
+            # truthy non-mapping body (list/str): j.get would raise
+            # AttributeError and abort generate_image instead of letting
+            # its caller fall back to the sync endpoint.
+            return None, "job submission returned a malformed response"
         job_id = j.get("id")
         if not job_id:
             return None, "job submission returned no job id"
@@ -1758,21 +1766,40 @@ async def _img_gen_job_submit(api_base: str, body: dict):
 
 async def _job_poll(api_base: str, job_id: str):
     """GET /sdcpp/v1/jobs/{id}. Returns (status, result, error) where
-    status is queued|generating|completed|failed|cancelled|gone and
-    result/error are the server's payloads (either may be None)."""
+    status is queued|generating|completed|failed|cancelled|gone|transient
+    and result/error are the server's payloads (either may be None).
+
+    'transient' covers anything worth retrying until the caller's
+    deadline: transport errors, timeouts, non-200 responses, malformed
+    bodies. A single dropped poll must NOT fail a job that is still
+    running on the server (it would keep the GPU busy while the harness
+    walks away, and the server has no preemption)."""
     import httpx
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(f"{api_base.rstrip('/')}/sdcpp/v1/jobs/{job_id}")
-        if r.status_code == 404 or r.status_code == 410:
+        if r.status_code in (404, 410):
+            # TTL-purged or cancelled: genuinely terminal
             return "gone", None, None
+        if r.status_code == 503:
+            # server restarting/recycling (known on this box): retryable
+            return "transient", None, {"code": "http", "message": "HTTP 503"}
         if r.status_code != 200:
-            return "failed", None, {"code": "http", "message": f"HTTP {r.status_code}"}
-        j = r.json() or {}
+            return "transient", None, {"code": "http", "message": f"HTTP {r.status_code}"}
+        try:
+            j = r.json()
+        except ValueError:
+            return "transient", None, {"code": "json", "message": "malformed poll body"}
+        if not isinstance(j, dict):
+            return "transient", None, {"code": "json", "message": "malformed poll body"}
         return j.get("status") or "queued", j.get("result"), j.get("error")
     except (httpx.HTTPError, ValueError) as e:
-        return "failed", None, {"code": type(e).__name__, "message": str(e)}
+        return (
+            "transient",
+            None,
+            {"code": type(e).__name__, "message": str(e)},
+        )
 
 
 async def _job_cancel(api_base: str, job_id: str) -> None:
@@ -1798,6 +1825,7 @@ async def _img_gen_job_wait(api_base: str, job_id: str, deadline_s: float = 600.
     import time
 
     start = time.monotonic()
+    transient: list[str] = []
     while True:
         status, result, error = await _job_poll(api_base, job_id)
         if status == "completed":
@@ -1811,12 +1839,22 @@ async def _img_gen_job_wait(api_base: str, job_id: str, deadline_s: float = 600.
             return None, f"image generation job {status}: {msg}"
         if status == "gone":
             return None, "image generation job expired server-side before completion"
+        if status == "transient":
+            # keep waiting: the server may hiccup mid-generation (a 15s
+            # poll timeout is normal on a busy GPU). Only the deadline
+            # ends the wait, and it cancels the job server-side.
+            if len(transient) < 20:  # capped: a thrashing server must
+                transient.append(    # not grow this list unboundedly
+                    (error or {}).get("message") or "unknown"
+                )
         if time.monotonic() - start > deadline_s:
             await _job_cancel(api_base, job_id)
+            t = len(transient)
             return None, (
                 "image generation timed out after "
                 f"{int(deadline_s)}s (job cancelled; the model may be "
                 "thrashing - try a smaller size)"
+                + (f" [{t} transient poll error(s) seen]" if t else "")
             )
         await asyncio.sleep(1.0)
 
