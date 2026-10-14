@@ -108,7 +108,7 @@ import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
 import { tapeOffsetPx, quantizeUiScale } from './jitter'
 import { CodeBlock, AgentMarkdown } from './markdown'
-import { emissionSegments } from './emissionSegments'
+import { emissionSegments, isInlineImageAnchor } from './emissionSegments'
 import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
@@ -1786,6 +1786,11 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
         interleaved.push(
           seg.anchor.name === 'spawn_agent' && seg.anchor.subAgent ? (
             <SubAgentBlock key={seg.key} run={seg.anchor.subAgent} />
+          ) : isInlineImageAnchor(seg.anchor) ? (
+            // #401: the generated image IS the message - ToolCallRow's
+            // inline branch shows the artwork with its audit chip + [+]
+            // expander (prompt/args), at the spot the turn emitted it.
+            <ToolCallRow key={seg.key} tc={seg.anchor} />
           ) : (
             <QuestionAnchor
               key={seg.key}
@@ -2733,7 +2738,7 @@ export function RemoteTranscriptDialog({
       } else if (ev.type === 'thinking') {
         useAgent.getState().setStatus(remoteKey, 'thinking')
       } else if (ev.type === 'tool_start') {
-        useAgent.getState().startToolCall(remoteKey, asstId, `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
+        useAgent.getState().startToolCall(remoteKey, asstId, ev.call_id ?? `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
         useAgent.getState().setStatus(remoteKey, 'running-tool')
         // #308 follow-up: a remote ask_user call parks the turn on the same
         // answer future the local loop uses; render the card against the
@@ -2751,7 +2756,10 @@ export function RemoteTranscriptDialog({
           })
         }
       } else if (ev.type === 'tool_result') {
-        useAgent.getState().finishToolCall(remoteKey, asstId, '', typeof ev.result === 'string' ? ev.result : JSON.stringify(ev.result ?? {}))
+        // Pass the result through as-is: stringifying it broke every rich
+        // result render (inline images, #401), and the '' call id never
+        // matched the started call, leaving remote chips result-less.
+        useAgent.getState().finishToolCall(remoteKey, asstId, ev.call_id ?? '', ev.result)
         if (ev.name === 'ask_user') {
           useAgent.getState().setPendingQuestion((q) => (q && q.convKey === remoteKey && q.callId === (ev.call_id ?? '') ? null : q))
         }
