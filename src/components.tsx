@@ -1112,7 +1112,16 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
       const savedTo = typeof resultObjInline.saved_to === 'string' ? resultObjInline.saved_to : ''
       return (
         <div className="my-1 font-mono text-[11px]">
-          <ToolChip tc={tc} />
+          {/* Audit parity with every other tool row: the chip toggles an
+              expander carrying the call's args (prompt, size, seed) and
+              the full result - the image stays inline and untouched. */}
+          <button
+            className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-zinc-800/60"
+            onClick={() => setOpen((o) => !o)}
+          >
+            <ToolChip tc={tc} />
+            <span className="shrink-0 text-zinc-600">{open ? '[-]' : '[+]'}</span>
+          </button>
           <div className="mt-1 flex flex-wrap gap-2">
             {inlineImages.map((imgRel, i) => (
               <img
@@ -1126,6 +1135,18 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
             ))}
           </div>
           {savedTo && <div className="mt-1 text-zinc-600">saved to {savedTo}</div>}
+          {open && (
+            <div className="px-2 py-1 text-zinc-400">
+              <div className="whitespace-pre-wrap break-all text-zinc-300">
+                args: {JSON.stringify(tc.args ?? {}, null, 2)}
+              </div>
+              {tc.result !== undefined && (
+                <div className="mt-1 whitespace-pre-wrap break-all">
+                  result: {JSON.stringify(tc.result, null, 2)}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )
     }

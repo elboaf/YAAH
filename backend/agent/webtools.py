@@ -315,17 +315,38 @@ async def view_image(url, workspace=None):
                 urllib.parse.urlparse(s).path))
         else:
             p = Path(s).expanduser()
-            if not p.is_absolute() and workspace:
+            if not p.is_absolute():
+                # Resolve relative paths against the workspace root -
+                # INCLUDING the Default pseudo-workspace ('' or '.'), which
+                # workspace_root maps to the home dir. The old
+                # `and workspace` guard skipped resolution exactly there,
+                # so generate_image's ai-images/... copy could never be
+                # viewed by its own relative path in the default chat
+                # (agent loop: not found -> ls -> absolute-path retry).
                 try:
                     from backend.agent.tools import workspace_root
 
                     cand = Path(workspace_root(workspace)) / p
                     if cand.is_file():
                         p = cand
-                except Exception:  # noqa: BLE001 - workspace resolution is best-effort
+                except Exception:  # noqa: BLE001 - resolution is best-effort
                     pass
-        if not p.is_file():
-            return {"error": f"local image file not found: {s}", "url": s}
+            if not p.is_file():
+                # Backend image store: generate_image / upscale_image
+                # results carry store rels like 'generate_image/<hash>.png'
+                # (their images[] entries) - those live under the store
+                # root, not the workspace. This handle always works,
+                # regardless of workspace.
+                try:
+                    from backend.agent import imagedata
+
+                    cand = Path(imagedata.IMAGES_ROOT) / s
+                    if cand.is_file():
+                        p = cand
+                except Exception:  # noqa: BLE001 - store fallback is best-effort
+                    pass
+            if not p.is_file():
+                return {"error": f"local image file not found: {s}", "url": s}
         raw = await asyncio.to_thread(_read_local, p)
 
     if len(raw) > 5_000_000:
