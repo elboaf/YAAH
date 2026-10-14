@@ -6294,8 +6294,8 @@ export function ImageGenSettingsCard({
   imageGen,
   onChange,
 }: {
-  imageGen: { provider: string; api_base: string; size: string }
-  onChange: (next: { provider: string; api_base: string; size: string }) => void
+  imageGen: { provider: string; api_base: string }
+  onChange: (next: { provider: string; api_base: string }) => void
 }) {
   const [testState, setTestState] = useState<'idle' | 'busy'>('idle')
   const [testResult, setTestResult] = useState<string | null>(null)
@@ -6345,15 +6345,7 @@ export function ImageGenSettingsCard({
             ? 'generate_image tool is available to the agent.'
             : 'Blank = image generation off (no generate_image tool).'}
         </p>
-        <div className="flex items-center gap-1.5">
-          <label className="font-mono text-[10px] text-zinc-500">default size</label>
-          <input
-            className={`${settingsInputCls} w-24`}
-            value={imageGen.size}
-            placeholder="512x512"
-            onChange={(e) => onChange({ ...imageGen, size: e.target.value })}
-          />
-        </div>
+
       </div>
     </SettingsCard>
   )
@@ -6682,10 +6674,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   // Image generation (sd-server): endpoint + default size drafts; the
   // tool's availability is derived from api_base alone.
-  const [imageGen, setImageGen] = useState<{ provider: string; api_base: string; size: string }>({
+  const [imageGen, setImageGen] = useState<{ provider: string; api_base: string }>({
     provider: 'sdcpp',
     api_base: '',
-    size: '512x512',
   })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -6804,9 +6795,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setActive(c.active_provider)
           setMaxSteps(c.max_steps ?? '')
           setSubagentProvider(c.subagent_provider ?? '')
-          setImageGen(
-            c.image_generation ?? { provider: 'sdcpp', api_base: '', size: '512x512' },
-          )
+          setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
           setModelComp(c.model_compaction ?? {})
           setModelSteps(
             Object.fromEntries(
@@ -7101,11 +7090,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         image_generation: {
           provider: 'sdcpp',
           api_base: imageGen.api_base.trim(),
-          // Blank api_base strips the block server-side (unconfigure);
-          // otherwise a defaulted size saves through.
-          ...(imageGen.api_base.trim()
-            ? { size: imageGen.size.trim() || '512x512' }
-            : {}),
         },
       })
       // Hot-swap the live registration in the Composer; it reports failure

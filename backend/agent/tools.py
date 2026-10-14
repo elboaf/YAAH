@@ -324,18 +324,32 @@ HELP_DOCS: dict = {
         "specific anchor or raise the cap for long pages."
     ),
     "generate_image": (
-        "Generates ONE image per call on the stable-diffusion.cpp server "
-        "configured in Settings (Image generation). The image is saved "
-        "into the workspace under ai-images/ and attached to the "
-        "conversation, so the user sees it inline and you can reference "
-        "the file path afterwards. The image is NOT sent back to you - "
-        "call view_image on the saved file only if you must inspect it "
-        "(e.g. the user asks to change something specific about it). "
-        "width/height default to the configured "
-        "size (512x512); negative_prompt and seed are passed through to "
-        "the server. Generation on CPU can take a minute - one call, no "
-        "polling. Remote (namespaced) workspaces refuse the tool: the "
-        "server runs on this machine."
+        "Text-to-image on the stable-diffusion.cpp server configured in "
+        "Settings (Image generation). The image is saved into the "
+        "workspace under ai-images/ and attached to the conversation, so "
+        "the user sees it inline; it is NOT sent back to you - call "
+        "view_image on the saved file only if you must inspect it (e.g. "
+        "the user asks to change something specific about it). The "
+        "SERVER decides its native resolution: omit width/height for the "
+        "server default, or request any size - within the model's native "
+        "limits it renders directly, beyond them it renders native-sized "
+        "and upscales automatically when an ESRGAN is loaded (the result "
+        "reports exactly what happened and the 'native' field teaches "
+        "the model's real bounds). negative_prompt and seed pass "
+        "through. CPU generation can take a minute - one call, no "
+        "polling. Remote (namespaced) workspaces save to the store only."
+    ),
+    "upscale_image": (
+        "Detail-preserving enlargement of an EXISTING image via the "
+        "sd-server's native ESRGAN endpoint (POST /sdcpp/v1/upscale - "
+        "no diffusion, fast, synchronous). Pass path (workspace path "
+        "like ai-images/x.png from generate_image, or a store rel) plus "
+        "either repeats (1-4, each repeat multiplies the size) or "
+        "target_width/target_height (repeats are inferred). The result "
+        "is a NEW file (originals are never overwritten) shown inline. "
+        "Requires an ESRGAN upscaler on the server (capabilities "
+        "upscale=true); upscaling and generation share the server's "
+        "context lock, so they never run simultaneously."
     ),
     "view_image": (
         "Attaches the image to the conversation so a vision-capable "
@@ -1467,14 +1481,17 @@ def _memory_executor(op: str):
 
 # ---------------------------------------------------------------- image gen
 # Text-to-image via a stable-diffusion.cpp server (sd-server, default
-# http://127.0.0.1:1234). One tool, one provider kind (sdcpp) for v1.
+# http://127.0.0.1:1234). Two tools: generate_image (txt2img,
+# capability-aware resolution) and upscale_image (native ESRGAN endpoint
+# over an existing image). The SERVER's capabilities decide what "big"
+# means - the harness hard-codes no resolution.
 
-_IMAGE_GEN_TOOL = "generate_image"
+_IMAGE_GEN_TOOLS = ("generate_image", "upscale_image")
 
 GENERATE_IMAGE_SCHEMA = {
     "type": "function",
     "function": {
-        "name": _IMAGE_GEN_TOOL,
+        "name": "generate_image",
         "description": (
             "Generate an image from a text prompt with the local "
             "stable-diffusion.cpp server (set in Settings). Saves the PNG "
@@ -1482,7 +1499,9 @@ GENERATE_IMAGE_SCHEMA = {
             "conversation so the user sees it inline. Use for logos, "
             "mockups, illustrations, art assets. The image is not sent "
             "back to you; view_image the saved file only if inspection "
-            "is needed."
+            "is needed. Sizes beyond the model's native resolution are "
+            "reached by generating native + upscaling automatically; the "
+            "result reports what actually happened."
         ),
         "parameters": {
             "type": "object",
@@ -1496,11 +1515,18 @@ GENERATE_IMAGE_SCHEMA = {
                 },
                 "width": {
                     "type": "integer",
-                    "description": "Image width in pixels (default 512).",
+                    "description": (
+                        "Desired image width in pixels. Larger than the "
+                        "model's native size is fine: it generates native "
+                        "and upscales. Omit for the server default."
+                    ),
                 },
                 "height": {
                     "type": "integer",
-                    "description": "Image height in pixels (default 512).",
+                    "description": (
+                        "Desired image height in pixels. Same upscale "
+                        "rule as width. Omit for the server default."
+                    ),
                 },
                 "negative_prompt": {
                     "type": "string",
@@ -1516,6 +1542,60 @@ GENERATE_IMAGE_SCHEMA = {
     },
 }
 
+UPSCALE_IMAGE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "upscale_image",
+        "description": (
+            "Upscale an existing image with the local stable-diffusion.cpp "
+            "server's ESRGAN models (no re-generation - detail-preserving, "
+            "fast). Use to enlarge a previously generated or saved image, "
+            "e.g. when the user wants the same picture at a bigger size. "
+            "The result is saved as a NEW file and shown to the user "
+            "inline."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Image to upscale: a workspace path (e.g. "
+                        "ai-images/x.png from generate_image) or the "
+                        "store path from a tool result."
+                    ),
+                },
+                "target_width": {
+                    "type": "integer",
+                    "description": (
+                        "Desired result width; repeats are inferred from "
+                        "it. Omit to upscale by one step (repeats=1)."
+                    ),
+                },
+                "target_height": {
+                    "type": "integer",
+                    "description": "Desired result height (pairs with target_width).",
+                },
+                "repeats": {
+                    "type": "integer",
+                    "description": (
+                        "Explicit 1-4: run the upscaler this many times. "
+                        "Takes precedence over target_width/height."
+                    ),
+                },
+                "upscaler": {
+                    "type": "string",
+                    "description": (
+                        "Optional upscaler name from the server's "
+                        "capabilities; omit to use the first available."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+    },
+}
+
 # Same posture as memory (#169) / sandbox (#340): if the image config
 # disappears between schema build and tool call, refuse with a message
 # that points at Settings and teaches no bypass.
@@ -1523,6 +1603,135 @@ _IMAGE_GEN_DISABLED_MSG = (
     "No image provider is configured. Only the user can set one up "
     "in Settings (Image generation)."
 )
+
+# Capabilities are small static-per-server metadata; cache per api_base so
+# a chatty generation loop does not re-fetch every call. Short TTL: a
+# server restart with different models/flags is noticed quickly.
+_CAPS_CACHE: dict = {}
+_CAPS_TTL = 300.0
+
+
+def _png_dims(raw: bytes):
+    """(width, height) of a PNG blob (IHDR sits at a fixed offset), or
+    (None, None) for anything unparsable."""
+    if raw[:8] != b"\x89PNG\r\n\x1a\n" or len(raw) < 24:
+        return (None, None)
+    import struct
+
+    w, h = struct.unpack(">II", raw[16:24])
+    return (int(w), int(h))
+
+
+async def _capabilities(api_base: str) -> dict:
+    """GET /sdcpp/v1/capabilities, cached briefly. Returns {} on any
+    failure - every caller must degrade to server-default behavior."""
+    import time
+
+    import httpx
+
+    key = api_base.rstrip("/")
+    now = time.monotonic()
+    hit = _CAPS_CACHE.get(key)
+    if hit and now - hit[0] < _CAPS_TTL:
+        return hit[1]
+    caps: dict = {}
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(key + "/sdcpp/v1/capabilities")
+        if r.status_code == 200:
+            caps = r.json() or {}
+    except Exception:  # noqa: BLE001 — any probe failure = default behavior
+        caps = {}
+    _CAPS_CACHE[key] = (now, caps)
+    return caps
+
+
+def _native_bounds(caps: dict) -> dict:
+    """Size bounds + defaults + upscale availability from capabilities,
+    with safe fallbacks matching sd-server defaults for older builds."""
+    limits = caps.get("limits") or {}
+    defaults = (caps.get("defaults") or {}) if isinstance(caps.get("defaults"), dict) else {}
+    return {
+        "min_w": int(limits.get("min_width") or 64),
+        "min_h": int(limits.get("min_height") or 64),
+        "max_w": int(limits.get("max_width") or 2048),
+        "max_h": int(limits.get("max_height") or 2048),
+        "def_w": int(defaults.get("width") or 512),
+        "def_h": int(defaults.get("height") or 512),
+        "upscale": bool(caps.get("upscale")),
+    }
+
+
+def _mult64(n: float) -> int:
+    """Round down to a multiple of 64 (diffusion-friendly), floor at 64."""
+    return max(64, (int(n) // 64) * 64)
+
+
+def _clamp(v, lo, hi) -> int:
+    return int(max(lo, min(hi, v)))
+
+
+async def _img_gen_request(api_base: str, body: dict):
+    """POST /v1/images/generations. Returns (b64, error); exactly one."""
+    import base64
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            r = await client.post(
+                api_base.rstrip("/") + "/v1/images/generations", json=body
+            )
+        if r.status_code != 200:
+            return None, (
+                f"image generation failed: HTTP {r.status_code} from "
+                f"{api_base} (is the stable-diffusion.cpp server running?)"
+            )
+        data = r.json().get("data") or []
+        b64 = (data[0] or {}).get("b64_json") if data else None
+        if not b64:
+            return None, "image generation returned no image data"
+        return b64, None
+    except (httpx.HTTPError, ValueError) as e:
+        return None, f"image generation failed: {type(e).__name__}: {e}"
+
+
+async def _img_upscale_request(api_base: str, b64: str, repeats: int, upscaler=None):
+    """POST /sdcpp/v1/upscale (synchronous native endpoint, no job).
+    Returns (raw_bytes, meta, error); exactly one of raw/meta is usable."""
+    import base64
+
+    import httpx
+
+    body: dict = {"image": b64, "repeats": max(1, min(4, int(repeats)))}
+    if upscaler:
+        body["upscaler"] = upscaler
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            r = await client.post(
+                api_base.rstrip("/") + "/sdcpp/v1/upscale", json=body
+            )
+        if r.status_code != 200:
+            try:
+                detail = str(r.json())[:200]
+            except ValueError:
+                detail = ""
+            return None, None, f"upscale failed: HTTP {r.status_code} {detail}".rstrip()
+        j = r.json()
+        images = j.get("images") or []
+        b = (images[0] or {}).get("b64_json") if images else None
+        if not b:
+            return None, None, "upscale returned no image data"
+        meta = {
+            "upscaler": j.get("upscaler"),
+            "scale": j.get("scale"),
+            "repeats": j.get("repeats"),
+            "width": j.get("width"),
+            "height": j.get("height"),
+        }
+        return base64.b64decode(b), meta, None
+    except (httpx.HTTPError, ValueError) as e:
+        return None, None, f"upscale failed: {type(e).__name__}: {e}"
 
 
 def image_generation_configured() -> bool:
@@ -1537,6 +1746,35 @@ def image_generation_configured() -> bool:
         return False
 
 
+def _read_image_argument(path: str, workspace: str):
+    """Load image bytes for upscale_image: a workspace-relative path
+    first, then a backend store rel. Returns bytes or an error string."""
+    from backend.agent.imagedata import IMAGES_ROOT
+
+    p = str(path or "").strip()
+    if not p:
+        return "path is required"
+    try:
+        from backend.agent.remote import parse_ns
+
+        if parse_ns(workspace) is None:
+            cand = workspace_root(workspace) / p
+            if cand.is_file():
+                return cand.read_bytes()
+    except OSError:
+        pass
+    try:
+        cand = (IMAGES_ROOT / p).resolve()
+        if cand.is_file() and IMAGES_ROOT.resolve() in cand.parents:
+            return cand.read_bytes()
+    except OSError:
+        pass
+    return (
+        f"image not found: {p} (pass the ai-images/... path from the "
+        "generation result, or a workspace path)"
+    )
+
+
 async def generate_image(
     prompt: str,
     workspace: str,
@@ -1546,12 +1784,13 @@ async def generate_image(
     seed: int | None = None,
 ) -> dict:
     """Run text-to-image on the configured sd-server (OpenAI-compatible
-    POST /v1/images/generations). Returns {'images': [store rel]} so the
-    existing image contract renders it inline and replays it for vision,
-    plus 'path': the workspace-relative copy for code use."""
+    POST /v1/images/generations). Sizes beyond the model's native limits
+    generate native + upscale via POST /sdcpp/v1/upscale when an ESRGAN
+    is loaded (clamped with a note otherwise). Returns {'images':
+    [store rel]} so the existing image contract renders it inline, plus
+    'path': the workspace-relative copy for code use, and 'native': the
+    server's size bounds so the model learns what it is working with."""
     import base64
-
-    import httpx
 
     from backend.agent.imagedata import save_bytes
 
@@ -1559,7 +1798,6 @@ async def generate_image(
     if not prompt:
         return {"error": "prompt must not be empty"}
 
-    cfg = {}
     try:
         from backend.agent.config import load_config
 
@@ -1571,23 +1809,12 @@ async def generate_image(
         return {"error": _IMAGE_GEN_DISABLED_MSG}
 
     try:
-        width = max(64, min(4096, int(width))) if width else None
-        height = max(64, min(4096, int(height))) if height else None
+        width = int(width) if width else None
+        height = int(height) if height else None
     except (TypeError, ValueError):
         return {"error": "width/height must be integers"}
 
-    def _size(text: str, default: tuple[int, int]) -> tuple[int, int]:
-        try:
-            w, _, h = (text or "").lower().partition("x")
-            return int(w), int(h)
-        except (TypeError, ValueError):
-            return default
-
-    dw, dh = _size(cfg.get("size") or "", (512, 512))
-    w = width or dw
-    h = height or dh
-
-    body: dict = {"prompt": prompt, "n": 1, "size": f"{w}x{h}"}
+    body: dict = {"prompt": prompt, "n": 1}
     if negative_prompt or seed is not None:
         # sd-server's compatibility extension: native controls ride along
         # inside the prompt inside this block (stripped server-side).
@@ -1600,34 +1827,111 @@ async def generate_image(
             prompt + " <sd_cpp_extra_args>" + json.dumps(extra) + "</sd_cpp_extra_args>"
         )
 
-    # Local image generation on CPU can take tens of seconds to minutes.
-    try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            r = await client.post(
-                api_base.rstrip("/") + "/v1/images/generations", json=body
+    # --- size decision --------------------------------------------------
+    # No width/height: the server applies its own default - the harness
+    # hard-codes no resolution. With an explicit size, the server's
+    # capabilities decide: within native limits -> pass through; beyond
+    # them -> generate native (aspect-preserving) + ESRGAN upscale; no
+    # ESRGAN loaded -> clamp and say so honestly.
+    caps = await _capabilities(api_base)
+    b = _native_bounds(caps) if caps else None
+    notes: list[str] = []
+    gen_size = None
+    up_repeats = 0
+    want_w = width or 0
+    want_h = height or 0
+
+    if width or height:
+        if b is None:
+            # Server without a capabilities endpoint (older build): pass
+            # the request through and let it decide.
+            gen_size = f"{width}x{height or width}"
+        elif not (
+            (width and (width > b["max_w"] or width < b["min_w"]))
+            or (height and (height > b["max_h"] or height < b["min_h"]))
+        ):
+            # Within native limits: pass through, clamped defensively.
+            gen_size = (
+                f"{_clamp(width or (height or b['def_w']), b['min_w'], b['max_w'])}x"
+                f"{_clamp(height or (width or b['def_h']), b['min_h'], b['max_h'])}"
             )
-        if r.status_code != 200:
-            return {
-                "error": (
-                    f"image generation failed: HTTP {r.status_code} from "
-                    f"{api_base} (is the stable-diffusion.cpp server running?)"
-                )
-            }
-        data = r.json().get("data") or []
-        b64 = (data[0] or {}).get("b64_json") if data else None
-        if not b64:
-            return {"error": "image generation returned no image data"}
-    except (httpx.HTTPError, ValueError) as e:
-        return {"error": f"image generation failed: {type(e).__name__}: {e}"}
+        elif b["upscale"]:
+            # Beyond native WITH an ESRGAN: generate native-size with the
+            # requested aspect ratio, then repeat the upscaler toward the
+            # target (the native endpoint exposes only whole-repeat steps).
+            tw = float(want_w or want_h)
+            th = float(want_h or want_w)
+            over = max(tw / b["max_w"], th / b["max_h"], 1.0)
+            gen_w = _clamp(_mult64(tw / over), b["min_w"], b["max_w"])
+            gen_h = _clamp(_mult64(th / over), b["min_h"], b["max_h"])
+            gen_size = f"{gen_w}x{gen_h}"
+            up_repeats = 1
+            # each repeat doubles the render; stop at the first n that
+            # reaches the target (the endpoint exposes whole repeats only)
+            while up_repeats < 4 and (
+                gen_w * (2 ** up_repeats) < want_w
+                or gen_h * (2 ** up_repeats) < want_h
+            ):
+                up_repeats += 1
+        else:
+            gen_size = (
+                f"{_clamp(width or b['def_w'], b['min_w'], b['max_w'])}x"
+                f"{_clamp(height or b['def_h'], b['min_h'], b['max_h'])}"
+            )
+            notes.append(
+                f"requested {want_w}x{want_h} exceeds the model's native "
+                f"{b['max_w']}x{b['max_h']} and no ESRGAN upscaler is loaded "
+                f"on the server; clamped to {gen_size}"
+            )
+    if gen_size:
+        body["size"] = gen_size
 
-    raw = base64.b64decode(b64)
-    store_rel = save_bytes(raw, "png", "generate_image")
+    b64, err = await _img_gen_request(api_base, body)
+    if err:
+        return {"error": err}
+    raw_out = base64.b64decode(b64)
+    dims = _png_dims(raw_out)
 
-    # "display": "inline" marks this result as user-facing only: the UI
-    # renders the image in the tape, but transcript replay must NOT feed
-    # it back to the model as vision input (it never observed anything;
-    # a deliberate view_image call does that explicitly).
-    out: dict = {"images": [store_rel], "path": None, "saved_to": None, "display": "inline"}
+    if up_repeats:
+        raw2, meta, err2 = await _img_upscale_request(api_base, b64, up_repeats)
+        if err2 or raw2 is None:
+            # Generation succeeded; surface the native render with an
+            # honest note instead of failing the whole call.
+            notes.append(
+                f"requested {want_w}x{want_h}: upscale step failed ({err2}); "
+                f"returning the {gen_size} native render"
+            )
+        else:
+            raw_out = raw2
+            dims = _png_dims(raw2)
+            m = meta or {}
+            notes.append(
+                f"requested {want_w}x{want_h}: generated native {gen_size}, "
+                f"then upscaled x{m.get('scale')} ({m.get('repeats')} repeat(s), "
+                f"{m.get('upscaler')})"
+                + (f" to {m.get('width')}x{m.get('height')}" if m.get("width") else "")
+            )
+
+    store_rel = save_bytes(raw_out, "png", "generate_image")
+
+    out: dict = {
+        "images": [store_rel],
+        "path": None,
+        "saved_to": None,
+        "display": "inline",
+    }
+    if dims and dims[0]:
+        out["width"], out["height"] = dims
+    if b:
+        out["native"] = (
+            f"model native bounds {b['min_w']}-{b['max_w']} wide x "
+            f"{b['min_h']}-{b['max_h']} high, default {b['def_w']}x{b['def_h']}; "
+            "for other sizes call generate_image again with width/height "
+            "(oversized requests upscale automatically) or upscale_image "
+            "on the saved file"
+        )
+    if notes:
+        out["note"] = " ".join(notes)
     try:
         from backend.agent.remote import parse_ns
 
@@ -1636,16 +1940,114 @@ async def generate_image(
             # local, a written file would land on the wrong machine. The
             # image still displays; only the workspace copy is skipped.
             out["note"] = (
-                "workspace is a remote host; image saved to the local "
+                out.get("note", "")
+                + " workspace is a remote host; image saved to the local "
                 "image store only (local-only in this version)"
-            )
+            ).strip()
             return out
         rel_dir = "ai-images"
         dest = workspace_root(workspace) / rel_dir
         dest.mkdir(parents=True, exist_ok=True)
         target = dest / (store_rel.split("/")[-1])
-        target.write_bytes(raw)
+        target.write_bytes(raw_out)
         out["path"] = f"{rel_dir}/{target.name}"
+        out["saved_to"] = out["path"]
+    except OSError as e:
+        out["note"] = (out.get("note", "") + f" workspace copy failed: {e}").strip()
+    return out
+
+
+async def upscale_image(
+    path: str,
+    workspace: str,
+    repeats: int | None = None,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    upscaler: str | None = None,
+) -> dict:
+    """Upscale an existing image via the sd-server's native synchronous
+    POST /sdcpp/v1/upscale (ESRGAN; no generation). Saves a NEW file in
+    the workspace (ai-images/) and the chat store; the original is kept."""
+    import base64
+
+    from backend.agent.imagedata import save_bytes
+
+    try:
+        from backend.agent.config import load_config
+
+        cfg = load_config().get("image_generation") or {}
+    except Exception:  # noqa: BLE001
+        return {"error": _IMAGE_GEN_DISABLED_MSG}
+    api_base = (cfg.get("api_base") or "").strip()
+    if not api_base:
+        return {"error": _IMAGE_GEN_DISABLED_MSG}
+
+    caps = await _capabilities(api_base)
+    b = _native_bounds(caps) if caps else None
+    if b is not None and not b["upscale"]:
+        # Gate before touching the file: the server-side answer is the
+        # actionable one (the user must load an ESRGAN model).
+        return {
+            "error": (
+                "the server has no ESRGAN upscaler loaded (capabilities "
+                "report upscale=false); the user needs to load one before "
+                "images can be upscaled"
+            )
+        }
+
+    raw_in = _read_image_argument(path, workspace)
+    if isinstance(raw_in, str):
+        return {"error": raw_in}
+    dims_in = _png_dims(raw_in)
+
+    if repeats is not None:
+        try:
+            n = max(1, min(4, int(repeats)))
+        except (TypeError, ValueError):
+            return {"error": "repeats must be an integer 1-4"}
+    elif target_width or target_height:
+        cur_w, cur_h = dims_in[0] or 512, dims_in[1] or 512
+        want_w = target_width or target_height or cur_w
+        want_h = target_height or target_width or cur_h
+        n = 1
+        while n < 4 and (cur_w * (2 ** n) < want_w or cur_h * (2 ** n) < want_h):
+            n += 1
+    else:
+        n = 1
+
+    raw_out, meta, err = await _img_upscale_request(
+        api_base, base64.b64encode(raw_in).decode(), n, upscaler
+    )
+    if err or raw_out is None:
+        return {"error": err or "upscale returned no image"}
+
+    store_rel = save_bytes(raw_out, "png", "generate_image")
+    out: dict = {
+        "images": [store_rel],
+        "display": "inline",
+        "source": path,
+        "repeats": n,
+    }
+    if meta:
+        out.update({k: meta.get(k) for k in ("upscaler", "scale", "width", "height")})
+    dims = _png_dims(raw_out)
+    if dims and dims[0]:
+        out["width"], out["height"] = dims
+    try:
+        from backend.agent.remote import parse_ns
+
+        if parse_ns(workspace) is not None:
+            out["note"] = (
+                "workspace is a remote host; image saved to the local "
+                "image store only (local-only in this version)"
+            )
+            return out
+        dest = workspace_root(workspace) / "ai-images"
+        dest.mkdir(parents=True, exist_ok=True)
+        stem = store_rel.split("/")[-1]
+        target = dest / f"upscaled-{stem}"
+        target.write_bytes(raw_out)
+        out["path"] = f"ai-images/{target.name}"
         out["saved_to"] = out["path"]
     except OSError as e:
         out["note"] = f"workspace copy failed: {e}"
@@ -1670,6 +2072,7 @@ EXECUTORS = {
     "get_help": get_help,
     "branch_select": branch_select,
     "generate_image": generate_image,
+    "upscale_image": upscale_image,
     "memory_save": _memory_executor("save"),
     "memory_read": _memory_executor("read"),
     "memory_search": _memory_executor("search"),
@@ -1822,7 +2225,7 @@ async def execute_tool(
         # Settings; crucially, the error must NOT name the config key or
         # file (the old message taught agents to bypass the toggle).
         return {"info": _SANDBOX_DISABLED_MSG}
-    if name == _IMAGE_GEN_TOOL and not image_generation_configured():
+    if name in _IMAGE_GEN_TOOLS and not image_generation_configured():
         # Same degrade-gracefully posture as memory/sandbox: the image
         # provider was unconfigured (or wiped) after the schemas were
         # sent. Refuse, point at Settings, name no config keys.
@@ -1927,7 +2330,7 @@ def get_schemas(workspace: str | None = None) -> list:
     # image provider is configured, and never in remote sessions — the
     # server runs on this machine, so remote workspaces refuse it (v1).
     if image_generation_configured() and host is None and not remote_target:
-        schemas = schemas + [GENERATE_IMAGE_SCHEMA]
+        schemas = schemas + [GENERATE_IMAGE_SCHEMA, UPSCALE_IMAGE_SCHEMA]
     # MCP server tools (mcp_<server>_<tool>) merge in dynamically — they're
     # client-local like web/ask_user, regardless of where file tools run.
     from backend.agent import mcp_client
