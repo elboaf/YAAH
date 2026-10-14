@@ -245,3 +245,126 @@ def test_config_get_exposes_block(configured, client):
     got = client.get("/api/config").json()
     assert got["image_generation"]["api_base"] == "http://127.0.0.1:1234"
     assert got["image_generation"]["provider"] == "sdcpp"
+
+
+# ------------------------------------------------- display-only replay rule
+
+
+def _history_after_generate(configured, tmp_path, monkeypatch):
+    """Drive one generate_image call through persist + replay, returning
+    the replayed OpenAI messages."""
+    import asyncio
+
+    import backend.main as mainmod
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(mainmod, "load_config", cfgmod.load_config)
+    monkeypatch.setattr(mainmod, "save_config", cfgmod.save_config)
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    from backend.db.database import add_message, create_conversation, get_messages
+    from backend.agent.loop import load_history
+
+    cid = asyncio.run(create_conversation("imgen-display", None))
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    asyncio.run(
+        add_message(
+            cid,
+            "assistant",
+            "",
+            tool_calls=[{"id": "call_t1", "type": "function", "function": {"name": "generate_image", "arguments": "{}"}}],
+        )
+    )
+    asyncio.run(
+        add_message(
+            cid,
+            "tool",
+            json.dumps(result),
+            tool_call_id="call_t1",
+        )
+    )
+    return asyncio.run(load_history(cid)), cid
+
+
+def test_generated_image_not_replayed_as_vision(configured, tmp_path, monkeypatch):
+    """The core fix: a generate_image tool row must NOT become image parts
+    on the next turn's context - it replays as its text content only. The
+    model that needs to inspect the image calls view_image deliberately."""
+    msgs, cid = _history_after_generate(configured, tmp_path, monkeypatch)
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    content = tool_msgs[0]["content"]
+    assert isinstance(content, str), content
+    assert "sd_cpp" not in content and "data:image" not in content
+    parsed = json.loads(content)
+    assert parsed["display"] == "inline"
+    assert parsed["path"].startswith("ai-images/")
+
+
+def test_view_image_results_still_replay_as_vision(configured, tmp_path, monkeypatch):
+    """Control: without the inline marker, an image-bearing tool row keeps
+    its existing behavior (parts list with the image) - the fix must not
+    change view_image/MCP image replay."""
+    import asyncio
+
+    from backend.db.database import add_message, create_conversation
+    from backend.agent.loop import load_history
+
+    from backend.agent.imagedata import save_bytes
+
+    cid = asyncio.run(create_conversation("viewimg-control", None))
+    rel = save_bytes(PNG_BYTES, "png", "viewtest")
+    asyncio.run(
+        add_message(
+            cid,
+            "assistant",
+            "",
+            tool_calls=[{"id": "call_v1", "type": "function", "function": {"name": "view_image", "arguments": "{}"}}],
+        )
+    )
+    asyncio.run(
+        add_message(
+            cid,
+            "tool",
+            json.dumps({"note": "fetched"}),
+            tool_call_id="call_v1",
+            images=[rel],
+        )
+    )
+    msgs = asyncio.run(load_history(cid))
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert isinstance(tool_msgs[0]["content"], list)
+    assert any(p.get("type") == "image_url" for p in tool_msgs[0]["content"])
+
+
+def test_generated_image_marker_survives_persist_roundtrip(configured, tmp_path, monkeypatch):
+    """display:'inline' reaches get_messages() rows - the frontend renders
+    from persisted state, not just the live stream."""
+    import asyncio
+
+    import backend.main as mainmod
+
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(mainmod, "load_config", cfgmod.load_config)
+    monkeypatch.setattr(mainmod, "save_config", cfgmod.save_config)
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    from backend.db.database import add_message, create_conversation, get_messages
+
+    cid = asyncio.run(create_conversation("imgen-persist", None))
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    asyncio.run(
+        add_message(
+            cid,
+            "tool",
+            json.dumps(result),
+            tool_call_id="call_p1",
+        )
+    )
+    rows = asyncio.run(get_messages(cid))
+    tool_rows = [r for r in rows if r["role"] == "tool"]
+    assert json.loads(tool_rows[0]["content"])["display"] == "inline"

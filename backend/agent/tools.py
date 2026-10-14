@@ -328,7 +328,10 @@ HELP_DOCS: dict = {
         "configured in Settings (Image generation). The image is saved "
         "into the workspace under ai-images/ and attached to the "
         "conversation, so the user sees it inline and you can reference "
-        "the file path afterwards. width/height default to the configured "
+        "the file path afterwards. The image is NOT sent back to you - "
+        "call view_image on the saved file only if you must inspect it "
+        "(e.g. the user asks to change something specific about it). "
+        "width/height default to the configured "
         "size (512x512); negative_prompt and seed are passed through to "
         "the server. Generation on CPU can take a minute - one call, no "
         "polling. Remote (namespaced) workspaces refuse the tool: the "
@@ -1477,7 +1480,9 @@ GENERATE_IMAGE_SCHEMA = {
             "stable-diffusion.cpp server (set in Settings). Saves the PNG "
             "into the workspace under ai-images/ AND attaches it to this "
             "conversation so the user sees it inline. Use for logos, "
-            "mockups, illustrations, art assets."
+            "mockups, illustrations, art assets. The image is not sent "
+            "back to you; view_image the saved file only if inspection "
+            "is needed."
         ),
         "parameters": {
             "type": "object",
@@ -1618,7 +1623,11 @@ async def generate_image(
     raw = base64.b64decode(b64)
     store_rel = save_bytes(raw, "png", "generate_image")
 
-    out: dict = {"images": [store_rel], "path": None, "saved_to": None}
+    # "display": "inline" marks this result as user-facing only: the UI
+    # renders the image in the tape, but transcript replay must NOT feed
+    # it back to the model as vision input (it never observed anything;
+    # a deliberate view_image call does that explicitly).
+    out: dict = {"images": [store_rel], "path": None, "saved_to": None, "display": "inline"}
     try:
         from backend.agent.remote import parse_ns
 
