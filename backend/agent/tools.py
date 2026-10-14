@@ -329,15 +329,17 @@ HELP_DOCS: dict = {
         "workspace under ai-images/ and attached to the conversation, so "
         "the user sees it inline; it is NOT sent back to you - call "
         "view_image on the saved file only if you must inspect it (e.g. "
-        "the user asks to change something specific about it). The "
-        "SERVER decides its native resolution: omit width/height for the "
-        "server default, or request any size - within the model's native "
-        "limits it renders directly, beyond them it renders native-sized "
-        "and upscales automatically when an ESRGAN is loaded (the result "
-        "reports exactly what happened and the 'native' field teaches "
-        "the model's real bounds). negative_prompt and seed pass "
-        "through. CPU generation can take a minute - one call, no "
-        "polling. Remote (namespaced) workspaces save to the store only."
+        "the user asks to change something specific about it). "
+        "RESOLUTION POLICY: the diffusion model always renders at the "
+        "server's default size - that is the size its operator's "
+        "hardware handles comfortably, and asking a large model for "
+        "1024+ native can stall it for minutes under VRAM thrash. "
+        "Request any width/height you like: it renders at the default "
+        "(aspect-fitted) and reaches your size with the ESRGAN upscaler "
+        "automatically; the result reports exactly what happened. "
+        "negative_prompt and seed pass through. Generation runs as a "
+        "server job: pressing Stop cancels it and returns immediately. "
+        "Remote (namespaced) workspaces save to the store only."
     ),
     "upscale_image": (
         "Detail-preserving enlargement of an EXISTING image via the "
@@ -1481,10 +1483,20 @@ def _memory_executor(op: str):
 
 # ---------------------------------------------------------------- image gen
 # Text-to-image via a stable-diffusion.cpp server (sd-server, default
-# http://127.0.0.1:1234). Two tools: generate_image (txt2img,
-# capability-aware resolution) and upscale_image (native ESRGAN endpoint
-# over an existing image). The SERVER's capabilities decide what "big"
-# means - the harness hard-codes no resolution.
+# http://127.0.0.1:1234). Two tools: generate_image (txt2img) and
+# upscale_image (native ESRGAN endpoint over an existing image).
+#
+# Resolution policy (learned the hard way on a 12GB card): the DIFFUSION
+# model never renders ABOVE the server's default size - asking a 9B flux
+# model for 1024 native can thrash weights forever under VRAM pressure.
+# Sizes beyond the default are reached by the server's HIRES FIX when it
+# is available (render small, ESRGAN-upscale, then a second diffusion
+# pass at the exact target: exact sizes, sharper detail, heavier second
+# pass - paired with per-request VAE tiling for memory relief). Without
+# hires support the ESRGAN upscale chain is used instead (fast,
+# detail-preserving, staged on the server's real scale factor, may
+# overshoot). The harness hard-codes no resolution; the server's
+# capabilities decide what "default" means and which routes exist.
 
 _IMAGE_GEN_TOOLS = ("generate_image", "upscale_image")
 
@@ -1499,9 +1511,11 @@ GENERATE_IMAGE_SCHEMA = {
             "conversation so the user sees it inline. Use for logos, "
             "mockups, illustrations, art assets. The image is not sent "
             "back to you; view_image the saved file only if inspection "
-            "is needed. Sizes beyond the model's native resolution are "
-            "reached by generating native + upscaling automatically; the "
-            "result reports what actually happened."
+            "is needed. The diffusion model never renders above the "
+            "server's default size; larger sizes are reached via the "
+            "server's hires fix (upscale + second diffusion pass) or "
+            "plain upscaling, and the result reports what actually "
+            "happened."
         ),
         "parameters": {
             "type": "object",
@@ -1516,16 +1530,30 @@ GENERATE_IMAGE_SCHEMA = {
                 "width": {
                     "type": "integer",
                     "description": (
-                        "Desired image width in pixels. Larger than the "
-                        "model's native size is fine: it generates native "
-                        "and upscales. Omit for the server default."
+                        "Desired final image width in pixels. Omit for "
+                        "the server default. Bigger than the default is "
+                        "fine: the render stays small and the size is "
+                        "reached via hires fix (default) or upscaling."
                     ),
                 },
                 "height": {
                     "type": "integer",
                     "description": (
-                        "Desired image height in pixels. Same upscale "
+                        "Desired final image height in pixels. Same "
                         "rule as width. Omit for the server default."
+                    ),
+                },
+                "hires_fix": {
+                    "type": "boolean",
+                    "description": (
+                        "Above-default sizes: run the server's hires "
+                        "fix (ESRGAN upscale + a second diffusion pass "
+                        "at the exact target - sharper, slower, heavier "
+                        "on VRAM; the server tiles the VAE to cope). "
+                        "false = ESRGAN upscale only (fast; may "
+                        "overshoot slightly). Default: true when the "
+                        "server supports it. Ignored when no size above "
+                        "the server default is requested."
                     ),
                 },
                 "negative_prompt": {
@@ -1568,8 +1596,8 @@ UPSCALE_IMAGE_SCHEMA = {
                 "target_width": {
                     "type": "integer",
                     "description": (
-                        "Desired result width; repeats are inferred from "
-                        "it. Omit to upscale by one step (repeats=1)."
+                        "Desired result width; steps are inferred from "
+                        "it. Omit to upscale by one step."
                     ),
                 },
                 "target_height": {
@@ -1624,7 +1652,7 @@ def _png_dims(raw: bytes):
 
 async def _capabilities(api_base: str) -> dict:
     """GET /sdcpp/v1/capabilities, cached briefly. Returns {} on any
-    failure - every caller must degrade to server-default behavior."""
+    failure - every caller must degrade to default behavior."""
     import time
 
     import httpx
@@ -1647,10 +1675,18 @@ async def _capabilities(api_base: str) -> dict:
 
 
 def _native_bounds(caps: dict) -> dict:
-    """Size bounds + defaults + upscale availability from capabilities,
+    """Size bounds + defaults + route availability from capabilities,
     with safe fallbacks matching sd-server defaults for older builds."""
     limits = caps.get("limits") or {}
     defaults = (caps.get("defaults") or {}) if isinstance(caps.get("defaults"), dict) else {}
+    features = (
+        ((caps.get("features_by_mode") or {}).get("img_gen"))
+        if isinstance(caps.get("features_by_mode"), dict)
+        else None
+    )
+    if not isinstance(features, dict):
+        # deprecated top-level mirror (older builds)
+        features = caps.get("features") if isinstance(caps.get("features"), dict) else {}
     return {
         "min_w": int(limits.get("min_width") or 64),
         "min_h": int(limits.get("min_height") or 64),
@@ -1661,6 +1697,8 @@ def _native_bounds(caps: dict) -> dict:
         "upscale": bool(caps.get("upscale")),
         "max_up_w": int(limits.get("max_upscale_width") or 8192),
         "max_up_h": int(limits.get("max_upscale_height") or 8192),
+        "hires": bool(features.get("hires")),
+        "vae_tiling": bool(features.get("vae_tiling")),
     }
 
 
@@ -1674,7 +1712,8 @@ def _clamp(v, lo, hi) -> int:
 
 
 async def _img_gen_request(api_base: str, body: dict):
-    """POST /v1/images/generations. Returns (b64, error); exactly one."""
+    """Legacy transport: sync POST /v1/images/generations (servers without
+    the native job API). Returns (b64, error); exactly one."""
     import base64
 
     import httpx
@@ -1696,6 +1735,128 @@ async def _img_gen_request(api_base: str, body: dict):
         return b64, None
     except (httpx.HTTPError, ValueError) as e:
         return None, f"image generation failed: {type(e).__name__}: {e}"
+
+
+async def _img_gen_job_submit(api_base: str, body: dict):
+    """Native transport: POST /sdcpp/v1/img_gen -> 202 {id, poll_url}.
+    Returns (job_id, error); exactly one."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(api_base.rstrip("/") + "/sdcpp/v1/img_gen", json=body)
+        if r.status_code not in (200, 202):
+            return None, f"job submission failed: HTTP {r.status_code} {r.text[:200]}".rstrip()
+        try:
+            j = r.json()
+        except ValueError:
+            return None, "job submission returned a malformed response"
+        if not isinstance(j, dict):
+            # truthy non-mapping body (list/str): j.get would raise
+            # AttributeError and abort generate_image instead of letting
+            # its caller fall back to the sync endpoint.
+            return None, "job submission returned a malformed response"
+        job_id = j.get("id")
+        if not job_id:
+            return None, "job submission returned no job id"
+        return job_id, None
+    except (httpx.HTTPError, ValueError) as e:
+        return None, f"job submission failed: {type(e).__name__}: {e}"
+
+
+async def _job_poll(api_base: str, job_id: str):
+    """GET /sdcpp/v1/jobs/{id}. Returns (status, result, error) where
+    status is queued|generating|completed|failed|cancelled|gone|transient
+    and result/error are the server's payloads (either may be None).
+
+    'transient' covers anything worth retrying until the caller's
+    deadline: transport errors, timeouts, non-200 responses, malformed
+    bodies. A single dropped poll must NOT fail a job that is still
+    running on the server (it would keep the GPU busy while the harness
+    walks away, and the server has no preemption)."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"{api_base.rstrip('/')}/sdcpp/v1/jobs/{job_id}")
+        if r.status_code in (404, 410):
+            # TTL-purged or cancelled: genuinely terminal
+            return "gone", None, None
+        if r.status_code == 503:
+            # server restarting/recycling (known on this box): retryable
+            return "transient", None, {"code": "http", "message": "HTTP 503"}
+        if r.status_code != 200:
+            return "transient", None, {"code": "http", "message": f"HTTP {r.status_code}"}
+        try:
+            j = r.json()
+        except ValueError:
+            return "transient", None, {"code": "json", "message": "malformed poll body"}
+        if not isinstance(j, dict):
+            return "transient", None, {"code": "json", "message": "malformed poll body"}
+        return j.get("status") or "queued", j.get("result"), j.get("error")
+    except (httpx.HTTPError, ValueError) as e:
+        return (
+            "transient",
+            None,
+            {"code": type(e).__name__, "message": str(e)},
+        )
+
+
+async def _job_cancel(api_base: str, job_id: str) -> None:
+    """Best-effort POST /sdcpp/v1/jobs/{id}/cancel - removes QUEUED work
+    server-side. A job already generating runs to completion server-side
+    (the server has no preemption); cancelling still stops the harness
+    from waiting on it. Never raises."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(f"{api_base.rstrip('/')}/sdcpp/v1/jobs/{job_id}/cancel")
+    except Exception:  # noqa: BLE001 — best effort by contract
+        pass
+
+
+async def _img_gen_job_wait(api_base: str, job_id: str, deadline_s: float = 600.0):
+    """Poll a native img_gen job to completion. Returns (b64, error).
+    On CancelledError (the user pressed Stop): best-effort server-side
+    cancel, then re-raise so the run stops immediately instead of
+    waiting out a thrashing server."""
+    import asyncio
+    import time
+
+    start = time.monotonic()
+    transient: list[str] = []
+    while True:
+        status, result, error = await _job_poll(api_base, job_id)
+        if status == "completed":
+            images = (result or {}).get("images") or []
+            b64 = (images[0] or {}).get("b64_json") if images else None
+            if not b64:
+                return None, "job completed but returned no image data"
+            return b64, None
+        if status in ("failed", "cancelled"):
+            msg = (error or {}).get("message") or status
+            return None, f"image generation job {status}: {msg}"
+        if status == "gone":
+            return None, "image generation job expired server-side before completion"
+        if status == "transient":
+            # keep waiting: the server may hiccup mid-generation (a 15s
+            # poll timeout is normal on a busy GPU). Only the deadline
+            # ends the wait, and it cancels the job server-side.
+            if len(transient) < 20:  # capped: a thrashing server must
+                transient.append(    # not grow this list unboundedly
+                    (error or {}).get("message") or "unknown"
+                )
+        if time.monotonic() - start > deadline_s:
+            await _job_cancel(api_base, job_id)
+            t = len(transient)
+            return None, (
+                "image generation timed out after "
+                f"{int(deadline_s)}s (job cancelled; the model may be "
+                "thrashing - try a smaller size)"
+                + (f" [{t} transient poll error(s) seen]" if t else "")
+            )
+        await asyncio.sleep(1.0)
 
 
 async def _img_upscale_request(api_base: str, b64: str, repeats: int, upscaler=None):
@@ -1734,53 +1895,6 @@ async def _img_upscale_request(api_base: str, b64: str, repeats: int, upscaler=N
         return base64.b64decode(b), meta, None
     except (httpx.HTTPError, ValueError) as e:
         return None, None, f"upscale failed: {type(e).__name__}: {e}"
-
-
-async def _upscale_to_target(
-    api_base: str,
-    b64: str,
-    want_w: int,
-    want_h: int,
-    upscaler: str | None,
-    max_up_w: int = 8192,
-    max_up_h: int = 8192,
-):
-    """Reach (want_w, want_h) by CHAINING single-repeat calls: the server
-    reports each model's real scale factor in the response (x2 or x4
-    models exist; assuming x2 overshoots badly on x4 and vice versa).
-    Returns (raw, meta, note) - note is None or a plain-language summary
-    of what happened. Stops at the target, after 4 steps, or before a
-    step that would exceed the endpoint's output limit."""
-    import base64
-
-    cur = b64
-    steps = 0
-    last_meta: dict = {}
-    note: str | None = None
-    while True:
-        raw, meta, err = await _img_upscale_request(api_base, cur, 1, upscaler)
-        if err or raw is None:
-            if steps == 0:
-                return None, None, err
-            note = f"stopped after {steps} upscale step(s): further upscaling failed ({err})"
-            return base64.b64decode(cur), last_meta, note
-        steps += 1
-        cur = base64.b64encode(raw).decode()
-        last_meta = meta or {}
-        w = int(last_meta.get("width") or 0)
-        h = int(last_meta.get("height") or 0)
-        if w and h and w >= want_w and h >= want_h:
-            return base64.b64decode(cur), last_meta, note
-        scale = int(last_meta.get("scale") or 2)
-        if w and h and (w * scale > max_up_w or h * scale > max_up_h):
-            note = (
-                f"stopped at {w}x{h}: another {scale}x step would exceed "
-                f"the server's {max_up_w}x{max_up_h} upscale limit"
-            )
-            return base64.b64decode(cur), last_meta, note
-        if steps >= 4:
-            note = f"stopped after {steps} upscale step(s) at {w}x{h}"
-            return base64.b64decode(cur), last_meta, note
 
 
 def image_generation_configured() -> bool:
@@ -1830,6 +1944,83 @@ def _read_image_argument(path: str, workspace: str):
     )
 
 
+async def _upscale_to_target(
+    api_base: str,
+    b64: str,
+    want_w: int,
+    want_h: int,
+    upscaler: str | None,
+    max_up_w: int = 8192,
+    max_up_h: int = 8192,
+):
+    """Reach (want_w, want_h) by CHAINING single-repeat calls: the server
+    reports each model's real scale factor in the response (x2 or x4
+    models exist; assuming x2 overshoots badly on x4 and vice versa).
+    Returns (raw, meta, note) - note is None or a plain-language summary
+    of what happened. Stops at the target, after 4 steps, or before a
+    step that would exceed the endpoint's output limit."""
+    import base64
+
+    cur = b64
+    steps = 0
+    last_meta: dict = {}
+    note: str | None = None
+    while True:
+        raw, meta, err = await _img_upscale_request(api_base, cur, 1, upscaler)
+        if err or raw is None:
+            if steps == 0:
+                return None, None, err
+            note = f"stopped after {steps} upscale step(s): further upscaling failed ({err})"
+            return base64.b64decode(cur), last_meta, note
+        steps += 1
+        cur = base64.b64encode(raw).decode()
+        last_meta = meta or {}
+        w = int(last_meta.get("width") or 0)
+        h = int(last_meta.get("height") or 0)
+        if w and h and w >= want_w and h >= want_h:
+            return base64.b64decode(cur), last_meta, note
+        scale = int(last_meta.get("scale") or 2)
+        if w and h and (w * scale > max_up_w or h * scale > max_up_h):
+            note = (
+                f"stopped at {w}x{h}: another {scale}x step would exceed "
+                f"the server's {max_up_w}x{max_up_h} upscale limit"
+            )
+            return base64.b64decode(cur), last_meta, note
+        if steps >= 4:
+            note = f"stopped after {steps} upscale step(s) at {w}x{h}"
+            return base64.b64decode(cur), last_meta, note
+
+
+def _hires_render_size(want_w: int, want_h: int, b: dict):
+    """Render dims for a hires-fix first pass: at or under the default's
+    pixel budget (what this model/VRAM handles comfortably), shaped to
+    the requested aspect ratio, never above the target itself. Returns
+    (gen_w, gen_h, within_budget)."""
+    budget = float(b["def_w"]) * float(b["def_h"])
+    ratio = float(want_w or want_h) / max(float(want_h or want_w), 1.0)
+    gw = (budget * ratio) ** 0.5
+    gh = gw / max(ratio, 0.0001)
+    within = gw * gh <= budget * 1.05
+    if not within:
+        gw, gh = float(b["def_w"]), float(b["def_h"])
+    return (
+        _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"]),
+        _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"]),
+        within,
+    )
+
+
+def _hires_plan(want_w: int, want_h: int, b: dict):
+    """Target for the hires second pass: the requested size 64-aligned
+    into the server's GENERATION limits (invalid hires targets 400 at
+    submit; generation max is the honest bound - the upscaler limit does
+    not apply to a diffusion pass). Returns (target_w, target_h)."""
+    return (
+        _clamp(_mult64(want_w), b["min_w"], b["max_w"]),
+        _clamp(_mult64(want_h), b["min_h"], b["max_h"]),
+    )
+
+
 async def generate_image(
     prompt: str,
     workspace: str,
@@ -1837,14 +2028,18 @@ async def generate_image(
     height: int | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    hires_fix: bool | None = None,
 ) -> dict:
-    """Run text-to-image on the configured sd-server (OpenAI-compatible
-    POST /v1/images/generations). Sizes beyond the model's native limits
-    generate native + upscale via POST /sdcpp/v1/upscale when an ESRGAN
-    is loaded (clamped with a note otherwise). Returns {'images':
-    [store rel]} so the existing image contract renders it inline, plus
-    'path': the workspace-relative copy for code use, and 'native': the
-    server's size bounds so the model learns what it is working with."""
+    """Run text-to-image on the configured sd-server. The DIFFUSION model
+    never renders above the server's default size (a 9B flux model can
+    thrash VRAM for minutes above it); requested sizes beyond the default
+    go through the server's HIRES FIX when available (small render, ESRGAN
+    upscale, second diffusion pass at the exact target - the user's
+    explicit default) with the ESRGAN upscale chain as the fallback.
+    Transport: the native async job API when capabilities are available
+    (Stop cancels the queued job and stops waiting immediately), the sync
+    OpenAI-compatible endpoint as the fallback for older servers."""
+    import asyncio
     import base64
 
     from backend.agent.imagedata import save_bytes
@@ -1869,107 +2064,209 @@ async def generate_image(
     except (TypeError, ValueError):
         return {"error": "width/height must be integers"}
 
-    body: dict = {"prompt": prompt, "n": 1}
-    if negative_prompt or seed is not None:
-        # sd-server's compatibility extension: native controls ride along
-        # inside the prompt inside this block (stripped server-side).
-        extra: dict = {}
-        if negative_prompt:
-            extra["negative_prompt"] = negative_prompt
-        if seed is not None:
-            extra["seed"] = seed
-        body["prompt"] = (
-            prompt + " <sd_cpp_extra_args>" + json.dumps(extra) + "</sd_cpp_extra_args>"
-        )
-
-    # --- size decision --------------------------------------------------
-    # No width/height: the server applies its own default - the harness
-    # hard-codes no resolution. With an explicit size, the server's
-    # capabilities decide: within native limits -> pass through; beyond
-    # them -> generate native (aspect-preserving) + ESRGAN upscale; no
-    # ESRGAN loaded -> clamp and say so honestly.
     caps = await _capabilities(api_base)
     b = _native_bounds(caps) if caps else None
+    # the server's first ESRGAN-capable upscaler (used by the hires pass
+    # and the fallback chain); a sane default for caps-less replies
+    up_name = "RealESRGAN_x4plus"
+    for u in caps.get("upscalers") or []:
+        if isinstance(u, dict) and u.get("image_upscale") and u.get("name"):
+            up_name = str(u["name"])
+            break
     notes: list[str] = []
-    gen_size = None
-    up_repeats = 0
+    up_target: tuple[int, int] | None = None
+    hires_body: dict | None = None
+    body: dict = {"prompt": prompt}
+
+    if b is None:
+        # Older server without capabilities: legacy passthrough, its call.
+        legacy: dict = {"prompt": prompt, "n": 1}
+        if negative_prompt or seed is not None:
+            extra: dict = {}
+            if negative_prompt:
+                extra["negative_prompt"] = negative_prompt
+            if seed is not None:
+                extra["seed"] = seed
+            legacy["prompt"] = (
+                prompt
+                + " <sd_cpp_extra_args>"
+                + json.dumps(extra)
+                + "</sd_cpp_extra_args>"
+            )
+        if width or height:
+            legacy["size"] = f"{width}x{height or width}"
+        b64, err = await _img_gen_request(api_base, legacy)
+        if err:
+            return {"error": err}
+        raw_out = base64.b64decode(b64)
+        dims = _png_dims(raw_out)
+        store_rel = _persist_generation(raw_out, workspace, notes)
+        return _generation_result(
+            store_rel, raw_out, dims, None, notes, workspace
+        )
+
+    # --- size decision (capability-aware, conservative) ------------------
+    # The diffusion render never exceeds the server default's pixel
+    # budget: that is what the operator's model/VRAM comfortably handles
+    # (a 9B flux at 1024 native can thrash weight paging for minutes).
+    # Sizes beyond the default go through the server's HIRES FIX (render
+    # small, ESRGAN-upscale, second diffusion pass at the exact target),
+    # with per-request VAE tiling on the second pass for memory; the
+    # ESRGAN upscale chain is the fallback when hires is unsupported or
+    # explicitly disabled (hires_fix=False).
+    gen_w, gen_h = b["def_w"], b["def_h"]
     want_w = width or 0
     want_h = height or 0
-
-    if width or height:
-        if b is None:
-            # Server without a capabilities endpoint (older build): pass
-            # the request through and let it decide.
-            gen_size = f"{width}x{height or width}"
-        elif not (
-            (width and (width > b["max_w"] or width < b["min_w"]))
-            or (height and (height > b["max_h"] or height < b["min_h"]))
-        ):
-            # Within native limits: pass through, clamped defensively.
-            gen_size = (
-                f"{_clamp(width or (height or b['def_w']), b['min_w'], b['max_w'])}x"
-                f"{_clamp(height or (width or b['def_h']), b['min_h'], b['max_h'])}"
+    if want_w or want_h:
+        # The render budget holds the requested aspect ratio; the render
+        # itself never exceeds the target (no rendering big to scale down).
+        budget = float(b["def_w"]) * float(b["def_h"])
+        ratio = (want_w or want_h) / max(want_h or want_w, 1.0)
+        gw = max(64.0, (budget * ratio) ** 0.5)
+        gh = max(64.0, gw / max(ratio, 0.0001))
+        gen_w = _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"])
+        gen_h = _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"])
+        tw, th = _hires_plan(int(want_w or want_h), int(want_h or want_w), b)
+        over = max(tw / gen_w, th / gen_h, 1.0)
+        want_hires = bool(hires_fix) if hires_fix is not None else True
+        if over <= 1.0:
+            # the render already meets the request
+            notes.append(
+                f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
+                "(within the server's default budget)"
+            )
+        elif b["hires"] and b["upscale"] and want_hires:
+            # server-side hires fix: exact target via upscale + second
+            # diffusion pass. Default-on (the user's explicit call: the
+            # heavier second pass is accepted for exact sizes + detail);
+            # hires_fix=False escapes to the fast ESRGAN chain. VAE
+            # tiling rides along per-request for decode memory.
+            hires_body = {
+                "hires": {
+                    "enabled": True,
+                    "target_width": tw,
+                    "target_height": th,
+                    "upscaler": up_name,
+                    "denoising_strength": 0.7,
+                }
+            }
+            if b["vae_tiling"]:
+                hires_body["vae_tiling_params"] = {"enabled": True}
+            notes.append(
+                f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
+                f"(the model's default budget), then hires fix to "
+                f"{tw}x{th} (ESRGAN upscale + second diffusion pass"
+                + (
+                    ", VAE tiled for memory"
+                    if "vae_tiling_params" in hires_body
+                    else ""
+                )
+                + ")"
             )
         elif b["upscale"]:
-            # Beyond native WITH an ESRGAN: generate native-size with the
-            # requested aspect ratio, then repeat the upscaler toward the
-            # target (the native endpoint exposes only whole-repeat steps).
-            tw = float(want_w or want_h)
-            th = float(want_h or want_w)
-            over = max(tw / b["max_w"], th / b["max_h"], 1.0)
-            gen_w = _clamp(_mult64(tw / over), b["min_w"], b["max_w"])
-            gen_h = _clamp(_mult64(th / over), b["min_h"], b["max_h"])
-            gen_size = f"{gen_w}x{gen_h}"
-            up_repeats = 1
-            # each repeat doubles the render; stop at the first n that
-            # reaches the target (the endpoint exposes whole repeats only)
-            while up_repeats < 4 and (
-                gen_w * (2 ** up_repeats) < want_w
-                or gen_h * (2 ** up_repeats) < want_h
-            ):
-                up_repeats += 1
+            # hires unsupported or explicitly off: ESRGAN chain (may
+            # overshoot; the chain stops as soon as the target is met)
+            up_target = (
+                _clamp(tw, 64, b["max_up_w"]),
+                _clamp(th, 64, b["max_up_h"]),
+            )
         else:
-            gen_size = (
-                f"{_clamp(width or b['def_w'], b['min_w'], b['max_w'])}x"
-                f"{_clamp(height or b['def_h'], b['min_h'], b['max_h'])}"
-            )
             notes.append(
-                f"requested {want_w}x{want_h} exceeds the model's native "
-                f"{b['max_w']}x{b['max_h']} and no ESRGAN upscaler is loaded "
-                f"on the server; clamped to {gen_size}"
+                f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
+                "(no ESRGAN upscaler is loaded on the server, so it "
+                "cannot be enlarged)"
             )
-    if gen_size:
-        body["size"] = gen_size
+        if width or height:
+            # native bodies take the explicit size; when the user gave
+            # none we omit it so the server default applies verbatim
+            body["width"], body["height"] = gen_w, gen_h
+    if negative_prompt:
+        body["negative_prompt"] = negative_prompt
+    if seed is not None:
+        body["seed"] = seed
 
-    b64, err = await _img_gen_request(api_base, body)
+    # --- transport: native job API (cancellable), sync fallback ---------
+    submit_body = {**body, **hires_body} if hires_body else body
+    job_id, err = await _img_gen_job_submit(api_base, submit_body)
+    if err and hires_body and "HTTP 404" not in err:
+        # Server rejected the hires body (unknown field / bad upscaler /
+        # invalid target): one clean retry WITHOUT it, and the ESRGAN
+        # chain takes over the target. A 404 means no native job API at
+        # all - the legacy fallback below handles that, and "refused"
+        # would be the wrong story.
+        notes.append(
+            "hires fix was refused by the server; the ESRGAN upscale "
+            "chain is used instead"
+        )
+        hires_body = None
+        if not up_target:
+            up_target = (
+                _clamp(tw, 64, b["max_up_w"]),
+                _clamp(th, 64, b["max_up_h"]),
+            )
+        job_id, err = await _img_gen_job_submit(api_base, body)
     if err:
-        return {"error": err}
-    raw_out = base64.b64decode(b64)
+        if hires_body:
+            # the native endpoint died and the legacy sync path cannot
+            # express hires - say so instead of silently dropping it
+            notes.append(
+                "hires fix could not be applied (native job API "
+                "unavailable); plain render used"
+            )
+            hires_body = None
+        # native endpoint unavailable (older build): fall back to sync
+        legacy = dict(body)
+        legacy["n"] = 1
+        legacy["size"] = f"{body.get('width', b['def_w'])}x{body.get('height', b['def_h'])}"
+        legacy.pop("width", None)
+        legacy.pop("height", None)
+        legacy["prompt"] = body["prompt"] + (
+            " <sd_cpp_extra_args>"
+            + json.dumps(
+                {k: body[k] for k in ("negative_prompt", "seed") if k in body}
+            )
+            + "</sd_cpp_extra_args>"
+            if ("negative_prompt" in body or "seed" in body)
+            else ""
+        )
+        b64, err2 = await _img_gen_request(api_base, legacy)
+        if err2:
+            return {"error": f"{err}; fallback also failed: {err2}"}
+        raw_out = base64.b64decode(b64)
+    else:
+        try:
+            b64, err = await _img_gen_job_wait(api_base, job_id)
+        except asyncio.CancelledError:
+            await _job_cancel(api_base, job_id)
+            raise
+        if err:
+            return {"error": err}
+        raw_out = base64.b64decode(b64)
     dims = _png_dims(raw_out)
 
-    if up_repeats:
-        # Staged: single-repeat calls chained with the server's REAL scale
-        # factor from each response (x2 and x4 ESRGAN models exist; the
-        # endpoint has a hard output cap the chain must respect).
+    if up_target:
         raw2, meta2, note2 = await _upscale_to_target(
-            api_base, b64, want_w, want_h, None,
-            max_up_w=b["max_up_w"] if b else 8192,
-            max_up_h=b["max_up_h"] if b else 8192,
+            api_base,
+            base64.b64encode(raw_out).decode(),
+            up_target[0],
+            up_target[1],
+            None,
+            max_up_w=b["max_up_w"],
+            max_up_h=b["max_up_h"],
         )
         if raw2 is None:
-            # Generation succeeded; surface the native render with an
-            # honest note instead of failing the whole call.
             notes.append(
                 f"requested {want_w}x{want_h}: upscale step failed ({note2}); "
-                f"returning the {gen_size} native render"
+                f"returning the {gen_w}x{gen_h} render"
             )
         else:
             raw_out = raw2
             dims = _png_dims(raw2)
             m = meta2 or {}
             notes.append(
-                f"requested {want_w}x{want_h}: generated native {gen_size}, "
-                f"then upscaled via {m.get('upscaler')}"
+                f"requested {want_w}x{want_h}: rendered {gen_w}x{gen_h} "
+                f"(the model's default size), then upscaled via "
+                f"{m.get('upscaler')}"
                 + (
                     f" to {m.get('width')}x{m.get('height')}"
                     if m.get("width")
@@ -1978,49 +2275,8 @@ async def generate_image(
                 + (f"; {note2}" if note2 else "")
             )
 
-    store_rel = save_bytes(raw_out, "png", "generate_image")
-
-    out: dict = {
-        "images": [store_rel],
-        "path": None,
-        "saved_to": None,
-        "display": "inline",
-    }
-    if dims and dims[0]:
-        out["width"], out["height"] = dims
-    if b:
-        out["native"] = (
-            f"model native bounds {b['min_w']}-{b['max_w']} wide x "
-            f"{b['min_h']}-{b['max_h']} high, default {b['def_w']}x{b['def_h']}; "
-            "for other sizes call generate_image again with width/height "
-            "(oversized requests upscale automatically) or upscale_image "
-            "on the saved file"
-        )
-    if notes:
-        out["note"] = " ".join(notes)
-    try:
-        from backend.agent.remote import parse_ns
-
-        if parse_ns(workspace) is not None:
-            # Q8 (design): remote workspaces are refused for v1 — bytes are
-            # local, a written file would land on the wrong machine. The
-            # image still displays; only the workspace copy is skipped.
-            out["note"] = (
-                out.get("note", "")
-                + " workspace is a remote host; image saved to the local "
-                "image store only (local-only in this version)"
-            ).strip()
-            return out
-        rel_dir = "ai-images"
-        dest = workspace_root(workspace) / rel_dir
-        dest.mkdir(parents=True, exist_ok=True)
-        target = dest / (store_rel.split("/")[-1])
-        target.write_bytes(raw_out)
-        out["path"] = f"{rel_dir}/{target.name}"
-        out["saved_to"] = out["path"]
-    except OSError as e:
-        out["note"] = (out.get("note", "") + f" workspace copy failed: {e}").strip()
-    return out
+    store_rel = _persist_generation(raw_out, workspace, notes)
+    return _generation_result(store_rel, raw_out, dims, b, notes, workspace)
 
 
 async def _save_upscale_output(out: dict, raw: bytes, workspace: str, source: str) -> dict:
@@ -2156,6 +2412,65 @@ async def upscale_image(
     return await _save_upscale_output(out, raw_out, workspace, path)
 
 
+def _persist_generation(raw: bytes, workspace: str, notes: list[str]) -> str:
+    """Save the final image to the backend store. Returns the store rel."""
+    from backend.agent.imagedata import save_bytes
+
+    return save_bytes(raw, "png", "generate_image")
+
+
+def _generation_result(
+    store_rel: str,
+    raw: bytes,
+    dims,
+    b: dict | None,
+    notes: list[str],
+    workspace: str,
+) -> dict:
+    """Shared result assembly: inline display contract, dims, the server's
+    bounds sentence, notes, and the workspace copy (remote sessions keep
+    store-only)."""
+    out: dict = {
+        "images": [store_rel],
+        "path": None,
+        "saved_to": None,
+        "display": "inline",
+    }
+    if dims and dims[0]:
+        out["width"], out["height"] = dims
+    if b:
+        out["native"] = (
+            f"the diffusion model renders within the server default "
+            f"{b['def_w']}x{b['def_h']} budget; larger sizes are reached "
+            "via the server's hires fix (upscale + second diffusion "
+            "pass) when supported, otherwise by the ESRGAN upscaler "
+            "(or call upscale_image on the saved file)"
+        )
+    if notes:
+        out["note"] = " ".join(notes)
+    try:
+        from backend.agent.remote import parse_ns
+
+        if parse_ns(workspace) is not None:
+            # Q8 (design): remote workspaces are refused for v1 — bytes are
+            # local, a written file would land on the wrong machine. The
+            # image still displays; only the workspace copy is skipped.
+            out["note"] = (
+                out.get("note", "")
+                + " workspace is a remote host; image saved to the local "
+                "image store only (local-only in this version)"
+            ).strip()
+            return out
+        rel_dir = "ai-images"
+        dest = workspace_root(workspace) / rel_dir
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / (store_rel.split("/")[-1])
+        target.write_bytes(raw)
+        out["path"] = f"{rel_dir}/{target.name}"
+        out["saved_to"] = out["path"]
+    except OSError as e:
+        out["note"] = (out.get("note", "") + f" workspace copy failed: {e}").strip()
+    return out
 EXECUTORS = {
     "bash": run_bash,
     "powershell": run_powershell,

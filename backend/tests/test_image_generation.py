@@ -36,6 +36,7 @@ def _png(w, h):
 
 class _FakeResp:
     status_code = 200
+    text = '{"error": "fake-response"}'
 
     def json(self):
         return {"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode()}]}
@@ -50,6 +51,16 @@ class _FakeClient:
     upscale_calls = 0
     gen_sizes = []
     upscale_bodies = []
+    job_bodies = []
+    job_status = None  # None = complete normally
+    cancel_calls = 0
+    native_ok = True
+    reject_hires_submit = False  # 400 any img_gen body carrying `hires`
+    submit_calls = 0
+    submit_status = 202
+    submit_payload = None  # when set, the submit responds with this body
+    poll_queue = []  # poll payloads replayed before the normal status
+    poll_attempts = 0
 
     @classmethod
     def reset(cls):
@@ -60,6 +71,16 @@ class _FakeClient:
         cls.upscale_calls = 0
         cls.gen_sizes = []
         cls.upscale_bodies = []
+        cls.job_bodies = []
+        cls.job_status = None
+        cls.cancel_calls = 0
+        cls.native_ok = True
+        cls.reject_hires_submit = False
+        cls.submit_calls = 0
+        cls.submit_status = 202
+        cls.submit_payload = None
+        cls.poll_queue = []
+        cls.poll_attempts = 0
 
     def __init__(self, **kw):
         pass
@@ -71,19 +92,100 @@ class _FakeClient:
         return False
 
     async def get(self, url):
-        _FakeClient.caps_calls += 1
+        if "/capabilities" in url:
+            _FakeClient.caps_calls += 1
+            r = _FakeResp()
+            r.json = lambda: dict(_FakeClient.caps_payload)
+            return r
+        # job poll: replay scripted payloads first (e.g. a transient
+        # hiccup before the real status), then the normal status machine
+        if _FakeClient.poll_queue:
+            _FakeClient.poll_attempts += 1
+            payload = _FakeClient.poll_queue.pop(0)
+            if isinstance(payload, int):  # a non-200 status code
+                r = _FakeResp()
+                r.status_code = payload
+                r.json = lambda: {"error": "boom"}
+                return r
+            r = _FakeResp()
+            r.status_code = 200
+            r.json = lambda: dict(payload)
+            return r
+        if _FakeClient.job_status == "generating":
+            payload = {"status": "generating", "result": None, "error": None}
+        elif _FakeClient.job_status == "failed":
+            payload = {
+                "status": "failed",
+                "result": None,
+                "error": {"code": "generation_failed", "message": "boom"},
+            }
+        else:
+            job = _FakeClient.job_bodies[-1] if _FakeClient.job_bodies else {}
+            # a hires job completes at the HIRES TARGET dims (the second
+            # pass runs there), mirroring the real server
+            hires = job.get("hires") or {}
+            payload = {
+                "status": "completed",
+                "result": {
+                    "output_format": "png",
+                    "images": [
+                        {
+                            "index": 0,
+                            "b64_json": base64.b64encode(
+                                _png(
+                                    hires.get("target_width")
+                                    or job.get("width")
+                                    or 512,
+                                    hires.get("target_height")
+                                    or job.get("height")
+                                    or 512,
+                                )
+                            ).decode(),
+                        }
+                    ],
+                },
+                "error": None,
+            }
         r = _FakeResp()
-        r.json = lambda: dict(_FakeClient.caps_payload)
+        r.json = lambda: dict(payload)
         return r
 
     async def post(self, url, json=None):
         _FakeClient.last = (url, json)
+        if url.endswith("/sdcpp/v1/img_gen"):
+            _FakeClient.submit_calls += 1
+            if not _FakeClient.native_ok:
+                r = _FakeResp()
+                r.status_code = 404
+                r.json = lambda: {"error": "not found"}
+                return r
+            if _FakeClient.reject_hires_submit and "hires" in (json or {}):
+                r = _FakeResp()
+                r.status_code = 400
+                r.json = lambda: {"error": {"message": "invalid generation parameters"}}
+                return r
+            if _FakeClient.submit_payload is not None:
+                # scripted submit response (e.g. malformed 200 body)
+                r = _FakeResp()
+                r.status_code = _FakeClient.submit_status
+                r.json = lambda: _FakeClient.submit_payload
+                return r
+            _FakeClient.job_bodies.append(dict(json or {}))
+            r = _FakeResp()
+            r.json = lambda: {"id": "job_test1", "status": "queued"}
+            return r
+        if url.endswith("/cancel"):
+            _FakeClient.cancel_calls += 1
+            r = _FakeResp()
+            r.json = lambda: {"ok": True}
+            return r
         if url.endswith("/sdcpp/v1/upscale"):
             _FakeClient.upscale_calls += 1
             _FakeClient.upscale_bodies.append(json)
             r = _FakeResp()
             r.json = lambda: dict(_FakeClient.upscale_payload)
             return r
+        # legacy sync generation endpoint
         _FakeClient.gen_calls += 1
         _FakeClient.gen_sizes.append((json or {}).get("size"))
         return _FakeResp()
@@ -179,20 +281,19 @@ def test_no_size_requested_uses_server_default(configured, tmp_path, monkeypatch
     assert _FakeClient.gen_sizes == [None]
 
 
-def test_oversized_request_generates_native_and_upscales(configured, tmp_path, monkeypatch):
-    """1024x1024 on a 512-max model: one native gen (512x512, 64-aligned,
-    aspect-preserving) + a native-endpoint upscale with inferred repeats,
-    result reports dims + what happened + the native bounds."""
+def test_oversized_request_uses_hires_fix(configured, tmp_path, monkeypatch):
+    """THE POLICY (v3): a 1024x1024 request never asks the diffusion
+    model for 1024 as the FIRST pass - it renders within the default
+    budget (512-class) and lets the server's hires fix (ESRGAN upscale
+    + second diffusion pass at the exact target) produce the final size.
+    Protects 12GB-class cards from weight-thrash while landing EXACT
+    sizes with more detail than the bare upscaler."""
     _FakeClient.caps_payload = {
-        "limits": {"min_width": 64, "min_height": 64, "max_width": 512, "max_height": 512,
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
                    "max_upscale_width": 8192, "max_upscale_height": 8192},
         "defaults": {"width": 512, "height": 512},
         "upscale": True,
-    }
-    _FakeClient.upscale_payload = {
-        "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
-        "upscaler": "realesr-general", "scale": 2, "repeats": 2,
-        "width": 1024, "height": 1024,
+        "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
     }
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(
@@ -202,20 +303,61 @@ def test_oversized_request_generates_native_and_upscales(configured, tmp_path, m
         )
     )
     assert not result.get("error"), result
-    assert _FakeClient.gen_sizes == ["512x512"]
-    assert _FakeClient.upscale_calls == 1
-    assert _FakeClient.upscale_bodies[0]["repeats"] == 1
+    # first diffusion pass stays at the default budget, NEVER 1024
+    assert _FakeClient.job_bodies[0]["width"] == 512
+    assert _FakeClient.job_bodies[0]["height"] == 512
+    # hires rides in the SAME job body: exact target, no client-side chain
+    jb = _FakeClient.job_bodies[0]
+    assert jb["hires"]["enabled"] is True
+    assert jb["hires"]["target_width"] == 1024
+    assert jb["hires"]["target_height"] == 1024
+    assert jb["vae_tiling_params"]["enabled"] is True
+    assert _FakeClient.upscale_calls == 0
     assert result["width"] == 1024 and result["height"] == 1024
-    assert "generated native 512x512" in result["note"]
-    assert "512" in result["native"] and "upscale_image" in result["native"]
-    assert result["display"] == "inline"
+    assert "hires fix" in result["note"] and "512x512" in result["note"]
 
 
-def test_within_native_limits_generates_directly(configured, tmp_path, monkeypatch):
+def test_oversized_hires_fix_off_upscales_instead_of_diffusing(configured, tmp_path, monkeypatch):
+    """hires_fix=False: the old policy verbatim - render at the default
+    and reach the target with the ESRGAN chain (fast, may overshoot).
+    The escape hatch for when the second pass is too heavy or too slow."""
     _FakeClient.caps_payload = {
-        "limits": {"min_width": 64, "min_height": 64, "max_width": 1024, "max_height": 1024},
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
+                   "max_upscale_width": 8192, "max_upscale_height": 8192},
         "defaults": {"width": 512, "height": 512},
         "upscale": True,
+        "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
+    }
+    _FakeClient.upscale_payload = {
+        "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
+        "upscaler": "RealESRGAN_x4plus", "scale": 4, "repeats": 1,
+        "width": 1024, "height": 1024,
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image",
+            {"prompt": "x", "width": 1024, "height": 1024, "hires_fix": False},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    assert _FakeClient.job_bodies[0]["width"] == 512
+    assert _FakeClient.job_bodies[0]["height"] == 512
+    assert "hires" not in _FakeClient.job_bodies[0]
+    assert _FakeClient.upscale_calls == 1
+    assert result["width"] == 1024 and result["height"] == 1024
+    assert "default" in result["note"] and "upscaled" in result["note"]
+
+
+def test_hires_without_vae_tiling_support_omits_tiling(configured, tmp_path, monkeypatch):
+    """An older build that reports hires but not vae_tiling gets the
+    hires object WITHOUT the tiling params (server would ignore/400)."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+        "features_by_mode": {"img_gen": {"hires": True}},
     }
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(
@@ -225,13 +367,113 @@ def test_within_native_limits_generates_directly(configured, tmp_path, monkeypat
         )
     )
     assert not result.get("error"), result
-    assert _FakeClient.gen_sizes == ["768x768"]
+    jb = _FakeClient.job_bodies[0]
+    assert jb["hires"]["enabled"] is True
+    assert "vae_tiling_params" not in jb
+    assert jb["hires"]["target_width"] == 768
+
+
+def test_hires_refused_by_server_falls_back_with_a_note(configured, tmp_path, monkeypatch):
+    """A server that 400s the hires body (unknown field, bad upscaler
+    name): one clean retry WITHOUT hires, an honest note, and the
+    ESRGAN chain still lands the size."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
+                   "max_upscale_width": 8192, "max_upscale_height": 8192},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+        "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
+    }
+    _FakeClient.upscale_payload = {
+        "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
+        "upscaler": "RealESRGAN_x4plus", "scale": 4, "repeats": 1,
+        "width": 1024, "height": 1024,
+    }
+    _FakeClient.reject_hires_submit = True
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 1024, "height": 1024},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    # exactly two submits: the hires body, then the clean retry
+    assert _FakeClient.submit_calls == 2
+    assert "hires" not in _FakeClient.job_bodies[-1]
+    assert "refused" in result["note"]
+    # the chain still delivers the size
+    assert _FakeClient.upscale_calls == 1
+    assert result["width"] == 1024 and result["height"] == 1024
+
+
+def test_hires_upscaler_name_comes_from_capabilities(configured, tmp_path, monkeypatch):
+    """The hires pass uses the server's first image_upscale-capable
+    upscaler from capabilities - never a hardcoded model name."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+        "upscalers": [
+            {"name": "Lanczos", "image_upscale": False},
+            {"name": "MyUpscaler_x2", "image_upscale": True},
+        ],
+        "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 1024, "height": 1024},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    assert _FakeClient.job_bodies[0]["hires"]["upscaler"] == "MyUpscaler_x2"
+
+
+def test_no_size_requested_stays_pure_default(configured, tmp_path, monkeypatch):
+    """No width/height: no hires object at all - the server default
+    applies verbatim (same as before this change)."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+        "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert not result.get("error"), result
+    jb = _FakeClient.job_bodies[0]
+    assert "width" not in jb and "height" not in jb
+    assert "hires" not in jb
+
+
+def test_within_default_request_still_renders_at_default(configured, tmp_path, monkeypatch):
+    """Any explicit size renders at the server default (the diffusion
+    model's comfortable size); the result says so."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 512, "height": 512},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    assert _FakeClient.job_bodies[0]["width"] == 512
+    assert _FakeClient.job_bodies[0]["height"] == 512
     assert _FakeClient.upscale_calls == 0
 
 
-def test_oversized_without_esrgan_clamps_honestly(configured, tmp_path, monkeypatch):
+def test_oversized_without_esrgan_stays_at_default_and_says_so(configured, tmp_path, monkeypatch):
     _FakeClient.caps_payload = {
-        "limits": {"min_width": 64, "min_height": 64, "max_width": 512, "max_height": 512},
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
         "defaults": {"width": 512, "height": 512},
         "upscale": False,
     }
@@ -243,9 +485,37 @@ def test_oversized_without_esrgan_clamps_honestly(configured, tmp_path, monkeypa
         )
     )
     assert not result.get("error"), result
-    assert _FakeClient.gen_sizes == ["512x512"]
+    assert _FakeClient.job_bodies[0]["width"] == 512
     assert _FakeClient.upscale_calls == 0
-    assert "clamped" in result["note"] and "no ESRGAN" in result["note"]
+    assert "no ESRGAN" in result["note"]
+
+
+def test_non_square_request_aspect_fits_default_budget(configured, tmp_path, monkeypatch):
+    """1536x768 (2:1) on a 512-default server: render at the default's
+    pixel budget reshaped to the ratio (768x384 or similar), then upscale
+    to the target - the diffusion pixel count never grows."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
+                   "max_upscale_width": 8192, "max_upscale_height": 8192},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+    }
+    _FakeClient.upscale_payload = {
+        "images": [{"b64_json": base64.b64encode(_png(1536, 768)).decode()}],
+        "upscaler": "RealESRGAN_x4plus", "scale": 2, "repeats": 1,
+        "width": 1536, "height": 768,
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 1536, "height": 768},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    w, h = _FakeClient.job_bodies[0]["width"], _FakeClient.job_bodies[0]["height"]
+    assert w * h <= 512 * 512 * 1.1  # default budget, ~64-rounded
+    assert w / h > 1.5  # landscape ratio preserved
 
 
 def test_capabilities_failure_degrades_to_passthrough(configured, tmp_path, monkeypatch):
@@ -592,3 +862,130 @@ def test_config_get_exposes_block(configured, client):
     got = client.get("/api/config").json()
     assert got["image_generation"]["api_base"] == "http://127.0.0.1:1234"
     assert got["image_generation"]["provider"] == "sdcpp"
+
+
+# --------------------------------------------------- cancellable job transport
+
+
+def test_failed_job_reports_server_error(configured, tmp_path, monkeypatch):
+    """A failed native job surfaces the server's message, not a hang."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.job_status = "failed"
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert "failed: boom" in result["error"]
+
+
+def test_transient_poll_errors_do_not_fail_the_job(configured, tmp_path, monkeypatch):
+    """CodeRabbit major: ONE dropped poll (15s timeout, 503, malformed
+    body) must not fail a job that is still running server-side - the
+    wait loop retries until its deadline and the image still lands."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.poll_queue = [
+        {"status": "generating", "result": None, "error": None},  # ok
+        503,                                        # server hiccup
+        {"status": "queued", "result": None, "error": None},
+        {"status": "generating", "result": None, "error": None},
+        "MALFORMED",                                # non-JSON body
+        {"status": "generating", "result": None, "error": None},
+    ]
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert not result.get("error"), result
+    assert result["width"] == 512 and result["height"] == 512
+    assert _FakeClient.cancel_calls == 0
+
+
+def test_gone_job_is_still_terminal(configured, tmp_path, monkeypatch):
+    """404/410 (TTL purge / cancelled server-side) stays terminal even
+    with retry-on-transient in place - no waiting out a dead job."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.poll_queue = [404]
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert "expired server-side" in result["error"]
+
+
+def test_malformed_submit_body_falls_back_to_legacy(configured, tmp_path, monkeypatch):
+    """CodeRabbit minor: a truthy non-mapping 200 submit body must not
+    raise AttributeError out of generate_image - it degrades to the
+    sync fallback like any other native-path failure."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.submit_status = 200
+    _FakeClient.submit_payload = ["not", "a", "mapping"]
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert not result.get("error"), result
+    assert _FakeClient.gen_calls == 1  # legacy endpoint was used
+
+
+def test_stop_cancels_the_job_and_reraises(configured, tmp_path, monkeypatch):
+    """The reason the job transport exists: Stop (CancelledError) must
+    fire a best-effort server-side cancel and re-raise immediately, so
+    the harness never waits out a thrashing server (rc.14 incident)."""
+    import asyncio as aio
+
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.job_status = "generating"  # never completes
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    async def run_and_cancel():
+        task = aio.create_task(
+            tools.execute_tool(
+                "generate_image", {"prompt": "x"}, workspace=str(tmp_path)
+            )
+        )
+        await aio.sleep(0.05)  # let it submit + enter the poll loop
+        task.cancel()
+        try:
+            await task
+            return None
+        except aio.CancelledError:
+            return "cancelled"
+
+    outcome = asyncio.run(run_and_cancel())
+    assert outcome == "cancelled"
+    assert _FakeClient.cancel_calls == 1
+
+
+def test_legacy_server_without_native_api_uses_sync_fallback(configured, tmp_path, monkeypatch):
+    """404 on /sdcpp/v1/img_gen (older sd-server build): fall back to the
+    sync OpenAI-compatible endpoint - generation still works, just not
+    cancellable (the old behavior)."""
+    _FakeClient.native_ok = False
+    _FakeClient.caps_payload = {"upscale": True}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+    )
+    assert not result.get("error"), result
+    assert _FakeClient.gen_calls == 1
+    assert _FakeClient.gen_sizes == ["512x512"]
+    assert _FakeClient.job_bodies == []
+
+
+def test_native_body_carries_native_fields(configured, tmp_path, monkeypatch):
+    """negative_prompt/seed go as native body fields on the job path (no
+    sd_cpp_extra_args embedding - that's a compatibility-API mechanism)."""
+    _FakeClient.caps_payload = {"upscale": True}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image",
+            {"prompt": "x", "negative_prompt": "dogs", "seed": 42},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    body = _FakeClient.job_bodies[0]
+    assert body["negative_prompt"] == "dogs"
+    assert body["seed"] == 42
+    assert "sd_cpp_extra_args" not in body["prompt"]
