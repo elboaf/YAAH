@@ -27,6 +27,24 @@ export interface EmissionSegment {
   anchor?: ToolCall
 }
 
+/** #401: a FINISHED generate_image / upscale_image result anchors inline in
+ *  the message flow - the artwork IS the message, exactly like an answered
+ *  ask_user card. Only successful results that carry at least one stored
+ *  image rel qualify; running calls, failures, and non-image payloads stay
+ *  in the collapsed trace (where ToolCallRow's own inline branch still
+ *  reaches them through the expander). */
+export function isInlineImageAnchor(t: ToolCall): boolean {
+  if (t.name !== 'generate_image' && t.name !== 'upscale_image') return false
+  if (t.result === undefined || t.result === null || typeof t.result !== 'object') return false
+  const r = t.result as Record<string, unknown>
+  if (r.error) return false
+  const one = typeof r.image === 'string' && r.image ? 1 : 0
+  const many = Array.isArray(r.images)
+    ? r.images.filter((v) => typeof v === 'string' && !!v).length
+    : 0
+  return one + many > 0
+}
+
 /**
  * Split a (possibly still-streaming) agent message into emission segments.
  * Anchors are the message's answered ask_user calls and spawn_agent runs
@@ -54,7 +72,8 @@ export function emissionSegments(msg: ChatMessage): EmissionSegment[] | null {
     .filter(
       (t) =>
         ((t.name === 'ask_user' && t.result !== undefined) ||
-          t.name === 'spawn_agent') &&
+          t.name === 'spawn_agent' ||
+          isInlineImageAnchor(t)) &&
         typeof t.contentOffset === 'number',
     )
     .sort((a, b) => (a.contentOffset ?? 0) - (b.contentOffset ?? 0))
