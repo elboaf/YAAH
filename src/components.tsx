@@ -2756,10 +2756,18 @@ export function RemoteTranscriptDialog({
           })
         }
       } else if (ev.type === 'tool_result') {
-        // Pass the result through as-is: stringifying it broke every rich
-        // result render (inline images, #401), and the '' call id never
-        // matched the started call, leaving remote chips result-less.
-        useAgent.getState().finishToolCall(remoteKey, asstId, ev.call_id ?? '', ev.result)
+        // Pass the result through as an object: stringifying it broke every
+        // rich result render (inline images, #401), and the '' call id never
+        // matched the started call, leaving remote chips result-less. Image
+        // rels inside the result are scoped to the OWNING device (same
+        // treatment the history-load path applies via scopeRemoteMedia) -
+        // unscoped refs would hit this viewer's local /api/images endpoint
+        // and 404. Non-object results (plain strings) pass through untouched.
+        const remoteResult =
+          ev.result && typeof ev.result === 'object'
+            ? scopeRemoteMedia(ev.result as Record<string, unknown>, hostId)
+            : ev.result
+        useAgent.getState().finishToolCall(remoteKey, asstId, ev.call_id ?? '', remoteResult)
         if (ev.name === 'ask_user') {
           useAgent.getState().setPendingQuestion((q) => (q && q.convKey === remoteKey && q.callId === (ev.call_id ?? '') ? null : q))
         }
