@@ -2235,18 +2235,24 @@ async def api_set_config(body: ConfigUpdate):
     img = updates.get("image_generation")
     if isinstance(img, dict):
         existing_img = load_config().get("image_generation") or {}
+        # api_base IS the configured flag, so it has three states: absent =
+        # untouched (a size-only save must not wipe it), non-blank = the
+        # user's explicit endpoint, blank = unconfigure. Every other key
+        # merges blank-tolerantly like the remote/memory blocks.
+        incoming_base = str(img["api_base"]).strip() if "api_base" in img else None
         img = {
             **existing_img,
             **{k: v for k, v in img.items() if v not in (None, "")},
         }
-        if img.get("size") not in ("", None) and "x" not in str(img.get("size")).lower():
-            img["size"] = "512x512"
-        if not str(img.get("api_base") or "").strip():
-            updates.pop("image_generation", None)
-        else:
-            img["provider"] = "sdcpp"
-            img["api_base"] = str(img["api_base"]).strip()
-            updates["image_generation"] = img
+        if incoming_base is not None:
+            # Blank must WIN over the merge: the filter above resurrected
+            # the stored endpoint, and leaving it would keep the tool
+            # enabled after the user cleared the field (regression).
+            img["api_base"] = incoming_base
+        size = str(img.get("size") or "").strip().lower()
+        img["size"] = size if "x" in size else "512x512"
+        img["provider"] = "sdcpp"
+        updates["image_generation"] = img
         # Persistent-memory block merges the same way (#169): a Settings save
     # that only touches enabled keeps any future sibling keys intact.
     # enabled must be a real boolean (CodeRabbit return trip): bool("false")

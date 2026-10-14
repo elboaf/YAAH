@@ -228,6 +228,19 @@ def test_config_put_strips_blank_api_base(client):
     assert not (got.get("image_generation") or {}).get("api_base")
 
 
+def test_config_put_blank_unconfigures_after_configure(client):
+    """Blank endpoint after a configured block: the stored api_base must
+    actually clear (regression: popping the update kept the old block)."""
+    r = client.put(
+        "/api/config", json={"image_generation": {"api_base": "http://127.0.0.1:1234"}}
+    )
+    assert r.status_code == 200
+    r = client.put("/api/config", json={"image_generation": {"api_base": ""}})
+    assert r.status_code == 200
+    got = client.get("/api/config").json()["image_generation"]
+    assert got["api_base"] == ""
+
+
 def test_config_get_exposes_block(configured, client):
     got = client.get("/api/config").json()
     assert got["image_generation"]["api_base"] == "http://127.0.0.1:1234"
