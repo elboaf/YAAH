@@ -79,6 +79,9 @@ class AgentDef:
 # block on the user) or spawn_agent (no nesting).
 _ALWAYS_EXCLUDED = {
     "ask_user", "spawn_agent", "search_conversation_history",
+    # Image generation is a main-chat capability: the parent generates and
+    # hands files down, keeping one generation queue on the sd-server.
+    "generate_image",
 }
 
 _EXPLORE_TOOLS = {

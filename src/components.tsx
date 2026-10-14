@@ -95,6 +95,7 @@ import {
   cancelRemoteDeviceTurn,
   getSandboxStatus,
   type SandboxStatus,
+  probeImageProvider,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
@@ -6253,6 +6254,78 @@ function AgentsSettingsSection() {
 
 /** One settings group: mono micro-label header, hairline frame, compact
  *  body. Cards are flat (no fill, no shadow) — hairlines do the grouping. */
+/** Image generation (sd-server): endpoint + default size + live Test
+ *  probe (SaySettingsCard precedent). Rendered in Settings -> Connect.
+ *  Blank endpoint = unconfigured = no generate_image tool. */
+export function ImageGenSettingsCard({
+  imageGen,
+  onChange,
+}: {
+  imageGen: { provider: string; api_base: string; size: string }
+  onChange: (next: { provider: string; api_base: string; size: string }) => void
+}) {
+  const [testState, setTestState] = useState<'idle' | 'busy'>('idle')
+  const [testResult, setTestResult] = useState<string | null>(null)
+  const [testOk, setTestOk] = useState(false)
+  const test = async () => {
+    setTestState('busy')
+    setTestResult(null)
+    try {
+      const r = await probeImageProvider(imageGen.api_base)
+      setTestOk(!!r.ok)
+      setTestResult(
+        r.ok
+          ? `ok - sd-server reachable (${(r.models ?? []).join(', ')})`
+          : (r.error ?? 'unreachable'),
+      )
+    } catch (e) {
+      setTestOk(false)
+      setTestResult((e as Error).message)
+    }
+    setTestState('idle')
+  }
+  return (
+    <SettingsCard title="Image generation" className="col-span-4">
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <input
+            className={`${settingsInputCls} flex-1`}
+            value={imageGen.api_base}
+            placeholder="http://127.0.0.1:1234 (stable-diffusion.cpp server)"
+            onChange={(e) => onChange({ ...imageGen, api_base: e.target.value })}
+          />
+          <button
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            disabled={testState === 'busy' || !imageGen.api_base.trim()}
+            onClick={test}
+          >
+            {testState === 'busy' ? '…' : 'Test'}
+          </button>
+        </div>
+        {testResult && (
+          <p className={`font-mono text-[10px] ${testOk ? 'text-emerald-400' : 'text-red-400'}`}>
+            {testResult}
+          </p>
+        )}
+        <p className="font-mono text-[10px] text-zinc-600">
+          {imageGen.api_base.trim()
+            ? 'generate_image tool is available to the agent.'
+            : 'Blank = image generation off (no generate_image tool).'}
+        </p>
+        <div className="flex items-center gap-1.5">
+          <label className="font-mono text-[10px] text-zinc-500">default size</label>
+          <input
+            className={`${settingsInputCls} w-24`}
+            value={imageGen.size}
+            placeholder="512x512"
+            onChange={(e) => onChange({ ...imageGen, size: e.target.value })}
+          />
+        </div>
+      </div>
+    </SettingsCard>
+  )
+}
+
 function SettingsCard({
   title,
   className = '',
@@ -6574,6 +6647,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // persisted on save.
   const [uiScale, setUiScale] = useState(1.0)
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
+  // Image generation (sd-server): endpoint + default size drafts; the
+  // tool's availability is derived from api_base alone.
+  const [imageGen, setImageGen] = useState<{ provider: string; api_base: string; size: string }>({
+    provider: 'sdcpp',
+    api_base: '',
+    size: '512x512',
+  })
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -6691,6 +6771,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setActive(c.active_provider)
           setMaxSteps(c.max_steps ?? '')
           setSubagentProvider(c.subagent_provider ?? '')
+          setImageGen(
+            c.image_generation ?? { provider: 'sdcpp', api_base: '', size: '512x512' },
+          )
           setModelComp(c.model_compaction ?? {})
           setModelSteps(
             Object.fromEntries(
@@ -6982,6 +7065,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           passphrase: remotePass,
           display_name: remoteName,
         },
+        image_generation: {
+          provider: 'sdcpp',
+          api_base: imageGen.api_base.trim(),
+          // Blank api_base strips the block server-side (unconfigure);
+          // otherwise a defaulted size saves through.
+          ...(imageGen.api_base.trim()
+            ? { size: imageGen.size.trim() || '512x512' }
+            : {}),
+        },
       })
       // Hot-swap the live registration in the Composer; it reports failure
       // (combo taken by another app) through the same reject toast system.
@@ -7114,6 +7206,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             {/* providers: collapsed rows, active first; fields behind one open row */}
             {activeTab === 'connect' && (
               <>
+              <ImageGenSettingsCard imageGen={imageGen} onChange={setImageGen} />
               <SettingsCard title="Providers" className="col-span-4">
               {providerOrder.length === 0 && (
                 <p className="text-[11px] text-zinc-600">

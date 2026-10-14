@@ -323,6 +323,17 @@ HELP_DOCS: dict = {
         "max_chars truncates from the top - fetch a "
         "specific anchor or raise the cap for long pages."
     ),
+    "generate_image": (
+        "Generates ONE image per call on the stable-diffusion.cpp server "
+        "configured in Settings (Image generation). The image is saved "
+        "into the workspace under ai-images/ and attached to the "
+        "conversation, so the user sees it inline and you can reference "
+        "the file path afterwards. width/height default to the configured "
+        "size (512x512); negative_prompt and seed are passed through to "
+        "the server. Generation on CPU can take a minute - one call, no "
+        "polling. Remote (namespaced) workspaces refuse the tool: the "
+        "server runs on this machine."
+    ),
     "view_image": (
         "Attaches the image to the conversation so a vision-capable "
         "model sees it on the next model call - usually immediately "
@@ -1451,6 +1462,187 @@ def _memory_executor(op: str):
     return _run
 
 
+# ---------------------------------------------------------------- image gen
+# Text-to-image via a stable-diffusion.cpp server (sd-server, default
+# http://127.0.0.1:1234). One tool, one provider kind (sdcpp) for v1.
+
+_IMAGE_GEN_TOOL = "generate_image"
+
+GENERATE_IMAGE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": _IMAGE_GEN_TOOL,
+        "description": (
+            "Generate an image from a text prompt with the local "
+            "stable-diffusion.cpp server (set in Settings). Saves the PNG "
+            "into the workspace under ai-images/ AND attaches it to this "
+            "conversation so the user sees it inline. Use for logos, "
+            "mockups, illustrations, art assets."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "What to render. Describe subject, style, medium, "
+                        "lighting, composition."
+                    ),
+                },
+                "width": {
+                    "type": "integer",
+                    "description": "Image width in pixels (default 512).",
+                },
+                "height": {
+                    "type": "integer",
+                    "description": "Image height in pixels (default 512).",
+                },
+                "negative_prompt": {
+                    "type": "string",
+                    "description": "What to avoid in the image.",
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": "Seed for reproducible output.",
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+}
+
+# Same posture as memory (#169) / sandbox (#340): if the image config
+# disappears between schema build and tool call, refuse with a message
+# that points at Settings and teaches no bypass.
+_IMAGE_GEN_DISABLED_MSG = (
+    "No image provider is configured. Only the user can set one up "
+    "in Settings (Image generation)."
+)
+
+
+def image_generation_configured() -> bool:
+    """Is an image provider configured? Read live so a Settings save
+    applies to new turns without a restart. Any read failure keeps the
+    safe default (OFF)."""
+    try:
+        from backend.agent.config import load_config
+
+        return bool((load_config().get("image_generation") or {}).get("api_base", "").strip())
+    except Exception:  # noqa: BLE001 — fail closed, images are opt-in
+        return False
+
+
+async def generate_image(
+    prompt: str,
+    workspace: str,
+    width: int | None = None,
+    height: int | None = None,
+    negative_prompt: str | None = None,
+    seed: int | None = None,
+) -> dict:
+    """Run text-to-image on the configured sd-server (OpenAI-compatible
+    POST /v1/images/generations). Returns {'images': [store rel]} so the
+    existing image contract renders it inline and replays it for vision,
+    plus 'path': the workspace-relative copy for code use."""
+    import base64
+
+    import httpx
+
+    from backend.agent.imagedata import save_bytes
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return {"error": "prompt must not be empty"}
+
+    cfg = {}
+    try:
+        from backend.agent.config import load_config
+
+        cfg = load_config().get("image_generation") or {}
+    except Exception:  # noqa: BLE001
+        return {"error": _IMAGE_GEN_DISABLED_MSG}
+    api_base = (cfg.get("api_base") or "").strip()
+    if not api_base:
+        return {"error": _IMAGE_GEN_DISABLED_MSG}
+
+    try:
+        width = max(64, min(4096, int(width))) if width else None
+        height = max(64, min(4096, int(height))) if height else None
+    except (TypeError, ValueError):
+        return {"error": "width/height must be integers"}
+
+    def _size(text: str, default: tuple[int, int]) -> tuple[int, int]:
+        try:
+            w, _, h = (text or "").lower().partition("x")
+            return int(w), int(h)
+        except (TypeError, ValueError):
+            return default
+
+    dw, dh = _size(cfg.get("size") or "", (512, 512))
+    w = width or dw
+    h = height or dh
+
+    body: dict = {"prompt": prompt, "n": 1, "size": f"{w}x{h}"}
+    if negative_prompt or seed is not None:
+        # sd-server's compatibility extension: native controls ride along
+        # inside the prompt inside this block (stripped server-side).
+        extra: dict = {}
+        if negative_prompt:
+            extra["negative_prompt"] = negative_prompt
+        if seed is not None:
+            extra["seed"] = seed
+        body["prompt"] = (
+            prompt + " <sd_cpp_extra_args>" + json.dumps(extra) + "</sd_cpp_extra_args>"
+        )
+
+    # Local image generation on CPU can take tens of seconds to minutes.
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            r = await client.post(
+                api_base.rstrip("/") + "/v1/images/generations", json=body
+            )
+        if r.status_code != 200:
+            return {
+                "error": (
+                    f"image generation failed: HTTP {r.status_code} from "
+                    f"{api_base} (is the stable-diffusion.cpp server running?)"
+                )
+            }
+        data = r.json().get("data") or []
+        b64 = (data[0] or {}).get("b64_json") if data else None
+        if not b64:
+            return {"error": "image generation returned no image data"}
+    except (httpx.HTTPError, ValueError) as e:
+        return {"error": f"image generation failed: {type(e).__name__}: {e}"}
+
+    raw = base64.b64decode(b64)
+    store_rel = save_bytes(raw, "png", "generate_image")
+
+    out: dict = {"images": [store_rel], "path": None, "saved_to": None}
+    try:
+        from backend.agent.remote import parse_ns
+
+        if parse_ns(workspace) is not None:
+            # Q8 (design): remote workspaces are refused for v1 — bytes are
+            # local, a written file would land on the wrong machine. The
+            # image still displays; only the workspace copy is skipped.
+            out["note"] = (
+                "workspace is a remote host; image saved to the local "
+                "image store only (local-only in this version)"
+            )
+            return out
+        rel_dir = "ai-images"
+        dest = workspace_root(workspace) / rel_dir
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / (store_rel.split("/")[-1])
+        target.write_bytes(raw)
+        out["path"] = f"{rel_dir}/{target.name}"
+        out["saved_to"] = out["path"]
+    except OSError as e:
+        out["note"] = f"workspace copy failed: {e}"
+    return out
+
+
 EXECUTORS = {
     "bash": run_bash,
     "powershell": run_powershell,
@@ -1468,6 +1660,7 @@ EXECUTORS = {
     "install_git": _install_git_executor,
     "get_help": get_help,
     "branch_select": branch_select,
+    "generate_image": generate_image,
     "memory_save": _memory_executor("save"),
     "memory_read": _memory_executor("read"),
     "memory_search": _memory_executor("search"),
@@ -1620,6 +1813,11 @@ async def execute_tool(
         # Settings; crucially, the error must NOT name the config key or
         # file (the old message taught agents to bypass the toggle).
         return {"info": _SANDBOX_DISABLED_MSG}
+    if name == _IMAGE_GEN_TOOL and not image_generation_configured():
+        # Same degrade-gracefully posture as memory/sandbox: the image
+        # provider was unconfigured (or wiped) after the schemas were
+        # sent. Refuse, point at Settings, name no config keys.
+        return {"info": _IMAGE_GEN_DISABLED_MSG}
     if name in CONTEXT_TOOLS:
         # #303: one injection point for chat-scoped tools — the model can't
         # pass its own conversation id, and every dispatch path (direct,
@@ -1715,6 +1913,12 @@ def get_schemas(workspace: str | None = None) -> list:
     if host is not None or remote_target:
         schemas = [s for s in schemas
                    if s["function"]["name"] not in _SANDBOX_NAMES]
+    # Image generation (sd-server) is a LOCAL-machine capability and a
+    # main-chat-only tool (sub-agents exclude it): offered only while an
+    # image provider is configured, and never in remote sessions — the
+    # server runs on this machine, so remote workspaces refuse it (v1).
+    if image_generation_configured() and host is None and not remote_target:
+        schemas = schemas + [GENERATE_IMAGE_SCHEMA]
     # MCP server tools (mcp_<server>_<tool>) merge in dynamically — they're
     # client-local like web/ask_user, regardless of where file tools run.
     from backend.agent import mcp_client

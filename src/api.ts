@@ -314,6 +314,9 @@ export interface AgentConfig {
   }
   /** Per-model compaction settings (model id -> settings). */
   model_compaction?: Record<string, { enabled: boolean; trigger_tokens: number }>
+  /** Image generation (sd-server): own Settings block; api_base doubles
+   *  as the configured flag for the generate_image tool. */
+  image_generation?: { provider: string; api_base: string; size: string }
   /** Per-model step budgets (issue #111; model id -> steps, 0 = unlimited). */
   model_steps?: Record<string, number>
   /** Voice dictation; cloud_api_key arrives masked ("set" | ""). */
@@ -371,6 +374,13 @@ export interface AgentConfig {
 
 export const getConfig = () => api<AgentConfig>('/api/config')
 
+/** Probe an sd-server's OpenAI-compatible /v1/models (Settings Test button). */
+export const probeImageProvider = (apiBase: string) =>
+  api<{ ok: boolean; models?: string[]; error?: string }>('/api/image-provider/probe', {
+    method: 'POST',
+    body: JSON.stringify({ api_base: apiBase }),
+  })
+
 /** Remember the workspace for the next app launch (stored in config.json). */
 export const updateLastWorkspace = (workspace: string) =>
   api<{ ok: boolean }>('/api/config/last-workspace', {
@@ -388,6 +398,9 @@ export const updateConfig = (
     /** Sub-agent routing override (#383): provider name or
      *  "provider::model"; "" = inherit parent model. */
     subagent_provider?: string
+    /** Image generation block (sd-server): merged server-side, so a
+     *  partial save never wipes sibling keys. */
+    image_generation?: { provider?: string; api_base?: string; size?: string }
     context_window_overrides: Record<string, number | null>
     /** Per-model context windows: the authoritative map when present. */
     model_context?: Record<string, { context_window: number | null }>
