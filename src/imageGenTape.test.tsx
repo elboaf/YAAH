@@ -47,6 +47,19 @@ describe('generate_image tape rendering', () => {
     expect(useAgent.getState().lightboxSrc).toBe('generate_image/abc.png')
   })
 
+  it('renders upscale_image results inline (marker-driven, not name-gated)', () => {
+    render(
+      <ToolCallRow
+        tc={tc({
+          name: 'upscale_image',
+          result: { ...inlineResult, path: 'ai-images/upscaled-abc.png', saved_to: 'ai-images/upscaled-abc.png' },
+        })}
+      />,
+    )
+    expect(screen.getByAltText('generated image')).toBeTruthy()
+    expect(screen.getByText(/saved to ai-images\/upscaled-abc\.png/)).toBeTruthy()
+  })
+
   it('renders pre-marker results (no display field) inline too', () => {
     const legacy = { ...inlineResult } as Record<string, unknown>
     delete legacy.display

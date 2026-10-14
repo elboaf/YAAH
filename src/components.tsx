@@ -1096,13 +1096,15 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
   const [open, setOpen] = useState(false)
   const args = (tc.args ?? {}) as Record<string, unknown>
 
-  // Generated images (generate_image): the image IS the message. Render it
-  // directly in the tape instead of behind the [+] expander - the user
-  // should see the artwork the moment it lands, not a collapsed tool row.
-  // Backend marks these results display:"inline"; the fallback name check
-  // covers results streamed before the marker existed.
+  // Generated/enlarged images (generate_image, upscale_image): the image
+  // IS the message. Render it directly in the tape instead of behind the
+  // [+] expander - the user should see the artwork the moment it lands,
+  // not a collapsed tool row. Backend marks these results display:"inline";
+  // the fallback name check covers generate_image results streamed before
+  // the marker existed.
   const resultObjInline = tc.result && typeof tc.result === 'object' ? (tc.result as Record<string, unknown>) : null
-  if (tc.name === 'generate_image' && resultObjInline && !resultObjInline.error) {
+  const inlineTool = tc.name === 'generate_image' || tc.name === 'upscale_image'
+  if (inlineTool && resultObjInline && !resultObjInline.error) {
     const inlineRel = typeof resultObjInline.image === 'string' ? resultObjInline.image : ''
     const inlineRels = Array.isArray(resultObjInline.images) ? resultObjInline.images.filter((v): v is string => typeof v === 'string' && !!v) : []
     const inlineImages = inlineRel ? [inlineRel, ...inlineRels] : inlineRels

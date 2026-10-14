@@ -333,16 +333,46 @@ def test_generate_image_http_error_is_structured(configured, tmp_path, monkeypat
 # ------------------------------------------------------------ upscale tool
 
 
-def test_upscale_image_infers_repeats_from_target(configured, tmp_path, monkeypatch):
-    """target 1024 on a 256px source: repeats=2; result saved as a NEW
-    workspace file and reported with dims + upscaler meta."""
-    _FakeClient.caps_payload = {"upscale": True}
-    _FakeClient.upscale_payload = {
-        "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
-        "upscaler": "realesr-general", "scale": 2, "repeats": 2,
-        "width": 1024, "height": 1024,
-    }
-    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+class _ChainClient(_FakeClient):
+    """Multi-step chain: each call doubles the image (a x2 ESRGAN model);
+    response reports the server's REAL scale and evolving dims."""
+
+    @classmethod
+    def reset(cls):
+        super().reset()
+        # a x2 model on a 256px source: one call -> 512, two -> 1024
+        cls.chain = [(512, 512), (1024, 1024)]
+
+    @classmethod
+    async def post(cls, url, json=None):
+        cls.last = (url, json)
+        if url.endswith("/sdcpp/v1/upscale"):
+            cls.upscale_calls += 1
+            step = min(cls.upscale_calls, len(cls.chain)) - 1
+            w, h = cls.chain[step]
+            cls.upscale_bodies.append(json)
+            payload = {
+                "images": [{"b64_json": base64.b64encode(_png(w, h)).decode()}],
+                "upscaler": "realesr-general",
+                "scale": 2,
+                "repeats": 1,
+                "width": w,
+                "height": h,
+            }
+            r = _FakeResp()
+            r.json = lambda: dict(payload)
+            return r
+        cls.gen_calls += 1
+        cls.gen_sizes.append((json or {}).get("size"))
+        return _FakeResp()
+
+
+def test_upscale_image_stops_at_target(configured, tmp_path, monkeypatch):
+    """Staged chain: single-repeat steps, server's real scale honored,
+    stops exactly at the target - no x2-per-repeat guessing, no overshoot."""
+    _ChainClient.reset()
+    _ChainClient.caps_payload = {"upscale": True}
+    monkeypatch.setattr(httpx, "AsyncClient", _ChainClient)
     ws = tmp_path / "ws"
     (ws / "ai-images").mkdir(parents=True)
     (ws / "ai-images" / "src.png").write_bytes(_png(256, 256))
@@ -354,7 +384,8 @@ def test_upscale_image_infers_repeats_from_target(configured, tmp_path, monkeypa
         )
     )
     assert not result.get("error"), result
-    assert _FakeClient.upscale_bodies[0]["repeats"] == 2
+    assert _ChainClient.upscale_calls == 2  # 256 -> 512 -> 1024
+    assert all(b["repeats"] == 1 for b in _ChainClient.upscale_bodies)
     assert result["width"] == 1024 and result["height"] == 1024
     assert result["upscaler"] == "realesr-general"
     assert result["path"].startswith("ai-images/upscaled-")
@@ -371,8 +402,46 @@ def test_upscale_image_refuses_without_esrgan(configured, tmp_path, monkeypatch)
             "upscale_image", {"path": "nope.png"}, workspace=str(tmp_path)
         )
     )
+    # gate fires before the file read: the actionable error is the
+    # server-side one, not "image not found"
     assert "no ESRGAN" in result["error"]
+    assert "not found" not in result["error"]
     assert _FakeClient.upscale_calls == 0
+
+
+def test_upscale_image_rejects_paths_outside_workspace(configured, tmp_path, monkeypatch):
+    """Security (CodeRabbit): path is model-supplied, so containment is
+    enforced - traversal and absolute paths outside the workspace must
+    not read arbitrary files and ship them to the server."""
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.upscale_payload = {
+        "images": [{"b64_json": base64.b64encode(_png(128, 128)).decode()}],
+        "upscaler": "realesr-general", "scale": 2, "repeats": 1,
+        "width": 128, "height": 128,
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    ws = tmp_path / "ws"
+    (ws / "ai-images").mkdir(parents=True)
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(_png(64, 64))
+    for bad in (
+        "../secret.png",
+        "..\\secret.png",
+        str(secret),  # absolute, outside workspace
+    ):
+        result = asyncio.run(
+            tools.execute_tool("upscale_image", {"path": bad}, workspace=str(ws))
+        )
+        assert "not found" in result.get("error", ""), (bad, result)
+    assert _FakeClient.upscale_calls == 0
+    # a legitimate in-workspace path still reads fine
+    (ws / "ai-images" / "ok.png").write_bytes(_png(64, 64))
+    ok = asyncio.run(
+        tools.execute_tool(
+            "upscale_image", {"path": "ai-images/ok.png", "repeats": 1}, workspace=str(ws)
+        )
+    )
+    assert not ok.get("error"), ok
 
 
 def test_upscale_image_missing_path_is_friendly(configured, tmp_path, monkeypatch):

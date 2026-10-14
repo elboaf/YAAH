@@ -1659,6 +1659,8 @@ def _native_bounds(caps: dict) -> dict:
         "def_w": int(defaults.get("width") or 512),
         "def_h": int(defaults.get("height") or 512),
         "upscale": bool(caps.get("upscale")),
+        "max_up_w": int(limits.get("max_upscale_width") or 8192),
+        "max_up_h": int(limits.get("max_upscale_height") or 8192),
     }
 
 
@@ -1734,6 +1736,53 @@ async def _img_upscale_request(api_base: str, b64: str, repeats: int, upscaler=N
         return None, None, f"upscale failed: {type(e).__name__}: {e}"
 
 
+async def _upscale_to_target(
+    api_base: str,
+    b64: str,
+    want_w: int,
+    want_h: int,
+    upscaler: str | None,
+    max_up_w: int = 8192,
+    max_up_h: int = 8192,
+):
+    """Reach (want_w, want_h) by CHAINING single-repeat calls: the server
+    reports each model's real scale factor in the response (x2 or x4
+    models exist; assuming x2 overshoots badly on x4 and vice versa).
+    Returns (raw, meta, note) - note is None or a plain-language summary
+    of what happened. Stops at the target, after 4 steps, or before a
+    step that would exceed the endpoint's output limit."""
+    import base64
+
+    cur = b64
+    steps = 0
+    last_meta: dict = {}
+    note: str | None = None
+    while True:
+        raw, meta, err = await _img_upscale_request(api_base, cur, 1, upscaler)
+        if err or raw is None:
+            if steps == 0:
+                return None, None, err
+            note = f"stopped after {steps} upscale step(s): further upscaling failed ({err})"
+            return base64.b64decode(cur), last_meta, note
+        steps += 1
+        cur = base64.b64encode(raw).decode()
+        last_meta = meta or {}
+        w = int(last_meta.get("width") or 0)
+        h = int(last_meta.get("height") or 0)
+        if w and h and w >= want_w and h >= want_h:
+            return base64.b64decode(cur), last_meta, note
+        scale = int(last_meta.get("scale") or 2)
+        if w and h and (w * scale > max_up_w or h * scale > max_up_h):
+            note = (
+                f"stopped at {w}x{h}: another {scale}x step would exceed "
+                f"the server's {max_up_w}x{max_up_h} upscale limit"
+            )
+            return base64.b64decode(cur), last_meta, note
+        if steps >= 4:
+            note = f"stopped after {steps} upscale step(s) at {w}x{h}"
+            return base64.b64decode(cur), last_meta, note
+
+
 def image_generation_configured() -> bool:
     """Is an image provider configured? Read live so a Settings save
     applies to new turns without a restart. Any read failure keeps the
@@ -1758,8 +1807,14 @@ def _read_image_argument(path: str, workspace: str):
         from backend.agent.remote import parse_ns
 
         if parse_ns(workspace) is None:
-            cand = workspace_root(workspace) / p
-            if cand.is_file():
+            # resolve_path enforces workspace containment (the path is
+            # model-supplied: without it, ../ or absolute paths would read
+            # any file the backend can reach and ship it to the server).
+            try:
+                cand = resolve_path(workspace, p, for_write=False)
+            except ValueError:
+                cand = None
+            if cand is not None and cand.is_file():
                 return cand.read_bytes()
     except OSError:
         pass
@@ -1893,23 +1948,34 @@ async def generate_image(
     dims = _png_dims(raw_out)
 
     if up_repeats:
-        raw2, meta, err2 = await _img_upscale_request(api_base, b64, up_repeats)
-        if err2 or raw2 is None:
+        # Staged: single-repeat calls chained with the server's REAL scale
+        # factor from each response (x2 and x4 ESRGAN models exist; the
+        # endpoint has a hard output cap the chain must respect).
+        raw2, meta2, note2 = await _upscale_to_target(
+            api_base, b64, want_w, want_h, None,
+            max_up_w=b["max_up_w"] if b else 8192,
+            max_up_h=b["max_up_h"] if b else 8192,
+        )
+        if raw2 is None:
             # Generation succeeded; surface the native render with an
             # honest note instead of failing the whole call.
             notes.append(
-                f"requested {want_w}x{want_h}: upscale step failed ({err2}); "
+                f"requested {want_w}x{want_h}: upscale step failed ({note2}); "
                 f"returning the {gen_size} native render"
             )
         else:
             raw_out = raw2
             dims = _png_dims(raw2)
-            m = meta or {}
+            m = meta2 or {}
             notes.append(
                 f"requested {want_w}x{want_h}: generated native {gen_size}, "
-                f"then upscaled x{m.get('scale')} ({m.get('repeats')} repeat(s), "
-                f"{m.get('upscaler')})"
-                + (f" to {m.get('width')}x{m.get('height')}" if m.get("width") else "")
+                f"then upscaled via {m.get('upscaler')}"
+                + (
+                    f" to {m.get('width')}x{m.get('height')}"
+                    if m.get("width")
+                    else ""
+                )
+                + (f"; {note2}" if note2 else "")
             )
 
     store_rel = save_bytes(raw_out, "png", "generate_image")
@@ -1954,6 +2020,30 @@ async def generate_image(
         out["saved_to"] = out["path"]
     except OSError as e:
         out["note"] = (out.get("note", "") + f" workspace copy failed: {e}").strip()
+    return out
+
+
+async def _save_upscale_output(out: dict, raw: bytes, workspace: str, source: str) -> dict:
+    """Shared tail for upscale_image: workspace copy (remote sessions keep
+    store-only) + friendly errors. Mutates and returns `out`."""
+    try:
+        from backend.agent.remote import parse_ns
+
+        if parse_ns(workspace) is not None:
+            out["note"] = (
+                "workspace is a remote host; image saved to the local "
+                "image store only (local-only in this version)"
+            )
+            return out
+        dest = workspace_root(workspace) / "ai-images"
+        dest.mkdir(parents=True, exist_ok=True)
+        stem = (out["images"][0]).split("/")[-1]
+        target = dest / f"upscaled-{stem}"
+        target.write_bytes(raw)
+        out["path"] = f"ai-images/{target.name}"
+        out["saved_to"] = out["path"]
+    except OSError as e:
+        out["note"] = f"workspace copy failed: {e}"
     return out
 
 
@@ -2006,12 +2096,42 @@ async def upscale_image(
         except (TypeError, ValueError):
             return {"error": "repeats must be an integer 1-4"}
     elif target_width or target_height:
-        cur_w, cur_h = dims_in[0] or 512, dims_in[1] or 512
-        want_w = target_width or target_height or cur_w
-        want_h = target_height or target_width or cur_h
-        n = 1
-        while n < 4 and (cur_w * (2 ** n) < want_w or cur_h * (2 ** n) < want_h):
-            n += 1
+        # Staged chain: each single-repeat response reports the model's
+        # real scale; keep stepping until the target is met, the chain
+        # cap, or the server's output limit. No x2-per-repeat guessing.
+        cur_w, cur_h = dims_in[0] or 0, dims_in[1] or 0
+        want_w = target_width or target_height or cur_w or 512
+        want_h = target_height or target_width or cur_h or 512
+        if cur_w and want_w <= cur_w and want_h <= cur_h:
+            return {
+                "error": (
+                    f"image is already {cur_w}x{cur_h}, at or above the "
+                    f"{want_w}x{want_h} target; upscaling cannot shrink it"
+                )
+            }
+        raw_out, meta, note = await _upscale_to_target(
+            api_base, base64.b64encode(raw_in).decode(), want_w, want_h,
+            upscaler,
+            max_up_w=b["max_up_w"] if b else 8192,
+            max_up_h=b["max_up_h"] if b else 8192,
+        )
+        if raw_out is None:
+            return {"error": note or "upscale returned no image"}
+        out: dict = {
+            "images": [save_bytes(raw_out, "png", "generate_image")],
+            "display": "inline",
+            "source": path,
+            "steps": meta.get("repeats") if meta else None,
+            "scale": meta.get("scale") if meta else None,
+            "upscaler": meta.get("upscaler") if meta else None,
+        }
+        if note:
+            out["note"] = note
+        dims = _png_dims(raw_out)
+        if dims and dims[0]:
+            out["width"], out["height"] = dims
+        return await _save_upscale_output(out, raw_out, workspace, path)
+
     else:
         n = 1
 
@@ -2033,25 +2153,7 @@ async def upscale_image(
     dims = _png_dims(raw_out)
     if dims and dims[0]:
         out["width"], out["height"] = dims
-    try:
-        from backend.agent.remote import parse_ns
-
-        if parse_ns(workspace) is not None:
-            out["note"] = (
-                "workspace is a remote host; image saved to the local "
-                "image store only (local-only in this version)"
-            )
-            return out
-        dest = workspace_root(workspace) / "ai-images"
-        dest.mkdir(parents=True, exist_ok=True)
-        stem = store_rel.split("/")[-1]
-        target = dest / f"upscaled-{stem}"
-        target.write_bytes(raw_out)
-        out["path"] = f"ai-images/{target.name}"
-        out["saved_to"] = out["path"]
-    except OSError as e:
-        out["note"] = f"workspace copy failed: {e}"
-    return out
+    return await _save_upscale_output(out, raw_out, workspace, path)
 
 
 EXECUTORS = {
