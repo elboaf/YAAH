@@ -5,6 +5,10 @@ Transport-level tests reuse the _FakeClient machinery from
 test_image_generation (monkeypatched over httpx.AsyncClient). Depth
 preprocessor tests run the real numpy/Pillow fallback path (the neural
 path is force-disabled by ensuring the ONNX session init fails).
+
+Degradation policy (review round 2): a server missing a capability
+degrades with a note; invalid input and a violated control_lora
+contract are hard errors.
 """
 import asyncio
 import base64
@@ -61,8 +65,8 @@ _CAPS = {
 
 
 def _caps_with(**feat):
-    caps = {**_CAPS, "features_by_mode": {"img_gen": {**feat}}}
-    return caps
+    """Capabilities payload advertising exactly these img_gen features."""
+    return {**_CAPS, "features_by_mode": {"img_gen": {**feat}}}
 
 
 @pytest.fixture
@@ -79,20 +83,23 @@ def configured(tmp_path, monkeypatch):
 
 
 def _caps_feat(configured, monkeypatch, **feat):
-    """Advertise exactly these img_gen features + the refcontrol lora."""
+    """Script the fake capabilities + swap in the fake transport."""
     _FakeClient.caps_payload = _caps_with(**feat)
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
 
 
 def _run(tool, args, workspace):
+    """execute_tool via asyncio.run (the sibling module's pattern)."""
     return asyncio.run(tools.execute_tool(tool, args, workspace=workspace))
 
 
 def _last_body():
+    """The most recent img_gen submit body."""
     return _FakeClient.job_bodies[-1]
 
 
 def _ref_files(tmp_path, *names):
+    """Write small real PNGs into the workspace; returns their paths."""
     out = []
     for n in names:
         p = tmp_path / n
@@ -111,6 +118,9 @@ def _force_fallback(monkeypatch):
 
 
 def test_lora_and_reference_images_reach_job_body(configured, tmp_path, monkeypatch):
+    """Happy path: a name-matched lora lands in the job body as the
+    server's own path with the requested multiplier, and reference
+    files are inlined as data-URLs in ref_images."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True)
     ref = _ref_files(tmp_path, "photo.png")[0]
     r = _run(
@@ -134,6 +144,8 @@ def test_lora_and_reference_images_reach_job_body(configured, tmp_path, monkeypa
 
 
 def test_lora_multiplier_clamped(configured, tmp_path, monkeypatch):
+    """Multiplier is clamped (0-2), never int-truncated: 99 -> 2.0 and
+    -1 -> 0.0, not 2 and 0."""
     _caps_feat(configured, monkeypatch, lora=True, hires=True)
     r = _run(
         "generate_image",
@@ -145,7 +157,26 @@ def test_lora_multiplier_clamped(configured, tmp_path, monkeypatch):
     assert mults == [2.0, 0.0]
 
 
+def test_lora_unknown_name_degrades_with_note(configured, tmp_path, monkeypatch):
+    """An unresolvable lora name degrades: note explains it, the
+    generation runs WITHOUT the lora field (the server would 400 on a
+    garbage path)."""
+    _caps_feat(configured, monkeypatch, lora=True, hires=True)
+    r = _run(
+        "generate_image",
+        {"prompt": "x", "lora": [{"name": "no_such_lora"}]},
+        str(tmp_path),
+    )
+    assert not r.get("error"), r
+    assert "not found on the server" in r.get("note", "")
+    assert "skipped" in r.get("note", "")
+    assert "lora" not in _last_body()
+    assert _FakeClient.submit_calls == 1
+
+
 def test_control_lora_shorthand_resolves_and_validates(configured, tmp_path, monkeypatch):
+    """control_lora resolves by substring, activates at 1.0, and accepts
+    the caller-supplied [depth, photo] order."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True)
     depth, photo = _ref_files(tmp_path, "depth.png", "photo.png")
     r = _run(
@@ -162,6 +193,8 @@ def test_control_lora_shorthand_resolves_and_validates(configured, tmp_path, mon
 
 
 def test_control_lora_rejects_single_ref(configured, tmp_path, monkeypatch):
+    """One ref without depth_from violates the [depth, photo] contract:
+    hard error, nothing submitted."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True)
     (depth,) = _ref_files(tmp_path, "depth.png")
     r = _run(
@@ -173,7 +206,10 @@ def test_control_lora_rejects_single_ref(configured, tmp_path, monkeypatch):
     assert _FakeClient.submit_calls == 0
 
 
-def test_control_lora_unknown_name_friendly_error(configured, tmp_path, monkeypatch):
+def test_control_lora_unknown_name_is_a_hard_error(configured, tmp_path, monkeypatch):
+    """Unlike plain lora, an unresolved control_lora refuses the whole
+    request: the shorthand exists to prevent silently-wrong depth
+    control, and degrading to no-LoRA is exactly that."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True)
     depth, photo = _ref_files(tmp_path, "depth.png", "photo.png")
     r = _run(
@@ -186,7 +222,10 @@ def test_control_lora_unknown_name_friendly_error(configured, tmp_path, monkeypa
     assert _FakeClient.submit_calls == 0
 
 
-def test_control_lora_with_depth_from_computes_and_prepends(configured, tmp_path, monkeypatch):
+def test_control_lora_with_depth_from_sends_depth_then_photo(configured, tmp_path, monkeypatch):
+    """depth_from with no reference_images: the computed map is ref[0]
+    and the source image itself is ref[1] - the full [depth, photo]
+    contract assembled from one input."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True)
 
     async def fake_depth(image_bytes):
@@ -202,30 +241,58 @@ def test_control_lora_with_depth_from_computes_and_prepends(configured, tmp_path
     assert not r.get("error"), r
     body = _last_body()
     expected = "data:image/png;base64," + base64.b64encode(b"FAKEPNG").decode()
-    assert body["ref_images"] == [expected]
+    photo_url = "data:image/png;base64," + base64.b64encode(_real_png(32, 24)).decode()
+    assert body["ref_images"] == [expected, photo_url]
     assert "depth" in r.get("note", "")
 
 
-def test_reference_images_refused_without_feature(configured, tmp_path, monkeypatch):
-    _caps_feat(configured, monkeypatch, lora=True, hires=True)  # no ref_images
-    (ref,) = _ref_files(tmp_path, "photo.png")
-    r = _run("generate_image", {"prompt": "x", "reference_images": [ref]}, str(tmp_path))
-    assert "does not support reference images" in r.get("error", "")
+def test_control_lora_missing_lora_capability_is_a_hard_error(configured, tmp_path, monkeypatch):
+    """Without the lora feature, control_lora cannot be honored - and
+    unlike plain lora it must NOT degrade (silently skipping the depth
+    LoRA would produce an unguided render with no explanation)."""
+    _caps_feat(configured, monkeypatch, ref_images=True, hires=True)  # no lora
+    depth, photo = _ref_files(tmp_path, "depth.png", "photo.png")
+    r = _run(
+        "generate_image",
+        {"prompt": "x", "control_lora": "refcontrol", "reference_images": [depth, photo]},
+        str(tmp_path),
+    )
+    assert "supports LoRA activation" in r.get("error", "")
     assert _FakeClient.submit_calls == 0
 
 
-def test_reference_images_refused_on_legacy_capsless(configured, tmp_path, monkeypatch):
+# ------------------------------------------------------------ references
+
+
+def test_reference_images_degrade_with_note(configured, tmp_path, monkeypatch):
+    """A server without the ref_images feature still gets its
+    generation - minus the references - with a note saying so (issue
+    #403's graceful-degradation requirement)."""
+    _caps_feat(configured, monkeypatch, lora=True, hires=True)  # no ref_images
+    (ref,) = _ref_files(tmp_path, "photo.png")
+    r = _run("generate_image", {"prompt": "x", "reference_images": [ref]}, str(tmp_path))
+    assert not r.get("error"), r
+    assert "reference-guided generation skipped" in r.get("note", "")
+    assert "ref_images" not in _last_body()
+    assert _FakeClient.submit_calls == 1
+
+
+def test_reference_images_degrade_on_legacy_capsless(configured, tmp_path, monkeypatch):
+    """Legacy caps-less servers have no channel for references: degrade
+    with a note, never fall back to the sync endpoint carrying refs."""
     _FakeClient.caps_payload = {}
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     (ref,) = _ref_files(tmp_path, "photo.png")
     r = _run("generate_image", {"prompt": "x", "reference_images": [ref]}, str(tmp_path))
-    assert "did not report" in r.get("error", "")
-    # the legacy sync path must NOT silently degrade a reference request
-    assert _FakeClient.gen_calls == 0
+    assert not r.get("error"), r
+    assert "reference-guided generation skipped" in r.get("note", "")
+    assert _FakeClient.gen_calls == 1
     assert _FakeClient.submit_calls == 0
 
 
 def test_ref_image_outside_workspace_refused(configured, tmp_path, monkeypatch):
+    """Path guard: references must resolve inside the workspace/store
+    (parity with upscale_image) - invalid input is a hard error."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True)
     r = _run(
         "generate_image",
@@ -236,7 +303,33 @@ def test_ref_image_outside_workspace_refused(configured, tmp_path, monkeypatch):
     assert _FakeClient.submit_calls == 0
 
 
+def test_too_many_refs_is_a_hard_error(configured, tmp_path, monkeypatch):
+    """>4 references cannot be partially honored: refuse."""
+    _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True)
+    refs = _ref_files(tmp_path, *(f"r{i}.png" for i in range(5)))
+    r = _run("generate_image", {"prompt": "x", "reference_images": refs}, str(tmp_path))
+    assert "at most 4" in r.get("error", "")
+    assert _FakeClient.submit_calls == 0
+
+
+def test_depth_from_without_ref_feature_skips_download(configured, tmp_path, monkeypatch):
+    """No ref channel -> no point paying the one-time ~100MB model
+    download: skip the depth work with a note."""
+    _caps_feat(configured, monkeypatch, lora=True, hires=True)  # no ref_images
+
+    async def boom(image_bytes):  # must never be reached
+        raise AssertionError("compute_depth must not run")
+
+    monkeypatch.setattr(depthmap, "compute_depth", boom)
+    (photo,) = _ref_files(tmp_path, "photo.png")
+    r = _run("generate_image", {"prompt": "x", "depth_from": photo}, str(tmp_path))
+    assert not r.get("error"), r
+    assert "depth map skipped" in r.get("note", "")
+
+
 def test_refs_skip_hires_second_pass(configured, tmp_path, monkeypatch):
+    """Reference renders take the ESRGAN chain instead of the hires
+    second diffusion pass (re-diffusion drifts off-reference)."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
     _FakeClient.upscale_payload = {
         "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
@@ -267,26 +360,16 @@ def test_plain_oversized_still_uses_hires(configured, tmp_path, monkeypatch):
     assert "hires" in _last_body()
 
 
-def test_steps_and_guidance_passthrough(configured, tmp_path, monkeypatch):
-    _caps_feat(configured, monkeypatch, hires=True)
-    r = _run(
-        "generate_image",
-        {"prompt": "x", "steps": 30, "guidance": 4.0},
-        str(tmp_path),
-    )
-    assert not r.get("error"), r
-    assert _last_body()["sample_params"] == {"sample_steps": 30, "guidance": {"txt_cfg": 4.0}}
-
-
 def test_schema_grows_only_when_configured(configured, tmp_path, monkeypatch):
     """The new params ride the existing generate_image schema (no new
     tool, so subagent exclusion and gating are untouched)."""
     _caps_feat(configured, monkeypatch, hires=True)
-    names = [s["function"]["name"] for s in tools.get_schemas(workspace=str(tmp_path))]
-    assert "generate_image" in names
-    schema = next(s for s in tools.get_schemas(workspace=str(tmp_path)) if s["function"]["name"] == "generate_image")
+    schema = next(
+        s for s in tools.get_schemas(workspace=str(tmp_path))
+        if s["function"]["name"] == "generate_image"
+    )
     props = schema["function"]["parameters"]["properties"]
-    for p in ("reference_images", "lora", "control_lora", "depth_from", "steps", "guidance"):
+    for p in ("reference_images", "lora", "control_lora", "depth_from"):
         assert p in props, p
 
 
@@ -294,6 +377,8 @@ def test_schema_grows_only_when_configured(configured, tmp_path, monkeypatch):
 
 
 def test_fallback_luminance_produces_png(configured, tmp_path, monkeypatch):
+    """Fallback path yields a decodable PNG at the input's size, with a
+    note that says luminance approximation happened."""
     _force_fallback(monkeypatch)
     png, note = asyncio.run(depthmap.compute_depth(_real_png(32, 16)))
     assert png is not None
@@ -306,6 +391,7 @@ def test_fallback_luminance_produces_png(configured, tmp_path, monkeypatch):
 
 
 def test_compute_depth_never_raises_on_garbage(configured, monkeypatch):
+    """Undecodable input -> (None, reason), never an exception."""
     _force_fallback(monkeypatch)
     png, note = asyncio.run(depthmap.compute_depth(b"not an image at all"))
     assert png is None
@@ -313,6 +399,8 @@ def test_compute_depth_never_raises_on_garbage(configured, monkeypatch):
 
 
 def test_depth_note_mentions_unavailable_reason(configured, monkeypatch):
+    """The fallback note must point at the fix (install onnxruntime),
+    not just report failure."""
     _force_fallback(monkeypatch)
     _, note = asyncio.run(depthmap.compute_depth(_real_png(8, 8)))
     assert "onnxruntime" in note

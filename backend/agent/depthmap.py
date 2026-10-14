@@ -13,8 +13,14 @@ as the FIRST reference image. This module derives one locally:
 
 Never raises: the public API returns (png_bytes, note) and only fails
 (png_bytes=None) when the input cannot be decoded at all.
+
+Threading: download and ONNX inference are BLOCKING (hundreds of MB,
+seconds of CPU). compute_depth() is the only async entry point and it
+shunts all of that to a worker thread - the backend's event loop must
+never stall under a generating agent.
 """
 
+import asyncio
 import io
 import os
 import tempfile
@@ -36,12 +42,15 @@ _MODEL_URL = (
 _MODEL_TIMEOUT = (30.0, 600.0)  # (connect, read)
 
 # Set when _ensure_model() downloaded the file this process, so the note
-# can tell the user the one-time cost happened (a model-size probe alone
-# cannot distinguish "just fetched" from "already cached").
+# can tell the user the one-time cost happened. _MODEL_BYTES caches the
+# file size for the same note (stat-per-call would be fine too, but the
+# download path already knows the number).
 _downloaded_this_process = False
+_MODEL_BYTES = 0
 
 
 def _model_exists() -> bool:
+    """Is the ONNX model already cached on disk?"""
     return _MODEL_PATH.exists()
 
 
@@ -50,7 +59,7 @@ def _ensure_model() -> bool:
     present afterwards. Any failure returns False (the caller falls back
     to the luminance approximation) - a missing model must never raise
     out of a generation request."""
-    global _downloaded_this_process
+    global _downloaded_this_process, _MODEL_BYTES
     if _model_exists():
         return True
     try:
@@ -59,10 +68,15 @@ def _ensure_model() -> bool:
         _MODEL_DIR.mkdir(parents=True, exist_ok=True)
         # *.part then os.replace: a killed download must never leave a
         # truncated file at the real path (the session would load it and
-        # fail confusingly on every later call).
+        # fail confusingly on every later call). SYNC client on purpose:
+        # the caller runs on a worker thread, and HF "resolve" URLs
+        # redirect, which AsyncClient+stream setups must be told to
+        # follow (a silent zero-byte 3xx body otherwise).
         fd, tmp_path = tempfile.mkstemp(suffix=".part", dir=str(_MODEL_DIR))
         try:
-            with httpx.AsyncClient(timeout=_MODEL_TIMEOUT) as client:
+            with httpx.Client(
+                timeout=_MODEL_TIMEOUT, follow_redirects=True
+            ) as client:
                 with client.stream("GET", _MODEL_URL) as r:
                     r.raise_for_status()
                     with os.fdopen(fd, "wb") as f:
@@ -70,6 +84,7 @@ def _ensure_model() -> bool:
                             f.write(chunk)
             os.replace(tmp_path, _MODEL_PATH)
             _downloaded_this_process = True
+            _MODEL_BYTES = _MODEL_PATH.stat().st_size
             return True
         except BaseException:
             try:
@@ -206,32 +221,43 @@ def _luminance_depth(image_bytes: bytes):
 
 
 # ---------------------------------------------------------------------
-# Public API
+# Sync worker (runs on a thread via compute_depth) + async entry point
 # ---------------------------------------------------------------------
 
-async def compute_depth(image_bytes: bytes):
-    """Depth map for one image. Returns (png_bytes, note); png_bytes is
-    None only when the input cannot be decoded at all."""
+def _compute_depth_sync(image_bytes: bytes):
+    """The blocking part: model download, ONNX inference, or the numpy
+    fallback. Returns (png_bytes, note). Never raises for undecodable
+    input (returns (None, reason) instead)."""
     sess = _init_onnx_session()
-    reason = "onnxruntime not installed or the depth model is unavailable"
+    reason = None
     if sess is not None:
         png, reason = _neural_depth(sess, image_bytes)
         if png is not None:
             note = "depth map computed locally (DepthAnything-V2-small)"
             if _downloaded_this_process:
-                try:
-                    mb = _MODEL_PATH.stat().st_size // (1024 * 1024)
-                    note = f"depth model downloaded (~{mb}MB, one-time); {note}"
-                except OSError:
-                    pass
+                note = (
+                    f"depth model downloaded (~{_MODEL_BYTES // (1024 * 1024)}MB, "
+                    f"one-time); {note}"
+                )
             return png, note
     png, fallback_reason = _luminance_depth(image_bytes)
     if png is None:
-        return None, "could not decode image for depth extraction " f"({fallback_reason})"
-    why = reason or fallback_reason or "unknown"
+        return (
+            None,
+            "could not decode image for depth extraction "
+            f"({fallback_reason})",
+        )
+    why = reason or "onnxruntime not installed or the depth model is unavailable"
     return (
         png,
         "depth map approximated from luminance (neural depth "
         f"unavailable: {why}); pose guidance is coarse - install "
         "onnxruntime for true depth",
     )
+
+
+async def compute_depth(image_bytes: bytes):
+    """Depth map for one image, off the event loop. Returns
+    (png_bytes, note); png_bytes is None only when the input cannot be
+    decoded at all."""
+    return await asyncio.to_thread(_compute_depth_sync, image_bytes)

@@ -346,7 +346,7 @@ HELP_DOCS: dict = {
         "the FIRST reference ([depth, photo] order; reversed silently "
         "does nothing) and the hires second pass is skipped for "
         "reference renders to preserve fidelity; lora[] activates "
-        "server-side LoRAs; steps and guidance override sampling."
+        "server-side LoRAs."
     ),
     "upscale_image": (
         "Detail-preserving enlargement of an EXISTING image via the "
@@ -1525,8 +1525,7 @@ GENERATE_IMAGE_SCHEMA = {
             "plain upscaling, and the result reports what actually "
             "happened. When the server advertises them: reference-"
             "guided editing (reference_images), depth-pose control "
-            "(control_lora / depth_from), LoRA activation (lora), and "
-            "steps/guidance overrides."
+            "(control_lora / depth_from), and LoRA activation (lora)."
         ),
         "parameters": {
             "type": "object",
@@ -1630,19 +1629,6 @@ GENERATE_IMAGE_SCHEMA = {
                         "contract). With control_lora and no "
                         "reference_images, the same image is used as "
                         "both depth source and photo."
-                    ),
-                },
-                "steps": {
-                    "type": "integer",
-                    "description": (
-                        "Sampling steps; omit for the server default."
-                    ),
-                },
-                "guidance": {
-                    "type": "number",
-                    "description": (
-                        "Text guidance (CFG) scale, e.g. 4.0; omit for "
-                        "the server default."
                     ),
                 },
                 "seed": {
@@ -2130,22 +2116,23 @@ def _resolve_lora_field(lora, control_lora, b, notes):
     substring); unresolved names pass through as-is so the server's
     own 400 surfaces."""
 
-    def _resolve_name(name: str) -> str:
+    def _resolve_name(name: str) -> str | None:
         """Canonical NAME from the capabilities list (exact, with/without
-        the .safetensors extension, then unique substring)."""
+        the .safetensors extension, then unique substring); None when
+        nothing matches (the capabilities list IS the server's scan of
+        its LoRA dir - a name outside it would 400 the whole job)."""
         names = b["loras"] or []
         if name in names:
             return name
         stem = (
             name[:-11] if name.lower().endswith(".safetensors") else name
         )
-        for cand in (stem,):
-            if cand in names:
-                return cand
+        if stem in names:
+            return stem
         hits = [n for n in names if stem.lower() in n.lower()]
         if len(hits) == 1:
             return hits[0]
-        return name
+        return None
 
     def _name_to_path(name: str) -> str:
         return (b.get("lora_by_name") or {}).get(name, name)
@@ -2158,10 +2145,16 @@ def _resolve_lora_field(lora, control_lora, b, notes):
             mult = float(item.get("multiplier", 1.0))
         except (TypeError, ValueError):
             mult = 1.0
+        resolved = _resolve_name(str(item["name"]).strip())
+        if resolved is None:
+            notes.append(
+                f"lora '{item['name']}' not found on the server; skipped"
+            )
+            continue
         # float clamp, NOT _clamp (which casts int - 0.8 would become 0)
         field.append(
             {
-                "path": _name_to_path(_resolve_name(str(item["name"]).strip())),
+                "path": _name_to_path(resolved),
                 "multiplier": max(0.0, min(2.0, mult)),
             }
         )
@@ -2195,8 +2188,6 @@ async def generate_image(
     lora: list | None = None,
     control_lora: str | None = None,
     depth_from: str | None = None,
-    steps: int | None = None,
-    guidance: float | None = None,
 ) -> dict:
     """Run text-to-image on the configured sd-server. The DIFFUSION model
     never renders above the server's default size (a 9B flux model can
@@ -2247,39 +2238,36 @@ async def generate_image(
     body: dict = {"prompt": prompt}
 
     # --- references, depth maps, lora (#403) --------------------------
+    # Degradation ladder (review round 2): invalid INPUT (bad path, too
+    # many refs, malformed entries) is a hard error - the request cannot
+    # be honored as asked. A server missing the CAPABILITY degrades:
+    # the generation still runs without the unsupported fields and the
+    # result carries a note saying what was dropped. The control_lora
+    # CONTRACT stays a hard error: a silently-wrong depth control is
+    # worse than a refused one (the reversed order produces NO pose
+    # guidance at all, which nothing downstream can detect).
     refs: list[str] = []
     depth_inserted = False
-    if reference_images or depth_from:
-        # Reference-guided generation rides the NATIVE job body: the
-        # legacy sync endpoint cannot carry images, and the feature is
-        # capability-gated like hires (the server must advertise
-        # features_by_mode.img_gen.ref_images).
-        if b is None:
-            return {
-                "error": (
-                    "reference-guided generation needs the server's "
-                    "capabilities (native job API); this server did "
-                    "not report them"
-                )
-            }
-        if not b["ref_images"]:
-            return {
-                "error": (
-                    "the server does not support reference images "
-                    "(capabilities report no ref_images feature)"
-                )
-            }
-        if len(reference_images or []) > 4:
-            return {"error": "reference_images accepts at most 4 images"}
-        for p in [str(x or "").strip() for x in (reference_images or [])]:
-            if not p:
-                return {"error": "reference_images entries must be non-empty paths"}
-            raw = _read_image_argument(p, workspace)
-            if isinstance(raw, str):
-                return {"error": f"reference image: {raw}"}
-            refs.append(
-                "data:image/png;base64," + base64.b64encode(raw).decode()
+    refs_supported = b is not None and b["ref_images"]
+    if reference_images:
+        if not refs_supported:
+            notes.append(
+                "reference-guided generation skipped: this server does "
+                "not support reference images (ref_images capability "
+                "missing or no native job API); rendered without them"
             )
+        else:
+            if len(reference_images) > 4:
+                return {"error": "reference_images accepts at most 4 images"}
+            for p in [str(x or "").strip() for x in reference_images]:
+                if not p:
+                    return {"error": "reference_images entries must be non-empty paths"}
+                raw = _read_image_argument(p, workspace)
+                if isinstance(raw, str):
+                    return {"error": f"reference image: {raw}"}
+                refs.append(
+                    "data:image/png;base64," + base64.b64encode(raw).decode()
+                )
     if depth_from:
         # Depth-pose control: the map goes FIRST (the verified contract;
         # reversed order silently drops the pose guidance).
@@ -2289,36 +2277,79 @@ async def generate_image(
         raw_src = _read_image_argument(df, workspace)
         if isinstance(raw_src, str):
             return {"error": f"depth_from: {raw_src}"}
-        from backend.agent import depthmap
-
-        depth_png, dnote = await depthmap.compute_depth(raw_src)
-        if depth_png:
-            refs.insert(
-                0,
-                "data:image/png;base64,"
-                + base64.b64encode(depth_png).decode(),
+        if not refs_supported:
+            # no channel to send the map on: skip the (potentially
+            # one-time ~100MB) model download entirely
+            notes.append(
+                "depth map skipped: this server does not support "
+                "reference images (ref_images capability missing or "
+                "no native job API)"
             )
-            depth_inserted = True
-        notes.append(dnote or "depth map unavailable")
+        else:
+            from backend.agent import depthmap
+
+            depth_png, dnote = await depthmap.compute_depth(raw_src)
+            if depth_png:
+                refs.insert(
+                    0,
+                    "data:image/png;base64,"
+                    + base64.b64encode(depth_png).decode(),
+                )
+                depth_inserted = True
+                # depth_from doubles as the photo source (documented in
+                # the schema): the same image is the depth source AND
+                # reference[1] unless the caller supplied photos.
+                if not reference_images:
+                    refs.append(
+                        "data:image/png;base64,"
+                        + base64.b64encode(raw_src).decode()
+                    )
+            notes.append(dnote or "depth map unavailable")
 
     lora_field: list | None = None
     if lora or control_lora:
         if b is None:
-            return {
-                "error": (
-                    "lora activation needs the server's capabilities "
-                    "(native job API); this server did not report them"
-                )
-            }
-        lora_field, lerr = _resolve_lora_field(lora, control_lora, b, notes)
-        if lerr:
-            return {"error": lerr}
+            if control_lora:
+                return {
+                    "error": (
+                        "control_lora needs a server that supports LoRA "
+                        "activation (this one has no native job API)"
+                    )
+                }
+            notes.append(
+                "lora skipped: this server did not report capabilities "
+                "(legacy endpoint); rendered without it"
+            )
+        elif not b["lora"]:
+            # feature flag off: the server would reject the lora[] field
+            if control_lora:
+                return {
+                    "error": (
+                        "control_lora needs a server that supports LoRA "
+                        "activation (capabilities report no lora feature)"
+                    )
+                }
+            notes.append(
+                "lora skipped: this server does not support LoRA "
+                "activation (no lora feature); rendered without it"
+            )
+        else:
+            lora_field, lerr = _resolve_lora_field(lora, control_lora, b, notes)
+            if lerr:
+                if control_lora:
+                    # the shorthand exists to prevent silently-wrong
+                    # depth control: an unresolved control LoRA is
+                    # exactly that, so refuse instead of degrading
+                    return {"error": lerr}
+                notes.append(f"lora skipped: {lerr}")
+                lora_field = None
 
     if control_lora:
         # Contract validation AFTER depth insertion: refs[0] must be
         # the depth map, 1-2 refs total. With depth_from, refs[0] IS
-        # the computed map ([depth] alone or [depth, photo]); without
-        # it, the caller supplies exactly [depth, photo] themselves.
+        # the computed map ([depth, photo] - or [depth] when the map
+        # could not be computed); without it, the caller supplies
+        # exactly [depth, photo] themselves.
         if depth_inserted:
             ok = 1 <= len(refs) <= 2
         else:
@@ -2458,19 +2489,6 @@ async def generate_image(
         body["ref_images"] = refs
     if lora_field:
         body["lora"] = lora_field
-    if steps is not None or guidance is not None:
-        sp = body.setdefault("sample_params", {})
-        if steps is not None:
-            try:
-                sp["sample_steps"] = int(steps)
-            except (TypeError, ValueError):
-                return {"error": "steps must be an integer"}
-        if guidance is not None:
-            try:
-                g = float(guidance)
-            except (TypeError, ValueError):
-                return {"error": "guidance must be a number"}
-            sp.setdefault("guidance", {})["txt_cfg"] = g
 
     # --- transport: native job API (cancellable), sync fallback ---------
     submit_body = {**body, **hires_body} if hires_body else body
