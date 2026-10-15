@@ -199,7 +199,8 @@ async def health():
 
 # ---- Conversation / Message API ----
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 
 from backend.db.database import (
     add_message,
@@ -1827,6 +1828,7 @@ async def api_agents_retry(body: AgentRetryBody):
 # ---- Provider / model discovery ----
 
 
+from backend.agent import loras as loras_mod
 from backend.agent import providers
 
 
@@ -1861,6 +1863,115 @@ async def api_image_provider_probe(body: dict):
         return {"ok": True, "models": ["sd-cpp-local"]}
     except (httpx.HTTPError, ValueError) as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# ---- LoRA catalog (#398) ----
+
+
+def _schedule_lora_scan(api_base: str) -> None:
+    """Fire-and-forget the LoRA scan for one api_base. Called from the
+    settings-save path (PUT /api/config): the response returns before the
+    scan finishes, and any scan failure is a notice in the catalog, never
+    a failed save."""
+    async def _runner() -> None:
+        try:
+            scan = await _run_lora_scan(api_base)
+            if scan.get("scanned_at"):
+                await asyncio.to_thread(loras_mod.save_scan, api_base, scan)
+        except Exception:  # noqa: BLE001 - scan must never break a save
+            logging.getLogger(__name__).warning(
+                "lora scan failed for %s", api_base, exc_info=True
+            )
+
+    asyncio.create_task(_runner())
+
+
+async def _run_lora_scan(api_base: str) -> dict:
+    """The scan itself (indirection exists so tests can stub it)."""
+    return await loras_mod.run_scan(api_base)
+
+
+@app.get("/api/loras")
+async def api_loras():
+    """The effective LoRA catalog for the configured image provider:
+    persisted classifications plus a non-blocking notice pointing at the
+    /loras slash command when files came back UNKNOWN."""
+    cfg = load_config()
+    api_base = str(((cfg.get("image_generation") or {}).get("api_base")) or "").strip()
+    if not api_base:
+        return {"loras": [], "count": 0, "unknown_count": 0, "notice": None}
+    scan = loras_mod.load_scan(api_base)
+    files = scan.get("files") or {}
+    items = [
+        {"path": path, **{k: v for k, v in (info or {}).items()}}
+        for path, info in sorted(files.items())
+    ]
+    unknown = sum(1 for i in items if i.get("class") == "unknown")
+    notice = (
+        f"{unknown} LoRA{'s' if unknown != 1 else ''} could not be "
+        "classified automatically - start a chat and run /loras to "
+        "finish setup."
+        if unknown
+        else None
+    )
+    return {
+        "loras": items,
+        "count": len(items),
+        "unknown_count": unknown,
+        "scanned_at": scan.get("scanned_at"),
+        "notice": notice,
+    }
+
+
+class LoraOverride(BaseModel):
+    path: str
+    cls: Literal["triggered", "triggerless", "img2img_helper", "skip"] = Field(
+        alias="class"
+    )
+    trigger: str | None = None
+    img2img_prompt: str | None = None
+    multiplier: float | None = None
+    notes: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/api/loras/override")
+async def api_loras_override(body: LoraOverride):
+    """Persist one user-authored KB entry (from the /loras flow), keyed to
+    the FILE's SHA256 so a rename or re-download still resolves."""
+    api_base = str(((load_config().get("image_generation") or {}).get("api_base")) or "").strip()
+    scan = loras_mod.load_scan(api_base) if api_base else {}
+    info = (scan.get("files") or {}).get(body.path)
+    if not info:
+        raise HTTPException(status_code=404, detail="path not in the last scan")
+    digest = info.get("sha256")
+    if not digest:
+        # No hash persisted (file classified on metadata): compute it now.
+        lora_dir = scan.get("lora_dir")
+        if not lora_dir:
+            raise HTTPException(status_code=409, detail="file location unknown; rescan first")
+        from backend.agent.loras import sha256_file
+
+        digest = await asyncio.to_thread(sha256_file, _Path(lora_dir) / body.path)
+        if not digest:
+            raise HTTPException(status_code=409, detail="file could not be hashed")
+    entry = {
+        "class": body.cls,
+        "trigger": body.trigger,
+        "img2img_prompt": body.img2img_prompt,
+        "multiplier": body.multiplier,
+        "notes": body.notes,
+        "name": info.get("name"),
+    }
+    await asyncio.to_thread(loras_mod.save_override, digest, entry)
+    # Stamp the hash into the persisted scan for this path: a later KB
+    # entry (or this override's removal) can then be consulted on the
+    # next scan without rehashing a metadata-classified file.
+    if info.get("sha256") != digest:
+        info["sha256"] = digest
+        await asyncio.to_thread(loras_mod.save_scan, api_base, scan)
+    return {"ok": True, "sha256": digest, "entry": entry}
 
 
 @app.get("/api/models/available")
@@ -2251,6 +2362,11 @@ async def api_set_config(body: ConfigUpdate):
             img["api_base"] = incoming_base
         img["provider"] = "sdcpp"
         updates["image_generation"] = img
+        if incoming_base:
+            # A real endpoint was set or changed (#398): schedule the LoRA
+            # scan in the background - the save NEVER waits on it, and a
+            # failed scan is a notice, not an error.
+            _schedule_lora_scan(incoming_base)
         # Persistent-memory block merges the same way (#169): a Settings save
     # that only touches enabled keeps any future sibling keys intact.
     # enabled must be a real boolean (CodeRabbit return trip): bool("false")

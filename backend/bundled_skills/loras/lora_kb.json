@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "issue": 398,
+    "note": "Bundled LoRA knowledge base. Entries are keyed to the file's SHA256, never its filename - filenames collide and lie; the hash is the identity. Lookup happens only for files the metadata scanner could not classify. Devs grow this file by ordinary PRs (the 'document what we learned and bake it in' channel); user-authored entries live in config lora_overrides and win over these.",
+    "verified": "2026-10-15 against the live sd.cpp server catalog (D:\\sd.cpp\\models\\loras) + Civitai/HF model cards"
+  },
+  "22eeedfe80ffc35963fdd837bbe99d789eb2279a8296f9aa14e944e97abdc848": {
+    "names": ["ultra_real_v5_pro"],
+    "title": "UltraReal - KL9_V5_Pro (vizsumit)",
+    "base_model": "flux2_klein_9b",
+    "class": "img2img_helper",
+    "trigger": null,
+    "img2img_prompt": "Make this photo high-quality. Preserve subject's face, expression, figure and pose. Preserve overall composition of this photo.",
+    "multiplier": { "t2i_fallback": [0.6, 0.8] },
+    "notes": "Quality/detail enhancer reducing soft AI look; SFW professional-photography dataset (portraits/lifestyle/fashion/wildlife/sports/architecture). Civitai trainedWords is an instruction prompt, not a token. Sibling KL9_V2 (same repo) does natural skin/freckles; Krea_* files in that repo are a DIFFERENT base model - do not use on klein.",
+    "source": "https://civitai.com/models/2462105?modelVersionId=3370879"
+  },
+  "61db2017ce420b97bd5ef11984e5a894c90003a6bbf0dc9473f8d7b9ebb3ff93": {
+    "names": ["Flux2-Klein-9B-consistency-V2"],
+    "title": "FLUX.2 Klein 9B Consistency V2 (dx8152)",
+    "base_model": "flux2_klein_9b",
+    "class": "img2img_helper",
+    "trigger": null,
+    "img2img_prompt": "<edit instruction, e.g. Turn this cat into a dog>",
+    "multiplier": { "img2img": [1.6, 1.6] },
+    "notes": "Subject-consistency editing LoRA: keeps the input-image subject consistent across pose/face-angle changes; works 'without any cue words' (author's words - the count-1 'consistency' tag in file metadata is a training artifact, ignore it). Trained on people, reportedly OK on other characters. V2 fixed V1's color cast / oversaturation / dirty-detail issues. Higher steps help; not on Civitai - the similarly named Civitai 'Character Consistency LoRA' (model 2988766) is a different author/training.",
+    "source": "https://huggingface.co/dx8152/Flux2-Klein-9B-Consistency"
+  }
+}

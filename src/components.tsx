@@ -96,6 +96,7 @@ import {
   getSandboxStatus,
   type SandboxStatus,
   probeImageProvider,
+  getLoraCatalog,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
@@ -6339,6 +6340,40 @@ export function ImageGenSettingsCard({
   const [testState, setTestState] = useState<'idle' | 'busy'>('idle')
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testOk, setTestOk] = useState(false)
+  // LoRA scan notice (#398): the backend scans when the provider is saved
+  // (background, never blocking); poll briefly for its outcome so the
+  // notice appears without a Settings revisit. NEVER an error path.
+  const [loraNotice, setLoraNotice] = useState<string | null>(null)
+  useEffect(() => {
+    if (!imageGen.api_base.trim()) {
+      setLoraNotice(null)
+      return
+    }
+    let dead = false
+    let tries = 0
+    const tick = async () => {
+      try {
+        const r = await getLoraCatalog()
+        if (!dead && r.notice) setLoraNotice(r.notice)
+        if (!dead && !r.notice && r.count > 0) setLoraNotice(null)
+      } catch {
+        // catalog unavailable (old backend): silence, never an error
+      }
+    }
+    void tick()
+    const iv = window.setInterval(() => {
+      tries += 1
+      if (dead || tries > 12) {
+        window.clearInterval(iv)
+        return
+      }
+      void tick()
+    }, 2500)
+    return () => {
+      dead = true
+      window.clearInterval(iv)
+    }
+  }, [imageGen.api_base])
   const test = async () => {
     setTestState('busy')
     setTestResult(null)
@@ -6377,6 +6412,11 @@ export function ImageGenSettingsCard({
         {testResult && (
           <p className={`font-mono text-[10px] ${testOk ? 'text-emerald-400' : 'text-red-400'}`}>
             {testResult}
+          </p>
+        )}
+        {loraNotice && (
+          <p className="font-mono text-[10px] text-amber-400" role="status">
+            {loraNotice}
           </p>
         )}
         <p className="font-mono text-[10px] text-zinc-600">

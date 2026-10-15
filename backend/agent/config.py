@@ -108,6 +108,13 @@ DEFAULTS = {
     # No size field: the sd-server's own defaults/capabilities decide
     # native resolution; oversized requests upscale server-side.
     "image_generation": {"provider": "sdcpp", "api_base": ""},
+    # LoRA support (#398): `lora_scan` holds the per-server classification
+    # snapshot written by the settings-save scan (keyed by normalized
+    # api_base); `lora_overrides` holds user-authored, SHA256-keyed KB
+    # entries from the /loras slash command. Both ride save_config's merge;
+    # neither is user-editable from Settings directly.
+    "lora_scan": {},
+    "lora_overrides": {},
     # Saved remote device metadata. Passphrases are intentionally never
     # persisted here; users re-enter them after a backend restart.
     "remote_devices": [],

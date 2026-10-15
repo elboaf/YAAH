@@ -1452,6 +1452,7 @@ async def search_files(
 
 # ---------------------------------------------------------------- dispatch
 
+from backend.agent.loras import apply_to_body, load_scan
 from backend.agent.webtools import view_image, web_fetch, web_search
 
 
@@ -1984,6 +1985,32 @@ async def _img_upscale_request(api_base: str, b64: str, repeats: int, upscaler=N
         return None, None, f"upscale failed: {type(e).__name__}: {e}"
 
 
+def _lora_note(body: dict, scan: dict) -> str:
+    """Plain-language line for the result: which LoRA rode along, at what
+    strength, and (for img2img helpers) the instruction prompt its KB
+    entry recommends - the model's cue for how to drive it next."""
+    sel = ((body.get("lora") or [{}])[0]) or {}
+    name = body.get("lora_applied") or sel.get("path") or "unknown"
+    lines = [
+        f"lora applied: {name} at multiplier {sel.get('multiplier', 0.8)}"
+    ]
+    if sel.get("trigger_injected"):
+        lines.append(f"trigger word '{sel['trigger_injected']}' was injected")
+    entry = None
+    for info in (scan.get("files") or {}).values():
+        if info.get("kb") and name in (
+            info.get("name"), info.get("kb", {}).get("names", [None])[0]
+        ):
+            entry = info.get("kb")
+            break
+    if entry and entry.get("img2img_prompt"):
+        lines.append(
+            "this LoRA is an img2img helper; its documented instruction "
+            f"prompt: {entry['img2img_prompt']}"
+        )
+    return "; ".join(lines)
+
+
 def image_generation_configured() -> bool:
     """Is an image provider configured? Read live so a Settings save
     applies to new turns without a restart. Any read failure keeps the
@@ -2225,6 +2252,12 @@ async def generate_image(
 
     caps = await _capabilities(api_base)
     b = _native_bounds(caps) if caps else None
+    # LoRA auto-apply (#398): consult the PERSISTED scan only - no server
+    # calls, no header reads, no hashing in this hot path. apply_to_body
+    # attaches the structured `lora[]` field and injects the trigger word
+    # for the triggered class; `<lora:...>` tags are never emitted (the
+    # server rejects them by design). Any failure leaves `body` untouched.
+    scan = load_scan(api_base)
     # the server's first ESRGAN-capable upscaler (used by the hires pass
     # and the fallback chain); a sane default for caps-less replies
     up_name = "RealESRGAN_x4plus"
@@ -2236,6 +2269,7 @@ async def generate_image(
     up_target: tuple[int, int] | None = None
     hires_body: dict | None = None
     body: dict = {"prompt": prompt}
+    apply_to_body(body, scan, prompt)
 
     # --- references, depth maps, lora (#403) --------------------------
     # Degradation ladder (review round 2): invalid INPUT (bad path, too
@@ -2370,6 +2404,7 @@ async def generate_image(
     if b is None:
         # Older server without capabilities: legacy passthrough, its call.
         legacy: dict = {"prompt": prompt, "n": 1}
+        apply_to_body(legacy, scan, prompt)
         if negative_prompt or seed is not None:
             extra: dict = {}
             if negative_prompt:
@@ -2389,6 +2424,8 @@ async def generate_image(
             return {"error": err}
         raw_out = base64.b64decode(b64)
         dims = _png_dims(raw_out)
+        if legacy.get("lora_applied"):
+            notes.append(_lora_note(legacy, scan))
         store_rel = _persist_generation(raw_out, workspace, notes)
         return _generation_result(
             store_rel, raw_out, dims, None, notes, workspace
@@ -2580,6 +2617,8 @@ async def generate_image(
                 + (f"; {note2}" if note2 else "")
             )
 
+    if body.get("lora_applied"):
+        notes.append(_lora_note(body, scan))
     store_rel = _persist_generation(raw_out, workspace, notes)
     return _generation_result(store_rel, raw_out, dims, b, notes, workspace)
 

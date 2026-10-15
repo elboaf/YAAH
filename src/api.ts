@@ -375,6 +375,24 @@ export interface AgentConfig {
 export const getConfig = () => api<AgentConfig>('/api/config')
 
 /** Probe an sd-server's OpenAI-compatible /v1/models (Settings Test button). */
+/** LoRA catalog for the configured image provider (#398): classifications
+ *  from the last scan + a notice when files need the /loras command. */
+export const getLoraCatalog = () =>
+  api<{
+    loras: Array<{
+      path: string
+      name: string
+      class: string
+      trigger: string | null
+      multiplier: number | null
+      warning?: string
+    }>
+    count: number
+    unknown_count: number
+    scanned_at: string | null
+    notice: string | null
+  }>('/api/loras')
+
 export const probeImageProvider = (apiBase: string) =>
   api<{ ok: boolean; models?: string[]; error?: string }>('/api/image-provider/probe', {
     method: 'POST',
