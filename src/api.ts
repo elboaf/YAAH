@@ -263,7 +263,8 @@ export interface StoredMessage {
 export const getMessages = (id: number) =>
   api<StoredMessage[]>(`/api/conversations/${id}/messages`)
 
-/** URL for a stored image (rel path under backend/data/images/). */
+/** URL for a stored image (rel path under the backend's image store:
+ * backend/data/images in dev, ~/.yaah/images in packaged builds). */
 export const imageUrl = (rel: string) => `${BASE}/api/images/${rel}`
 
 /** Owner-scoped media URL for a cached transcript owned by a remote device. */

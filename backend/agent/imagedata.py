@@ -1,16 +1,42 @@
 """Image persistence: data URLs and raw bytes <-> files under
-backend/data/images/.
+IMAGES_ROOT (dev: backend/data/images; packaged: ~/.yaah/images - the
+PyInstaller _MEI extraction dir `__file__` points at vanishes on exit).
 
 Only relative paths are stored in the database; the bytes live on disk so
 the DB stays small. Paths are posix-style relative to IMAGES_ROOT and
-double as the public URL fragment (/api/images/<rel>).
+double as the public URL fragment (/api/images/<rel>) AND the handle the
+agent passes to generate_image / upscale_image / view_image.
 """
 import base64
+import os
 import re
+import sys
 import uuid
 from pathlib import Path
 
-IMAGES_ROOT = Path(__file__).parent.parent / "data" / "images"
+
+def _images_root() -> Path:
+    """Where stored images live.
+
+    `YAAH_IMAGES_DIR` wins (tests, portable setups). Frozen builds (the
+    packaged app is a PyInstaller --onefile bundle) persist under
+    ~/.yaah/images - mirroring config/database._default_data_dir, because
+    `__file__` here points into the throwaway _MEI extraction dir that
+    vanishes on exit: pasted chat images written there were undiscoverable
+    (a hunt through Temp_MEIxxxx) AND silently lost on app exit. Dev
+    runs keep the repo-local backend/data/images.
+    """
+    env = os.environ.get("YAAH_IMAGES_DIR")
+    if env:
+        return Path(env)
+    if getattr(sys, "frozen", False):
+        home = Path.home() / ".yaah" / "images"
+        home.mkdir(parents=True, exist_ok=True)
+        return home
+    return Path(__file__).parent.parent / "data" / "images"
+
+
+IMAGES_ROOT = _images_root()
 
 _DATA_URL_RE = re.compile(
     r"^data:image/(png|jpeg|jpg|gif|webp);base64,([A-Za-z0-9+/=\s]+)$"

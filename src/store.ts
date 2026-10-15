@@ -65,7 +65,7 @@ export interface ChatMessage {
   id: string
   role: Role
   content: string
-  /** Stored image rel paths (backend/data/images/...), rendered via imageUrl(). */
+  /** Stored image rel paths (the backend's image store), rendered via imageUrl(). */
   images?: string[]
   /** Structured text attachments (#142): one {name,size,content?|path?}
    *  record per file; the bubble shows a filename+size chip, the model
@@ -244,7 +244,7 @@ interface AgentState {
 
   /** Image currently open in the full-res viewer (#50): a `data:` URL
    *  (optimistic attachment) or a stored rel path under
-   *  backend/data/images/ (attachment thumbnails, trace tool results).
+   *  the backend's image store (attachment thumbnails, trace tool results).
    *  Global so any entry point — chat bubbles, trace cards, sub-agent
    *  output — opens the same top-layer lightbox. */
   lightboxSrc: string | null

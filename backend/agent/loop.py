@@ -1469,7 +1469,15 @@ def _image_part(data_url: str) -> dict:
 def _parts_with_images(text: str, image_rels: list) -> list | str:
     """Build an OpenAI multimodal parts list (text + image_url parts) from
     stored image rel paths. Falls back to plain text when none of the
-    files can be read (deleted/moved)."""
+    files can be read (deleted/moved).
+
+    Each seen image also carries its store rel as a text annotation
+    (#406): a pasted image the model can SEE but never NAME left it
+    burning tool calls to hunt the bytes down (ls, search_files, sqlite)
+    before any reference-guided edit could use them. The rel is the
+    handle generate_image's reference_images, upscale_image's path and
+    view_image's url all resolve natively - one short line, no replay
+    change."""
     parts: list = []
     if text:
         parts.append({"type": "text", "text": text})
@@ -1477,6 +1485,14 @@ def _parts_with_images(text: str, image_rels: list) -> list | str:
         data_url = load_data_url(rel)
         if data_url:
             parts.append(_image_part(data_url))
+            parts.append({
+                "type": "text",
+                "text": (
+                    f"[attached image, stored rel: {rel} - pass this path to "
+                    "generate_image reference_images / upscale_image path / "
+                    "view_image url]"
+                ),
+            })
         else:
             parts.append({"type": "text", "text": f"[image file missing: {rel}]"})
     return parts or text
@@ -1730,7 +1746,8 @@ async def _run_agent_claimed(
 ) -> AsyncIterator[str]:
     """Execute one user turn. Yields JSON-line event strings.
 
-    image_paths: rel paths (under backend/data/images/) of images the user
+    image_paths: store rel paths (under the IMAGES_ROOT - dev
+    backend/data/images, packaged ~/.yaah/images) of images the user
     attached; already saved to disk by the API layer.
     skill_names: skills the user invoked with /s or a chip; their bodies
     are injected into the system prompt for this turn only.
