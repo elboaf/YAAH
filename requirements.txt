@@ -28,6 +28,8 @@ numpy>=2.0
 # --lora-model-dir. Optional at runtime (absence degrades to UNKNOWN);
 # pinned present so the packaged app keeps the feature.
 psutil>=5.9.0
+# Image decode/encode for the depth-map preprocessor (#403)
+pillow>=11.0
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
 pytest-shard>=0.1.2
