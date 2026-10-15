@@ -56,6 +56,7 @@ from backend.db.database import (
     get_messages,
     get_prompt_summary,
     set_conversation_usage,
+    touch_updated_at,
     update_conversation,
 )
 
@@ -254,7 +255,7 @@ async def _generate_conversation_title(
     title = _clean_title(title)
     if not title:
         return None
-    await update_conversation(conversation_id, title=title)
+    await update_conversation(conversation_id, touch_updated_at=False, title=title)
     return title
 
 
@@ -1310,6 +1311,7 @@ async def _load_skill(
             )
             await update_conversation(
                 conversation_id,
+                touch_updated_at=False,
                 persisted_skill_tail=merged,
                 persisted_skill_tail_ws=workspace or "",
             )
@@ -1878,6 +1880,7 @@ async def _run_agent_claimed(
             try:
                 await update_conversation(
                     conversation_id,
+                    touch_updated_at=False,
                     frozen_system_prompt="",
                     frozen_system_prompt_ws="",
                 )
@@ -2044,6 +2047,7 @@ async def _run_agent_claimed(
         try:
             await update_conversation(
                 conversation_id,
+                touch_updated_at=False,
                 frozen_system_prompt=system_prompt,
                 frozen_system_prompt_ws=workspace or "",
             )
@@ -2107,6 +2111,10 @@ async def _run_agent_claimed(
             if cancel_ev.is_set():
                 async for _fev in _finalize_file_changes():
                     yield _fev
+                try:
+                    await touch_updated_at(conversation_id)
+                except Exception:  # noqa: BLE001
+                    pass
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
@@ -2284,6 +2292,10 @@ async def _run_agent_claimed(
             if cancel_ev.is_set():
                 async for _fev in _finalize_file_changes():
                     yield _fev
+                try:
+                    await touch_updated_at(conversation_id)
+                except Exception:  # noqa: BLE001
+                    pass
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
@@ -2406,6 +2418,12 @@ async def _run_agent_claimed(
                     yield _ndjson({"type": "queued_autosend", "items": remaining})
                 async for _fev in _finalize_file_changes():
                     yield _fev
+                # #388: bump updated_at once per run (not per message) so the
+                # sidebar re-sorts to the top when the turn completes.
+                try:
+                    await touch_updated_at(conversation_id)
+                except Exception:  # noqa: BLE001
+                    pass
                 yield _ndjson({"type": "done"})
                 return
 
@@ -2911,6 +2929,11 @@ async def _run_agent_claimed(
         # checks).
         async for _fev in _finalize_file_changes():
             yield _fev
+        # #388: bump updated_at once per run.
+        try:
+            await touch_updated_at(conversation_id)
+        except Exception:  # noqa: BLE001
+            pass
         yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
     except model_client.ModelError as e:
         # The user message is already stored; without a record of the
@@ -2918,6 +2941,11 @@ async def _run_agent_claimed(
         await add_message(conversation_id, "system", f"turn failed: {e}")
         async for _fev in _finalize_file_changes():
             yield _fev
+        # #388: bump updated_at once per run.
+        try:
+            await touch_updated_at(conversation_id)
+        except Exception:  # noqa: BLE001
+            pass
         yield _ndjson({"type": "error", "message": str(e)})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
@@ -2929,6 +2957,11 @@ async def _run_agent_claimed(
         )
         async for _fev in _finalize_file_changes():
             yield _fev
+        # #388: bump updated_at once per run.
+        try:
+            await touch_updated_at(conversation_id)
+        except Exception:  # noqa: BLE001
+            pass
         yield _ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
         if not cancel_ev.is_set():
             remaining = _drain_queue(conversation_id)
