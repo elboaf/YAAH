@@ -1,3 +1,7 @@
 # Build-time only: packages the backend into the standalone sidecar
 # executable that Tauri bundles via externalBin (see release.yml).
 pyinstaller>=6.10.0
+# LoRA dir discovery (#398): psutil reads the sd-server process command
+# line to locate --lora-model-dir; the frozen sidecar needs it declared
+# for PyInstaller's static scan to bundle it.
+psutil>=5.9.0

@@ -4,11 +4,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
-const { probeImageProvider } = vi.hoisted(() => ({ probeImageProvider: vi.fn() }))
+const { probeImageProvider, getLoraCatalog } = vi.hoisted(() => ({
+  probeImageProvider: vi.fn(),
+  getLoraCatalog: vi.fn(),
+}))
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
-  return { ...actual, probeImageProvider }
+  return { ...actual, probeImageProvider, getLoraCatalog }
 })
 
 import { ImageGenSettingsCard } from './components'
@@ -18,6 +21,8 @@ const base = { provider: 'sdcpp', api_base: '' }
 describe('Image generation settings card', () => {
   beforeEach(() => {
     probeImageProvider.mockReset()
+    getLoraCatalog.mockReset()
+    getLoraCatalog.mockResolvedValue({ loras: [], count: 0, unknown_count: 0, scanned_at: null, notice: null })
   })
 
   afterEach(() => {
@@ -41,6 +46,43 @@ describe('Image generation settings card', () => {
     const button = screen.getByRole('button', { name: 'Test' }) as HTMLButtonElement
     expect(button.disabled).toBe(true)
     expect(screen.getByText(/no generate_image tool/)).toBeTruthy()
+  })
+
+  it('shows the /loras notice when the scan reports unknown LoRAs (#398)', async () => {
+    getLoraCatalog.mockResolvedValue({
+      loras: [{ path: 'x.safetensors', name: 'x', class: 'unknown', trigger: null, multiplier: null }],
+      count: 1,
+      unknown_count: 1,
+      scanned_at: 'now',
+      notice: '1 LoRA could not be classified automatically - start a chat and run /loras to finish setup.',
+    })
+    render(
+      <ImageGenSettingsCard
+        imageGen={{ ...base, api_base: 'http://127.0.0.1:1234' }}
+        onChange={() => {}}
+      />,
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toMatch(/run \/loras/),
+    )
+  })
+
+  it('stays silent when the scan classifies everything (#398)', async () => {
+    getLoraCatalog.mockResolvedValue({
+      loras: [{ path: 'a.safetensors', name: 'a', class: 'triggered', trigger: 'tok', multiplier: 0.8 }],
+      count: 1,
+      unknown_count: 0,
+      scanned_at: 'now',
+      notice: null,
+    })
+    render(
+      <ImageGenSettingsCard
+        imageGen={{ ...base, api_base: 'http://127.0.0.1:1234' }}
+        onChange={() => {}}
+      />,
+    )
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.queryByRole('status')).toBeNull()
   })
 
   it('shows probe success with the reported model', async () => {
