@@ -814,6 +814,8 @@ def render_local_family(combo: str, flags: dict) -> dict:
         sep.join(str(m.get("content") or "") for m in manifest_messages)
     )
     tools = captured["tools"]
+    # Issue #375: the KV-cache-stable prefix for this combo.
+    stable_prefix = _stable_prefix_for(combos_for_host(), combo)
     return {
         "combo": combo,
         "kind": flags["kind"],
@@ -842,6 +844,7 @@ def render_local_family(combo: str, flags: dict) -> dict:
         "subagent_prompts": {},
         "auxiliary_prompts": {},
         "rendered_text": rendered,
+        "stable_prefix": stable_prefix,
     }
 
 
@@ -1022,6 +1025,54 @@ def _canonicalize_chat_ids(text: str) -> str:
     a DB autoincrement counter, not data) with the `<CHAT_ID>` token
     before sizing/hashing/splitting: reproducible manifests."""
     return re.sub(r"chat-\d+", CHAT_ID_TOKEN, text)
+
+
+def _stable_prefix_for(combos_for_host, combo: str) -> dict | None:
+    """Compute the stable-prefix block for a local-family combo.
+
+    The fixed core is everything before the first variance block (spoken
+    briefing, sandbox, skills, sub-agent index). We find it by locating
+    the ask-user section and taking everything through its closing
+    (the text before the first '\n\n---\n\n' that follows it).
+
+    Returns None for non-local families (subagents/auxiliary don't have
+    a KV-cache-stable core).
+
+    Issue #375.
+    """
+    flags = _split_combo(combo)
+    if flags.get("kind") not in ("local", "remote", "remote-offline"):
+        return None
+
+    # Render the full prompt to extract the stable prefix.
+    _prep_flags(flags)
+    from backend.agent import loop
+
+    prompt = loop._default_system_prompt(
+        REMOTE_WS if flags["kind"] in ("remote", "remote-offline") else LOCAL_WS
+    )
+
+    # The fixed core ends at the first variance block separator that
+    # follows the ask-user section. The ask-user section ends with
+    # "what remains unchanged, and safe options before asking how to proceed."
+    # The next '\n\n---\n\n' is the boundary.
+    ask_user_end_marker = "what remains unchanged, and safe options before asking how to proceed."
+    idx = prompt.find(ask_user_end_marker)
+    if idx < 0:
+        return None
+    # Find the end of the ask-user text (end of that line).
+    line_end = prompt.find("\n", idx + len(ask_user_end_marker))
+    if line_end < 0:
+        prefix_text = prompt
+    else:
+        prefix_text = prompt[: line_end + 1]
+
+    raw = prefix_text.encode("utf-8")
+    return {
+        "sha256": _sha256_text(prefix_text),
+        "bytes": len(raw),
+        "text": prefix_text,
+    }
 
 
 def manifest_to_json(manifest: dict) -> str:

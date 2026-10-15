@@ -44,16 +44,21 @@ def test_rule_carries_the_stripped_tag_rationale(restored_config):
 
 
 def test_rule_lands_inside_say_section_only(restored_config):
-    """The rule must not leak past the say section: everything before
-    the section is byte-identical to a prompt without it, and the
-    ask-user section carries no homograph bytes."""
+    """The rule must not leak past the say section: it must not appear
+    in the fixed core (identity, guidelines, ask-user) that precedes
+    the spoken-briefing variance block."""
     prompt = loop._default_system_prompt("")
     say_opening = "Spoken briefing (voice read-aloud):\n"
+    # Everything before the spoken briefing is the fixed core.
     head = prompt.split(say_opening, 1)[0]
     tail = prompt.split("\nInterview the user", 1)
-    assert len(tail) == 2, "say-section sentinel moved; fix the slicing"
+    assert len(tail) == 2, "ask-user sentinel moved; fix the slicing"
+    # The fixed core (identity + env + tools + guidelines + ask-user)
+    # must not carry homograph phonetic instructions.
     assert "Homographs go phonetic" not in head
-    assert "Homographs go phonetic" not in tail[1]
+    # In the new layout (#375), ask-user precedes spoken briefing, so
+    # tail[1] contains the spoken briefing — the homograph text IS
+    # expected there; only the fixed core (head) must be clean.
 
 
 # ---- emissions gate -----------------------------------------------------------
