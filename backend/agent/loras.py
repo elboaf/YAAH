@@ -57,6 +57,51 @@ TRIGGERLESS_MULTIPLIER = 0.8
 IMG2IMG_T2I_MULTIPLIER = 0.7
 IMG2IMG_MULTIPLIER = 1.6
 
+# #406: style words so generic they would fire a filename-derived
+# match on nearly every art prompt ("a photo of a castle" -> a
+# Realistic_studio LoRA), defeating the conservative auto-apply bar.
+# Name tokens in this set never become match criteria.
+_STOP_TOKENS = {
+    "style", "flux", "flux2", "klein", "9b", "v5", "pro", "ultra", "real",
+    "checkpoint", "lora", "epoch", "final", "v1", "v2", "v3", "v4",
+    # content-less fragments: 'ck' = checkpoint abbreviations, bare
+    # version numbers, hash-ish step counters ('000005000').
+    "ck", "sd", "v", "t", "000005000",
+}
+
+# Longest token that may still count as a style word: drops bare '2'
+# fragments ('[FLUX.2.Klein]') and stray digits from filenames like
+# 'Ghibli_style_Flux 9B'.
+_MIN_TOKEN_LEN = 3
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Style-word candidates derived from a LoRA's FILENAME (#406).
+
+    Triggerless style LoRAs carry no training-time tokens, but their
+    filenames describe them ('ck-neon-retrowave-klein-9b' IS a retrowave
+    style). Split on separators, case-fold, drop the base-model noise and
+    the stop words above. Used ONLY for the triggerless class: a
+    triggered LoRA's training tokens are authoritative and stay
+    untouched.
+    """
+    # bracket-grouped names ('[FLUX.2.Klein]PixelArt_Redmond') keep their
+    # glued fragments out: brackets are noise, so strip them BEFORE the
+    # separator split (a '[flux' fragment would never match a prompt).
+    cleaned = str(name or "").replace("[", " ").replace("]", " ")
+    raw = re.split(r"[\s_\-.]+", cleaned)
+    out: list[str] = []
+    for tok in raw:
+        t = tok.lower().strip()
+        if not t or t in _STOP_TOKENS or t in out:
+            continue
+        # digit-only or too-short fragments ('9', '2') say nothing about
+        # the style.
+        if t.isdigit() or len(t) < _MIN_TOKEN_LEN:
+            continue
+        out.append(t)
+    return out
+
 
 def classify_metadata(meta: dict | None) -> dict:
     """Classify one LoRA from its safetensors `__metadata__` (or None).
@@ -527,25 +572,60 @@ def save_override(sha256: str, entry: dict) -> None:
 # only - no server calls, no header reads, no hashing here.
 # ---------------------------------------------------------------------------
 
+def _squash(s: str) -> str:
+    """Case-folded, separator-free form of a string: 'Retro-Wave' and
+    'retro_wave' and 'retrowave' all collapse to the same run of letters.
+    Token matching runs on BOTH the spaced and the squashed form (#406):
+    prompts and filenames disagree about where the separators go."""
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
 def _match_score(info: dict, prompt: str) -> float:
     """How strongly a LoRA's match tokens hit a prompt: the fraction of
-    tokens present, 0 = no match. Triggerless style LoRAs with no match
-    list never fire on content - the spec keeps auto-apply conservative:
-    a weight-only LoRA rides along only when the user's prompt names it."""
-    prompt_l = (prompt or "").lower().replace("_", " ")
+    tokens present, 0 = no match. An empty match list never fires on
+    content - select_lora derives filename tokens for the triggerless
+    class (see there) and enforces the conservative bar."""
+    # Separators are unreliable spelling: the live-session prompt said
+    # "retro-wave" for a 'retrowave'-named LoRA (#406). A token hits when
+    # it appears in the spaced form ("pix art" in "pix art castle") OR
+    # its squashed form equals a squashed prompt word/bigram
+    # ("retrowave" == "retro wave" glued).
+    prompt_l = re.sub(r"[\s_\-]+", " ", (prompt or "").lower())
+    # squashed WORD list plus squashed BIGRAM glues: 'phone' must match a
+    # whole prompt word (never the interior of 'photography'), while
+    # 'retrowave' matches the glue of adjacent words 'retro wave' - the
+    # separator disagreement is exactly what squashing erases (#406).
+    words = [
+        w for w in re.split(r"[^a-z0-9]+", (prompt or "").lower()) if w
+    ]
+    prompt_sq_words = {_squash(w) for w in words}
+    # bigram glue: ADJACENT prompt words in ORDER, squashed and
+    # concatenated - 'retro wave' -> 'retrowave' is exactly the spelling
+    # collision (a set-iteration order would shuffle the pairs).
+    sq_words = [_squash(w) for w in words]
+    prompt_sq_words |= {
+        sq_words[i] + sq_words[i + 1] for i in range(len(sq_words) - 1)
+    }
     tokens: list[str] = []
     for m in info.get("match") or []:
         # match entries can be whole caption lines ("Pixel Art, PixArFK"):
         # score token-by-token so a prompt naming any ingredient hits.
         # Underscores normalize to spaces: training triggers are
         # snake_case by convention, prompts use either form.
-        for part in str(m).replace("_", " ").split(","):
+        for part in re.sub(r"[\s_\-]+", " ", str(m)).split(","):
             part = part.strip().lower()
             if part and part not in tokens:
                 tokens.append(part)
     if not tokens:
         return 0.0
-    hits = sum(1 for t in tokens if t in prompt_l)
+    hits = 0
+    for t in tokens:
+        # spaced-substring OR squashed-word hit: "phone" inside
+        # "photography" is a prefix collision, not a style match - the
+        # squashed check requires the squashed token to BE one of the
+        # prompt's squashed words/bigrams, never an interior fragment.
+        if t in prompt_l or _squash(t) in prompt_sq_words:
+            hits += 1
     if not hits:
         return 0.0
     return hits / len(tokens)
@@ -587,8 +667,25 @@ def select_lora(scan: dict, prompt: str, has_init_image: bool) -> dict | None:
             if kls == CLASS_TRIGGERED and not trigger:
                 cand = None  # classified triggered, trigger lost: skip
             else:
+                # #406: a triggerless style LoRA has no training tokens -
+                # derive match criteria from its FILENAME so a prompt
+                # naming the style ("retro-wave") can summon it
+                # ("ck-neon-retrowave-klein-9b"). HALF the derived tokens
+                # (at least one) must hit: 'neon'+'retrowave' against
+                # "retro-wave style" hits one of two, and that IS the
+                # prompt naming the style - the separator squash makes
+                # the spelling difference not matter. Still conservative:
+                # a generic prompt ("a cozy village") scores 0. Triggered
+                # class keeps score>0 (training-token presence).
+                if kls == CLASS_TRIGGERLESS and not info.get("match"):
+                    name_toks = _name_tokens(info.get("name") or path)
+                    if name_toks:
+                        info = {**info, "match": name_toks, "match_from": "filename"}
                 score = _match_score(info, prompt)
-                if score > 0:
+                if score > 0 and (
+                    info.get("match_from") != "filename"
+                    or score >= 0.5
+                ):
                     cand = (
                         score,
                         {

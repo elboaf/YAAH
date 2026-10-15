@@ -346,7 +346,13 @@ HELP_DOCS: dict = {
         "the FIRST reference ([depth, photo] order; reversed silently "
         "does nothing) and the hires second pass is skipped for "
         "reference renders to preserve fidelity; lora[] activates "
-        "server-side LoRAs."
+        "server-side LoRAs. Reference sources: workspace paths, store "
+        "rels (generate_image results, and PASTED chat images - their "
+        "store rel is annotated in the context under the attached "
+        "image). The result note lists the server's available LoRAs "
+        "when none was applied; one style-named LoRA auto-applies when "
+        "the prompt names the style (spelling-tolerant: retro-wave "
+        "matches a retrowave-named LoRA)."
     ),
     "upscale_image": (
         "Detail-preserving enlargement of an EXISTING image via the "
@@ -1578,10 +1584,12 @@ GENERATE_IMAGE_SCHEMA = {
                         "1-4 image paths for reference-guided generation "
                         "(Flux.2-style editing: the model reproduces the "
                         "referenced scene or subject). Workspace paths "
-                        "like ai-images/x.png, or store rels. For "
-                        "depth-pose control use control_lora instead - "
-                        "reference ORDER matters there: [depth map, "
-                        "reference photo], depth FIRST."
+                        "like ai-images/x.png, pasted chat images' store "
+                        "rels (annotated under attached images, e.g. "
+                        "845/<hash>.png), or store rels. For depth-pose "
+                        "control use control_lora instead - reference "
+                        "ORDER matters there: [depth map, reference "
+                        "photo], depth FIRST."
                     ),
                 },
                 "lora": {
@@ -1605,7 +1613,10 @@ GENERATE_IMAGE_SCHEMA = {
                     },
                     "description": (
                         "LoRAs to activate for this generation, on top "
-                        "of the server's loaded model."
+                        "of the server's loaded model. Names come from "
+                        "the result note's 'available loras' list (or "
+                        "GET /api/loras); a style-named prompt usually "
+                        "auto-applies the matching one without this."
                     ),
                 },
                 "control_lora": {
@@ -2054,7 +2065,8 @@ def _read_image_argument(path: str, workspace: str):
         pass
     return (
         f"image not found: {p} (pass the ai-images/... path from the "
-        "generation result, or a workspace path)"
+        "generation result, the store rel annotated under an attached "
+        "image, or a workspace path)"
     )
 
 
@@ -2174,8 +2186,10 @@ def _resolve_lora_field(lora, control_lora, b, notes):
             mult = 1.0
         resolved = _resolve_name(str(item["name"]).strip())
         if resolved is None:
+            known_preview = ", ".join((b["loras"] or [])[:8]) or "(none)"
             notes.append(
-                f"lora '{item['name']}' not found on the server; skipped"
+                f"lora '{item['name']}' not found on the server; skipped "
+                f"(known: {known_preview})"
             )
             continue
         # float clamp, NOT _clamp (which casts int - 0.8 would become 0)
@@ -2270,6 +2284,31 @@ async def generate_image(
     hires_body: dict | None = None
     body: dict = {"prompt": prompt}
     apply_to_body(body, scan, prompt)
+
+    # Catalog visibility (#406): when nothing rode along, tell the model
+    # WHICH LoRAs exist - the schema says "name from the server's
+    # capabilities", but capabilities are invisible to the model; a
+    # style request the auto-matcher missed then costs a filesystem
+    # grep. Capped list, names only (paths are internal). Skipped when
+    # the caller already picked one (lora/control_lora) or nothing is
+    # known (scan empty AND caps list empty).
+    if not body.get("lora_applied") and not lora and not control_lora:
+        known: list[str] = list(b["loras"]) if b else []
+        if not known:
+            known = [
+                str(info.get("name") or rel)
+                for rel, info in ((scan or {}).get("files") or {}).items()
+                if info.get("class") != "unknown"
+            ]
+        if known:
+            shown = known[:8]
+            more = f" (+{len(known) - len(shown)} more - GET /api/loras)" if len(known) > 8 else ""
+            notes.append(
+                "available loras on this server: "
+                + ", ".join(shown) + more
+                + " - pass matching ones via lora[] (a style word in the "
+                "prompt auto-applies the obvious one)"
+            )
 
     # --- references, depth maps, lora (#403) --------------------------
     # Degradation ladder (review round 2): invalid INPUT (bad path, too

@@ -16,6 +16,9 @@ os.environ["YAAH_DB_PATH"] = os.path.join(_TMP, "agent.db")
 os.environ["YAAH_CONFIG_PATH"] = os.path.join(_TMP, "config.json")
 os.environ["YAAH_SKILLS_PATH"] = os.path.join(_TMP, "skills")
 os.environ["YAAH_MEMORY_PATH"] = os.path.join(_TMP, "memory")
+# Images too (#406): imagedata honors this override so pytest never
+# touches the real backend/data/images either.
+os.environ["YAAH_IMAGES_DIR"] = os.path.join(_TMP, "images")
 # Skip mDNS LAN advertising: every TestClient(app) runs the app lifespan,
 # and Zeroconf registration costs ~10s per boot (verified by profiling).
 # No test exercises advertising; YAAH_NO_HOSTING is the supported switch.
