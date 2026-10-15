@@ -3380,6 +3380,29 @@ export function ConversationList({
     // and the new registry row must appear without any other refresh trigger.
   }, [conversationId, workspace, refresh])
 
+  // Issue #388: re-sort the sidebar when a run finishes (the backend bumps
+  // updated_at once per run now, so the refresh picks up the new position).
+  // Uses a ref so the timer survives finishedByConv state changes — the user
+  // clearing a finish signal mid-timer must not cancel the pending refresh.
+  const sidebarRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    const hasFinished = Object.keys(finishedByConv).length > 0
+    if (!hasFinished) {
+      if (sidebarRefreshTimerRef.current) {
+        clearTimeout(sidebarRefreshTimerRef.current)
+        sidebarRefreshTimerRef.current = null
+      }
+      return
+    }
+    sidebarRefreshTimerRef.current = setTimeout(refresh, 300)
+    return () => {
+      if (sidebarRefreshTimerRef.current) {
+        clearTimeout(sidebarRefreshTimerRef.current)
+        sidebarRefreshTimerRef.current = null
+      }
+    }
+  }, [finishedByConv, refresh])
+
 
   // Expanded state persists per workspace (Q14); a group with no remembered
   // state starts expanded.

@@ -909,13 +909,18 @@ async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
         )
 
 
-async def update_conversation(conversation_id: int, **fields):
+async def update_conversation(conversation_id: int, *, touch_updated_at: bool = True, **fields):
     """Update allowed conversation fields (title, workspace,
     system_prompt_override, model, effort, subagent_model). #132: a bare
     model write is qualified with the active provider — '' stays ''
     (deliberate Default). #382: a ''/'.' workspace write is the Default
     pseudo-workspace and lands as NULL — a stored '' would drop the chat
-    from the sidebar's NULL-matched Default group."""
+    from the sidebar's NULL-matched Default group.
+
+    touch_updated_at: whether to bump updated_at (default True). Pass
+    False when the write is cosmetic (title, skill tail, freeze) and
+    should not re-sort the sidebar list.
+    """
     allowed = {
         "title",
         "workspace",
@@ -954,17 +959,42 @@ async def update_conversation(conversation_id: int, **fields):
     try:
         await db.execute("BEGIN IMMEDIATE")
         await assert_no_active_remote_edit_lease(db, conversation_id)
-        await db.execute(
-            f"UPDATE conversations SET {sets},"
-            " updated_at = datetime('now') WHERE id = ?",
-            (*updates.values(), conversation_id),
-        )
+        if touch_updated_at:
+            await db.execute(
+                f"UPDATE conversations SET {sets},"
+                " updated_at = datetime('now') WHERE id = ?",
+                (*updates.values(), conversation_id),
+            )
+        else:
+            await db.execute(
+                f"UPDATE conversations SET {sets} WHERE id = ?",
+                (*updates.values(), conversation_id),
+            )
         await db.commit()
         return True
     except Exception:
         if db.in_transaction:
             await db.rollback()
         raise
+    finally:
+        await db.close()
+
+
+async def touch_updated_at(conversation_id: int) -> None:
+    """Bump the conversation's updated_at timestamp — used at run
+    completion so the sidebar re-sorts once per run, not per message.
+
+    Uses strftime with %f for microsecond resolution to avoid two fast
+    runs finishing in the same second from colliding on sort position.
+    """
+    db = await get_db()
+    try:
+        await assert_no_active_remote_edit_lease(db, conversation_id)
+        await db.execute(
+            "UPDATE conversations SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?",
+            (conversation_id,),
+        )
+        await db.commit()
     finally:
         await db.close()
 
@@ -1150,10 +1180,6 @@ async def add_message(
                 1 if say_is_fallback else (0 if say_is_fallback is not None else None),
                 json.dumps(meta) if meta else None,
             ),
-        )
-        await db.execute(
-            "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",
-            (conversation_id,),
         )
         await db.commit()
         return cur.lastrowid
