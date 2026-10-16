@@ -261,6 +261,8 @@ async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path,
         "deleted": 2,
         "commit": None,
         "extra_commits": 0,
+        "truncated": False,
+        "total_files": 3,
     }
 @pytest.mark.asyncio
 async def test_usage_event_uses_frontend_context_token_field(fake_model, tmp_path):
