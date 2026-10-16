@@ -1530,8 +1530,9 @@ GENERATE_IMAGE_SCHEMA = {
             "server's default size; larger sizes are reached via the "
             "server's hires fix (upscale + second diffusion pass) or "
             "plain upscaling, and the result reports what actually "
-            "happened. Default steps 4 is a fast draft (typical look: "
-            "soft anatomy, smudged eyes, mushy text) - pass steps for "
+            "happened. Four steps is fast-draft guidance when passed "
+            "(typical look: soft anatomy, smudged eyes, mushy text) - "
+            "pass steps for "
             "detail-critical text-to-image (~15-20; cost is near-linear "
             "in steps); reference-guided edits hold together fine at "
             "the default. If an edit did not take, steps is the wrong "
@@ -1653,9 +1654,10 @@ GENERATE_IMAGE_SCHEMA = {
                 "steps": {
                     "type": "integer",
                     "description": (
-                        "Sampling steps; omit for the default (4 - a fast "
-                        "draft with soft anatomy, smudged eyes, mushy "
-                        "text). Raise for detail-critical text-to-image, "
+                        "Sampling steps. Four is fast-draft guidance when "
+                        "passed (its look: soft anatomy, smudged eyes, "
+                        "mushy text); omit for the configured or server "
+                        "default. Raise for detail-critical text-to-image, "
                         "typically 15-20 (near-linear time cost). "
                         "Reference-guided edits hold fine at the default "
                         "(the reference pins content - steps only buy "
@@ -1800,7 +1802,13 @@ def _generation_defaults(cfg: dict) -> dict:
             f = float(v)
         except (TypeError, ValueError):
             continue
-        if math.isfinite(f):
+        if not math.isfinite(f):
+            continue
+        if k in ("width", "height", "steps"):
+            # counts/dimensions must be positive whole numbers
+            if f > 0 and f == int(f):
+                out[k] = f
+        else:
             out[k] = f
     return out
 
@@ -1809,8 +1817,9 @@ def _png_params_note(raw: bytes) -> str:
     """Ground-truth result note (#411): stable-diffusion.cpp embeds the
     parameters it actually received in the output PNG's tEXt `parameters`
     chunk. Parsing it turns the result note into server testimony instead
-    of client assumption. Returns '' when the chunk is absent or unparsable
-    (e.g. the ESRGAN chain's fresh PNGs have none) - silence, never error."""
+    of client assumption. Returns '' when no usable chunk is present (a
+    non-parameters tEXt chunk is skipped and the scan continues; the
+    ESRGAN chain's fresh PNGs have none) - silence, never error."""
     if raw[:8] != b"\x89PNG\r\n\x1a\n":
         return ""
     pos = 8
@@ -1824,32 +1833,50 @@ def _png_params_note(raw: bytes) -> str:
             data = raw[pos + 8 : pos + 8 + length]
             if ctype == b"tEXt":
                 keyword, sep, value = data.partition(bytes([0]))
-                txt = (
-                    value.decode("utf-8", "replace")
-                    if keyword == b"parameters" and sep
-                    else ""
-                )
-                want = {
-                    "Steps": None,
-                    "CFG scale": None,
-                    "Guidance": None,
-                    "Seed": None,
-                    "Size": None,
-                }
-                for part in txt.splitlines():
-                    for key in want:
-                        if part.startswith(key + ": "):
-                            want[key] = part[len(key) + 2 :].strip()
-                have = [
-                    f"{k.lower().replace(' ', '_')} {v}"
-                    for k, v in want.items()
-                    if v
-                ]
-                return "server ran: " + ", ".join(have) if have else ""
+                if keyword == b"parameters" and sep:
+                    return _params_note_text(
+                        value.decode("utf-8", "replace")
+                    )
+                # not the parameters keyword: keep scanning - a later
+                # tEXt chunk may carry it
             pos += 12 + length  # length + type + CRC
     except (struct.error, OverflowError):
         return ""
     return ""
+
+
+def _params_note_text(txt: str) -> str:
+    """Extract the effective sampling fields from a `parameters` chunk.
+
+    The real chunk is the prompt line(s) followed by ONE comma-separated
+    params line: "Steps: 15, CFG scale: 1.000000, Guidance: 3.500000,
+    Eta: inf, Seed: 978904, Size: 1024x1024, Model: , RNG: cuda, ...".
+    Anchoring on the LAST "Steps:" keeps a prompt that itself mentions
+    steps/seed from derailing the parse; each value runs to the next
+    comma/line-end, so commas inside the prompt never split fields.
+    Missing fields are simply omitted from the note."""
+    import re
+
+    idx = txt.rfind("Steps:")
+    if idx < 0:
+        return ""
+    seg = txt[idx : idx + 1500]
+    want = (
+        ("steps", "Steps"),
+        ("cfg_scale", "CFG scale"),
+        ("guidance", "Guidance"),
+        ("seed", "Seed"),
+        ("size", "Size"),
+    )
+    have: list[str] = []
+    for out_key, label in want:
+        m = re.search(label + ":" + r"\s*([^,\r\n]+)", seg)
+        if not m:
+            continue
+        v = m.group(1).strip()
+        if v:
+            have.append(f"{out_key} {v}")
+    return "server ran: " + ", ".join(have) if have else ""
 
 
 async def _capabilities(api_base: str) -> dict:
@@ -2362,8 +2389,10 @@ async def generate_image(
     Sampling defaults (#411): caller > config generation_defaults >
     omit (the server's own defaults apply). Seed is NEVER pinned on the
     omit path; reseed=True asks the server for a fresh random draw
-    (seed -1). The result note carries the ground truth of what the
-    server actually ran, parsed from the PNG parameters chunk.
+    (seed -1). When the output PNG carries a parameters chunk, the
+    result note reports the ground truth of what the server
+    actually ran (parsed from it); without the chunk it stays
+    silent.
     Transport: the native async job API when capabilities are available
     (Stop cancels the queued job and stops waiting immediately), the sync
     OpenAI-compatible endpoint as the fallback for older servers."""
@@ -2413,10 +2442,21 @@ async def generate_image(
     if steps is None and d_cfg.get("steps") is not None:
         steps = int(d_cfg["steps"])
         notes.append(f"steps {steps} (configured default)")
+    width_from_cfg = False
+    height_from_cfg = False
     if width is None and d_cfg.get("width"):
         width = int(d_cfg["width"])
-        if height is None:
-            height = width
+        width_from_cfg = True
+        notes.append(f"width {width} (configured default)")
+    if height is None and d_cfg.get("height"):
+        height = int(d_cfg["height"])
+        height_from_cfg = True
+        notes.append(f"height {height} (configured default)")
+    if height is None and width is not None:
+        # width-only request (caller or config): square fallback,
+        # the pre-existing `height or width` body semantics
+        height = width
+        if width_from_cfg and not height_from_cfg:
             notes.append(f"size {width}x{height} (configured default)")
 
     caps = await _capabilities(api_base)
@@ -2604,7 +2644,9 @@ async def generate_image(
             extra["negative_prompt"] = negative_prompt
         if seed is not None:
             extra["seed"] = seed
-        if reseed:
+        elif reseed:
+            # same precedence as the native path: an explicit seed
+            # (reproducibility) wins over the fresh-draw request
             extra["seed"] = -1
         if steps is not None or cfg_scale is not None:
             sp: dict = {}
