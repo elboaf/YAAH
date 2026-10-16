@@ -330,13 +330,13 @@ HELP_DOCS: dict = {
         "the user sees it inline; it is NOT sent back to you - call "
         "view_image on the saved file only if you must inspect it (e.g. "
         "the user asks to change something specific about it). "
-        "RESOLUTION POLICY: the diffusion model always renders at the "
-        "server's default size - that is the size its operator's "
-        "hardware handles comfortably, and asking a large model for "
-        "1024+ native can stall it for minutes under VRAM thrash. "
-        "Request any width/height you like: it renders at the default "
-        "(aspect-fitted) and reaches your size with the ESRGAN upscaler "
-        "automatically; the result reports exactly what happened. "
+        "RESOLUTION POLICY: the render happens at the requested size "
+        "whenever the server's generation limits allow it (composition "
+        "is decided by the first pass's canvas, so native rendering is "
+        "the default); hires_fix=true opts into the conservative "
+        "budget-render + server hires second pass; targets beyond the "
+        "limits render at the max legal size and are enlarged by the "
+        "ESRGAN chain. The result reports exactly what happened. "
         "negative_prompt and seed pass through. Generation runs as a "
         "server job: pressing Stop cancels it and returns immediately. "
         "Remote (namespaced) workspaces save to the store only. "
@@ -1706,8 +1706,11 @@ GENERATE_IMAGE_SCHEMA = {
                     "type": "integer",
                     "description": (
                         "Seed for reproducible output. Omit (and leave "
-                        "reseed false) for a randomized seed - never "
-                        "invent one to be helpful."
+                        "reseed false) for a fresh random draw - the "
+                        "sd-server pins an omitted seed to its default "
+                        "(seed 42), so YAAH sends -1 (the protocol's "
+                        "own randomizer) whenever no seed is given - "
+                        "never invent one to be helpful."
                     ),
                 },
             },
@@ -2410,17 +2413,20 @@ async def generate_image(
     control_lora: str | None = None,
     depth_from: str | None = None,
 ) -> dict:
-    """Run text-to-image on the configured sd-server. The DIFFUSION model
-    never renders above the server's default size (a 9B flux model can
-    thrash VRAM for minutes above it); requested sizes beyond the default
-    go through the server's HIRES FIX when available (small render, ESRGAN
-    upscale, second diffusion pass at the exact target - the user's
-    explicit default) with the ESRGAN upscale chain as the fallback.
+    """Run text-to-image on the configured sd-server. The requested
+    size IS the diffusion render's size whenever the server's
+    generation limits allow it (#421: the FIRST pass decides the
+    composition); hires_fix=True opts into the conservative small-VRAM
+    route (budget render + the server's hires second pass), and targets
+    beyond the limits render at the maximum legal size, enlarged by the
+    ESRGAN chain.
 
     Sampling defaults (#411): caller > config generation_defaults >
-    omit (the server's own defaults apply). Seed is NEVER pinned on the
-    omit path; reseed=True asks the server for a fresh random draw
-    (seed -1). When the output PNG carries a parameters chunk, the
+    omit (the server's own defaults apply). Seed is NEVER pinned on
+    the omit path (#423: the sd-server pins an omitted seed to its
+    default, so YAAH sends -1 - the protocol's own randomizer -
+    whenever no seed is given); reseed=True requests that same fresh
+    draw explicitly. When the output PNG carries a parameters chunk, the
     result note reports the ground truth of what the server
     actually ran (parsed from it); without the chunk it stays
     silent.
@@ -2465,8 +2471,10 @@ async def generate_image(
     # at 512, over-guidance at cfg 7.0). YAAH now always names sampling
     # values: the caller wins, configured generation_defaults override
     # per key, and the built-ins (1024x1024, steps 4, cfg 1.0 - the
-    # klein empirics) underlay everything. Seed stays NEVER pinned; the
-    # configured width doubles as the square-render height.
+    # klein empirics) underlay everything. Seed stays NEVER pinned: the
+    # omit path sends -1 because the sd-server treats an omitted seed
+    # as its default (42), not as a random draw (#423). The configured
+    # width doubles as the square-render height.
     notes: list[str] = []
     d_cfg = _generation_defaults(cfg)
     if cfg_scale is None:
@@ -2693,10 +2701,14 @@ async def generate_image(
             extra["negative_prompt"] = negative_prompt
         if seed is not None:
             extra["seed"] = seed
-        elif reseed:
-            # same precedence as the native path: an explicit seed
-            # (reproducibility) wins over the fresh-draw request
+        else:
+            # omitted seed = fresh random draw (#423): the sd-server
+            # pins an omitted seed to its default (42) on every
+            # transport it exposes, so -1 always goes out. Same
+            # precedence as the native path; reseed adds a note only.
             extra["seed"] = -1
+            if reseed:
+                notes.append("reseed: fresh random draw")
         if steps is not None or cfg_scale is not None:
             sp: dict = {}
             if steps is not None:
@@ -2752,12 +2764,7 @@ async def generate_image(
             # via the server's hires fix (ESRGAN upscale + second
             # diffusion pass; VAE tiling per-request for decode memory).
             # The pre-#421 default policy, kept for 12GB-class cards.
-            budget = float(b["def_w"]) * float(b["def_h"])
-            ratio = (want_w or want_h) / max(want_h or want_w, 1.0)
-            gw = max(64.0, (budget * ratio) ** 0.5)
-            gh = max(64.0, gw / max(ratio, 0.0001))
-            gen_w = _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"])
-            gen_h = _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"])
+            gen_w, gen_h, _within = _hires_render_size(want_w, want_h, b)
             over = max(tw / gen_w, th / gen_h, 1.0)
             if over <= 1.0:
                 # the render already meets the request
@@ -2863,10 +2870,17 @@ async def generate_image(
         body["negative_prompt"] = negative_prompt
     if seed is not None:
         body["seed"] = seed
-    elif reseed:
-        # never pin the omit path (#411): reseed is the caller ASKING for
-        # a fresh random draw - -1 is the server's own randomizer.
+    else:
+        # never pin the omit path (#411): -1 is the server's own
+        # randomizer. Mandatory rather than optional (#423, live-verified):
+        # both sd-server transports pin an OMITTED seed to the server
+        # default (42) - byte-identical PNGs on repeat calls - so the
+        # omit must send -1 to stay a fresh random draw. reseed=True
+        # asks for the same draw explicitly (a note, not a different
+        # wire value).
         body["seed"] = -1
+        if reseed:
+            notes.append("reseed: fresh random draw")
     # hires.steps stays unset: 0 = reuse the first pass's step count
     # (no evidence for a different second-pass operating point).
     if steps is not None or cfg_scale is not None:
@@ -3151,11 +3165,13 @@ def _generation_result(
         out["width"], out["height"] = dims
     if b:
         out["native"] = (
-            f"the diffusion model renders within the server default "
-            f"{b['def_w']}x{b['def_h']} budget; larger sizes are reached "
-            "via the server's hires fix (upscale + second diffusion "
-            "pass) when supported, otherwise by the ESRGAN upscaler "
-            "(or call upscale_image on the saved file)"
+            "the render happens at the requested size whenever the "
+            f"server's generation limits (up to {b['max_w']}x{b['max_h']}) "
+            "allow it; hires_fix: true opts into the conservative "
+            f"budget render ({b['def_w']}x{b['def_h']}) + the server's "
+            "hires second pass; targets beyond the limits render at "
+            "the maximum legal size and are enlarged by the ESRGAN "
+            "chain (or call upscale_image on the saved file)"
         )
     if notes:
         out["note"] = " ".join(notes)

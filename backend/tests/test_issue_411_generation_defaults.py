@@ -104,7 +104,7 @@ def test_full_omit_uses_built_in_defaults(configured, tmp_path, monkeypatch):
     result = _gen(configured, tmp_path, monkeypatch)
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
-    assert "seed" not in body
+    assert body["seed"] == -1  # #423: omit = fresh random draw
     assert body["sample_params"]["sample_steps"] == 4
     assert body["sample_params"]["guidance"]["txt_cfg"] == 1.0
     assert body["width"] == 1024 and body["height"] == 1024
@@ -131,6 +131,7 @@ def test_omit_path_capsless_carries_built_ins_in_envelope(configured, tmp_path, 
     extra = _embedded_extra(body)
     assert extra["sample_params"]["sample_steps"] == 4
     assert extra["sample_params"]["guidance"]["txt_cfg"] == 1.0
+    assert extra["seed"] == -1  # #423: omit = fresh random draw
     assert body["size"] == "1024x1024"
 
 
@@ -222,6 +223,7 @@ def test_native_endpoint_unavailable_falls_back_with_sampling_fields(
     extra = _embedded_extra(legacy)
     assert extra["sample_params"]["sample_steps"] == 15
     assert extra["sample_params"]["guidance"]["txt_cfg"] == 1.0
+    assert extra["seed"] == -1  # #423: omit = fresh random draw
 
 
 # ---------------------------------------------------------- caps-less extras
@@ -270,7 +272,7 @@ def test_config_defaults_apply_on_omit(configured, tmp_path, monkeypatch):
     # the configured 1024 size IS the native render (#421)
     assert body["width"] == 1024 and body["height"] == 1024
     assert "hires" not in body
-    assert "seed" not in body
+    assert body["seed"] == -1  # #423: omit = fresh random draw
     note = result.get("note") or ""
     assert "configured default" in note
     assert "(built-in default)" not in note
