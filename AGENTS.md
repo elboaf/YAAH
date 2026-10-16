@@ -17,7 +17,8 @@ See `docs/agents/triage-labels.md`. The five canonical labels: `needs-triage`, `
 
 Run the tests you touched, not the suite: `npm test` runs the entire
 backend suite (10+ minutes, ~1100 tests and growing every issue) and
-CI re-runs it on every push anyway. See `docs/agents/testing.md`.
+CI re-runs it at the edges (every PR and every release/RC build)
+anyway — plain pushes trigger no CI. See `docs/agents/testing.md`.
 
 ### Domain docs
 

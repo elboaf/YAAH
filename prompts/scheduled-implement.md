@@ -39,8 +39,9 @@ Follow the /implement pipeline:
 - Implement the ticket one red-green slice at a time, test-first (TDD: write
   the failing test, make it pass, refactor).
 - Respect the repo's coding standards and any `GLOSSARY.md` domain vocabulary.
-- Verify: run the relevant tests/lint/build for the code you touched. If the
-  full suite is too long for one run, run it in chunks (per directory).
+- Verify with targeted runs only (docs/agents/testing.md): the test
+  files covering the code you touched — never the full suite, chunked
+  or otherwise. CI re-runs everything at the PR and release edges.
 - Do not open a PR unless the ticket asks for one. Commit with a message that
   references the issue number.
 

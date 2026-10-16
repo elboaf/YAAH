@@ -1,10 +1,15 @@
 name: CI
 
 on:
-  push:
-    branches: [master]
   pull_request:
     branches: [master]
+
+# No push trigger by design (docs/agents/testing.md): the full suite is a
+# gate at the edges only — PR review and release. Plain pushes (feature
+# branches, master) get no CI; a merge-commit push to master re-tests the
+# exact tree the PR edge already tested, and the release edge re-tests the
+# tagged tree. Branch pushes with no open PR are covered only by the
+# agents' targeted local runs (see docs/agents/testing.md).
 
 # One push supersedes the previous: cancel the in-flight run for the same
 # ref so the self-hosted Linux runners spend their time on the newest

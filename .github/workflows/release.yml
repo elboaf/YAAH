@@ -43,8 +43,48 @@ on:
         default: false
 
 jobs:
+  tests:
+    name: Backend tests (gate)
+    # Edge gate (docs/agents/testing.md): the release/RC tag gets the full
+    # backend suite before any installer is built — tags are permanent and
+    # shipped, so this is the last cheap place to catch what the PR edge's
+    # targeted local runs missed. Frontend needs no job here: `tauri build`
+    # below compiles the frontend (typecheck lives at the PR edge).
+    runs-on: Linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # Same warm-cache note as ci.yml: explicit install until the
+          # requirements cache carries these.
+          python -c "import pytest_shard" 2>/dev/null || pip install "pytest-shard>=0.1.2"
+          python -c "import xdist" 2>/dev/null || pip install "pytest-xdist>=3.5"
+
+      - name: Run tests
+        run: |
+          # Whole suite on one runner, xdist-2 for wall time. No sharding:
+          # sharding needs the two-runner pairing CI has.
+          pytest backend/tests -v -n 2 2>&1 | tee test-output.log
+          test ${PIPESTATUS[0]} -eq 0
+
+      - name: Report failures
+        if: failure()
+        run: |
+          grep -E "^(FAILED|ERROR)" test-output.log | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+          tail -50 test-output.log | while IFS= read -r line; do echo "::error::$line"; done
+
   build:
     name: Build (${{ matrix.artifact }} / ${{ matrix.os }})
+    needs: tests
     strategy:
       fail-fast: false
       matrix:
