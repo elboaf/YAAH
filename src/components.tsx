@@ -6736,7 +6736,7 @@ export function InterfaceScaleCard({
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean; staticSystemPrompt: boolean }>>({})
-  const [active, setActive] = useState('')
+  // No longer in Settings — the chat model bar is the sole writer of active_provider.
   const [newName, setNewName] = useState('')
   const [maxSteps, setMaxSteps] = useState<number | ''>('')
   // Sub-agent routing draft (#383): '' = sub-agent: auto (the parent's
@@ -6894,7 +6894,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             }
           }
           setProviders(next)
-          setActive(c.active_provider)
           setMaxSteps(c.max_steps ?? '')
           setSubagentProvider(c.subagent_provider ?? '')
           setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
@@ -7104,20 +7103,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       delete next[name]
       return next
     })
-    if (active === name) {
-      const rest = Object.keys(providers).filter((n) => n !== name)
-      setActive(rest[0] ?? '')
-    }
     if (expanded === name) setExpanded(null)
   }
 
-  // Active provider first, then the rest alphabetically — the row the user
-  // needs to verify is always the first thing they see.
-  const providerOrder = (Object.keys(providers) as string[]).sort((a, b) => {
-    if (a === active) return -1
-    if (b === active) return 1
-    return a.localeCompare(b)
-  })
+  // Alphabetical order — no more active-provider concept in Settings.
+  const providerOrder = (Object.keys(providers) as string[]).sort((a, b) =>
+    a.localeCompare(b),
+  )
 
   const save = async () => {
     setSaving(true)
@@ -7157,7 +7149,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       }
       await updateConfig({
         providers: out,
-        active_provider: active || undefined,
         max_steps: maxSteps === '' ? undefined : Number(maxSteps),
         subagent_provider: subagentProvider,
         model_steps: outSteps,
@@ -7322,7 +7313,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           tabIndex={0}
         >
           <div className="grid grid-cols-4 gap-3">
-            {/* providers: collapsed rows, active first; fields behind one open row */}
+            {/* providers: collapsed rows; fields behind one open row */}
             {activeTab === 'connect' && (
               <>
               <ImageGenSettingsCard imageGen={imageGen} onChange={setImageGen} />
@@ -7344,18 +7335,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   return (
                     <div
                       key={name}
-                      className={`rounded ${active === name ? '' : ''}`}
+                      className={`rounded ${isOpen ? 'bg-white/5 border border-white/10' : ''}`}
                     >
                       <div className="flex items-center gap-2.5 px-2.5 py-2">
-                        <input
-                          type="radio"
-                          name="active-provider"
-                          checked={active === name}
-                          onChange={() => setActive(name)}
-                          title="Make active"
-                          aria-label={`Make ${name} the active provider`}
-                          className="h-3 w-3 shrink-0 accent-blue-600"
-                        />
                         <button
                           type="button"
                           className="flex min-w-0 flex-1 items-center gap-2 text-left"
@@ -7363,7 +7345,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                           aria-expanded={isOpen}
                           aria-label={`Toggle ${name} settings`}
                         >
-                          <span className={`truncate font-mono text-xs ${active === name ? 'text-zinc-100' : 'text-zinc-200'}`}>
+                          <span className="truncate font-mono text-xs text-zinc-200">
                             {name}
                           </span>
                           {!isOpen && (
@@ -7375,7 +7357,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         </button>
                       </div>
                       {isOpen && (
-                        <div className="  p-2.5">
+                        <div className="p-2.5">
                           <div className="mb-1.5 flex gap-1.5">
                             <input
                               className={`${settingsInputCls} min-w-0 flex-1`}
