@@ -1526,13 +1526,16 @@ GENERATE_IMAGE_SCHEMA = {
             "conversation so the user sees it inline. Use for logos, "
             "mockups, illustrations, art assets. The image is not sent "
             "back to you; view_image the saved file only if inspection "
-            "is needed. The diffusion model never renders above the "
-            "server's default size; larger sizes are reached via the "
-            "server's hires fix (upscale + second diffusion pass) or "
-            "plain upscaling, and the result reports what actually "
-            "happened. Four steps is fast-draft guidance when passed "
-            "(typical look: soft anatomy, smudged eyes, mushy text) - "
-            "pass steps for "
+            "is needed. Omitted size/steps/cfg ride YAAH's built-in "
+            "defaults (1024x1024, four steps, cfg 1.0 - tuned for "
+            "guidance-distilled klein-class models; a configured or "
+            "explicit value always wins). The diffusion model never "
+            "renders above the server's default-size pixel budget; "
+            "larger targets are reached via the server's hires fix "
+            "(upscale + second diffusion pass) or plain upscaling, and "
+            "the result reports what actually happened. Four steps is "
+            "fast-draft guidance (typical look: soft anatomy, smudged "
+            "eyes, mushy text) - pass steps for "
             "detail-critical text-to-image (~15-20; cost is near-linear "
             "in steps); reference-guided edits hold together fine at "
             "the default. If an edit did not take, steps is the wrong "
@@ -1556,16 +1559,19 @@ GENERATE_IMAGE_SCHEMA = {
                     "type": "integer",
                     "description": (
                         "Desired final image width in pixels. Omit for "
-                        "the server default. Bigger than the default is "
-                        "fine: the render stays small and the size is "
-                        "reached via hires fix (default) or upscaling."
+                        "the built-in default (1024) unless a configured "
+                        "default applies. Bigger than the server's "
+                        "default-size budget is fine: the render stays "
+                        "small and the size is reached via hires fix "
+                        "(default) or upscaling."
                     ),
                 },
                 "height": {
                     "type": "integer",
                     "description": (
                         "Desired final image height in pixels. Same "
-                        "rule as width. Omit for the server default."
+                        "rule as width. Omit for the built-in default "
+                        "(1024) unless a configured default applies."
                     ),
                 },
                 "hires_fix": {
@@ -1654,10 +1660,11 @@ GENERATE_IMAGE_SCHEMA = {
                 "steps": {
                     "type": "integer",
                     "description": (
-                        "Sampling steps. Four is fast-draft guidance when "
-                        "passed (its look: soft anatomy, smudged eyes, "
-                        "mushy text); omit for the configured or server "
-                        "default. Raise for detail-critical text-to-image, "
+                        "Sampling steps. Omit for the built-in default "
+                        "four (fast-draft: soft anatomy, smudged eyes, "
+                        "mushy text when pushed into detail work) unless "
+                        "a configured default applies. Raise for "
+                        "detail-critical text-to-image, "
                         "typically 15-20 (near-linear time cost). "
                         "Reference-guided edits hold fine at the default "
                         "(the reference pins content - steps only buy "
@@ -1669,8 +1676,9 @@ GENERATE_IMAGE_SCHEMA = {
                 "cfg_scale": {
                     "type": "number",
                     "description": (
-                        "Text guidance scale; omit for the default. "
-                        "Guidance-distilled models (klein-class) are "
+                        "Text guidance scale; omit for the built-in "
+                        "default 1.0 unless a configured default "
+                        "applies. Guidance-distilled models (klein-class) are "
                         "trained at 1.0 - other values fight them and "
                         "cost roughly 1.6x per render. Meaningful only "
                         "on base/dev-class checkpoints."
@@ -1781,13 +1789,29 @@ def _png_dims(raw: bytes):
     return (int(w), int(h))
 
 
+# Built-in sampling defaults for the omit path (#419): FLUX.2-klein-shaped
+# values, chosen empirically (docs/research/flux2-klein-9b-generation-knobs.md):
+# 1024x1024 is the model's native scale (at 512 it drops subjects / garbles
+# anatomy), 4 steps is klein's distilled design point, cfg 1.0 suits a
+# guidance-distilled model. Server-applied omit defaults (512 / cfg 7.0 /
+# steps 20) fight the model, so YAAH now always names sampling values:
+# caller > configured generation_defaults > BUILT-IN. Operators retune via
+# config; the server's own defaults no longer apply to the omit path.
+_IMG_W_DEFAULT = 1024
+_IMG_H_DEFAULT = 1024
+_IMG_STEPS_DEFAULT = 4
+_IMG_CFG_DEFAULT = 1.0
+
+
 def _generation_defaults(cfg: dict) -> dict:
-    """User-configured generation defaults for the omit path (#411): cfg
-    scale, steps, size. The server cannot say what MODEL is loaded (its
-    /v1/models list is a placeholder), so model-appropriate sampling
-    values are the operator's call. Keys: cfg_scale, steps, width,
-    height (all optional). Non-numeric junk is ignored per key, so one
-    bad field never disables the others."""
+    """User-configured generation-default OVERRIDES (#411): keys cfg_scale,
+    steps, width, height (all optional). They sit between the caller and
+    the built-ins (#419: 1024x1024, steps 4, cfg 1.0) - an unset config
+    key no longer means "omit" (the server's own defaults are never used
+    again); it falls through to the built-in. The server cannot say what
+    MODEL is loaded (/v1/models is a placeholder), so the operator's
+    config retunes what the built-in layer guesses. Non-numeric junk is
+    ignored per key, so one bad field never disables the others."""
     d = (cfg or {}).get("generation_defaults")
     if not isinstance(d, dict):
         return {}
@@ -2427,21 +2451,31 @@ async def generate_image(
     except (TypeError, ValueError):
         return {"error": "cfg_scale must be a number"}
 
-    # --- sampling defaults: caller > config > omit (#411) -------------
-    # The server cannot report which MODEL is loaded, so model-appropriate
-    # sampling values are the operator's call. Each key applies only when
-    # the caller omitted it; unset config changes nothing (byte-identical
-    # outgoing bodies - pinned by tests). The configured width doubles as
-    # the square-render height so a 1024 default actually renders 1024
-    # without the caller naming height.
+    # --- sampling defaults: caller > config > BUILT-IN (#419) ---------
+    # Pre-#419 the omit path sent nothing and the server's own defaults
+    # applied - in practice 512x512 / cfg 7.0 / steps 20, exactly the
+    # operating point where klein-class models fail (composition collapse
+    # at 512, over-guidance at cfg 7.0). YAAH now always names sampling
+    # values: the caller wins, configured generation_defaults override
+    # per key, and the built-ins (1024x1024, steps 4, cfg 1.0 - the
+    # klein empirics) underlay everything. Seed stays NEVER pinned; the
+    # configured width doubles as the square-render height.
     notes: list[str] = []
     d_cfg = _generation_defaults(cfg)
-    if cfg_scale is None and d_cfg.get("cfg_scale") is not None:
-        cfg_scale = float(d_cfg["cfg_scale"])
-        notes.append(f"cfg_scale {cfg_scale:g} (configured default)")
-    if steps is None and d_cfg.get("steps") is not None:
-        steps = int(d_cfg["steps"])
-        notes.append(f"steps {steps} (configured default)")
+    if cfg_scale is None:
+        if d_cfg.get("cfg_scale") is not None:
+            cfg_scale = float(d_cfg["cfg_scale"])
+            notes.append(f"cfg_scale {cfg_scale:g} (configured default)")
+        else:
+            cfg_scale = _IMG_CFG_DEFAULT
+            notes.append(f"cfg_scale {cfg_scale:g} (built-in default)")
+    if steps is None:
+        if d_cfg.get("steps") is not None:
+            steps = int(d_cfg["steps"])
+            notes.append(f"steps {steps} (configured default)")
+        else:
+            steps = _IMG_STEPS_DEFAULT
+            notes.append(f"steps {steps} (built-in default)")
     width_from_cfg = False
     height_from_cfg = False
     if width is None and d_cfg.get("width"):
@@ -2452,7 +2486,15 @@ async def generate_image(
         height = int(d_cfg["height"])
         height_from_cfg = True
         notes.append(f"height {height} (configured default)")
-    if height is None and width is not None:
+    if width is None and height is None:
+        # built-in size underlay (#419): no caller size and no configured
+        # size -> the built-in 1024x1024 intent rides the size-decision
+        # pipeline below (budget render + hires to exact), so the
+        # server's 512-class default stops deciding the omit path.
+        width = _IMG_W_DEFAULT
+        height = _IMG_H_DEFAULT
+        notes.append(f"size {width}x{height} (built-in default)")
+    elif height is None and width is not None:
         # width-only request (caller or config): square fallback,
         # the pre-existing `height or width` body semantics
         height = width

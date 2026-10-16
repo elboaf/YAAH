@@ -1,9 +1,11 @@
-"""#411: model-appropriate generation defaults for generate_image.
+"""#411 (+ #419): model-appropriate generation defaults for generate_image.
 
-Caller > configured generation_defaults > omit (server defaults). The
-seed is NEVER pinned on the omit path; reseed=True asks the server for a
-fresh random draw (seed -1); the result note carries the ground truth of
-what the server actually ran, parsed from the PNG parameters chunk.
+Caller > configured generation_defaults > BUILT-IN (1024x1024, steps 4,
+cfg 1.0 - #419 retired the omit-to-server-default tail: sampling is
+never unset anymore). The seed is NEVER pinned on the omit path;
+reseed=True asks the server for a fresh random draw (seed -1); the
+result note carries the ground truth of what the server actually ran,
+parsed from the PNG parameters chunk.
 """
 import asyncio
 import base64
@@ -94,20 +96,30 @@ def _embedded_extra(legacy_body: dict) -> dict:
 # ----------------------------------------------------------------- omit path
 
 
-def test_full_omit_native_sends_no_sampling_fields(configured, tmp_path, monkeypatch):
-    """Byte-identical to pre-#411 behavior: prompt-only call, no config ->
-    no seed, no sample_params, no steps anywhere in the job body."""
+def test_full_omit_uses_built_in_defaults(configured, tmp_path, monkeypatch):
+    """#419: a prompt-only call with no config rides the BUILT-IN layer -
+    steps 4 + cfg 1.0 in sample_params, the 1024x1024 intent through the
+    size pipeline (512 budget render + hires fix to exact on the fake),
+    and never a pinned seed."""
     result = _gen(configured, tmp_path, monkeypatch)
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
     assert "seed" not in body
-    assert "sample_params" not in body
-    assert "steps" not in body
-    assert "cfg_scale" not in body
-    assert "server ran:" not in (result.get("note") or "")
+    assert body["sample_params"]["sample_steps"] == 4
+    assert body["sample_params"]["guidance"]["txt_cfg"] == 1.0
+    assert body["width"] == 512 and body["height"] == 512
+    assert body["hires"]["target_width"] == 1024
+    assert body["hires"]["target_height"] == 1024
+    assert result["width"] == 1024 and result["height"] == 1024
+    note = result.get("note") or ""
+    assert "(built-in default)" in note
+    assert "(configured default)" not in note
 
 
-def test_omit_path_capsless_has_no_extra_args_block(configured, tmp_path, monkeypatch):
+def test_omit_path_capsless_carries_built_ins_in_envelope(configured, tmp_path, monkeypatch):
+    """#419: on a caps-less server the built-in steps/cfg ride the
+    <sd_cpp_extra_args> envelope and the built-in size rides the legacy
+    size string - the omit path is fully specified everywhere."""
     _FakeClient.caps_payload = {}
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(
@@ -117,7 +129,10 @@ def test_omit_path_capsless_has_no_extra_args_block(configured, tmp_path, monkey
     )
     assert not result.get("error"), result
     _, body = _FakeClient.last
-    assert "<sd_cpp_extra_args>" not in (body.get("prompt") or "")
+    extra = _embedded_extra(body)
+    assert extra["sample_params"]["sample_steps"] == 4
+    assert extra["sample_params"]["guidance"]["txt_cfg"] == 1.0
+    assert body["size"] == "1024x1024"
 
 
 # ---------------------------------------------------------------------- seed
@@ -177,14 +192,16 @@ def test_steps_native_body_sample_params(configured, tmp_path, monkeypatch):
     _gen(configured, tmp_path, monkeypatch, steps=15)
     sp = _FakeClient.job_bodies[0]["sample_params"]
     assert sp["sample_steps"] == 15
-    assert "guidance" not in sp
+    # #419: the omit slot still fills from the built-in layer
+    assert sp["guidance"]["txt_cfg"] == 1.0
 
 
 def test_cfg_scale_native_body_guidance(configured, tmp_path, monkeypatch):
     _gen(configured, tmp_path, monkeypatch, cfg_scale=1.0)
     sp = _FakeClient.job_bodies[0]["sample_params"]
     assert sp["guidance"]["txt_cfg"] == 1.0
-    assert "sample_steps" not in sp
+    # #419: the omit slot still fills from the built-in layer
+    assert sp["sample_steps"] == 4
 
 
 def test_steps_and_cfg_together(configured, tmp_path, monkeypatch):
@@ -259,6 +276,7 @@ def test_config_defaults_apply_on_omit(configured, tmp_path, monkeypatch):
     assert "seed" not in body
     note = result.get("note") or ""
     assert "configured default" in note
+    assert "(built-in default)" not in note
     assert result["width"] == 1024 and result["height"] == 1024
 
 
@@ -323,10 +341,16 @@ def test_config_rejects_nonpositive_and_fractional_counts(configured, tmp_path, 
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
     sp = body.get("sample_params") or {}
-    assert "sample_steps" not in sp          # 4.5 rejected
+    assert sp["sample_steps"] == 4           # 4.5 rejected -> built-in (#419)
     assert sp.get("guidance", {}).get("txt_cfg") == 1.5  # free float kept
-    assert "width" not in body and "height" not in body  # 0 / -64 rejected
+    # 0 / -64 rejected -> the BUILT-IN 1024x1024 intent decides the size
+    # pipeline (512 budget render + hires to exact); junk keys never
+    # poison it, and the budget render is a normal body field now
+    assert body["width"] == 512 and body["height"] == 512
+    assert body["hires"]["target_width"] == 1024
+    assert body["hires"]["target_height"] == 1024
     note = result.get("note") or ""
+    assert "steps 4 (built-in default)" in note
     assert "steps (configured" not in note
     assert "width (configured" not in note
     assert "height (configured" not in note
@@ -366,8 +390,9 @@ def test_junk_config_values_are_ignored(configured, tmp_path, monkeypatch):
     result = _gen(configured, tmp_path, monkeypatch)
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
-    assert "sample_params" not in body
+    assert body["sample_params"]["sample_steps"] == 4  # built-in underlay
     assert "configured default" not in (result.get("note") or "")
+    assert "(built-in default)" in (result.get("note") or "")
 
 
 # -------------------------------------------------- ground-truth result note
@@ -431,3 +456,106 @@ def test_schema_documents_steps_cfg_reseed():
     )
     desc = tools.GENERATE_IMAGE_SCHEMA["function"]["description"]
     assert "fast-draft" in desc and "15-20" in desc
+
+
+# ------------------------------------------------------------------ #419
+
+
+def test_built_in_size_reaches_capsless_legacy_size(configured, tmp_path, monkeypatch):
+    """#419 second transport leg: with NO capabilities reply, a caller
+    size rides the legacy `size` string - built-ins already covered by
+    test_omit_path_capsless_carries_built_ins_in_envelope above."""
+    _FakeClient.caps_payload = {}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 512}, workspace=str(tmp_path)
+        )
+    )
+    assert not result.get("error"), result
+    _, body = _FakeClient.last
+    assert body["size"] == "512x512"
+
+
+def test_caller_size_and_config_size_partial_mix(configured, tmp_path, monkeypatch):
+    """Caller height 768 with no width anywhere: width squares to the
+    caller height (pre-existing `height or width` semantics); no
+    configured-default note fires for the squared width."""
+    cfgmod.save_config(
+        {
+            "image_generation": {
+                "provider": "sdcpp",
+                "api_base": "http://127.0.0.1:1234",
+                "generation_defaults": {"steps": 6},
+            }
+        }
+    )
+    result = _gen(configured, tmp_path, monkeypatch, height=768)
+    assert not result.get("error"), result
+    body = _FakeClient.job_bodies[0]
+    assert body["width"] == 512 and body["height"] == 512
+    # height-only intent squares to 768x768 (pre-existing semantics);
+    # budget render 512 + hires fix lands the exact squared target
+    assert body["hires"]["target_width"] == 768
+    assert body["hires"]["target_height"] == 768
+    assert body["sample_params"]["sample_steps"] == 6
+    note = result.get("note") or ""
+    assert "steps 6 (configured default)" in note
+    assert "size 1024x1024" not in note
+    assert "width (configured" not in note
+
+
+def test_mixed_config_and_built_in_notes(configured, tmp_path, monkeypatch):
+    """Config overrides only steps; cfg_scale + size report their
+    BUILT-IN source so the note tells the truth about every layer."""
+    cfgmod.save_config(
+        {
+            "image_generation": {
+                "provider": "sdcpp",
+                "api_base": "http://127.0.0.1:1234",
+                "generation_defaults": {"steps": 12},
+            }
+        }
+    )
+    result = _gen(configured, tmp_path, monkeypatch)
+    assert not result.get("error"), result
+    body = _FakeClient.job_bodies[0]
+    assert body["sample_params"]["sample_steps"] == 12
+    assert body["sample_params"]["guidance"]["txt_cfg"] == 1.0
+    assert body["hires"]["target_width"] == 1024
+    note = result.get("note") or ""
+    assert "steps 12 (configured default)" in note
+    assert "cfg_scale 1 (built-in default)" in note
+    assert "size 1024x1024 (built-in default)" in note
+
+
+def test_reseed_still_forces_fresh_draw_over_built_ins(configured, tmp_path, monkeypatch):
+    """reseed=True stays a fresh-random request (seed -1) even though
+    #419 pins everything else on the omit path."""
+    result = _gen(configured, tmp_path, monkeypatch, reseed=True)
+    assert not result.get("error"), result
+    body = _FakeClient.job_bodies[0]
+    assert body["seed"] == -1
+    assert body["sample_params"]["sample_steps"] == 4
+
+
+def test_nonpositive_config_width_falls_through_to_built_in(
+    configured, tmp_path, monkeypatch
+):
+    """Junk/nonpositive config size keys are dropped and the BUILT-IN
+    size underlay catches the omit (pre-#419 they fell to the server)."""
+    cfgmod.save_config(
+        {
+            "image_generation": {
+                "provider": "sdcpp",
+                "api_base": "http://127.0.0.1:1234",
+                "generation_defaults": {"width": -64, "height": 0},
+            }
+        }
+    )
+    result = _gen(configured, tmp_path, monkeypatch)
+    assert not result.get("error"), result
+    body = _FakeClient.job_bodies[0]
+    assert body["hires"]["target_width"] == 1024
+    assert body["hires"]["target_height"] == 1024
+    assert "(built-in default)" in (result.get("note") or "")

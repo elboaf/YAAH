@@ -270,15 +270,16 @@ def test_sub_agents_never_get_image_tools(configured):
 # --------------------------------------------------- capability-aware sizes
 
 
-def test_no_size_requested_uses_server_default(configured, tmp_path, monkeypatch):
-    """The harness hard-codes no resolution: no width/height -> no size in
-    the request body; the server applies its own default."""
+def test_no_size_requested_uses_built_in_defaults(configured, tmp_path, monkeypatch):
+    """#419, caps-less legacy transport: the omit path is never
+    size/sampling-blind - the built-in 1024x1024 rides the legacy size
+    string (pre-#419 this was None = server default 512)."""
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(
         tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
     )
     assert not result.get("error"), result
-    assert _FakeClient.gen_sizes == [None]
+    assert _FakeClient.gen_sizes == ["1024x1024"]
 
 
 def test_oversized_request_uses_hires_fix(configured, tmp_path, monkeypatch):
@@ -431,9 +432,11 @@ def test_hires_upscaler_name_comes_from_capabilities(configured, tmp_path, monke
     assert _FakeClient.job_bodies[0]["hires"]["upscaler"] == "MyUpscaler_x2"
 
 
-def test_no_size_requested_stays_pure_default(configured, tmp_path, monkeypatch):
-    """No width/height: no hires object at all - the server default
-    applies verbatim (same as before this change)."""
+def test_no_size_requested_rides_built_in_size(configured, tmp_path, monkeypatch):
+    """#419: no width/height from caller or config -> the BUILT-IN
+    1024x1024 intent rides the normal size pipeline: budget render +
+    hires fix to the exact target (the server's own default no longer
+    decides the omit path)."""
     _FakeClient.caps_payload = {
         "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
         "defaults": {"width": 512, "height": 512},
@@ -446,8 +449,11 @@ def test_no_size_requested_stays_pure_default(configured, tmp_path, monkeypatch)
     )
     assert not result.get("error"), result
     jb = _FakeClient.job_bodies[0]
-    assert "width" not in jb and "height" not in jb
-    assert "hires" not in jb
+    assert jb["width"] == 512 and jb["height"] == 512
+    assert jb["hires"]["target_width"] == 1024
+    assert jb["hires"]["target_height"] == 1024
+    assert result["width"] == 1024 and result["height"] == 1024
+    assert "(built-in default)" in (result.get("note") or "")
 
 
 def test_within_default_request_still_renders_at_default(configured, tmp_path, monkeypatch):
@@ -563,7 +569,13 @@ def test_generate_image_end_to_end(configured, tmp_path, monkeypatch):
     embedded = json.loads(
         body["prompt"].split("<sd_cpp_extra_args>")[1].split("</sd_cpp_extra_args>")[0]
     )
-    assert embedded == {"negative_prompt": "dogs", "seed": 42}
+    # #419: sampling is always specified - built-in steps/cfg ride the
+    # envelope even when the caller only named negative_prompt + seed
+    assert embedded == {
+        "negative_prompt": "dogs",
+        "seed": 42,
+        "sample_params": {"sample_steps": 4, "guidance": {"txt_cfg": 1.0}},
+    }
     assert result["images"] and result["images"][0].startswith("generate_image/")
     assert result["path"].startswith("ai-images/")
     assert result["display"] == "inline"
@@ -893,7 +905,10 @@ def test_transient_poll_errors_do_not_fail_the_job(configured, tmp_path, monkeyp
     ]
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(
-        tools.execute_tool("generate_image", {"prompt": "x"}, workspace=str(tmp_path))
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 512, "height": 512},
+            workspace=str(tmp_path),
+        )
     )
     assert not result.get("error"), result
     assert result["width"] == 512 and result["height"] == 512
@@ -968,6 +983,9 @@ def test_legacy_server_without_native_api_uses_sync_fallback(configured, tmp_pat
     )
     assert not result.get("error"), result
     assert _FakeClient.gen_calls == 1
+    # the omit path's built-in 1024x1024 intent rides the sample_params
+    # envelope; the mid-fallback legacy size string carries the BUDGET
+    # render dims (the native body never named an explicit size)
     assert _FakeClient.gen_sizes == ["512x512"]
     assert _FakeClient.job_bodies == []
 
