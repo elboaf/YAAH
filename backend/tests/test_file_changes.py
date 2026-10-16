@@ -157,3 +157,32 @@ async def test_non_git_snapshot_reports_binary_and_text_changes(tmp_path):
     assert by_path["note.txt"]["added"] == 1
     assert by_path["note.txt"]["deleted"] == 1
     assert by_path["image.bin"]["binary"] is True
+
+
+@pytest.mark.asyncio
+async def test_summarize_caps_files_list_and_preserves_aggregates():
+    """When the files list exceeds the cap, the summary is truncated but
+    the aggregate added/deleted counts remain accurate (computed from the
+    full list), and truncated/total_files are set."""
+    big_list = [
+        {"path": f"file_{i:04d}.txt", "added": 1, "deleted": 0, "binary": False}
+        for i in range(600)
+    ]
+    summary = await summarize_file_changes(big_list)
+    assert summary["truncated"] is True
+    assert summary["total_files"] == 600
+    assert len(summary["files"]) == 500  # _MAX_FILES_IN_SUMMARY
+    assert summary["added"] == 600  # computed from full list
+    assert summary["deleted"] == 0
+
+    # Small list should not be truncated.
+    small_list = [
+        {"path": f"file_{i:04d}.txt", "added": 2, "deleted": 1, "binary": False}
+        for i in range(50)
+    ]
+    summary = await summarize_file_changes(small_list)
+    assert summary["truncated"] is False
+    assert summary["total_files"] == 50
+    assert len(summary["files"]) == 50
+    assert summary["added"] == 100
+    assert summary["deleted"] == 50
