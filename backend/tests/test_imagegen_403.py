@@ -327,9 +327,31 @@ def test_depth_from_without_ref_feature_skips_download(configured, tmp_path, mon
     assert "depth map skipped" in r.get("note", "")
 
 
-def test_refs_skip_hires_second_pass(configured, tmp_path, monkeypatch):
-    """Reference renders take the ESRGAN chain instead of the hires
-    second diffusion pass (re-diffusion drifts off-reference)."""
+def test_refs_within_limits_render_natively_without_hires(configured, tmp_path, monkeypatch):
+    """#421: reference renders within the generation limits are NATIVE
+    at the target - no hires second diffusion pass (re-diffusion
+    drifts off-reference) and no ESRGAN chain either: the first pass
+    already sees the full canvas."""
+    _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
+    (ref,) = _ref_files(tmp_path, "photo.png")
+    r = _run(
+        "generate_image",
+        {"prompt": "x", "reference_images": [ref], "width": 1024, "height": 1024},
+        str(tmp_path),
+    )
+    assert not r.get("error"), r
+    body = _last_body()
+    assert body["width"] == 1024 and body["height"] == 1024
+    assert "hires" not in body, "reference renders must skip the second diffusion pass"
+    assert _FakeClient.upscale_calls == 0
+    assert "native render at 1024x1024" in r.get("note", "")
+
+
+def test_refs_explicit_hires_fix_keeps_conservative_route(configured, tmp_path, monkeypatch):
+    """#421: refs + hires_fix=True keeps the pre-#421 conservative
+    behavior - budget render, and the hires second diffusion pass is
+    skipped in favor of the ESRGAN chain (re-diffusion drifts
+    off-reference)."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
     _FakeClient.upscale_payload = {
         "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
@@ -342,7 +364,8 @@ def test_refs_skip_hires_second_pass(configured, tmp_path, monkeypatch):
     (ref,) = _ref_files(tmp_path, "photo.png")
     r = _run(
         "generate_image",
-        {"prompt": "x", "reference_images": [ref], "width": 1024, "height": 1024},
+        {"prompt": "x", "reference_images": [ref], "width": 1024, "height": 1024,
+         "hires_fix": True},
         str(tmp_path),
     )
     assert not r.get("error"), r
@@ -352,10 +375,15 @@ def test_refs_skip_hires_second_pass(configured, tmp_path, monkeypatch):
     assert "hires second diffusion pass is skipped" in r.get("note", "")
 
 
-def test_plain_oversized_still_uses_hires(configured, tmp_path, monkeypatch):
-    """The refs-only hires skip must not leak into plain generations."""
+def test_plain_within_limits_still_uses_hires_when_explicitly_asked(configured, tmp_path, monkeypatch):
+    """#421: plain generations render natively by default; the hires
+    second pass rides only when the caller opts in (hires_fix=True)."""
     _caps_feat(configured, monkeypatch, hires=True, vae_tiling=True)
-    r = _run("generate_image", {"prompt": "x", "width": 1024, "height": 1024}, str(tmp_path))
+    r = _run(
+        "generate_image",
+        {"prompt": "x", "width": 1024, "height": 1024, "hires_fix": True},
+        str(tmp_path),
+    )
     assert not r.get("error"), r
     assert "hires" in _last_body()
 
