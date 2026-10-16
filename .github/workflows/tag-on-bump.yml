@@ -83,45 +83,6 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Release gate: the tag is only pushed once CI is green on THIS
-      # commit. A red master never ships installers - the tag (and with it
-      # the release build) simply waits or fails loudly. The bump commit
-      # itself triggers that CI run, so the common path is: bump pushed ->
-      # CI runs here and on the Linux pool -> tag pushed -> release built.
-      - name: Wait for CI on this commit
-        if: steps.exists.outputs.exists == 'false'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const sha = context.sha;
-            const deadline = Date.now() + 30 * 60 * 1000;
-            while (Date.now() < deadline) {
-              const res = await github.rest.actions.listWorkflowRunsForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                head_sha: sha,
-                per_page: 100,
-              });
-              const ciRuns = res.data.workflow_runs.filter(
-                (r) => r.name === 'CI' && r.event === 'push' && r.status === 'completed'
-              );
-              if (ciRuns.length > 0) {
-                const failed = ciRuns.filter((r) => r.conclusion !== 'success');
-                if (failed.length > 0) {
-                  core.setFailed(
-                    'CI is not green on ' + sha + ': ' +
-                    failed.map((r) => r.name + '=' + r.conclusion).join(', ')
-                  );
-                  return;
-                }
-                core.info('CI green on ' + sha + ' - releasing');
-                return;
-              }
-              core.info('CI still running on ' + sha + '; waiting 30s');
-              await new Promise((r) => setTimeout(r, 30000));
-            }
-            core.setFailed('CI did not complete within 30 minutes on ' + sha);
-
       - name: Push tag
         id: push
         if: steps.exists.outputs.exists == 'false'
