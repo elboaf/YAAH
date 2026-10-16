@@ -1529,11 +1529,13 @@ GENERATE_IMAGE_SCHEMA = {
             "is needed. Omitted size/steps/cfg ride YAAH's built-in "
             "defaults (1024x1024, four steps, cfg 1.0 - tuned for "
             "guidance-distilled klein-class models; a configured or "
-            "explicit value always wins). The diffusion model never "
-            "renders above the server's default-size pixel budget; "
-            "larger targets are reached via the server's hires fix "
-            "(upscale + second diffusion pass) or plain upscaling, and "
-            "the result reports what actually happened. Four steps is "
+            "explicit value always wins). The render happens AT the "
+            "requested size whenever the server's limits allow it - "
+            "composition is decided by the first pass's canvas (a "
+            "512 render drops subjects on klein-class models), so "
+            "native rendering is the default; hires_fix=true opts "
+            "into the conservative small-VRAM route (budget render "
+            "+ hires second pass). Four steps is "
             "fast-draft guidance (typical look: soft anatomy, smudged "
             "eyes, mushy text) - pass steps for "
             "detail-critical text-to-image (~15-20; cost is near-linear "
@@ -1560,10 +1562,10 @@ GENERATE_IMAGE_SCHEMA = {
                     "description": (
                         "Desired final image width in pixels. Omit for "
                         "the built-in default (1024) unless a configured "
-                        "default applies. Bigger than the server's "
-                        "default-size budget is fine: the render stays "
-                        "small and the size is reached via hires fix "
-                        "(default) or upscaling."
+                        "default applies. The render happens at this "
+                        "size (within the server's limits); targets "
+                        "beyond the limits render at the maximum legal "
+                        "size and are enlarged."
                     ),
                 },
                 "height": {
@@ -1577,14 +1579,19 @@ GENERATE_IMAGE_SCHEMA = {
                 "hires_fix": {
                     "type": "boolean",
                     "description": (
-                        "Above-default sizes: run the server's hires "
-                        "fix (ESRGAN upscale + a second diffusion pass "
-                        "at the exact target - sharper, slower, heavier "
-                        "on VRAM; the server tiles the VAE to cope). "
-                        "false = ESRGAN upscale only (fast; may "
-                        "overshoot slightly). Default: true when the "
-                        "server supports it. Ignored when no size above "
-                        "the server default is requested."
+                        "Opt into the conservative small-VRAM route: the "
+                        "render stays inside the server's default-size "
+                        "pixel budget and a server-side hires fix "
+                        "(ESRGAN upscale + a second diffusion pass at "
+                        "the exact target) reaches the full size - "
+                        "sharper, slower, heavier on VRAM; the server "
+                        "tiles the VAE to cope. Default false: sizes "
+                        "within the server's limits render natively "
+                        "(the first pass decides composition - a "
+                        "budget-sized render loses subjects on "
+                        "klein-class models), and sizes beyond the "
+                        "limits render at the maximum legal size + "
+                        "ESRGAN enlargement."
                     ),
                 },
                 "negative_prompt": {
@@ -2721,89 +2728,133 @@ async def generate_image(
             store_rel, raw_out, dims, None, notes, workspace
         )
 
-    # --- size decision (capability-aware, conservative) ------------------
-    # The diffusion render never exceeds the server default's pixel
-    # budget: that is what the operator's model/VRAM comfortably handles
-    # (a 9B flux at 1024 native can thrash weight paging for minutes).
-    # Sizes beyond the default go through the server's HIRES FIX (render
-    # small, ESRGAN-upscale, second diffusion pass at the exact target),
-    # with per-request VAE tiling on the second pass for memory; the
-    # ESRGAN upscale chain is the fallback when hires is unsupported or
-    # explicitly disabled (hires_fix=False).
+    # --- size decision (#421: native render within limits is default) ----
+    # The requested size IS the diffusion render's size whenever the
+    # server's GENERATION limits allow it. Pre-#421 the render was
+    # clamped into the server's DEFAULT pixel budget (a VRAM guess, not
+    # a capability) and the remainder routed through the server's hires
+    # fix - but for klein-class models the FIRST pass decides the
+    # composition (at a 512 render the model drops subjects and garbles
+    # anatomy; research notes 13-14), and a second pass re-diffusing an
+    # upscaled 512 frame cannot resurrect what pass 1 never drew. Live
+    # A/B (note 23): native 1024 beat 512+hires on quality AND time.
+    # The conservative budget+hires route survives as the explicit
+    # hires_fix=True mode for small-VRAM cards; the ESRGAN chain reaches
+    # targets beyond the server's generation limits.
     gen_w, gen_h = b["def_w"], b["def_h"]
     want_w = width or 0
     want_h = height or 0
     if want_w or want_h:
-        # The render budget holds the requested aspect ratio; the render
-        # itself never exceeds the target (no rendering big to scale down).
-        budget = float(b["def_w"]) * float(b["def_h"])
-        ratio = (want_w or want_h) / max(want_h or want_w, 1.0)
-        gw = max(64.0, (budget * ratio) ** 0.5)
-        gh = max(64.0, gw / max(ratio, 0.0001))
-        gen_w = _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"])
-        gen_h = _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"])
         tw, th = _hires_plan(int(want_w or want_h), int(want_h or want_w), b)
-        over = max(tw / gen_w, th / gen_h, 1.0)
-        want_hires = bool(hires_fix) if hires_fix is not None else True
-        if over <= 1.0:
-            # the render already meets the request
-            notes.append(
-                f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
-                "(within the server's default budget)"
-            )
-        elif b["hires"] and b["upscale"] and want_hires and refs:
-            # A second diffusion pass can drift the subject away from
-            # the reference; ESRGAN enlargement re-diffuses nothing.
-            up_target = (
-                _clamp(tw, 64, b["max_up_w"]),
-                _clamp(th, 64, b["max_up_h"]),
-            )
-            notes.append(
-                f"reference-guided render stays at {gen_w}x{gen_h}; "
-                "the hires second diffusion pass is skipped to "
-                "preserve reference fidelity (upscale_image can enlarge)"
-            )
-        elif b["hires"] and b["upscale"] and want_hires:
-            # server-side hires fix: exact target via upscale + second
-            # diffusion pass. Default-on (the user's explicit call: the
-            # heavier second pass is accepted for exact sizes + detail);
-            # hires_fix=False escapes to the fast ESRGAN chain. VAE
-            # tiling rides along per-request for decode memory.
-            hires_body = {
-                "hires": {
-                    "enabled": True,
-                    "target_width": tw,
-                    "target_height": th,
-                    "upscaler": up_name,
-                    "denoising_strength": 0.7,
-                }
-            }
-            if b["vae_tiling"]:
-                hires_body["vae_tiling_params"] = {"enabled": True}
-            notes.append(
-                f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
-                f"(the model's default budget), then hires fix to "
-                f"{tw}x{th} (ESRGAN upscale + second diffusion pass"
-                + (
-                    ", VAE tiled for memory"
-                    if "vae_tiling_params" in hires_body
-                    else ""
+        if hires_fix is True:
+            # CONSERVATIVE MODE (explicit opt-in): render within the
+            # server's default pixel budget and reach the exact target
+            # via the server's hires fix (ESRGAN upscale + second
+            # diffusion pass; VAE tiling per-request for decode memory).
+            # The pre-#421 default policy, kept for 12GB-class cards.
+            budget = float(b["def_w"]) * float(b["def_h"])
+            ratio = (want_w or want_h) / max(want_h or want_w, 1.0)
+            gw = max(64.0, (budget * ratio) ** 0.5)
+            gh = max(64.0, gw / max(ratio, 0.0001))
+            gen_w = _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"])
+            gen_h = _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"])
+            over = max(tw / gen_w, th / gen_h, 1.0)
+            if over <= 1.0:
+                # the render already meets the request
+                notes.append(
+                    f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
+                    "(within the server's default budget)"
                 )
-                + ")"
-            )
-        elif b["upscale"]:
-            # hires unsupported or explicitly off: ESRGAN chain (may
-            # overshoot; the chain stops as soon as the target is met)
-            up_target = (
-                _clamp(tw, 64, b["max_up_w"]),
-                _clamp(th, 64, b["max_up_h"]),
-            )
+            elif b["hires"] and b["upscale"] and refs:
+                # A second diffusion pass can drift the subject away from
+                # the reference; ESRGAN enlargement re-diffuses nothing.
+                up_target = (
+                    _clamp(tw, 64, b["max_up_w"]),
+                    _clamp(th, 64, b["max_up_h"]),
+                )
+                notes.append(
+                    f"reference-guided render stays at {gen_w}x{gen_h}; "
+                    "the hires second diffusion pass is skipped to "
+                    "preserve reference fidelity (upscale_image can enlarge)"
+                )
+            elif b["hires"] and b["upscale"]:
+                # server-side hires fix: exact target via upscale + second
+                # diffusion pass. VAE tiling rides along per-request for
+                # decode memory.
+                hires_body = {
+                    "hires": {
+                        "enabled": True,
+                        "target_width": tw,
+                        "target_height": th,
+                        "upscaler": up_name,
+                        "denoising_strength": 0.7,
+                    }
+                }
+                if b["vae_tiling"]:
+                    hires_body["vae_tiling_params"] = {"enabled": True}
+                notes.append(
+                    f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
+                    f"(the model's default budget), then hires fix to "
+                    f"{tw}x{th} (ESRGAN upscale + second diffusion pass"
+                    + (
+                        ", VAE tiled for memory"
+                        if "vae_tiling_params" in hires_body
+                        else ""
+                    )
+                    + ")"
+                )
+            elif b["upscale"]:
+                # hires unsupported: ESRGAN chain (may overshoot; the
+                # chain stops as soon as the target is met)
+                up_target = (
+                    _clamp(tw, 64, b["max_up_w"]),
+                    _clamp(th, 64, b["max_up_h"]),
+                )
+            else:
+                notes.append(
+                    f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
+                    "(no ESRGAN upscaler is loaded on the server, so it "
+                    "cannot be enlarged)"
+                )
         else:
-            notes.append(
-                f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
-                "(no ESRGAN upscaler is loaded on the server, so it "
-                "cannot be enlarged)"
-            )
+            # NATIVE RENDER (default): the target, 64-aligned into the
+            # server's generation limits, is the render itself. No hires
+            # detour: the first pass sees the full canvas.
+            over_limit = want_w > b["max_w"] or want_h > b["max_h"]
+            if over_limit:
+                # clamp to the max legal size PRESERVING the request's
+                # aspect ratio (the hires_plan target is per-axis and
+                # would square the shape)
+                scale = min(
+                    float(b["max_w"]) / max(want_w, 1),
+                    float(b["max_h"]) / max(want_h, 1),
+                )
+                gen_w = _clamp(_mult64(want_w * scale), b["min_w"], b["max_w"])
+                gen_h = _clamp(_mult64(want_h * scale), b["min_h"], b["max_h"])
+            else:
+                gen_w, gen_h = tw, th
+            if not over_limit:
+                notes.append(f"native render at {gen_w}x{gen_h}")
+            elif b["upscale"]:
+                # Beyond the generation limits no diffusion pass helps
+                # (a hires target is bound by the same limits): render
+                # at the maximum legal size, then enlarge toward the
+                # request with the ESRGAN chain.
+                up_target = (
+                    _clamp(_mult64(want_w or want_h), 64, b["max_up_w"]),
+                    _clamp(_mult64(want_h or want_w), 64, b["max_up_h"]),
+                )
+                notes.append(
+                    f"requested {want_w}x{want_h} exceeds the server's "
+                    f"generation limits; rendering {gen_w}x{gen_h} (its "
+                    "maximum) and enlarging toward the request"
+                )
+            else:
+                notes.append(
+                    f"requested {want_w}x{want_h} exceeds the server's "
+                    f"generation limits; rendered at {gen_w}x{gen_h} (its "
+                    "maximum - no ESRGAN upscaler is loaded to enlarge)"
+                )
         if width or height:
             # native bodies take the explicit size; when the user gave
             # none we omit it so the server default applies verbatim

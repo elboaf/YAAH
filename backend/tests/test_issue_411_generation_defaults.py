@@ -97,19 +97,18 @@ def _embedded_extra(legacy_body: dict) -> dict:
 
 
 def test_full_omit_uses_built_in_defaults(configured, tmp_path, monkeypatch):
-    """#419: a prompt-only call with no config rides the BUILT-IN layer -
-    steps 4 + cfg 1.0 in sample_params, the 1024x1024 intent through the
-    size pipeline (512 budget render + hires fix to exact on the fake),
-    and never a pinned seed."""
+    """#419 + #421: a prompt-only call with no config rides the
+    BUILT-IN layer - steps 4 + cfg 1.0 in sample_params, a NATIVE
+    1024x1024 render (within limits; no hires detour), and never a
+    pinned seed."""
     result = _gen(configured, tmp_path, monkeypatch)
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
     assert "seed" not in body
     assert body["sample_params"]["sample_steps"] == 4
     assert body["sample_params"]["guidance"]["txt_cfg"] == 1.0
-    assert body["width"] == 512 and body["height"] == 512
-    assert body["hires"]["target_width"] == 1024
-    assert body["hires"]["target_height"] == 1024
+    assert body["width"] == 1024 and body["height"] == 1024
+    assert "hires" not in body
     assert result["width"] == 1024 and result["height"] == 1024
     note = result.get("note") or ""
     assert "(built-in default)" in note
@@ -268,11 +267,9 @@ def test_config_defaults_apply_on_omit(configured, tmp_path, monkeypatch):
     body = _FakeClient.job_bodies[0]
     assert body["sample_params"]["sample_steps"] == 4
     assert body["sample_params"]["guidance"]["txt_cfg"] == 1.0
-    # the render budget stays conservative (the server's 512 default);
-    # the configured 1024 size is reached via the hires fix, in-band
-    assert body["width"] == 512 and body["height"] == 512
-    assert body["hires"]["target_width"] == 1024
-    assert body["hires"]["target_height"] == 1024
+    # the configured 1024 size IS the native render (#421)
+    assert body["width"] == 1024 and body["height"] == 1024
+    assert "hires" not in body
     assert "seed" not in body
     note = result.get("note") or ""
     assert "configured default" in note
@@ -343,12 +340,10 @@ def test_config_rejects_nonpositive_and_fractional_counts(configured, tmp_path, 
     sp = body.get("sample_params") or {}
     assert sp["sample_steps"] == 4           # 4.5 rejected -> built-in (#419)
     assert sp.get("guidance", {}).get("txt_cfg") == 1.5  # free float kept
-    # 0 / -64 rejected -> the BUILT-IN 1024x1024 intent decides the size
-    # pipeline (512 budget render + hires to exact); junk keys never
-    # poison it, and the budget render is a normal body field now
-    assert body["width"] == 512 and body["height"] == 512
-    assert body["hires"]["target_width"] == 1024
-    assert body["hires"]["target_height"] == 1024
+    # 0 / -64 rejected -> the BUILT-IN 1024x1024 is the native render
+    # (#421); junk keys never poison it
+    assert body["width"] == 1024 and body["height"] == 1024
+    assert "hires" not in body
     note = result.get("note") or ""
     assert "steps 4 (built-in default)" in note
     assert "steps (configured" not in note
@@ -358,7 +353,7 @@ def test_config_rejects_nonpositive_and_fractional_counts(configured, tmp_path, 
 
 def test_config_width_only_squares(configured, tmp_path, monkeypatch):
     """A configured width with no height keeps the pre-existing square
-    semantics (render budget from the full 1024x1024 intent)."""
+    semantics (native render from the full 1024x1024 intent)."""
     cfgmod.save_config(
         {
             "image_generation": {
@@ -371,10 +366,10 @@ def test_config_width_only_squares(configured, tmp_path, monkeypatch):
     result = _gen(configured, tmp_path, monkeypatch)
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
-    # render budget from the full 1024x1024 intent (512 render + hires
-    # to 1024), NOT a 1024x512 half-budget
-    assert body["hires"]["target_width"] == 1024
-    assert body["hires"]["target_height"] == 1024
+    # native render from the full 1024x1024 intent (#421), NOT a
+    # 1024x512 half-render
+    assert body["width"] == 1024 and body["height"] == 1024
+    assert "hires" not in body
 
 
 def test_junk_config_values_are_ignored(configured, tmp_path, monkeypatch):
@@ -493,11 +488,10 @@ def test_caller_size_and_config_size_partial_mix(configured, tmp_path, monkeypat
     result = _gen(configured, tmp_path, monkeypatch, height=768)
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
-    assert body["width"] == 512 and body["height"] == 512
-    # height-only intent squares to 768x768 (pre-existing semantics);
-    # budget render 512 + hires fix lands the exact squared target
-    assert body["hires"]["target_width"] == 768
-    assert body["hires"]["target_height"] == 768
+    # height-only intent squares to 768x768 (pre-existing semantics)
+    # and renders natively (#421)
+    assert body["width"] == 768 and body["height"] == 768
+    assert "hires" not in body
     assert body["sample_params"]["sample_steps"] == 6
     note = result.get("note") or ""
     assert "steps 6 (configured default)" in note
@@ -522,7 +516,7 @@ def test_mixed_config_and_built_in_notes(configured, tmp_path, monkeypatch):
     body = _FakeClient.job_bodies[0]
     assert body["sample_params"]["sample_steps"] == 12
     assert body["sample_params"]["guidance"]["txt_cfg"] == 1.0
-    assert body["hires"]["target_width"] == 1024
+    assert body["width"] == 1024 and body["height"] == 1024
     note = result.get("note") or ""
     assert "steps 12 (configured default)" in note
     assert "cfg_scale 1 (built-in default)" in note
@@ -543,7 +537,7 @@ def test_nonpositive_config_width_falls_through_to_built_in(
     configured, tmp_path, monkeypatch
 ):
     """Junk/nonpositive config size keys are dropped and the BUILT-IN
-    size underlay catches the omit (pre-#419 they fell to the server)."""
+    size underlay catches the omit (native render, #421)."""
     cfgmod.save_config(
         {
             "image_generation": {
@@ -556,6 +550,6 @@ def test_nonpositive_config_width_falls_through_to_built_in(
     result = _gen(configured, tmp_path, monkeypatch)
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
-    assert body["hires"]["target_width"] == 1024
-    assert body["hires"]["target_height"] == 1024
+    assert body["width"] == 1024 and body["height"] == 1024
+    assert "hires" not in body
     assert "(built-in default)" in (result.get("note") or "")
