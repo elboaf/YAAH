@@ -127,15 +127,40 @@ def test_general_purpose_prompt_mentions_every_resolved_tool():
 def test_parent_prose_names_match_its_schema_set():
     """#181 AC3 (parent side): every name in the parent's schema set
     appears in the rendered prose list (annotated or bare) — no more
-    schema-without-mention drift like search_conversation_history."""
+    schema-without-mention drift like search_conversation_history.
+
+    Sandbox tools live in the variance block (sandbox section) since #375
+    — collect prose names from both the core "You have tools:" line and
+    the sandbox section.
+    """
     prompt = loop._default_system_prompt("")
-    prose = _prose_names(prompt)
+    core_names = _prose_names(prompt)
+    # Extract sandbox tool names from the sandbox section (lines that
+    # start with "Boot with `sandbox_test`" etc.). The sandbox section
+    # uses backtick-wrapped tool names.
+    sandbox_names: set[str] = set()
+    in_sandbox = False
+    for line in prompt.splitlines():
+        if line.startswith("# Windows Sandbox"):
+            in_sandbox = True
+            # Extract inline backtick names from the same line
+            for part in line.split("`"):
+                if len(part.split()) == 1 and part and "_" in part:
+                    sandbox_names.add(part)
+        elif in_sandbox and line.startswith("# "):
+            in_sandbox = False
+        elif in_sandbox:
+            # Extract backtick-wrapped tool names from section bullets
+            for part in line.split("`"):
+                if len(part.split()) == 1 and part and "_" in part:
+                    sandbox_names.add(part)
+    all_names = core_names | sandbox_names
     schema_names = {
         s["function"]["name"] for s in tools.get_schemas()
     }
     # tools conditionally stripped (install_git) may be
     # absent from the schema set; everything present must be mentioned.
-    missing = schema_names - _drop_annotation_overflow(prose)
+    missing = schema_names - _drop_annotation_overflow(all_names)
     assert not missing, missing
 
 

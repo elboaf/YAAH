@@ -802,26 +802,16 @@ def _default_system_prompt(workspace: str = "") -> str:
         windows = os.name == "nt"
         env = _local_env_line()
 
-    tools: list[str] = ["bash (shell commands)"]
-    sandbox_section = ""
+    # Build the core tool list (stable regardless of sandbox.enabled).
+    # Sandbox_* tools are conditional on sandbox.enabled and belong in the
+    # variance section, not the fixed core (#375).
+    core_tools: list[str] = ["bash (shell commands)"]
     if windows:
-        tools.append("powershell (Windows PowerShell)")
-        if host is None:
-            from backend.agent import sandbox as sandbox_mod
-
-            if sandbox_enabled():
-                tools += [
-                    "sandbox_test (boot/reuse a disposable Windows Sandbox VM "
-                    "for tests that need isolation, such as servers/ports or GUI checks)",
-                    "sandbox_run (run a command inside that VM)",
-                    "sandbox_status", "sandbox_stop",
-                ]
-                sandbox_section = sandbox_mod.prompt_section()
-
+        core_tools.append("powershell (Windows PowerShell)")
     # #181: the prose line must cover the whole schema set. The tail tools
     # below previously existed only as schemas (search_conversation_history
     # was never mentioned anywhere); annotations keep the useful pointers.
-    tools += [
+    core_tools += [
         "web_search", "web_fetch", "view_image", "read_file", "write_file",
         "create_file", "edit_file", "delete_file", "move_file",
         "search_files",
@@ -837,7 +827,7 @@ def _default_system_prompt(workspace: str = "") -> str:
     ]
 
     # 1-3. Fixed core: identity + env + tools + guidelines + ask-user.
-    prompt = _build_fixed_core(env, tools)
+    prompt = _build_fixed_core(env, core_tools)
 
     # 4-5. Spoken briefing + persona (conditional: #207/#295).
     spoken = _build_spoken_briefing_block()
@@ -845,6 +835,12 @@ def _default_system_prompt(workspace: str = "") -> str:
         prompt += spoken
 
     # 6. Sandbox section (conditional: #179, #186).
+    sandbox_section = ""
+    if windows and host is None:
+        from backend.agent import sandbox as sandbox_mod
+
+        if sandbox_enabled():
+            sandbox_section = sandbox_mod.prompt_section()
     if sandbox_section:
         # #173: append with the standard separator — sandbox.prompt_section()
         # opens with a markdown H1, which would glue mid-line otherwise.
