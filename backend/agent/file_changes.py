@@ -89,6 +89,11 @@ _MAX_FILE_BYTES = 2_000_000
 # gathered everything the diff needs. Bounded memory for huge trees.
 _MAX_TOTAL_BYTES = 64_000_000
 
+# Per-run summary: the files list feeds a model system message, not storage.
+# The first N entries cover the vast majority of changed files in real work;
+# beyond that, the aggregate added/deleted counts carry the signal.
+_MAX_FILES_IN_SUMMARY = 500
+
 
 def _filesystem_snapshot(workspace: str) -> dict[str, bytes]:
     """Capture a non-Git folder without following symlinks, entering .git,
@@ -229,12 +234,23 @@ async def summarize_file_changes(
     """
     if not files:
         return None
+    # Cap the files list so persisted summaries stay bounded.
+    if len(files) > _MAX_FILES_IN_SUMMARY:
+        capped_files = files[:_MAX_FILES_IN_SUMMARY]
+        truncated = True
+        total_files = len(files)
+    else:
+        capped_files = files
+        truncated = False
+        total_files = len(files)
     summary: dict = {
-        "files": files,
+        "files": capped_files,
         "added": sum(file.get("added", 0) for file in files),
         "deleted": sum(file.get("deleted", 0) for file in files),
         "commit": None,
         "extra_commits": 0,
+        "truncated": truncated,
+        "total_files": total_files,
     }
     if baseline is None or current is None:
         return summary

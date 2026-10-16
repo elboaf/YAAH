@@ -1860,6 +1860,7 @@ async def _run_agent_claimed(
     # exit / completion path that closes out file accounting. The finally
     # block keeps its own persist-only variant (no yield possible there).
     async def _finalize_file_changes() -> AsyncIterator[str]:
+        nonlocal file_summary_emitted
         file_summary = await _emit_file_changes(
             conversation_id,
             turn_workspace,
