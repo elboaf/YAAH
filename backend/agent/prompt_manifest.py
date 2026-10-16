@@ -814,6 +814,12 @@ def render_local_family(combo: str, flags: dict) -> dict:
         sep.join(str(m.get("content") or "") for m in manifest_messages)
     )
     tools = captured["tools"]
+    # Issue #375: the KV-cache-stable prefix derived from the captured
+    # system message (not re-rendered), so it always matches the actual
+    # bytes sent to the model. When an override replaces the core
+    # (e.g. "You are a pirate"), stable_prefix is None — nothing in
+    # the override is cache-stable.
+    stable_prefix = _stable_prefix_from_captured(manifest_messages, flags)
     return {
         "combo": combo,
         "kind": flags["kind"],
@@ -842,6 +848,7 @@ def render_local_family(combo: str, flags: dict) -> dict:
         "subagent_prompts": {},
         "auxiliary_prompts": {},
         "rendered_text": rendered,
+        "stable_prefix": stable_prefix,
     }
 
 
@@ -1022,6 +1029,61 @@ def _canonicalize_chat_ids(text: str) -> str:
     a DB autoincrement counter, not data) with the `<CHAT_ID>` token
     before sizing/hashing/splitting: reproducible manifests."""
     return re.sub(r"chat-\d+", CHAT_ID_TOKEN, text)
+
+
+def _stable_prefix_from_captured(manifest_messages: list, flags: dict) -> dict | None:
+    """Derive the stable-prefix block from the captured system message.
+
+    The fixed core is everything from the start of the first system message
+    through the ask-user section's closing line. We find it by locating the
+    ask-user section and taking everything through the end of the line that
+    ends with "what remains unchanged, and safe options before asking how to
+    proceed."
+
+    Returns None when:
+    - The family is not a local-family (subagents/auxiliary have no prefix)
+    - An override replaced the core entirely (e.g. "You are a pirate")
+      -- nothing in an override is cache-stable
+
+    Derived from the *captured* message (not re-rendered), so it always
+    matches the exact bytes sent to the model for this combo. Fixes
+    override mismatches, platform-flip contamination, and offline prompt
+    discrepancies.
+
+    Issue #375.
+    """
+    if not manifest_messages:
+        return None
+
+    # Non-local families have no KV-cache-stable core.
+    kind = flags.get("kind", "")
+    if kind not in ("local", "remote", "remote-offline"):
+        return None
+
+    head_msg = str(manifest_messages[0].get("content") or "")
+    # An override starts with "You are a pirate." — the default core
+    # is gone; nothing cache-stable to report.
+    if head_msg.startswith("You are a pirate."):
+        return None
+
+    # The fixed core ends at the closing line of the ask-user section.
+    ask_user_end_marker = "what remains unchanged, and safe options before asking how to proceed."
+    idx = head_msg.find(ask_user_end_marker)
+    if idx < 0:
+        return None
+    # Find the end of the ask-user text (end of that line).
+    line_end = head_msg.find("\n", idx + len(ask_user_end_marker))
+    if line_end < 0:
+        prefix_text = head_msg
+    else:
+        prefix_text = head_msg[: line_end + 1]
+
+    raw = prefix_text.encode("utf-8")
+    return {
+        "sha256": _sha256_text(prefix_text),
+        "bytes": len(raw),
+        "text": prefix_text,
+    }
 
 
 def manifest_to_json(manifest: dict) -> str:

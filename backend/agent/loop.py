@@ -630,63 +630,50 @@ def _say_persona() -> str:
     return persona if persona in SAY_PERSONAS else "neutral"
 
 
-def _default_system_prompt(workspace: str = "") -> str:
-    """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
-    and the runtime-environment line must match what execute_tool can
-    actually do where tools run — the remote host while one is connected,
-    otherwise this machine — or the model attempts commands for the wrong
-    platform (e.g. PowerShell registry queries on Linux). The chat's
-    workspace rides along so a remote session can name the selected folder
-    on the host instead of always claiming the host's home."""
-    from backend.agent import remote as remote_mod
+# ---------------------------------------------------------------------------
+# Issue #375: prompt layout for KV-cache stability.
+#
+# The system prompt is built from a fixed core followed by ordered
+# variance blocks.  The invariant:  conditional ⇒ later.  Every block
+# that *sometimes* appears comes strictly *after* every block that *always*
+# appears.  This guarantees that the fixed core is byte-identical across
+# every combo in the prompt manifest that differs only in settings
+# (sandbox, skills, say, plan mode, remote/local), so a provider like
+# llama.cpp can prefill / cache the core in the KV cache.
+#
+# Layout (rendered in this exact order):
+#   1. Identity paragraph + environment line + tools list  (fixed core)
+#   2. Guidelines                                         (fixed core)
+#   3. Ask-user rules                                     (fixed core)
+#   4. Spoken briefing (voice read-aloud)                 (variance: #207)
+#   5. Spoken-narrator persona                            (variance: #295)
+#   6. Sandbox section                                    (variance: #179, #186)
+#   7. Skills index                                       (variance: plugin)
+#   8. Sub-agent index                                    (variance: plugin)
+#
+# Per-turn appends in _run_agent_claimed (after #8):
+#   9. Project notes (AGENTS.md)                          (always for non-remote)
+#   10. Persistent memory index                            (variance: #169)
+#   11. Plan-mode note                                     (variance: plan)
+#   12. Sandbox-only policy note                           (variance: policy)
+#
+# Every variance block and per-turn append uses the standard '\n\n---\n\n'
+# separator so section splitters (prompt_manifest, KV-cache docs) can
+# distinguish blocks reliably.
+# ---------------------------------------------------------------------------
 
-    # Namespaced workspaces choose their own device, independent of any
-    # legacy active connection. Unnamespaced paths retain compatibility for
-    # older clients that still use the singleton host switcher.
-    host = (
-        remote_mod.remote_for_workspace(workspace)
-        if remote_mod.parse_ns(workspace) is not None
-        else remote_mod.get_remote()
-    )
-    if host is not None:
-        env = host.env_line(workspace)
-        windows = host.windows
-    else:
-        windows = os.name == "nt"
-        env = _local_env_line()
-    tools = ["bash (shell commands)"]
-    sandbox_section = ""
-    if windows:
-        tools.append("powershell (Windows PowerShell)")
-        if host is None:
-            from backend.agent import sandbox as sandbox_mod
 
-            if sandbox_enabled():
-                tools += [
-                    "sandbox_test (boot/reuse a disposable Windows Sandbox VM "
-                    "for tests that need isolation, such as servers/ports or GUI checks)",
-                    "sandbox_run (run a command inside that VM)",
-                    "sandbox_status", "sandbox_stop",
-                ]
-                sandbox_section = sandbox_mod.prompt_section()
-    # #181: the prose line must cover the whole schema set. The tail tools
-    # below previously existed only as schemas (search_conversation_history
-    # was never mentioned anywhere); annotations keep the useful pointers.
-    tools += [
-        "web_search", "web_fetch", "view_image", "read_file", "write_file",
-        "create_file", "edit_file", "delete_file", "move_file",
-        "search_files",
-        "get_help (full docs for any tool; call with no argument to list them)",
-        "spawn_agent (delegate self-contained work to a sub-agent; see the "
-        "sub-agents index below)",
-        "ask_user",
-        "load_skill",
-        "branch_select (switch the workspace to a branch, on the user's "
-        "request; creates it when missing)",
-        "memory_save", "memory_read", "memory_search", "memory_delete",
-        "search_conversation_history",
-    ]
-    prompt = f"""You are an expert AI coding agent working inside a user's project workspace.
+def _build_fixed_core(env: str, tools: list[str]) -> str:
+    """The byte-stable fixed core of the system prompt.
+
+    Identity, runtime environment, tool list, guidelines, and ask-user
+    rules.  This part never varies for a given platform+remote combo,
+    so providers can prefill it into the KV cache.
+
+    Issue #375.
+    """
+    return f"""\
+You are an expert AI coding agent working inside a user's project workspace.
 
 {env}
 
@@ -720,62 +707,7 @@ Guidelines:
 - Shell calls start in the selected workspace; no setup `cd` is needed.
 - Each shell call is a fresh process. `cd` does not persist; use workspace-relative
   paths unless the task specifically requires the main checkout.
-"""
 
-    # Issue #179: sandbox guidance must never name a tool the schema set
-    # does not carry — the sandbox tools exist only for a local Windows
-    # session, which is exactly when the full sandbox section
-    # (sandbox.prompt_section(), appended below) renders. Issue #186
-    # (SYN-12/17): that section is the SINGLE home for the
-    # test-environment rule, containment rules, and toolkit persistence —
-    # guidelines bullets that duplicated ~1 KB of it (and had drifted)
-    # were removed.
-
-    # #207: the spoken-briefing section is only ever generated when the
-    # voice.say_emissions toggle is on — with it off, these bytes would sit
-    # in every turn's context asking the model for briefings nobody hears.
-    if _say_emissions_enabled():
-        prompt += """
-Spoken briefing (voice read-aloud):
-- If the user has read-aloud enabled, your words are SPOKEN, not read
-  verbatim. End EVERY text emission with a <say> tag containing a 1-3
-  sentence spoken briefing of what just happened — under 400 characters,
-  plain prose, no markdown, no lists, no code. That includes each interim
-  text block you emit between tool calls while a run is in progress (the
-  voice keeps pace with the run), not only the final answer.
-  Write what the user most needs to hear: the outcome and the next step.
-  The tag is stripped from the chat transcript; the chat text itself stays
-  as detailed as you like. Omit the tag when read-aloud is off or when the
-  emission is a question (ask_user questions are spoken verbatim already).
-  Write for the ear, not the eye: technical digit runs the way a human
-  says them (ports and IPs digit by digit — "port four four three" —,
-  years as years — "nineteen ninety-nine" —, versions as spoken —
-  "version one point oh point five"); symbol-heavy locators the way a
-  human says their MEANING, never the marks — substitute the spoken
-  form: "~L539" is spoken "around line five thirty nine"; a lone "~"
-  (approximation) becomes "about" / "roughly"; "#292" is spoken "issue
-  two ninety-two"; "loop.py" becomes the thing by role — "the prompt
-  builder", "the say ruleset" — never a path; backticks and quotes
-  around identifiers simply drop — say the name in prose. When a
-  locator doesn't flow in spoken prose, omit it entirely: "in the say
-  ruleset in the prompt builder" says enough. Homographs go phonetic
-  — the tag is spoken, never shown, so inside it spelling IS
-  pronunciation: when a word's sound depends on context the voice
-  can't infer, spell it the way it sounds: past-tense "read" → "red"
-  ("only read code" becomes "only red code"), the metal "lead" → "led",
-  "bass" → "base". Prefer rewording when phonetic spelling would look
-  alarming — the text is never rendered, so "red code" costs nothing.
-  Say and chat split the labor: chat keeps the precise ref (file and
-  line), the voice gets the gist — never ship a raw symbol to the
-  voice. No ALL-CAPS for
-  emphasis and no SSML or emotion markers like [excited] — the voice
-  reads those literally; punctuation is your prosody: commas pace a
-  line, one exclamation mark at most, a blank line marks a beat.
-"""
-        persona = _say_persona()
-        if persona != "neutral":
-            prompt += SAY_PERSONAS[persona]
-    prompt += """
 Interview the user (ask_user tool):
 - Ask before consequential choices the user has not authorized and that
   cannot be safely inferred. Do not ask again for decisions already stated
@@ -788,19 +720,141 @@ Interview the user (ask_user tool):
 - If a safety boundary blocks the requested outcome, explain the blocker,
   what remains unchanged, and safe options before asking how to proceed."""
 
+
+def _build_spoken_briefing_block() -> str:
+    """Spoken briefing variance block (#207).
+
+    Returns the block only when voice.say_emissions is enabled.
+    Issue #375.
+    """
+    if not _say_emissions_enabled():
+        return ""
+    lines = [
+        "Spoken briefing (voice read-aloud):",
+        "- If the user has read-aloud enabled, your words are SPOKEN, not read",
+        "  verbatim. End EVERY text emission with a <say> tag containing a 1-3",
+        "  sentence spoken briefing of what just happened — under 400 characters,",
+        "  plain prose, no markdown, no lists, no code. That includes each interim",
+        "  text block you emit between tool calls while a run is in progress (the",
+        "  voice keeps pace with the run), not only the final answer.",
+        "  Write what the user most needs to hear: the outcome and the next step.",
+        "  The tag is stripped from the chat transcript; the chat text itself stays",
+        "  as detailed as you like. Omit the tag when read-aloud is off or when the",
+        "  emission is a question (ask_user questions are spoken verbatim already).",
+        "  Write for the ear, not the eye: technical digit runs the way a human",
+        "  says them (ports and IPs digit by digit — \"port four four three\" —,",
+        "  years as years — \"nineteen ninety-nine\" —, versions as spoken —",
+        "  \"version one point oh point five\"); symbol-heavy locators the way a",
+        "  human says their MEANING, never the marks — substitute the spoken",
+        "  form: \"~L539\" is spoken \"around line five thirty nine\"; a lone \"~\"",
+        "  (approximation) becomes \"about\" / \"roughly\"; \"#292\" is spoken \"issue",
+        "  two ninety-two\"; \"loop.py\" becomes the thing by role — \"the prompt",
+        "  builder\", \"the say ruleset\" — never a path; backticks and quotes",
+        "  around identifiers simply drop — say the name in prose. When a",
+        "  locator doesn't flow in spoken prose, omit it entirely: \"in the say",
+        "  ruleset in the prompt builder\" says enough. Homographs go phonetic",
+        "  — the tag is spoken, never shown, so inside it spelling IS",
+        "  pronunciation: when a word's sound depends on context the voice",
+        "  can't infer, spell it the way it sounds: past-tense \"read\" → \"red\"",
+        "  (\"only read code\" becomes \"only red code\"), the metal \"lead\" → \"led\",",
+        "  \"bass\" → \"base\". Prefer rewording when phonetic spelling would look",
+        "  alarming — the text is never rendered, so \"red code\" costs nothing.",
+        "  Say and chat split the labor: chat keeps the precise ref (file and",
+        "  line), the voice gets the gist — never ship a raw symbol to the",
+        "  voice. No ALL-CAPS for",
+        "  emphasis and no SSML or emotion markers like [excited] — the voice",
+        "  reads those literally; punctuation is your prosody: commas pace a",
+        "  line, one exclamation mark at most, a blank line marks a beat.",
+    ]
+    text = "\n".join(lines) + "\n"
+    persona = _say_persona()
+    if persona != "neutral":
+        text += "\n\n" + SAY_PERSONAS[persona]
+    return "\n\n---\n\n" + text
+
+
+def _default_system_prompt(workspace: str = "") -> str:
+    """SYSTEM_PROMPT adapted to the current EXECUTION TARGET: the tool list
+    and the runtime-environment line must match what execute_tool can
+    actually do where tools run — the remote host while one is connected,
+    otherwise this machine — or the model attempts commands for the wrong
+    platform (e.g. PowerShell registry queries on Linux). The chat's
+    workspace rides along so a remote session can name the selected folder
+    on the host instead of always claiming the host's home.
+
+    Issue #375: fixed core (identity, env, tools, guidelines, ask-user) is
+    rendered first; all conditional/variance blocks follow after.
+    """
+    from backend.agent import remote as remote_mod
+
+    # Namespaced workspaces choose their own device, independent of any
+    # legacy active connection. Unnamespaced paths retain compatibility for
+    # older clients that still use the singleton host switcher.
+    host = (
+        remote_mod.remote_for_workspace(workspace)
+        if remote_mod.parse_ns(workspace) is not None
+        else remote_mod.get_remote()
+    )
+    if host is not None:
+        env = host.env_line(workspace)
+        windows = host.windows
+    else:
+        windows = os.name == "nt"
+        env = _local_env_line()
+
+    # Build the core tool list (stable regardless of sandbox.enabled).
+    # Sandbox_* tools are conditional on sandbox.enabled and belong in the
+    # variance section, not the fixed core (#375).
+    core_tools: list[str] = ["bash (shell commands)"]
+    if windows:
+        core_tools.append("powershell (Windows PowerShell)")
+    # #181: the prose line must cover the whole schema set. The tail tools
+    # below previously existed only as schemas (search_conversation_history
+    # was never mentioned anywhere); annotations keep the useful pointers.
+    core_tools += [
+        "web_search", "web_fetch", "view_image", "read_file", "write_file",
+        "create_file", "edit_file", "delete_file", "move_file",
+        "search_files",
+        "get_help (full docs for any tool; call with no argument to list them)",
+        "spawn_agent (delegate self-contained work to a sub-agent; see the "
+        "sub-agents index below)",
+        "ask_user",
+        "load_skill",
+        "branch_select (switch the workspace to a branch, on the user's "
+        "request; creates it when missing)",
+        "memory_save", "memory_read", "memory_search", "memory_delete",
+        "search_conversation_history",
+    ]
+
+    # 1-3. Fixed core: identity + env + tools + guidelines + ask-user.
+    prompt = _build_fixed_core(env, core_tools)
+
+    # 4-5. Spoken briefing + persona (conditional: #207/#295).
+    spoken = _build_spoken_briefing_block()
+    if spoken:
+        prompt += spoken
+
+    # 6. Sandbox section (conditional: #179, #186).
+    sandbox_section = ""
+    if windows and host is None:
+        from backend.agent import sandbox as sandbox_mod
+
+        if sandbox_enabled():
+            sandbox_section = sandbox_mod.prompt_section()
     if sandbox_section:
         # #173: append with the standard separator — sandbox.prompt_section()
         # opens with a markdown H1, which would glue mid-line otherwise.
         prompt += "\n\n---\n\n" + sandbox_section
 
-    # Skills index: only added when at least one model-invocable skill
-    # exists, so a fresh install with no skills sees no extra noise.
+    # 7. Skills index (conditional: plugin registry).
     skill_index = skill_registry.index_for_prompt()
     if skill_index:
         prompt += "\n\n" + skill_index
 
-    # Sub-agent index: the parent needs to know what it can delegate to.
+    # 8. Sub-agent index (always present — parent needs to know what it can
+    # delegate to).
     prompt += "\n\n" + subagents_mod.index_for_prompt()
+
     return prompt
 
 

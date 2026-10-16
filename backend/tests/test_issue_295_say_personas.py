@@ -5,12 +5,12 @@ a persona block INSIDE the gated spoken-briefing section of the system
 prompt. The contract under test:
 
 - neutral (and absent/unset/unknown) produces byte-identical prompts to
-  the pre-feature baseline — no regression for existing users;
-- jester/elitest change ONLY the spoken-briefing section — the persona
-  bytes sit between the section opening and the ask-user section, and the
-  never-in-chat boundary is written into the persona text itself;
+  the pre-feature baseline \u2014 no regression for existing users;
+- jester/elitest change ONLY the spoken-briefing section \u2014 the persona
+  bytes sit inside the section, and the never-in-chat boundary is written
+  into the persona text itself;
 - with say_emissions off, the section (persona included) is omitted
-  entirely — no persona bytes leak into any prompt.
+  entirely \u2014 no persona bytes leak into any prompt.
 """
 import pytest
 
@@ -52,18 +52,18 @@ def test_say_persona_reads_neutral_for_absent_unset_unknown(restored_config):
 def test_neutral_prompt_is_byte_identical_to_absent_key(restored_config):
     """The acceptance criterion verbatim: neutral produces byte-identical
     prompts to today. An explicit 'neutral' must equal a voice dict with
-    the key absent — which is exactly what existing users have on disk."""
+    the key absent \u2014 which is exactly what existing users have on disk."""
     _config_with_voice()  # key absent
     without_key = loop._default_system_prompt("")
     _config_with_voice(say_persona="neutral")
     assert loop._default_system_prompt("") == without_key
-    # And the section itself ends where it always did — no tail bytes.
+    # And the section itself ends where it always did \u2014 no tail bytes.
     assert _say_section(without_key).endswith("a blank line marks a beat.\n")
 
 
 def test_unknown_persona_falls_back_to_neutral_bytes(restored_config):
     """A garbage value (hand-edited config) must not change any prompt
-    bytes — the fallback is the neutral prompt, not a mangled one."""
+    bytes \u2014 the fallback is the neutral prompt, not a mangled one."""
     _config_with_voice(say_persona="neutral")
     baseline = loop._default_system_prompt("")
     _config_with_voice(say_persona="gangster")
@@ -76,8 +76,8 @@ def test_unknown_persona_falls_back_to_neutral_bytes(restored_config):
 @pytest.mark.parametrize("persona", ["jester", "elitest"])
 def test_persona_block_lands_inside_say_section_only(restored_config, persona):
     """jester/elitest change only the spoken-briefing section: the persona
-    block sits between the section opening and the ask-user section, and
-    everything before the say section is byte-identical to neutral."""
+    block sits inside the section, and everything before the say section
+    is byte-identical to neutral."""
     _config_with_voice(say_persona="neutral")
     baseline = loop._default_system_prompt("")
     _config_with_voice(say_persona=persona)
@@ -86,11 +86,10 @@ def test_persona_block_lands_inside_say_section_only(restored_config, persona):
     say_opening = "Spoken briefing (voice read-aloud):\n"
     head = persona_prompt.split(say_opening, 1)[0] + say_opening
     assert head == baseline.split(say_opening, 1)[0] + say_opening
-    assert f"Narrator persona — {persona}:" in _say_section(persona_prompt)
+    assert f"Narrator persona \u2014 {persona}:" in _say_section(persona_prompt)
     # The persona block ends before the next section starts.
-    assert f"Narrator persona — {persona}:" not in persona_prompt.split(
-        "\nInterview the user", 1
-    )[1]
+    persona_text = f"Narrator persona \u2014 {persona}:"
+    assert persona_text not in _say_section(persona_prompt).split(persona_text, 1)[1]
 
 
 @pytest.mark.parametrize("persona", ["jester", "elitest"])
@@ -104,7 +103,7 @@ def test_persona_block_carries_the_scope_boundary(restored_config, persona):
 
 
 def test_elitest_rudeness_ceiling_is_in_the_persona_text(restored_config):
-    """Hard scope boundary #3: elitest never crosses into abuse — the
+    """Hard scope boundary #3: elitest never crosses into abuse \u2014 the
     ceiling (problem-directed smugness, never the user, no slurs or
     profanity) is written into the persona prompt text itself."""
     text = loop.SAY_PERSONAS["elitest"]
@@ -116,7 +115,7 @@ def test_elitest_rudeness_ceiling_is_in_the_persona_text(restored_config):
 
 
 def test_persona_omitted_entirely_when_emissions_disabled(restored_config):
-    """With say_emissions off, the section is omitted entirely — no
+    """With say_emissions off, the section is omitted entirely \u2014 no
     persona prompt bytes leak into any prompt."""
     _config_with_voice(say_emissions=False, say_persona="jester")
     prompt = loop._default_system_prompt("")

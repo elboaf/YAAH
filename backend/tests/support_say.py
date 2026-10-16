@@ -56,5 +56,23 @@ def save_config_with_voice(**overrides):
 
 
 def say_section(prompt: str) -> str:
+    """Return the spoken-briefing section from the prompt text.
+
+    Works with both the old layout (say before ask-user) and the new
+    layout (#375: say after ask-user) — in both cases the section
+    ends at the next section boundary.
+    """
     section = prompt.split("Spoken briefing (voice read-aloud):\n", 1)[1]
-    return section.split("\nInterview the user", 1)[0]
+    # The section ends at the next '---' separator (sandbox, skills, etc.)
+    idx = section.find("\n\n---\n\n")
+    if idx >= 0:
+        return section[:idx]
+    # No '---' separator — fall back to splitting at the next section
+    # header (skills index, sub-agent index, or any '\n\n## ' heading).
+    # This prevents the fallback from swallowing trailing sections.
+    for boundary in ("\n\nSkills available", "\n\nSub-agents available", "\n\n## "):
+        idx = section.find(boundary)
+        if idx >= 0:
+            return section[:idx]
+    # Last resort: trim trailing whitespace/newlines and return as-is.
+    return section.rstrip("\n")
