@@ -1530,7 +1530,15 @@ GENERATE_IMAGE_SCHEMA = {
             "server's default size; larger sizes are reached via the "
             "server's hires fix (upscale + second diffusion pass) or "
             "plain upscaling, and the result reports what actually "
-            "happened. When the server advertises them: reference-"
+            "happened. Four steps is fast-draft guidance when passed "
+            "(typical look: soft anatomy, smudged eyes, mushy text) - "
+            "pass steps for "
+            "detail-critical text-to-image (~15-20; cost is near-linear "
+            "in steps); reference-guided edits hold together fine at "
+            "the default. If an edit did not take, steps is the wrong "
+            "knob - rephrase, or mask, or crop the reference instead. "
+            "Every result note reports the ground truth of what ran "
+            "(server ran: ...). When the server advertises them: reference-"
             "guided editing (reference_images), depth-pose control "
             "(control_lora / depth_from), and LoRA activation (lora)."
         ),
@@ -1643,9 +1651,49 @@ GENERATE_IMAGE_SCHEMA = {
                         "both depth source and photo."
                     ),
                 },
+                "steps": {
+                    "type": "integer",
+                    "description": (
+                        "Sampling steps. Four is fast-draft guidance when "
+                        "passed (its look: soft anatomy, smudged eyes, "
+                        "mushy text); omit for the configured or server "
+                        "default. Raise for detail-critical text-to-image, "
+                        "typically 15-20 (near-linear time cost). "
+                        "Reference-guided edits hold fine at the default "
+                        "(the reference pins content - steps only buy "
+                        "polish). More is not the fix for an edit that "
+                        "did not take: rephrase, or mask, or crop the "
+                        "reference instead."
+                    ),
+                },
+                "cfg_scale": {
+                    "type": "number",
+                    "description": (
+                        "Text guidance scale; omit for the default. "
+                        "Guidance-distilled models (klein-class) are "
+                        "trained at 1.0 - other values fight them and "
+                        "cost roughly 1.6x per render. Meaningful only "
+                        "on base/dev-class checkpoints."
+                    ),
+                },
+                "reseed": {
+                    "type": "boolean",
+                    "description": (
+                        "Request a NEW random seed for this render "
+                        "(seed -1, the protocol's own randomizer) "
+                        "instead of the server's random pick. Same "
+                        "effect, but the note reports it as a fresh "
+                        "draw. Use when a render needs a different "
+                        "take. Pinned reproducibility stays on seed."
+                    ),
+                },
                 "seed": {
                     "type": "integer",
-                    "description": "Seed for reproducible output.",
+                    "description": (
+                        "Seed for reproducible output. Omit (and leave "
+                        "reseed false) for a randomized seed - never "
+                        "invent one to be helpful."
+                    ),
                 },
             },
             "required": ["prompt"],
@@ -1731,6 +1779,104 @@ def _png_dims(raw: bytes):
 
     w, h = struct.unpack(">II", raw[16:24])
     return (int(w), int(h))
+
+
+def _generation_defaults(cfg: dict) -> dict:
+    """User-configured generation defaults for the omit path (#411): cfg
+    scale, steps, size. The server cannot say what MODEL is loaded (its
+    /v1/models list is a placeholder), so model-appropriate sampling
+    values are the operator's call. Keys: cfg_scale, steps, width,
+    height (all optional). Non-numeric junk is ignored per key, so one
+    bad field never disables the others."""
+    d = (cfg or {}).get("generation_defaults")
+    if not isinstance(d, dict):
+        return {}
+    out: dict = {}
+    for k in ("cfg_scale", "steps", "width", "height"):
+        v = d.get(k)
+        if isinstance(v, bool) or v is None:
+            continue
+        import math
+
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(f):
+            continue
+        if k in ("width", "height", "steps"):
+            # counts/dimensions must be positive whole numbers
+            if f > 0 and f == int(f):
+                out[k] = f
+        else:
+            out[k] = f
+    return out
+
+
+def _png_params_note(raw: bytes) -> str:
+    """Ground-truth result note (#411): stable-diffusion.cpp embeds the
+    parameters it actually received in the output PNG's tEXt `parameters`
+    chunk. Parsing it turns the result note into server testimony instead
+    of client assumption. Returns '' when no usable chunk is present (a
+    non-parameters tEXt chunk is skipped and the scan continues; the
+    ESRGAN chain's fresh PNGs have none) - silence, never error."""
+    if raw[:8] != b"\x89PNG\r\n\x1a\n":
+        return ""
+    pos = 8
+    end = len(raw) - 12  # last chunk is IEND: type (4) + CRC (4)
+    try:
+        while pos + 8 <= end:
+            import struct
+
+            (length,) = struct.unpack(">I", raw[pos : pos + 4])
+            ctype = raw[pos + 4 : pos + 8]
+            data = raw[pos + 8 : pos + 8 + length]
+            if ctype == b"tEXt":
+                keyword, sep, value = data.partition(bytes([0]))
+                if keyword == b"parameters" and sep:
+                    return _params_note_text(
+                        value.decode("utf-8", "replace")
+                    )
+                # not the parameters keyword: keep scanning - a later
+                # tEXt chunk may carry it
+            pos += 12 + length  # length + type + CRC
+    except (struct.error, OverflowError):
+        return ""
+    return ""
+
+
+def _params_note_text(txt: str) -> str:
+    """Extract the effective sampling fields from a `parameters` chunk.
+
+    The real chunk is the prompt line(s) followed by ONE comma-separated
+    params line: "Steps: 15, CFG scale: 1.000000, Guidance: 3.500000,
+    Eta: inf, Seed: 978904, Size: 1024x1024, Model: , RNG: cuda, ...".
+    Anchoring on the LAST "Steps:" keeps a prompt that itself mentions
+    steps/seed from derailing the parse; each value runs to the next
+    comma/line-end, so commas inside the prompt never split fields.
+    Missing fields are simply omitted from the note."""
+    import re
+
+    idx = txt.rfind("Steps:")
+    if idx < 0:
+        return ""
+    seg = txt[idx : idx + 1500]
+    want = (
+        ("steps", "Steps"),
+        ("cfg_scale", "CFG scale"),
+        ("guidance", "Guidance"),
+        ("seed", "Seed"),
+        ("size", "Size"),
+    )
+    have: list[str] = []
+    for out_key, label in want:
+        m = re.search(label + ":" + r"\s*([^,\r\n]+)", seg)
+        if not m:
+            continue
+        v = m.group(1).strip()
+        if v:
+            have.append(f"{out_key} {v}")
+    return "server ran: " + ", ".join(have) if have else ""
 
 
 async def _capabilities(api_base: str) -> dict:
@@ -2224,6 +2370,9 @@ async def generate_image(
     height: int | None = None,
     negative_prompt: str | None = None,
     seed: int | None = None,
+    reseed: bool | None = None,
+    steps: int | None = None,
+    cfg_scale: float | None = None,
     hires_fix: bool | None = None,
     reference_images: list | None = None,
     lora: list | None = None,
@@ -2236,13 +2385,19 @@ async def generate_image(
     go through the server's HIRES FIX when available (small render, ESRGAN
     upscale, second diffusion pass at the exact target - the user's
     explicit default) with the ESRGAN upscale chain as the fallback.
+
+    Sampling defaults (#411): caller > config generation_defaults >
+    omit (the server's own defaults apply). Seed is NEVER pinned on the
+    omit path; reseed=True asks the server for a fresh random draw
+    (seed -1). When the output PNG carries a parameters chunk, the
+    result note reports the ground truth of what the server
+    actually ran (parsed from it); without the chunk it stays
+    silent.
     Transport: the native async job API when capabilities are available
     (Stop cancels the queued job and stops waiting immediately), the sync
     OpenAI-compatible endpoint as the fallback for older servers."""
     import asyncio
     import base64
-
-    from backend.agent.imagedata import save_bytes
 
     prompt = (prompt or "").strip()
     if not prompt:
@@ -2263,6 +2418,46 @@ async def generate_image(
         height = int(height) if height else None
     except (TypeError, ValueError):
         return {"error": "width/height must be integers"}
+    try:
+        steps = int(steps) if steps is not None else None
+    except (TypeError, ValueError):
+        return {"error": "steps must be an integer"}
+    try:
+        cfg_scale = float(cfg_scale) if cfg_scale is not None else None
+    except (TypeError, ValueError):
+        return {"error": "cfg_scale must be a number"}
+
+    # --- sampling defaults: caller > config > omit (#411) -------------
+    # The server cannot report which MODEL is loaded, so model-appropriate
+    # sampling values are the operator's call. Each key applies only when
+    # the caller omitted it; unset config changes nothing (byte-identical
+    # outgoing bodies - pinned by tests). The configured width doubles as
+    # the square-render height so a 1024 default actually renders 1024
+    # without the caller naming height.
+    notes: list[str] = []
+    d_cfg = _generation_defaults(cfg)
+    if cfg_scale is None and d_cfg.get("cfg_scale") is not None:
+        cfg_scale = float(d_cfg["cfg_scale"])
+        notes.append(f"cfg_scale {cfg_scale:g} (configured default)")
+    if steps is None and d_cfg.get("steps") is not None:
+        steps = int(d_cfg["steps"])
+        notes.append(f"steps {steps} (configured default)")
+    width_from_cfg = False
+    height_from_cfg = False
+    if width is None and d_cfg.get("width"):
+        width = int(d_cfg["width"])
+        width_from_cfg = True
+        notes.append(f"width {width} (configured default)")
+    if height is None and d_cfg.get("height"):
+        height = int(d_cfg["height"])
+        height_from_cfg = True
+        notes.append(f"height {height} (configured default)")
+    if height is None and width is not None:
+        # width-only request (caller or config): square fallback,
+        # the pre-existing `height or width` body semantics
+        height = width
+        if width_from_cfg and not height_from_cfg:
+            notes.append(f"size {width}x{height} (configured default)")
 
     caps = await _capabilities(api_base)
     b = _native_bounds(caps) if caps else None
@@ -2279,7 +2474,6 @@ async def generate_image(
         if isinstance(u, dict) and u.get("image_upscale") and u.get("name"):
             up_name = str(u["name"])
             break
-    notes: list[str] = []
     up_target: tuple[int, int] | None = None
     hires_body: dict | None = None
     body: dict = {"prompt": prompt}
@@ -2442,14 +2636,26 @@ async def generate_image(
 
     if b is None:
         # Older server without capabilities: legacy passthrough, its call.
+        # Sampling fields ride <sd_cpp_extra_args> (native-schema envelope).
         legacy: dict = {"prompt": prompt, "n": 1}
         apply_to_body(legacy, scan, prompt)
-        if negative_prompt or seed is not None:
-            extra: dict = {}
-            if negative_prompt:
-                extra["negative_prompt"] = negative_prompt
-            if seed is not None:
-                extra["seed"] = seed
+        extra: dict = {}
+        if negative_prompt:
+            extra["negative_prompt"] = negative_prompt
+        if seed is not None:
+            extra["seed"] = seed
+        elif reseed:
+            # same precedence as the native path: an explicit seed
+            # (reproducibility) wins over the fresh-draw request
+            extra["seed"] = -1
+        if steps is not None or cfg_scale is not None:
+            sp: dict = {}
+            if steps is not None:
+                sp["sample_steps"] = steps
+            if cfg_scale is not None:
+                sp["guidance"] = {"txt_cfg": cfg_scale}
+            extra["sample_params"] = sp
+        if extra:
             legacy["prompt"] = (
                 prompt
                 + " <sd_cpp_extra_args>"
@@ -2463,6 +2669,9 @@ async def generate_image(
             return {"error": err}
         raw_out = base64.b64decode(b64)
         dims = _png_dims(raw_out)
+        pn = _png_params_note(raw_out)
+        if pn:
+            notes.append(pn)
         if legacy.get("lora_applied"):
             notes.append(_lora_note(legacy, scan))
         store_rel = _persist_generation(raw_out, workspace, notes)
@@ -2561,6 +2770,19 @@ async def generate_image(
         body["negative_prompt"] = negative_prompt
     if seed is not None:
         body["seed"] = seed
+    elif reseed:
+        # never pin the omit path (#411): reseed is the caller ASKING for
+        # a fresh random draw - -1 is the server's own randomizer.
+        body["seed"] = -1
+    # hires.steps stays unset: 0 = reuse the first pass's step count
+    # (no evidence for a different second-pass operating point).
+    if steps is not None or cfg_scale is not None:
+        sp = dict(body.get("sample_params") or {})
+        if steps is not None:
+            sp["sample_steps"] = steps
+        if cfg_scale is not None:
+            sp["guidance"] = {**(sp.get("guidance") or {}), "txt_cfg": cfg_scale}
+        body["sample_params"] = sp
     if refs:
         body["ref_images"] = refs
     if lora_field:
@@ -2604,10 +2826,17 @@ async def generate_image(
         legacy["prompt"] = body["prompt"] + (
             " <sd_cpp_extra_args>"
             + json.dumps(
-                {k: body[k] for k in ("negative_prompt", "seed") if k in body}
+                {
+                    k: body[k]
+                    for k in ("negative_prompt", "seed", "cfg_scale", "steps", "sample_params")
+                    if k in body
+                }
             )
             + "</sd_cpp_extra_args>"
-            if ("negative_prompt" in body or "seed" in body)
+            if any(
+                k in body
+                for k in ("negative_prompt", "seed", "cfg_scale", "steps", "sample_params")
+            )
             else ""
         )
         b64, err2 = await _img_gen_request(api_base, legacy)
@@ -2624,6 +2853,12 @@ async def generate_image(
             return {"error": err}
         raw_out = base64.b64decode(b64)
     dims = _png_dims(raw_out)
+    # Ground truth (#411): what the server actually ran, from the PNG's
+    # parameters chunk. Captured from the PRE-upscale render - the ESRGAN
+    # chain re-encodes the image and the chunk does not survive it.
+    pn = _png_params_note(raw_out)
+    if pn:
+        notes.append(pn)
 
     if up_target:
         raw2, meta2, note2 = await _upscale_to_target(
