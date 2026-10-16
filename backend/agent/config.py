@@ -107,7 +107,14 @@ DEFAULTS = {
     # set; blank = unconfigured = no image tool.
     # No size field: the sd-server's own defaults/capabilities decide
     # native resolution; oversized requests upscale server-side.
-    "image_generation": {"provider": "sdcpp", "api_base": ""},
+    "image_generation": {"provider": "sdcpp", "api_base": "",
+                         "generation_defaults": {}},
+    # generation_defaults (#411): sampling defaults for the OMIT path
+    # only - cfg_scale, steps, width, height (all optional; the caller
+    # always wins; unset keys change nothing). Model-appropriate values
+    # are the operator's call because the server cannot report which
+    # model is loaded. Example for FLUX.2 klein (guidance-distilled):
+    #   {"cfg_scale": 1.0, "steps": 4, "width": 1024, "height": 1024}
     # LoRA support (#398): `lora_scan` holds the per-server classification
     # snapshot written by the settings-save scan (keyed by normalized
     # api_base); `lora_overrides` holds user-authored, SHA256-keyed KB
