@@ -97,6 +97,18 @@ def _rejecting_provider(status=500,
     calls = {"n": 0, "image_parts": [], "system_counts": [], "notes": []}
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        # Count ONLY model calls. Since #430 the vision probe rides the
+        # same patched httpx client (GET /props, /v1/models before the
+        # first model call); counting those as calls shifted the e2e
+        # indexes and broke "first call must carry the image" (caught
+        # by the rc.29 release gate). Non-model requests are answered
+        # without touching the counters; probe GETs 404, which keeps
+        # every probe rule at None - the unknown-provider world this
+        # suite was written for.
+        if request.method != "POST" or not request.url.path.endswith(
+            "/chat/completions"
+        ):
+            return httpx.Response(404, json={"error": "not found"})
         calls["n"] += 1
         raw = request.content.decode("utf-8", errors="replace")
         try:
