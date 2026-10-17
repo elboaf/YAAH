@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 from typing import AsyncIterator
 
@@ -57,6 +58,8 @@ _LOCAL_ONLY_TOOL_NAMES = {
 }
 
 _LEASE_RENEW_SECONDS = 45  # owner leases expire at 120s; renew well before
+
+log = logging.getLogger("yaah.remote")
 
 
 def _ndjson(event: dict) -> str:
@@ -276,6 +279,9 @@ async def _run_claimed(
         last_renew = asyncio.get_event_loop().time()
 
         step = 0
+        # Issue #428: one text-only retry after a provider image-input
+        # rejection - never a second one.
+        _image_retry_spent = False
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 # Cancelled before any model output: nothing to commit.
@@ -337,6 +343,66 @@ async def _run_claimed(
                 # message — a stop mid-call appends nothing.
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
+            except model_client.ModelImageRejected as exc:
+                # Issue #428 (remote twin): the provider refuses image
+                # input. Strip the image parts and retry text-only once -
+                # the store-rel annotations survive, so the model can still
+                # wire generate_image reference_images / upscale_image path
+                # server-side. One shot; a second rejection surfaces as a
+                # plain error below.
+                if _image_retry_spent:
+                    yield _ndjson({"type": "error",
+                                   "message": f"{type(exc).__name__}: {exc}"})
+                    return
+                _image_retry_spent = True
+                messages, n_stripped = model_client.strip_image_parts(messages)
+                # Merged into the FIRST system message, never a second
+                # system row: strict chat templates (llama.cpp qwen-class)
+                # reject any system message after the first.
+                _sys_idx = next(
+                    (i for i, m in enumerate(messages)
+                     if m.get("role") == "system"),
+                    None,
+                )
+                if _sys_idx is None:
+                    messages.insert(0, {"role": "system", "content": (
+                        "The user attached image(s), but the current model "
+                        "provider rejected image input, so the image bytes "
+                        "were removed from this context. The store rel path "
+                        "annotations under the attached images remain valid: "
+                        "pass those paths to generate_image (reference_images) "
+                        "or upscale_image (path) - they resolve the stored "
+                        "files server-side without vision."
+                    )})
+                else:
+                    _head = messages[_sys_idx]
+                    _head_content = _head.get("content")
+                    _head["content"] = (
+                        _head_content
+                        if isinstance(_head_content, str)
+                        else str(_head_content or "")
+                    ) + "\n\n" + (
+                        "The user attached image(s), but the current model "
+                        "provider rejected image input, so the image bytes "
+                        "were removed from this context. The store rel path "
+                        "annotations under the attached images remain valid: "
+                        "pass those paths to generate_image (reference_images) "
+                        "or upscale_image (path) - they resolve the stored "
+                        "files server-side without vision."
+                    )
+                yield _ndjson({
+                    "type": "note",
+                    "text": (
+                        "Provider rejected image input - "
+                        f"{n_stripped} image(s) stripped from context, "
+                        "retrying text-only with the file paths intact."
+                    ),
+                })
+                log.info(
+                    "remote image rejection retry: stripped %d image part(s) (%s)",
+                    n_stripped, exc,
+                )
+                continue
             except Exception as exc:  # ModelError and transport failures
                 yield _ndjson({"type": "error",
                                "message": f"{type(exc).__name__}: {exc}"})

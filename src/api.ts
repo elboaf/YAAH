@@ -1300,6 +1300,7 @@ export interface AgentEvent {
     | 'error'
     | 'stopped'
     | 'skill_not_found'
+    | 'note'
   text?: string
   name?: string
   args?: unknown

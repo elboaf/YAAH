@@ -2310,6 +2310,9 @@ async def _run_agent_claimed(
                 state["content"] = "".join(acc)
 
             attempt = 0
+            # Issue #428: one text-only retry after a provider image-input
+            # rejection - never a second one.
+            _image_retry_spent = [False]
             while True:
                 attempt += 1
                 try:
@@ -2332,6 +2335,76 @@ async def _run_agent_claimed(
                     # to cover a worst-case cold prefill, so reaching here
                     # means the provider is genuinely stuck: surface it.
                     raise
+                except model_client.ModelImageRejected as e:
+                    # Issue #428: the provider refuses image input (request
+                    # validation fails before any prefill). Strip every
+                    # image_url part from the context and retry once
+                    # text-only: the text parts survive, including the #406
+                    # store-rel annotations, so a non-vision model can still
+                    # wire generate_image reference_images / upscale_image
+                    # path with the attached file. Unlike the infra retry
+                    # above, the prompt mutation is the POINT here - the
+                    # failure is deterministic input rejection, so the
+                    # byte-identical retry would fail identically. One shot:
+                    # if the text-only context still fails, it is a real
+                    # provider problem and the generic ModelError path
+                    # surfaces it.
+                    if _image_retry_spent[0] or cancel_ev.is_set():
+                        raise
+                    _image_retry_spent[0] = True
+                    messages, n_stripped = model_client.strip_image_parts(messages)
+                    # Tell the model what happened - merged into the FIRST
+                    # system message, never a second system row: strict
+                    # chat templates (llama.cpp qwen-class) reject any
+                    # system message after the first, and this fix targets
+                    # exactly that provider class. Transient: the frozen
+                    # head on the conversation row replays unchanged next
+                    # turn (KV-cache stability, #375).
+                    _sys_idx = next(
+                        (i for i, m in enumerate(messages)
+                         if m.get("role") == "system"),
+                        None,
+                    )
+                    if _sys_idx is None:
+                        messages.insert(0, {"role": "system", "content": (
+                            "The user attached image(s), but the current model "
+                            "provider rejected image input, so the image bytes "
+                            "were removed from this context. The store rel path "
+                            "annotations under the attached images remain valid: "
+                            "pass those paths to generate_image (reference_images) "
+                            "or upscale_image (path) - they resolve the stored "
+                            "files server-side without vision."
+                        )})
+                    else:
+                        _head = messages[_sys_idx]
+                        _head_content = _head.get("content")
+                        _head["content"] = (
+                            _head_content
+                            if isinstance(_head_content, str)
+                            else str(_head_content or "")
+                        ) + "\n\n" + (
+                            "The user attached image(s), but the current model "
+                            "provider rejected image input, so the image bytes "
+                            "were removed from this context. The store rel path "
+                            "annotations under the attached images remain valid: "
+                            "pass those paths to generate_image (reference_images) "
+                            "or upscale_image (path) - they resolve the stored "
+                            "files server-side without vision."
+                        )
+                    yield _ndjson({
+                        "type": "note",
+                        "text": (
+                            "Provider rejected image input - "
+                            f"{n_stripped} image(s) stripped from context, "
+                            "retrying text-only with the file paths intact."
+                        ),
+                    })
+                    log.info(
+                        "image rejection retry: stripped %d image part(s), "
+                        "retrying text-only (%s)",
+                        n_stripped, e,
+                    )
+                    continue
                 except model_client.ModelError:
                     if attempt >= 2 or cancel_ev.is_set():
                         raise

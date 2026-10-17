@@ -35,6 +35,81 @@ class ModelCancelled(ModelError):
     settle the turn as 'stopped' instead of surfacing an API error."""
 
 
+class ModelImageRejected(ModelError):
+    """The provider rejected the request because it cannot accept image
+    input (issue #428). llama.cpp-class servers without a mmproj validate
+    the request before prefill and reject the WHOLE call with
+    "image input is not supported - hint: ... provide the mmproj"; the
+    caller's auto-retry (Q23) is byte-identical, so it fails the same way
+    and the turn dies before the model ever reads the store-rel annotation
+    that would let it wire generate_image. Distinguished so the caller can
+    strip the image parts (the text parts - with the #406 store-rel
+    annotations - survive) and retry text-only."""
+
+
+# Image-input rejection markers (issue #428). Matched against the raw error
+# body, case-insensitively: llama.cpp "image input is not supported - hint:
+# ... provide the mmproj", Ollama "not support image", LM Studio variants.
+IMAGE_REJECT_MARKERS = (
+    "image input is not supported",
+    "provide the mmproj",
+    "mmproj",
+    "not support image",
+    "does not support images",
+    "image is not supported",
+    "unsupported image",
+    "vision is not supported",
+    "vision not supported",
+    "not a multimodal",
+    "no multimodal",
+)
+
+
+def _looks_like_image_rejection(status: int, body: str) -> bool:
+    """Heuristic over the error body: a non-200 whose text matches an
+    image/vision/mmproj rejection marker. Deliberately loose - a false
+    positive costs one text-only retry of an already-failing call; a false
+    negative re-creates the dead turn."""
+    if status == 200:
+        return False
+    low = (body or "").lower()
+    return any(marker in low for marker in IMAGE_REJECT_MARKERS)
+
+
+def strip_image_parts(messages: list) -> tuple[list, int]:
+    """Return (copy_of_messages_without_image_url_parts, count_stripped).
+
+    Deep-copies each message dict and keeps ONLY the text parts of parts-list
+    contents (the text parts carry the #406 store-rel annotations a
+    non-vision model still needs to wire generate_image/upscale_image).
+    String contents and tool_calls/tool/assistant/system rows pass through
+    untouched. Pure function so the strip rules are unit-testable.
+    """
+    out: list = []
+    stripped = 0
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    stripped += 1
+                    continue
+                if isinstance(part, dict) and part.get("type") == "text":
+                    texts.append(str(part.get("text") or ""))
+                    continue
+                if isinstance(part, dict):
+                    texts.append(json.dumps(part))
+                else:
+                    texts.append(str(part))
+            new_m = dict(m)
+            new_m["content"] = "\n".join(texts)
+            out.append(new_m)
+        else:
+            out.append(dict(m) if isinstance(m, dict) else m)
+    return out, stripped
+
+
 # llama.cpp (and friends) send zero response bytes until prompt prefill
 # finishes, so the httpx READ timeout must cover the whole prefill, not the
 # inter-chunk gap: at ~40 tok/s a 128k-token cold prefill runs ~55 minutes.
@@ -199,7 +274,14 @@ async def chat(
                 started,
             ) from e
         if r.status_code != 200:
-            raise ModelError(f"Model API error {r.status_code}: {r.text[:500]}")
+            body = r.text[:500]
+            if _looks_like_image_rejection(r.status_code, body):
+                # Issue #428: the provider refuses image input (request-level
+                # validation, before any prefill). Classified so the caller
+                # can retry text-only instead of burning the byte-identical
+                # retry on the same rejection.
+                raise ModelImageRejected(f"Model API error {r.status_code}: {body}")
+            raise ModelError(f"Model API error {r.status_code}: {body}")
         data = r.json()
         log.info("model reply: finish=%s tool_calls=%d",
                  (data.get("choices") or [{}])[0].get("finish_reason"),
@@ -291,6 +373,10 @@ async def _stream_gen(
             ) as r:
                 if r.status_code != 200:
                     body = (await r.aread()).decode("utf-8", errors="replace")
+                    if _looks_like_image_rejection(r.status_code, body):
+                        raise ModelImageRejected(
+                            f"Model API error {r.status_code}: {body[:500]}"
+                        )
                     raise ModelError(f"Model API error {r.status_code}: {body[:500]}")
 
                 async for line in r.aiter_lines():
