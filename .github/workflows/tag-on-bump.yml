@@ -91,6 +91,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -d "$TAG" 2>/dev/null || true  # self-hosted runner persists its
+          # work dir: a tag deleted on origin can survive locally and
+          # 128-fail the next cut of the same version (#62 family)
           git tag -a "$TAG" -m "$TAG"
           if git push origin "$TAG"; then
             echo "pushed=true" >> "$GITHUB_OUTPUT"
