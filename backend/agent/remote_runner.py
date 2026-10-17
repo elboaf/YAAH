@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 from typing import AsyncIterator
 
@@ -57,6 +58,8 @@ _LOCAL_ONLY_TOOL_NAMES = {
 }
 
 _LEASE_RENEW_SECONDS = 45  # owner leases expire at 120s; renew well before
+
+log = logging.getLogger("yaah.remote")
 
 
 def _ndjson(event: dict) -> str:
@@ -275,7 +278,44 @@ async def _run_claimed(
         tools = _schemas_for(workspace)
         last_renew = asyncio.get_event_loop().time()
 
+        # Proactive vision probe (issue #430, remote twin): same contract as
+        # the local loop - only when the context carries image parts, only a
+        # definitive False acts, capped so a dead server cannot stall the
+        # turn. The cache is keyed (api_base, model) in THIS process, which
+        # is the process that owns the server connection - the correct
+        # network view by construction.
+        if model_client.has_image_parts(messages):
+            from backend.agent import vision as vision_mod
+
+            _vcfg = model_client._resolve_call_cfg(
+                dict(model_client.load_config()),
+                model_override or "",
+                effort_override,
+            )
+            _verdict = await vision_mod.capability_capped(
+                _vcfg["api_base"], _vcfg["model"]
+            )
+            if _verdict is False:
+                messages, _n_stripped = model_client.strip_image_parts(messages)
+                model_client.merge_note_into_first_system(
+                    messages, model_client.IMAGE_NOVISION_NOTE
+                )
+                yield _ndjson({
+                    "type": "note",
+                    "text": (
+                        "Model reports no vision support - "
+                        f"{_n_stripped} image(s) passed as file paths only."
+                    ),
+                })
+                log.info(
+                    "vision probe: pre-stripped %d image part(s) (%s / %s)",
+                    _n_stripped, _vcfg["api_base"], _vcfg["model"],
+                )
+
         step = 0
+        # Issue #428: one text-only retry after a provider image-input
+        # rejection - never a second one.
+        _image_retry_spent = False
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 # Cancelled before any model output: nothing to commit.
@@ -337,6 +377,53 @@ async def _run_claimed(
                 # message — a stop mid-call appends nothing.
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
+            except model_client.ModelImageRejected as exc:
+                # Issue #428 (remote twin): the provider refuses image
+                # input. Strip the image parts and retry text-only once -
+                # the store-rel annotations survive, so the model can still
+                # wire generate_image reference_images / upscale_image path
+                # server-side. One shot; a second rejection surfaces as a
+                # plain error below.
+                if _image_retry_spent:
+                    yield _ndjson({"type": "error",
+                                   "message": f"{type(exc).__name__}: {exc}"})
+                    return
+                _image_retry_spent = True
+                messages, n_stripped = model_client.strip_image_parts(messages)
+                # Shared helper (#430): merged into the FIRST system message,
+                # never a second system row (strict chat templates reject
+                # that); transient - not persisted anywhere.
+                model_client.merge_note_into_first_system(
+                    messages, model_client.IMAGE_REJECTION_NOTE
+                )
+                yield _ndjson({
+                    "type": "note",
+                    "text": (
+                        "Provider rejected image input - "
+                        f"{n_stripped} image(s) stripped from context, "
+                        "retrying text-only with the file paths intact."
+                    ),
+                })
+                log.info(
+                    "remote image rejection retry: stripped %d image part(s) (%s)",
+                    n_stripped, exc,
+                )
+                # Issue #430: the rejection is ground truth - cache it so
+                # later turns on this provider pre-strip without a failed
+                # request. Model/effort overrides are the remote runner's
+                # resolved scope; best-effort only.
+                try:
+                    from backend.agent import vision as _vision
+
+                    _cfgm = model_client._resolve_call_cfg(
+                        dict(model_client.load_config()),
+                        model_override or "",
+                        effort_override,
+                    )
+                    _vision.record_rejection(_cfgm["api_base"], _cfgm["model"])
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
             except Exception as exc:  # ModelError and transport failures
                 yield _ndjson({"type": "error",
                                "message": f"{type(exc).__name__}: {exc}"})

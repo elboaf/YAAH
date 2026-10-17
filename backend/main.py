@@ -1130,6 +1130,24 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
             rel = image if load_data_url(image) else None
         if rel:
             image_paths.append(rel)
+    # Issue #430: warm the vision-probe cache while the turn spins up, so
+    # the seam's capped await usually hits an already-resolved verdict.
+    # Fire-and-forget: never awaited by the endpoint, never blocks the
+    # response, failures are the probe module's problem (it swallows all).
+    if image_paths:
+        try:
+            from backend.agent import vision as vision_mod
+            from backend.agent.model_client import _resolve_call_cfg
+
+            _pcfg = _resolve_call_cfg(
+                dict(__import__("backend.agent.config", fromlist=["load_config"]).load_config()),
+                turn_model, turn_effort,
+            )
+            asyncio.create_task(
+                vision_mod.preflight(_pcfg["api_base"], _pcfg["model"])
+            )
+        except Exception:  # noqa: BLE001 - prefetch must never break the send
+            pass
     return StreamingResponse(
         run_agent(conversation_id, body.message, turn_workspace,
                   image_paths=image_paths, skill_names=body.skills,

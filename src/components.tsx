@@ -1574,6 +1574,21 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
         </div>
       )
     }
+    // System notice mid-run (issue #428): a transient condition the turn
+    // survived - rendered plainly, not as an error.
+    try {
+      const parsed: unknown = JSON.parse(msg.content)
+      if (parsed && typeof parsed === 'object' && 'note' in (parsed as object)) {
+        const note = (parsed as { note: string }).note
+        return (
+          <div className="pl-3">
+            <div className="font-mono text-[11px] text-sky-300/90">◆ {note}</div>
+          </div>
+        )
+      }
+    } catch {
+      // not JSON - fall through
+    }
     // Invoked skill the backend registry doesn't know (chip rendered from the
     // UI list which can drift from the backend cache): say so plainly.
     try {
@@ -2738,6 +2753,13 @@ export function RemoteTranscriptDialog({
         useAgent.getState().setSay(remoteKey, asstId, ev.text ?? ev.say ?? '')
       } else if (ev.type === 'thinking') {
         useAgent.getState().setStatus(remoteKey, 'thinking')
+      } else if (ev.type === 'note') {
+        // System notice mid-run (issue #428): system row, like local turns.
+        useAgent.getState().appendRawMessage(remoteKey, {
+          id: `remote-note-${Date.now()}`,
+          role: 'system',
+          content: JSON.stringify({ note: ev.text ?? '' }),
+        })
       } else if (ev.type === 'tool_start') {
         useAgent.getState().startToolCall(remoteKey, asstId, ev.call_id ?? `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
         useAgent.getState().setStatus(remoteKey, 'running-tool')
@@ -10430,6 +10452,14 @@ export function Composer() {
         content: JSON.stringify({
           skill_not_found: { skills: ev.skills ?? [] },
         }),
+      })
+    } else if (ev.type === 'note') {
+      // System notice mid-run (issue #428): rendered as a system row like
+      // skill_not_found; the turn continues after it.
+      appendRawMessage(bufKey, {
+        id: `note-${Date.now()}`,
+        role: 'system',
+        content: JSON.stringify({ note: ev.text ?? '' }),
       })
     } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')
