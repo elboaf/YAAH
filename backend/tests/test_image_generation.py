@@ -1075,3 +1075,147 @@ def test_native_body_carries_native_fields(configured, tmp_path, monkeypatch):
     assert body["negative_prompt"] == "dogs"
     assert body["seed"] == 42
     assert "sd_cpp_extra_args" not in body["prompt"]
+
+
+
+# ------------------------------------------------------------------ #425
+# Long-render visibility: banners on the live tape, hard cap only at
+# the ABSOLUTE deadline. The wait loop reads the module constants at
+# runtime (the cap default resolves inside the function), so shrinking
+# them via monkeypatch keeps these tests at real-sleep speed. Banner
+# assertions never pin the minute count: a shrunken cap rounds to
+# "0 min", and only the default 1800s reads "30 min".
+
+
+def _shrink_wait_consts(monkeypatch, banner_after, banner_every, max_wait):
+    monkeypatch.setattr(tools, "_IMG_BANNER_AFTER_S", banner_after)
+    monkeypatch.setattr(tools, "_IMG_BANNER_EVERY_S", banner_every)
+    monkeypatch.setattr(tools, "_IMG_MAX_WAIT_S", max_wait)
+
+
+def test_wait_banner_emits_and_job_still_completes(configured, tmp_path, monkeypatch):
+    """#425: past the banner threshold the wait emits a progress note
+    (the live tape's banner) but does NOT stop - the job completes and
+    the image still lands."""
+    _shrink_wait_consts(monkeypatch, 0.5, 600.0, 30.0)
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.job_status = "generating"  # real_poll answers generating
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    chunks = []
+
+    async def drive():
+        real_poll = tools._job_poll  # captured BEFORE patching
+        polls = {"n": 0}
+
+        async def wrapped_poll(api_base, job_id):
+            polls["n"] += 1
+            if polls["n"] >= 3:  # ~2s in: banner already fired at ~1s
+                return ("completed",
+                        {"images": [{"index": 0,
+                                     "b64_json": base64.b64encode(_png(512, 512)).decode()}]},
+                        None)
+            return await real_poll(api_base, job_id)
+
+        monkeypatch.setattr(tools, "_job_poll", wrapped_poll)
+        return await tools._img_gen_job_wait(
+            "http://127.0.0.1:1234", "job_x", on_chunk=chunks.append
+        )
+
+    b64, err = asyncio.run(drive())
+    assert not err, err
+    assert b64
+    assert len(chunks) == 1, chunks
+    assert "still rendering" in chunks[0]
+    assert "hard cap" in chunks[0]
+
+
+def test_wait_no_banner_before_threshold(configured, tmp_path, monkeypatch):
+    """#425: a fast render never sees a banner."""
+    _shrink_wait_consts(monkeypatch, 600.0, 600.0, 30.0)
+    _FakeClient.caps_payload = {"upscale": True}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    chunks = []
+
+    async def drive():
+        real_poll = tools._job_poll  # captured BEFORE patching
+        polls = {"n": 0}
+
+        async def wrapped_poll(api_base, job_id):
+            polls["n"] += 1
+            if polls["n"] >= 2:  # ~1s, well under the 600s threshold
+                return ("completed",
+                        {"images": [{"index": 0,
+                                     "b64_json": base64.b64encode(_png(512, 512)).decode()}]},
+                        None)
+            return await real_poll(api_base, job_id)
+
+        monkeypatch.setattr(tools, "_job_poll", wrapped_poll)
+        return await tools._img_gen_job_wait(
+            "http://127.0.0.1:1234", "job_x", on_chunk=chunks.append
+        )
+
+    b64, err = asyncio.run(drive())
+    assert not err, err
+    assert b64
+    assert chunks == []
+
+
+def test_wait_hard_cap_still_cancels_after_banner(configured, tmp_path, monkeypatch):
+    """#425: the ABSOLUTE cap ends the wait with a server-side cancel -
+    after at least one banner went out."""
+    _shrink_wait_consts(monkeypatch, 0.5, 600.0, 2.5)
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.job_status = "generating"  # never completes
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    chunks = []
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 512, "height": 512},
+            workspace=str(tmp_path), on_chunk=chunks.append,
+        )
+    )
+    assert "abandoned after" in (result.get("error") or ""), result
+    assert "hard cap" in (result.get("error") or "")
+    assert _FakeClient.cancel_calls == 1
+    assert len(chunks) >= 1 and "still rendering" in chunks[0]
+
+
+def test_wait_on_chunk_none_still_caps_silently(configured, tmp_path, monkeypatch):
+    """#425: on_chunk=None callers (direct/legacy) get no banners but
+    the same absolute cap."""
+    _shrink_wait_consts(monkeypatch, 0.5, 600.0, 2.5)
+    _FakeClient.caps_payload = {"upscale": True}
+    _FakeClient.job_status = "generating"
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x", "width": 512, "height": 512},
+            workspace=str(tmp_path),
+        )
+    )
+    assert "abandoned after" in (result.get("error") or ""), result
+    assert _FakeClient.cancel_calls == 1
+
+
+def test_execute_tool_forwards_on_chunk_to_generate_image(configured, tmp_path, monkeypatch):
+    """#425: the harness-injected on_chunk reaches generate_image (the
+    forwarding whitelist), and the schema never exposes it."""
+    _FakeClient.caps_payload = {"upscale": True}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    seen = {}
+
+    async def fake_wait(api_base, job_id, on_chunk=None, deadline_s=None):
+        seen["on_chunk"] = on_chunk
+        return base64.b64encode(_png(512, 512)).decode(), None
+
+    monkeypatch.setattr(tools, "_img_gen_job_wait", fake_wait)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image", {"prompt": "x"},
+            workspace=str(tmp_path), on_chunk=lambda t: None,
+        )
+    )
+    assert not result.get("error"), result
+    assert seen["on_chunk"] is not None
+    props = tools.GENERATE_IMAGE_SCHEMA["function"]["parameters"]["properties"]
+    assert "on_chunk" not in props

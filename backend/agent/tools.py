@@ -339,6 +339,9 @@ HELP_DOCS: dict = {
         "ESRGAN chain. The result reports exactly what happened. "
         "negative_prompt and seed pass through. Generation runs as a "
         "server job: pressing Stop cancels it and returns immediately. "
+        "Long renders stay visible: progress notes appear on the live "
+        "tape after 10 minutes, and the wait hard-cancels at 30 "
+        "minutes. "
         "Remote (namespaced) workspaces save to the store only. "
         "EDITING (server-capability-gated): reference_images does "
         "Flux-style reference-guided generation; control_lora + "
@@ -1812,6 +1815,16 @@ _IMG_H_DEFAULT = 1024
 _IMG_STEPS_DEFAULT = 4
 _IMG_CFG_DEFAULT = 1.0
 
+# #425: long-render visibility. The native wait used to hard-cancel at
+# 10 minutes with no warning while the render was still running; now
+# 10 minutes is only a BANNER threshold (a progress note on the live
+# tool tape, repeating every 10 minutes) and the hard cap is 30 minutes.
+# Module-level so tests can shrink them; the cap default resolves
+# INSIDE the wait (not bound at def time) so monkeypatching works.
+_IMG_BANNER_AFTER_S = 600.0
+_IMG_BANNER_EVERY_S = 600.0
+_IMG_MAX_WAIT_S = 1800.0
+
 
 def _generation_defaults(cfg: dict) -> dict:
     """User-configured generation-default OVERRIDES (#411): keys cfg_scale,
@@ -2095,16 +2108,24 @@ async def _job_cancel(api_base: str, job_id: str) -> None:
         pass
 
 
-async def _img_gen_job_wait(api_base: str, job_id: str, deadline_s: float = 600.0):
+async def _img_gen_job_wait(api_base: str, job_id: str, on_chunk=None,
+                            deadline_s: float | None = None):
     """Poll a native img_gen job to completion. Returns (b64, error).
+    Long renders stay visible (#425): after _IMG_BANNER_AFTER_S a
+    progress note rides on_chunk (the live tool tape) every
+    _IMG_BANNER_EVERY_S, and only the ABSOLUTE cap - _IMG_MAX_WAIT_S
+    unless deadline_s is given - ends the wait, with a best-effort
+    server-side cancel. on_chunk=None callers get the same cap silently.
     On CancelledError (the user pressed Stop): best-effort server-side
     cancel, then re-raise so the run stops immediately instead of
     waiting out a thrashing server."""
     import asyncio
     import time
 
+    cap = _IMG_MAX_WAIT_S if deadline_s is None else deadline_s
     start = time.monotonic()
     transient: list[str] = []
+    next_banner = _IMG_BANNER_AFTER_S
     while True:
         status, result, error = await _job_poll(api_base, job_id)
         if status == "completed":
@@ -2126,15 +2147,28 @@ async def _img_gen_job_wait(api_base: str, job_id: str, deadline_s: float = 600.
                 transient.append(    # not grow this list unboundedly
                     (error or {}).get("message") or "unknown"
                 )
-        if time.monotonic() - start > deadline_s:
+        elapsed = time.monotonic() - start
+        if elapsed > cap:
             await _job_cancel(api_base, job_id)
             t = len(transient)
             return None, (
-                "image generation timed out after "
-                f"{int(deadline_s)}s (job cancelled; the model may be "
-                "thrashing - try a smaller size)"
+                "image generation abandoned after "
+                f"{int(elapsed)}s (the {int(cap)}s hard cap; job cancelled "
+                "server-side; the model may be thrashing - try a smaller size)"
                 + (f" [{t} transient poll error(s) seen]" if t else "")
             )
+        if on_chunk is not None and elapsed > next_banner:
+            # #425: a note on the live tool tape, not a stop - the render
+            # keeps running server-side and the wait keeps polling.
+            try:
+                on_chunk(
+                    f"still rendering: {int(elapsed // 60)} min elapsed - "
+                    f"waiting (hard cap {int(cap // 60)} min); press Stop "
+                    "to cancel the run"
+                )
+            except Exception:  # noqa: BLE001 - progress must never kill the tool
+                pass
+            next_banner += _IMG_BANNER_EVERY_S
         await asyncio.sleep(1.0)
 
 
@@ -2412,6 +2446,7 @@ async def generate_image(
     lora: list | None = None,
     control_lora: str | None = None,
     depth_from: str | None = None,
+    on_chunk=None,
 ) -> dict:
     """Run text-to-image on the configured sd-server. The requested
     size IS the diffusion render's size whenever the server's
@@ -2952,7 +2987,7 @@ async def generate_image(
         raw_out = base64.b64decode(b64)
     else:
         try:
-            b64, err = await _img_gen_job_wait(api_base, job_id)
+            b64, err = await _img_gen_job_wait(api_base, job_id, on_chunk=on_chunk)
         except asyncio.CancelledError:
             await _job_cancel(api_base, job_id)
             raise
@@ -3400,7 +3435,10 @@ async def execute_tool(
             or memory_workspace_for(workspace),
         }
     try:
-        if on_chunk is not None and name in ("bash", "powershell"):
+        if on_chunk is not None and name in ("bash", "powershell", "generate_image"):
+            # generate_image (#425): on_chunk carries wait banners to the
+            # live tool tape; the schema never exposes it, the harness
+            # injects it exactly like the shell executors' stream.
             result = await fn(workspace=workspace, on_chunk=on_chunk, **arguments)
         else:
             result = await fn(workspace=workspace, **arguments)
