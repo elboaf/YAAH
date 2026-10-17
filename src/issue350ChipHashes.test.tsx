@@ -73,9 +73,9 @@ describe('two-hash sync readout (#350, direct world)', () => {
     })
     const btn = hashButton('def5678')
     expect(btn.className).toContain('text-red-400')
-    // and both counters still render - magnitude lives beside the color.
-    expect(screen.getByText('↑3')).toBeTruthy()
-    expect(screen.getByText('↓1')).toBeTruthy()
+    // and both directional counters still render - magnitude lives beside the color.
+    expect(screen.getByText('→3')).toBeTruthy()
+    expect(screen.getByText('←1')).toBeTruthy()
   })
 
   it('leaves the upstream hash zinc when in sync', () => {
