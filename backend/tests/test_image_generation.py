@@ -701,7 +701,10 @@ def test_generate_image_end_to_end(configured, tmp_path, monkeypatch):
     assert embedded == {
         "negative_prompt": "dogs",
         "seed": 42,
-        "sample_params": {"sample_steps": 4, "guidance": {"txt_cfg": 1.0}},
+        "sample_params": {
+            "sample_steps": 4,
+            "guidance": {"txt_cfg": 1.0, "distilled_guidance": 1.0},
+        },
     }
     assert result["images"] and result["images"][0].startswith("generate_image/")
     assert result["path"].startswith("ai-images/")

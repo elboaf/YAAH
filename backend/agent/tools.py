@@ -357,7 +357,11 @@ HELP_DOCS: dict = {
         "image). The result note lists the server's available LoRAs "
         "when none was applied; one style-named LoRA auto-applies when "
         "the prompt names the style (spelling-tolerant: retro-wave "
-        "matches a retrowave-named LoRA)."
+        "matches a retrowave-named LoRA). "
+        "SAMPLING: steps 4 and BOTH guidance fields (cfg, distilled "
+        "guidance) are locked at the guidance-distilled klein-class "
+        "operating point - cfg_scale is not a parameter; a higher step "
+        "count goes out only when the user explicitly asks for one."
     ),
     "upscale_image": (
         "Detail-preserving enlargement of an EXISTING image via the "
@@ -1531,21 +1535,22 @@ GENERATE_IMAGE_SCHEMA = {
             "conversation so the user sees it inline. Use for logos, "
             "mockups, illustrations, art assets. The image is not sent "
             "back to you; view_image the saved file only if inspection "
-            "is needed. Omitted size/steps/cfg ride YAAH's built-in "
-            "defaults (1024x1024, four steps, cfg 1.0 - tuned for "
-            "guidance-distilled klein-class models; a configured or "
-            "explicit value always wins). The render happens AT the "
+            "is needed. Omitted size/steps ride YAAH's built-in "
+            "defaults (1024x1024 at four steps - the guidance-"
+            "distilled klein-class operating point; cfg and "
+            "distilled guidance are locked at 1 and not exposed). "
+            "The render happens AT the "
             "requested size whenever the server's limits allow it - "
             "composition is decided by the first pass's canvas (a "
             "512 render drops subjects on klein-class models), so "
             "native rendering is the default; hires_fix=true opts "
             "into the conservative small-VRAM route, whose first "
             "pass is never smaller than 1024x1024 before the hires "
-            "second pass reaches the exact target. Four steps is "
-            "fast-draft guidance (typical look: soft anatomy, smudged "
-            "eyes, mushy text) - pass steps for "
-            "detail-critical text-to-image (~15-20; cost is near-linear "
-            "in steps); reference-guided edits hold together fine at "
+            "second pass reaches the exact target. Four steps is the "
+            "model's step-distilled design point - omit steps unless "
+            "the user EXPLICITLY asks for more (a higher count is "
+            "off-design for klein and near-linear in time); "
+            "reference-guided edits hold together fine at "
             "the default. If an edit did not take, steps is the wrong "
             "knob - rephrase, or mask, or crop the reference instead. "
             "Every result note reports the ground truth of what ran "
@@ -1676,28 +1681,16 @@ GENERATE_IMAGE_SCHEMA = {
                 "steps": {
                     "type": "integer",
                     "description": (
-                        "Sampling steps. Omit for the built-in default "
-                        "four (fast-draft: soft anatomy, smudged eyes, "
-                        "mushy text when pushed into detail work) unless "
-                        "a configured default applies. Raise for "
-                        "detail-critical text-to-image, "
-                        "typically 15-20 (near-linear time cost). "
+                        "Sampling steps. Omit for the locked default "
+                        "four - klein's step-distilled design point. "
+                        "Pass a higher count ONLY when the user "
+                        "explicitly asks for more steps (off-design "
+                        "for klein; near-linear time cost). "
                         "Reference-guided edits hold fine at the default "
                         "(the reference pins content - steps only buy "
                         "polish). More is not the fix for an edit that "
                         "did not take: rephrase, or mask, or crop the "
                         "reference instead."
-                    ),
-                },
-                "cfg_scale": {
-                    "type": "number",
-                    "description": (
-                        "Text guidance scale; omit for the built-in "
-                        "default 1.0 unless a configured default "
-                        "applies. Guidance-distilled models (klein-class) are "
-                        "trained at 1.0 - other values fight them and "
-                        "cost roughly 1.6x per render. Meaningful only "
-                        "on base/dev-class checkpoints."
                     ),
                 },
                 "reseed": {
@@ -1808,18 +1801,30 @@ def _png_dims(raw: bytes):
     return (int(w), int(h))
 
 
-# Built-in sampling defaults for the omit path (#419): FLUX.2-klein-shaped
-# values, chosen empirically (docs/research/flux2-klein-9b-generation-knobs.md):
-# 1024x1024 is the model's native scale (at 512 it drops subjects / garbles
-# anatomy), 4 steps is klein's distilled design point, cfg 1.0 suits a
-# guidance-distilled model. Server-applied omit defaults (512 / cfg 7.0 /
-# steps 20) fight the model, so YAAH now always names sampling values:
-# caller > configured generation_defaults > BUILT-IN. Operators retune via
-# config; the server's own defaults no longer apply to the omit path.
+# Built-in sampling defaults for the omit path (#419), LOCKED per the
+# owner (2026-10-18): FLUX.2-klein-shaped values from
+# docs/research/flux2-klein-9b-generation-knobs.md - 1024x1024 is the
+# model's native scale (at 512 it drops subjects / garbles anatomy),
+# 4 steps is klein's step-DISTILLED design point, and BOTH guidance
+# fields sit at 1.0: klein is guidance-distilled, so txt_cfg (cfg) and
+# distilled_guidance are locked at 1 (BFL's own CLI hard-errors on
+# anything else). cfg_scale is therefore NOT a model-facing parameter;
+# operators retune via config only (base/dev-class checkpoints).
+# Server-applied omit defaults (512 / cfg 7.0 / steps 20) fight the
+# model, so YAAH always names sampling values: caller > configured
+# generation_defaults > BUILT-IN. The server's own defaults never
+# apply - including its distilled_guidance 3.5-class default, which
+# YAAH overrides on every render at the klein operating point (#433).
 _IMG_W_DEFAULT = 1024
 _IMG_H_DEFAULT = 1024
 _IMG_STEPS_DEFAULT = 4
 _IMG_CFG_DEFAULT = 1.0
+# klein is guidance-distilled to 1.0 (both fields). The sd-server's own
+# default for distilled_guidance is a dev-class 3.5 - it leaks into
+# every render YAAH doesn't explicitly name (#433), so YAAH sends
+# distilled_guidance 1.0 whenever txt_cfg sits at the klein operating
+# point (the ONLY point the harness ships).
+_IMG_DISTILLED_GUIDANCE = 1.0
 
 # #425: long-render visibility. The native wait used to hard-cancel at
 # 10 minutes with no warning while the render was still running; now
@@ -1902,7 +1907,7 @@ def _params_note_text(txt: str) -> str:
     """Extract the effective sampling fields from a `parameters` chunk.
 
     The real chunk is the prompt line(s) followed by ONE comma-separated
-    params line: "Steps: 15, CFG scale: 1.000000, Guidance: 3.500000,
+    params line: "Steps: 4, CFG scale: 1.000000, Guidance: 1.000000,
     Eta: inf, Seed: 978904, Size: 1024x1024, Model: , RNG: cuda, ...".
     Anchoring on the LAST "Steps:" keeps a prompt that itself mentions
     steps/seed from derailing the parse; each value runs to the next
@@ -2460,7 +2465,10 @@ async def generate_image(
     legal size, enlarged by the ESRGAN chain.
 
     Sampling defaults (#411): caller > config generation_defaults >
-    omit (the server's own defaults apply). Seed is NEVER pinned on
+    omit (the server's own defaults apply). cfg + distilled guidance
+    are LOCKED at 1 (#433: guidance-distilled klein operating point;
+    cfg_scale is not a model-facing parameter), steps defaults to the
+    step-distilled 4. Seed is NEVER pinned on
     the omit path (#423: the sd-server pins an omitted seed to its
     default, so YAAH sends -1 - the protocol's own randomizer -
     whenever no seed is given); reseed=True requests that same fresh
@@ -2518,10 +2526,10 @@ async def generate_image(
     if cfg_scale is None:
         if d_cfg.get("cfg_scale") is not None:
             cfg_scale = float(d_cfg["cfg_scale"])
-            notes.append(f"cfg_scale {cfg_scale:g} (configured default)")
+            notes.append("cfg_scale locked at 1 (configured default)")
         else:
             cfg_scale = _IMG_CFG_DEFAULT
-            notes.append(f"cfg_scale {cfg_scale:g} (built-in default)")
+            notes.append("cfg_scale locked at 1 (the klein operating point)")
     if steps is None:
         if d_cfg.get("steps") is not None:
             steps = int(d_cfg["steps"])
@@ -2754,6 +2762,14 @@ async def generate_image(
                 sp["sample_steps"] = steps
             if cfg_scale is not None:
                 sp["guidance"] = {"txt_cfg": cfg_scale}
+                if cfg_scale == _IMG_CFG_DEFAULT:
+                    # klein is guidance-distilled: pin BOTH fields at 1
+                    # (#433) - the server's own distilled_guidance
+                    # default is a dev-class 3.5 and leaks into every
+                    # render that omits it.
+                    sp["guidance"]["distilled_guidance"] = (
+                        _IMG_DISTILLED_GUIDANCE
+                    )
             extra["sample_params"] = sp
         if extra:
             legacy["prompt"] = (
@@ -2934,6 +2950,12 @@ async def generate_image(
             sp["sample_steps"] = steps
         if cfg_scale is not None:
             sp["guidance"] = {**(sp.get("guidance") or {}), "txt_cfg": cfg_scale}
+            if cfg_scale == _IMG_CFG_DEFAULT:
+                # klein is guidance-distilled: pin BOTH fields at 1
+                # (#433) - the server's own distilled_guidance default
+                # is a dev-class 3.5 and leaks into every render that
+                # omits it.
+                sp["guidance"]["distilled_guidance"] = _IMG_DISTILLED_GUIDANCE
         body["sample_params"] = sp
     if refs:
         body["ref_images"] = refs
@@ -3011,6 +3033,20 @@ async def generate_image(
     pn = _png_params_note(raw_out)
     if pn:
         notes.append(pn)
+        import re as _re
+
+        m = _re.search(r"Guidance:\s*([0-9.]+)", pn)
+        if (
+            cfg_scale == _IMG_CFG_DEFAULT
+            and m
+            and float(m.group(1)) > _IMG_DISTILLED_GUIDANCE
+        ):
+            # #433: the guidance override did not land on this build -
+            # surface it instead of letting the leak ride silently.
+            notes.append(
+                "note: distilled_guidance override did not land - the "
+                "server ran its higher default (update the sd-server)"
+            )
 
     if up_target:
         raw2, meta2, note2 = await _upscale_to_target(
