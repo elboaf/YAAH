@@ -2161,6 +2161,39 @@ async def _run_agent_claimed(
     # issue #111), then the legacy per-provider value, then the global.
     max_steps = _resolve_max_steps(load_config(), model_override)
 
+    # Proactive vision probe (issue #430): when the built context carries
+    # image parts and the provider is DEFINITIVELY non-vision, strip the
+    # pixels before the first model call - zero failed requests, the #428
+    # reactive retry stays the backstop for unknown providers. The capped
+    # await is not a blocking probe: a slow/dead server yields None and the
+    # turn proceeds exactly as before. Once per turn, not per step.
+    if model_client.has_image_parts(messages):
+        from backend.agent import vision as vision_mod
+
+        _vcfg = model_client._resolve_call_cfg(
+            dict(load_config()), model_override or "", effort_override
+        )
+        _verdict = await vision_mod.capability_capped(
+            _vcfg["api_base"], _vcfg["model"]
+        )
+        if _verdict is False:
+            messages, _n_stripped = model_client.strip_image_parts(messages)
+            model_client.merge_note_into_first_system(
+                messages, model_client.IMAGE_NOVISION_NOTE
+            )
+            yield _ndjson({
+                "type": "note",
+                "text": (
+                    "Model reports no vision support - "
+                    f"{_n_stripped} image(s) passed as file paths only."
+                ),
+            })
+            log.info(
+                "vision probe: provider %s model %s has no vision - "
+                "pre-stripped %d image part(s) before the first call",
+                _vcfg["api_base"], _vcfg["model"], _n_stripped,
+            )
+
     try:
         for _step in range(max_steps) if max_steps > 0 else itertools.count():
             if cancel_ev.is_set():
@@ -2353,44 +2386,14 @@ async def _run_agent_claimed(
                         raise
                     _image_retry_spent[0] = True
                     messages, n_stripped = model_client.strip_image_parts(messages)
-                    # Tell the model what happened - merged into the FIRST
-                    # system message, never a second system row: strict
-                    # chat templates (llama.cpp qwen-class) reject any
-                    # system message after the first, and this fix targets
-                    # exactly that provider class. Transient: the frozen
-                    # head on the conversation row replays unchanged next
-                    # turn (KV-cache stability, #375).
-                    _sys_idx = next(
-                        (i for i, m in enumerate(messages)
-                         if m.get("role") == "system"),
-                        None,
+                    # Tell the model what happened through the shared helper
+                    # (#430): merges into the FIRST system message - never a
+                    # second system row (strict chat templates reject that) -
+                    # and stays transient (the frozen head replays unchanged
+                    # next turn, #375).
+                    model_client.merge_note_into_first_system(
+                        messages, model_client.IMAGE_REJECTION_NOTE
                     )
-                    if _sys_idx is None:
-                        messages.insert(0, {"role": "system", "content": (
-                            "The user attached image(s), but the current model "
-                            "provider rejected image input, so the image bytes "
-                            "were removed from this context. The store rel path "
-                            "annotations under the attached images remain valid: "
-                            "pass those paths to generate_image (reference_images) "
-                            "or upscale_image (path) - they resolve the stored "
-                            "files server-side without vision."
-                        )})
-                    else:
-                        _head = messages[_sys_idx]
-                        _head_content = _head.get("content")
-                        _head["content"] = (
-                            _head_content
-                            if isinstance(_head_content, str)
-                            else str(_head_content or "")
-                        ) + "\n\n" + (
-                            "The user attached image(s), but the current model "
-                            "provider rejected image input, so the image bytes "
-                            "were removed from this context. The store rel path "
-                            "annotations under the attached images remain valid: "
-                            "pass those paths to generate_image (reference_images) "
-                            "or upscale_image (path) - they resolve the stored "
-                            "files server-side without vision."
-                        )
                     yield _ndjson({
                         "type": "note",
                         "text": (
@@ -2404,6 +2407,22 @@ async def _run_agent_claimed(
                         "retrying text-only (%s)",
                         n_stripped, e,
                     )
+                    # Issue #430: the rejection is ground truth - cache it so
+                    # later turns on this provider pre-strip without a failed
+                    # request. Best-effort: never affect the retry itself.
+                    try:
+                        from backend.agent import vision as vision_mod
+
+                        _rcfg = model_client._resolve_call_cfg(
+                            dict(load_config()),
+                            model_override or "",
+                            effort_override,
+                        )
+                        vision_mod.record_rejection(
+                            _rcfg["api_base"], _rcfg["model"]
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     continue
                 except model_client.ModelError:
                     if attempt >= 2 or cancel_ev.is_set():

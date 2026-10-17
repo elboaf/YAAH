@@ -278,6 +278,40 @@ async def _run_claimed(
         tools = _schemas_for(workspace)
         last_renew = asyncio.get_event_loop().time()
 
+        # Proactive vision probe (issue #430, remote twin): same contract as
+        # the local loop - only when the context carries image parts, only a
+        # definitive False acts, capped so a dead server cannot stall the
+        # turn. The cache is keyed (api_base, model) in THIS process, which
+        # is the process that owns the server connection - the correct
+        # network view by construction.
+        if model_client.has_image_parts(messages):
+            from backend.agent import vision as vision_mod
+
+            _vcfg = model_client._resolve_call_cfg(
+                dict(model_client.load_config()),
+                model_override or "",
+                effort_override,
+            )
+            _verdict = await vision_mod.capability_capped(
+                _vcfg["api_base"], _vcfg["model"]
+            )
+            if _verdict is False:
+                messages, _n_stripped = model_client.strip_image_parts(messages)
+                model_client.merge_note_into_first_system(
+                    messages, model_client.IMAGE_NOVISION_NOTE
+                )
+                yield _ndjson({
+                    "type": "note",
+                    "text": (
+                        "Model reports no vision support - "
+                        f"{_n_stripped} image(s) passed as file paths only."
+                    ),
+                })
+                log.info(
+                    "vision probe: pre-stripped %d image part(s) (%s / %s)",
+                    _n_stripped, _vcfg["api_base"], _vcfg["model"],
+                )
+
         step = 0
         # Issue #428: one text-only retry after a provider image-input
         # rejection - never a second one.
@@ -356,40 +390,12 @@ async def _run_claimed(
                     return
                 _image_retry_spent = True
                 messages, n_stripped = model_client.strip_image_parts(messages)
-                # Merged into the FIRST system message, never a second
-                # system row: strict chat templates (llama.cpp qwen-class)
-                # reject any system message after the first.
-                _sys_idx = next(
-                    (i for i, m in enumerate(messages)
-                     if m.get("role") == "system"),
-                    None,
+                # Shared helper (#430): merged into the FIRST system message,
+                # never a second system row (strict chat templates reject
+                # that); transient - not persisted anywhere.
+                model_client.merge_note_into_first_system(
+                    messages, model_client.IMAGE_REJECTION_NOTE
                 )
-                if _sys_idx is None:
-                    messages.insert(0, {"role": "system", "content": (
-                        "The user attached image(s), but the current model "
-                        "provider rejected image input, so the image bytes "
-                        "were removed from this context. The store rel path "
-                        "annotations under the attached images remain valid: "
-                        "pass those paths to generate_image (reference_images) "
-                        "or upscale_image (path) - they resolve the stored "
-                        "files server-side without vision."
-                    )})
-                else:
-                    _head = messages[_sys_idx]
-                    _head_content = _head.get("content")
-                    _head["content"] = (
-                        _head_content
-                        if isinstance(_head_content, str)
-                        else str(_head_content or "")
-                    ) + "\n\n" + (
-                        "The user attached image(s), but the current model "
-                        "provider rejected image input, so the image bytes "
-                        "were removed from this context. The store rel path "
-                        "annotations under the attached images remain valid: "
-                        "pass those paths to generate_image (reference_images) "
-                        "or upscale_image (path) - they resolve the stored "
-                        "files server-side without vision."
-                    )
                 yield _ndjson({
                     "type": "note",
                     "text": (
@@ -402,6 +408,21 @@ async def _run_claimed(
                     "remote image rejection retry: stripped %d image part(s) (%s)",
                     n_stripped, exc,
                 )
+                # Issue #430: the rejection is ground truth - cache it so
+                # later turns on this provider pre-strip without a failed
+                # request. Model/effort overrides are the remote runner's
+                # resolved scope; best-effort only.
+                try:
+                    from backend.agent import vision as _vision
+
+                    _cfgm = model_client._resolve_call_cfg(
+                        dict(model_client.load_config()),
+                        model_override or "",
+                        effort_override,
+                    )
+                    _vision.record_rejection(_cfgm["api_base"], _cfgm["model"])
+                except Exception:  # noqa: BLE001
+                    pass
                 continue
             except Exception as exc:  # ModelError and transport failures
                 yield _ndjson({"type": "error",

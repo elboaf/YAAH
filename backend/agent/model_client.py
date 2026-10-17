@@ -76,6 +76,75 @@ def _looks_like_image_rejection(status: int, body: str) -> bool:
     return any(marker in low for marker in IMAGE_REJECT_MARKERS)
 
 
+# The note a non-vision context carries (issue #428). Exported so the
+# reactive retry and the #430 proactive pre-strip say the SAME thing to the
+# model through the SAME helper - one wording to maintain.
+IMAGE_REJECTION_NOTE = (
+    "The user attached image(s), but the current model "
+    "provider rejected image input, so the image bytes "
+    "were removed from this context. The store rel path "
+    "annotations under the attached images remain valid: "
+    "pass those paths to generate_image (reference_images) "
+    "or upscale_image (path) - they resolve the stored "
+    "files server-side without vision."
+)
+
+# Generic wording for the #430 proactive path (the provider did not reject
+# anything - it merely reports no vision).
+IMAGE_NOVISION_NOTE = (
+    "The current model provider reports no vision support, so the image "
+    "bytes were left out of this context. The store rel path annotations "
+    "under the attached images remain valid: pass those paths to "
+    "generate_image (reference_images) or upscale_image (path) - they "
+    "resolve the stored files server-side without vision."
+)
+
+
+def merge_note_into_first_system(messages: list, note: str) -> None:
+    """Fold `note` into the FIRST system message in place - never a second
+    system row: strict chat templates (llama.cpp qwen-class) reject any
+    system message after the first (#428 contract, asserted by the #428
+    e2e test). Transient by design: the frozen head on the conversation row
+    replays unchanged next turn (KV-cache stability, #375). Mutates the
+    first message's content string; inserts a system row only when the
+    context has none at all."""
+    idx = next(
+        (i for i, m in enumerate(messages) if m.get("role") == "system"),
+        None,
+    )
+    if idx is None:
+        messages.insert(0, {"role": "system", "content": note})
+        return
+    head = messages[idx]
+    content = head.get("content")
+    if isinstance(content, list):
+        # Parts-list head (rare: a system row built as a parts list):
+        # collapse to its text parts rather than str()-ing the structure.
+        texts = [
+            str(p.get("text") or "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        content = "\n".join(texts)
+    head["content"] = (content or "") + "\n\n" + note
+
+
+def has_image_parts(messages: list) -> bool:
+    """True when any message carries an image_url part (parts-list content).
+    Cheap scan for the #430 turn seam - don't probe providers that have
+    nothing to strip."""
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content")
+        if isinstance(content, list) and any(
+            isinstance(p, dict) and p.get("type") == "image_url"
+            for p in content
+        ):
+            return True
+    return False
+
+
 def strip_image_parts(messages: list) -> tuple[list, int]:
     """Return (copy_of_messages_without_image_url_parts, count_stripped).
 
