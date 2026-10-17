@@ -8309,14 +8309,22 @@ export function GitChipCluster({
 
       {/* Sync readout (#350): two short hashes — the checked-out branch's
           tip, its upstream's tip — click = copy,
-          each colored by its own divergence; ahead/behind counters kept.
-          Each hash sits in a column with its role named above it (plain
-          text, always visible — name > hover-only title). items-end: the
-          columns hang from the strip's top edge like the selector chip. */}
+          each colored by its own divergence; directional sync indicator
+          between hashes (#387): → when ahead (push rightward), ← when
+          behind (pull leftward), both when diverged, dot when in sync. */}
       <span className="flex shrink-0 items-end font-mono text-[10px] text-zinc-400">
-        {slots.map(({ which, label, hash, title, color }) => (
+        {slots.map(({ which, label, hash, title, color }, idx) => (
           <Fragment key={which}>
-            {which !== 'local' && sep}
+            {idx > 0 && (
+              info.ahead === 0 && info.behind === 0
+                ? sep
+                : (
+                    <span className="mx-1 flex items-center gap-0.5">
+                      {info.behind > 0 && <span>←{info.behind}</span>}
+                      {info.ahead > 0 && <span>→{info.ahead}</span>}
+                    </span>
+                  )
+            )}
             <span className="flex flex-col items-center leading-tight">
               <span className="text-[9px] leading-none tracking-wide text-zinc-500">{label}</span>
               <button
@@ -8329,8 +8337,6 @@ export function GitChipCluster({
             </span>
           </Fragment>
         ))}
-        {info.ahead > 0 && <span className="ml-1">↑{info.ahead}</span>}
-        {info.behind > 0 && <span className="ml-1">↓{info.behind}</span>}
       </span>
 
     </span>
@@ -8412,12 +8418,10 @@ function DialTick({ frac, color }: { frac: number; color: string }) {
 
 /** Context gauge (status strip): a circular dial whose fill arc is the
  *  exact context size against the model's window, climbing with every
- *  model call during a run. Two rim ticks mark the thresholds:
+ *  model call during a run. One rim tick marks the compaction trigger:
  *  - compaction trigger (light tick, adr/0004): the absolute
  *    Settings trigger_tokens value — past it the NEXT turn rewrites
  *    history, so the visible count is no longer the full transcript.
- *  - the "dumb zone" (red tick, 120k): past it model quality measurably
- *    degrades on most families, independent of the hard window.
  *  Nothing renders until the first turn completes (the count comes from
  *  the API's usage report). Config arrives from /api/config, cached per
  *  page load. */
@@ -8471,7 +8475,7 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
         )}
         {/* Threshold ticks on the rim. */}
         {triggerFrac !== null && <DialTick frac={triggerFrac} color="#d4d4d8" />}
-        {dumbVisible && <DialTick frac={dumbFrac!} color="#f87171" />}
+        {/* red dumb-zone tick removed (#387): keep only the compaction trigger tick */}
         {/* Hub readout: true, unclamped percentage of the fixed dial. */}
         <text
           x="12"
@@ -8486,8 +8490,7 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
         </text>
       </svg>
       <span className={tokenCountColor(info.tokens)}>
-        {fmtTok(info.tokens)}
-        {windowTokens ? ` / ${fmtTok(windowTokens)}` : ''} tok
+        {fmtTok(info.tokens)} tok
       </span>
     </span>
   )

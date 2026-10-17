@@ -51,10 +51,9 @@ describe('ContextChip context dial (#135)', () => {
     expect(svg.querySelector('path')!.getAttribute('d')).toBe(
       `M 12 ${12 - r} A ${r} ${r} 0 0 1 ${endX} ${endY}`,
     )
-    // Threshold ticks unchanged: compaction off by default -> only the 120k dumb-zone tick.
+    // Threshold ticks: compaction tick silent (trigger_tokens=0 means null trigger); dumb-zone tick removed (#387) -> zero lines.
     const lines = svg.querySelectorAll('line')
-    expect(lines).toHaveLength(1)
-    expect(lines[0].getAttribute('stroke')).toBe('#f87171')
+    expect(lines).toHaveLength(0)
   })
 
   it('tooltip is exactly the three copy lines, old numeric lines gone', () => {
