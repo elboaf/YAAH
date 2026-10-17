@@ -396,7 +396,7 @@ def test_junk_config_values_are_ignored(configured, tmp_path, monkeypatch):
 
 
 def test_params_chunk_note_reaches_result(configured, tmp_path, monkeypatch):
-    async def fake_wait(api_base, job_id):
+    async def fake_wait(api_base, job_id, on_chunk=None, deadline_s=None):
         text = (
             "prompt\nSteps: 4\nCFG scale: 1.000000\nGuidance: 1.000000\n"
             "Seed: 28500\nSize: 1024x1024\n"
