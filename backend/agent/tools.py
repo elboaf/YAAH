@@ -334,9 +334,11 @@ HELP_DOCS: dict = {
         "whenever the server's generation limits allow it (composition "
         "is decided by the first pass's canvas, so native rendering is "
         "the default); hires_fix=true opts into the conservative "
-        "budget-render + server hires second pass; targets beyond the "
-        "limits render at the max legal size and are enlarged by the "
-        "ESRGAN chain. The result reports exactly what happened. "
+        "small-VRAM route - the first pass is never smaller than "
+        "1024x1024 and the server hires second pass reaches the exact "
+        "target; targets beyond the limits render at the max legal "
+        "size and are enlarged by the ESRGAN chain. The result reports "
+        "exactly what happened. "
         "negative_prompt and seed pass through. Generation runs as a "
         "server job: pressing Stop cancels it and returns immediately. "
         "Long renders stay visible: progress notes appear on the live "
@@ -1504,17 +1506,17 @@ def _memory_executor(op: str):
 # http://127.0.0.1:1234). Two tools: generate_image (txt2img) and
 # upscale_image (native ESRGAN endpoint over an existing image).
 #
-# Resolution policy (learned the hard way on a 12GB card): the DIFFUSION
-# model never renders ABOVE the server's default size - asking a 9B flux
-# model for 1024 native can thrash weights forever under VRAM pressure.
-# Sizes beyond the default are reached by the server's HIRES FIX when it
-# is available (render small, ESRGAN-upscale, then a second diffusion
-# pass at the exact target: exact sizes, sharper detail, heavier second
-# pass - paired with per-request VAE tiling for memory relief). Without
-# hires support the ESRGAN upscale chain is used instead (fast,
-# detail-preserving, staged on the server's real scale factor, may
-# overshoot). The harness hard-codes no resolution; the server's
-# capabilities decide what "default" means and which routes exist.
+# Resolution policy (#421/#433): the requested size IS the DIFFUSION
+# render's size whenever the server's GENERATION limits allow it - the
+# FIRST pass decides composition (a 512 render drops subjects on
+# klein-class models; research notes 13-14), so every first pass floors
+# at 1024x1024. Targets beyond the limits render at the maximum legal
+# size and are enlarged by the ESRGAN chain; the server's hires fix
+# (ESRGAN upscale + a second diffusion pass at the exact target, VAE
+# tiled per request) is the explicit hires_fix=True route, and its
+# first pass ALSO floors at 1024x1024 - never the server's 512-class
+# default. The harness hard-codes no resolution beyond that floor; the
+# server's capabilities decide which routes exist.
 
 _IMAGE_GEN_TOOLS = ("generate_image", "upscale_image")
 
@@ -1537,8 +1539,9 @@ GENERATE_IMAGE_SCHEMA = {
             "composition is decided by the first pass's canvas (a "
             "512 render drops subjects on klein-class models), so "
             "native rendering is the default; hires_fix=true opts "
-            "into the conservative small-VRAM route (budget render "
-            "+ hires second pass). Four steps is "
+            "into the conservative small-VRAM route, whose first "
+            "pass is never smaller than 1024x1024 before the hires "
+            "second pass reaches the exact target. Four steps is "
             "fast-draft guidance (typical look: soft anatomy, smudged "
             "eyes, mushy text) - pass steps for "
             "detail-critical text-to-image (~15-20; cost is near-linear "
@@ -1582,19 +1585,22 @@ GENERATE_IMAGE_SCHEMA = {
                 "hires_fix": {
                     "type": "boolean",
                     "description": (
-                        "Opt into the conservative small-VRAM route: the "
-                        "render stays inside the server's default-size "
-                        "pixel budget and a server-side hires fix "
-                        "(ESRGAN upscale + a second diffusion pass at "
-                        "the exact target) reaches the full size - "
-                        "sharper, slower, heavier on VRAM; the server "
-                        "tiles the VAE to cope. Default false: sizes "
-                        "within the server's limits render natively "
-                        "(the first pass decides composition - a "
-                        "budget-sized render loses subjects on "
-                        "klein-class models), and sizes beyond the "
-                        "limits render at the maximum legal size + "
-                        "ESRGAN enlargement."
+                        "Opt into the conservative small-VRAM route: "
+                        "the first pass renders at 1024x1024 - never "
+                        "smaller, never the server's smaller default - "
+                        "shaped to the requested aspect ratio, and a "
+                        "server-side hires fix (ESRGAN upscale + a "
+                        "second diffusion pass at the exact target) "
+                        "reaches the full size - sharper, slower, "
+                        "heavier on VRAM; the server tiles the VAE to "
+                        "cope. Targets at or under 1024x1024 are just "
+                        "rendered natively (the second pass would add "
+                        "nothing). Default false: sizes within the "
+                        "server's limits render natively (the first "
+                        "pass decides composition - a 512-class render "
+                        "loses subjects on klein-class models), and "
+                        "sizes beyond the limits render at the maximum "
+                        "legal size + ESRGAN enlargement."
                     ),
                 },
                 "negative_prompt": {
@@ -2332,21 +2338,17 @@ async def _upscale_to_target(
 
 
 def _hires_render_size(want_w: int, want_h: int, b: dict):
-    """Render dims for a hires-fix first pass: at or under the default's
-    pixel budget (what this model/VRAM handles comfortably), shaped to
-    the requested aspect ratio, never above the target itself. Returns
-    (gen_w, gen_h, within_budget)."""
-    budget = float(b["def_w"]) * float(b["def_h"])
+    """Render dims for a hires-fix first pass (#433): the 1024x1024
+    class floor - klein's composition scale, NOT the server's
+    512-class default - shaped to the requested aspect ratio and never
+    above the target itself. Returns (gen_w, gen_h)."""
+    budget = float(_IMG_W_DEFAULT) * float(_IMG_H_DEFAULT)
     ratio = float(want_w or want_h) / max(float(want_h or want_w), 1.0)
     gw = (budget * ratio) ** 0.5
     gh = gw / max(ratio, 0.0001)
-    within = gw * gh <= budget * 1.05
-    if not within:
-        gw, gh = float(b["def_w"]), float(b["def_h"])
     return (
         _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"]),
         _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"]),
-        within,
     )
 
 
@@ -2452,9 +2454,10 @@ async def generate_image(
     size IS the diffusion render's size whenever the server's
     generation limits allow it (#421: the FIRST pass decides the
     composition); hires_fix=True opts into the conservative small-VRAM
-    route (budget render + the server's hires second pass), and targets
-    beyond the limits render at the maximum legal size, enlarged by the
-    ESRGAN chain.
+    route, whose first pass floors at 1024x1024 (#433 - never the
+    server's 512-class default) before the hires second pass reaches
+    the exact target; targets beyond the limits render at the maximum
+    legal size, enlarged by the ESRGAN chain.
 
     Sampling defaults (#411): caller > config generation_defaults >
     omit (the server's own defaults apply). Seed is NEVER pinned on
@@ -2539,8 +2542,9 @@ async def generate_image(
     if width is None and height is None:
         # built-in size underlay (#419): no caller size and no configured
         # size -> the built-in 1024x1024 intent rides the size-decision
-        # pipeline below (budget render + hires to exact), so the
-        # server's 512-class default stops deciding the omit path.
+        # pipeline below (native render; the conservative hires route's
+        # first pass also floors at 1024), so the server's 512-class
+        # default stops deciding the omit path.
         width = _IMG_W_DEFAULT
         height = _IMG_H_DEFAULT
         notes.append(f"size {width}x{height} (built-in default)")
@@ -2785,27 +2789,33 @@ async def generate_image(
     # anatomy; research notes 13-14), and a second pass re-diffusing an
     # upscaled 512 frame cannot resurrect what pass 1 never drew. Live
     # A/B (note 23): native 1024 beat 512+hires on quality AND time.
-    # The conservative budget+hires route survives as the explicit
-    # hires_fix=True mode for small-VRAM cards; the ESRGAN chain reaches
-    # targets beyond the server's generation limits.
+    # The conservative route survives as the explicit hires_fix=True
+    # mode for small-VRAM cards - but its first pass now FLOORS at
+    # 1024x1024 (#433): starting from the server's 512-class default
+    # was exactly the operating point klein fails at. The ESRGAN chain
+    # reaches targets beyond the server's generation limits.
     gen_w, gen_h = b["def_w"], b["def_h"]
     want_w = width or 0
     want_h = height or 0
     if want_w or want_h:
         tw, th = _hires_plan(int(want_w or want_h), int(want_h or want_w), b)
         if hires_fix is True:
-            # CONSERVATIVE MODE (explicit opt-in): render within the
-            # server's default pixel budget and reach the exact target
-            # via the server's hires fix (ESRGAN upscale + second
-            # diffusion pass; VAE tiling per-request for decode memory).
-            # The pre-#421 default policy, kept for 12GB-class cards.
-            gen_w, gen_h, _within = _hires_render_size(want_w, want_h, b)
+            # CONSERVATIVE MODE (explicit opt-in): the first pass
+            # floors at 1024x1024 (#433 - never the server's 512-class
+            # default) and the exact target is reached via the server's
+            # hires fix (ESRGAN upscale + second diffusion pass; VAE
+            # tiling per-request for decode memory). A target the floor
+            # render already covers skips the second pass: it would
+            # add nothing a native render does not already give.
+            gen_w, gen_h = _hires_render_size(want_w, want_h, b)
             over = max(tw / gen_w, th / gen_h, 1.0)
             if over <= 1.0:
-                # the render already meets the request
+                # the render already meets the request - no hires
+                # second pass, no ESRGAN step (same size as native)
                 notes.append(
-                    f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
-                    "(within the server's default budget)"
+                    f"requested {want_w}x{want_h}: native render at "
+                    f"{gen_w}x{gen_h} (the 1024x1024 floor already "
+                    "covers it - no hires pass needed)"
                 )
             elif b["hires"] and b["upscale"] and refs:
                 # A second diffusion pass can drift the subject away from
@@ -2836,7 +2846,7 @@ async def generate_image(
                     hires_body["vae_tiling_params"] = {"enabled": True}
                 notes.append(
                     f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
-                    f"(the model's default budget), then hires fix to "
+                    f"(the 1024x1024 floor), then hires fix to "
                     f"{tw}x{th} (ESRGAN upscale + second diffusion pass"
                     + (
                         ", VAE tiled for memory"
@@ -3023,7 +3033,7 @@ async def generate_image(
             m = meta2 or {}
             notes.append(
                 f"requested {want_w}x{want_h}: rendered {gen_w}x{gen_h} "
-                f"(the model's default size), then upscaled via "
+                f"(the maximum legal size), then upscaled via "
                 f"{m.get('upscaler')}"
                 + (
                     f" to {m.get('width')}x{m.get('height')}"
@@ -3203,10 +3213,12 @@ def _generation_result(
             "the render happens at the requested size whenever the "
             f"server's generation limits (up to {b['max_w']}x{b['max_h']}) "
             "allow it; hires_fix: true opts into the conservative "
-            f"budget render ({b['def_w']}x{b['def_h']}) + the server's "
-            "hires second pass; targets beyond the limits render at "
-            "the maximum legal size and are enlarged by the ESRGAN "
-            "chain (or call upscale_image on the saved file)"
+            "small-VRAM route, whose first pass is never smaller than "
+            "1024x1024 (never the server's smaller default) before the "
+            "hires second pass reaches the exact target; targets "
+            "beyond the limits render at the maximum legal size and "
+            "are enlarged by the ESRGAN chain (or call upscale_image "
+            "on the saved file)"
         )
     if notes:
         out["note"] = " ".join(notes)

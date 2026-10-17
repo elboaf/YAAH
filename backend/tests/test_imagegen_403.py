@@ -348,23 +348,23 @@ def test_refs_within_limits_render_natively_without_hires(configured, tmp_path, 
 
 
 def test_refs_explicit_hires_fix_keeps_conservative_route(configured, tmp_path, monkeypatch):
-    """#421: refs + hires_fix=True keeps the pre-#421 conservative
-    behavior - budget render, and the hires second diffusion pass is
-    skipped in favor of the ESRGAN chain (re-diffusion drifts
-    off-reference)."""
+    """#421 + #433: refs + hires_fix=True keeps the conservative
+    behavior - a first pass floored at 1024x1024 (never the 512-class
+    default), and the hires second diffusion pass is skipped in favor
+    of the ESRGAN chain (re-diffusion drifts off-reference)."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
     _FakeClient.upscale_payload = {
-        "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
+        "images": [{"b64_json": base64.b64encode(_png(1536, 1536)).decode()}],
         "upscaler": "RealESRGAN_x4plus",
         "scale": 2,
         "repeats": 2,
-        "width": 1024,
-        "height": 1024,
+        "width": 1536,
+        "height": 1536,
     }
     (ref,) = _ref_files(tmp_path, "photo.png")
     r = _run(
         "generate_image",
-        {"prompt": "x", "reference_images": [ref], "width": 1024, "height": 1024,
+        {"prompt": "x", "reference_images": [ref], "width": 1536, "height": 1536,
          "hires_fix": True},
         str(tmp_path),
     )
@@ -376,12 +376,14 @@ def test_refs_explicit_hires_fix_keeps_conservative_route(configured, tmp_path, 
 
 
 def test_plain_within_limits_still_uses_hires_when_explicitly_asked(configured, tmp_path, monkeypatch):
-    """#421: plain generations render natively by default; the hires
-    second pass rides only when the caller opts in (hires_fix=True)."""
+    """#421 + #433: plain generations render natively by default; the
+    hires second pass rides only when the caller opts in
+    (hires_fix=True) - and only above the 1024x1024 floor, which the
+    conservative first pass always meets."""
     _caps_feat(configured, monkeypatch, hires=True, vae_tiling=True)
     r = _run(
         "generate_image",
-        {"prompt": "x", "width": 1024, "height": 1024, "hires_fix": True},
+        {"prompt": "x", "width": 1536, "height": 1536, "hires_fix": True},
         str(tmp_path),
     )
     assert not r.get("error"), r

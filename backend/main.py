@@ -2307,7 +2307,7 @@ async def api_get_config():
         # Image generation (sd-server): its own Settings block; api_base
         # doubles as the configured flag for tool availability.
         "image_generation": cfg.get("image_generation")
-        or {"provider": "sdcpp", "api_base": "", "size": "512x512"},
+        or {"provider": "sdcpp", "api_base": "", "size": "1024x1024"},
     }
 
 
