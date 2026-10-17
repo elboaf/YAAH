@@ -2,7 +2,11 @@
 
 Caller > configured generation_defaults > BUILT-IN (1024x1024, steps 4,
 cfg 1.0 - #419 retired the omit-to-server-default tail: sampling is
-never unset anymore). The seed is NEVER pinned on the omit path;
+never unset anymore). #433: cfg + distilled guidance are LOCKED at 1
+(guidance-distilled klein) and cfg_scale is not a model-facing
+parameter; the built-in layer injects distilled_guidance 1.0 whenever
+txt_cfg sits at the klein operating point. The seed is NEVER pinned on
+the omit path;
 reseed=True asks the server for a fresh random draw (seed -1); the
 result note carries the ground truth of what the server actually ran,
 parsed from the PNG parameters chunk.
@@ -107,11 +111,13 @@ def test_full_omit_uses_built_in_defaults(configured, tmp_path, monkeypatch):
     assert body["seed"] == -1  # #423: omit = fresh random draw
     assert body["sample_params"]["sample_steps"] == 4
     assert body["sample_params"]["guidance"]["txt_cfg"] == 1.0
+    assert body["sample_params"]["guidance"]["distilled_guidance"] == 1.0
     assert body["width"] == 1024 and body["height"] == 1024
     assert "hires" not in body
     assert result["width"] == 1024 and result["height"] == 1024
     note = result.get("note") or ""
-    assert "(built-in default)" in note
+    assert "cfg_scale locked at 1" in note
+    assert "steps 4 (built-in default)" in note
     assert "(configured default)" not in note
 
 
@@ -131,6 +137,7 @@ def test_omit_path_capsless_carries_built_ins_in_envelope(configured, tmp_path, 
     extra = _embedded_extra(body)
     assert extra["sample_params"]["sample_steps"] == 4
     assert extra["sample_params"]["guidance"]["txt_cfg"] == 1.0
+    assert extra["sample_params"]["guidance"]["distilled_guidance"] == 1.0
     assert extra["seed"] == -1  # #423: omit = fresh random draw
     assert body["size"] == "1024x1024"
 
@@ -194,12 +201,14 @@ def test_steps_native_body_sample_params(configured, tmp_path, monkeypatch):
     assert sp["sample_steps"] == 15
     # #419: the omit slot still fills from the built-in layer
     assert sp["guidance"]["txt_cfg"] == 1.0
+    assert sp["guidance"]["distilled_guidance"] == 1.0
 
 
 def test_cfg_scale_native_body_guidance(configured, tmp_path, monkeypatch):
     _gen(configured, tmp_path, monkeypatch, cfg_scale=1.0)
     sp = _FakeClient.job_bodies[0]["sample_params"]
     assert sp["guidance"]["txt_cfg"] == 1.0
+    assert sp["guidance"]["distilled_guidance"] == 1.0  # #433: locked at 1
     # #419: the omit slot still fills from the built-in layer
     assert sp["sample_steps"] == 4
 
@@ -209,6 +218,7 @@ def test_steps_and_cfg_together(configured, tmp_path, monkeypatch):
     sp = _FakeClient.job_bodies[0]["sample_params"]
     assert sp["sample_steps"] == 15
     assert sp["guidance"]["txt_cfg"] == 1.0
+    assert sp["guidance"]["distilled_guidance"] == 1.0
 
 
 def test_native_endpoint_unavailable_falls_back_with_sampling_fields(
@@ -342,6 +352,7 @@ def test_config_rejects_nonpositive_and_fractional_counts(configured, tmp_path, 
     sp = body.get("sample_params") or {}
     assert sp["sample_steps"] == 4           # 4.5 rejected -> built-in (#419)
     assert sp.get("guidance", {}).get("txt_cfg") == 1.5  # free float kept
+    assert "distilled_guidance" not in (sp.get("guidance") or {})  # off-lock: no injection
     # 0 / -64 rejected -> the BUILT-IN 1024x1024 is the native render
     # (#421); junk keys never poison it
     assert body["width"] == 1024 and body["height"] == 1024
@@ -444,15 +455,18 @@ def test_png_params_scans_past_foreign_text_chunks():
 def test_schema_documents_steps_cfg_reseed():
     props = tools.GENERATE_IMAGE_SCHEMA["function"]["parameters"]["properties"]
     assert "steps" in props and props["steps"]["type"] == "integer"
-    assert "cfg_scale" in props and props["cfg_scale"]["type"] == "number"
+    # #433: cfg is LOCKED at 1 (guidance-distilled klein) - cfg_scale
+    # is not a model-facing parameter at all
+    assert "cfg_scale" not in props
     assert "reseed" in props and props["reseed"]["type"] == "boolean"
     steps_desc = props["steps"]["description"]
-    assert "15-20" in steps_desc and "draft" in steps_desc
+    assert "explicitly asks" in steps_desc and "distilled" in steps_desc
+    assert "15-20" not in steps_desc
     assert props["seed"]["description"].startswith(
         "Seed for reproducible output."
     )
     desc = tools.GENERATE_IMAGE_SCHEMA["function"]["description"]
-    assert "fast-draft" in desc and "15-20" in desc
+    assert "locked at 1" in desc and "EXPLICITLY asks for more" in desc
 
 
 # ------------------------------------------------------------------ #419
@@ -521,7 +535,7 @@ def test_mixed_config_and_built_in_notes(configured, tmp_path, monkeypatch):
     assert body["width"] == 1024 and body["height"] == 1024
     note = result.get("note") or ""
     assert "steps 12 (configured default)" in note
-    assert "cfg_scale 1 (built-in default)" in note
+    assert "cfg_scale locked at 1" in note
     assert "size 1024x1024 (built-in default)" in note
 
 

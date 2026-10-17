@@ -312,11 +312,75 @@ def test_above_budget_size_renders_natively(configured, tmp_path, monkeypatch):
 
 
 def test_explicit_hires_fix_true_keeps_conservative_route(configured, tmp_path, monkeypatch):
-    """#421: hires_fix=True is the explicit OPT-IN to the pre-#421
-    conservative policy: render within the default budget (512-class)
-    and let the server's hires fix produce the exact final size.
-    Protects 12GB-class cards from weight-thrash when the operator
-    asks for it."""
+    """#421 + #433: hires_fix=True is the explicit OPT-IN to the
+    conservative policy, but its first pass FLOORS at 1024x1024 -
+    never the server's 512-class default (the operating point
+    klein-class models fail at). A 1536x1536 request renders 1024
+    first and the server's hires fix produces the exact final
+    size."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
+                   "max_upscale_width": 8192, "max_upscale_height": 8192},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+        "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image",
+            {"prompt": "x", "width": 1536, "height": 1536, "hires_fix": True},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    # first diffusion pass floors at the 1024-class, NEVER the 512 default
+    assert _FakeClient.job_bodies[0]["width"] == 1024
+    assert _FakeClient.job_bodies[0]["height"] == 1024
+    # hires rides in the SAME job body: exact target, no client-side chain
+    jb = _FakeClient.job_bodies[0]
+    assert jb["hires"]["enabled"] is True
+    assert jb["hires"]["target_width"] == 1536
+    assert jb["hires"]["target_height"] == 1536
+    assert jb["vae_tiling_params"]["enabled"] is True
+    assert _FakeClient.upscale_calls == 0
+    assert result["width"] == 1536 and result["height"] == 1536
+    assert "hires fix" in result["note"] and "1536x1536" in result["note"]
+
+
+def test_conservative_hires_first_pass_never_below_1024(configured, tmp_path, monkeypatch):
+    """#433 THE REGRESSION: on a 512-default server the conservative
+    first pass used to render 512x512 (the operating point klein-class
+    models fail at). It must floor at the 1024x1024 class regardless
+    of what the server advertises as its default, shaped to the
+    requested aspect ratio."""
+    _FakeClient.caps_payload = {
+        "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
+                   "max_upscale_width": 8192, "max_upscale_height": 8192},
+        "defaults": {"width": 512, "height": 512},
+        "upscale": True,
+        "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    result = asyncio.run(
+        tools.execute_tool(
+            "generate_image",
+            {"prompt": "x", "width": 2048, "height": 1024, "hires_fix": True},
+            workspace=str(tmp_path),
+        )
+    )
+    assert not result.get("error"), result
+    jb = _FakeClient.job_bodies[0]
+    # 2:1 request shaped into the 1024-class floor (NOT the 512 default)
+    assert jb["width"] == 1408 and jb["height"] == 704
+    assert jb["hires"]["target_width"] == 2048
+    assert jb["hires"]["target_height"] == 1024
+
+
+def test_conservative_hires_target_at_floor_renders_natively(configured, tmp_path, monkeypatch):
+    """#433: a target at or under the 1024x1024 floor + hires_fix=True
+    renders natively - the second pass would add nothing (the old code
+    still routed it through the hires machinery)."""
     _FakeClient.caps_payload = {
         "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096,
                    "max_upscale_width": 8192, "max_upscale_height": 8192},
@@ -333,18 +397,11 @@ def test_explicit_hires_fix_true_keeps_conservative_route(configured, tmp_path, 
         )
     )
     assert not result.get("error"), result
-    # first diffusion pass stays at the default budget, NEVER 1024
-    assert _FakeClient.job_bodies[0]["width"] == 512
-    assert _FakeClient.job_bodies[0]["height"] == 512
-    # hires rides in the SAME job body: exact target, no client-side chain
     jb = _FakeClient.job_bodies[0]
-    assert jb["hires"]["enabled"] is True
-    assert jb["hires"]["target_width"] == 1024
-    assert jb["hires"]["target_height"] == 1024
-    assert jb["vae_tiling_params"]["enabled"] is True
+    assert jb["width"] == 1024 and jb["height"] == 1024
+    assert "hires" not in jb
     assert _FakeClient.upscale_calls == 0
-    assert result["width"] == 1024 and result["height"] == 1024
-    assert "hires fix" in result["note"] and "512x512" in result["note"]
+    assert "native render at 1024x1024" in (result.get("note") or "")
 
 
 def test_beyond_limits_with_hires_fix_off_upscales_instead_of_diffusing(configured, tmp_path, monkeypatch):
@@ -385,7 +442,9 @@ def test_beyond_limits_with_hires_fix_off_upscales_instead_of_diffusing(configur
 
 def test_hires_without_vae_tiling_support_omits_tiling(configured, tmp_path, monkeypatch):
     """An older build that reports hires but not vae_tiling gets the
-    hires object WITHOUT the tiling params (server would ignore/400)."""
+    hires object WITHOUT the tiling params (server would ignore/400).
+    #433: the request sits above the 1024x1024 floor so the hires pass
+    actually engages."""
     _FakeClient.caps_payload = {
         "limits": {"min_width": 64, "min_height": 64, "max_width": 4096, "max_height": 4096},
         "defaults": {"width": 512, "height": 512},
@@ -396,7 +455,7 @@ def test_hires_without_vae_tiling_support_omits_tiling(configured, tmp_path, mon
     result = asyncio.run(
         tools.execute_tool(
             "generate_image",
-            {"prompt": "x", "width": 768, "height": 768, "hires_fix": True},
+            {"prompt": "x", "width": 1536, "height": 1536, "hires_fix": True},
             workspace=str(tmp_path),
         )
     )
@@ -404,7 +463,7 @@ def test_hires_without_vae_tiling_support_omits_tiling(configured, tmp_path, mon
     jb = _FakeClient.job_bodies[0]
     assert jb["hires"]["enabled"] is True
     assert "vae_tiling_params" not in jb
-    assert jb["hires"]["target_width"] == 768
+    assert jb["hires"]["target_width"] == 1536
 
 
 def test_hires_refused_by_server_falls_back_with_a_note(configured, tmp_path, monkeypatch):
@@ -419,16 +478,16 @@ def test_hires_refused_by_server_falls_back_with_a_note(configured, tmp_path, mo
         "features_by_mode": {"img_gen": {"hires": True, "vae_tiling": True}},
     }
     _FakeClient.upscale_payload = {
-        "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
+        "images": [{"b64_json": base64.b64encode(_png(1536, 1536)).decode()}],
         "upscaler": "RealESRGAN_x4plus", "scale": 4, "repeats": 1,
-        "width": 1024, "height": 1024,
+        "width": 1536, "height": 1536,
     }
     _FakeClient.reject_hires_submit = True
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(
         tools.execute_tool(
             "generate_image",
-            {"prompt": "x", "width": 1024, "height": 1024, "hires_fix": True},
+            {"prompt": "x", "width": 1536, "height": 1536, "hires_fix": True},
             workspace=str(tmp_path),
         )
     )
@@ -439,7 +498,7 @@ def test_hires_refused_by_server_falls_back_with_a_note(configured, tmp_path, mo
     assert "refused" in result["note"]
     # the chain still delivers the size
     assert _FakeClient.upscale_calls == 1
-    assert result["width"] == 1024 and result["height"] == 1024
+    assert result["width"] == 1536 and result["height"] == 1536
 
 
 def test_hires_upscaler_name_comes_from_capabilities(configured, tmp_path, monkeypatch):
@@ -459,7 +518,7 @@ def test_hires_upscaler_name_comes_from_capabilities(configured, tmp_path, monke
     result = asyncio.run(
         tools.execute_tool(
             "generate_image",
-            {"prompt": "x", "width": 1024, "height": 1024, "hires_fix": True},
+            {"prompt": "x", "width": 1536, "height": 1536, "hires_fix": True},
             workspace=str(tmp_path),
         )
     )
@@ -642,7 +701,10 @@ def test_generate_image_end_to_end(configured, tmp_path, monkeypatch):
     assert embedded == {
         "negative_prompt": "dogs",
         "seed": 42,
-        "sample_params": {"sample_steps": 4, "guidance": {"txt_cfg": 1.0}},
+        "sample_params": {
+            "sample_steps": 4,
+            "guidance": {"txt_cfg": 1.0, "distilled_guidance": 1.0},
+        },
     }
     assert result["images"] and result["images"][0].startswith("generate_image/")
     assert result["path"].startswith("ai-images/")
