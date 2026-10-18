@@ -1545,8 +1545,8 @@ def _parts_with_images(text: str, image_rels: list) -> list | str:
                 "type": "text",
                 "text": (
                     f"[attached image, stored rel: {rel} - pass this path to "
-                    "generate_image reference_images / upscale_image path / "
-                    "view_image url]"
+                    "generate_image (mode \"edit\", reference_images) / "
+                    "upscale_image path / view_image url]"
                 ),
             })
         else:

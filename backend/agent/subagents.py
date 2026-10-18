@@ -82,6 +82,7 @@ _ALWAYS_EXCLUDED = {
     # Image generation is a main-chat capability: the parent generates and
     # hands files down, keeping one generation queue on the sd-server.
     "generate_image",
+    "edit_image",
     "upscale_image",
 }
 

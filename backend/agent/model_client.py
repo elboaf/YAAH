@@ -84,8 +84,8 @@ IMAGE_REJECTION_NOTE = (
     "provider rejected image input, so the image bytes "
     "were removed from this context. The store rel path "
     "annotations under the attached images remain valid: "
-    "pass those paths to generate_image (reference_images) "
-    "or upscale_image (path) - they resolve the stored "
+    "pass those paths to generate_image (mode \"edit\", "
+    "reference_images) or upscale_image (path) - they resolve the stored "
     "files server-side without vision."
 )
 
@@ -95,8 +95,9 @@ IMAGE_NOVISION_NOTE = (
     "The current model provider reports no vision support, so the image "
     "bytes were left out of this context. The store rel path annotations "
     "under the attached images remain valid: pass those paths to "
-    "generate_image (reference_images) or upscale_image (path) - they "
-    "resolve the stored files server-side without vision."
+    "generate_image (mode \"edit\", reference_images) or "
+    "upscale_image (path) - they resolve the stored files "
+    "server-side without vision."
 )
 
 
