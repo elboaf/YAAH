@@ -2751,6 +2751,19 @@ async def generate_image(
     refs: list[str] = []
     depth_inserted = False
     refs_supported = b is not None and b["ref_images"]
+    if mode == "edit" and not refs_supported:
+        # #437 round 2 (CodeRabbit): edit mode NEEDS the references
+        # - without a channel for them the call would silently
+        # render a plain generation from a transformation-only
+        # prompt, unrelated to the user's picture. Refuse instead of
+        # degrading (generate mode keeps the #403 degrade ladder).
+        return {
+            "error": (
+                "mode \"edit\" needs a server that supports "
+                "reference images (ref_images capability missing or "
+                "no native job API); this server cannot carry them"
+            )
+        }
     if reference_images:
         if not refs_supported:
             notes.append(

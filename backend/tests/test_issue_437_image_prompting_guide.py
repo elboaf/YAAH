@@ -203,12 +203,12 @@ def test_edit_mode_capsless_legacy_still_errors_before_request(
     assert _FakeClient.gen_calls == 0
 
 
-def test_edit_mode_capsless_legacy_degrades_like_403(
-    configured, tmp_path, monkeypatch
-):
-    """A capsless server has no channel for references (#403 ladder):
-    the edit render degrades WITHOUT them - honestly noted, no editor
-    note (nothing was refed), rewrite still in the wire prompt."""
+def test_edit_mode_on_refless_server_refuses(configured, tmp_path, monkeypatch):
+    """Round 2 (CodeRabbit): edit mode NEEDS the references - a server
+    without the ref_images capability (or with no native job API) gets
+    a hard error, NOT a silent plain generation from a
+    transformation-only prompt. Generate mode keeps the #403 degrade
+    ladder untouched."""
     _FakeClient.caps_payload = {}
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     refs = _ref_files(tmp_path, "src3.png")
@@ -221,13 +221,28 @@ def test_edit_mode_capsless_legacy_degrades_like_403(
         },
         workspace=str(tmp_path),
     )
+    err = r.get("error") or ""
+    assert "mode" in err and "edit" in err and "ref_images" in err, r
+    assert _FakeClient.gen_calls == 0 and _FakeClient.submit_calls == 0
+
+
+def test_generate_mode_still_degrades_refs_on_capsless(
+    configured, tmp_path, monkeypatch
+):
+    """The #403 ladder survives: generate mode (explicit or omitted)
+    with refs on a capsless server degrades with the note and renders."""
+    _FakeClient.caps_payload = {}
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    refs = _ref_files(tmp_path, "src5.png")
+    r = _run(
+        "generate_image",
+        {"prompt": "a lighthouse", "reference_images": refs},
+        workspace=str(tmp_path),
+    )
     assert not r.get("error"), r
+    assert "reference-guided generation skipped" in r.get("note", "")
     assert _FakeClient.gen_calls == 1
-    sent = _FakeClient.last[1]["prompt"]
-    assert "apply this edit; the references carry the visual" in sent
-    note = r.get("note") or ""
-    assert "reference-guided generation skipped" in note
-    assert "references carried this render" not in note
+    assert "references carried this render" not in (r.get("note") or "")
 
 
 # --------------------------------------------------------------- edit_image
