@@ -343,13 +343,11 @@ HELP_DOCS: dict = {
         "references carry the visual details, so never re-describe them, "
         "and vague verbs (improve it, make it professional) change "
         "nothing. edit_image is the same tool with mode \"edit\" forced "
-        "and references required. RESOLUTION POLICY: every size above the "
-        "1024x1024-class floor is reached exactly via the server's hires "
-        "fix (ESRGAN upscale + second diffusion pass at the target) from "
-        "a first pass floored at 1024x1024 - never the server's smaller "
-        "default; targets at or under the floor render natively. "
-        "hires_fix=false is the only knob: false caps the route at a "
-        "plain native render. The result reports exactly what happened. "
+        "and references required. RESOLUTION POLICY: the requested size "
+        "IS the render size, passed directly to the server (64-aligned "
+        "into its advertised limits; a request beyond them renders at "
+        "the server's maximum legal size, preserving the aspect ratio, "
+        "and the note says so). The result reports exactly what happened. "
         "negative_prompt and seed pass through (a pinned seed reproduces "
         "a render; a new take on an edited scene wants seed omitted - "
         "fresh draw - or reseed). Generation runs as a server job: "
@@ -358,9 +356,9 @@ HELP_DOCS: dict = {
         "minutes, and the wait hard-cancels at 30 minutes. Remote "
         "(namespaced) workspaces save to the store only. EDITING "
         "MACHINERY (server-capability-gated): reference_images does "
-        "Flux-style reference-guided generation (above-floor targets "
-        "ride the hires fix with a drift note - the second pass "
-        "re-diffuses); control_lora + depth_from does depth-pose control "
+        "Flux-style reference-guided generation (any requested size "
+        "renders natively in one pass); control_lora + depth_from does "
+        "depth-pose control "
         "- the depth map MUST be the FIRST reference ([depth, photo] "
         "order; reversed silently does nothing); lora[] activates "
         "server-side LoRAs. Reference sources: workspace paths, store "
@@ -1521,22 +1519,20 @@ def _memory_executor(op: str):
 # http://127.0.0.1:1234). Two tools: generate_image (txt2img) and
 # upscale_image (native ESRGAN endpoint over an existing image).
 #
-# Resolution policy (#421/#433, owner round 3): every above-floor size
-# reaches its EXACT target through the server's hires fix (an ESRGAN
-# upscale + a second diffusion pass at the target, VAE tiled per
-# request) from a first pass floored at the 1024x1024 class - never the
-# server's 512-class default. The first pass still decides composition
-# (a 512 render drops subjects on klein-class models; research notes
-# 13-14), and native 1024 beat 512+hires in the live A/B (note 23) -
-# which is why the floor exists; the owner chose the hires fix over the
-# old ESRGAN chain for the final size because it re-diffuses at the
-# exact target and needs no client-side staging. Targets at or under
-# the floor render natively (the second pass would add nothing). The
-# server's hires fix is not bound by its generation limits (upstream
-# request validation only 64-aligns targets), so any target goes out
-# as asked; a server-side refusal falls back to one plain native
-# render. The harness hard-codes no resolution beyond that floor; the
-# server's capabilities decide which routes exist.
+# Resolution policy (#421/#441): the requested size IS the diffusion
+# render's size, passed to the server directly - flux composes fine at
+# any resolution, so the 1024x1024-class floor and the server hires fix
+# are gone from the pipeline (the double pass cost time and drifted
+# references). 1024x1024 is just the DEFAULT on the omit path (the
+# #419 built-in underlay), never a hard-coded floor: caller > config >
+# built-in, and any of them passes through as the render size. The one
+# honest limit is the server's own generation limits
+# (limits.max_width/height): a request beyond them renders at the
+# maximum legal size preserving the aspect ratio, and the note says
+# so - no hires detour, no unclamped targets, no client-side ESRGAN
+# anywhere in generation. (The server's hires fix itself remains
+# unbound by its generation limits - upstream request validation only
+# 64-aligns targets - but nothing in the pipeline uses it any more.)
 
 # Issue #437: the official BFL prompting guide for FLUX.2 [klein]
 # (docs.bfl.ai/guides/prompting_guide_flux2_klein). Its two disciplines
@@ -1628,13 +1624,11 @@ GENERATE_IMAGE_SCHEMA = {
             "Omitted size/steps ride YAAH's built-in defaults (1024x1024 at "
             "four steps - the guidance-distilled klein-class operating "
             "point; cfg and distilled guidance are locked at 1 and not "
-            "exposed). Sizing: every size above the 1024x1024-class floor "
-            "is reached exactly via the server's hires fix (ESRGAN upscale "
-            "+ a second diffusion pass at the target) from a first pass "
-            "floored at 1024x1024 - never the server's smaller default; "
-            "targets at or under the floor render natively, and the first "
-            "pass decides composition (a 512 render drops subjects on "
-            "klein-class models). Four steps is the model's step-distilled "
+            "exposed). Sizing: the requested size IS the render size, "
+            "passed directly to the server (64-aligned into its "
+            "advertised limits; a request beyond them renders at the "
+            "server's maximum legal size, preserving the aspect ratio, "
+            "and the note says so). Four steps is the model's step-distilled "
             "design point; a higher count is off-design for klein and "
             "near-linear in time. Reference-guided edits hold together "
             "fine at the default. If an edit did not take, steps is the "
@@ -1687,10 +1681,10 @@ GENERATE_IMAGE_SCHEMA = {
                     "description": (
                         "Desired final image width in pixels. Omit for "
                         "the built-in default (1024) unless a configured "
-                        "default applies. Targets above the 1024x1024 "
-                        "floor go out through the server's hires fix at "
-                        "this exact size; the floor render itself is "
-                        "shaped to the requested aspect ratio."
+                        "default applies. The requested size IS the "
+                        "render size, passed directly to the server "
+                        "(a size beyond the server's advertised limits "
+                        "renders at its maximum legal size instead)."
                     ),
                 },
                 "height": {
@@ -1699,24 +1693,6 @@ GENERATE_IMAGE_SCHEMA = {
                         "Desired final image height in pixels. Same "
                         "rule as width. Omit for the built-in default "
                         "(1024) unless a configured default applies."
-                    ),
-                },
-                "hires_fix": {
-                    "type": "boolean",
-                    "description": (
-                        "Set false to cap the render at the native "
-                        "first pass - never smaller than 1024x1024, "
-                        "never the server's smaller default, shaped to "
-                        "the requested aspect ratio, no hires pass "
-                        "(larger sizes then come back at the floor "
-                        "size). Default true: targets above the floor "
-                        "go through the server's hires fix (ESRGAN "
-                        "upscale + a second diffusion pass at the "
-                        "exact target) - sharper, slower, heavier on "
-                        "VRAM; the server tiles the VAE to cope. "
-                        "Targets at or under 1024x1024 render natively "
-                        "either way (the second pass would add "
-                        "nothing)."
                     ),
                 },
                 "negative_prompt": {
@@ -2451,30 +2427,27 @@ async def _upscale_to_target(
             return base64.b64decode(cur), last_meta, note
 
 
-def _hires_render_size(want_w: int, want_h: int, b: dict):
-    """Render dims for a hires-fix first pass (#433): the 1024x1024
-    class floor - klein's composition scale, NOT the server's
-    512-class default - shaped to the requested aspect ratio and never
-    above the target itself. Returns (gen_w, gen_h)."""
-    budget = float(_IMG_W_DEFAULT) * float(_IMG_H_DEFAULT)
-    ratio = float(want_w or want_h) / max(float(want_h or want_w), 1.0)
-    gw = (budget * ratio) ** 0.5
-    gh = gw / max(ratio, 0.0001)
-    return (
-        _clamp(_mult64(min(gw, want_w or gw)), b["min_w"], b["max_w"]),
-        _clamp(_mult64(min(gh, want_h or gh)), b["min_h"], b["max_h"]),
+def _native_target(w: int, h: int, b: dict):
+    """The render IS the request (#441): the requested size 64-aligned
+    (the diffusion-friendly spatial multiple, floored at 64). `b` is
+    kept for call-signature symmetry with _clamp_within_limits.
+    Returns (target_w, target_h)."""
+    return (_mult64(w), _mult64(h))
+
+
+def _clamp_within_limits(w: int, h: int, b: dict):
+    """Max legal render size for a request beyond the server's
+    GENERATION limits: scale the request down to fit inside
+    limits.max_width/height PRESERVING the aspect ratio, then
+    64-align it into the server's bounds. Returns (gen_w, gen_h)."""
+    scale = min(
+        float(b["max_w"]) / max(w, 1),
+        float(b["max_h"]) / max(h, 1),
     )
-
-
-def _hires_plan(want_w: int, want_h: int, b: dict):
-    """Target for the hires second pass: the requested size 64-aligned,
-    sent UNCLAMPED (owner round 3; resolves the old 400-vs-any-size
-    question: upstream request validation only aligns targets UP to the
-    spatial multiple - it never clamps them to the generation limits,
-    so any target runs; if a build refuses one anyway, the 400-retry
-    renders natively at the floor instead). `b` is kept for the call
-    signature. Returns (target_w, target_h)."""
-    return (_mult64(want_w), _mult64(want_h))
+    return (
+        _clamp(_mult64(w * scale), b["min_w"], b["max_w"]),
+        _clamp(_mult64(h * scale), b["min_h"], b["max_h"]),
+    )
 
 
 def _resolve_lora_field(lora, control_lora, b, notes):
@@ -2558,20 +2531,17 @@ async def generate_image(
     reseed: bool | None = None,
     steps: int | None = None,
     cfg_scale: float | None = None,
-    hires_fix: bool | None = None,
     reference_images: list | None = None,
     lora: list | None = None,
     control_lora: str | None = None,
     depth_from: str | None = None,
     on_chunk=None,
 ) -> dict:
-    """Run text-to-image on the configured sd-server. Every size
-    above the 1024x1024-class floor is reached exactly via the
-    server's hires fix (an ESRGAN upscale + a second diffusion pass at
-    the target) from a first pass floored at 1024x1024 (#433 - never
-    the server's 512-class default; the FIRST pass decides the
-    composition). Targets at or under the floor render natively;
-    hires_fix=false caps the route at the plain native render.
+    """Run text-to-image on the configured sd-server. The requested
+    size IS the render size, passed directly to the server (#441 -
+    64-aligned into its advertised limits; a request beyond them
+    renders at the server's maximum legal size, preserving the aspect
+    ratio, and the note says so).
 
     Sampling defaults (#411): caller > config generation_defaults >
     omit (the server's own defaults apply). cfg is LOCKED at 1 (#433:
@@ -2672,8 +2642,7 @@ async def generate_image(
     if width is None and height is None:
         # built-in size underlay (#419): no caller size and no configured
         # size -> the built-in 1024x1024 intent rides the size-decision
-        # pipeline below (native render; the hires route's first pass
-        # also floors at 1024), so the server's 512-class
+        # pipeline below as a NATIVE render, so the server's 512-class
         # default stops deciding the omit path.
         width = _IMG_W_DEFAULT
         height = _IMG_H_DEFAULT
@@ -2684,6 +2653,14 @@ async def generate_image(
         height = width
         if width_from_cfg and not height_from_cfg:
             notes.append(f"size {width}x{height} (configured default)")
+    elif width is None and height is not None:
+        # height-only request: mirror-image of the width-only case -
+        # square the render to the given height (#441: the request IS
+        # the render, both axes; the old ladder silently dropped a
+        # caller height to the server's default)
+        width = height
+        if height_from_cfg and not width_from_cfg:
+            notes.append(f"size {width}x{height} (configured default)")
 
     caps = await _capabilities(api_base)
     b = _native_bounds(caps) if caps else None
@@ -2693,13 +2670,6 @@ async def generate_image(
     # for the triggered class; `<lora:...>` tags are never emitted (the
     # server rejects them by design). Any failure leaves `body` untouched.
     scan = load_scan(api_base)
-    # the server's first ESRGAN-capable upscaler (the hires pass runs
-    # through it); a sane default for caps-less replies
-    up_name = "RealESRGAN_x4plus"
-    for u in caps.get("upscalers") or []:
-        if isinstance(u, dict) and u.get("image_upscale") and u.get("name"):
-            up_name = str(u["name"])
-            break
     if mode == "edit":
         # #437: reinforce the transformation-only contract in the
         # wire prompt itself (the guide: references carry the visual
@@ -2710,7 +2680,6 @@ async def generate_image(
             "details"
         )
 
-    hires_body: dict | None = None
     body: dict = {"prompt": prompt}
     apply_to_body(body, scan, prompt)
 
@@ -2937,127 +2906,34 @@ async def generate_image(
             refed=bool(refs),
         )
 
-    # --- size decision (#421: native render within limits is default) ----
-    # The requested size IS the diffusion render's size whenever the
-    # server's GENERATION limits allow it. Pre-#421 the render was
-    # clamped into the server's DEFAULT pixel budget (a VRAM guess, not
-    # a capability) and the remainder routed through the server's hires
-    # fix - but for klein-class models the FIRST pass decides the
-    # composition (at a 512 render the model drops subjects and garbles
-    # anatomy; research notes 13-14), and a second pass re-diffusing an
-    # upscaled 512 frame cannot resurrect what pass 1 never drew. Live
-    # A/B (note 23): native 1024 beat 512+hires on quality AND time.
-    # The owner's round-3 directive: no client-side ESRGAN staging -
-    # EVERY above-floor target goes through the server's hires fix
-    # (a first pass floored at 1024x1024 (#433), then an ESRGAN
-    # upscale + second diffusion pass at the exact target). The
-    # upstream request validation only 64-aligns hires targets, so the
-    # target goes out unclamped; a server-side refusal falls back to
-    # one plain native render (hires_fix=false forces that directly).
+    # --- size decision (#441: the request IS the render) ----------------
+    # The requested size is the diffusion render's size, passed to the
+    # server directly: flux composes fine at any resolution, so the
+    # old 1024x1024-class floor and the server hires fix are gone from
+    # the pipeline (the double pass cost time and drifted references).
+    # 1024x1024 survives ONLY as the omit path's built-in default
+    # (#419 layering above), never as a hard-coded floor. The one
+    # honest limit is the server's own: a request beyond its
+    # GENERATION limits (limits.max_width/height) cannot render as
+    # asked, so it clamps to the maximum legal size preserving the
+    # aspect ratio and the note says so - no hires detour, no
+    # unclamped targets, no client-side ESRGAN anywhere.
     gen_w, gen_h = b["def_w"], b["def_h"]
     want_w = width or 0
     want_h = height or 0
     if want_w or want_h:
-        # #433 (owner round 3): the 1024x1024-class floor is the smallest
-        # first pass klein composes at; everything above it goes through
-        # the server's hires fix to the EXACT target. No target clamp:
-        # the upstream request validation only 64-aligns hires targets,
-        # so the requested size goes out as asked.
-        tw, th = _hires_plan(int(want_w or want_h), int(want_h or want_w), b)
-        gen_w, gen_h = _hires_render_size(want_w, want_h, b)
-        over = max(tw / gen_w, th / gen_h, 1.0)
-        if over <= 1.0:
-            # the floor render already meets the request - native, no
-            # hires pass (a second pass at the same size adds nothing)
+        # The request IS the render (#441): 64-align it and pass it
+        # through. Beyond the server's generation limits, scale to the
+        # maximum legal size preserving the aspect ratio and say so.
+        gen_w, gen_h = _native_target(want_w, want_h, b)
+        if want_w > b["max_w"] or want_h > b["max_h"]:
+            gen_w, gen_h = _clamp_within_limits(want_w, want_h, b)
             notes.append(
-                f"requested {want_w}x{want_h}: native render at "
-                f"{gen_w}x{gen_h} (the 1024x1024 floor already covers "
-                "it - no hires pass needed)"
-            )
-        elif hires_fix is False:
-            # explicit opt-out: a plain native render even above the
-            # floor - the caller asked for no hires pass
-            where = (
-                f" exceeds the server's {b['max_w']}x{b['max_h']} "
-                "generation limits"
-                if tw > b["max_w"] or th > b["max_h"]
-                else ""
-            )
-            notes.append(
-                f"requested {want_w}x{want_h}{where}: plain native "
-                f"render at {gen_w}x{gen_h} (the 1024x1024-class "
-                "floor; hires_fix is false, no hires pass)"
-            )
-        elif b["hires"] and refs:
-            # same hires body as any other render; the note says a
-            # reference rode along (a second diffusion pass re-diffuses
-            # the reference too - the owner accepted that trade)
-            hires_body = {
-                "hires": {
-                    "enabled": True,
-                    "target_width": tw,
-                    "target_height": th,
-                    "upscaler": up_name,
-                    "denoising_strength": 0.7,
-                }
-            }
-            if b["vae_tiling"]:
-                hires_body["vae_tiling_params"] = {"enabled": True}
-            notes.append(
-                f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
-                f"(the 1024x1024 floor), then hires fix to {tw}x{th} "
-                "(ESRGAN upscale + second diffusion pass"
-                + (
-                    ", VAE tiled for memory"
-                    if "vae_tiling_params" in hires_body
-                    else ""
-                )
-                + "); reference-guided: the second pass re-diffuses, "
-                "which can drift off-reference"
-            )
-        elif b["hires"]:
-            hires_body = {
-                "hires": {
-                    "enabled": True,
-                    "target_width": tw,
-                    "target_height": th,
-                    "upscaler": up_name,
-                    "denoising_strength": 0.7,
-                }
-            }
-            if b["vae_tiling"]:
-                hires_body["vae_tiling_params"] = {"enabled": True}
-            tail = (
-                ", VAE tiled for memory"
-                if "vae_tiling_params" in hires_body
-                else ""
-            )
-            where = (
-                f" exceeds the server's {b['max_w']}x{b['max_h']} "
-                "generation limits"
-                if tw > b["max_w"] or th > b["max_h"]
-                else ""
-            )
-            notes.append(
-                f"requested {want_w}x{want_h}{where}: rendering "
-                f"{gen_w}x{gen_h} (the 1024x1024-class floor), then "
-                f"hires fix to {tw}x{th} (ESRGAN upscale + second "
-                f"diffusion pass{tail})"
+                f"requested {want_w}x{want_h} exceeds the server's "
+                f"{b['max_w']}x{b['max_h']} generation limits; rendered "
+                f"at {gen_w}x{gen_h} (its maximum, aspect preserved)"
             )
         else:
-            # no hires support on the server: plain native render at
-            # the floor (its composition scale), shortfall noted
-            where = (
-                f" exceeds the server's {b['max_w']}x{b['max_h']} "
-                "generation limits"
-                if tw > b["max_w"] or th > b["max_h"]
-                else ""
-            )
-            notes.append(
-                f"requested {want_w}x{want_h}{where}: this server does "
-                "not support the hires fix, rendering natively at "
-                f"{gen_w}x{gen_h} (the 1024x1024-class floor)"
-            )
             notes.append(f"native render at {gen_w}x{gen_h}")
         if width or height:
             # native bodies take the explicit size; when the user gave
@@ -3078,8 +2954,6 @@ async def generate_image(
         body["seed"] = -1
         if reseed:
             notes.append("reseed: fresh random draw")
-    # hires.steps stays unset: 0 = reuse the first pass's step count
-    # (no evidence for a different second-pass operating point).
     if steps is not None or cfg_scale is not None:
         sp = dict(body.get("sample_params") or {})
         if steps is not None:
@@ -3093,30 +2967,8 @@ async def generate_image(
         body["lora"] = lora_field
 
     # --- transport: native job API (cancellable), sync fallback ---------
-    submit_body = {**body, **hires_body} if hires_body else body
-    job_id, err = await _img_gen_job_submit(api_base, submit_body)
-    if err and hires_body and "HTTP 404" not in err:
-        # Server rejected the hires body (unknown field / bad upscaler /
-        # invalid target): one clean retry WITHOUT it - a plain native
-        # render at the floor (no ESRGAN staging exists any more to
-        # chase the exact target; the shortfall is stated honestly). A
-        # 404 means no native job API at all - the legacy fallback
-        # below handles that, and "refused" would be the wrong story.
-        notes.append(
-            "hires fix was refused by the server; retrying as a plain "
-            f"native render at {gen_w}x{gen_h}"
-        )
-        hires_body = None
-        job_id, err = await _img_gen_job_submit(api_base, body)
+    job_id, err = await _img_gen_job_submit(api_base, body)
     if err:
-        if hires_body:
-            # the native endpoint died and the legacy sync path cannot
-            # express hires - say so instead of silently dropping it
-            notes.append(
-                "hires fix could not be applied (native job API "
-                "unavailable); plain render used"
-            )
-            hires_body = None
         # native endpoint unavailable (older build): fall back to sync
         legacy = dict(body)
         legacy["n"] = 1
@@ -3154,18 +3006,11 @@ async def generate_image(
         raw_out = base64.b64decode(b64)
     dims = _png_dims(raw_out)
     # Ground truth (#411): what the server actually ran, from the PNG's
-    # parameters chunk (PNGs without the chunk stay silent - a
-    # server-side hires pass re-encodes the image and may drop it).
+    # parameters chunk (PNGs without the chunk stay silent).
     pn = _png_params_note(raw_out)
 
     if pn:
         notes.append(pn)
-
-    if hires_body and want_w and want_h and (dims is None or dims[0] != want_w or dims[1] != want_h):
-        notes.append(
-            f"requested {want_w}x{want_h}: the hires pass returned "
-            f"{dims[0]}x{dims[1]} - a size mismatch, reported as ran"
-        )
 
     if body.get("lora_applied"):
         notes.append(_lora_note(body, scan))
@@ -3185,7 +3030,6 @@ async def edit_image(
     seed: int | None = None,
     reseed: bool | None = None,
     steps: int | None = None,
-    hires_fix: bool | None = None,
     lora: list | None = None,
     on_chunk=None,
 ) -> dict:
@@ -3210,7 +3054,6 @@ async def edit_image(
         reseed=reseed,
         steps=steps,
         cfg_scale=None,
-        hires_fix=hires_fix,
         lora=lora,
         control_lora=None,
         depth_from=None,
@@ -3380,13 +3223,9 @@ def _generation_result(
         out["width"], out["height"] = dims
     if b:
         out["native"] = (
-            "every size above the 1024x1024-class floor is reached "
-            "exactly via the server's hires fix (ESRGAN upscale + "
-            "second diffusion pass at the target) from a first pass "
-            "floored at 1024x1024 (never the server's smaller "
-            "default); targets at or under the floor render natively; "
-            "hires_fix: false caps the route at the plain native "
-            "render (larger sizes then come back at the floor size)"
+            "the requested size IS the render size, passed directly "
+            "to the server (a size beyond the server's advertised "
+            "limits renders at its maximum legal size instead)"
         )
     if refed:
         notes.append(IMG_REF_RENDER_NOTE)
