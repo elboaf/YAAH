@@ -600,7 +600,7 @@ def _match_text(user_text: str | None) -> str:
     if not text:
         return ""
     text = re.sub(r"\n+--- attached file:[^\n]*---", " ", text)
-    text = re.sub(r"```[^`]*```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"Saved to [^\n]*", " ", text)
     text = re.sub(r"Read it with read_file[^\n]*", " ", text)
     return text.strip()

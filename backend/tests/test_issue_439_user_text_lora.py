@@ -15,6 +15,7 @@ decides a match; absent user text means no content match (fail closed);
 an explicitly requested lora[] always wins.
 """
 import asyncio
+import importlib
 import json
 
 import httpx
@@ -418,3 +419,121 @@ async def test_run_agent_turn_user_words_still_fire(
         events.append(json.loads(e))
     body = _FakeClient.job_bodies[-1]
     assert body["lora"][0]["path"] == "ck-neon-retrowave-klein-9b_epoch_10.safetensors"
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (CodeRabbit findings on PR #440)
+# ---------------------------------------------------------------------------
+
+
+async def test_439_empty_text_turn_falls_back_to_db_row(
+    monkeypatch, tmp_path, configured,
+):
+    """Empty-text turn (an image-only user message): the loop must not
+    crash resolving the turn's user text - the old resolve_user_text
+    placeholder raised NameError exactly here - and an empty corpus must
+    fail closed (no auto-apply)."""
+    import backend.agent.loop as loop_mod
+
+    tools._CAPS_CACHE.clear()
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    scripts = [
+        [
+            {"type": "content", "text": "styling"},
+            {"type": "tool_calls", "tool_calls": [_tool_call(
+                "generate_image", prompt=MODEL_PROMPT)]},
+            {"type": "finish"},
+        ],
+        [{"type": "finish"}],
+    ]
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return _FakeStream(scripts.pop(0) if scripts else [{"type": "finish"}])
+
+    monkeypatch.setattr(loop_mod.model_client, "chat", fake_chat)
+
+    cid = await create_conversation(str(tmp_path), "t")
+    events = []
+    async for e in loop_mod.run_agent(
+        cid, "", str(tmp_path),  # empty text: the NameError trigger
+    ):
+        events.append(json.loads(e))
+    assert not any(ev.get("type") == "error" for ev in events)
+    assert "lora" not in _FakeClient.job_bodies[-1]
+
+
+async def test_439_steered_message_refreshes_user_text(
+    monkeypatch, tmp_path, configured,
+):
+    """A steered message is the newest user request: once the loop
+    consumes it at a tool-result boundary, the match corpus is the
+    steer's words. The steer is queued only AFTER the first image call
+    has started, so it cannot drain at the pre-tool steer boundary -
+    the first image call rides bare on the turn text, the post-steer
+    call auto-applies from the steer."""
+    import backend.agent.loop as loop_mod
+
+    tools._CAPS_CACHE.clear()
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    scripts = [
+        [
+            {"type": "content", "text": "styling"},
+            {"type": "tool_calls", "tool_calls": [_tool_call(
+                "generate_image", prompt="a city street")]},
+            {"type": "finish"},
+        ],
+        [
+            {"type": "content", "text": "styling again"},
+            {"type": "tool_calls", "tool_calls": [_tool_call(
+                "generate_image", prompt="a city street", call_id="c2")]},
+            {"type": "finish"},
+        ],
+        [{"type": "finish"}],
+    ]
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return _FakeStream(scripts.pop(0) if scripts else [{"type": "finish"}])
+
+    monkeypatch.setattr(loop_mod.model_client, "chat", fake_chat)
+
+    cid = await create_conversation(str(tmp_path), "t")
+    # The steer must be a genuine mid-run message: queue it only once
+    # the first image call has STARTED (its body is already recorded).
+    # A pre-run enqueue would drain at the first steer boundary, before
+    # tool execution - that ordering is loop behavior, not what this
+    # test pins.
+    _real_chat = fake_chat
+
+    async def _queue_after_first_call(*_a, **_kw):
+        if len(_FakeClient.job_bodies) == 1:
+            loop_mod.enqueue_message(cid, "make it look retrowave")
+        return await _real_chat(*_a, **_kw)
+
+    loop_mod.model_client.chat = _queue_after_first_call
+    async for _e in loop_mod.run_agent(
+        cid, "draw something", str(tmp_path),
+    ):
+        pass
+    first, last = _FakeClient.job_bodies[-2], _FakeClient.job_bodies[-1]
+    assert "lora" not in first  # turn text named no style
+    assert last["lora"][0]["path"] == (
+        "ck-neon-retrowave-klein-9b_epoch_10.safetensors"
+    )  # the steer's words became the corpus
+
+
+def test_439_attachment_with_inline_backtick_excluded():
+    """An attached file whose body contains single backticks must stay
+    excluded from the match corpus: the fence strip must match through
+    the closing fence even when the body holds inline code spans."""
+    user_text = (
+        "edit this\n\n--- attached file: notes.md ---\n"
+        "```\nthe file says `sample` retrowave and more\n```\n"
+    )
+    assert loras._match_text(user_text) == "edit this"
+    body = {"prompt": MODEL_PROMPT}
+    loras.apply_to_body(
+        body, _retrowave_scan(), MODEL_PROMPT, user_text=user_text,
+    )
+    assert "lora" not in body

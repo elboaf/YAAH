@@ -1748,8 +1748,8 @@ GENERATE_IMAGE_SCHEMA = {
                         "LoRAs to activate for this generation, on top "
                         "of the server's loaded model. Names come from "
                         "the result note's 'available loras' list (or "
-                        "GET /api/loras); a style-named prompt usually "
-                        "auto-applies the matching one without this."
+                        "GET /api/loras); auto-apply matches ONLY the "
+                        "user's typed request words, never this prompt."
                     ),
                 },
                 "control_lora": {
@@ -2708,7 +2708,11 @@ async def generate_image(
     body: dict = {"prompt": prompt}
     # #439: user_text rides in from execute_tool's funnel injection (the
     # user's typed words this turn) - the auto-matcher's only corpus.
-    apply_to_body(body, scan, prompt, user_text=user_text)
+    # Skipped entirely when the caller picked a LoRA explicitly: an
+    # auto-applied style would only be replaced by lora_field at the
+    # end, after its trigger word already leaked into the prompt.
+    if not lora and not control_lora:
+        apply_to_body(body, scan, prompt, user_text=user_text)
 
     # Catalog visibility (#406): when nothing rode along, tell the model
     # WHICH LoRAs exist - the schema says "name from the server's
@@ -2731,8 +2735,9 @@ async def generate_image(
             notes.append(
                 "available loras on this server: "
                 + ", ".join(shown) + more
-                + " - pass matching ones via lora[] (a style word in the "
-                "prompt auto-applies the obvious one)"
+                + " - when the user named a style but nothing matched, "
+                "pass it via lora[] explicitly (auto-apply matches only "
+                "the user's typed words)"
             )
 
     # --- references, depth maps, lora (#403) --------------------------
@@ -2882,7 +2887,8 @@ async def generate_image(
         # Older server without capabilities: legacy passthrough, its call.
         # Sampling fields ride <sd_cpp_extra_args> (native-schema envelope).
         legacy: dict = {"prompt": prompt, "n": 1}
-        apply_to_body(legacy, scan, prompt, user_text=user_text)
+        if not lora and not control_lora:
+            apply_to_body(legacy, scan, prompt, user_text=user_text)
         extra: dict = {}
         if negative_prompt:
             extra["negative_prompt"] = negative_prompt

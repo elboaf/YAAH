@@ -54,6 +54,7 @@ from backend.db.database import (
     assert_no_active_remote_edit_lease,
     get_conversation,
     get_db,
+    get_last_user_message,
     get_messages,
     get_prompt_summary,
     set_conversation_usage,
@@ -1887,8 +1888,15 @@ async def _run_agent_claimed(
     # wrapper hands them down for the normal paths; a caller that passed
     # none (exotic resume shapes, direct harness callers) resolves the
     # turn's root user message from the DB here - AFTER the persist above
-    # (or from the already-stored row when persist_user=False).
-    turn_user_text = user_text or await resolve_user_text(conversation_id)
+    # (or from the already-stored row when persist_user=False). The
+    # latest user row is the same corpus get_last_user_message serves;
+    # a resume replay's earlier rows are equally stale as a style
+    # corpus, and an empty-text turn stays empty (no match). Steer
+    # boundaries below re-resolve from the live queue when a steered
+    # message lands mid-run (#439 review).
+    turn_user_text = user_text or await get_last_user_message(
+        conversation_id
+    )
 
     # Per-conversation system prompt override (Q17) wins over the global
     # one.
@@ -2608,6 +2616,9 @@ async def _run_agent_claimed(
                 ):
                     yield _ndjson(ev)
                 messages.append({"role": "user", "content": _parts_with_images(_reinline(inj), inj.get("images", []))})
+                # #439: the steered message is the newest user request -
+                # it becomes the auto-apply match corpus from here on.
+                turn_user_text = (inj.get("text") or "").strip() or turn_user_text
 
             # Partition this step's tool calls: spawn_agent delegations run
             # in parallel (foreground — the parent blocks until all finish);
@@ -2881,6 +2892,12 @@ async def _run_agent_claimed(
                                 _reinline(inj), inj.get("images", [])
                             ),
                         }
+                    )
+                    # #439: the steered message is the newest user
+                    # request - it becomes the auto-apply match corpus
+                    # from here on.
+                    turn_user_text = (
+                        (inj.get("text") or "").strip() or turn_user_text
                     )
 
             # Run every spawn_agent delegation of this step in parallel.
