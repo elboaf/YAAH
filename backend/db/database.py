@@ -1645,6 +1645,26 @@ async def get_remote_messages(host_id: str, conversation_id: str) -> list[dict] 
         await db.close()
 
 
+async def get_last_user_message(conversation_id: int) -> str | None:
+    """The text of the most recent user message (#439): the match corpus
+    for LoRA auto-apply - what the user typed, not what the model
+    composed. None when the conversation has no user rows (the caller
+    then matches nothing). Attachment scaffolding is stripped downstream
+    (loras._match_text)."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT content FROM messages"
+            " WHERE conversation_id = ? AND role = 'user'"
+            " ORDER BY id DESC LIMIT 1",
+            (conversation_id,),
+        )
+        row = await cur.fetchone()
+        return (row["content"] if row else None) or None
+    finally:
+        await db.close()
+
+
 async def get_messages(conversation_id: int):
     db = await get_db()
     try:

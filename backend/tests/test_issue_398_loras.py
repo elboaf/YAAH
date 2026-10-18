@@ -380,10 +380,12 @@ def test_apply_triggered_injects_trigger_and_lora_field():
             "match": ["elusarca_ancient_style"],
         }
     })
-    # the prompt names the trigger the way the agent is taught to (the
-    # tool result note reports applied triggers, reinforcing their use)
+    # the USER typed the trigger; #439: the match corpus is the user's
+    # typed words, never the composed prompt
     prompt = "an elusarca_ancient_style marble bust"
-    body = loras.apply_to_body({"prompt": prompt}, scan, prompt)
+    body = loras.apply_to_body(
+        {"prompt": prompt}, scan, prompt, user_text=prompt,
+    )
     assert body["lora"][0]["path"] == "style.safetensors"
     assert body["lora"][0]["multiplier"] == 0.8
     assert body["lora"][0]["is_high_noise"] is False
@@ -400,7 +402,9 @@ def test_apply_never_emits_lora_tag():
             "multiplier": 0.8, "match": ["pix art"],
         }
     })
-    body = loras.apply_to_body({"prompt": "x"}, scan, "pix art castle")
+    body = loras.apply_to_body(
+        {"prompt": "x"}, scan, "pix art castle", user_text="pix art castle",
+    )
     assert "<lora:" not in json.dumps(body)
 
 
@@ -475,8 +479,11 @@ def test_generate_image_attaches_lora(configured, tmp_path, monkeypatch):
         }
     })
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    # #439: the harness injects the user's typed words; the trigger only
+    # fires because the USER named it
     result = asyncio.run(tools.execute_tool(
-        "generate_image", {"prompt": "snarbo castle"}, workspace=str(tmp_path)
+        "generate_image", {"prompt": "snarbo castle"},
+        workspace=str(tmp_path), user_text="snarbo castle",
     ))
     assert "error" not in result
     body = _FakeClient.job_bodies[-1]

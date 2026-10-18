@@ -36,6 +36,7 @@ from backend.agent import skills as skill_registry
 from backend.agent import subagents as subagents_mod
 from backend.agent.tools import (
     CONTEXT_TOOLS,
+    USER_TEXT_TOOLS,
     MEMORY_TOOLS,
     execute_tool,
     get_schemas,
@@ -53,6 +54,7 @@ from backend.db.database import (
     assert_no_active_remote_edit_lease,
     get_conversation,
     get_db,
+    get_last_user_message,
     get_messages,
     get_prompt_summary,
     set_conversation_usage,
@@ -1393,6 +1395,7 @@ async def _execute_with_progress(
     steer_ev: asyncio.Event | None = None,
     conversation_id: int | None = None,
     memory_workspace: str | None = None,
+    user_text: str | None = None,
 ):
     """Run a tool, yielding tool_progress events with live output while it
     runs (only the shell executors actually stream; everything else emits
@@ -1421,6 +1424,10 @@ async def _execute_with_progress(
         # injection itself lives in execute_tool — this kwarg feeds it
         # on the direct AND the gate-approved re-exec path.
         tool_kwargs["memory_workspace"] = memory_workspace
+    if name in USER_TEXT_TOOLS:
+        # #439: the user's typed words this turn - injected for
+        # image-gen tools (and only them) at the dispatch funnel.
+        tool_kwargs["user_text"] = user_text
     task = asyncio.create_task(
         execute_tool(name, args, workspace, **tool_kwargs)
     )
@@ -1876,6 +1883,20 @@ async def _run_agent_claimed(
             conversation_id, "user", user_text, images=image_paths or None,
             attachments=attachments or None, meta=user_meta,
         )
+
+    # #439: the root user's typed words, resolved once per turn. The
+    # wrapper hands them down for the normal paths; a caller that passed
+    # none (exotic resume shapes, direct harness callers) resolves the
+    # turn's root user message from the DB here - AFTER the persist above
+    # (or from the already-stored row when persist_user=False). The
+    # latest user row is the same corpus get_last_user_message serves;
+    # a resume replay's earlier rows are equally stale as a style
+    # corpus, and an empty-text turn stays empty (no match). Steer
+    # boundaries below re-resolve from the live queue when a steered
+    # message lands mid-run (#439 review).
+    turn_user_text = user_text or await get_last_user_message(
+        conversation_id
+    )
 
     # Per-conversation system prompt override (Q17) wins over the global
     # one.
@@ -2595,6 +2616,9 @@ async def _run_agent_claimed(
                 ):
                     yield _ndjson(ev)
                 messages.append({"role": "user", "content": _parts_with_images(_reinline(inj), inj.get("images", []))})
+                # #439: the steered message is the newest user request -
+                # it becomes the auto-apply match corpus from here on.
+                turn_user_text = (inj.get("text") or "").strip() or turn_user_text
 
             # Partition this step's tool calls: spawn_agent delegations run
             # in parallel (foreground — the parent blocks until all finish);
@@ -2719,6 +2743,10 @@ async def _run_agent_claimed(
                                     # #346: the canonical memory key this
                                     # turn resolved (pre-rebind workspace).
                                     memory_workspace=memory_workspace,
+                                    # #439: the user's typed words this
+                                    # turn (the root message) - the LoRA
+                                    # auto-matcher's only corpus.
+                                    user_text=turn_user_text,
                                 ):
                                     yield _ndjson(pev)
                                 result = box.get("result")
@@ -2773,6 +2801,10 @@ async def _run_agent_claimed(
                                         # #346: and the same canonical
                                         # memory key as the direct path.
                                         memory_workspace=memory_workspace,
+                                        # #439: same corpus as the direct
+                                        # path (this is the COMMON path for
+                                        # mutating tools under ask mode).
+                                        user_text=turn_user_text,
                                     ):
                                         yield _ndjson(pev)
                                     result = box.get("result")
@@ -2860,6 +2892,12 @@ async def _run_agent_claimed(
                                 _reinline(inj), inj.get("images", [])
                             ),
                         }
+                    )
+                    # #439: the steered message is the newest user
+                    # request - it becomes the auto-apply match corpus
+                    # from here on.
+                    turn_user_text = (
+                        (inj.get("text") or "").strip() or turn_user_text
                     )
 
             # Run every spawn_agent delegation of this step in parallel.
