@@ -347,41 +347,37 @@ def test_refs_within_limits_render_natively_without_hires(configured, tmp_path, 
     assert "native render at 1024x1024" in r.get("note", "")
 
 
-def test_refs_explicit_hires_fix_keeps_conservative_route(configured, tmp_path, monkeypatch):
-    """#421: refs + hires_fix=True keeps the pre-#421 conservative
-    behavior - budget render, and the hires second diffusion pass is
-    skipped in favor of the ESRGAN chain (re-diffusion drifts
-    off-reference)."""
+def test_refs_above_floor_rides_hires_with_a_drift_note(configured, tmp_path, monkeypatch):
+    """Round 3 (owner directive): reference renders take the same
+    hires route as everything else above the floor - the exact target
+    in one job - and the note says the second pass re-diffuses, which
+    can drift off-reference (the accepted trade)."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
-    _FakeClient.upscale_payload = {
-        "images": [{"b64_json": base64.b64encode(_png(1024, 1024)).decode()}],
-        "upscaler": "RealESRGAN_x4plus",
-        "scale": 2,
-        "repeats": 2,
-        "width": 1024,
-        "height": 1024,
-    }
     (ref,) = _ref_files(tmp_path, "photo.png")
     r = _run(
         "generate_image",
-        {"prompt": "x", "reference_images": [ref], "width": 1024, "height": 1024,
-         "hires_fix": True},
+        {"prompt": "x", "reference_images": [ref], "width": 1536, "height": 1536},
         str(tmp_path),
     )
     assert not r.get("error"), r
     body = _last_body()
-    assert "hires" not in body, "reference renders must skip the second diffusion pass"
-    assert _FakeClient.upscale_calls >= 1
-    assert "hires second diffusion pass is skipped" in r.get("note", "")
+    assert body["width"] == 1024 and body["height"] == 1024
+    assert body["hires"]["enabled"] is True
+    assert body["hires"]["target_width"] == 1536
+    assert body["hires"]["target_height"] == 1536
+    assert _FakeClient.upscale_calls == 0
+    assert "drift off-reference" in r.get("note", "")
 
 
 def test_plain_within_limits_still_uses_hires_when_explicitly_asked(configured, tmp_path, monkeypatch):
-    """#421: plain generations render natively by default; the hires
-    second pass rides only when the caller opts in (hires_fix=True)."""
+    """#421 + #433: plain generations render natively by default; the
+    hires second pass rides only when the caller opts in
+    (hires_fix=True) - and only above the 1024x1024 floor, which the
+    conservative first pass always meets."""
     _caps_feat(configured, monkeypatch, hires=True, vae_tiling=True)
     r = _run(
         "generate_image",
-        {"prompt": "x", "width": 1024, "height": 1024, "hires_fix": True},
+        {"prompt": "x", "width": 1536, "height": 1536, "hires_fix": True},
         str(tmp_path),
     )
     assert not r.get("error"), r
