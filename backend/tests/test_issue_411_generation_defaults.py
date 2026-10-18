@@ -505,12 +505,11 @@ def test_caller_size_and_config_size_partial_mix(configured, tmp_path, monkeypat
     assert not result.get("error"), result
     body = _FakeClient.job_bodies[0]
     # height-only intent squares to 768x768 (pre-existing semantics);
-    # the 1024x1024-class budget shapes to the aspect (1024x768) and
-    # already covers the request, so the render is native with no
-    # hires pass
-    assert body["width"] == 1024 and body["height"] == 768
+    # the render IS that squared request, natively (#441: no floor
+    # reshaping any more)
+    assert body["width"] == 768 and body["height"] == 768
     assert "hires" not in body
-    assert "no hires pass needed" in (result.get("note") or "")
+    assert "native render at 768x768" in (result.get("note") or "")
     assert body["sample_params"]["sample_steps"] == 6
     note = result.get("note") or ""
     assert "steps 6 (configured default)" in note

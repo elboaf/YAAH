@@ -103,13 +103,14 @@ def test_schema_description_names_mode_and_keeps_433_pins():
     assert "cfg_scale" not in props
 
 
-def test_help_docs_carries_the_guide_and_fixed_hires_claim():
+def test_help_docs_carries_the_guide_and_native_resolution_policy():
     doc = tools.HELP_DOCS["generate_image"]
     assert "TWO PROMPTING DISCIPLINES" in doc
     assert "front-load" in doc and "TRANSFORMATION only" in doc
-    # pre-#436 drift fixed: refs ride hires with a drift note, never skipped
-    assert "skipped for reference renders" not in doc
-    assert "ride the hires fix with a drift note" in doc
+    # #441: the resolution policy is native passthrough - no hires
+    # machinery left anywhere in the tool's story
+    assert "hires" not in doc
+    assert "IS the render size" in doc
 
 
 # ---------------------------------------------------------------- executor
