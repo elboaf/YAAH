@@ -330,15 +330,14 @@ HELP_DOCS: dict = {
         "the user sees it inline; it is NOT sent back to you - call "
         "view_image on the saved file only if you must inspect it (e.g. "
         "the user asks to change something specific about it). "
-        "RESOLUTION POLICY: the render happens at the requested size "
-        "whenever the server's generation limits allow it (composition "
-        "is decided by the first pass's canvas, so native rendering is "
-        "the default); hires_fix=true opts into the conservative "
-        "small-VRAM route - the first pass is never smaller than "
-        "1024x1024 and the server hires second pass reaches the exact "
-        "target; targets beyond the limits render at the max legal "
-        "size and are enlarged by the ESRGAN chain. The result reports "
-        "exactly what happened. "
+        "RESOLUTION POLICY: every size above the 1024x1024-class "
+        "floor is reached exactly via the server's hires fix (ESRGAN "
+        "upscale + second diffusion pass at the target) from a first "
+        "pass floored at 1024x1024 - never the server's smaller "
+        "default; targets at or under the floor render natively. "
+        "hires_fix=false is the only knob: false caps the route at a "
+        "plain native render. The result reports exactly what "
+        "happened. "
         "negative_prompt and seed pass through. Generation runs as a "
         "server job: pressing Stop cancels it and returns immediately. "
         "Long renders stay visible: progress notes appear on the live "
@@ -360,8 +359,7 @@ HELP_DOCS: dict = {
         "matches a retrowave-named LoRA). "
         "SAMPLING: steps 4 and BOTH guidance fields (cfg, distilled "
         "guidance) are locked at the guidance-distilled klein-class "
-        "operating point - cfg_scale is not a parameter; a higher step "
-        "count goes out only when the user explicitly asks for one."
+        "operating point - cfg_scale is not a parameter."
     ),
     "upscale_image": (
         "Detail-preserving enlargement of an EXISTING image via the "
@@ -1510,16 +1508,21 @@ def _memory_executor(op: str):
 # http://127.0.0.1:1234). Two tools: generate_image (txt2img) and
 # upscale_image (native ESRGAN endpoint over an existing image).
 #
-# Resolution policy (#421/#433): the requested size IS the DIFFUSION
-# render's size whenever the server's GENERATION limits allow it - the
-# FIRST pass decides composition (a 512 render drops subjects on
-# klein-class models; research notes 13-14), so every first pass floors
-# at 1024x1024. Targets beyond the limits render at the maximum legal
-# size and are enlarged by the ESRGAN chain; the server's hires fix
-# (ESRGAN upscale + a second diffusion pass at the exact target, VAE
-# tiled per request) is the explicit hires_fix=True route, and its
-# first pass ALSO floors at 1024x1024 - never the server's 512-class
-# default. The harness hard-codes no resolution beyond that floor; the
+# Resolution policy (#421/#433, owner round 3): every above-floor size
+# reaches its EXACT target through the server's hires fix (an ESRGAN
+# upscale + a second diffusion pass at the target, VAE tiled per
+# request) from a first pass floored at the 1024x1024 class - never the
+# server's 512-class default. The first pass still decides composition
+# (a 512 render drops subjects on klein-class models; research notes
+# 13-14), and native 1024 beat 512+hires in the live A/B (note 23) -
+# which is why the floor exists; the owner chose the hires fix over the
+# old ESRGAN chain for the final size because it re-diffuses at the
+# exact target and needs no client-side staging. Targets at or under
+# the floor render natively (the second pass would add nothing). The
+# server's hires fix is not bound by its generation limits (upstream
+# request validation only 64-aligns targets), so any target goes out
+# as asked; a server-side refusal falls back to one plain native
+# render. The harness hard-codes no resolution beyond that floor; the
 # server's capabilities decide which routes exist.
 
 _IMAGE_GEN_TOOLS = ("generate_image", "upscale_image")
@@ -1539,17 +1542,16 @@ GENERATE_IMAGE_SCHEMA = {
             "defaults (1024x1024 at four steps - the guidance-"
             "distilled klein-class operating point; cfg and "
             "distilled guidance are locked at 1 and not exposed). "
-            "The render happens AT the "
-            "requested size whenever the server's limits allow it - "
-            "composition is decided by the first pass's canvas (a "
-            "512 render drops subjects on klein-class models), so "
-            "native rendering is the default; hires_fix=true opts "
-            "into the conservative small-VRAM route, whose first "
-            "pass is never smaller than 1024x1024 before the hires "
-            "second pass reaches the exact target. Four steps is the "
-            "model's step-distilled design point - omit steps unless "
-            "the user EXPLICITLY asks for more (a higher count is "
-            "off-design for klein and near-linear in time); "
+            "Sizing (owner round 3): every size above the "
+            "1024x1024-class floor is reached exactly via the "
+            "server's hires fix (ESRGAN upscale + a second diffusion "
+            "pass at the target) from a first pass floored at "
+            "1024x1024 - never the server's smaller default; targets "
+            "at or under the floor render natively, and the first "
+            "pass decides composition (a 512 render drops subjects "
+            "on klein-class models). Four steps is the "
+            "model's step-distilled design point; a higher count is "
+            "off-design for klein and near-linear in time. "
             "reference-guided edits hold together fine at "
             "the default. If an edit did not take, steps is the wrong "
             "knob - rephrase, or mask, or crop the reference instead. "
@@ -1573,10 +1575,10 @@ GENERATE_IMAGE_SCHEMA = {
                     "description": (
                         "Desired final image width in pixels. Omit for "
                         "the built-in default (1024) unless a configured "
-                        "default applies. The render happens at this "
-                        "size (within the server's limits); targets "
-                        "beyond the limits render at the maximum legal "
-                        "size and are enlarged."
+                        "default applies. Targets above the 1024x1024 "
+                        "floor go out through the server's hires fix at "
+                        "this exact size; the floor render itself is "
+                        "shaped to the requested aspect ratio."
                     ),
                 },
                 "height": {
@@ -1590,22 +1592,19 @@ GENERATE_IMAGE_SCHEMA = {
                 "hires_fix": {
                     "type": "boolean",
                     "description": (
-                        "Opt into the conservative small-VRAM route: "
-                        "the first pass renders at 1024x1024 - never "
-                        "smaller, never the server's smaller default - "
-                        "shaped to the requested aspect ratio, and a "
-                        "server-side hires fix (ESRGAN upscale + a "
-                        "second diffusion pass at the exact target) "
-                        "reaches the full size - sharper, slower, "
-                        "heavier on VRAM; the server tiles the VAE to "
-                        "cope. Targets at or under 1024x1024 are just "
-                        "rendered natively (the second pass would add "
-                        "nothing). Default false: sizes within the "
-                        "server's limits render natively (the first "
-                        "pass decides composition - a 512-class render "
-                        "loses subjects on klein-class models), and "
-                        "sizes beyond the limits render at the maximum "
-                        "legal size + ESRGAN enlargement."
+                        "Set false to cap the render at the native "
+                        "first pass - never smaller than 1024x1024, "
+                        "never the server's smaller default, shaped to "
+                        "the requested aspect ratio, no hires pass "
+                        "(larger sizes then come back at the floor "
+                        "size). Default true: targets above the floor "
+                        "go through the server's hires fix (ESRGAN "
+                        "upscale + a second diffusion pass at the "
+                        "exact target) - sharper, slower, heavier on "
+                        "VRAM; the server tiles the VAE to cope. "
+                        "Targets at or under 1024x1024 render natively "
+                        "either way (the second pass would add "
+                        "nothing)."
                     ),
                 },
                 "negative_prompt": {
@@ -1681,16 +1680,14 @@ GENERATE_IMAGE_SCHEMA = {
                 "steps": {
                     "type": "integer",
                     "description": (
-                        "Sampling steps. Omit for the locked default "
-                        "four - klein's step-distilled design point. "
-                        "Pass a higher count ONLY when the user "
-                        "explicitly asks for more steps (off-design "
-                        "for klein; near-linear time cost). "
-                        "Reference-guided edits hold fine at the default "
-                        "(the reference pins content - steps only buy "
-                        "polish). More is not the fix for an edit that "
-                        "did not take: rephrase, or mask, or crop the "
-                        "reference instead."
+                        "Sampling steps. Omit for the default four - "
+                        "klein's step-distilled design point (a higher "
+                        "count is off-design for klein; near-linear time "
+                        "cost). Reference-guided edits hold fine at the "
+                        "default (the reference pins content - steps only "
+                        "buy polish). More is not the fix for an edit "
+                        "that did not take: rephrase, or mask, or crop "
+                        "the reference instead."
                     ),
                 },
                 "reseed": {
@@ -1805,26 +1802,25 @@ def _png_dims(raw: bytes):
 # owner (2026-10-18): FLUX.2-klein-shaped values from
 # docs/research/flux2-klein-9b-generation-knobs.md - 1024x1024 is the
 # model's native scale (at 512 it drops subjects / garbles anatomy),
-# 4 steps is klein's step-DISTILLED design point, and BOTH guidance
-# fields sit at 1.0: klein is guidance-distilled, so txt_cfg (cfg) and
-# distilled_guidance are locked at 1 (BFL's own CLI hard-errors on
-# anything else). cfg_scale is therefore NOT a model-facing parameter;
-# operators retune via config only (base/dev-class checkpoints).
-# Server-applied omit defaults (512 / cfg 7.0 / steps 20) fight the
-# model, so YAAH always names sampling values: caller > configured
-# generation_defaults > BUILT-IN. The server's own defaults never
-# apply - including its distilled_guidance 3.5-class default, which
-# YAAH overrides on every render at the klein operating point (#433).
+# 4 steps is klein's step-DISTILLED design point, and cfg sits at 1.0:
+# klein is guidance-distilled, so txt_cfg (cfg) is locked at 1 (BFL's
+# own CLI hard-errors on anything else). cfg_scale is therefore NOT a
+# model-facing parameter; operators retune via config only (base/dev-
+# class checkpoints). Server-applied omit defaults (512 / cfg 7.0 /
+# steps 20) fight the model, so YAAH always names sampling values:
+# caller > configured generation_defaults > BUILT-IN. The server's own
+# defaults never apply.
+#
+# distilled_guidance (#433, owner round 3): the request OMITS the field
+# entirely - the owner confirmed klein ignores it, and a request that
+# names it risks a server-side 400 on builds that validate unknown
+# fields. The earlier "inject 1.0 so the server's 3.5 default doesn't
+# leak" story is retired; the PNG parameters chunk still reports the
+# guidance the server actually ran, as ground truth.
 _IMG_W_DEFAULT = 1024
 _IMG_H_DEFAULT = 1024
 _IMG_STEPS_DEFAULT = 4
 _IMG_CFG_DEFAULT = 1.0
-# klein is guidance-distilled to 1.0 (both fields). The sd-server's own
-# default for distilled_guidance is a dev-class 3.5 - it leaks into
-# every render YAAH doesn't explicitly name (#433), so YAAH sends
-# distilled_guidance 1.0 whenever txt_cfg sits at the klein operating
-# point (the ONLY point the harness ships).
-_IMG_DISTILLED_GUIDANCE = 1.0
 
 # #425: long-render visibility. The native wait used to hard-cancel at
 # 10 minutes with no warning while the render was still running; now
@@ -1877,7 +1873,8 @@ def _png_params_note(raw: bytes) -> str:
     chunk. Parsing it turns the result note into server testimony instead
     of client assumption. Returns '' when no usable chunk is present (a
     non-parameters tEXt chunk is skipped and the scan continues; the
-    ESRGAN chain's fresh PNGs have none) - silence, never error."""
+    freshly upscaled/second-pass PNGs may lack it) - silence, never
+    error."""
     if raw[:8] != b"\x89PNG\r\n\x1a\n":
         return ""
     pos = 8
@@ -2358,14 +2355,14 @@ def _hires_render_size(want_w: int, want_h: int, b: dict):
 
 
 def _hires_plan(want_w: int, want_h: int, b: dict):
-    """Target for the hires second pass: the requested size 64-aligned
-    into the server's GENERATION limits (invalid hires targets 400 at
-    submit; generation max is the honest bound - the upscaler limit does
-    not apply to a diffusion pass). Returns (target_w, target_h)."""
-    return (
-        _clamp(_mult64(want_w), b["min_w"], b["max_w"]),
-        _clamp(_mult64(want_h), b["min_h"], b["max_h"]),
-    )
+    """Target for the hires second pass: the requested size 64-aligned,
+    sent UNCLAMPED (owner round 3; resolves the old 400-vs-any-size
+    question: upstream request validation only aligns targets UP to the
+    spatial multiple - it never clamps them to the generation limits,
+    so any target runs; if a build refuses one anyway, the 400-retry
+    renders natively at the floor instead). `b` is kept for the call
+    signature. Returns (target_w, target_h)."""
+    return (_mult64(want_w), _mult64(want_h))
 
 
 def _resolve_lora_field(lora, control_lora, b, notes):
@@ -2455,20 +2452,20 @@ async def generate_image(
     depth_from: str | None = None,
     on_chunk=None,
 ) -> dict:
-    """Run text-to-image on the configured sd-server. The requested
-    size IS the diffusion render's size whenever the server's
-    generation limits allow it (#421: the FIRST pass decides the
-    composition); hires_fix=True opts into the conservative small-VRAM
-    route, whose first pass floors at 1024x1024 (#433 - never the
-    server's 512-class default) before the hires second pass reaches
-    the exact target; targets beyond the limits render at the maximum
-    legal size, enlarged by the ESRGAN chain.
+    """Run text-to-image on the configured sd-server. Every size
+    above the 1024x1024-class floor is reached exactly via the
+    server's hires fix (an ESRGAN upscale + a second diffusion pass at
+    the target) from a first pass floored at 1024x1024 (#433 - never
+    the server's 512-class default; the FIRST pass decides the
+    composition). Targets at or under the floor render natively;
+    hires_fix=false caps the route at the plain native render.
 
     Sampling defaults (#411): caller > config generation_defaults >
-    omit (the server's own defaults apply). cfg + distilled guidance
-    are LOCKED at 1 (#433: guidance-distilled klein operating point;
-    cfg_scale is not a model-facing parameter), steps defaults to the
-    step-distilled 4. Seed is NEVER pinned on
+    omit (the server's own defaults apply). cfg is LOCKED at 1 (#433:
+    guidance-distilled klein operating point; cfg_scale is not a
+    model-facing parameter) and distilled_guidance is OMITTED from the
+    request entirely (owner round 3: klein ignores it), steps defaults
+    to the step-distilled 4. Seed is NEVER pinned on
     the omit path (#423: the sd-server pins an omitted seed to its
     default, so YAAH sends -1 - the protocol's own randomizer -
     whenever no seed is given); reseed=True requests that same fresh
@@ -2526,7 +2523,10 @@ async def generate_image(
     if cfg_scale is None:
         if d_cfg.get("cfg_scale") is not None:
             cfg_scale = float(d_cfg["cfg_scale"])
-            notes.append("cfg_scale locked at 1 (configured default)")
+            if cfg_scale == 1.0:
+                notes.append("cfg_scale locked at 1 (configured default)")
+            else:
+                notes.append(f"cfg_scale {cfg_scale:g} (configured default)")
         else:
             cfg_scale = _IMG_CFG_DEFAULT
             notes.append("cfg_scale locked at 1 (the klein operating point)")
@@ -2550,8 +2550,8 @@ async def generate_image(
     if width is None and height is None:
         # built-in size underlay (#419): no caller size and no configured
         # size -> the built-in 1024x1024 intent rides the size-decision
-        # pipeline below (native render; the conservative hires route's
-        # first pass also floors at 1024), so the server's 512-class
+        # pipeline below (native render; the hires route's first pass
+        # also floors at 1024), so the server's 512-class
         # default stops deciding the omit path.
         width = _IMG_W_DEFAULT
         height = _IMG_H_DEFAULT
@@ -2571,14 +2571,13 @@ async def generate_image(
     # for the triggered class; `<lora:...>` tags are never emitted (the
     # server rejects them by design). Any failure leaves `body` untouched.
     scan = load_scan(api_base)
-    # the server's first ESRGAN-capable upscaler (used by the hires pass
-    # and the fallback chain); a sane default for caps-less replies
+    # the server's first ESRGAN-capable upscaler (the hires pass runs
+    # through it); a sane default for caps-less replies
     up_name = "RealESRGAN_x4plus"
     for u in caps.get("upscalers") or []:
         if isinstance(u, dict) and u.get("image_upscale") and u.get("name"):
             up_name = str(u["name"])
             break
-    up_target: tuple[int, int] | None = None
     hires_body: dict | None = None
     body: dict = {"prompt": prompt}
     apply_to_body(body, scan, prompt)
@@ -2762,14 +2761,6 @@ async def generate_image(
                 sp["sample_steps"] = steps
             if cfg_scale is not None:
                 sp["guidance"] = {"txt_cfg": cfg_scale}
-                if cfg_scale == _IMG_CFG_DEFAULT:
-                    # klein is guidance-distilled: pin BOTH fields at 1
-                    # (#433) - the server's own distilled_guidance
-                    # default is a dev-class 3.5 and leaks into every
-                    # render that omits it.
-                    sp["guidance"]["distilled_guidance"] = (
-                        _IMG_DISTILLED_GUIDANCE
-                    )
             extra["sample_params"] = sp
         if extra:
             legacy["prompt"] = (
@@ -2805,124 +2796,118 @@ async def generate_image(
     # anatomy; research notes 13-14), and a second pass re-diffusing an
     # upscaled 512 frame cannot resurrect what pass 1 never drew. Live
     # A/B (note 23): native 1024 beat 512+hires on quality AND time.
-    # The conservative route survives as the explicit hires_fix=True
-    # mode for small-VRAM cards - but its first pass now FLOORS at
-    # 1024x1024 (#433): starting from the server's 512-class default
-    # was exactly the operating point klein fails at. The ESRGAN chain
-    # reaches targets beyond the server's generation limits.
+    # The owner's round-3 directive: no client-side ESRGAN staging -
+    # EVERY above-floor target goes through the server's hires fix
+    # (a first pass floored at 1024x1024 (#433), then an ESRGAN
+    # upscale + second diffusion pass at the exact target). The
+    # upstream request validation only 64-aligns hires targets, so the
+    # target goes out unclamped; a server-side refusal falls back to
+    # one plain native render (hires_fix=false forces that directly).
     gen_w, gen_h = b["def_w"], b["def_h"]
     want_w = width or 0
     want_h = height or 0
     if want_w or want_h:
+        # #433 (owner round 3): the 1024x1024-class floor is the smallest
+        # first pass klein composes at; everything above it goes through
+        # the server's hires fix to the EXACT target. No target clamp:
+        # the upstream request validation only 64-aligns hires targets,
+        # so the requested size goes out as asked.
         tw, th = _hires_plan(int(want_w or want_h), int(want_h or want_w), b)
-        if hires_fix is True:
-            # CONSERVATIVE MODE (explicit opt-in): the first pass
-            # floors at 1024x1024 (#433 - never the server's 512-class
-            # default) and the exact target is reached via the server's
-            # hires fix (ESRGAN upscale + second diffusion pass; VAE
-            # tiling per-request for decode memory). A target the floor
-            # render already covers skips the second pass: it would
-            # add nothing a native render does not already give.
-            gen_w, gen_h = _hires_render_size(want_w, want_h, b)
-            over = max(tw / gen_w, th / gen_h, 1.0)
-            if over <= 1.0:
-                # the render already meets the request - no hires
-                # second pass, no ESRGAN step (same size as native)
-                notes.append(
-                    f"requested {want_w}x{want_h}: native render at "
-                    f"{gen_w}x{gen_h} (the 1024x1024 floor already "
-                    "covers it - no hires pass needed)"
-                )
-            elif b["hires"] and b["upscale"] and refs:
-                # A second diffusion pass can drift the subject away from
-                # the reference; ESRGAN enlargement re-diffuses nothing.
-                up_target = (
-                    _clamp(tw, 64, b["max_up_w"]),
-                    _clamp(th, 64, b["max_up_h"]),
-                )
-                notes.append(
-                    f"reference-guided render stays at {gen_w}x{gen_h}; "
-                    "the hires second diffusion pass is skipped to "
-                    "preserve reference fidelity (upscale_image can enlarge)"
-                )
-            elif b["hires"] and b["upscale"]:
-                # server-side hires fix: exact target via upscale + second
-                # diffusion pass. VAE tiling rides along per-request for
-                # decode memory.
-                hires_body = {
-                    "hires": {
-                        "enabled": True,
-                        "target_width": tw,
-                        "target_height": th,
-                        "upscaler": up_name,
-                        "denoising_strength": 0.7,
-                    }
+        gen_w, gen_h = _hires_render_size(want_w, want_h, b)
+        over = max(tw / gen_w, th / gen_h, 1.0)
+        if over <= 1.0:
+            # the floor render already meets the request - native, no
+            # hires pass (a second pass at the same size adds nothing)
+            notes.append(
+                f"requested {want_w}x{want_h}: native render at "
+                f"{gen_w}x{gen_h} (the 1024x1024 floor already covers "
+                "it - no hires pass needed)"
+            )
+        elif hires_fix is False:
+            # explicit opt-out: a plain native render even above the
+            # floor - the caller asked for no hires pass
+            where = (
+                f" exceeds the server's {b['max_w']}x{b['max_h']} "
+                "generation limits"
+                if tw > b["max_w"] or th > b["max_h"]
+                else ""
+            )
+            notes.append(
+                f"requested {want_w}x{want_h}{where}: plain native "
+                f"render at {gen_w}x{gen_h} (the 1024x1024-class "
+                "floor; hires_fix is false, no hires pass)"
+            )
+        elif b["hires"] and refs:
+            # same hires body as any other render; the note says a
+            # reference rode along (a second diffusion pass re-diffuses
+            # the reference too - the owner accepted that trade)
+            hires_body = {
+                "hires": {
+                    "enabled": True,
+                    "target_width": tw,
+                    "target_height": th,
+                    "upscaler": up_name,
+                    "denoising_strength": 0.7,
                 }
-                if b["vae_tiling"]:
-                    hires_body["vae_tiling_params"] = {"enabled": True}
-                notes.append(
-                    f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
-                    f"(the 1024x1024 floor), then hires fix to "
-                    f"{tw}x{th} (ESRGAN upscale + second diffusion pass"
-                    + (
-                        ", VAE tiled for memory"
-                        if "vae_tiling_params" in hires_body
-                        else ""
-                    )
-                    + ")"
+            }
+            if b["vae_tiling"]:
+                hires_body["vae_tiling_params"] = {"enabled": True}
+            notes.append(
+                f"requested {want_w}x{want_h}: rendering {gen_w}x{gen_h} "
+                f"(the 1024x1024 floor), then hires fix to {tw}x{th} "
+                "(ESRGAN upscale + second diffusion pass"
+                + (
+                    ", VAE tiled for memory"
+                    if "vae_tiling_params" in hires_body
+                    else ""
                 )
-            elif b["upscale"]:
-                # hires unsupported: ESRGAN chain (may overshoot; the
-                # chain stops as soon as the target is met)
-                up_target = (
-                    _clamp(tw, 64, b["max_up_w"]),
-                    _clamp(th, 64, b["max_up_h"]),
-                )
-            else:
-                notes.append(
-                    f"requested {want_w}x{want_h}: rendered at {gen_w}x{gen_h} "
-                    "(no ESRGAN upscaler is loaded on the server, so it "
-                    "cannot be enlarged)"
-                )
+                + "); reference-guided: the second pass re-diffuses, "
+                "which can drift off-reference"
+            )
+        elif b["hires"]:
+            hires_body = {
+                "hires": {
+                    "enabled": True,
+                    "target_width": tw,
+                    "target_height": th,
+                    "upscaler": up_name,
+                    "denoising_strength": 0.7,
+                }
+            }
+            if b["vae_tiling"]:
+                hires_body["vae_tiling_params"] = {"enabled": True}
+            tail = (
+                ", VAE tiled for memory"
+                if "vae_tiling_params" in hires_body
+                else ""
+            )
+            where = (
+                f" exceeds the server's {b['max_w']}x{b['max_h']} "
+                "generation limits"
+                if tw > b["max_w"] or th > b["max_h"]
+                else ""
+            )
+            notes.append(
+                f"requested {want_w}x{want_h}{where}: rendering "
+                f"{gen_w}x{gen_h} (the 1024x1024-class floor), then "
+                f"hires fix to {tw}x{th} (ESRGAN upscale + second "
+                f"diffusion pass{tail})"
+            )
         else:
-            # NATIVE RENDER (default): the target, 64-aligned into the
-            # server's generation limits, is the render itself. No hires
-            # detour: the first pass sees the full canvas.
-            over_limit = want_w > b["max_w"] or want_h > b["max_h"]
-            if over_limit:
-                # clamp to the max legal size PRESERVING the request's
-                # aspect ratio (the hires_plan target is per-axis and
-                # would square the shape)
-                scale = min(
-                    float(b["max_w"]) / max(want_w, 1),
-                    float(b["max_h"]) / max(want_h, 1),
-                )
-                gen_w = _clamp(_mult64(want_w * scale), b["min_w"], b["max_w"])
-                gen_h = _clamp(_mult64(want_h * scale), b["min_h"], b["max_h"])
-            else:
-                gen_w, gen_h = tw, th
-            if not over_limit:
-                notes.append(f"native render at {gen_w}x{gen_h}")
-            elif b["upscale"]:
-                # Beyond the generation limits no diffusion pass helps
-                # (a hires target is bound by the same limits): render
-                # at the maximum legal size, then enlarge toward the
-                # request with the ESRGAN chain.
-                up_target = (
-                    _clamp(_mult64(want_w or want_h), 64, b["max_up_w"]),
-                    _clamp(_mult64(want_h or want_w), 64, b["max_up_h"]),
-                )
-                notes.append(
-                    f"requested {want_w}x{want_h} exceeds the server's "
-                    f"generation limits; rendering {gen_w}x{gen_h} (its "
-                    "maximum) and enlarging toward the request"
-                )
-            else:
-                notes.append(
-                    f"requested {want_w}x{want_h} exceeds the server's "
-                    f"generation limits; rendered at {gen_w}x{gen_h} (its "
-                    "maximum - no ESRGAN upscaler is loaded to enlarge)"
-                )
+            # no hires support on the server: plain native render at
+            # the floor (its composition scale), shortfall noted
+            where = (
+                f" exceeds the server's {b['max_w']}x{b['max_h']} "
+                "generation limits"
+                if tw > b["max_w"] or th > b["max_h"]
+                else ""
+            )
+            notes.append(
+                f"requested {want_w}x{want_h}{where}: this server does "
+                "not support the hires fix, rendering natively at "
+                f"{gen_w}x{gen_h} (the 1024x1024-class floor)"
+            )
+            notes.append(f"native render at {gen_w}x{gen_h}")
         if width or height:
             # native bodies take the explicit size; when the user gave
             # none we omit it so the server default applies verbatim
@@ -2950,12 +2935,6 @@ async def generate_image(
             sp["sample_steps"] = steps
         if cfg_scale is not None:
             sp["guidance"] = {**(sp.get("guidance") or {}), "txt_cfg": cfg_scale}
-            if cfg_scale == _IMG_CFG_DEFAULT:
-                # klein is guidance-distilled: pin BOTH fields at 1
-                # (#433) - the server's own distilled_guidance default
-                # is a dev-class 3.5 and leaks into every render that
-                # omits it.
-                sp["guidance"]["distilled_guidance"] = _IMG_DISTILLED_GUIDANCE
         body["sample_params"] = sp
     if refs:
         body["ref_images"] = refs
@@ -2967,20 +2946,16 @@ async def generate_image(
     job_id, err = await _img_gen_job_submit(api_base, submit_body)
     if err and hires_body and "HTTP 404" not in err:
         # Server rejected the hires body (unknown field / bad upscaler /
-        # invalid target): one clean retry WITHOUT it, and the ESRGAN
-        # chain takes over the target. A 404 means no native job API at
-        # all - the legacy fallback below handles that, and "refused"
-        # would be the wrong story.
+        # invalid target): one clean retry WITHOUT it - a plain native
+        # render at the floor (no ESRGAN staging exists any more to
+        # chase the exact target; the shortfall is stated honestly). A
+        # 404 means no native job API at all - the legacy fallback
+        # below handles that, and "refused" would be the wrong story.
         notes.append(
-            "hires fix was refused by the server; the ESRGAN upscale "
-            "chain is used instead"
+            "hires fix was refused by the server; retrying as a plain "
+            f"native render at {gen_w}x{gen_h}"
         )
         hires_body = None
-        if not up_target:
-            up_target = (
-                _clamp(tw, 64, b["max_up_w"]),
-                _clamp(th, 64, b["max_up_h"]),
-            )
         job_id, err = await _img_gen_job_submit(api_base, body)
     if err:
         if hires_body:
@@ -3028,56 +3003,18 @@ async def generate_image(
         raw_out = base64.b64decode(b64)
     dims = _png_dims(raw_out)
     # Ground truth (#411): what the server actually ran, from the PNG's
-    # parameters chunk. Captured from the PRE-upscale render - the ESRGAN
-    # chain re-encodes the image and the chunk does not survive it.
+    # parameters chunk (PNGs without the chunk stay silent - a
+    # server-side hires pass re-encodes the image and may drop it).
     pn = _png_params_note(raw_out)
+
     if pn:
         notes.append(pn)
-        import re as _re
 
-        m = _re.search(r"Guidance:\s*([0-9.]+)", pn)
-        if (
-            cfg_scale == _IMG_CFG_DEFAULT
-            and m
-            and float(m.group(1)) > _IMG_DISTILLED_GUIDANCE
-        ):
-            # #433: the guidance override did not land on this build -
-            # surface it instead of letting the leak ride silently.
-            notes.append(
-                "note: distilled_guidance override did not land - the "
-                "server ran its higher default (update the sd-server)"
-            )
-
-    if up_target:
-        raw2, meta2, note2 = await _upscale_to_target(
-            api_base,
-            base64.b64encode(raw_out).decode(),
-            up_target[0],
-            up_target[1],
-            None,
-            max_up_w=b["max_up_w"],
-            max_up_h=b["max_up_h"],
+    if hires_body and want_w and want_h and (dims is None or dims[0] != want_w or dims[1] != want_h):
+        notes.append(
+            f"requested {want_w}x{want_h}: the hires pass returned "
+            f"{dims[0]}x{dims[1]} - a size mismatch, reported as ran"
         )
-        if raw2 is None:
-            notes.append(
-                f"requested {want_w}x{want_h}: upscale step failed ({note2}); "
-                f"returning the {gen_w}x{gen_h} render"
-            )
-        else:
-            raw_out = raw2
-            dims = _png_dims(raw2)
-            m = meta2 or {}
-            notes.append(
-                f"requested {want_w}x{want_h}: rendered {gen_w}x{gen_h} "
-                f"(the maximum legal size), then upscaled via "
-                f"{m.get('upscaler')}"
-                + (
-                    f" to {m.get('width')}x{m.get('height')}"
-                    if m.get("width")
-                    else ""
-                )
-                + (f"; {note2}" if note2 else "")
-            )
 
     if body.get("lora_applied"):
         notes.append(_lora_note(body, scan))
@@ -3246,15 +3183,13 @@ def _generation_result(
         out["width"], out["height"] = dims
     if b:
         out["native"] = (
-            "the render happens at the requested size whenever the "
-            f"server's generation limits (up to {b['max_w']}x{b['max_h']}) "
-            "allow it; hires_fix: true opts into the conservative "
-            "small-VRAM route, whose first pass is never smaller than "
-            "1024x1024 (never the server's smaller default) before the "
-            "hires second pass reaches the exact target; targets "
-            "beyond the limits render at the maximum legal size and "
-            "are enlarged by the ESRGAN chain (or call upscale_image "
-            "on the saved file)"
+            "every size above the 1024x1024-class floor is reached "
+            "exactly via the server's hires fix (ESRGAN upscale + "
+            "second diffusion pass at the target) from a first pass "
+            "floored at 1024x1024 (never the server's smaller "
+            "default); targets at or under the floor render natively; "
+            "hires_fix: false caps the route at the plain native "
+            "render (larger sizes then come back at the floor size)"
         )
     if notes:
         out["note"] = " ".join(notes)
