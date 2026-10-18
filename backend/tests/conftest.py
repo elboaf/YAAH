@@ -26,6 +26,27 @@ os.environ["YAAH_NO_HOSTING"] = "1"
 
 
 @pytest.fixture(autouse=True)
+def _restore_global_config():
+    """Config is the one GLOBAL the suite shares through the redirected
+    YAAH_CONFIG_PATH file - and many test files write it wholesale
+    (providers/active_provider/access_mode) without restoring it, which
+    leaks into later tests that read ambient config: the rc.30 release
+    gate failed on main._resolve_turn_scope qualifying a bare model with
+    a leaked active_provider ("m" -> "local::m"), and the manifest
+    harness (_prep_flags) leaks access_mode=plan into remote-runner's
+    full-mode dispatch test (mutating tool blocked). The local
+    per-file fixtures proved the polluters (test_prompt_manifest's
+    harness, test_issue_428's wholesale writes, test_issue_430's
+    config_only) - this session-wide restore makes every file safe and
+    keeps the local ones as documentation."""
+    from backend.agent import config as cfgmod
+
+    snapshot = cfgmod.CONFIG_PATH.read_text(encoding="utf-8")
+    yield
+    cfgmod.CONFIG_PATH.write_text(snapshot, encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
 def _gc_after_test():
     yield
     # Force any leaked asyncio transport to fire __del__ right here, while
