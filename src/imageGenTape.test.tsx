@@ -73,7 +73,7 @@ describe('generate_image tape rendering', () => {
     render(
       <ToolCallRow
         tc={tc({
-          args: { prompt: 'a cat', width: 768, height: 768, hires_fix: true },
+          args: { prompt: 'a cat', width: 768, height: 768, negative_prompt: 'dogs' },
           result: inlineResult,
         })}
       />)
@@ -81,7 +81,7 @@ describe('generate_image tape rendering', () => {
     fireEvent.click(screen.getByText('[+]'))
     expect(screen.getByText(/"prompt"/)).toBeTruthy()
     expect(screen.getByText(/a cat/)).toBeTruthy()
-    expect(screen.getByText(/"hires_fix": true/)).toBeTruthy()
+    expect(screen.getByText(/"negative_prompt": "dogs"/)).toBeTruthy()
     expect(screen.getByText(/"saved_to"/)).toBeTruthy() // full result JSON
     // image still inline after expanding
     expect(screen.getByAltText('generated image')).toBeTruthy()

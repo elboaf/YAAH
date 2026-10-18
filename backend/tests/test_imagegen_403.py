@@ -327,31 +327,10 @@ def test_depth_from_without_ref_feature_skips_download(configured, tmp_path, mon
     assert "depth map skipped" in r.get("note", "")
 
 
-def test_refs_within_limits_render_natively_without_hires(configured, tmp_path, monkeypatch):
-    """#421: reference renders within the generation limits are NATIVE
-    at the target - no hires second diffusion pass (re-diffusion
-    drifts off-reference) and no ESRGAN chain either: the first pass
-    already sees the full canvas."""
-    _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
-    (ref,) = _ref_files(tmp_path, "photo.png")
-    r = _run(
-        "generate_image",
-        {"prompt": "x", "reference_images": [ref], "width": 1024, "height": 1024},
-        str(tmp_path),
-    )
-    assert not r.get("error"), r
-    body = _last_body()
-    assert body["width"] == 1024 and body["height"] == 1024
-    assert "hires" not in body, "reference renders must skip the second diffusion pass"
-    assert _FakeClient.upscale_calls == 0
-    assert "native render at 1024x1024" in r.get("note", "")
-
-
-def test_refs_above_floor_rides_hires_with_a_drift_note(configured, tmp_path, monkeypatch):
-    """Round 3 (owner directive): reference renders take the same
-    hires route as everything else above the floor - the exact target
-    in one job - and the note says the second pass re-diffuses, which
-    can drift off-reference (the accepted trade)."""
+def test_refs_render_natively_at_the_requested_size(configured, tmp_path, monkeypatch):
+    """#441: reference renders take the requested size natively - one
+    diffusion pass at the exact target (the old above-floor hires
+    detour re-diffused the reference and drifted)."""
     _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
     (ref,) = _ref_files(tmp_path, "photo.png")
     r = _run(
@@ -361,27 +340,29 @@ def test_refs_above_floor_rides_hires_with_a_drift_note(configured, tmp_path, mo
     )
     assert not r.get("error"), r
     body = _last_body()
-    assert body["width"] == 1024 and body["height"] == 1024
-    assert body["hires"]["enabled"] is True
-    assert body["hires"]["target_width"] == 1536
-    assert body["hires"]["target_height"] == 1536
+    assert body["width"] == 1536 and body["height"] == 1536
+    assert "hires" not in body, "reference renders must be a single native pass"
     assert _FakeClient.upscale_calls == 0
-    assert "drift off-reference" in r.get("note", "")
+    assert "native render at 1536x1536" in r.get("note", "")
 
 
-def test_plain_within_limits_still_uses_hires_when_explicitly_asked(configured, tmp_path, monkeypatch):
-    """#421 + #433: plain generations render natively by default; the
-    hires second pass rides only when the caller opts in
-    (hires_fix=True) - and only above the 1024x1024 floor, which the
-    conservative first pass always meets."""
-    _caps_feat(configured, monkeypatch, hires=True, vae_tiling=True)
+def test_refs_beyond_limits_clamp_with_an_honest_note(configured, tmp_path, monkeypatch):
+    """#441: a reference render beyond the generation limits clamps to
+    the maximum legal size preserving the aspect ratio, with the
+    shortfall stated - never a silent reshape."""
+    _caps_feat(configured, monkeypatch, ref_images=True, lora=True, hires=True, vae_tiling=True)
+    (ref,) = _ref_files(tmp_path, "photo.png")
     r = _run(
         "generate_image",
-        {"prompt": "x", "width": 1536, "height": 1536, "hires_fix": True},
+        {"prompt": "x", "reference_images": [ref], "width": 6144, "height": 6144},
         str(tmp_path),
     )
     assert not r.get("error"), r
-    assert "hires" in _last_body()
+    body = _last_body()
+    assert body["width"] == 4096 and body["height"] == 4096
+    assert "hires" not in body
+    assert _FakeClient.upscale_calls == 0
+    assert "exceeds the server" in r.get("note", "")
 
 
 def test_schema_grows_only_when_configured(configured, tmp_path, monkeypatch):
