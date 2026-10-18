@@ -324,42 +324,55 @@ HELP_DOCS: dict = {
         "specific anchor or raise the cap for long pages."
     ),
     "generate_image": (
-        "Text-to-image on the stable-diffusion.cpp server configured in "
-        "Settings (Image generation). The image is saved into the "
-        "workspace under ai-images/ and attached to the conversation, so "
-        "the user sees it inline; it is NOT sent back to you - call "
-        "view_image on the saved file only if you must inspect it (e.g. "
-        "the user asks to change something specific about it). "
-        "RESOLUTION POLICY: every size above the 1024x1024-class "
-        "floor is reached exactly via the server's hires fix (ESRGAN "
-        "upscale + second diffusion pass at the target) from a first "
-        "pass floored at 1024x1024 - never the server's smaller "
+        "Text-to-image AND reference-guided editing on the stable-"
+        "diffusion.cpp server configured in Settings (Image generation). "
+        "The image is saved into the workspace under ai-images/ and "
+        "attached to the conversation, so the user sees it inline; it is "
+        "NOT sent back to you - call view_image on the saved file only if "
+        "you must inspect it (e.g. the user asks to change something "
+        "specific about it). TWO PROMPTING DISCIPLINES (official klein "
+        "guide - they are opposites): CREATE (mode \"generate\", no "
+        "references) - flowing novelist prose, not keywords; front-load "
+        "the subject and action; describe lighting like a photographer "
+        "(source, quality, direction, temperature - the single "
+        "highest-impact element); every sentence adds visual information; "
+        "optional Style:/Mood: tags at the end. EDIT (mode \"edit\", "
+        "reference_images required) - the prompt is the TRANSFORMATION "
+        "only: what should change and the target state (replace the bike "
+        "with a rearing black horse; change the season to winter); the "
+        "references carry the visual details, so never re-describe them, "
+        "and vague verbs (improve it, make it professional) change "
+        "nothing. edit_image is the same tool with mode \"edit\" forced "
+        "and references required. RESOLUTION POLICY: every size above the "
+        "1024x1024-class floor is reached exactly via the server's hires "
+        "fix (ESRGAN upscale + second diffusion pass at the target) from "
+        "a first pass floored at 1024x1024 - never the server's smaller "
         "default; targets at or under the floor render natively. "
         "hires_fix=false is the only knob: false caps the route at a "
-        "plain native render. The result reports exactly what "
-        "happened. "
-        "negative_prompt and seed pass through. Generation runs as a "
-        "server job: pressing Stop cancels it and returns immediately. "
-        "Long renders stay visible: progress notes appear on the live "
-        "tape after 10 minutes, and the wait hard-cancels at 30 "
-        "minutes. "
-        "Remote (namespaced) workspaces save to the store only. "
-        "EDITING (server-capability-gated): reference_images does "
-        "Flux-style reference-guided generation; control_lora + "
-        "depth_from does depth-pose control - the depth map MUST be "
-        "the FIRST reference ([depth, photo] order; reversed silently "
-        "does nothing) and the hires second pass is skipped for "
-        "reference renders to preserve fidelity; lora[] activates "
+        "plain native render. The result reports exactly what happened. "
+        "negative_prompt and seed pass through (a pinned seed reproduces "
+        "a render; a new take on an edited scene wants seed omitted - "
+        "fresh draw - or reseed). Generation runs as a server job: "
+        "pressing Stop cancels it and returns immediately. Long renders "
+        "stay visible: progress notes appear on the live tape after 10 "
+        "minutes, and the wait hard-cancels at 30 minutes. Remote "
+        "(namespaced) workspaces save to the store only. EDITING "
+        "MACHINERY (server-capability-gated): reference_images does "
+        "Flux-style reference-guided generation (above-floor targets "
+        "ride the hires fix with a drift note - the second pass "
+        "re-diffuses); control_lora + depth_from does depth-pose control "
+        "- the depth map MUST be the FIRST reference ([depth, photo] "
+        "order; reversed silently does nothing); lora[] activates "
         "server-side LoRAs. Reference sources: workspace paths, store "
         "rels (generate_image results, and PASTED chat images - their "
         "store rel is annotated in the context under the attached "
-        "image). The result note lists the server's available LoRAs "
-        "when none was applied; one style-named LoRA auto-applies when "
-        "the prompt names the style (spelling-tolerant: retro-wave "
-        "matches a retrowave-named LoRA). "
-        "SAMPLING: steps 4 and BOTH guidance fields (cfg, distilled "
-        "guidance) are locked at the guidance-distilled klein-class "
-        "operating point - cfg_scale is not a parameter."
+        "image). The result note lists the server's available LoRAs when "
+        "none was applied; one style-named LoRA auto-applies when the "
+        "prompt names the style (spelling-tolerant: retro-wave matches a "
+        "retrowave-named LoRA). SAMPLING: steps 4 and BOTH guidance "
+        "fields (cfg, distilled guidance) are locked at the "
+        "guidance-distilled klein-class operating point - cfg_scale is "
+        "not a parameter."
     ),
     "upscale_image": (
         "Detail-preserving enlargement of an EXISTING image via the "
@@ -1525,7 +1538,71 @@ def _memory_executor(op: str):
 # render. The harness hard-codes no resolution beyond that floor; the
 # server's capabilities decide which routes exist.
 
-_IMAGE_GEN_TOOLS = ("generate_image", "upscale_image")
+# Issue #437: the official BFL prompting guide for FLUX.2 [klein]
+# (docs.bfl.ai/guides/prompting_guide_flux2_klein). Its two disciplines
+# are OPPOSITE, so they are kept as named constants injected into every
+# model-facing surface (schema, HELP_DOCS, result notes) and never
+# paraphrased per-surface: creation prompts are novelist prose; edit
+# prompts describe only the transformation and let the references carry
+# the visual detail.
+
+# Creation side (txt2img), guide phrases kept verbatim.
+IMG_GUIDE_CREATION = (
+    "Write flowing novelist prose, not keywords: subject first, then "
+    "setting, details, and lighting - this ordering gives the model "
+    "clear relationships between elements. Front-load your most "
+    "important elements - word order signals priority (main subject, "
+    "key action, style, context, secondary details last). Describe "
+    "lighting like a photographer: it has the single greatest impact "
+    "on output quality - name the source (natural, artificial, "
+    "ambient), quality (soft, harsh, diffused, direct), direction "
+    "(side, back, overhead, fill), temperature (warm, cool, golden, "
+    "blue) and how light catches, filters, or reflects on surfaces, "
+    "e.g. soft, diffused light from a large window camera-left, "
+    "creating gentle shadows that define the subject's features. "
+    "Make every sentence add visual information - avoid filler; "
+    "longer prompts work well when every detail serves the image. "
+    "Optional consistency tags at the END: Style: ... / Mood: ... "
+    "(e.g. Shot on 35mm film (Kodak Portra 400) with shallow depth "
+    "of field)."
+)
+
+# Edit side (reference-guided), guide phrases kept verbatim.
+IMG_GUIDE_EDIT = (
+    "The references carry the visual details; your prompt describes "
+    "what should change or how elements should combine - not what "
+    "they look like. Name what changes and the target state: replace "
+    "the bike with a rearing black horse; change the season to "
+    "winter; add small goblins climbing the right wall; change image "
+    "1 to match the style of image 2 (name each reference's role "
+    "when several ride along). Vague verbs fail - make it better, "
+    "improve the lighting, make it more professional, fix the image "
+    "change nothing, and re-describing the reference fights it."
+)
+
+# mode:"edit" hard error (teaching text - it names the missing input
+# and the two ways out).
+EDIT_MODE_NO_REFS = (
+    'mode "edit" needs reference_images (1-4 paths): the edit prompt '
+    "describes only the transformation - what should change and the "
+    "target state - while the references carry the visual details, "
+    "so there is nothing to render from without them. For a fresh "
+    'image with no references, use mode "generate" (the default).'
+)
+EDIT_MODE_BAD = 'mode must be "generate" or "edit"'
+
+# Per-render result-note coaching for reference-bearing renders
+# (#437): the render already happened - the note coaches the NEXT
+# call's prompt discipline.
+IMG_REF_RENDER_NOTE = (
+    "prompting note (references carried this render): the prompt "
+    "should describe only the transformation - what should change "
+    "and the target state - never the scene; if this render missed, "
+    "rephrase the change (a fresh seed varies the take; more steps "
+    "does not)"
+)
+
+_IMAGE_GEN_TOOLS = ("generate_image", "edit_image", "upscale_image")
 
 GENERATE_IMAGE_SCHEMA = {
     "type": "function",
@@ -1537,28 +1614,35 @@ GENERATE_IMAGE_SCHEMA = {
             "into the workspace under ai-images/ AND attaches it to this "
             "conversation so the user sees it inline. Use for logos, "
             "mockups, illustrations, art assets. The image is not sent "
-            "back to you; view_image the saved file only if inspection "
-            "is needed. Omitted size/steps ride YAAH's built-in "
-            "defaults (1024x1024 at four steps - the guidance-"
-            "distilled klein-class operating point; cfg and "
-            "distilled guidance are locked at 1 and not exposed). "
-            "Sizing (owner round 3): every size above the "
-            "1024x1024-class floor is reached exactly via the "
-            "server's hires fix (ESRGAN upscale + a second diffusion "
-            "pass at the target) from a first pass floored at "
-            "1024x1024 - never the server's smaller default; targets "
-            "at or under the floor render natively, and the first "
-            "pass decides composition (a 512 render drops subjects "
-            "on klein-class models). Four steps is the "
-            "model's step-distilled design point; a higher count is "
-            "off-design for klein and near-linear in time. "
-            "reference-guided edits hold together fine at "
-            "the default. If an edit did not take, steps is the wrong "
-            "knob - rephrase, or mask, or crop the reference instead. "
-            "Every result note reports the ground truth of what ran "
-            "(server ran: ...). When the server advertises them: reference-"
-            "guided editing (reference_images), depth-pose control "
-            "(control_lora / depth_from), and LoRA activation (lora)."
+            "back to you; view_image the saved file only if inspection is "
+            "needed. PROMPTING (official klein guide, two opposite "
+            "disciplines): CREATE - flowing novelist prose, not keywords; "
+            "front-load the subject and action; describe lighting like a "
+            "photographer, the single highest-impact element; every "
+            "sentence adds visual information; optional Style:/Mood: tags "
+            "at the end. EDIT (mode \"edit\") - the prompt is the "
+            "transformation only; the references carry the visual details; "
+            "never re-describe them. mode \"generate\" (default) creates "
+            "from the prompt alone; \"edit\" re-renders from 1-4 "
+            "reference_images and requires them (teaching error otherwise). "
+            "Omitted size/steps ride YAAH's built-in defaults (1024x1024 at "
+            "four steps - the guidance-distilled klein-class operating "
+            "point; cfg and distilled guidance are locked at 1 and not "
+            "exposed). Sizing: every size above the 1024x1024-class floor "
+            "is reached exactly via the server's hires fix (ESRGAN upscale "
+            "+ a second diffusion pass at the target) from a first pass "
+            "floored at 1024x1024 - never the server's smaller default; "
+            "targets at or under the floor render natively, and the first "
+            "pass decides composition (a 512 render drops subjects on "
+            "klein-class models). Four steps is the model's step-distilled "
+            "design point; a higher count is off-design for klein and "
+            "near-linear in time. Reference-guided edits hold together "
+            "fine at the default. If an edit did not take, steps is the "
+            "wrong knob - rephrase the transformation (or mask/crop the "
+            "reference) instead. Every result note reports the ground "
+            "truth of what ran (server ran: ...). When the server "
+            "advertises them: depth-pose control (control_lora / "
+            "depth_from), and LoRA activation (lora)."
         ),
         "parameters": {
             "type": "object",
@@ -1566,8 +1650,36 @@ GENERATE_IMAGE_SCHEMA = {
                 "prompt": {
                     "type": "string",
                     "description": (
-                        "What to render. Describe subject, style, medium, "
-                        "lighting, composition."
+                        "What to render. CREATE (no references): flowing "
+                        "novelist prose, not keywords - subject first, then "
+                        "setting, details, lighting, atmosphere; front-load "
+                        "what matters most; describe lighting like a "
+                        "photographer (source, quality, direction, "
+                        "temperature, how it catches surfaces) - the "
+                        "single highest-impact element; every sentence "
+                        "adds visual information; optional Style:/Mood: "
+                        "tags at the end. EDIT (mode \"edit\" + "
+                        "reference_images): describe only the "
+                        "transformation - what should change and the "
+                        "target state (replace the bike with a rearing "
+                        "black horse) - the references carry the visual "
+                        "details, so never re-describe them; vague verbs "
+                        "(improve it, make it professional) change "
+                        "nothing."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["generate", "edit"],
+                    "description": (
+                        "\"generate\" (default) renders from the prompt "
+                        "alone. \"edit\" re-renders from reference_images "
+                        "(required, 1-4): the prompt describes the "
+                        "transformation - what should change and the "
+                        "target state - while the references carry the "
+                        "visual details. Seed: a pinned seed reproduces "
+                        "a render; for a new take on the edited scene "
+                        "omit seed (fresh draw) or pass reseed."
                     ),
                 },
                 "width": {
@@ -2438,6 +2550,7 @@ def _resolve_lora_field(lora, control_lora, b, notes):
 async def generate_image(
     prompt: str,
     workspace: str,
+    mode: str | None = None,
     width: int | None = None,
     height: int | None = None,
     negative_prompt: str | None = None,
@@ -2482,6 +2595,15 @@ async def generate_image(
     prompt = (prompt or "").strip()
     if not prompt:
         return {"error": "prompt must not be empty"}
+
+    # mode:"edit" (#437): the editing contract is a hard gate BEFORE any
+    # transport work - no references means nothing to render from (the
+    # prompt describes only the transformation). Bad values refuse too.
+    mode = ((str(mode) if mode is not None else "") or "generate").strip().lower()
+    if mode not in ("generate", "edit"):
+        return {"error": EDIT_MODE_BAD}
+    if mode == "edit" and not reference_images:
+        return {"error": EDIT_MODE_NO_REFS}
 
     try:
         from backend.agent.config import load_config
@@ -2578,6 +2700,16 @@ async def generate_image(
         if isinstance(u, dict) and u.get("image_upscale") and u.get("name"):
             up_name = str(u["name"])
             break
+    if mode == "edit":
+        # #437: reinforce the transformation-only contract in the
+        # wire prompt itself (the guide: references carry the visual
+        # details; the prompt describes what should change).
+        prompt = (
+            prompt
+            + " - apply this edit; the references carry the visual "
+            "details"
+        )
+
     hires_body: dict | None = None
     body: dict = {"prompt": prompt}
     apply_to_body(body, scan, prompt)
@@ -2783,7 +2915,13 @@ async def generate_image(
             notes.append(_lora_note(legacy, scan))
         store_rel = _persist_generation(raw_out, workspace, notes)
         return _generation_result(
-            store_rel, raw_out, dims, None, notes, workspace
+            store_rel,
+            raw_out,
+            dims,
+            None,
+            notes,
+            workspace,
+            refed=bool(refs),
         )
 
     # --- size decision (#421: native render within limits is default) ----
@@ -3019,7 +3157,52 @@ async def generate_image(
     if body.get("lora_applied"):
         notes.append(_lora_note(body, scan))
     store_rel = _persist_generation(raw_out, workspace, notes)
-    return _generation_result(store_rel, raw_out, dims, b, notes, workspace)
+    return _generation_result(
+        store_rel, raw_out, dims, b, notes, workspace, refed=bool(refs)
+    )
+
+
+async def edit_image(
+    prompt: str,
+    workspace: str,
+    reference_images: list | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    negative_prompt: str | None = None,
+    seed: int | None = None,
+    reseed: bool | None = None,
+    steps: int | None = None,
+    hires_fix: bool | None = None,
+    lora: list | None = None,
+    on_chunk=None,
+) -> dict:
+    """The edit-mode face of generate_image (#437): same executor with
+    mode "edit" forced and reference_images required (NOT schema-
+    advertised today - the model-facing surface stays the mode param
+    per the owner's round; this wrapper is the seam a future
+    edit_image promotion would publish)."""
+    if not (prompt or "").strip():
+        return {"error": "prompt must not be empty"}
+    if not reference_images:
+        return {"error": EDIT_MODE_NO_REFS}
+    return await generate_image(
+        prompt,
+        workspace,
+        mode="edit",
+        reference_images=reference_images,
+        width=width,
+        height=height,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        reseed=reseed,
+        steps=steps,
+        cfg_scale=None,
+        hires_fix=hires_fix,
+        lora=lora,
+        control_lora=None,
+        depth_from=None,
+        on_chunk=on_chunk,
+    )
 
 
 async def _save_upscale_output(out: dict, raw: bytes, workspace: str, source: str) -> dict:
@@ -3169,6 +3352,7 @@ def _generation_result(
     b: dict | None,
     notes: list[str],
     workspace: str,
+    refed: bool = False,
 ) -> dict:
     """Shared result assembly: inline display contract, dims, the server's
     bounds sentence, notes, and the workspace copy (remote sessions keep
@@ -3191,6 +3375,8 @@ def _generation_result(
             "hires_fix: false caps the route at the plain native "
             "render (larger sizes then come back at the floor size)"
         )
+    if refed:
+        notes.append(IMG_REF_RENDER_NOTE)
     if notes:
         out["note"] = " ".join(notes)
     try:
@@ -3240,6 +3426,7 @@ EXECUTORS = {
     "get_help": get_help,
     "branch_select": branch_select,
     "generate_image": generate_image,
+    "edit_image": edit_image,
     "upscale_image": upscale_image,
     "memory_save": _memory_executor("save"),
     "memory_read": _memory_executor("read"),
