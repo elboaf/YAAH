@@ -84,6 +84,10 @@ def _name_tokens(name: str) -> list[str]:
     the stop words above. Used ONLY for the triggerless class: a
     triggered LoRA's training tokens are authoritative and stay
     untouched.
+
+    #439: these tokens match against the USER's typed words only, never
+    the model's composed prompt - a palette word ("neon") describing a
+    reference image must not summon a style LoRA.
     """
     # bracket-grouped names ('[FLUX.2.Klein]PixelArt_Redmond') keep their
     # glued fragments out: brackets are noise, so strip them BEFORE the
@@ -580,30 +584,57 @@ def _squash(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
-def _match_score(info: dict, prompt: str) -> float:
-    """How strongly a LoRA's match tokens hit a prompt: the fraction of
-    tokens present, 0 = no match. An empty match list never fires on
-    content - select_lora derives filename tokens for the triggerless
-    class (see there) and enforces the conservative bar."""
+def _match_text(user_text: str | None) -> str:
+    """The authoritative match corpus: what the USER typed (#439).
+
+    Attachment scaffolding re-inlined onto the message row ("--- attached
+    file:" fences and the inline-content blocks that follow them) is
+    stripped so a file's name or pasted contents can never summon a style
+    LoRA - only the user's typed words may. The model's composed
+    generate_image prompt is explicitly NOT a match corpus: it may (and
+    routinely does) describe reference-image details the user never
+    mentioned (chat 901: a neon-lit sidewalk auto-applied a retrowave
+    LoRA the user never asked for).
+    """
+    text = str(user_text or "")
+    if not text:
+        return ""
+    text = re.sub(r"\n+--- attached file:[^\n]*---", " ", text)
+    text = re.sub(r"```[^`]*```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"Saved to [^\n]*", " ", text)
+    text = re.sub(r"Read it with read_file[^\n]*", " ", text)
+    return text.strip()
+
+
+def _match_score(info: dict, text: str) -> tuple[float, list[str]]:
+    """How strongly a LoRA's match tokens hit the match text: the
+    fraction of tokens present plus WHICH tokens hit (the result note's
+    evidence line, #439), or (0.0, []) for no match. An empty match list
+    never fires on content - select_lora derives filename tokens for the
+    triggerless class (see there) and enforces the conservative bar.
+
+    The `text` argument is the USER's typed words (see _match_text),
+    never the model's composed prompt (#439).
+    """
     # Separators are unreliable spelling: the live-session prompt said
     # "retro-wave" for a 'retrowave'-named LoRA (#406). A token hits when
     # it appears in the spaced form ("pix art" in "pix art castle") OR
-    # its squashed form equals a squashed prompt word/bigram
+    # its squashed form equals a squashed word/bigram
     # ("retrowave" == "retro wave" glued).
-    prompt_l = re.sub(r"[\s_\-]+", " ", (prompt or "").lower())
+    text_l = re.sub(r"[\s_\-]+", " ", (text or "").lower())
     # squashed WORD list plus squashed BIGRAM glues: 'phone' must match a
-    # whole prompt word (never the interior of 'photography'), while
+    # whole word (never the interior of 'photography'), while
     # 'retrowave' matches the glue of adjacent words 'retro wave' - the
     # separator disagreement is exactly what squashing erases (#406).
     words = [
-        w for w in re.split(r"[^a-z0-9]+", (prompt or "").lower()) if w
+        w for w in re.split(r"[^a-z0-9]+", (text or "").lower()) if w
     ]
-    prompt_sq_words = {_squash(w) for w in words}
-    # bigram glue: ADJACENT prompt words in ORDER, squashed and
+    sq_words_set = {_squash(w) for w in words}
+    # bigram glue: ADJACENT words in ORDER, squashed and
     # concatenated - 'retro wave' -> 'retrowave' is exactly the spelling
     # collision (a set-iteration order would shuffle the pairs).
     sq_words = [_squash(w) for w in words]
-    prompt_sq_words |= {
+    sq_words_set |= {
         sq_words[i] + sq_words[i + 1] for i in range(len(sq_words) - 1)
     }
     tokens: list[str] = []
@@ -617,24 +648,31 @@ def _match_score(info: dict, prompt: str) -> float:
             if part and part not in tokens:
                 tokens.append(part)
     if not tokens:
-        return 0.0
-    hits = 0
-    for t in tokens:
+        return 0.0, []
+    matched = [
+        t
+        for t in tokens
         # spaced-substring OR squashed-word hit: "phone" inside
         # "photography" is a prefix collision, not a style match - the
         # squashed check requires the squashed token to BE one of the
-        # prompt's squashed words/bigrams, never an interior fragment.
-        if t in prompt_l or _squash(t) in prompt_sq_words:
-            hits += 1
-    if not hits:
-        return 0.0
-    return hits / len(tokens)
+        # match text's squashed words/bigrams, never an interior
+        # fragment.
+        if t in text_l or _squash(t) in sq_words_set
+    ]
+    if not matched:
+        return 0.0, []
+    return len(matched) / len(tokens), matched
 
 
-def select_lora(scan: dict, prompt: str, has_init_image: bool) -> dict | None:
+def select_lora(
+    scan: dict, user_text: str | None, has_init_image: bool,
+) -> dict | None:
     """Pick at most ONE LoRA for a request (v1: no stacking). Returns
     {path, multiplier, trigger, name, cls} or None.
 
+    - `user_text` is what the USER typed this turn (#439) - the only
+      match corpus. None (no user text known: tests, direct callers,
+      transports without the injection) matches nothing on content.
     - img2img helpers apply only when an init image is present (they are
       enhancers/editors; in plain t2i they would drag every render).
     - triggered/triggerless classes apply on match only.
@@ -668,20 +706,20 @@ def select_lora(scan: dict, prompt: str, has_init_image: bool) -> dict | None:
                 cand = None  # classified triggered, trigger lost: skip
             else:
                 # #406: a triggerless style LoRA has no training tokens -
-                # derive match criteria from its FILENAME so a prompt
+                # derive match criteria from its FILENAME so the user
                 # naming the style ("retro-wave") can summon it
                 # ("ck-neon-retrowave-klein-9b"). HALF the derived tokens
                 # (at least one) must hit: 'neon'+'retrowave' against
                 # "retro-wave style" hits one of two, and that IS the
-                # prompt naming the style - the separator squash makes
+                # user naming the style - the separator squash makes
                 # the spelling difference not matter. Still conservative:
-                # a generic prompt ("a cozy village") scores 0. Triggered
+                # generic user words ("a cozy village") score 0. Triggered
                 # class keeps score>0 (training-token presence).
                 if kls == CLASS_TRIGGERLESS and not info.get("match"):
                     name_toks = _name_tokens(info.get("name") or path)
                     if name_toks:
                         info = {**info, "match": name_toks, "match_from": "filename"}
-                score = _match_score(info, prompt)
+                score, matched = _match_score(info, user_text)
                 if score > 0 and (
                     info.get("match_from") != "filename"
                     or score >= 0.5
@@ -701,6 +739,7 @@ def select_lora(scan: dict, prompt: str, has_init_image: bool) -> dict | None:
                             "trigger": trigger,
                             "name": info.get("name") or path,
                             "cls": kls,
+                            "matched": matched,
                         },
                     )
         if cand and (best is None or cand[0] > best[0]):
@@ -708,14 +747,24 @@ def select_lora(scan: dict, prompt: str, has_init_image: bool) -> dict | None:
     return best[1] if best else None
 
 
-def apply_to_body(body: dict, scan: dict, prompt: str) -> dict:
+def apply_to_body(
+    body: dict, scan: dict, prompt: str, user_text: str | None = None,
+) -> dict:
     """Attach `lora[]` (and inject the trigger word when a triggered LoRA
     matched) onto an img_gen request body. Mutates and returns `body`.
+
+    `prompt` is the model's composed wire prompt - scene text only; it is
+    NEVER a style-match corpus. Auto-apply matches ONLY the user's typed
+    words (`user_text`, injected from the current turn by execute_tool);
+    None = no user text known (tests, direct callers, transports without
+    the injection) = no content match at all (#439). An explicitly
+    requested lora[] is resolved upstream and wins before this runs.
+
     Any failure yields the body unchanged - auto-apply must never break
     a generation that worked without it."""
     try:
         has_init = bool(body.get("init_image"))
-        sel = select_lora(scan, prompt, has_init)
+        sel = select_lora(scan, _match_text(user_text), has_init)
         if not sel:
             return body
         body["lora"] = [
@@ -727,10 +776,16 @@ def apply_to_body(body: dict, scan: dict, prompt: str) -> dict:
         ]
         if sel.get("trigger"):
             # Trigger word = steering wheel (training-time association);
-            # injected at the head so it anchors the style tokens.
+            # injected at the head so it anchors the style tokens. The
+            # match already proved the USER's words summoned it, so the
+            # injection is user-driven too (#439).
             body["prompt"] = f"{sel['trigger']}, {prompt}"
             body["lora"][0]["trigger_injected"] = sel["trigger"]
         body["lora_applied"] = sel["name"]
+        if sel.get("matched"):
+            # evidence for the result note (#439): WHICH user words
+            # summoned it - the model sees why a style rode along.
+            body["lora_matched"] = sel["matched"]
         return body
     except Exception:  # noqa: BLE001 - never break the request
         return body

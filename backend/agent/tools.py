@@ -367,9 +367,11 @@ HELP_DOCS: dict = {
         "rels (generate_image results, and PASTED chat images - their "
         "store rel is annotated in the context under the attached "
         "image). The result note lists the server's available LoRAs when "
-        "none was applied; one style-named LoRA auto-applies when the "
-        "prompt names the style (spelling-tolerant: retro-wave matches a "
-        "retrowave-named LoRA). SAMPLING: steps 4 and BOTH guidance "
+        "none was applied; one style LoRA auto-applies ONLY when the USER's "
+        "typed request names the style (spelling-tolerant: retro-wave "
+        "matches a retrowave-named LoRA) - never from this prompt's own "
+        "style words describing a reference image; if the user wants a "
+        "style they did not type, pass lora[] explicitly. SAMPLING: steps 4 and BOTH guidance "
         "fields (cfg, distilled guidance) are locked at the "
         "guidance-distilled klein-class operating point - cfg_scale is "
         "not a parameter."
@@ -605,6 +607,15 @@ _MEMORY_TOOL_NAMES = set(MEMORY_TOOLS)
 # the model never passes it, and the executor signatures take it
 # optionally so direct calls (tests, other harness code) still work.
 CONTEXT_TOOLS = ("search_conversation_history",)
+
+# #439: image-generation executors that auto-match style LoRAs. The
+# harness injects the user's typed words for the current turn into these
+# executors' arguments at the same dispatch funnel as conversation_id
+# (#303) / memory_workspace (#346): the model composes the wire prompt
+# freely (it may describe a reference image's palette), but auto-apply
+# may only react to what the USER actually typed. Not a schema field -
+# the model never passes it.
+USER_TEXT_TOOLS = ("generate_image", "edit_image")
 
 
 def memory_workspace_for(workspace: str | None) -> str | None:
@@ -2339,6 +2350,13 @@ def _lora_note(body: dict, scan: dict) -> str:
     lines = [
         f"lora applied: {name} at multiplier {sel.get('multiplier', 0.8)}"
     ]
+    matched = body.get("lora_matched")
+    if matched:
+        # #439: the evidence - WHICH of the user's typed words summoned
+        # it (the model's composed prompt never decides a match).
+        lines.append(
+            "matched user words: " + ", ".join(str(m) for m in matched)
+        )
     if sel.get("trigger_injected"):
         lines.append(f"trigger word '{sel['trigger_injected']}' was injected")
     entry = None
@@ -2563,6 +2581,7 @@ async def generate_image(
     lora: list | None = None,
     control_lora: str | None = None,
     depth_from: str | None = None,
+    user_text: str | None = None,
     on_chunk=None,
 ) -> dict:
     """Run text-to-image on the configured sd-server. Every size
@@ -2586,6 +2605,12 @@ async def generate_image(
     result note reports the ground truth of what the server
     actually ran (parsed from it); without the chunk it stays
     silent.
+    `user_text` (#439) is harness-injected, never model-visible: the
+    user's typed words for the current turn are the ONLY corpus the LoRA
+    auto-matcher reacts to. The composed `prompt` describes the scene
+    (and may re-describe a reference image's palette) but never summons
+    a style LoRA on its own.
+
     Transport: the native async job API when capabilities are available
     (Stop cancels the queued job and stops waiting immediately), the sync
     OpenAI-compatible endpoint as the fallback for older servers."""
@@ -2712,7 +2737,9 @@ async def generate_image(
 
     hires_body: dict | None = None
     body: dict = {"prompt": prompt}
-    apply_to_body(body, scan, prompt)
+    # #439: user_text rides in from execute_tool's funnel injection (the
+    # user's typed words this turn) - the auto-matcher's only corpus.
+    apply_to_body(body, scan, prompt, user_text=user_text)
 
     # Catalog visibility (#406): when nothing rode along, tell the model
     # WHICH LoRAs exist - the schema says "name from the server's
@@ -2886,7 +2913,7 @@ async def generate_image(
         # Older server without capabilities: legacy passthrough, its call.
         # Sampling fields ride <sd_cpp_extra_args> (native-schema envelope).
         legacy: dict = {"prompt": prompt, "n": 1}
-        apply_to_body(legacy, scan, prompt)
+        apply_to_body(legacy, scan, prompt, user_text=user_text)
         extra: dict = {}
         if negative_prompt:
             extra["negative_prompt"] = negative_prompt
@@ -3187,6 +3214,7 @@ async def edit_image(
     steps: int | None = None,
     hires_fix: bool | None = None,
     lora: list | None = None,
+    user_text: str | None = None,
     on_chunk=None,
 ) -> dict:
     """The edit-mode face of generate_image (#437): same executor with
@@ -3214,6 +3242,7 @@ async def edit_image(
         lora=lora,
         control_lora=None,
         depth_from=None,
+        user_text=user_text,
         on_chunk=on_chunk,
     )
 
@@ -3540,6 +3569,7 @@ async def execute_tool(
     name: str, arguments: dict, workspace: str, on_chunk=None,
     conversation_id: int | None = None,
     memory_workspace: str | None = None,
+    user_text: str | None = None,
 ) -> dict:
     """Execute a tool by name with a dict of arguments. Never raises.
 
@@ -3553,6 +3583,11 @@ async def execute_tool(
     it from the call workspace — identical for non-pinned chats, and
     the same shape direct callers (tests, other harness code) had
     before the injection existed.
+
+    user_text (#439): the user's typed words for the CURRENT turn,
+    injected into USER_TEXT_TOOLS (image-gen executors) the same way -
+    the LoRA auto-matcher's only permitted match corpus. The model's
+    composed prompt never decides a style match.
 
 """
     from backend.agent import remote as remote_mod
@@ -3617,6 +3652,15 @@ async def execute_tool(
             "memory_workspace": memory_workspace
             or memory_workspace_for(workspace),
         }
+    if name in USER_TEXT_TOOLS:
+        # #439: the user's typed words for the current turn, injected
+        # like conversation_id (#303) / memory_workspace (#346) above -
+        # every dispatch path (direct, gate re-exec, sub-agent) funnels
+        # through here, so image-gen auto-apply always sees the SAME
+        # corpus. None (tests, direct callers, transports without the
+        # injection) means the executor matches nothing on content -
+        # fail closed.
+        arguments = {**arguments, "user_text": user_text}
     try:
         if on_chunk is not None and name in ("bash", "powershell", "generate_image"):
             # generate_image (#425): on_chunk carries wait banners to the

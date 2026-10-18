@@ -276,7 +276,9 @@ def test_apply_injects_no_trigger_for_filename_match():
         }
     })
     prompt = "retro-wave city"
-    body = loras.apply_to_body({"prompt": prompt}, scan, prompt)
+    body = loras.apply_to_body(
+        {"prompt": prompt}, scan, prompt, user_text="make it retro-wave",
+    )
     assert body["lora"][0]["path"] == "ck.safetensors"
     assert body["prompt"] == prompt  # no invented trigger injected
 
@@ -308,7 +310,8 @@ def test_generate_image_note_absent_when_lora_applied(configured, tmp_path, monk
     })
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
     result = asyncio.run(tools.execute_tool(
-        "generate_image", {"prompt": "snarbo castle"}, workspace=str(tmp_path)
+        "generate_image", {"prompt": "snarbo castle"},
+        workspace=str(tmp_path), user_text="snarbo castle",
     ))
     note = result.get("note", "")
     assert "available loras" not in note
