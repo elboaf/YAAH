@@ -346,6 +346,12 @@ export interface AgentConfig {
     /** Arrives masked ("set" | ""); a fresh value replaces the stored key. */
     tts_api_key?: string
     tts_model?: string
+    /** #443: remote dialect when tts_engine is remote. */
+    tts_remote_api?: 'openai' | 'moss'
+    /** #443: MOSS language hint. */
+    tts_moss_lang?: string
+    /** #443: MOSS reference-clip name; "" = reference-less. */
+    tts_moss_ref?: string
     /** Notification chimes (#29): run-finished + question-pending sounds. */
     sounds_enabled?: boolean
   }
@@ -988,6 +994,8 @@ export async function transcribeAudio(wav: Blob): Promise<{ text: string; langua
 export interface TtsStatus {
   /** Active narration engine (#205): 'local' | 'remote'. */
   engine: 'local' | 'remote'
+  /** Active remote dialect (#443): openai or moss (local reads openai). */
+  remote_api?: 'openai' | 'moss'
   /** Whether the ACTIVE engine can speak right now (remote = endpoint
    *  configured; local = model present). */
   available: boolean
@@ -1039,13 +1047,13 @@ export async function ttsTest(
  *  does not). The backend probe NEVER errors — an unreachable or
  *  list-less server resolves to [] and the UI falls back to free-text.
  *  Drafts ride in the body so discovery works before the first Save. */
-export async function ttsVoices(endpoint?: string, apiKey?: string): Promise<string[]> {
+export async function ttsVoices(endpoint?: string, apiKey?: string, remoteApi?: 'openai' | 'moss'): Promise<string[]> {
   let res: Response
   try {
     res = await fetch(url('/api/tts/voices'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ endpoint, api_key: apiKey }),
+      body: JSON.stringify({ endpoint, api_key: apiKey, remote_api: remoteApi }),
     })
   } catch {
     return [] // backend down: free-text fallback, no error noise
