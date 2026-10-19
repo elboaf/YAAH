@@ -2,8 +2,8 @@
 // (voices AND models), the RemoteVoiceField and RemoteModelField
 // dropdown/free-text dualities.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ttsVoices } from './api'
-import { RemoteVoiceField, RemoteModelField } from './components'
+import { ttsVoices, ttsTest } from './api'
+import { RemoteVoiceField, RemoteModelField, effectiveRemoteModel } from './components'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import React from 'react'
 
@@ -42,6 +42,22 @@ describe('#231/#448 ttsVoices (discovery probe wrapper)', () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
     vi.stubGlobal('fetch', fetchMock)
     await expect(ttsVoices('http://box:8081')).resolves.toEqual({ voices: [], models: [] })
+  })
+
+  it('#449: ttsTest forwards the on-screen model draft', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(ttsTest('af_heart', 1.0, 'remote', 'moss-tts-realtime')).resolves.toEqual({
+      ok: true,
+    })
+    const [, init] = fetchMock.mock.calls[0]
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({
+      voice: 'af_heart',
+      speed: 1.0,
+      engine: 'remote',
+      model: 'moss-tts-realtime',
+    })
   })
 
   it('tolerates a pre-#448 backend answering voices only', async () => {

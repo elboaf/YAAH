@@ -2640,9 +2640,12 @@ class TtsTestBody(BaseModel):
     voice: str | None = None
     speed: float | None = None
     engine: str | None = None
+    # On-screen draft override for the remote model (#449 review):
+    # Test must send what the UI displays, not the last saved value.
+    model: str | None = None
 
 
-def _remote_engine_args(voice_cfg: dict, voice: str, speed):
+def _remote_engine_args(voice_cfg: dict, voice: str, speed, model_override=None):
     """The (endpoint, api_key, model, voice, speed) the remote engine
     needs from a voice config + request drafts. Raises RemoteTTSError
     ("not-configured") when no endpoint is set — the shared 409 gate for
@@ -2655,10 +2658,14 @@ def _remote_engine_args(voice_cfg: dict, voice: str, speed):
             "remote TTS selected but no endpoint configured (Settings → Voice)",
             code="not-configured",
         )
+    # An explicit override (the Settings Test button's on-screen draft)
+    # wins over the saved model (#449 review); narration passes None
+    # and keeps the saved value.
+    model = (model_override or "").strip() or (voice_cfg.get("tts_model") or "kokoro")
     return (
         endpoint,
         voice_cfg.get("tts_api_key") or "",
-        voice_cfg.get("tts_model") or "kokoro",
+        model,
         voice,
         None if speed is None else float(speed),
     )
@@ -2686,7 +2693,10 @@ async def api_tts_test(body: TtsTestBody):
     try:
         if engine == "remote":
             await speak.synthesize_remote(
-                text, *_remote_engine_args(voice_cfg, voice, speed)
+                text,
+                *_remote_engine_args(
+                    voice_cfg, voice, speed, model_override=body.model
+                ),
             )
         else:
             if not speak.model_available():

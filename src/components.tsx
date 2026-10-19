@@ -6562,6 +6562,17 @@ export function RemoteVoiceField({
   )
 }
 
+/** The model value remote requests should actually send (#449 review):
+ *  a blank draft DISPLAYS the first discovered model (RemoteModelField's
+ *  dropdown fallback) but would save/send '' - and the backend would
+ *  then substitute its own default ("kokoro"), which the server can
+ *  reject. Derive the effective choice instead; the draft itself is
+ *  never auto-overwritten. */
+export function effectiveRemoteModel(modelDraft: string, models: string[]): string {
+  if (modelDraft.trim() !== '') return modelDraft
+  return models.length > 0 ? models[0] : modelDraft
+}
+
 /** #448: the remote narration model field — a dropdown when the server
  *  lists models at the standard /v1/models, free-text otherwise. Mirrors
  *  RemoteVoiceField exactly: the saved draft stays selectable ("(saved)")
@@ -6898,6 +6909,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // voices endpoint; absence of a list is normal, never an error).
   const [remoteVoiceList, setRemoteVoiceList] = useState<string[]>([])
   const [remoteModelList, setRemoteModelList] = useState<string[]>([])
+  // What remote requests send for the model: the draft, or the first
+  // discovered model while the draft is blank (#449 review - Test and
+  // Save must send what the dropdown displays).
+  const effectiveModel = effectiveRemoteModel(ttsModel, remoteModelList)
   const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
@@ -7252,7 +7267,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           // Typed key replaces; empty/kept field is dropped server-side so
           // the saved key survives (same masking dance as the dictation key).
           ...(ttsKey ? { tts_api_key: ttsKey } : {}),
-          tts_model: ttsModel,
+          tts_model: effectiveModel,
           sounds_enabled: soundsEnabled,
         },
         remote: {
@@ -7903,7 +7918,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         setTtsTestResult(null)
                         setTtsTestOk(false)
                         try {
-                          await ttsTest(ttsVoiceDraft, ttsSpeedDraft, ttsEngine)
+                          await ttsTest(
+                            ttsVoiceDraft,
+                            ttsSpeedDraft,
+                            ttsEngine,
+                            effectiveModel,
+                          )
                           setTtsTestResult('ok — synthesis worked')
                           setTtsTestOk(true)
                         } catch (e) {

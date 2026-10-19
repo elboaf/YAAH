@@ -403,6 +403,12 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
 # covers the observed CPU profile with slack; a timeout still surfaces fast
 # RELATIVE to the work, and narration stays async.
 REMOTE_TIMEOUT = 180.0
+# Connection establishment keeps a short leash (review, #449): the
+# budget above pays for the server's SYNTHESIS work (read phase). A
+# dead host (powered off, firewall silently dropping packets) must
+# fail in seconds as "connection failed", not burn the full budget
+# and then be mis-reported as "still synthesizing".
+REMOTE_CONNECT_TIMEOUT = 5.0
 REMOTE_ATTEMPTS = 2  # one retry, then the chunk is skipped (the frontend
 # degrades to the visible text — narration must never stall the chat)
 
@@ -564,7 +570,8 @@ async def _post_remote(
     timed_out = False
     for _ in range(REMOTE_ATTEMPTS):
         try:
-            async with httpx.AsyncClient(timeout=REMOTE_TIMEOUT) as client:
+            timeout = httpx.Timeout(REMOTE_TIMEOUT, connect=REMOTE_CONNECT_TIMEOUT)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 res = await client.post(url, json=body, headers=headers)
             if res.status_code == 200:
                 audio = res.content
@@ -576,6 +583,12 @@ async def _post_remote(
                 break  # 4xx: retrying the same request cannot help
         except RemoteTTSError:
             raise
+        except httpx.ConnectTimeout as e:
+            # Never connected (review, #449): the host never answered
+            # the handshake. That is a connection failure (dead host /
+            # silent firewall), not a slow synthesis - say so.
+            timed_out = False
+            last_err = f"connection failed: {e}"
         except httpx.TimeoutException as e:
             # A timeout is NOT a connection failure (#448): the server took
             # the request and is still working (a CPU-served model can run
@@ -774,10 +787,20 @@ async def probe_remote_models(endpoint: str, api_key: str = "") -> list[str]:
 
 def _normalize_models(body) -> list[str]:
     """Model ids from an OpenAI list-shape body ({"data": [{"id": ...}]},
-    the MOSS box's shape) or {"models": [...]}. Deliberately STRICTER than
-    _normalize_voices: a bare array is NOT accepted, so a degenerate server
-    answering every GET with its voices list can never dress those voices
-    up as models."""
+    the MOSS box's shape), {"models": [...]}, or a bare array of ids
+    (plain strings or {"id": ...} objects) - #448's spec asks for all
+    three dialects. Voices cannot leak in here: this only ever runs on
+    the /v1/models answer, never on a shared endpoint."""
+    if isinstance(body, list):
+        # Bare-array dialect (#448 spec): ids as plain strings or as
+        # OpenAI-shaped objects. Junk entries are dropped, the rest
+        # trimmed + deduplicated, server order preserved.
+        ids = []
+        for v in body:
+            i = v.get("id") if isinstance(v, dict) else v
+            if isinstance(i, str) and i.strip():
+                ids.append(i.strip())
+        return list(dict.fromkeys(ids))
     if not isinstance(body, dict):
         return []
     ids: list[str] = []

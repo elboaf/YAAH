@@ -1007,19 +1007,21 @@ export const ttsStatus = () => api<TtsStatus>('/api/tts/status')
 /** Synthesize a one-line sample through the given engine (#205): the
  *  Settings Test button. `engine` defaults to the saved choice server-side;
  *  the UI passes its on-screen draft so Test reflects unsaved edits.
+ *  `model` (optional) is the on-screen remote model draft (#449).
  *  Rejects with the backend's detail — a remote engine surfaces the
  *  server's own error message here (and `.status` drives result styling). */
 export async function ttsTest(
   voice: string,
   speed: number,
   engine?: 'local' | 'remote',
+  model?: string,
 ): Promise<{ ok: boolean }> {
   let res: Response
   try {
     res = await fetch(url('/api/tts/test'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ voice, speed, engine }),
+      body: JSON.stringify({ voice, speed, engine, model }),
     })
   } catch {
     signalBackendDown()

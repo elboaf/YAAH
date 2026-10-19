@@ -155,14 +155,15 @@ async def test_probe_no_auth_header_when_no_key(monkeypatch):
 
 async def test_route_returns_voice_list(monkeypatch):
     """POST /api/tts/voices {endpoint} -> 200 {"voices": [...], "models":
-    [...]} (#448 merged probe). A bare-array body is voices-only: the
-    strict _normalize_models refuses to read a voices list as models."""
+    [...]} (#448 merged probe). A bare-array body parses on BOTH sides:
+    #448's spec reads bare arrays as models too, and the same shape is a
+    legal voices answer - ambiguity is resolved toward discoverability."""
     transport = _RecordingTransport(lambda req: httpx.Response(200, json=["af_heart", "af_nicole"]))
     monkeypatch.setattr(speak.httpx, "AsyncClient", lambda **kw: _client(transport))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post("/api/tts/voices", json={"endpoint": "http://box:8081"})
     assert res.status_code == 200
-    assert res.json() == {"voices": ["af_heart", "af_nicole"], "models": []}
+    assert res.json() == {"voices": ["af_heart", "af_nicole"], "models": ["af_heart", "af_nicole"]}
 
 
 async def test_route_409_without_any_endpoint():
