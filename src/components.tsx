@@ -102,7 +102,7 @@ import { createDeltaBuffer } from './deltaBuffer'
 import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
-import { useTts, splitSentences, liveProse, spokenLine } from './speech'
+import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
 import { AgentContextPerProvider } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
@@ -7056,6 +7056,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         // (possibly remote) engine can speak is the status endpoint's job.
         setTtsModelReady(s.model_available)
         setTtsDownloading(s.downloading)
+        setKokoroShaping(s.kokoro !== false)
         if (s.tts_voice) setTtsVoiceDraft(s.tts_voice)
       })
       .catch(() => {})
@@ -9304,7 +9305,13 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   // Hydrate readiness + persisted enabled flag once at mount.
   useEffect(() => {
     ttsStatus()
-      .then((s) => ttsSync({ available: s.available, tts_enabled: s.tts_enabled }))
+      .then((s) => {
+        ttsSync({ available: s.available, tts_enabled: s.tts_enabled })
+        // #451: gate the ear-shaping in speech.ts on the engine family.
+        // `!== false` so an older remote backend (no flag) keeps the
+        // kokoro shaping instead of silently dropping it.
+        setKokoroShaping(s.kokoro !== false)
+      })
       .catch(() => {})
   }, [ttsSync])
   // Briefing-first narration (#66 + #75): while an emission streams, its

@@ -988,6 +988,9 @@ export async function transcribeAudio(wav: Blob): Promise<{ text: string; langua
 export interface TtsStatus {
   /** Active narration engine (#205): 'local' | 'remote'. */
   engine: 'local' | 'remote'
+  /** #451: the active voice is Kokoro-family - gates the ear-shaping in
+   *  src/speech.ts (mirrors speak.kokoro_voice on the backend). */
+  kokoro: boolean
   /** Whether the ACTIVE engine can speak right now (remote = endpoint
    *  configured; local = model present). */
   available: boolean

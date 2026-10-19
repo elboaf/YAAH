@@ -723,6 +723,15 @@ Interview the user (ask_user tool):
   what remains unchanged, and safe options before asking how to proceed."""
 
 
+def _kokoro_ear() -> bool:
+    """#451: the ear-writing prompt rules apply only when the active voice
+    is a Kokoro-family engine (speak.kokoro_voice). Non-espeak engines
+    read written forms natively and stumble on the taught spellings."""
+    from backend.agent import speak as _speak_mod
+
+    return _speak_mod.kokoro_voice()
+
+
 def _build_spoken_briefing_block() -> str:
     """Spoken briefing variance block (#207).
 
@@ -743,6 +752,13 @@ def _build_spoken_briefing_block() -> str:
         "  The tag is stripped from the chat transcript; the chat text itself stays",
         "  as detailed as you like. Omit the tag when read-aloud is off or when the",
         "  emission is a question (ask_user questions are spoken verbatim already).",
+    ]
+    # #451: the write-for-the-ear rules below are Kokoro-shaping — they
+    # teach spelled digit runs and phonetic homographs that Kokoro's
+    # espeak front-end needs and non-espeak engines (moss-tts) stumble
+    # over ("A P I" pauses where "API" reads perfectly).
+    if _kokoro_ear():
+        lines += [
         "  Write for the ear, not the eye: technical digit runs the way a human",
         "  says them (ports and IPs digit by digit — \"port four four three\" —,",
         "  years as years — \"nineteen ninety-nine\" —, versions as spoken —",
@@ -767,7 +783,7 @@ def _build_spoken_briefing_block() -> str:
         "  emphasis and no SSML or emotion markers like [excited] — the voice",
         "  reads those literally; punctuation is your prosody: commas pace a",
         "  line, one exclamation mark at most, a blank line marks a beat.",
-    ]
+        ]
     text = "\n".join(lines) + "\n"
     persona = _say_persona()
     if persona != "neutral":
