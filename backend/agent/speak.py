@@ -14,6 +14,7 @@ The engine is loaded lazily and kept as a module singleton; synthesis is
 serialized behind a lock (sherpa's OfflineTts is not thread-safe) and
 runs in worker threads via asyncio.to_thread at the endpoint layer.
 """
+import io
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ import sys
 import tarfile
 import threading
 import time
+import wave
 from pathlib import Path
 
 import httpx
@@ -447,28 +449,94 @@ def _remote_error_detail(res: httpx.Response) -> str:
     return f"{status}: {res.text[:200]}".rstrip()
 
 
-async def synthesize_remote(
+# ---- Adaptive input splitting (servers that cap `input`) ---------------------
+# The speech contract caps `input` wherever each server pleases, and each
+# server says so only in its own rejection: OpenAI documents 4096 chars;
+# the MOSS-TTS-Realtime wrapper rejects anything over 48 (its model tops
+# out at ~41 s of audio per request). /voices carries no hint, so the
+# client LEARNS the cap from a "too long" HTTP 4xx: one sentence-bounded
+# re-split at the stated cap (any "too long" 4xx counts; halving the
+# failed input when the rejection states no number), pieces synthesized in order and merged into a single WAV (same
+# server/voice => identical format; stdlib wave). The learned cap is
+# cached per origin, so only the first-ever oversized chunk pays the
+# rejected-request tax. Any OTHER 4xx (bad voice, bad model) is not a
+# length problem: it surfaces verbatim, never split, never retried.
+
+_REMOTE_CAPS: dict[str, int] = {}  # origin -> learned max `input` chars
+
+_SPLITTABLE_ERR = re.compile(r"^HTTP 4\d\d\b")  # a 4xx detail, not a timeout
+_TOO_LONG_RE = re.compile(
+    r"\btoo\s+long\b"
+    r"|(?:chars?|characters?)\s*max"
+    r"|max(?:imum)?\s*(?:of\s+)?\d+\s*(?:chars?|characters?)"
+    r"|(?:at\s+most|up\s+to)\s+\d+\s*(?:chars?|characters?)"
+    r"|(?:chars?|characters?)\s+long\b",
+    re.IGNORECASE,
+)
+_CAP_RE = re.compile(
+    r"(?P<a>\d{1,5})\s*(?:chars?|characters?)\s*max(?:imum)?"
+    r"|max(?:imum)?\s*(?:of\s+)?(?P<b>\d{1,5})\s*(?:chars?|characters?)"
+    r"|(?:at\s+most|up\s+to)\s+(?P<c>\d{1,5})\s*(?:chars?|characters?)",
+    re.IGNORECASE,
+)
+
+
+def _origin_of(url: str) -> str:
+    """scheme://host[:port] of an endpoint URL — the cap-cache key."""
+    m = re.match(r"[a-z][a-z0-9+.-]*://[^/?#]+", url, re.IGNORECASE)
+    return m.group(0).lower() if m else url
+
+
+def _cap_from_error(detail: str) -> int | None:
+    """The input cap a server states in its own rejection ("(48 chars
+    max)", "at most 4096 characters"), or None when it states no number."""
+    m = _CAP_RE.search(detail)
+    if not m:
+        return None
+    n = int(next(g for g in (m.group("a"), m.group("b"), m.group("c")) if g))
+    return n if n > 0 else None
+
+
+def _merge_wavs(chunks: list[bytes]) -> bytes:
+    """Concatenate same-server WAV bytes into one WAV (stdlib wave). A
+    channels/width/rate disagreement is a broken server, surfaced — never
+    glued into garbage audio."""
+    if len(chunks) == 1:
+        return chunks[0]
+    out = io.BytesIO()
+    params = None
+    with wave.open(out, "wb") as w:
+        for i, data in enumerate(chunks):
+            with wave.open(io.BytesIO(data), "rb") as r:
+                p = r.getparams()
+                if params is None:
+                    params = p
+                    w.setparams(p)
+                elif p[:3] != params[:3]:
+                    raise RemoteTTSError(
+                        "remote TTS split pieces disagree on audio format "
+                        f"(piece {i + 1}: {p.nchannels}ch/{p.sampwidth * 8}-bit/"
+                        f"{p.framerate}Hz vs {params.nchannels}ch/"
+                        f"{params.sampwidth * 8}-bit/{params.framerate}Hz)"
+                    )
+                w.writeframes(r.readframes(r.getnframes()))
+    return out.getvalue()
+
+
+async def _post_remote(
     text: str,
-    endpoint: str,
-    api_key: str,
+    url: str,
     model: str,
     voice: str,
     speed: float | None,
+    headers: dict,
 ) -> bytes:
-    """One chunk through the remote engine; returns the server's WAV bytes
-    (the endpoint pipes them to the frontend untouched, Web Audio decodes).
-
-    Error posture (the spec's contract): a 4xx is the server's final
-    answer — one request, no retry. Timeouts and 5xx get one retry, then
-    RemoteTTSError carries the server's message. An empty 200 body is a
-    broken server, not silence. The endpoint maps failures to 502; the
-    frontend skips the chunk and keeps the text visible.
-    """
-    url = _remote_url(endpoint)
+    """One unwrapped POST with the #205 retry posture (a 4xx is final; one
+    retry for timeouts/5xx). No splitting here — synthesize_remote owns
+    the adaptive-cap logic."""
     body: dict = {"model": model, "input": text, "voice": voice, "response_format": "wav"}
     if speed is not None:
         body["speed"] = speed
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     last_err: str | None = None
     for _ in range(REMOTE_ATTEMPTS):
         try:
@@ -487,6 +555,83 @@ async def synthesize_remote(
         except (httpx.TimeoutException, httpx.TransportError) as e:
             last_err = f"connection failed: {e}"
     raise RemoteTTSError(last_err or "remote TTS failed")
+
+
+async def synthesize_remote(
+    text: str,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    voice: str,
+    speed: float | None,
+) -> bytes:
+    """One chunk through the remote engine; returns the server's WAV bytes
+    (the endpoint pipes them to the frontend untouched, Web Audio decodes).
+
+    If the server rejects the input as too long (see the splitting section
+    above), the chunk re-splits at the server's own cap and the pieces come
+    back merged as one WAV; a piece that STILL fails surfaces the server's
+    answer and drops the whole chunk, like any other failure.
+
+    Error posture (the spec's contract): a 4xx is the server's final
+    answer — one request, no retry. Timeouts and 5xx get one retry, then
+    RemoteTTSError carries the server's message. An empty 200 body is a
+    broken server, not silence. The endpoint maps failures to 502; the
+    frontend skips the chunk and keeps the text visible.
+    """
+    url = _remote_url(endpoint)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    origin = _origin_of(url)
+    cap = _REMOTE_CAPS.get(origin)
+    detail = f"HTTP 400: input too long ({cap} chars max)" if cap else ""
+
+    async def pieces_to_wav(parts: list[str]) -> bytes:
+        wavs = [await _post_remote(p, url, model, voice, speed, headers) for p in parts]
+        return _merge_wavs(wavs)
+
+    # A cap learned earlier for THIS server pre-splits oversized chunks, so
+    # only the first-ever oversized chunk pays the rejected-request tax.
+    # Otherwise the chunk goes verbatim (the #205 contract for servers with
+    # no practical cap), and a "too long" rejection teaches us the cap.
+    if cap is None or len(text) <= cap:
+        try:
+            return await _post_remote(text, url, model, voice, speed, headers)
+        except RemoteTTSError as e:
+            detail = str(e)
+            if not _SPLITTABLE_ERR.match(detail) or not _TOO_LONG_RE.search(detail):
+                raise  # timeouts, bad voice/model: anything but a length rejection
+            stated = _cap_from_error(detail)
+            if stated is not None:
+                cap = stated  # the server's own number is authoritative
+            elif len(text) >= 4:
+                cap = len(text) // 2  # nothing stated: start halving
+
+    # A "too long" 4xx - the server's own admission that `input` is over
+    # its cap. Re-split at the cap and synthesize the pieces in order. A
+    # piece that STILL answers too-long refines the cap further (a stated
+    # number is exact; the no-number halving guess can land high). Any
+    # OTHER failure is final: the server's answer surfaces and the whole
+    # chunk drops - no partial audio, no unbounded shrinking.
+    while True:
+        if cap < 2 or cap >= len(text):
+            raise RemoteTTSError(detail)  # a split cannot shrink this; answer stands
+        _REMOTE_CAPS[origin] = cap
+        pieces = split_sentences(text, min_len=cap, max_len=cap)
+        if len(pieces) < 2:
+            raise RemoteTTSError(detail)  # no usable boundary; answer stands
+        try:
+            return await pieces_to_wav(pieces)
+        except RemoteTTSError as e:
+            piece_detail = str(e)
+            if not _SPLITTABLE_ERR.match(piece_detail) or not _TOO_LONG_RE.search(
+                piece_detail
+            ):
+                raise
+            stated = _cap_from_error(piece_detail)
+            # Only a real refinement (a SMALLER bound) is taken; a lying or
+            # repeating number falls back to halving so the loop terminates.
+            cap = stated if stated is not None and stated < cap else cap // 2
+            detail = piece_detail  # the answer that stands if refinement stalls
 
 
 # ---- Voice discovery (#231): best-effort, non-standard GET /voices --------
