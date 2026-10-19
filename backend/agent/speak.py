@@ -396,17 +396,26 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
 # contract, and api.openai.com works with tts-1 / gpt-4o-mini-tts — never
 # send the newer surface (instructions, stream_format/sse, custom voices).
 
-REMOTE_TIMEOUT = 10.0  # seconds; a LAN GPU box answers well inside this
+# Per-request ceiling, not a wait (#448): a GPU box answers in seconds, but
+# the owner's MOSS-TTS-Realtime box serves on CPU at ~6x realtime and measured
+# 63 s cold / ~118 s warm for one short sentence — the old 10 s (tuned for a
+# GPU LAN box) gave up mid-synthesis and read as "connection failed". 180 s
+# covers the observed CPU profile with slack; a timeout still surfaces fast
+# RELATIVE to the work, and narration stays async.
+REMOTE_TIMEOUT = 180.0
 REMOTE_ATTEMPTS = 2  # one retry, then the chunk is skipped (the frontend
 # degrades to the visible text — narration must never stall the chat)
 
 
 class RemoteTTSError(RuntimeError):
     """A remote synthesis request failed. The message is user-facing:
-    the synthesize endpoint and Settings' Test button surface it."""
+    the synthesize endpoint and Settings' Test button surface it. timed_out
+    distinguishes "server took too long" (#448: normal for CPU-served
+    models) from "unreachable/refused" — recovery advice differs."""
 
     def __init__(self, message: str, code: str = "remote-failed"):
         super().__init__(message)
+        self.timed_out = False
         # Machine-readable cause for UI branching: "not-configured" (no
         # endpoint set), "remote-failed" (server refused / unreachable).
         self.code = code
@@ -552,6 +561,7 @@ async def _post_remote(
     if speed is not None:
         body["speed"] = speed
     last_err: str | None = None
+    timed_out = False
     for _ in range(REMOTE_ATTEMPTS):
         try:
             async with httpx.AsyncClient(timeout=REMOTE_TIMEOUT) as client:
@@ -566,9 +576,21 @@ async def _post_remote(
                 break  # 4xx: retrying the same request cannot help
         except RemoteTTSError:
             raise
-        except (httpx.TimeoutException, httpx.TransportError) as e:
+        except httpx.TimeoutException as e:
+            # A timeout is NOT a connection failure (#448): the server took
+            # the request and is still working (a CPU-served model can run
+            # minutes per request) — say so, or the user debugs a live box.
+            timed_out = True
+            last_err = (
+                f"remote TTS timed out after {REMOTE_TIMEOUT:.0f}s (server still "
+                f"synthesizing?): {e}"
+            )
+        except httpx.TransportError as e:
+            timed_out = False
             last_err = f"connection failed: {e}"
-    raise RemoteTTSError(last_err or "remote TTS failed")
+    err = RemoteTTSError(last_err or "remote TTS failed")
+    err.timed_out = timed_out
+    raise err
 
 
 async def synthesize_remote(
@@ -724,6 +746,52 @@ async def probe_remote_voices(endpoint: str, api_key: str = "") -> list[str]:
     except ValueError:
         return []
     return _normalize_voices(body)
+
+
+async def probe_remote_models(endpoint: str, api_key: str = "") -> list[str]:
+    """The model ids a server lists at the STANDARD OpenAI GET /v1/models
+    (MOSS-TTS-Realtime serves it; Kokoro-shaped boxes may not). Same
+    posture as voices: ANY failure reads as "no list" — discovery is a
+    nicety, never a requirement."""
+    trimmed = (endpoint or "").strip().rstrip("/")
+    if not trimmed:
+        return []
+    base = trimmed[:-3] if trimmed.endswith("/v1") else trimmed
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=VOICES_TIMEOUT) as client:
+            res = await client.get(base + "/v1/models", headers=headers)
+    except (httpx.TimeoutException, httpx.TransportError):
+        return []
+    if res.status_code != 200:
+        return []
+    try:
+        body = res.json()
+    except ValueError:
+        return []
+    return _normalize_models(body)
+
+
+def _normalize_models(body) -> list[str]:
+    """Model ids from an OpenAI list-shape body ({"data": [{"id": ...}]},
+    the MOSS box's shape) or {"models": [...]}. Deliberately STRICTER than
+    _normalize_voices: a bare array is NOT accepted, so a degenerate server
+    answering every GET with its voices list can never dress those voices
+    up as models."""
+    if not isinstance(body, dict):
+        return []
+    ids: list[str] = []
+    if isinstance(body.get("data"), list):
+        # OpenAI list shape: entries are objects with an "id" - bare
+        # strings are junk and dropped.
+        for v in body["data"]:
+            i = v.get("id") if isinstance(v, dict) else None
+            if isinstance(i, str) and i.strip():
+                ids.append(i.strip())
+    elif isinstance(body.get("models"), list):
+        # The looser dialect: plain name strings.
+        ids = [v.strip() for v in body["models"] if isinstance(v, str) and v.strip()]
+    return list(dict.fromkeys(ids))
 
 
 # ---- Spoken briefing (two-channel split, #66) ---------------------------------

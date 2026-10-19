@@ -1034,12 +1034,16 @@ export async function ttsTest(
   return res.json()
 }
 
-/** Voice discovery (#231): the names a remote server offers via its
- *  non-standard GET /voices (the reference Kokoro server does; OpenAI
- *  does not). The backend probe NEVER errors — an unreachable or
- *  list-less server resolves to [] and the UI falls back to free-text.
- *  Drafts ride in the body so discovery works before the first Save. */
-export async function ttsVoices(endpoint?: string, apiKey?: string): Promise<string[]> {
+/** Voice + model discovery (#231, #448): the names a remote server offers
+ *  via its non-standard GET /voices, plus (since #448) the model ids from
+ *  the standard GET /v1/models. The backend probe NEVER errors — an
+ *  unreachable or list-less server resolves to empty lists and the UI
+ *  falls back to free-text. Drafts ride in the body so discovery works
+ *  before the first Save. */
+export async function ttsVoices(
+  endpoint?: string,
+  apiKey?: string,
+): Promise<{ voices: string[]; models: string[] }> {
   let res: Response
   try {
     res = await fetch(url('/api/tts/voices'), {
@@ -1048,11 +1052,13 @@ export async function ttsVoices(endpoint?: string, apiKey?: string): Promise<str
       body: JSON.stringify({ endpoint, api_key: apiKey }),
     })
   } catch {
-    return [] // backend down: free-text fallback, no error noise
+    return { voices: [], models: [] } // backend down: free-text fallback
   }
-  if (!res.ok) return [] // 409 not-configured included: absence of a list is normal
-  const body = (await res.json().catch(() => ({}))) as { voices?: unknown }
-  return Array.isArray(body.voices) ? body.voices.filter((v): v is string => typeof v === 'string') : []
+  if (!res.ok) return { voices: [], models: [] } // 409 not-configured included
+  const body = (await res.json().catch(() => ({}))) as { voices?: unknown; models?: unknown }
+  const strs = (xs: unknown): string[] =>
+    Array.isArray(xs) ? xs.filter((v): v is string => typeof v === 'string') : []
+  return { voices: strs(body.voices), models: strs(body.models) }
 }
 
 /** Fire-and-forget stop handshake: raises the backend's supersede floor to

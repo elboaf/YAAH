@@ -6562,6 +6562,59 @@ export function RemoteVoiceField({
   )
 }
 
+/** #448: the remote narration model field — a dropdown when the server
+ *  lists models at the standard /v1/models, free-text otherwise. Mirrors
+ *  RemoteVoiceField exactly: the saved draft stays selectable ("(saved)")
+ *  even when the list dropped it, and an empty draft falls to the first
+ *  server entry. The draft is never auto-overwritten. */
+export function RemoteModelField({
+  modelDraft,
+  models,
+  probing,
+  onChange,
+}: {
+  modelDraft: string
+  models: string[]
+  probing: boolean
+  onChange: (v: string) => void
+}) {
+  if (models.length === 0) {
+    return (
+      <input
+        className={`${settingsInputCls} w-28 shrink-0`}
+        value={modelDraft}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={probing ? 'probing models…' : 'model'}
+        aria-label="Remote narration model"
+      />
+    )
+  }
+  return (
+    <select
+      className={`${settingsInputCls} min-w-0 flex-1`}
+      value={
+        models.includes(modelDraft)
+          ? modelDraft
+          : modelDraft.trim() === ''
+            ? models[0]
+            : modelDraft
+      }
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Remote narration model"
+      title="Models from the server's /v1/models endpoint"
+    >
+      {!models.includes(modelDraft) && modelDraft.trim() !== '' && (
+        <option value={modelDraft}>{modelDraft} (saved)</option>
+      )}
+      {models.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 /** #207: the spoken-briefing toggles as an isolated card (the Settings
  *  modal's Voice tab embeds it; the card is exported for component tests,
  *  same precedent as SandboxSettingsCard). */
@@ -6844,6 +6897,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // endpoint/key changes. Empty list = free-text fallback (OpenAI has no
   // voices endpoint; absence of a list is normal, never an error).
   const [remoteVoiceList, setRemoteVoiceList] = useState<string[]>([])
+  const [remoteModelList, setRemoteModelList] = useState<string[]>([])
   const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
@@ -7003,14 +7057,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     const endpoint = ttsEndpoint.trim()
     if (!endpoint) {
       setRemoteVoiceList([])
+      setRemoteModelList([])
       return
     }
     let cancelled = false
     setRemoteProbing(true)
     const t = setTimeout(() => {
       ttsVoices(endpoint, ttsKey)
-        .then((voices) => {
-          if (!cancelled) setRemoteVoiceList(voices)
+        .then(({ voices, models }) => {
+          if (!cancelled) {
+            setRemoteVoiceList(voices)
+            setRemoteModelList(models)
+          }
         })
         .catch(() => {})
         .finally(() => {
@@ -7701,18 +7759,19 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
                       aria-label="Remote narration API key"
                     />
-                    <input
-                      className={`${settingsInputCls} w-28 shrink-0`}
-                      value={ttsModel}
-                      onChange={(e) => setTtsModel(e.target.value)}
-                      placeholder="model"
-                      aria-label="Remote narration model"
+                    <RemoteModelField
+                      modelDraft={ttsModel}
+                      models={remoteModelList}
+                      probing={remoteProbing}
+                      onChange={setTtsModel}
                     />
                   </div>
                   <p className="text-[10px] leading-relaxed text-zinc-600">
                     Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the
                     path is appended). Sentence chunks are sent to that server; the key goes there
-                    and nowhere else.
+                    and nowhere else. Voices (/voices) and models (/v1/models) are probed from the
+                    drafts above; CPU-served models can take minutes per chunk, so the first test
+                    may be slow.
                   </p>
                 </div>
               )}

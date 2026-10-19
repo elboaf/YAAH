@@ -2735,7 +2735,10 @@ async def api_tts_voices(body: TtsVoicesBody | None = None):
         voices = await speak.probe_remote_voices(endpoint, api_key=api_key)
     except speak.RemoteTTSError as e:  # a malformed endpoint, same gate as Test
         return JSONResponse({"detail": str(e), "code": e.code}, status_code=409)
-    return {"voices": voices}
+    # #448: the standard OpenAI model list rides along (— [] on any
+    # failure), so Settings can offer real model ids from one round-trip.
+    models = await speak.probe_remote_models(endpoint, api_key=api_key)
+    return {"voices": voices, "models": models}
 
 
 @app.get("/api/tts/status")
