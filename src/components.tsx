@@ -6562,6 +6562,70 @@ export function RemoteVoiceField({
   )
 }
 
+/** The model value remote requests should actually send (#449 review):
+ *  a blank draft DISPLAYS the first discovered model (RemoteModelField's
+ *  dropdown fallback) but would save/send '' - and the backend would
+ *  then substitute its own default ("kokoro"), which the server can
+ *  reject. Derive the effective choice instead; the draft itself is
+ *  never auto-overwritten. */
+export function effectiveRemoteModel(modelDraft: string, models: string[]): string {
+  if (modelDraft.trim() !== '') return modelDraft
+  return models.length > 0 ? models[0] : modelDraft
+}
+
+/** #448: the remote narration model field — a dropdown when the server
+ *  lists models at the standard /v1/models, free-text otherwise. Mirrors
+ *  RemoteVoiceField exactly: the saved draft stays selectable ("(saved)")
+ *  even when the list dropped it, and an empty draft falls to the first
+ *  server entry. The draft is never auto-overwritten. */
+export function RemoteModelField({
+  modelDraft,
+  models,
+  probing,
+  onChange,
+}: {
+  modelDraft: string
+  models: string[]
+  probing: boolean
+  onChange: (v: string) => void
+}) {
+  if (models.length === 0) {
+    return (
+      <input
+        className={`${settingsInputCls} w-28 shrink-0`}
+        value={modelDraft}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={probing ? 'probing models…' : 'model'}
+        aria-label="Remote narration model"
+      />
+    )
+  }
+  return (
+    <select
+      className={`${settingsInputCls} min-w-0 flex-1`}
+      value={
+        models.includes(modelDraft)
+          ? modelDraft
+          : modelDraft.trim() === ''
+            ? models[0]
+            : modelDraft
+      }
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Remote narration model"
+      title="Models from the server's /v1/models endpoint"
+    >
+      {!models.includes(modelDraft) && modelDraft.trim() !== '' && (
+        <option value={modelDraft}>{modelDraft} (saved)</option>
+      )}
+      {models.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 /** #207: the spoken-briefing toggles as an isolated card (the Settings
  *  modal's Voice tab embeds it; the card is exported for component tests,
  *  same precedent as SandboxSettingsCard). */
@@ -6844,6 +6908,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // endpoint/key changes. Empty list = free-text fallback (OpenAI has no
   // voices endpoint; absence of a list is normal, never an error).
   const [remoteVoiceList, setRemoteVoiceList] = useState<string[]>([])
+  const [remoteModelList, setRemoteModelList] = useState<string[]>([])
+  // What remote requests send for the model: the draft, or the first
+  // discovered model while the draft is blank (#449 review - Test and
+  // Save must send what the dropdown displays).
+  const effectiveModel = effectiveRemoteModel(ttsModel, remoteModelList)
   const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
@@ -7003,14 +7072,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     const endpoint = ttsEndpoint.trim()
     if (!endpoint) {
       setRemoteVoiceList([])
+      setRemoteModelList([])
       return
     }
     let cancelled = false
     setRemoteProbing(true)
     const t = setTimeout(() => {
       ttsVoices(endpoint, ttsKey)
-        .then((voices) => {
-          if (!cancelled) setRemoteVoiceList(voices)
+        .then(({ voices, models }) => {
+          if (!cancelled) {
+            setRemoteVoiceList(voices)
+            setRemoteModelList(models)
+          }
         })
         .catch(() => {})
         .finally(() => {
@@ -7194,7 +7267,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           // Typed key replaces; empty/kept field is dropped server-side so
           // the saved key survives (same masking dance as the dictation key).
           ...(ttsKey ? { tts_api_key: ttsKey } : {}),
-          tts_model: ttsModel,
+          tts_model: effectiveModel,
           sounds_enabled: soundsEnabled,
         },
         remote: {
@@ -7701,18 +7774,19 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
                       aria-label="Remote narration API key"
                     />
-                    <input
-                      className={`${settingsInputCls} w-28 shrink-0`}
-                      value={ttsModel}
-                      onChange={(e) => setTtsModel(e.target.value)}
-                      placeholder="model"
-                      aria-label="Remote narration model"
+                    <RemoteModelField
+                      modelDraft={ttsModel}
+                      models={remoteModelList}
+                      probing={remoteProbing}
+                      onChange={setTtsModel}
                     />
                   </div>
                   <p className="text-[10px] leading-relaxed text-zinc-600">
                     Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the
                     path is appended). Sentence chunks are sent to that server; the key goes there
-                    and nowhere else.
+                    and nowhere else. Voices (/voices) and models (/v1/models) are probed from the
+                    drafts above; CPU-served models can take minutes per chunk, so the first test
+                    may be slow.
                   </p>
                 </div>
               )}
@@ -7844,7 +7918,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         setTtsTestResult(null)
                         setTtsTestOk(false)
                         try {
-                          await ttsTest(ttsVoiceDraft, ttsSpeedDraft, ttsEngine)
+                          await ttsTest(
+                            ttsVoiceDraft,
+                            ttsSpeedDraft,
+                            ttsEngine,
+                            effectiveModel,
+                          )
                           setTtsTestResult('ok — synthesis worked')
                           setTtsTestOk(true)
                         } catch (e) {
