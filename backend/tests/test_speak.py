@@ -709,3 +709,20 @@ def test_spoken_line_auto_detects_from_saved_config():
         set_voice(tts_engine="local", tts_endpoint="", tts_model="kokoro")
     assert moss_out == say
     assert "A P I" in kokoro_out and "nineteen ninety-nine" in kokoro_out
+
+
+
+def test_kokoro_voice_empty_remote_model_defaults_to_kokoro():
+    """#451 (review): an empty remote tts_model rides the same default the
+    request sends ("kokoro"), so the gate's classification matches what
+    synthesis actually uses."""
+    from backend.agent.config import load_config, save_config
+
+    voice = {
+        **(load_config().get("voice") or {}),
+        "tts_engine": "remote",
+        "tts_endpoint": "http://box",
+        "tts_model": "",
+    }
+    save_config({**load_config(), "voice": voice})
+    assert speak.kokoro_voice() is True

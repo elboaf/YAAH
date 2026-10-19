@@ -846,3 +846,43 @@ async def test_tail_replays_after_compact_summary_not_over_it(
     )
     assert "error" in result  # unknown skill: nothing injected
     assert len(messages) == 2
+
+
+
+@pytest.mark.asyncio
+async def test_voice_change_refreezes_head(static_provider, monkeypatch):
+    """#451 (review): the frozen head embeds the ear-writing rules, which
+    are Kokoro-family-only. A voice flip must refreeze (gate mismatch),
+    and byte-stable replay continues under the new voice once frozen."""
+    from backend.agent import speak as speak_mod
+
+    cid = await create_conversation("voice-refreeze")
+    # Hermetic: pin phase 1 to kokoro explicitly (ambient config may vary).
+    monkeypatch.setattr(speak_mod, "kokoro_voice", lambda: True)
+    await run_turn(cid)
+    conv = await get_conversation(cid)
+    assert conv["frozen_voice_gate"] == "1"
+    kokoro_head = conv["frozen_system_prompt"]
+    assert "Write for the ear, not the eye" in kokoro_head
+
+    # Voice flips to moss: the gate mismatches, the head refreezes without
+    # the Kokoro-only rules.
+    monkeypatch.setattr(speak_mod, "kokoro_voice", lambda: False)
+    await run_turn(cid)
+    conv = await get_conversation(cid)
+    assert conv["frozen_voice_gate"] == "0"
+    moss_head = conv["frozen_system_prompt"]
+    assert moss_head != kokoro_head
+    assert "Write for the ear, not the eye" not in moss_head
+
+    # Byte-stable replay under the new voice.
+    await run_turn(cid)
+    conv = await get_conversation(cid)
+    assert conv["frozen_system_prompt"] == moss_head
+
+    # Flipping back refreezes the kokoro bytes.
+    monkeypatch.setattr(speak_mod, "kokoro_voice", lambda: True)
+    await run_turn(cid)
+    conv = await get_conversation(cid)
+    assert conv["frozen_voice_gate"] == "1"
+    assert conv["frozen_system_prompt"] == kokoro_head

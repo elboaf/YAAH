@@ -1933,9 +1933,16 @@ async def _run_agent_claimed(
     # replay stale bytes. A missing/stale freeze means THIS turn builds the
     # head and freezes it.
     frozen_ws = conv.get("frozen_system_prompt_ws")
+    # #451 (review): the head embeds the ear-writing rules, which are
+    # Kokoro-family-only - a freeze is valid only for the voice gate it was
+    # made under, so a voice change refreezes instead of replaying stale
+    # coaching. Byte-stable replay is untouched while the voice stays.
+    frozen_gate = conv.get("frozen_voice_gate")
     frozen_prompt = (
         conv.get("frozen_system_prompt")
-        if static_mode and frozen_ws == (workspace or "")
+        if static_mode
+        and frozen_ws == (workspace or "")
+        and frozen_gate == ("1" if _kokoro_ear() else "0")
         else None
     )
     frozen_turn = static_mode and bool(frozen_prompt)
@@ -2135,6 +2142,8 @@ async def _run_agent_claimed(
     # after a frozen replay was REACHED on a `$skill` turn, persisting a
     # handoff block permanently into the head — self-healing below clears
     # such a poisoned row so the next turn refreezes clean bytes.)
+    # #451 (review): the freeze rides with the voice gate it was made
+    # under; the read site compares it so a voice change refreezes.
     if static_mode and not frozen_turn and not invoked_skill_block:
         try:
             await update_conversation(
@@ -2142,6 +2151,7 @@ async def _run_agent_claimed(
                 touch_updated_at=False,
                 frozen_system_prompt=system_prompt,
                 frozen_system_prompt_ws=workspace or "",
+                frozen_voice_gate="1" if _kokoro_ear() else "0",
             )
         except Exception as e:  # noqa: BLE001 — freezing must not break the turn
             log.warning("frozen_system_prompt_write_failed: %s", e)

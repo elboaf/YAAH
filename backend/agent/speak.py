@@ -1332,7 +1332,9 @@ def kokoro_voice_cfg(voice: dict) -> bool:
     tts-1, and every other front-end read written forms natively)."""
     if (voice.get("tts_engine") or "local") != "remote":
         return True
-    return "kokoro" in (voice.get("tts_model") or "").lower()
+    # An empty remote model name rides the same default _remote_engine_args
+    # sends ("kokoro"), so the classification always matches synthesis.
+    return "kokoro" in (voice.get("tts_model") or "kokoro").lower()
 
 
 def kokoro_voice() -> bool:

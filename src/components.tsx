@@ -7281,6 +7281,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           api_base: imageGen.api_base.trim(),
         },
       })
+      // #451 (review): a saved voice change must reach the frontend speech
+      // mirror immediately - the Settings and ChatPanel status probes run
+      // only at mount, so without this the next narrations keep the old
+      // shaping until an app restart.
+      try {
+        setKokoroShaping((await ttsStatus()).kokoro !== false)
+      } catch {
+        /* status probe failed: keep the current gate */
+      }
       // Hot-swap the live registration in the Composer; it reports failure
       // (combo taken by another app) through the same reject toast system.
       window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
