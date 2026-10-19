@@ -17,7 +17,6 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-global-shortcut": "^2.3.2",
-    "mermaid": "^12.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
@@ -42,6 +41,7 @@
     "vitest": "^5.0.1"
   },
   "overrides": {
-    "lodash-es": "^4.18.1"
+    "lodash-es": "^4.18.1",
+    "shell-quote": "~1.11.0"
   }
 }
