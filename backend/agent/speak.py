@@ -503,23 +503,37 @@ def _merge_wavs(chunks: list[bytes]) -> bytes:
     glued into garbage audio."""
     if len(chunks) == 1:
         return chunks[0]
-    out = io.BytesIO()
+    # Decode and validate EVERY piece before the writer opens: a piece
+    # failing inside a live writer would leave it param-less, and the
+    # writer's own close-time wave.Error would mask the clean answer.
     params = None
-    with wave.open(out, "wb") as w:
-        for i, data in enumerate(chunks):
+    frames_list: list[bytes] = []
+    for i, data in enumerate(chunks):
+        try:
             with wave.open(io.BytesIO(data), "rb") as r:
                 p = r.getparams()
-                if params is None:
-                    params = p
-                    w.setparams(p)
-                elif p[:3] != params[:3]:
-                    raise RemoteTTSError(
-                        "remote TTS split pieces disagree on audio format "
-                        f"(piece {i + 1}: {p.nchannels}ch/{p.sampwidth * 8}-bit/"
-                        f"{p.framerate}Hz vs {params.nchannels}ch/"
-                        f"{params.sampwidth * 8}-bit/{params.framerate}Hz)"
-                    )
-                w.writeframes(r.readframes(r.getnframes()))
+                frames = r.readframes(r.getnframes())
+        except (wave.Error, EOFError) as e:
+            # A piece that is not decodable WAV is a broken server, not
+            # silence - surfaced, never glued into garbage audio.
+            raise RemoteTTSError(
+                f"remote TTS split piece {i + 1} is not valid WAV audio ({e})"
+            ) from e
+        if params is None:
+            params = p
+        elif p[:3] != params[:3]:
+            raise RemoteTTSError(
+                "remote TTS split pieces disagree on audio format "
+                f"(piece {i + 1}: {p.nchannels}ch/{p.sampwidth * 8}-bit/"
+                f"{p.framerate}Hz vs {params.nchannels}ch/"
+                f"{params.sampwidth * 8}-bit/{params.framerate}Hz)"
+            )
+        frames_list.append(frames)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setparams(params)
+        for frames in frames_list:
+            w.writeframes(frames)
     return out.getvalue()
 
 
@@ -605,6 +619,8 @@ async def synthesize_remote(
                 cap = stated  # the server's own number is authoritative
             elif len(text) >= 4:
                 cap = len(text) // 2  # nothing stated: start halving
+            else:
+                raise  # too short to halve and no number stated: answer stands
 
     # A "too long" 4xx - the server's own admission that `input` is over
     # its cap. Re-split at the cap and synthesize the pieces in order. A

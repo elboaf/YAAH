@@ -334,3 +334,47 @@ async def test_within_cap_chunk_posts_verbatim_one_request(monkeypatch):
         "speed": 1.1,
     }
     assert speak._REMOTE_CAPS == {}
+
+
+# ---- 5. CodeRabbit round-1: broken-server edges stay clean errors ----------
+
+
+async def test_unnumbered_rejection_on_short_input_surfaces_answer(monkeypatch):
+    """A no-number "too long" on an input too short to halve: the server's
+    answer stands (regression: this path used to fall through with
+    cap=None and raise TypeError at `cap < 2`, mapping to a 500 instead
+    of the server's 4xx detail)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"detail": "too long for this server"})
+
+    _install(monkeypatch, _Recorder(handler))
+
+    with pytest.raises(speak.RemoteTTSError) as ei:
+        await speak.synthesize_remote(
+            "Hi!", endpoint="http://x.local", api_key="", model="m", voice="v", speed=None
+        )
+    assert str(ei.value) == "HTTP 400: too long for this server"
+    assert speak._REMOTE_CAPS == {}
+
+
+async def test_non_wav_piece_surfaces_as_remote_error(monkeypatch):
+    """A server answering 200 with non-WAV bytes for a piece is broken:
+    the merge surfaces it as RemoteTTSError (the 502 path), never a raw
+    wave.Error (which would map to a 500)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        n = len(json.loads(request.content.decode("utf-8"))["input"])
+        if n > 48:
+            return httpx.Response(400, json={"detail": MOSS_DETAIL})
+        return httpx.Response(200, content=b"JUNKJUNKNOTWAV")  # no RIFF header
+
+    _install(monkeypatch, _Recorder(handler))
+
+    with pytest.raises(speak.RemoteTTSError) as ei:
+        await speak.synthesize_remote(
+            LONG, endpoint="http://x.local", api_key="", model="m", voice="v", speed=None
+        )
+    assert "not valid WAV audio" in str(ei.value)
