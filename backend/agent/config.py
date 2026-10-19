@@ -91,6 +91,9 @@ DEFAULTS = {
         # Omitted from requests unless the user sets one (OpenAI 0.25-4.0,
         # Kokoro 0.5-2.0 - let the server validate its own range).
         "tts_speed": None,
+        # #451: no stored flag for this - speak.kokoro_voice() DERIVES the
+        # Kokoro-shape gate from tts_engine + tts_model on every call, so
+        # a Settings change applies without a restart.
     },
     # Persistent memory (issue #169): Settings toggle, opt-in with default
     # OFF. When disabled the memory tools are filtered from the schema, the

@@ -723,6 +723,15 @@ Interview the user (ask_user tool):
   what remains unchanged, and safe options before asking how to proceed."""
 
 
+def _kokoro_ear() -> bool:
+    """#451: the ear-writing prompt rules apply only when the active voice
+    is a Kokoro-family engine (speak.kokoro_voice). Non-espeak engines
+    read written forms natively and stumble on the taught spellings."""
+    from backend.agent import speak as _speak_mod
+
+    return _speak_mod.kokoro_voice()
+
+
 def _build_spoken_briefing_block() -> str:
     """Spoken briefing variance block (#207).
 
@@ -743,6 +752,13 @@ def _build_spoken_briefing_block() -> str:
         "  The tag is stripped from the chat transcript; the chat text itself stays",
         "  as detailed as you like. Omit the tag when read-aloud is off or when the",
         "  emission is a question (ask_user questions are spoken verbatim already).",
+    ]
+    # #451: the write-for-the-ear rules below are Kokoro-shaping — they
+    # teach spelled digit runs and phonetic homographs that Kokoro's
+    # espeak front-end needs and non-espeak engines (moss-tts) stumble
+    # over ("A P I" pauses where "API" reads perfectly).
+    if _kokoro_ear():
+        lines += [
         "  Write for the ear, not the eye: technical digit runs the way a human",
         "  says them (ports and IPs digit by digit — \"port four four three\" —,",
         "  years as years — \"nineteen ninety-nine\" —, versions as spoken —",
@@ -767,7 +783,7 @@ def _build_spoken_briefing_block() -> str:
         "  emphasis and no SSML or emotion markers like [excited] — the voice",
         "  reads those literally; punctuation is your prosody: commas pace a",
         "  line, one exclamation mark at most, a blank line marks a beat.",
-    ]
+        ]
     text = "\n".join(lines) + "\n"
     persona = _say_persona()
     if persona != "neutral":
@@ -1917,9 +1933,16 @@ async def _run_agent_claimed(
     # replay stale bytes. A missing/stale freeze means THIS turn builds the
     # head and freezes it.
     frozen_ws = conv.get("frozen_system_prompt_ws")
+    # #451 (review): the head embeds the ear-writing rules, which are
+    # Kokoro-family-only - a freeze is valid only for the voice gate it was
+    # made under, so a voice change refreezes instead of replaying stale
+    # coaching. Byte-stable replay is untouched while the voice stays.
+    frozen_gate = conv.get("frozen_voice_gate")
     frozen_prompt = (
         conv.get("frozen_system_prompt")
-        if static_mode and frozen_ws == (workspace or "")
+        if static_mode
+        and frozen_ws == (workspace or "")
+        and frozen_gate == ("1" if _kokoro_ear() else "0")
         else None
     )
     frozen_turn = static_mode and bool(frozen_prompt)
@@ -2119,6 +2142,8 @@ async def _run_agent_claimed(
     # after a frozen replay was REACHED on a `$skill` turn, persisting a
     # handoff block permanently into the head — self-healing below clears
     # such a poisoned row so the next turn refreezes clean bytes.)
+    # #451 (review): the freeze rides with the voice gate it was made
+    # under; the read site compares it so a voice change refreezes.
     if static_mode and not frozen_turn and not invoked_skill_block:
         try:
             await update_conversation(
@@ -2126,6 +2151,7 @@ async def _run_agent_claimed(
                 touch_updated_at=False,
                 frozen_system_prompt=system_prompt,
                 frozen_system_prompt_ws=workspace or "",
+                frozen_voice_gate="1" if _kokoro_ear() else "0",
             )
         except Exception as e:  # noqa: BLE001 — freezing must not break the turn
             log.warning("frozen_system_prompt_write_failed: %s", e)

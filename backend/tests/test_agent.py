@@ -1444,6 +1444,32 @@ def test_spoken_briefing_substitutes_symbols_for_the_ear():
         assert marker in section, marker
 
 
+def test_spoken_briefing_ear_rules_gated_on_kokoro(monkeypatch):
+    """#451: the write-for-the-ear rules teach Kokoro-shaped spellings
+    (digit runs, phonetic homographs); non-Kokoro voices (moss-tts) get
+    the briefing section without them."""
+    from backend.agent import speak as speak_mod
+
+    monkeypatch.setattr(speak_mod, "kokoro_voice", lambda: True)
+    kokoro_prompt = loop._default_system_prompt("")
+    monkeypatch.setattr(speak_mod, "kokoro_voice", lambda: False)
+    moss_prompt = loop._default_system_prompt("")
+
+    def section(prompt):
+        body = prompt.split("Spoken briefing (voice read-aloud):\n", 1)[1]
+        return " ".join(body.split("\nInterview the user", 1)[0].split())
+
+    kokoro_section = section(kokoro_prompt)
+    moss_section = section(moss_prompt)
+    # Kokoro keeps the taught ear-spellings.
+    assert "nineteen ninety-nine" in kokoro_section
+    assert "spelling IS pronunciation" in kokoro_section
+    # A non-Kokoro voice loses exactly those, keeps the briefing contract.
+    assert "nineteen ninety-nine" not in moss_section
+    assert "spelling IS pronunciation" not in moss_section
+    assert "<say>" in moss_section
+
+
 # ---- #226: briefings persist on the row -----------------------------------------
 
 @pytest.mark.asyncio

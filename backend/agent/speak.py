@@ -28,6 +28,7 @@ from pathlib import Path
 import httpx
 
 from backend.agent import gitproc
+from backend.agent.config import load_config
 
 # ---- Voice table -----------------------------------------------------------
 # Authoritative sid -> name order for the sherpa-onnx kokoro multi-lang v1.0
@@ -915,17 +916,22 @@ def heuristic_briefing(md: str, max_chars: int = SAY_MAX_CHARS) -> str:
     return cut.strip()
 
 
-def spoken_line(briefing: str | None, md: str, max_chars: int = SAY_MAX_CHARS) -> str:
+def spoken_line(
+    briefing: str | None, md: str, max_chars: int = SAY_MAX_CHARS, kokoro: bool | None = None
+) -> str:
     """The final TTS input for a turn: the model-emitted briefing when
     usable, else the heuristic, else the old truncated verbatim prose (the
     fallback is today's behavior, never silence). Everything passes through
     prose_for_speech so no markdown junk reaches the synthesizer, and the
-    hard cap is enforced here — in one place."""
+    hard cap is enforced here — in one place.
+
+    #451: kokoro=None consults kokoro_voice(); a non-Kokoro voice gets the
+    engine-neutral cleanup only."""
     def _finish(text: str) -> str:
         # #206: the speech-normalization pass is the last thing a briefing
         # receives before the synthesizer. The cap is re-enforced after it:
         # spelled-out numbers ("four four three") are longer than digits.
-        out = normalize_for_speech(text)
+        out = normalize_for_speech(text, kokoro=kokoro)
         return _clip(out, max_chars) if len(out) > max_chars else out
 
     prose = prose_for_speech(md, max_chars=10**9)
@@ -1319,15 +1325,45 @@ def _acronyms(text: str) -> str:
     )
 
 
-def normalize_for_speech(text: str) -> str:
+def kokoro_voice_cfg(voice: dict) -> bool:
+    """#451: the Kokoro-shape gate over an already-loaded voice config.
+    Local synthesis is always kokoro; a remote engine is Kokoro-family
+    only when its model name says so (the moss endpoint, api.openai.com
+    tts-1, and every other front-end read written forms natively)."""
+    if (voice.get("tts_engine") or "local") != "remote":
+        return True
+    # An empty remote model name rides the same default _remote_engine_args
+    # sends ("kokoro"), so the classification always matches synthesis.
+    return "kokoro" in (voice.get("tts_model") or "kokoro").lower()
+
+
+def kokoro_voice() -> bool:
+    """#451: kokoro_voice_cfg over the SAVED voice config, read on every
+    call so a Settings change applies without a restart. A config failure
+    reads non-kokoro (skip the Kokoro-only shaping rather than feed a
+    non-espeak engine text it stutters on)."""
+    try:
+        return kokoro_voice_cfg(load_config().get("voice") or {})
+    except Exception:
+        return False
+
+
+def normalize_for_speech(text: str, *, kokoro: bool | None = None) -> str:
     """Deterministic written→spoken pass over TTS INPUT only (the chat
     transcript is untouched). Order matters: markers/SSML first so their
     digits never feed the number rules, then years before bare runs, then
     versionish dotted groups, then long digit runs by context (phones
     group, everything else digit-by-digit), then short numbers, then
-    acronyms."""
+    acronyms.
+
+    #451: everything after stage 1 is Kokoro-shaping — it pre-speaks
+    exactly what non-espeak engines (moss-tts) already read natively, and
+    the letter-spaced acronyms make those engines stutter. kokoro=None
+    consults kokoro_voice(); False runs engine-neutral cleanup only."""
     if not text:
         return text
+    if kokoro is None:
+        kokoro = kokoro_voice()
 
     # 1. SSML tags and emotion markers cannot survive into synthesis.
     t = _SSML_TAG.sub(" ", text)
@@ -1336,6 +1372,9 @@ def normalize_for_speech(text: str) -> str:
     )
     t = re.sub(r"  +", " ", t)
     t = re.sub(r" ([,.!?;:])", r"\1", t)
+    if not kokoro:
+        # #451: non-Kokoro voice — skip the written→spoken shaping below.
+        return t.strip()
 
     # 1.5 Currency amounts ($19.99, $1,299.50, $5) before the year pass:
     # money is never a year, and the $ must not survive into synthesis.

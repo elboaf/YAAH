@@ -841,6 +841,19 @@ const versionWords = (_m: string, head: string | undefined, dotted: string, suff
   return out
 }
 
+// #451 — the Kokoro-shaping gate. Mirrors speak.kokoro_voice: local is
+// always kokoro; remote is one only when the model name says so. The
+// frontend components push /api/tts/status's `kokoro` flag here at mount
+// and whenever the Settings view probes; until then the default keeps
+// today's kokoro-shaped behavior (safe for the local engine).
+let kokoroShaping = true
+export function setKokoroShaping(on: boolean): void {
+  kokoroShaping = on
+}
+function kokoroShapingActive(): boolean {
+  return kokoroShaping
+}
+
 /** Curated acronyms to letter-spell; unlisted words (Kokoro, ONNX) are
  *  left to the engine's lexicon. */
 const acronyms = (text: string): string => {
@@ -854,13 +867,18 @@ const acronyms = (text: string): string => {
 /** Deterministic written→spoken pass over TTS INPUT only (the chat
  *  transcript is untouched). Mirrors speak.normalize_for_speech — keep the
  *  two in sync via the shared parity cases. */
-export function normalizeForSpeech(text: string): string {
+export function normalizeForSpeech(text: string, kokoro = kokoroShapingActive()): string {
   if (!text) return text
 
   // 1. SSML tags and emotion markers cannot survive into synthesis.
   let t = text.replace(SSML_TAG, ' ')
   t = t.replace(EMOTION_MARKER, (m, inner: string) => (isEmotionMarker(inner) ? '' : m))
   t = t.replace(/ {2,}/g, ' ').replace(/ ([,.!?;:])/g, '$1')
+
+  // #451: everything below is Kokoro-shaping — non-espeak engines
+  // (moss-tts) read the written forms natively and stutter on the
+  // letter-spaced acronyms. Non-Kokoro voices stop after the cleanup.
+  if (!kokoro) return t.trim()
 
   // 1.5 Currency amounts ($19.99, $1,299.50, $5) before the year pass:
   // money is never a year, and the $ must not survive into synthesis.

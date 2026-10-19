@@ -331,6 +331,15 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN frozen_system_prompt_ws TEXT"
         )
+    if "frozen_voice_gate" not in conv_cols:
+        # #451: the voice gate the freeze was made under ("1" kokoro /
+        # "0" not). The ear-writing rules in the head are Kokoro-family-
+        # only, so a voice change must refreeze the head, not replay
+        # stale coaching. NULL (pre-#451 rows) never matches = one
+        # refreeze on the next turn, then stable.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN frozen_voice_gate TEXT"
+        )
     if "persisted_skill_tail" not in conv_cols:
         # Persisted load_skill tail: the byte-exact "# Loaded skill" tail
         # message a static-mode conversation accumulated through the
@@ -927,6 +936,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
         "system_prompt_override",
         "frozen_system_prompt",
         "frozen_system_prompt_ws",
+        "frozen_voice_gate",
         "persisted_skill_tail",
         "persisted_skill_tail_ws",
         "model",

@@ -2767,8 +2767,12 @@ async def api_tts_status():
         available = bool((voice.get("tts_endpoint") or "").strip())
     else:
         available = speak.model_available()
+    # #451: is the active voice Kokoro-family? The frontend mirrors this
+    # flag to gate the ear-shaping in src/speech.ts; speak.kokoro_voice_cfg
+    # is the single decider on the backend.
     return {
         "engine": engine,
+        "kokoro": speak.kokoro_voice_cfg(voice),
         "available": available,
         # Local-model state, whatever the engine: remote mode keeps the
         # download UI hidden (spec) but the field honest.
@@ -2880,6 +2884,9 @@ async def api_tts_synthesize(body: TtsBody):
         epoch = body.epoch if body.epoch is not None else 0
         if speak.superseded(epoch):
             return JSONResponse({"detail": "superseded"}, status_code=409)
+        # #451: deliberately NO defensive normalization here - the
+        # written→spoken pass is Kokoro-shaping, and a remote engine
+        # (moss-tts) reads the written forms natively.
         try:
             args = _remote_engine_args(voice_cfg, voice, speed)
             # synthesize_remote is async (httpx.AsyncClient) — awaited
@@ -2903,9 +2910,10 @@ async def api_tts_synthesize(body: TtsBody):
     voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
     speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
     # #206: defensive normalization at the choke point — live-stream chunks
-    # may carry un-normalized text from older sessions; whatever reaches a
-    # synthesis engine (local today, remote per #205) reads like a human.
-    text = speak.normalize_for_speech(text)
+    # may carry un-normalized text from older sessions. Local synthesis IS
+    # kokoro, so the full written→spoken pass applies (remote synthesis
+    # returned earlier; #451 keeps its input untouched).
+    text = speak.normalize_for_speech(text, kokoro=True)
     # The utterance's generation comes from the frontend (body.epoch); a
     # hand-made request without one gets epoch 0, which any stop invalidates.
     epoch = body.epoch if body.epoch is not None else 0
