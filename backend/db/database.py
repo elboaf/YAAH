@@ -410,9 +410,9 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE workspaces ADD COLUMN position INTEGER")
     # Revision tokens change for every host-side metadata/transcript edit,
     # including legacy local routes, not just commits through the new API.
-    # The conversations trigger is dropped and recreated rather than
-    # IF NOT EXISTS: its UPDATE OF column list is code-owned, and IF NOT
-    # EXISTS would leave upgraded databases on the old list forever.
+    # The two UPDATE triggers are dropped and recreated rather than
+    # IF NOT EXISTS: their UPDATE OF column lists are code-owned, and IF
+    # NOT EXISTS would leave upgraded databases on the old list forever.
     await db.executescript("""
     DROP TRIGGER IF EXISTS conversations_remote_revision_update;
     CREATE TRIGGER conversations_remote_revision_update
@@ -427,7 +427,8 @@ async def get_db() -> aiosqlite.Connection:
         UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
         WHERE id = NEW.conversation_id;
     END;
-    CREATE TRIGGER IF NOT EXISTS messages_remote_revision_update
+    DROP TRIGGER IF EXISTS messages_remote_revision_update;
+    CREATE TRIGGER messages_remote_revision_update
     AFTER UPDATE OF role, content, tool_calls, tool_call_id, images, sub_agent_transcript, duration_ms
     ON messages BEGIN
         UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1

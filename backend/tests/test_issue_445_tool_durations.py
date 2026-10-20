@@ -15,8 +15,10 @@ Contract:
 """
 import json
 
+import aiosqlite
 import pytest
 
+import backend.db.database as database
 from backend.agent import loop
 from backend.db.database import (
     acquire_remote_edit_lease,
@@ -24,6 +26,23 @@ from backend.db.database import (
     create_conversation,
     get_messages,
 )
+
+
+async def _make_pre_445_db(path):
+    """Write a pre-#445 database: today's schema minus the duration_ms
+    column (which is exactly what an upgraded install carries), with the
+    messages revision trigger dropped first (the trigger's UPDATE OF list
+    names the column, and DROP COLUMN refuses a referenced column)."""
+    async with aiosqlite.connect(path) as db:
+        await db.executescript(database.SCHEMA)
+        await db.execute(
+            "DROP TRIGGER IF EXISTS messages_remote_revision_update"
+        )
+        await db.execute("ALTER TABLE messages DROP COLUMN duration_ms")
+        await db.execute(
+            "INSERT INTO conversations (title, workspace) VALUES ('pre-upgrade', NULL)"
+        )
+        await db.commit()
 
 
 class FakeStream:
@@ -309,3 +328,45 @@ async def test_sub_agent_malformed_first_call_survives(monkeypatch, tmp_path):
     assert tool_entries, "the malformed call must still be recorded"
     assert "error" in json.loads(tool_entries[0]["content"])
     assert tool_entries[0].get("duration_ms") is None
+
+
+@pytest.mark.asyncio
+async def test_upgraded_db_receives_duration_ms_trigger(monkeypatch, tmp_path):
+    """The messages revision trigger's UPDATE OF list is code-owned (the
+    same #383 contract for the conversations trigger). An upgraded
+    database must pick up the new body - CREATE TRIGGER IF NOT EXISTS
+    would leave the pre-#445 body in place, so duration_ms writes would
+    never bump the revision counter."""
+    old_db = tmp_path / "upgraded.db"
+    await _make_pre_445_db(old_db)
+    monkeypatch.setattr(database, "DB_PATH", old_db)
+    await database.init_db()
+    db = await database.get_db()
+    try:
+        cur = await db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger'"
+            " AND name = 'messages_remote_revision_update'"
+        )
+        trig = await cur.fetchone()
+        assert "duration_ms" in (trig["sql"] or ""), trig["sql"]
+
+        cur = await db.execute(
+            "INSERT INTO messages (conversation_id, role, content)"
+            " VALUES (1, 'tool', 'done')"
+        )
+        mid = cur.lastrowid
+        cur = await db.execute(
+            "SELECT remote_revision_counter FROM conversations WHERE id = 1"
+        )
+        before = (await cur.fetchone())["remote_revision_counter"]
+        await db.execute(
+            f"UPDATE messages SET duration_ms = 42 WHERE id = {mid}"
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT remote_revision_counter FROM conversations WHERE id = 1"
+        )
+        after = (await cur.fetchone())["remote_revision_counter"]
+        assert after == before + 1
+    finally:
+        await db.close()
