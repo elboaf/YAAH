@@ -1609,6 +1609,63 @@ IMG_REF_RENDER_NOTE = (
     "does not)"
 )
 
+
+# #450: the loaded checkpoint, surfaced verbatim from the server's
+# capabilities `model` field. stem first (the file's own short
+# name), then name sans suffix - a name-only payload still yields
+# a usable label; an absent field degrades to None exactly like
+# every other capability field.
+_MODEL_SUFFIXES = (".gguf", ".safetensors")
+
+
+# #450: the prompting discipline a checkpoint family dictates. Coarse
+# on purpose (the issue's point): FLUX vs SD is a WALL (flow-matching
+# distilled guidance vs cfg; negative prompts ignored vs load-
+# bearing); within a family the harness's own defaults already
+# carry the fine-tuning, so the note only names the family - the
+# model's tool descriptions do the rest. Order matters (substring): the specific
+# klein stem wins over the generic flux/SD checks.
+_MODEL_FAMILY_TABLE = (
+    ("klein", "this is a flux2-klein checkpoint: guidance-distilled (cfg locked at 1), 4 steps is the design point, negative prompts are ignored - drive the prompt, not the knobs"),
+    ("flux.1", "this is a flux1 checkpoint: cfg 3.5-class, negative prompts carry less weight than on SD"),
+    ("flux1", "this is a flux1 checkpoint: cfg 3.5-class, negative prompts carry less weight than on SD"),
+    ("flux2", "this is a flux2 checkpoint (guidance-distilled family: cfg locked at 1, negative prompts mostly ignored)"),
+    ("sdxl", "this is an SDXL checkpoint: cfg-driven, negative prompts matter"),
+    ("sd15", "this is an SD1.5 checkpoint: cfg-driven, negative prompts matter"),
+    ("sd", "this is a Stable-Diffusion checkpoint: cfg-driven, negative prompts matter"),
+)
+
+
+def _loaded_model_name(caps):
+    # The server's loaded model, or None (older builds omit it).
+    m = caps.get("model")
+    if not isinstance(m, dict):
+        return None
+    for key in ("stem", "name"):
+        v = str(m.get(key) or "").strip()
+        if not v:
+            continue
+        for suf in _MODEL_SUFFIXES:
+            if v.lower().endswith(suf):
+                v = v[: -len(suf)].strip()
+        if v:
+            return v
+    return None
+
+
+def _model_note(name):
+    # The 'server running: <name> ...' line, or None. Family cue
+    # when the stem matches a known family; bare name otherwise.
+    if not name:
+        return None
+    s = name.lower()
+    family = None
+    for stem, line in _MODEL_FAMILY_TABLE:
+        if stem in s:
+            family = line
+            break
+    return "server running: " + name + (" - " + family if family else "")
+
 _IMAGE_GEN_TOOLS = ("generate_image", "edit_image", "upscale_image")
 
 GENERATE_IMAGE_SCHEMA = {
@@ -2098,6 +2155,8 @@ def _native_bounds(caps: dict) -> dict:
             for l in (caps.get("loras") or [])
             if isinstance(l, dict) and l.get("name")
         },
+        # #450: the loaded checkpoint (stem > name sans suffix > None)
+        "model": _loaded_model_name(caps),
     }
 
 
@@ -2689,6 +2748,13 @@ async def generate_image(
 
     caps = await _capabilities(api_base)
     b = _native_bounds(caps) if caps else None
+    # #450: the loaded checkpoint rides EVERY result note (like the
+    # 'server ran: ...' chips) - the prompting discipline is family-
+    # specific and the model cannot see the server's capabilities.
+    # Absent on caps-less servers: the note simply never appears.
+    _mn = _model_note(b["model"] if b else None)
+    if _mn:
+        notes.append(_mn)
     # LoRA auto-apply (#398): consult the PERSISTED scan only - no server
     # calls, no header reads, no hashing in this hot path. apply_to_body
     # attaches the structured `lora[]` field and injects the trigger word
@@ -3163,6 +3229,11 @@ async def upscale_image(
         return {"error": raw_in}
     dims_in = _png_dims(raw_in)
 
+    # #450: same cadence as generate_image - the loaded checkpoint
+    # rides the result note when the server reports it (both the
+    # staged-chain and single-repeat paths read it).
+    _mn = _model_note(b["model"] if b else None)
+
     if repeats is not None:
         try:
             n = max(1, min(4, int(repeats)))
@@ -3198,8 +3269,8 @@ async def upscale_image(
             "scale": meta.get("scale") if meta else None,
             "upscaler": meta.get("upscaler") if meta else None,
         }
-        if note:
-            out["note"] = note
+        if _mn or note:
+            out["note"] = _mn + " " + note if note else _mn
         dims = _png_dims(raw_out)
         if dims and dims[0]:
             out["width"], out["height"] = dims
@@ -3223,6 +3294,8 @@ async def upscale_image(
     }
     if meta:
         out.update({k: meta.get(k) for k in ("upscaler", "scale", "width", "height")})
+    if _mn:
+        out["note"] = _mn
     dims = _png_dims(raw_out)
     if dims and dims[0]:
         out["width"], out["height"] = dims
