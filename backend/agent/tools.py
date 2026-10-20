@@ -1627,6 +1627,7 @@ _MODEL_SUFFIXES = (".gguf", ".safetensors")
 # klein stem wins over the generic flux/SD checks.
 _MODEL_FAMILY_TABLE = (
     ("klein", "this is a flux2-klein checkpoint: guidance-distilled (cfg locked at 1), 4 steps is the design point, negative prompts are ignored - drive the prompt, not the knobs"),
+    ("flux.1", "this is a flux1 checkpoint: cfg 3.5-class, negative prompts carry less weight than on SD"),
     ("flux1", "this is a flux1 checkpoint: cfg 3.5-class, negative prompts carry less weight than on SD"),
     ("flux2", "this is a flux2 checkpoint (guidance-distilled family: cfg locked at 1, negative prompts mostly ignored)"),
     ("sdxl", "this is an SDXL checkpoint: cfg-driven, negative prompts matter"),
@@ -3268,8 +3269,8 @@ async def upscale_image(
             "scale": meta.get("scale") if meta else None,
             "upscaler": meta.get("upscaler") if meta else None,
         }
-        if note:
-            out["note"] = _mn + " " + note if _mn else note
+        if _mn or note:
+            out["note"] = _mn + " " + note if note else _mn
         dims = _png_dims(raw_out)
         if dims and dims[0]:
             out["width"], out["height"] = dims

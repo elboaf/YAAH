@@ -94,6 +94,14 @@ def test_model_note_flux1_family():
     assert "flux1" in n
 
 
+def test_model_note_flux_dot_one_spelling():
+    """The owner triage on #450 lists the flux.1 spelling: a dotted
+    name like flux.1-dev must still get the Flux 1 cue (CodeRabbit #0)."""
+    n = tools._model_note("flux.1-dev")
+    assert n.startswith("server running: flux.1-dev - ")
+    assert "flux1" in n
+
+
 def test_model_note_unknown_stem_bare_name():
     """Unknown stems are surfaced as-is, no family claim."""
     assert tools._model_note("qwen-image-2") == "server running: qwen-image-2"
@@ -165,6 +173,33 @@ def test_upscale_image_single_repeat_note_carries_model(configured, tmp_path, mo
     result = asyncio.run(
         tools.execute_tool(
             "upscale_image", {"path": "ai-images/src.png", "repeats": 1},
+            workspace=str(ws),
+        )
+    )
+    assert not result.get("error"), result
+    note = result.get("note", "")
+    assert "server running: sdxl-turbo" in note
+    assert "SDXL" in note
+
+
+def test_upscale_image_staged_target_note_carries_model(configured, tmp_path, monkeypatch):
+    """Staged chain that REACHES its target returns note=None from
+    _upscale_to_target; the loaded-model line must still ride the
+    result (CodeRabbit #2: the `if note:` guard dropped it)."""
+    _FakeClient.caps_payload = _caps({"stem": "sdxl-turbo"})
+    _FakeClient.upscale_payload = {
+        "images": [{"b64_json": base64.b64encode(_png(128, 128)).decode()}],
+        "upscaler": "realesr-general", "scale": 2, "repeats": 1,
+        "width": 128, "height": 128,
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    ws = tmp_path / "ws"
+    (ws / "ai-images").mkdir(parents=True)
+    (ws / "ai-images" / "src.png").write_bytes(_png(64, 64))
+    result = asyncio.run(
+        tools.execute_tool(
+            "upscale_image",
+            {"path": "ai-images/src.png", "target_width": 128, "target_height": 128},
             workspace=str(ws),
         )
     )
