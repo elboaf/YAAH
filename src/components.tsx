@@ -784,7 +784,7 @@ function toolTarget(tc: ToolCall): string {
 }
 
 /** One compact chip: glyph + name + target, counting while the call runs. */
-type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'startedAt' | 'finishedAt'>
+type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'startedAt' | 'finishedAt' | 'durationMs'>
 
 function ToolChip({ tc }: { tc: TickerToolCall }) {
   const done = tc.result !== undefined
@@ -800,6 +800,15 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
       <span>{tc.name}</span>
       {toolTarget(tc) && <span className="text-zinc-500">{toolTarget(tc)}</span>}
       {!done && <ElapsedBadge startedAt={tc.startedAt} />}
+      {/* #445: server-measured duration beats the client clock pair
+          (correct across reload and tape replay); a finished call
+          without one (pre-#445 row, malformed-args error) stays
+          quiet rather than faking a duration. */}
+      {done && tc.durationMs !== undefined && (
+        <span className="tabular-nums text-zinc-500">
+          {formatElapsed(tc.durationMs)}
+        </span>
+      )}
       {!done && <span className="run-pulse text-amber-300">●</span>}
     </span>
   )
@@ -10628,16 +10637,16 @@ export function Composer() {
         appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
       }
     } else if (ev.type === 'tool_result') {
-      finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result)
+      finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result, ev.duration_ms)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
-      // Close the call's tape segment: response summary + client-measured time.
+      // Close the call's tape segment: response summary + duration.
+      // #445: the server-measured duration is preferred (it is correct
+      // even when the chip started before this client connected); the
+      // client clock pair stays the fallback for pre-#445 servers.
       {
-        const callId = ev.call_id ?? ''
-        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
-        const tc = msg?.toolCalls?.slice().reverse().find((t) => t.id === callId)
         const elapsed =
-          tc?.startedAt && tc?.finishedAt
-            ? formatElapsed(tc.finishedAt - tc.startedAt)
+          ev.duration_ms !== undefined
+            ? formatElapsed(ev.duration_ms)
             : undefined
         appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
       }
@@ -10698,12 +10707,15 @@ export function Composer() {
       } else if (ev.kind === 'tool_progress') {
         if (ev.chunk) subAgentToolProgress(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.chunk)
       } else if (ev.kind === 'tool_result') {
-        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
-        const childTool = msg?.toolCalls?.find((call) => call.id === spawnCallId)?.subAgent?.tools.find((tool) => tool.id === ev.tool_call_id)
-        const elapsed = childTool?.startedAt ? formatElapsed(Date.now() - childTool.startedAt) : undefined
+        // #445: server-measured duration preferred; client clock as
+        // the live fallback for servers that do not stamp it.
+        const elapsed =
+          ev.duration_ms !== undefined
+            ? formatElapsed(ev.duration_ms)
+            : undefined
         const resultChunk = tapeChunkForEvent(tapeEvent, elapsed)
         if (resultChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, resultChunk)
-        subAgentToolResult(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.result)
+        subAgentToolResult(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.result, ev.duration_ms)
       } else if (ev.kind === 'approval_request') {
         setStatus(bufKey, 'running-tool')
         setPendingApproval({
@@ -10717,7 +10729,7 @@ export function Composer() {
         setPendingApproval((a) => (a && a.callId === ev.approval_call_id ? null : a))
       }
     } else if (ev.type === 'sub_agent_done') {
-      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note)
+      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note, ev.duration_ms)
       appendSubAgentTelemetry(
         bufKey,
         curId,

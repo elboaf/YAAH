@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -602,6 +603,10 @@ async def run_sub_agent(
                             "args": args,
                         }
                     )
+                # #445: server-side wall clock for this call (gate wait
+                # included) - the transcript entry carries it so a
+                # reloaded sub-agent trace shows real durations.
+                _t0 = time.monotonic()
                 if name == "load_skill":
                     result = skill_registry.load_skill_into_messages(
                         args, loaded_skills, messages
@@ -631,6 +636,7 @@ async def run_sub_agent(
                         result = None
                     if result is None:
                         result = await _exec(name, args, tc.get("id", ""))
+                duration_ms = int((time.monotonic() - _t0) * 1000)
                 if on_event:
                     on_event(
                         {
@@ -638,6 +644,7 @@ async def run_sub_agent(
                             "tool_call_id": tc.get("id", ""),
                             "name": name,
                             "result": result,
+                            "duration_ms": duration_ms,
                         }
                     )
 
@@ -650,6 +657,8 @@ async def run_sub_agent(
                 tool_call_id=tc.get("id", ""),
                 name=name,
                 args=args,
+                # #445: server-measured duration rides the snapshot.
+                duration_ms=duration_ms,
             )
             messages.append(
                 {
@@ -969,6 +978,10 @@ async def spawn_batch(
                     }
                 )
 
+            # #445: the sub-run's own wall time (queue wait before the
+            # semaphore released is NOT included - the parent's spawn
+            # tool row carries that). Rides sub_agent_done only.
+            _sub_t0 = time.monotonic()
             result = await run_sub_agent(
                 defn,
                 prompt,
@@ -994,6 +1007,9 @@ async def spawn_batch(
                         "agent_type": defn.name,
                         "status": result["status"],
                         "turns": result["turns"],
+                        "duration_ms": int(
+                            (time.monotonic() - _sub_t0) * 1000
+                        ),
                         **({"note": result["note"]} if result.get("note") else {}),
                     }
                 )

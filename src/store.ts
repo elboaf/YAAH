@@ -15,6 +15,10 @@ export interface ToolCall {
   /** Client clock ms when the call started / finished (liveness UI). */
   startedAt?: number
   finishedAt?: number
+  /** Server-measured wall time of the call (#445). Present once the
+   *  tool_result event lands and on reloaded history; absent for
+   *  never-finished calls (rendered open-ended, not as 0.0s). */
+  durationMs?: number
   /** Content length of the owning message when the call started (#63):
    *  lets the renderer place answered ask_user cards in chronological
    *  order, between the emissions before and after the question. */
@@ -39,6 +43,8 @@ export interface SubAgentToolCall {
   output?: string
   startedAt?: number
   finishedAt?: number
+  /** Server-measured wall time (#445). */
+  durationMs?: number
 }
 
 /** A live sub-agent run (spawn_agent tool call in flight). */
@@ -59,6 +65,9 @@ export interface SubAgentRun {
   telemetry: string
   turns?: number
   note?: string
+  /** Total server-measured run time of the spawn (#445), from the
+   *  spawn_agent tool row's duration_ms on reload. */
+  durationMs?: number
 }
 
 export interface ChatMessage {
@@ -374,7 +383,13 @@ interface AgentState {
   /** Remove one optimistic message (failed-send rollback). */
   removeMessage: (key: string, msgId: string) => void
   startToolCall: (key: string, msgId: string, callId: string, name: string, args: unknown) => void
-  finishToolCall: (key: string, msgId: string, callId: string, result: unknown) => void
+  finishToolCall: (
+    key: string,
+    msgId: string,
+    callId: string,
+    result: unknown,
+    durationMs?: number,
+  ) => void
   appendToolOutput: (key: string, msgId: string, callId: string, chunk: string) => void
   /** At an approved exit_plan tool_result: close the planning message and
    *  open a fresh assistant message (flagged with the plan) for everything
@@ -387,9 +402,24 @@ interface AgentState {
   subAgentTextDelta: (key: string, msgId: string, callId: string, text: string) => void
   subAgentToolStart: (key: string, msgId: string, callId: string, toolCallId: string, name: string, args: unknown) => void
   subAgentToolProgress: (key: string, msgId: string, callId: string, toolCallId: string, chunk: string) => void
-  subAgentToolResult: (key: string, msgId: string, callId: string, toolCallId: string, result: unknown) => void
+  subAgentToolResult: (
+    key: string,
+    msgId: string,
+    callId: string,
+    toolCallId: string,
+    result: unknown,
+    durationMs?: number,
+  ) => void
   appendSubAgentTelemetry: (key: string, msgId: string, callId: string, chunk: string) => void
-  finishSubAgent: (key: string, msgId: string, callId: string, status: string, turns: number, note?: string) => void
+  finishSubAgent: (
+    key: string,
+    msgId: string,
+    callId: string,
+    status: string,
+    turns: number,
+    note?: string,
+    durationMs?: number,
+  ) => void
   /** Mark every still-running sub-agent on a message as interrupted and
    *  settle its unfinished tool chips — called when the stream ends
    *  (done, stopped, error, or abort) so no block pulses forever. */
@@ -975,7 +1005,7 @@ export const useAgent = create<AgentState>((set, get) => ({
     }))
   },
 
-  finishToolCall: (key, msgId, callId, result) => {
+  finishToolCall: (key, msgId, callId, result, durationMs) => {
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
@@ -984,7 +1014,14 @@ export const useAgent = create<AgentState>((set, get) => ({
           const tcs = [...m.toolCalls]
           for (let i = tcs.length - 1; i >= 0; i--) {
             if (tcs[i].id === callId && tcs[i].result === undefined) {
-              tcs[i] = { ...tcs[i], result, finishedAt: Date.now() }
+              // #445: prefer the server-measured duration; the client
+              // finishedAt/startedAt pair stays the live fallback.
+              tcs[i] = {
+                ...tcs[i],
+                result,
+                finishedAt: Date.now(),
+                ...(durationMs !== undefined ? { durationMs } : {}),
+              }
               break
             }
           }
@@ -1166,7 +1203,7 @@ export const useAgent = create<AgentState>((set, get) => ({
     }))
   },
 
-  subAgentToolResult: (key, msgId, callId, toolCallId, result) => {
+  subAgentToolResult: (key, msgId, callId, toolCallId, result, durationMs) => {
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
@@ -1181,7 +1218,14 @@ export const useAgent = create<AgentState>((set, get) => ({
                 (tool) => tool.id === toolCallId && tool.result === undefined,
               )
               if (j !== -1) {
-                tools[j] = { ...tools[j], result, finishedAt: Date.now() }
+                // #445: server-measured duration preferred over the
+                // client clock pair (live fallback).
+                tools[j] = {
+                  ...tools[j],
+                  result,
+                  finishedAt: Date.now(),
+                  ...(durationMs !== undefined ? { durationMs } : {}),
+                }
               }
               tcs[i] = { ...tcs[i], subAgent: { ...sa, tools } }
               break
@@ -1215,7 +1259,7 @@ export const useAgent = create<AgentState>((set, get) => ({
     }))
   },
 
-  finishSubAgent: (key, msgId, callId, status, turns, note) => {
+  finishSubAgent: (key, msgId, callId, status, turns, note, durationMs) => {
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
@@ -1232,6 +1276,7 @@ export const useAgent = create<AgentState>((set, get) => ({
                   status: status as SubAgentRun['status'],
                   turns,
                   note,
+                  ...(durationMs !== undefined ? { durationMs } : {}),
                   telemetry:
                     (sa.telemetry + `\n${status === 'completed' ? '✓' : status === 'cancelled' ? '■' : '!'} ${status} · ${turns} turns    `).slice(-TAPE_CAP),
                 },
@@ -1357,6 +1402,9 @@ export function buildMessages(
 ): ChatMessage[] {
   const resultById = new Map<string, unknown>()
   const nameById = new Map<string, string>()
+  // #445: server-measured duration per tool row (undefined = never
+  // finished / pre-#445 row; renders open-ended, not as 0.0s).
+  const durationById = new Map<string, number | undefined>()
   const subAgentById = new Map<string, SubAgentRun>()
   // Ids that a persisted assistant tool_calls row actually called. UI rows
   // (git commands run from the strip) carry a result but have no assistant
@@ -1370,6 +1418,7 @@ export function buildMessages(
     const id = r.tool_call_id ?? r.tool_calls?.[0]?.id ?? ''
     if (!id) continue
     resultById.set(id, safeParse(r.content))
+    durationById.set(id, r.duration_ms ?? undefined)
     const tc = r.tool_calls?.[0]
     const name =
       tc?.function?.name ?? (tc as { name?: string } | undefined)?.name
@@ -1392,6 +1441,9 @@ export function buildMessages(
             name: e.name,
             args: e.args,
             result: safeParse(e.content),
+            ...(typeof e.duration_ms === 'number'
+              ? { durationMs: e.duration_ms }
+              : {}),
           })
         }
       }
@@ -1406,6 +1458,9 @@ export function buildMessages(
         telemetry: '',
         turns: snap.turns,
         note: snap.note,
+        ...(typeof r.duration_ms === 'number'
+          ? { durationMs: r.duration_ms }
+          : {}),
       })
     }
   }
@@ -1480,6 +1535,8 @@ export function buildMessages(
             name: nameById.get(id) ?? 'tool',
             args: undefined,
             result: safeParse(r.content),
+            // #445: undefined for never-finished calls (open-ended).
+            ...(id ? { durationMs: durationById.get(id) } : {}),
           },
         ],
       })
@@ -1494,6 +1551,9 @@ export function buildMessages(
         ...(c.id && subAgentById.has(c.id)
           ? { subAgent: subAgentById.get(c.id) }
           : {}),
+        // #445: reloaded calls keep the server-measured duration
+        // (undefined for never-finished calls and pre-#445 rows).
+        ...(c.id ? { durationMs: durationById.get(c.id) } : {}),
         contentOffset: open?.content.length ?? (r.content ?? '').length,
       }))
       // A plan boundary always opens a fresh block; close the old one.
