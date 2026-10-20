@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -2177,7 +2178,10 @@ async def _run_agent_claimed(
     # model learns it can ask for approval at all).
     if current_access_mode() == "plan":
         tools = tools + [EXIT_PLAN_SCHEMA]
-    async def _record_parent_tool(name: str, args: dict, result: object, tool_workspace: str) -> None:
+    async def _record_parent_tool(
+        name: str, args: dict, result: object, tool_workspace: str,
+        *, duration_ms: int | None = None,
+    ) -> None:
         # Git-activity telemetry was removed with worktree isolation (ADR 0008).
         return None
     steer_ev = asyncio.Event()
@@ -2654,6 +2658,10 @@ async def _run_agent_claimed(
 
             # Execute each regular tool call in order
             for tc in regular_calls:
+                # #445: per-call timer; set only once this call's args
+                # decode (below), so a malformed-args call carries no
+                # duration instead of a stale one from the previous call.
+                _t0 = None
                 if cancel_ev.is_set():
                     async for _fev in _finalize_file_changes():
                         yield _fev
@@ -2682,6 +2690,12 @@ async def _run_agent_claimed(
                     else:
                         result = {"error": f"Invalid JSON arguments: {e}"}
                 else:
+                    # #445: measure once, at the source - the wall
+                    # clock the tool ran under, stamped onto the
+                    # result event and the persisted row so reloads
+                    # and tape replay keep real durations (client
+                    # startedAt/finishedAt stays the live fallback).
+                    _t0 = time.monotonic()
                     yield _ndjson(
                         {
                             "type": "tool_start",
@@ -2853,7 +2867,16 @@ async def _run_agent_claimed(
                         )
                     }
 
-                await _record_parent_tool(name, args, result, turn_workspace)
+                # #445: duration_ms = the server-measured wall time of
+                # this tool call (gate wait included). Malformed-args
+                # paths never started a timer and carry no duration.
+                duration_ms = (
+                    int((time.monotonic() - _t0) * 1000)
+                    if _t0 is not None else None
+                )
+                await _record_parent_tool(
+                    name, args, result, turn_workspace, duration_ms=duration_ms
+                )
                 result_str = _clip_result_str(result)
                 # A tool that attached an image (view_image) becomes a
                 # multimodal parts list for the live LLM call.
@@ -2872,6 +2895,8 @@ async def _run_agent_claimed(
                         "result": result,
                         "image": image_rel,
                         "call_id": tc.get("id", ""),
+                        **({"duration_ms": duration_ms}
+                           if duration_ms is not None else {}),
                     }
                 )
 
@@ -2890,6 +2915,7 @@ async def _run_agent_claimed(
                     tool_calls=[{"id": tc.get("id", ""), "name": name}],
                     tool_call_id=tc.get("id", ""),
                     images=[image_rel] if image_rel else None,
+                    duration_ms=duration_ms,
                 )
 
                 # Steer boundary (#7): the queued message lands after the
@@ -2930,6 +2956,9 @@ async def _run_agent_claimed(
             # Progress events flow through a queue so the generator can
             # yield them live while the batch task runs.
             if spawn_calls and not cancel_ev.is_set():
+                # #445: per-spawn start clocks, filled by the loop
+                # below and consumed after the batch lands.
+                _spawn_t0: dict = {}
                 calls = []
                 for i, tc in enumerate(spawn_calls):
                     try:
@@ -2956,6 +2985,10 @@ async def _run_agent_claimed(
                             "call_id": tc.get("id", ""),
                         }
                     )
+                    # #445: per-spawn wall time - the batch runs the
+                    # spawns in parallel, so this is queue wait plus the
+                    # sub's own runtime.
+                    _spawn_t0[tc.get("id", "")] = time.monotonic()
 
                 queue: asyncio.Queue = asyncio.Queue()
 
@@ -3010,7 +3043,9 @@ async def _run_agent_claimed(
                     )
                 )
 
-                async def _persist_spawn_result(tc: dict, result: dict) -> tuple:
+                async def _persist_spawn_result(
+                    tc: dict, result: dict, *, duration_ms: int | None = None
+                ) -> tuple:
                     """Persist one spawn_agent result row: summary in the
                     tool content, full transcript in its own column.
                     Returns (summary, result_str) for the parent context."""
@@ -3024,6 +3059,7 @@ async def _run_agent_claimed(
                         tool_calls=[{"id": tc.get("id", ""), "name": "spawn_agent"}],
                         tool_call_id=tc.get("id", ""),
                         sub_agent_transcript=summary | {"transcript": transcript},
+                        duration_ms=duration_ms,
                     )
                     return summary, result_str
 
@@ -3085,13 +3121,26 @@ async def _run_agent_claimed(
                     result = batch_results.get(
                         tc.get("id", ""), {"error": "sub-agent produced no result"}
                     )
-                    summary, result_str = await _persist_spawn_result(tc, result)
+                    _t0 = _spawn_t0.pop(tc.get("id", ""), None)
+                    duration_ms = (
+                        int((time.monotonic() - _t0) * 1000)
+                        if _t0 is not None else None
+                    )
+                    await _persist_spawn_result(
+                        tc, result, duration_ms=duration_ms
+                    )
+                    summary = {
+                        k: v for k, v in result.items() if k != "transcript"
+                    }
+                    result_str = _clip_result_str(summary)
                     yield _ndjson(
                         {
                             "type": "tool_result",
                             "name": "spawn_agent",
                             "result": summary,
                             "call_id": tc.get("id", ""),
+                            **({"duration_ms": duration_ms}
+                               if duration_ms is not None else {}),
                         }
                     )
                     messages.append(

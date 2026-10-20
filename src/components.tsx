@@ -784,7 +784,7 @@ function toolTarget(tc: ToolCall): string {
 }
 
 /** One compact chip: glyph + name + target, counting while the call runs. */
-type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'startedAt' | 'finishedAt'>
+type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'startedAt' | 'finishedAt' | 'durationMs'>
 
 function ToolChip({ tc }: { tc: TickerToolCall }) {
   const done = tc.result !== undefined
@@ -800,6 +800,15 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
       <span>{tc.name}</span>
       {toolTarget(tc) && <span className="text-zinc-500">{toolTarget(tc)}</span>}
       {!done && <ElapsedBadge startedAt={tc.startedAt} />}
+      {/* #445: server-measured duration beats the client clock pair
+          (correct across reload and tape replay); a finished call
+          without one (pre-#445 row, malformed-args error) stays
+          quiet rather than faking a duration. */}
+      {done && tc.durationMs !== undefined && (
+        <span className="tabular-nums text-zinc-500">
+          {formatElapsed(tc.durationMs)}
+        </span>
+      )}
       {!done && <span className="run-pulse text-amber-300">●</span>}
     </span>
   )
@@ -839,6 +848,15 @@ function formatElapsed(ms: number): string {
   if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`
   if (ms < 60_000) return `${Math.floor(ms / 1000)}s`
   return `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, '0')}`
+}
+
+/** Client-clock duration for a finished live call: the startedAt/
+    finishedAt pair the store stamps on completion, clamped nonnegative.
+    Undefined when either half is missing - only complete pairs are worth
+    rendering. */
+function clientElapsedMs(startedAt?: number, finishedAt?: number): number | undefined {
+  if (typeof startedAt !== 'number' || typeof finishedAt !== 'number') return undefined
+  return Math.max(0, finishedAt - startedAt)
 }
 
 /** Live elapsed time since `startedAt`, tabular so digits don't jitter. */
@@ -10628,17 +10646,23 @@ export function Composer() {
         appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
       }
     } else if (ev.type === 'tool_result') {
-      finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result)
+      finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result, ev.duration_ms)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
-      // Close the call's tape segment: response summary + client-measured time.
+      // Close the call's tape segment: response summary + duration.
+      // #445: the server-measured duration is preferred (it is correct
+      // even when the chip started before this client connected); the
+      // client clock pair stays the fallback for pre-#445 servers.
       {
         const callId = ev.call_id ?? ''
         const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
         const tc = msg?.toolCalls?.slice().reverse().find((t) => t.id === callId)
+        const clientMs = clientElapsedMs(tc?.startedAt, tc?.finishedAt)
         const elapsed =
-          tc?.startedAt && tc?.finishedAt
-            ? formatElapsed(tc.finishedAt - tc.startedAt)
-            : undefined
+          ev.duration_ms !== undefined
+            ? formatElapsed(ev.duration_ms)
+            : clientMs !== undefined
+              ? formatElapsed(clientMs)
+              : undefined
         appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
       }
       if (ev.name === 'ask_user') {
@@ -10698,12 +10722,26 @@ export function Composer() {
       } else if (ev.kind === 'tool_progress') {
         if (ev.chunk) subAgentToolProgress(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.chunk)
       } else if (ev.kind === 'tool_result') {
-        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
-        const childTool = msg?.toolCalls?.find((call) => call.id === spawnCallId)?.subAgent?.tools.find((tool) => tool.id === ev.tool_call_id)
-        const elapsed = childTool?.startedAt ? formatElapsed(Date.now() - childTool.startedAt) : undefined
-        const resultChunk = tapeChunkForEvent(tapeEvent, elapsed)
-        if (resultChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, resultChunk)
-        subAgentToolResult(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.result)
+        // Stamps finishedAt on the child row - the client-clock fallback
+        // below reads that pair.
+        subAgentToolResult(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.result, ev.duration_ms)
+        // #445: server-measured duration preferred; client clock as
+        // the live fallback for servers that do not stamp it.
+        {
+          const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
+          const childTool = msg?.toolCalls?.find((call) => call.id === spawnCallId)?.subAgent?.tools.find(
+            (tool) => tool.id === ev.tool_call_id,
+          )
+          const clientMs = clientElapsedMs(childTool?.startedAt, childTool?.finishedAt)
+          const elapsed =
+            ev.duration_ms !== undefined
+              ? formatElapsed(ev.duration_ms)
+              : clientMs !== undefined
+                ? formatElapsed(clientMs)
+                : undefined
+          const resultChunk = tapeChunkForEvent(tapeEvent, elapsed)
+          if (resultChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, resultChunk)
+        }
       } else if (ev.kind === 'approval_request') {
         setStatus(bufKey, 'running-tool')
         setPendingApproval({
@@ -10717,7 +10755,7 @@ export function Composer() {
         setPendingApproval((a) => (a && a.callId === ev.approval_call_id ? null : a))
       }
     } else if (ev.type === 'sub_agent_done') {
-      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note)
+      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note, ev.duration_ms)
       appendSubAgentTelemetry(
         bufKey,
         curId,

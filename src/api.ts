@@ -239,6 +239,8 @@ export interface StoredMessage {
   /** Structured text attachments (#142), parsed from the messages column. */
   attachments?: Array<{ name: string; size: number; content?: string; path?: string }> | null
   tool_call_id?: string | null
+  /** #445: server-measured tool-call duration in ms (tool rows only). */
+  duration_ms?: number | null
   tool_calls: Array<{
     id?: string
     type?: string
@@ -256,6 +258,8 @@ export interface StoredMessage {
       name?: string
       tool_call_id?: string
       args?: unknown
+      /** #445: server-measured duration of this nested call. */
+      duration_ms?: number
     }>
   } | null
 }
@@ -1321,6 +1325,9 @@ export interface AgentEvent {
   call_id?: string
   /** Inner child tool ID, distinct from the parent spawn ID. */
   tool_call_id?: string
+  /** Server-measured wall time of the call in ms (#445); omitted on
+   *  tool_start and for paths that never executed (malformed args). */
+  duration_ms?: number
   /** Namespaced approval gate ID used only to answer access requests. */
   approval_call_id?: string
   /** Spoken briefing for read-aloud (#66) — speech-only, never rendered. */

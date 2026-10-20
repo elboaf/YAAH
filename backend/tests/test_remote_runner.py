@@ -833,3 +833,37 @@ async def test_remote_ask_user_cancelled_run_returns_not_answered(_isolate_db):
     result = next(e for e in _events(stream) if e["type"] == "tool_result"
                   and e["name"] == "ask_user")
     assert result["result"]["answer"] is None
+
+
+@pytest.mark.asyncio
+async def test_remote_tool_result_carries_duration():
+    """#445: the remote runner measures its tool calls at the source too
+    - the tool_result event (and the committed transcript row) carry
+    duration_ms so remote conversations survive a reload with real
+    durations."""
+    session = FakeSession("host-owner")
+    _register(session)
+    _script_events(
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": json.dumps({"path": "a.py"})},
+        }]},
+        {"type": "finish", "reason": "tool_calls"},
+    )
+    _script_events(
+        {"type": "content", "text": "answer"},
+        {"type": "finish", "reason": "stop"},
+    )
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "go", "remote:host-ws:C:/repo"))
+    tr = next(e for e in _events(stream) if e["type"] == "tool_result")
+    assert isinstance(tr.get("duration_ms"), int), tr
+
+    # The committed transcript row carries the same duration.
+    commit = next(
+        c for c in session.calls
+        if c[1].endswith("/commit") and c[0] == "POST"
+    )
+    rows = commit[2]["messages"]
+    tool_row = next(r for r in rows if r["role"] == "tool")
+    assert tool_row["duration_ms"] == tr["duration_ms"]
