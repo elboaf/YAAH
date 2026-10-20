@@ -2658,6 +2658,10 @@ async def _run_agent_claimed(
 
             # Execute each regular tool call in order
             for tc in regular_calls:
+                # #445: per-call timer; set only once this call's args
+                # decode (below), so a malformed-args call carries no
+                # duration instead of a stale one from the previous call.
+                _t0 = None
                 if cancel_ev.is_set():
                     async for _fev in _finalize_file_changes():
                         yield _fev
@@ -2868,9 +2872,8 @@ async def _run_agent_claimed(
                 # paths never started a timer and carry no duration.
                 duration_ms = (
                     int((time.monotonic() - _t0) * 1000)
-                    if "_t0" in dir() else None
+                    if _t0 is not None else None
                 )
-                _t0 = None
                 await _record_parent_tool(
                     name, args, result, turn_workspace, duration_ms=duration_ms
                 )

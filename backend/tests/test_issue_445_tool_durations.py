@@ -246,3 +246,66 @@ async def test_run_sub_agent_transcript_stamps_durations(monkeypatch, tmp_path):
     tool_entries = [e for e in result["transcript"] if e.get("role") == "tool"]
     assert tool_entries, "the nested call must be in the transcript"
     assert isinstance(tool_entries[0].get("duration_ms"), int)
+
+
+@pytest.mark.asyncio
+async def test_malformed_then_valid_call_ordering(fake_model, tmp_path):
+    """Regression: a malformed-args call AFTER a valid one in the same
+    turn must not crash the loop (stale/None timer) nor inherit the
+    previous call's duration."""
+    # Valid call FIRST, malformed second: the stale-timer trap. After the
+    # valid call the timer slot is None; an existence-guard ("_t0" in
+    # dir()) would still try monotonic() - None and blow up the turn.
+    cid = await create_conversation("bad second")
+    bad = {
+        "id": "b1", "type": "function",
+        "function": {"name": "bash", "arguments": "{oops"},
+    }
+    fake_model.append([{"type": "tool_calls", "tool_calls": [_bash_call("g1"), bad]}])
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "go", str(tmp_path)))
+    trs = {e["call_id"]: e for e in events if e["type"] == "tool_result"}
+    assert set(trs) == {"b1", "g1"}
+    assert isinstance(trs["g1"].get("duration_ms"), int)
+    assert "duration_ms" not in trs["b1"]
+
+    rows = await get_messages(cid)
+    dur = {r["tool_call_id"]: r["duration_ms"] for r in rows if r["role"] == "tool"}
+    assert isinstance(dur["g1"], int), "valid call keeps its own duration"
+    assert dur["b1"] is None, "malformed call must not carry a duration"
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_malformed_first_call_survives(monkeypatch, tmp_path):
+    """Regression: the sub-agent's malformed-args call (first in its run)
+    must produce an error result row with no duration - not kill the run
+    with an unbound duration_ms (NameError -> status=error)."""
+    import backend.agent.model_client as model_client
+    from backend.agent import subagents
+
+    scripts = [
+        [
+            {"type": "tool_calls", "tool_calls": [{
+                "id": "u0", "type": "function",
+                "function": {"name": "bash", "arguments": "{nope"},
+            }]},
+            {"type": "finish"},
+        ],
+        [{"type": "content", "text": "recovered"}, {"type": "finish"}],
+    ]
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return FakeStream(scripts.pop(0))
+
+    monkeypatch.setattr(model_client, "chat", fake_chat)
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("general-purpose"),
+        "call bash with broken args, then recover",
+        str(tmp_path),
+    )
+    assert result["status"] == "completed", result
+    tool_entries = [e for e in result["transcript"] if e.get("role") == "tool"]
+    assert tool_entries, "the malformed call must still be recorded"
+    assert "error" in json.loads(tool_entries[0]["content"])
+    assert tool_entries[0].get("duration_ms") is None

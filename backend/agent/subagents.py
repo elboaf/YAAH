@@ -589,6 +589,10 @@ async def run_sub_agent(
                 return True
             name = tc["function"]["name"]
             args = {}
+            # #445: per-call duration; None unless the call executed,
+            # so a malformed-args call records no timing (and never a
+            # stale one from the previous call).
+            duration_ms = None
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")
             except json.JSONDecodeError as e:
