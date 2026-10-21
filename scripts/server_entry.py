@@ -19,8 +19,11 @@ management, and the interactive setup wizard):
     yaah-server-setup setup
         Interactive installer: prompts for the passphrase + display name,
         copies itself to %LOCALAPPDATA%\\YAAH\\, registers the Windows
-        service (automatic startup, running as your user so the workspace
-        is your real home), and starts it. Needs an elevated prompt.
+        service (automatic startup, running as LocalSystem - no account
+        password; the installing user's profile is recorded in the
+        service's Parameters so the workspace is their real home), and
+        starts it. Needs an elevated prompt (UAC consent for admins, a
+        credential prompt for standard users).
         This is also what happens when you double-click the exe.
     yaah-server-setup install|remove|start|stop|restart
         Service management (elevated prompt).
@@ -50,6 +53,15 @@ SERVICE_NAME = "YaahServer"
 SERVICE_DISPLAY = "YAAH Headless Server"
 SERVICE_DESC = "YAAH remote-exec host: serves workspace tools to YAAH desktop clients on the LAN."
 WIN_INSTALL_DIR = "YAAH"
+
+# The service runs as LocalSystem (CreateService's default - the wizard
+# passes no --username/--password), whose Path.home() is
+# System32\config\systemprofile. The wizard records the installing
+# user's real profile under the service's Parameters key; SvcDoRun
+# re-points the per-user paths there before any backend import resolves
+# Path.home() (backend.agent.config captures CONFIG_PATH at import).
+PARAM_SUBKEY = r"SYSTEM\CurrentControlSet\Services\YaahServer"
+PROFILE_DIR_VALUE = "ProfileDir"
 
 
 def run_server(host: str, port: int) -> None:
@@ -129,9 +141,12 @@ def _service_class():
             import servicemanager
 
             try:
-                # Passphrase comes from ~/.yaah/config.json (setup wrote it
-                # as the user); mDNS stays on — a service has the same LAN
-                # presence as a console run.
+                # Started as LocalSystem: re-point the per-user paths at
+                # the profile setup recorded (the passphrase config lives
+                # there) before anything resolves Path.home(). mDNS stays
+                # on — a service has the same LAN presence as a console
+                # run.
+                _apply_service_profile_dir()
                 run_server("0.0.0.0", 8765)
             except Exception as exc:  # noqa: BLE001 - SCM needs a clean exit
                 hint = ""
@@ -147,6 +162,45 @@ def _service_class():
                 self.ReportServiceStatus(win32serviceutil.SERVICE_STOPPED)
 
     return YaahService
+
+
+def _apply_service_profile_dir() -> bool:
+    """Point per-user path resolution at the installing user's profile.
+
+    The wizard stored the profile directory in the service's Parameters
+    key (PARAM_SUBKEY + Parameters, value ProfileDir, REG_SZ) at install
+    time. Reading it here - before any backend import, since
+    backend.agent.config resolves its config path via Path.home() at
+    module import - makes USERPROFILE, HOMEDRIVE/HOMEPATH and HOME agree
+    on that directory: the passphrase config AND the advertised
+    workspace_root become the installing user's real home instead of
+    SYSTEM's systemprofile.
+
+    Best-effort by design: a missing or unreadable value leaves the
+    SYSTEM defaults in place (the server then runs with no passphrase
+    and refuses every remote request - the documented config-less
+    state).
+    """
+    try:
+        import winreg
+
+        with winreg.OpenKeyEx(
+            winreg.HKEY_LOCAL_MACHINE, PARAM_SUBKEY + r"\Parameters", 0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            profile, _vtype = winreg.QueryValueEx(key, PROFILE_DIR_VALUE)
+    except (ImportError, OSError):
+        return False
+    profile = str(profile).strip()
+    if not profile or not os.path.isdir(profile):
+        return False
+    norm = os.path.normpath(profile)
+    drive, rest = os.path.splitdrive(norm)
+    os.environ["USERPROFILE"] = norm
+    os.environ["HOMEDRIVE"] = drive or norm[:2]
+    os.environ["HOMEPATH"] = rest or "\\"
+    os.environ["HOME"] = norm
+    return True
 
 
 def _handle_service_command(argv: list[str]) -> int | None:
@@ -209,93 +263,6 @@ def _installed_exe() -> "os.PathLike | str":
     """Where this exe lives when installed (%LOCALAPPDATA%\\YAAH)."""
     local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(local, WIN_INSTALL_DIR, "yaah-server-setup.exe")
-
-
-def _grant_logon_right(user: str) -> bool:
-    """Grant ``SeServiceLogonRight`` to ``user`` (best-effort).
-
-    Services.msc grants this right implicitly when you enter an account's
-    password, but the programmatic path (pywin32's ChangeServiceConfig,
-    same as `sc.exe obj=`/`password=`) does NOT — the service then fails
-    to start with 1069 "logon failure: user has not been granted the
-    requested logon type" (event 7041 names the missing right). We run
-    elevated in the wizard, so LsaAddAccountRights just works.
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    if sys.platform != "win32":
-        return False
-
-    class LsaObjectAttributes(ctypes.Structure):
-        _fields_ = [
-            ("Length", wintypes.ULONG),
-            ("RootDirectory", wintypes.HANDLE),
-            ("ObjectName", wintypes.LPVOID),
-            ("Attributes", wintypes.ULONG),
-            ("SecurityDescriptor", wintypes.LPVOID),
-            ("SecurityQualityOfService", wintypes.LPVOID),
-        ]
-
-    class LsaUnicodeString(ctypes.Structure):
-        # LSA_UNICODE_STRING: Length/MaximumLength are BYTE counts (no NUL).
-        _fields_ = [
-            ("Length", wintypes.USHORT),
-            ("MaximumLength", wintypes.USHORT),
-            ("Buffer", wintypes.LPWSTR),
-        ]
-
-    def lsa_str(s: str) -> LsaUnicodeString:
-        us = LsaUnicodeString()
-        raw = s.encode("utf-16-le")
-        us.Length = len(raw)
-        us.MaximumLength = len(raw) + 2
-        us.Buffer = ctypes.cast(ctypes.create_unicode_buffer(s),
-                                wintypes.LPWSTR)
-        return us
-
-    advapi = ctypes.windll.advapi32
-    advapi.LsaAddAccountRights.argtypes = [
-        wintypes.HANDLE, wintypes.LPVOID,
-        ctypes.POINTER(LsaUnicodeString), wintypes.ULONG,
-    ]
-    sid_size = ctypes.c_ulong(0)
-    domain_size = ctypes.c_ulong(0)
-    use = ctypes.c_ulong(0)
-    lp_user = ctypes.c_wchar_p(user)
-
-    if not advapi.LookupAccountNameW(None, lp_user, None,
-                                     ctypes.byref(sid_size), None,
-                                     ctypes.byref(domain_size),
-                                     ctypes.byref(use)):
-        sid = ctypes.create_string_buffer(sid_size.value)
-        domain = ctypes.create_unicode_buffer(domain_size.value)
-        if not advapi.LookupAccountNameW(None, lp_user, sid,
-                                         ctypes.byref(sid_size), domain,
-                                         ctypes.byref(domain_size),
-                                         ctypes.byref(use)):
-            print(f"warning: could not resolve account {user!r} to a SID")
-            return False
-
-    oa = LsaObjectAttributes()
-    oa.Length = ctypes.sizeof(oa)
-    lsa = ctypes.c_void_p()
-    # NULL system name = local machine. NTSTATUS 0 = STATUS_SUCCESS.
-    if advapi.LsaOpenPolicy(None, ctypes.byref(oa), 0x00F0FFF,
-                            ctypes.byref(lsa)):
-        print("warning: could not open LSA policy to grant logon right")
-        return False
-    try:
-        rights = (LsaUnicodeString * 1)(lsa_str("SeServiceLogonRight"))
-        nt = advapi.LsaAddAccountRights(lsa, sid, rights, 1)
-        if nt == 0:
-            print(f"granted 'Log on as a service' right to {user}")
-            return True
-        print(f"warning: LsaAddAccountRights returned "
-              f"0x{nt & 0xFFFFFFFF:08x} for {user}")
-        return False
-    finally:
-        advapi.LsaClose(lsa)
 
 
 def _service_state() -> str:
@@ -361,7 +328,12 @@ def _run_setup_wizard() -> int:
         shutil.copy2(me, installed)
         print(f"installed server to {installed}")
 
-    user = getpass.getuser()
+    # Identity anchor: the passphrase is written HERE and the service's
+    # ProfileDir points HERE. If this process is elevated as a DIFFERENT
+    # account than the one that launched setup (UAC credential prompt),
+    # this records that admin's profile - SERVER-SETUP.md says to run
+    # setup from the account whose workspace you want.
+    profile = os.path.expanduser("~")
 
     print("YAAH headless server setup")
     print("==========================")
@@ -377,26 +349,39 @@ def _run_setup_wizard() -> int:
 
     _persist_remote({"passphrase": passphrase, "display_name": display})
     print(f"saved passphrase + display name ({display!r}) to "
-          f"%USERPROFILE%\\.yaah\\config.json")
+          f"{profile}\\.yaah\\config.json")
 
-    # Register + start the service as the current user. HandleCommandLine
-    # parses with getopt, which stops at the first positional — ALL options
-    # must come first and the verb is the LAST argument. (Verified against
+    # Register + start the service as LocalSystem: no --username/
+    # --password, so CreateService defaults the account to LocalSystem —
+    # no account password asked, no credentials stored (nothing breaks
+    # when a password changes), no SeServiceLogonRight grant needed
+    # (LocalSystem has it implicitly). HandleCommandLine parses with
+    # getopt, which stops at the first positional — ALL options must
+    # come first and the verb is the LAST argument. (Verified against
     # pywin32: any other order prints usage and exits 1.)
-    print(f"installing service as {user} (automatic startup)...")
-    rc = subprocess.run(
-        [installed, "--startup", "auto",
-         "--username", f".\\{user}", "--password", getpass.getpass(
-             f"Windows password for {user}: "), "install"],
-    ).returncode
+    print("installing service as LocalSystem (automatic startup)...")
+    rc = subprocess.run([installed, "--startup", "auto", "install"]).returncode
     if rc != 0:
         print(f"error: service install failed (exit {rc})")
         return rc
 
-    # The programmatic install does NOT grant the logon right (only
-    # Services.msc does) — without it the SCM refuses to start the
-    # service: "did not start due to a logon failure" (1069).
-    _grant_logon_right(user)
+    # The service runs as LocalSystem but reads its config from the
+    # profile the passphrase was just written to — record that directory
+    # in the service's Parameters key so every start re-points the
+    # per-user paths there (_apply_service_profile_dir).
+    try:
+        import winreg
+
+        with winreg.CreateKeyEx(
+            winreg.HKEY_LOCAL_MACHINE, PARAM_SUBKEY + r"\Parameters", 0,
+            winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            winreg.SetValueEx(key, PROFILE_DIR_VALUE, 0,
+                              winreg.REG_SZ, profile)
+        print(f"service profile dir recorded: {profile}")
+    except (ImportError, OSError) as exc:
+        print(f"warning: could not record the profile dir ({exc}) — "
+              "the service will start with no passphrase; re-run setup")
 
     # Auto-restart on crash (every failure, 5s apart, counters reset daily).
     # Best-effort: arg spacing varies across sc builds.

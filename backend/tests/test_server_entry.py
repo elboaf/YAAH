@@ -131,11 +131,12 @@ def test_entry_routes_service_verb_without_serving(entry, monkeypatch):
 
 
 def test_install_flags_before_verb_reach_handle_commandline(entry, monkeypatch):
-    """The setup wizard invokes `exe --startup auto --username … install`.
-    pywin32's HandleCommandLine parses with getopt, which stops at the
-    first positional: the verb must be the ONLY/last positional or it
-    prints usage and exits 1 (broke v0.16.4 AND v0.16.5 — verified live
-    against pywin32). Routing itself must accept flags before the verb."""
+    """The setup wizard invokes `exe --startup auto install` (LocalSystem
+    default: no --username/--password). pywin32's HandleCommandLine
+    parses with getopt, which stops at the first positional: the verb
+    must be the ONLY/last positional or it prints usage and exits 1
+    (broke v0.16.4 AND v0.16.5 — verified live against pywin32).
+    Routing itself must accept flags before the verb."""
     import types
 
     captured = {}
@@ -143,8 +144,7 @@ def test_install_flags_before_verb_reach_handle_commandline(entry, monkeypatch):
     fake_mod.HandleCommandLine = lambda cls, argv: captured.update(argv=argv)
     monkeypatch.setattr(entry, "_service_class", lambda: object())
     monkeypatch.setitem(sys.modules, "win32serviceutil", fake_mod)
-    argv = ["--startup", "auto", "--username", ".\\Administrator",
-            "--password", "x", "install"]
+    argv = ["--startup", "auto", "install"]
     assert entry._handle_service_command(argv) == 0
     assert captured["argv"] == [""] + argv
 
@@ -184,40 +184,157 @@ def test_start_and_await_gives_up_on_stopped(entry, monkeypatch):
     assert entry._start_and_await("some.exe", timeout=10) == "1  STOPPED"
 
 
-def test_wizard_fails_when_service_never_reaches_running(entry, monkeypatch,
-                                                         capsys):
-    """The whole point of the v0.16.x bug: a failed start must exit 1 and
-    say so — never print "installed and running" over a dead service.
+def _fake_winreg(monkeypatch, profile=None, fail_open=False, fail_write=False):
+    """A fake winreg so wizard/service tests never touch the real HKLM.
 
-    Windows-only: the wizard refuses to run off-Windows before any of the
-    patched seams are reached, so on Linux this asserts nothing."""
+    Records ProfileDir writes; fail_open/fail_write simulate registry
+    failures for the warning paths."""
+    import types
+
+    written: dict = {}
+    fake = types.ModuleType("winreg")
+    fake.KEY_READ, fake.KEY_WRITE, fake.KEY_WOW64_64KEY = 1, 2, 512
+    fake.REG_SZ = 1
+    fake.HKEY_LOCAL_MACHINE = 0x80000002
+
+    class _Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def open_key_ex(*a, **k):
+        if fail_open:
+            raise OSError("registry key missing")
+        return _Key()
+
+    def query_value_ex(key, name):
+        return profile, fake.REG_SZ
+
+    def create_key_ex(*a, **k):
+        if fail_write:
+            raise OSError("access denied")
+        return _Key()
+
+    def set_value_ex(key, name, _reserved, _typ, val):
+        written[name] = val
+
+    fake.OpenKeyEx = open_key_ex
+    fake.QueryValueEx = query_value_ex
+    fake.CreateKeyEx = create_key_ex
+    fake.SetValueEx = set_value_ex
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    return written
+
+
+def _install_wizard(entry, monkeypatch, capsys, state="4  RUNNING",
+                    **winreg_kwargs):
+    """Drive _run_setup_wizard end-to-end with every external touch faked.
+
+    Returns (exit code, captured output, list of subprocess argv lists,
+    ProfileDir writes from the fake winreg)."""
     import getpass as getpass_mod
     import subprocess as subprocess_mod
     import types
 
-    if sys.platform != "win32":
-        pytest.skip("the setup wizard is Windows-only")
-
     monkeypatch.setattr(entry, "_is_elevated", lambda: True)
     monkeypatch.setattr(entry, "_persist_remote", lambda updates: None)
-    monkeypatch.setattr(entry, "_grant_logon_right", lambda user: True)
-    monkeypatch.setattr(entry, "_service_state", lambda: "1  STOPPED")
-    monkeypatch.setattr(getpass_mod, "getuser", lambda: "tester")
-    answers = iter(["secret-pass", "win-password"])
+    monkeypatch.setattr(entry, "_service_state", lambda: state)
+    answers = iter(["secret-pass"])
     monkeypatch.setattr(getpass_mod, "getpass", lambda *a, **k: next(answers))
     monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    calls = []
 
     def fake_run(cmd, *a, **k):
-        cmd = [str(c) for c in cmd]
+        calls.append([str(c) for c in cmd])
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(subprocess_mod, "run", fake_run)
     # Self-copy skip: point _installed_exe at THIS process's own exe so the
     # wizard sees source == dest and never touches the disk.
     monkeypatch.setattr(entry, "_installed_exe", lambda: sys.executable)
-
+    written = _fake_winreg(monkeypatch, **winreg_kwargs)
     rc = entry._run_setup_wizard()
+    return rc, capsys.readouterr().out, calls, written
+
+
+def test_wizard_installs_local_system_without_password(entry, monkeypatch,
+                                                       capsys):
+    """#459: the wizard must never ask for a Windows account password and
+    must register the service with NO --username/--password — CreateService
+    then defaults the account to LocalSystem."""
+    rc, out, calls, written = _install_wizard(entry, monkeypatch, capsys)
+    assert rc == 0
+    assert "RUNNING" in entry._service_state()
+    install = [c for c in calls if c[-1] == "install"]
+    assert install == [[sys.executable, "--startup", "auto", "install"]]
+    assert not any("--username" in c or "--password" in c for c in calls)
+    assert not hasattr(entry, "_grant_logon_right")  # deleted with its purpose
+    assert "Windows password" not in out
+    # The profile the passphrase was written to is recorded for the service.
+    import os as os_mod
+
+    assert written["ProfileDir"] == os_mod.path.expanduser("~")
+    assert "LocalSystem" in out
+
+
+def test_wizard_warns_but_starts_when_profile_dir_fails(entry, monkeypatch,
+                                                        capsys):
+    """A failed Parameters write must not abort the install — the service
+    still comes up (config-less: it refuses remote requests until setup
+    is re-run), with a warning that says exactly that."""
+    rc, out, calls, _w = _install_wizard(
+        entry, monkeypatch, capsys, fail_write=True)
+    assert rc == 0
+    assert "could not record the profile dir" in out
+    assert [c for c in calls if c[-1] == "install"]
+
+
+def test_wizard_fails_when_service_never_reaches_running(entry, monkeypatch,
+                                                         capsys):
+    """The whole point of the v0.16.x bug: a failed start must exit 1 and
+    say so — never print "installed and running" over a dead service."""
+    rc, out, _calls, _w = _install_wizard(
+        entry, monkeypatch, capsys, state="1  STOPPED")
     assert rc == 1
-    out = capsys.readouterr().out
     assert "did not reach RUNNING" in out
     assert "installed and running" not in out
+
+
+# ---------------------------------------------------------------- profile-dir application
+
+def test_apply_service_profile_dir_sets_user_env(entry, monkeypatch,
+                                                 tmp_path):
+    """SvcDoRun re-points the per-user paths at the recorded profile
+    BEFORE backend imports resolve Path.home() — USERPROFILE, HOME and
+    HOMEDRIVE+HOMEPATH must all land on that directory."""
+    profile = str(tmp_path)
+    _fake_winreg(monkeypatch, profile=profile)
+    for var in ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME"):
+        monkeypatch.delenv(var, raising=False)
+    assert entry._apply_service_profile_dir() is True
+    import os as os_mod
+
+    assert os_mod.environ["USERPROFILE"] == profile
+    assert os_mod.environ["HOME"] == profile
+    drive, rest = os_mod.path.splitdrive(profile)
+    assert os_mod.environ["HOMEDRIVE"] == drive
+    assert os_mod.environ["HOMEPATH"] == rest
+
+
+def test_apply_service_profile_dir_missing_value_is_noop(entry, monkeypatch):
+    """No recorded profile (or unreadable key): leave SYSTEM defaults
+    alone — the config-less state, not a crash."""
+    _fake_winreg(monkeypatch, fail_open=True)
+    before = dict(os.environ)
+    assert entry._apply_service_profile_dir() is False
+    assert {k: os.environ.get(k) for k in ("USERPROFILE", "HOME")} == \
+        {k: before.get(k) for k in ("USERPROFILE", "HOME")}
+
+
+def test_apply_service_profile_dir_rejects_bogus_dir(entry, monkeypatch):
+    """A stale ProfileDir (profile deleted since install) must be ignored,
+    not handed to Path.home()."""
+    _fake_winreg(monkeypatch, profile=r"C:\no\such\profile")
+    assert entry._apply_service_profile_dir() is False
