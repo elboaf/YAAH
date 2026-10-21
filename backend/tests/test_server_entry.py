@@ -228,12 +228,21 @@ def _fake_winreg(monkeypatch, profile=None, fail_open=False, fail_write=False):
     return written
 
 
+def _windows_only():
+    """Skip on non-Windows: the wizard and the service-context env apply
+    only exist there (winreg, HKLM, HOMEDRIVE). Same convention as the
+    pre-#459 wizard test's platform guard."""
+    if sys.platform != "win32":
+        pytest.skip("Windows-only code path (wizard/service + winreg)")
+
+
 def _install_wizard(entry, monkeypatch, capsys, state="4  RUNNING",
                     **winreg_kwargs):
     """Drive _run_setup_wizard end-to-end with every external touch faked.
 
     Returns (exit code, captured output, list of subprocess argv lists,
     ProfileDir writes from the fake winreg)."""
+    _windows_only()
     import getpass as getpass_mod
     import subprocess as subprocess_mod
     import types
@@ -309,6 +318,7 @@ def test_apply_service_profile_dir_sets_user_env(entry, monkeypatch,
     """SvcDoRun re-points the per-user paths at the recorded profile
     BEFORE backend imports resolve Path.home() — USERPROFILE, HOME and
     HOMEDRIVE+HOMEPATH must all land on that directory."""
+    _windows_only()
     profile = str(tmp_path)
     _fake_winreg(monkeypatch, profile=profile)
     for var in ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME"):
@@ -326,6 +336,7 @@ def test_apply_service_profile_dir_sets_user_env(entry, monkeypatch,
 def test_apply_service_profile_dir_missing_value_is_noop(entry, monkeypatch):
     """No recorded profile (or unreadable key): leave SYSTEM defaults
     alone — the config-less state, not a crash."""
+    _windows_only()
     _fake_winreg(monkeypatch, fail_open=True)
     before = dict(os.environ)
     assert entry._apply_service_profile_dir() is False
@@ -336,5 +347,6 @@ def test_apply_service_profile_dir_missing_value_is_noop(entry, monkeypatch):
 def test_apply_service_profile_dir_rejects_bogus_dir(entry, monkeypatch):
     """A stale ProfileDir (profile deleted since install) must be ignored,
     not handed to Path.home()."""
+    _windows_only()
     _fake_winreg(monkeypatch, profile=r"C:\no\such\profile")
     assert entry._apply_service_profile_dir() is False
