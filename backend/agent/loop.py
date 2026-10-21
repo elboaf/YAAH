@@ -784,6 +784,9 @@ def _build_spoken_briefing_block() -> str:
         "  emphasis and no SSML or emotion markers like [excited] — the voice",
         "  reads those literally; punctuation is your prosody: commas pace a",
         "  line, one exclamation mark at most, a blank line marks a beat.",
+        "The <say> tag content is shaped by these rules and normalised by the",
+        "harness (backend/agent/speak.py) before synthesis; TTS-prep skills are",
+        "not needed for it and must not be loaded on routine turns.",
         ]
     text = "\n".join(lines) + "\n"
     persona = _say_persona()
