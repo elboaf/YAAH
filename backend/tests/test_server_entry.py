@@ -48,12 +48,14 @@ def entry():
 # ---------------------------------------------------------------- config persistence
 
 def test_passphrase_persists_to_shared_config(entry):
+    """Passphrase written via CLI persists to shared config.json."""
     rc = entry.main(["--passphrase", "hunter2"])
     assert rc == 0
     assert (load_config().get("remote") or {}).get("passphrase") == "hunter2"
 
 
 def test_display_name_persists_to_shared_config(entry):
+    """Display name written via CLI persists to shared config.json."""
     entry.main(["--display-name", "lab-box"])
     assert (load_config().get("remote") or {}).get("display_name") == "lab-box"
 
@@ -322,7 +324,9 @@ def test_apply_service_profile_dir_sets_user_env(entry, monkeypatch,
     profile = str(tmp_path)
     _fake_winreg(monkeypatch, profile=profile)
     for var in ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME"):
-        monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(var, "placeholder")  # records original for undo
+        monkeypatch.setenv(var, "placeholder")  # records original for undo
+        monkeypatch.delenv(var)
     assert entry._apply_service_profile_dir() is True
     import os as os_mod
 

@@ -96,6 +96,7 @@ def _service_class():
         _svc_description_ = SERVICE_DESC
 
         def __init__(self, args):
+            """Initialize the service framework."""
             import servicemanager
             import win32event
             import win32service
@@ -105,6 +106,7 @@ def _service_class():
             self.log = servicemanager.LogMsg
 
         def SvcStop(self):
+            """Handle the SCM stop signal."""
             # Signal SvcDoRun; without this the SCM stop times out and the
             # service hangs in STOP_PENDING ("Gave up waiting...").
             import win32event
@@ -114,6 +116,7 @@ def _service_class():
             win32event.SetEvent(self.hWaitStop)
 
         def SvcDoRun(self):
+            """Run the service: apply profile dir and start uvicorn."""
             import servicemanager
 
             servicemanager.LogMsg(
@@ -138,6 +141,7 @@ def _service_class():
             self.ReportServiceStatus(win32serviceutil.SERVICE_STOPPED)
 
         def _serve(self):
+            """Run uvicorn in a separate thread for clean service shutdown."""
             import servicemanager
 
             try:
@@ -204,6 +208,7 @@ def _apply_service_profile_dir() -> bool:
 
 
 def _handle_service_command(argv: list[str]) -> int | None:
+    """Route service verbs (install/remove/start/stop/restart)."""
     """Dispatch `install|remove|start|stop|restart` (and bare SCM start).
 
     Returns the exit code, or None if argv is not a service invocation.
@@ -243,6 +248,7 @@ def _handle_service_command(argv: list[str]) -> int | None:
 
 
 def _persist_remote(updates: dict) -> None:
+    """Merge updates into the shared remote-access config file."""
     """Merge updates into the ``remote`` section of the shared config."""
     from backend.agent.config import load_config, save_config
 
@@ -251,6 +257,7 @@ def _persist_remote(updates: dict) -> None:
 
 
 def _is_elevated() -> bool:
+    """Check if this process has Administrator (elevated) privileges."""
     import ctypes
 
     try:
@@ -260,6 +267,7 @@ def _is_elevated() -> bool:
 
 
 def _installed_exe() -> "os.PathLike | str":
+    """Path to the installed server executable (%LOCALAPPDATA%\YAAH)."""
     """Where this exe lives when installed (%LOCALAPPDATA%\\YAAH)."""
     local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(local, WIN_INSTALL_DIR, "yaah-server-setup.exe")
@@ -280,6 +288,7 @@ def _service_state() -> str:
 
 
 def _start_and_await(installed: str, timeout: float = 10.0) -> str:
+    """Start the service and poll the SCM until it reaches a terminal state."""
     """`start` the service, then poll the SCM until it settles.
 
     Returns the final state string ("4  RUNNING" on success). pywin32's
@@ -300,12 +309,17 @@ def _start_and_await(installed: str, timeout: float = 10.0) -> str:
         time.sleep(0.5)
 
 
-def _run_setup_wizard() -> int:
+def _run_setup_wizard(launch_profile: str | None = None) -> int:
     """Interactive Windows install: prompts, self-copy, service, start.
 
     Runs in-process in the same single exe that hosts the service; there
     is no companion installer binary.
+
+    If launch_profile is provided, it is the launching user's profile (captured
+    before UAC elevation). Otherwise the wizard captures it now and, if not
+    elevated, self-elevates and re-invokes with the profile passed through.
     """
+    import ctypes
     import getpass
     import shutil
     import socket
@@ -314,12 +328,27 @@ def _run_setup_wizard() -> int:
     if sys.platform != "win32":
         print("the setup wizard is Windows-only; on Linux install the .deb")
         return 1
-    if not _is_elevated():
-        print("error: run from an elevated (Administrator) prompt — "
-              "installing a Windows service requires it")
-        return 1
 
     me = os.path.abspath(sys.executable)
+
+    # Identity anchor: capture the launching user's profile BEFORE elevation.
+    # If a standard user elevates with a different admin's credentials, we
+    # must preserve the original user's profile for ProfileDir and the
+    # passphrase config — the issue spec explicitly requires this.
+    if launch_profile is None:
+        launch_profile = os.path.expanduser("~")
+
+    if not _is_elevated():
+        # Not elevated — re-spawn elevated via ShellExecuteW, passing the
+        # pre-elevation profile so the elevated wizard can use it.
+        arguments = f'setup "{launch_profile}"'
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", me, arguments, None, 1)
+        if result <= 32:
+            print("error: could not elevate for service installation")
+            return 1
+        return 0  # elevated process will continue
+
     installed = _installed_exe()
     # Self-copy: the service must not depend on this exe staying wherever
     # the user happened to run it from (e.g. Downloads).
@@ -328,12 +357,7 @@ def _run_setup_wizard() -> int:
         shutil.copy2(me, installed)
         print(f"installed server to {installed}")
 
-    # Identity anchor: the passphrase is written HERE and the service's
-    # ProfileDir points HERE. If this process is elevated as a DIFFERENT
-    # account than the one that launched setup (UAC credential prompt),
-    # this records that admin's profile - SERVER-SETUP.md says to run
-    # setup from the account whose workspace you want.
-    profile = os.path.expanduser("~")
+    profile = launch_profile
 
     print("YAAH headless server setup")
     print("==========================")
@@ -454,7 +478,9 @@ def entry(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
 
     if args and args[0] == "setup":
-        return _run_setup_wizard()
+        # args[1] may be the captured launch profile (passed during self-elevation)
+        launch_profile = args[1] if len(args) > 1 and not args[1].startswith("--") else None
+        return _run_setup_wizard(launch_profile)
     if args and args[0] == "serve":  # explicit foreground run
         return main(args[1:])
     if sys.platform == "win32" and not args:
