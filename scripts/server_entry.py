@@ -247,13 +247,36 @@ def _handle_service_command(argv: list[str]) -> int | None:
     return None
 
 
-def _persist_remote(updates: dict) -> None:
-    """Merge updates into the shared remote-access config file."""
-    """Merge updates into the ``remote`` section of the shared config."""
-    from backend.agent.config import load_config, save_config
+def _persist_remote(updates: dict, profile_dir: str | None = None) -> None:
+    """Merge updates into the remote-access config file.
 
-    cfg = load_config().get("remote") or {}
-    save_config({"remote": {**cfg, **updates}})
+    If profile_dir is provided, write directly to that user's config
+    (needed when the wizard elevates as a different admin). Otherwise
+    use the current process's resolved config path.
+    """
+    import json
+    import os
+
+    if profile_dir is not None:
+        cfg_path = os.path.join(os.path.normpath(profile_dir), '.yaah', 'config.json')
+    else:
+        from backend.agent.config import CONFIG_PATH
+        cfg_path = CONFIG_PATH
+
+    cfg = {}
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    remote = cfg.get('remote') or {}
+    remote.update(updates)
+    cfg['remote'] = remote
+
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    with open(cfg_path, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2)
 
 
 def _is_elevated() -> bool:
@@ -371,7 +394,7 @@ def _run_setup_wizard(launch_profile: str | None = None) -> int:
     display = display or socket.gethostname()
     print()
 
-    _persist_remote({"passphrase": passphrase, "display_name": display})
+    _persist_remote({"passphrase": passphrase, "display_name": display}, profile)
     print(f"saved passphrase + display name ({display!r}) to "
           f"{profile}\\.yaah\\config.json")
 

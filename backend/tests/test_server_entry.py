@@ -250,7 +250,7 @@ def _install_wizard(entry, monkeypatch, capsys, state="4  RUNNING",
     import types
 
     monkeypatch.setattr(entry, "_is_elevated", lambda: True)
-    monkeypatch.setattr(entry, "_persist_remote", lambda updates: None)
+    monkeypatch.setattr(entry, "_persist_remote", lambda updates, profile_dir=None: None)
     monkeypatch.setattr(entry, "_service_state", lambda: state)
     answers = iter(["secret-pass"])
     monkeypatch.setattr(getpass_mod, "getpass", lambda *a, **k: next(answers))
