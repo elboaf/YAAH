@@ -1244,6 +1244,19 @@ export const listRemoteDeviceConversations = (hostId: string) =>
     `/api/remote/devices/${encodeURIComponent(hostId)}/conversations`,
   )
 
+export interface RemoteRunning {
+  status: 'online' | 'cached'
+  /** conversation_ids mid-turn (yellow tracer). */
+  running: string[]
+  /** conversation_ids parked on a pending ask_user answer (orange bar). */
+  pending: string[]
+}
+
+export const getRemoteDeviceRunning = (hostId: string) =>
+  api<RemoteRunning>(
+    `/api/remote/devices/${encodeURIComponent(hostId)}/running`,
+  )
+
 export const getRemoteDeviceMessages = (hostId: string, conversationId: string) =>
   api<StoredMessage[]>(
     `/api/remote/devices/${encodeURIComponent(hostId)}/conversations/${encodeURIComponent(conversationId)}/messages`,

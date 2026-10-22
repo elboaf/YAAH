@@ -72,6 +72,9 @@ import {
   localInstanceInfo,
   listRemoteDeviceConversations,
   getRemoteDeviceMessages,
+  getRemoteDeviceRunning,
+  listRemoteDevices,
+  type RemoteRunning,
   remoteDeviceImageUrl,
   remoteMediaRef,
   addRemoteDevice,
@@ -5980,6 +5983,137 @@ export function AgentRunWatcher() {
       window.clearInterval(t)
     }
   }, [refreshAgents])
+  return null
+}
+
+/**
+ * Issue #457: remote-device sidebar run-state parity. Local chats have the
+ * AgentRunWatcher polling `/api/agents` every ~5s; remote chats had no
+ * backend-truth equivalent, so a turn started on another window, after an app
+ * restart, or with the transcript dialog closed showed nothing in the sidebar.
+ * This component mirrors that watcher for remote devices: it polls each online
+ * device's dedicated `/api/remote/devices/{host}/running` endpoint on the same
+ * cadence and feeds the existing `remote:<host>:<conv>` keys the sidebar reads
+ * (statusByConv / finishedByConv / pendingQuestions), so the #308 signal slot
+ * for remote rows lights up for yellow-tracer-running, orange-parked-on-question,
+ * and green-finished-unacknowledged exactly as it does for local rows.
+ *
+ * A device's running set is a superset of its pending set, so the derived
+ * finished bar is computed here from the previous->current running transition
+ * (backend need only report running + pending). The on-screen gate reuses
+ * `activeRemoteKey`, the same mirror the local path uses: an on-screen remote
+ * chat never emits its own finished signal. Cached/offline devices expose no
+ * running state (AC 3), so they degrade to nothing.
+ */
+export function RemoteRunWatcher() {
+  const activeRemoteKey = useAgent((s) => s.activeRemoteKey)
+  useEffect(() => {
+    let alive = true
+    // Prev->now transitions derive the green finished bar per row.
+    let prevRunning: Record<string, string[]> = {}
+    // Keys this host previously reported as active (running or pending), so we
+    // can clear stale ones — otherwise a conv that went running->idle would
+    // leave a permanent yellow dot, and a cleared question an orange bar.
+    let prevActive: Record<string, string[]> = {}
+    const fetchOne = async (hostId: string, devices: RemoteDevice[]) => {
+      const device = devices.find((d) => d.host_id === hostId)
+      // Cached/offline devices report nothing (AC 3); skip the request entirely.
+      if (!device || device.status === 'offline' || device.status === 'cached') {
+        return
+      }
+      let res: RemoteRunning
+      try {
+        res = await getRemoteDeviceRunning(hostId)
+      } catch {
+        return
+      }
+      const runningSet = new Set(res.running ?? [])
+      const pendingSet = new Set(res.pending ?? [])
+      const prev = prevRunning[hostId] ?? []
+      // A row that was mid-turn last poll and is no longer running just
+      // finished: the green bar fires only for off-screen rows (the on-screen
+      // one already owns its finished signal via activeRemoteKey). finishedByConv
+      // is self-clearing when the chat opens (setActiveRemoteKey deletes it), so
+      // this poller only ever adds 'ok' here.
+      const finishedByConv: Record<string, 'ok' | 'error'> = {}
+      for (const cid of prev) {
+        if (!runningSet.has(cid)) {
+          const key = remoteConversationKey(hostId, cid)
+          if (key !== activeRemoteKey) {
+            finishedByConv[key] = 'ok'
+          }
+        }
+      }
+      // The on-screen remote chat is owned by its own dialog stream, which
+      // manages statusByConv/pendingQuestions for its key; the poller must not
+      // clobber it (e.g. flatten a live 'thinking' into 'running-tool').
+      const offscreen = (key: string) => key !== activeRemoteKey
+      const statusByConv: Record<string, AgentStatus> = {}
+      const pendingQuestions: Record<string, PendingQuestion> = {}
+      // Pending (orange bar) takes precedence in the row, so it wins in the
+      // status map too. A parked question still counts as running (yellow
+      // tracer) while it is parked.
+      for (const cid of runningSet) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        statusByConv[key] = pendingSet.has(cid) ? 'thinking' : 'running-tool'
+      }
+      for (const cid of pendingSet) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        // A minimal but valid pending card; the sidebar reads the key presence
+        // for the orange bar and the dialog (built for #308) renders the body.
+        pendingQuestions[key] = {
+          callId: '',
+          question: 'Remote turn is waiting for your answer',
+          options: [],
+          convKey: key,
+        }
+      }
+      // Clear any key that was active last poll but is not active now (off-screen
+      // only), so the signal set tracks reality rather than only growing.
+      const clears: Record<string, AgentStatus> = {}
+      for (const cid of prevActive[hostId] ?? []) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        if (!runningSet.has(cid) && !pendingSet.has(cid)) {
+          clears[key] = 'idle'
+        }
+      }
+      useAgent.setState((s) => ({
+        statusByConv: { ...s.statusByConv, ...statusByConv, ...clears },
+        finishedByConv: { ...s.finishedByConv, ...finishedByConv },
+        pendingQuestions: { ...s.pendingQuestions, ...pendingQuestions },
+      }))
+      // A key counts as "active" while running OR pending. Persist the snapshots
+      // for next poll.
+      const activeKeys = Array.from(new Set([...runningSet, ...pendingSet]))
+      prevRunning = { ...prevRunning, [hostId]: Array.from(runningSet) }
+      prevActive = { ...prevActive, [hostId]: activeKeys }
+    }
+    const poll = async () => {
+      if (!alive) return
+      let devices: RemoteDevice[]
+      try {
+        devices = (await listRemoteDevices()).devices
+      } catch {
+        return
+      }
+      const online = devices.filter((d) => d.status === 'online')
+      for (const device of online) {
+        await fetchOne(device.host_id, devices)
+      }
+    }
+    void poll()
+    const t = window.setInterval(() => void poll(), 5000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+    // activeRemoteKey is a stable reference from the store; the effect body is
+    // the only thing that changes each mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRemoteKey])
   return null
 }
 

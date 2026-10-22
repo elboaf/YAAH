@@ -44,3 +44,27 @@ async def test_run_registry_rejects_empty_owner_or_conversation_id():
         await runs.claim("", "731")
     with pytest.raises(ValueError):
         await runs.claim("host-a", "")
+
+
+@pytest.mark.asyncio
+async def test_running_convs_lists_all_owned_conversations():
+    runs = RemoteRunRegistry()
+
+    # No owner -> no running conversations.
+    assert await runs.running_convs("host-a") == []
+
+    # Claim two distinct conversations for the same owner.
+    assert await runs.claim("host-a", "1")
+    assert await runs.claim("host-a", "2")
+    assert set(await runs.running_convs("host-a")) == {"1", "2"}
+
+    # A different owner is unaffected.
+    assert await runs.running_convs("host-b") == []
+
+    # Release one; still running because the other is active.
+    assert await runs.release("host-a", "1")
+    assert set(await runs.running_convs("host-a")) == {"2"}
+
+    # Release the last active run for the owner -> nothing running.
+    assert await runs.release("host-a", "2")
+    assert await runs.running_convs("host-a") == []
