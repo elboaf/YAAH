@@ -43,7 +43,7 @@ export function highlightLine(line: string): Token[] {
       continue
     }
     const kwLater = KEYWORDS.exec(rest)
-    const nextStop = Math.min(commentIdx?.pos ?? -1, kwLater?.index ?? -1)
+    const nextStop = Math.min(commentIdx?.pos ?? Infinity, kwLater?.index ?? Infinity)
     const take = nextStop > 0 ? nextStop : rest.length
     tokens.push({ text: rest.slice(0, take), cls: '' })
     rest = rest.slice(take)
