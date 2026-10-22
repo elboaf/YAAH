@@ -11243,15 +11243,29 @@ export function Composer() {
         setSteerFlag(targetKey, false)
         // Drain the queue by sending items as fresh turns.
         for (const item of result.queued) {
-          // Reconcile the queued echo before sending the fresh turn, so the
-          // transcript shows one row, not the echo plus a duplicate.
+          // Reconcile the queued echo before sending the fresh turn.
           const echoes = useAgent.getState().queueEchoByConv[targetKey] ?? []
           const echo = echoes.find((e) => e.id === item.id)
+          let promoted = false
           if (echo) {
             markQueuedAsNormal(targetKey, echo.tempId)
             dropQueuedEcho(targetKey, echo.tempId)
+            promoted = true
           }
-          await send(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
+          // Send the fresh turn. If it fails and we already promoted the echo,
+          // restore it so the item isn't lost (it remains queued for the next
+          // manual send).
+          try {
+            await send(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
+          } catch (e) {
+            if (promoted && echo) {
+              // Re-add the echo so the item survives.
+              const restoredEchoes = useAgent.getState().queueEchoByConv[targetKey] ?? []
+              restoredEchoes.push(echo)
+              setQueueEcho(targetKey, restoredEchoes)
+            }
+            throw e
+          }
         }
       }
     } catch (e) {
