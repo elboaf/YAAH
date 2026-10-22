@@ -11236,7 +11236,16 @@ export function Composer() {
     if (useAgent.getState().pendingQuestions[targetKey] || useAgent.getState().pendingApprovals[targetKey] || useAgent.getState().pendingPlanApprovals[targetKey]) return
     setSteerFlag(targetKey, true)
     try {
-      await steerAgent(targetConversationId)
+      const result = await steerAgent(targetConversationId)
+      // Run ended before steer arrived (#460). If the backend returned queued
+      // items, start a fresh turn with them instead of failing.
+      if (result.run_ended && result.queued && result.queued.length > 0) {
+        setSteerFlag(targetKey, false)
+        // Drain the queue by sending items as fresh turns.
+        for (const item of result.queued) {
+          await sendQueued(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [] })
+        }
+      }
     } catch (e) {
       setSteerFlag(targetKey, false)
       useAgent.getState().pushToast({
