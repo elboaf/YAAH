@@ -11243,7 +11243,7 @@ export function Composer() {
         setSteerFlag(targetKey, false)
         // Drain the queue by sending items as fresh turns.
         for (const item of result.queued) {
-          await sendQueued(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [] })
+          await send(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [] })
         }
       }
     } catch (e) {
