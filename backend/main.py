@@ -1289,7 +1289,7 @@ async def api_agent_queue_remove(conversation_id: int, item_id: int):
 async def api_agent_steer(conversation_id: int):
     """Interrupt the in-flight step so queued messages land now (#7).
     The run continues at the next boundary with full context."""
-    from backend.agent.loop import agent_is_running, steer_agent, queue_items
+    from backend.agent.loop import agent_is_running, steer_agent, _drain_queue
 
     if agent_is_running(conversation_id):
         if not steer_agent(conversation_id):
@@ -1299,7 +1299,7 @@ async def api_agent_steer(conversation_id: int):
     # Run ended before steer arrived (#460). Check for queued items that
     # need to be sent as a fresh turn. Return them to the client so it can
     # start the turn with the correct conversation context.
-    items = queue_items(conversation_id)
+    items = _drain_queue(conversation_id)
     if items:
         return {"ok": True, "run_ended": True, "queued": items}
     raise HTTPException(status_code=409, detail="conversation is not running")
