@@ -6006,15 +6006,43 @@ export function AgentRunWatcher() {
  * running state (AC 3), so they degrade to nothing.
  */
 export function RemoteRunWatcher() {
-  const activeRemoteKey = useAgent((s) => s.activeRemoteKey)
   useEffect(() => {
     let alive = true
+    let inFlight = false
     // Prev->now transitions derive the green finished bar per row.
+    // Persisted across effect remounts so history survives active-chat changes.
     let prevRunning: Record<string, string[]> = {}
     // Keys this host previously reported as active (running or pending), so we
     // can clear stale ones — otherwise a conv that went running->idle would
     // leave a permanent yellow dot, and a cleared question an orange bar.
     let prevActive: Record<string, string[]> = {}
+    // Hosts seen as online on the previous poll, so we can detect when they go
+    // offline and clear their stale signals.
+    let prevOnline: Record<string, boolean> = {}
+    const clearHostSignals = (hostId: string) => {
+      const clears: Record<string, AgentStatus> = {}
+      const clearPq: Record<string, null> = {}
+      for (const cid of prevActive[hostId] ?? []) {
+        const key = remoteConversationKey(hostId, cid)
+        clears[key] = 'idle'
+        clearPq[key] = null
+      }
+      if (Object.keys(clears).length > 0) {
+        useAgent.setState((s) => {
+          const nextPq = { ...s.pendingQuestions }
+          for (const k of Object.keys(clearPq)) {
+            delete nextPq[k]
+          }
+          return {
+            statusByConv: { ...s.statusByConv, ...clears },
+            pendingQuestions: nextPq,
+          }
+        })
+      }
+      delete prevRunning[hostId]
+      delete prevActive[hostId]
+      delete prevOnline[hostId]
+    }
     const fetchOne = async (hostId: string, devices: RemoteDevice[]) => {
       const device = devices.find((d) => d.host_id === hostId)
       // Cached/offline devices report nothing (AC 3); skip the request entirely.
@@ -6027,6 +6055,10 @@ export function RemoteRunWatcher() {
       } catch {
         return
       }
+      if (!alive) return
+      // Re-read the active key from state each poll so the on-screen gate
+      // reflects the current chat even if the effect hasn't remounted.
+      const currentActiveKey = useAgent.getState().activeRemoteKey
       const runningSet = new Set(res.running ?? [])
       const pendingSet = new Set(res.pending ?? [])
       const prev = prevRunning[hostId] ?? []
@@ -6039,7 +6071,7 @@ export function RemoteRunWatcher() {
       for (const cid of prev) {
         if (!runningSet.has(cid)) {
           const key = remoteConversationKey(hostId, cid)
-          if (key !== activeRemoteKey) {
+          if (key !== currentActiveKey) {
             finishedByConv[key] = 'ok'
           }
         }
@@ -6047,7 +6079,7 @@ export function RemoteRunWatcher() {
       // The on-screen remote chat is owned by its own dialog stream, which
       // manages statusByConv/pendingQuestions for its key; the poller must not
       // clobber it (e.g. flatten a live 'thinking' into 'running-tool').
-      const offscreen = (key: string) => key !== activeRemoteKey
+      const offscreen = (key: string) => key !== currentActiveKey
       const statusByConv: Record<string, AgentStatus> = {}
       const pendingQuestions: Record<string, PendingQuestion> = {}
       // Pending (orange bar) takes precedence in the row, so it wins in the
@@ -6080,11 +6112,28 @@ export function RemoteRunWatcher() {
           clears[key] = 'idle'
         }
       }
-      useAgent.setState((s) => ({
-        statusByConv: { ...s.statusByConv, ...statusByConv, ...clears },
-        finishedByConv: { ...s.finishedByConv, ...finishedByConv },
-        pendingQuestions: { ...s.pendingQuestions, ...pendingQuestions },
-      }))
+      // Clear stale pending-question keys (orange bar) for convs that are no
+      // longer pending, so a question that got answered doesn't leave a stuck
+      // orange bar.
+      const clearPq: Record<string, null> = {}
+      for (const cid of prevActive[hostId] ?? []) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        if (!pendingSet.has(cid)) {
+          clearPq[key] = null
+        }
+      }
+      useAgent.setState((s) => {
+        const nextPq = { ...s.pendingQuestions, ...pendingQuestions }
+        for (const k of Object.keys(clearPq)) {
+          delete nextPq[k]
+        }
+        return {
+          statusByConv: { ...s.statusByConv, ...statusByConv, ...clears },
+          finishedByConv: { ...s.finishedByConv, ...finishedByConv },
+          pendingQuestions: nextPq,
+        }
+      })
       // A key counts as "active" while running OR pending. Persist the snapshots
       // for next poll.
       const activeKeys = Array.from(new Set([...runningSet, ...pendingSet]))
@@ -6092,16 +6141,35 @@ export function RemoteRunWatcher() {
       prevActive = { ...prevActive, [hostId]: activeKeys }
     }
     const poll = async () => {
-      if (!alive) return
-      let devices: RemoteDevice[]
+      if (!alive || inFlight) return
+      inFlight = true
       try {
-        devices = (await listRemoteDevices()).devices
-      } catch {
-        return
-      }
-      const online = devices.filter((d) => d.status === 'online')
-      for (const device of online) {
-        await fetchOne(device.host_id, devices)
+        let devices: RemoteDevice[]
+        try {
+          devices = (await listRemoteDevices()).devices
+        } catch {
+          return
+        }
+        if (!alive) return
+        const online = devices.filter((d) => d.status === 'online')
+        // Detect hosts that were online last poll but are no longer online;
+        // clear their stale signals so the sidebar doesn't show ghost dots.
+        for (const [hostId] of Object.entries(prevOnline)) {
+          if (!online.some((d) => d.host_id === hostId)) {
+            clearHostSignals(hostId)
+          }
+        }
+        for (const device of online) {
+          await fetchOne(device.host_id, devices)
+        }
+        // Track which hosts are currently online for next poll's offline detection.
+        const nowOnline: Record<string, boolean> = {}
+        for (const device of online) {
+          nowOnline[device.host_id] = true
+        }
+        prevOnline = nowOnline
+      } finally {
+        inFlight = false
       }
     }
     void poll()
@@ -6110,10 +6178,10 @@ export function RemoteRunWatcher() {
       alive = false
       window.clearInterval(t)
     }
-    // activeRemoteKey is a stable reference from the store; the effect body is
-    // the only thing that changes each mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeRemoteKey])
+    // Empty dependency array keeps this effect mounted for the app's lifetime;
+    // activeRemoteKey is re-read from state each poll (not captured), so the
+    // on-screen gate always reflects the current chat.
+  }, [])
   return null
 }
 

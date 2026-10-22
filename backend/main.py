@@ -3297,16 +3297,10 @@ async def api_remote_device_running(host_id: str):
         return {"status": "cached", "running": [], "pending": []}
 
     owner_id = host_id
-    try:
-        from backend.agent.remote_runner import remote_runs
-        running = await remote_runs.running_convs(owner_id)
-    except Exception:
-        running = []
-    try:
-        from backend.agent.loop import remote_pending_running_convs
-        pending = await remote_pending_running_convs(owner_id)
-    except Exception:
-        pending = []
+    from backend.agent.remote_runner import remote_runs
+    running = await remote_runs.running_convs(owner_id)
+    from backend.agent.loop import remote_pending_running_convs
+    pending = await remote_pending_running_convs(owner_id)
     return {"status": "online", "running": sorted(set(running)),
             "pending": sorted(set(pending))}
 
