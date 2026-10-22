@@ -4473,9 +4473,18 @@ export function Sidebar() {
 
   // Merged model list: every configured provider, queried in parallel by the
   // backend (keys never reach the browser). Grouped per provider in the dropdown.
+  // Ignore stale refresh responses: mount/save/save-close/button can all
+  // fire refreshModels() concurrently, so an older network response could
+  // resolve last and clobber newer model data. Track the latest request so
+  // only the newest one's result is applied (covers every caller, not just
+  // the disabled button).
+  const latestRefresh = useRef(0)
+
   const refreshModels = useCallback(() => {
+    const requestId = ++latestRefresh.current
     listAvailableModels()
       .then((r) => {
+        if (requestId !== latestRefresh.current) return
         setByProvider(r.providers)
         setActiveProvider(r.active_provider)
         // Notify useModelList() consumers (ChatScopePickers, EditAgentModal)
