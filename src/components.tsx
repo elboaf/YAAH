@@ -4478,6 +4478,9 @@ export function Sidebar() {
       .then((r) => {
         setByProvider(r.providers)
         setActiveProvider(r.active_provider)
+        // Notify useModelList() consumers (ChatScopePickers, EditAgentModal)
+        // that the model list has changed — they'll re-fetch on this event.
+        window.dispatchEvent(new CustomEvent('providers-changed'))
       })
       .catch(() => {})
   }, [])
@@ -9102,6 +9105,17 @@ export function ChatScopePickers() {
         >
           <ModelOptions byProvider={byProvider} value={`${shownProvider}::${shownModel}`} />
         </select>
+        <button
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+          aria-label="Refresh models"
+          title="Refresh model lists from all providers"
+          onClick={() => refresh()}
+          disabled={saving}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
+          </svg>
+        </button>
         <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">effort</span>
         <select
           className="rounded   bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
