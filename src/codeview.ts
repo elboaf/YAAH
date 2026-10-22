@@ -43,20 +43,12 @@ export function highlightLine(line: string): Token[] {
       continue
     }
     const kwLater = KEYWORDS.exec(rest)
-    const nextStop = firstOf(commentIdx?.pos ?? -1, kwLater?.index ?? -1)
+    const nextStop = Math.min(commentIdx?.pos ?? -1, kwLater?.index ?? -1)
     const take = nextStop > 0 ? nextStop : rest.length
     tokens.push({ text: rest.slice(0, take), cls: '' })
     rest = rest.slice(take)
   }
   return tokens
-}
-
-function firstOf(...vals: Array<number | null>): number {
-  let min = -1
-  for (const v of vals) {
-    if (v !== null && v !== undefined && v >= 0 && (min === -1 || v < min)) min = v
-  }
-  return min
 }
 
 function searchComment(line: string): { pos: number } | null {
