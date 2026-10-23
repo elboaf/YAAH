@@ -929,6 +929,14 @@ async def _try_begin_run_excluding_remote_lease(conversation_id: int) -> bool:
 # user's answer text. Resolved by the /answer API endpoint.
 _pending_answers: dict[str, asyncio.Future] = {}
 
+# Owner-qualified ask_user waits: (owner_id, conversation_id) pairs currently
+# parked on a future awaiting the user's answer. Kept SEPARATE from
+# _pending_answers (keyed by the local numeric conversation_id:call_id) so the
+# backend-truth poller can report which conversations of a given remote owner
+# are blocked, regardless of which window streamed the turn or whether the app
+# restarted. Local waits never carry an owner_id and never enter this set.
+_remote_pending_answers: set[tuple[str, str]] = set()
+
 
 def resolve_answer(conversation_id: int, call_id: str, answer: str) -> bool:
     """Deliver a user answer to a pending ask_user call or approval request.
@@ -942,15 +950,25 @@ def resolve_answer(conversation_id: int, call_id: str, answer: str) -> bool:
 
 
 async def _wait_answer(
-    conversation_id: int, call_id: str, cancel_ev: asyncio.Event
+    conversation_id: int, call_id: str, cancel_ev: asyncio.Event,
+    owner_id: str | None = None,
 ) -> asyncio.Future:
     """Register a pending-answer future and block until the user resolves it
     (POST /answer) or the run is cancelled. The stream stays open and other
     conversations keep running. Raises on cancel so callers can emit their
-    own not-answered result; the future's result is the raw answer string."""
+    own not-answered result; the future's result is the raw answer string.
+
+    When owner_id is supplied (a remote-owned turn), the (owner, conversation)
+    pair is registered in _remote_pending_answers so the backend-truth poller
+    can report the conversation as parked on a pending ask_user, even though
+    this window never streamed the turn. Local waits never pass an owner.
+    """
     key = f"{conversation_id}:{call_id}"
     fut: asyncio.Future = asyncio.get_running_loop().create_future()
     _pending_answers[key] = fut
+    parked = (owner_id, str(conversation_id)) if owner_id is not None else None
+    if parked is not None:
+        _remote_pending_answers.add(parked)
     cancel_task = asyncio.create_task(cancel_ev.wait())
     try:
         done, _ = await asyncio.wait(
@@ -962,17 +980,33 @@ async def _wait_answer(
     finally:
         cancel_task.cancel()
         _pending_answers.pop(key, None)
+        if parked is not None:
+            _remote_pending_answers.discard(parked)
         if not fut.done():
             fut.cancel()
 
 
+async def remote_pending_running_convs(owner_id: str) -> list[str]:
+    """Return the conversation IDs owned by owner_id that are parked on a
+    pending ask_user answer. Empty when the owner has no waiting question."""
+    return [
+        conv for (own, conv) in _remote_pending_answers if own == owner_id
+    ]
+
+
 async def _ask_user(
-    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event
+    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event,
+    owner_id: str | None = None,
 ) -> dict:
     """Block the loop until the user answers (or the run is cancelled).
-    The stream stays open and other conversations keep running."""
+    The stream stays open and other conversations keep running.
+
+    owner_id, when supplied, marks this wait as belonging to a remote-owned
+    turn so backend_pending_running_convs can report it (issue #457)."""
     try:
-        fut = await _wait_answer(conversation_id, call_id, cancel_ev)
+        fut = await _wait_answer(
+            conversation_id, call_id, cancel_ev, owner_id=owner_id
+        )
     except asyncio.CancelledError:
         return {"answer": None, "note": "user did not answer (run stopped)"}
     return {"answer": fut.result()}

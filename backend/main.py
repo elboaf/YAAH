@@ -3273,6 +3273,38 @@ async def api_remote_device_turn(host_id: str, conversation_id: str, body: Remot
     )
 
 
+@app.get("/api/remote/devices/{host_id}/running")
+async def api_remote_device_running(host_id: str):
+    """Backend-truth run state for one saved device (issue #457).
+
+    Returns the conversations of this device that are mid-turn (yellow tracer)
+    and the subset parked on a pending ask_user answer (orange bar), read from
+    the registry and the owner-keyed pending-answer tracker. Local chats have
+    this: the agents poller keeps every window's rows fresh regardless of which
+    window started the run. Remote chats had no equivalent, so a turn started
+    on another window, after an app restart, or with the transcript dialog
+    closed showed nothing.
+
+    The conversations-list response intentionally carries no run flags (AC 2):
+    this is a dedicated endpoint the sidebar poller hits alongside the cached
+    conversation list. A device that is offline/cached exposes no running
+    state — signals for a disconnected device degrade to nothing (AC 3).
+    """
+    # A turn is only tracked by this backend's registry when the turn is run
+    # through the local loop on a live owner connection; cached/offline devices
+    # have no live registry view, so they report nothing.
+    if remote_mod.get_remote(host_id) is None:
+        return {"status": "cached", "running": [], "pending": []}
+
+    owner_id = host_id
+    from backend.agent.remote_runner import remote_runs
+    running = await remote_runs.running_convs(owner_id)
+    from backend.agent.loop import remote_pending_running_convs
+    pending = await remote_pending_running_convs(owner_id)
+    return {"status": "online", "running": sorted(set(running)),
+            "pending": sorted(set(pending))}
+
+
 @app.post("/api/remote/devices/{host_id}/turns/{conversation_id}/answer")
 async def api_remote_device_turn_answer(host_id: str, conversation_id: str, body: AnswerBody):
     """Deliver the user's answer to a pending ask_user call in a remote

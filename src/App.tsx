@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
 import { quantizeUiScale } from './jitter'
-import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, ImageLightbox, PreviewModal, Sidebar, ToastStack } from './components'
+import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, ImageLightbox, PreviewModal, RemoteRunWatcher, Sidebar, ToastStack } from './components'
 import { NativeMenuGate } from './nativeMenu'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
@@ -238,6 +238,8 @@ export default function App() {
       <NotificationSounds />
       {/* Scheduled agents (issue #41): poller (toasts + store map) + toast stack */}
       <AgentRunWatcher />
+      {/* #457: backend-truth run-state parity for remote-device sidebar rows. */}
+      <RemoteRunWatcher />
       <AgentChatLiveFollow />
       {/* #296: speaks scheduled fires' spoken briefings (per-agent say_mode). */}
       <AgentSayWatcher />

@@ -499,8 +499,12 @@ async def _run_claimed(
                         yield _ndjson({"type": "tool_start", "name": name,
                                        "args": args, "call_id": tc.get("id", "")})
                         from backend.agent.loop import _ask_user
+                        # #457: owner_id marks this wait so the backend-truth
+                        # poller can report the conversation as parked on a
+                        # pending ask_user, even though no window streamed it.
                         result = await _ask_user(
-                            conversation_id, tc.get("id", ""), args, cancel_event
+                            conversation_id, tc.get("id", ""), args, cancel_event,
+                            owner_id=owner_id,
                         )
                     elif name == "exit_plan":
                         # Route to the loop's handler BEFORE the risk gate
