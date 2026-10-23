@@ -11472,7 +11472,38 @@ export function Composer() {
     if (useAgent.getState().pendingQuestions[targetKey] || useAgent.getState().pendingApprovals[targetKey] || useAgent.getState().pendingPlanApprovals[targetKey]) return
     setSteerFlag(targetKey, true)
     try {
-      await steerAgent(targetConversationId)
+      const result = await steerAgent(targetConversationId)
+      // Run ended before steer arrived (#460). If the backend returned queued
+      // items, start a fresh turn with them instead of failing.
+      if (result.run_ended && result.queued && result.queued.length > 0) {
+        setSteerFlag(targetKey, false)
+        // Drain the queue by sending items as fresh turns.
+        for (const item of result.queued) {
+          // Reconcile the queued echo before sending the fresh turn.
+          const echoes = useAgent.getState().queueEchoByConv[targetKey] ?? []
+          const echo = echoes.find((e) => e.id === item.id)
+          let promoted = false
+          if (echo) {
+            markQueuedAsNormal(targetKey, echo.tempId)
+            dropQueuedEcho(targetKey, echo.tempId)
+            promoted = true
+          }
+          // Send the fresh turn. If it fails and we already promoted the echo,
+          // restore it so the item isn't lost (it remains queued for the next
+          // manual send).
+          try {
+            await send(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
+          } catch (e) {
+            if (promoted && echo) {
+              // Re-add the echo so the item survives.
+              const restoredEchoes = useAgent.getState().queueEchoByConv[targetKey] ?? []
+              restoredEchoes.push(echo)
+              setQueueEcho(targetKey, restoredEchoes)
+            }
+            throw e
+          }
+        }
+      }
     } catch (e) {
       setSteerFlag(targetKey, false)
       useAgent.getState().pushToast({

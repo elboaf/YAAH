@@ -703,7 +703,7 @@ export const queueMessage = (
   })
 
 export const steerAgent = (id: number) =>
-  api<{ ok: boolean }>(`/api/agent/${id}/steer`, { method: 'POST' })
+  api<{ ok: boolean; run_ended?: boolean; queued?: Array<{ id: number; text: string; skills?: string[]; images?: string[] }> }>(`/api/agent/${id}/steer`, { method: 'POST' })
 
 /** Answer a pending ask_user question; the blocked agent loop resumes. */
 export const submitAnswer = (id: number, callId: string, answer: string) =>
