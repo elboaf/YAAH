@@ -1374,9 +1374,6 @@ export interface AgentEvent {
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number
   deleted?: number
-  /** The provider+model this turn's chat call is waiting on (model_call).
-   *  Unset between the response arriving and the next call of the turn. */
-  modelCall?: { provider: string; model: string; startedAt: number }
   model?: string
   /** History compaction (adr/0004): how many oldest messages the new
    *  summary row replaced (compacted). */
