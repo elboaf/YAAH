@@ -907,9 +907,3 @@ export function normalizeForSpeech(text: string, kokoro = kokoroShapingActive())
   // 6. Acronyms letter-spelled.
   return acronyms(t).trim()
 }
-
-/** #295 helper: markdown → plain prose (see proseForSpeech), then the #206
- *  normalization pass. */
-export function normalizeProseForSpeech(md: string, maxChars = 4000): string {
-  return normalizeForSpeech(proseForSpeech(md, maxChars))
-}
