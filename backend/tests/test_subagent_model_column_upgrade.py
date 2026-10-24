@@ -1,6 +1,6 @@
 """Regression: upgrading a pre-#383 database crashed backend startup.
 
-rc.9's boot (main.py lifespan: init_db -> repair_bare_model_scopes) died
+rc.9's boot (main.py lifespan: get_db -> repair_bare_model_scopes) died
 with `sqlite3.OperationalError: no such column: subagent_model` on every
 database upgraded from an earlier release: the conversations ALTER that
 adds the column was nested inside the
@@ -122,7 +122,6 @@ async def test_upgraded_columns_match_fresh(monkeypatch, tmp_path):
     upgraded = tmp_path / "upgraded.db"
     await _make_pre_383_db(upgraded)
     monkeypatch.setattr(database, "DB_PATH", upgraded)
-    await database.init_db()
     db = await database.get_db()
     try:
         cur = await db.execute("PRAGMA table_info(conversations)")
@@ -134,7 +133,6 @@ async def test_upgraded_columns_match_fresh(monkeypatch, tmp_path):
 
     fresh = tmp_path / "fresh.db"
     monkeypatch.setattr(database, "DB_PATH", fresh)
-    await database.init_db()
     db = await database.get_db()
     try:
         cur = await db.execute("PRAGMA table_info(conversations)")
