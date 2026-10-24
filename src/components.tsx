@@ -9422,23 +9422,15 @@ export function ChatScopePickers() {
 // fallback (no tag at all) is guarded by the msgId key only, and stays
 // once-per-message per mount — the mount-level lastSpokenMsgIdRef below.
 const lastSpokenSayByMsg = new Map<string, string>()
-const PRUNE_SPOKEN_KEYS = 200
-function wasSaySpoken(msgId: string, say: string): boolean {
-  return lastSpokenSayByMsg.get(msgId) === say
-}
-function markSaySpoken(msgId: string, say: string): void {
+
+
+function recordSaySpoken(msgId: string, say: string): void {
   lastSpokenSayByMsg.set(msgId, say)
-  if (lastSpokenSayByMsg.size > PRUNE_SPOKEN_KEYS) {
-    // FIFO-ish prune: drop the oldest entries (insertion order).
-    const it = lastSpokenSayByMsg.keys()
-    for (let i = 0; i < Math.floor(PRUNE_SPOKEN_KEYS / 2); i++) {
-      const k = it.next()
-      if (k.done) break
-      lastSpokenSayByMsg.delete(k.value)
-    }
+  if (lastSpokenSayByMsg.size > 200) {
+    const k = lastSpokenSayByMsg.keys().next().value
+    if (k) lastSpokenSayByMsg.delete(k)
   }
 }
-
 /** Test-only: clear the module-level dedupe latch between tests. */
 export function _resetNarrationDedupeForTests(): void {
   lastSpokenSayByMsg.clear()
@@ -9653,7 +9645,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
         // (startAssistantEmissionAfterUser) and the exit_plan approval
         // split (splitAtPlanApproval).
         const prevSay = prevMsg?.say
-        if (!prev.said && (prevSay == null || !wasSaySpoken(prev.msgId, prevSay))) {
+        if (!prev.said && (prevSay == null || !(lastSpokenSayByMsg.get(prev.msgId) === prevSay))) {
           const chunks = splitSentences(liveProse(prevMsg?.content ?? ''))
           // Nothing was appended while holding (see the hold path below), so
           // the flush hands over ALL held chunks: an emission without a
@@ -9687,7 +9679,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       // previous utterance out (end() lets its stream drain, #83) and start
       // a fresh narration for the new briefing. The same-say early return
       // is the remount guard: the module latch says this briefing played.
-      if (msgSay == null || wasSaySpoken(lastAssistantId, msgSay)) return
+      if (msgSay == null || lastSpokenSayByMsg.get(lastAssistantId) === msgSay) return
       n.feed.end()
       const feed = beginNarration(lastAssistantId)
       if (!feed) return
@@ -9700,11 +9692,11 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       // #237: the latch is the say TEXT at module scope — a remount must
       // not re-feed this briefing, but a NEW briefing for the same msgId
       // (the next emission of the turn) must still be spoken.
-      if (wasSaySpoken(lastAssistantId, msgSay)) {
+      if (lastSpokenSayByMsg.get(lastAssistantId) === msgSay) {
         n.said = true
         return
       }
-      markSaySpoken(lastAssistantId, msgSay)
+      recordSaySpoken(lastAssistantId, msgSay)
       n.said = true
       n.feed.append(spokenLine(msgSay, lastAssistantContent))
       return
@@ -9731,14 +9723,14 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     const n = narrationRef.current
     if (n) {
       const msgSay = messages.find((m) => m.id === n.msgId)?.say
-      if (!n.said && (msgSay == null || !wasSaySpoken(n.msgId, msgSay))) {
+      if (!n.said && (msgSay == null || !(lastSpokenSayByMsg.get(n.msgId) === msgSay))) {
         // The last emission ended without a (spoken) briefing: flush its
         // held sentences so the fallback stays verbatim, never silence.
         // #237: on a remount the new narration entry starts said=false even
         // though the briefing already played (module-scope latch) — the
         // wasSaySpoken guard keeps that remount from flushing the fallback
         // verbatim on top of the already-spoken briefing.
-        if (msgSay != null) markSaySpoken(n.msgId, msgSay)
+        if (msgSay != null) { recordSaySpoken(n.msgId, msgSay) }
         const msg = messages.find((m) => m.id === n.msgId)
         const chunks = splitSentences(liveProse(msg?.content ?? ''))
         for (let i = n.spoken; i < chunks.length; i++) n.feed.append(chunks[i])
