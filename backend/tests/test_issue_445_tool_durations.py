@@ -340,7 +340,6 @@ async def test_upgraded_db_receives_duration_ms_trigger(monkeypatch, tmp_path):
     old_db = tmp_path / "upgraded.db"
     await _make_pre_445_db(old_db)
     monkeypatch.setattr(database, "DB_PATH", old_db)
-    await database.init_db()
     db = await database.get_db()
     try:
         cur = await db.execute(

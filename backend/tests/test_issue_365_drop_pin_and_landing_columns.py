@@ -36,7 +36,6 @@ async def test_drop_legacy_pin_and_landing_columns(monkeypatch, tmp_path):
         await db.commit()
 
     monkeypatch.setattr(database, "DB_PATH", old_db)
-    await database.init_db()
     db = await database.get_db()
     try:
         cur = await db.execute("PRAGMA table_info(conversations)")
@@ -57,7 +56,6 @@ async def test_drop_legacy_pin_and_landing_columns(monkeypatch, tmp_path):
         # database's shape.
         fresh_db_path = tmp_path / "fresh.db"
         monkeypatch.setattr(database, "DB_PATH", fresh_db_path)
-        await database.init_db()
         fresh = await database.get_db()
         try:
             cur = await fresh.execute("PRAGMA table_info(conversations)")

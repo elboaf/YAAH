@@ -25,7 +25,7 @@ import pytest
 
 from backend.agent import extract, loop, memory
 from backend.agent.tools import MEMORY_TOOLS
-from backend.db.database import add_message, create_conversation, init_db
+from backend.db.database import add_message, create_conversation, get_db
 
 
 async def _async_blank(workspace):
@@ -59,7 +59,7 @@ def _isolated(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _db():
-    asyncio.run(init_db())
+    asyncio.run(get_db())
 
 
 def _window(*rows):
