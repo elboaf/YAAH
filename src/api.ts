@@ -485,7 +485,6 @@ export interface SandboxStatus {
 }
 export const getSandboxStatus = () => api<SandboxStatus>('/api/sandbox/status')
 
-
 /** Per-provider model listing, with the error when a provider is unreachable. */export interface ProviderModelInfo {
   id: string
   reasoning_efforts: string[]
@@ -798,7 +797,6 @@ export const checkMcpCommand = (command: string) =>
     `/api/mcp/command-check?command=${encodeURIComponent(command)}`,
   )
 
-
 // ---- Scheduled agents (issue #41) ----
 
 export type AgentPolicy = 'sandbox-only' | 'autonomous'
@@ -1002,10 +1000,6 @@ export interface TtsStatus {
   remote_api?: 'openai' | 'moss'
   /** #451: the active voice is Kokoro-family - gates the ear-shaping in
    *  src/speech.ts (mirrors speak.kokoro_voice on the backend). */
-  kokoro: boolean|  /** Active remote dialect (#443): openai or moss (local reads openai). */
-  remote_api?: 'openai' | 'moss'
-  /** #451: the active voice is Kokoro-family - gates the ear-shaping in
-   *  src/speech.ts (mirrors speak.kokoro_voice on the backend). */
   kokoro: boolean
   /** Whether the ACTIVE engine can speak right now (remote = endpoint
    *  configured; local = model present). */
@@ -1056,16 +1050,6 @@ export async function ttsTest(
 }
 
 /** Voice + model discovery (#231, #443, #448): the names a remote server
- *  offers via its non-standard GET /voices, plus the model ids from the
- *  standard GET /v1/models. The backend probe NEVER errors — an
- *  unreachable or list-less server resolves to empty lists and the UI
- *  falls back to free-text. Drafts ride in the body so discovery works
- *  before the first Save. */
-export async function ttsVoices(
-  endpoint?: string,
-  apiKey?: string,
-  remoteApi?: 'openai' | 'moss',
-): Promise<{ voices: string[]; models: string[] }> {|/** Voice + model discovery (#231, #443, #448): the names a remote server
  *  offers via its non-standard GET /voices, plus the model ids from the
  *  standard GET /v1/models. The backend probe NEVER errors — an
  *  unreachable or list-less server resolves to empty lists and the UI
@@ -1180,7 +1164,6 @@ export async function ttsDownload(onLine: (p: { stage: string; received?: number
     }
   }
 }
-
 
 export const deleteFile = (workspace: string, path: string) =>
   api<{ ok: boolean }>(

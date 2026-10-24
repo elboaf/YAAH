@@ -8072,7 +8072,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     placeholder={ttsRemoteApi === 'moss' ? 'http://herp.local' : 'http://herp.local:8081  or  https://api.openai.com'}
                     aria-label="Remote narration endpoint"
                   />
-<<<<<<< HEAD
                   {ttsRemoteApi === 'openai' && (
                     <div className="flex gap-1.5">
                       <input
@@ -8083,12 +8082,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
                         aria-label="Remote narration API key"
                       />
-                      <input
-                        className={`${settingsInputCls} w-28 shrink-0`}
-                        value={ttsModel}
-                        onChange={(e) => setTtsModel(e.target.value)}
-                        placeholder="model"
-                        aria-label="Remote narration model"
+                      <RemoteModelField
+                        modelDraft={ttsModel}
+                        models={remoteModelList}
+                        probing={remoteProbing}
+                        onChange={setTtsModel}
                       />
                     </div>
                   )}
@@ -8129,32 +8127,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   <p className="text-[10px] leading-relaxed text-zinc-600">
                     {ttsRemoteApi === 'moss'
                       ? 'MOSS job API — the base URL is used as-is, with /api/moss paths appended. The voice picker lists reference clips from the server; an empty value is reference-less.'
-                      : 'Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the path is appended). Sentence chunks are sent to that server; the key goes there and nowhere else.'}
-=======
-                  <div className="flex gap-1.5">
-                    <input
-                      type="password"
-                      className={`${settingsInputCls} min-w-0 flex-1`}
-                      value={ttsKey}
-                      onChange={(e) => setTtsKey(e.target.value)}
-                      placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
-                      aria-label="Remote narration API key"
-                    />
-                    <RemoteModelField
-                      modelDraft={ttsModel}
-                      models={remoteModelList}
-                      probing={remoteProbing}
-                      onChange={setTtsModel}
-                    />
-                  </div>
-                  <p className="text-[10px] leading-relaxed text-zinc-600">
-                    Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the
-                    path is appended). Sentence chunks are sent to that server; the key goes there
-                    and nowhere else. Voices (/voices) and models (/v1/models) are probed from the
-                    drafts above; CPU-served models can take minutes per chunk, so the first test
-                    may be slow.
->>>>>>> origin/master
+                      : 'Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the path is appended). Sentence chunks are sent to that server; the key goes there and nowhere else. Voices (/voices) and models (/v1/models) are probed from the drafts above; CPU-served models can take minutes per chunk, so the first test may be slow.'}
                   </p>
+
                 </div>
               )}
               {!ttsModelReady && ttsEngine === 'local' ? (
