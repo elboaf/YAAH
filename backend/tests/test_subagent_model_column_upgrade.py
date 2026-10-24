@@ -66,7 +66,7 @@ async def test_boot_migration_adds_column_and_repair_survives(monkeypatch, tmp_p
 
     # The exact boot sequence from main.py's lifespan. Before the fix the
     # repair raises OperationalError here and FastAPI refuses to start.
-    await database.init_db()
+    await database.get_db()
     await database.repair_bare_model_scopes()
 
     db = await database.get_db()
