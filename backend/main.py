@@ -17,14 +17,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend._version import __version__
-from backend.db.database import init_db
+from backend.db.database import get_db
 
 log = logging.getLogger("yaah.main")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    db = await get_db()
+    await db.close()
     # #132 one-time repair: qualify conversations/agents rows still carrying
     # bare model ids (no routing provider — turns silently followed the
     # sidebar default's provider after a default change). Best-effort: if
