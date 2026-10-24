@@ -2700,12 +2700,24 @@ async def api_tts_test(body: TtsTestBody):
     text = "Voice test. If you can hear this, narration is working."
     try:
         if engine == "remote":
-            await speak.synthesize_remote(
-                text,
-                *_remote_engine_args(
-                    voice_cfg, voice, speed, model_override=body.model
-                ),
-            )
+            if (voice_cfg.get("tts_remote_api") or "openai") == "moss":
+                # Test through the real MOSS path. The sample goes as-is:
+                # the live server synthesizes short text fine (probe-
+                # verified), and the server's own errors surface verbatim.
+                await speak.synthesize_moss(
+                    text,
+                    endpoint=(voice_cfg.get("tts_endpoint") or "").strip(),
+                    lang=voice_cfg.get("tts_moss_lang") or "en",
+                    ref=voice_cfg.get("tts_moss_ref") or "",
+                    voice=voice,
+                )
+            else:
+                await speak.synthesize_remote(
+                    text,
+                    *_remote_engine_args(
+                        voice_cfg, voice, speed, model_override=body.model
+                    ),
+                )
         else:
             if not speak.model_available():
                 return JSONResponse({"detail": "TTS model not downloaded"}, status_code=409)
@@ -2721,11 +2733,13 @@ async def api_tts_test(body: TtsTestBody):
 
 
 class TtsVoicesBody(BaseModel):
-    """Voice discovery (#231): the endpoint/key drafts Settings is showing.
-    Optional fields fall back to the stored voice config — the probe works
-    before the user touches the fields and with no body at all."""
+    """Voice discovery (#231/#443): the endpoint/key/dialect drafts
+    Settings is showing. Optional fields fall back to the stored voice
+    config — the probe works before the user touches the fields and with
+    no body at all."""
     endpoint: str | None = None
     api_key: str | None = None
+    remote_api: str | None = None
 
 
 @app.post("/api/tts/voices")
@@ -2749,8 +2763,19 @@ async def api_tts_voices(body: TtsVoicesBody | None = None):
             status_code=409,
         )
     api_key = (body.api_key if body else None) or (voice_cfg.get("tts_api_key") or "")
+    # A typed dialect draft wins over the stored dialect so discovery
+    # reflects the on-screen selector before the first Save.
+    remote_api = (body.remote_api if body and body.remote_api else None) or (
+        voice_cfg.get("tts_remote_api") or "openai"
+    )
     try:
-        voices = await speak.probe_remote_voices(endpoint, api_key=api_key)
+        if remote_api == "moss":
+            # The MOSS "voice" IS a reference clip: discovery lists the
+            # server's uploaded refs (their names feed the form's ref
+            # field). Key is OpenAI-flavor-only but tolerated as a header.
+            voices = await speak.probe_moss_refs(endpoint, api_key=api_key)
+        else:
+            voices = await speak.probe_remote_voices(endpoint, api_key=api_key)
     except speak.RemoteTTSError as e:  # a malformed endpoint, same gate as Test
         return JSONResponse({"detail": str(e), "code": e.code}, status_code=409)
     # #448: the standard OpenAI model list rides along (— [] on any
@@ -2771,8 +2796,19 @@ async def api_tts_status():
     # demands the local model (the download offer is meaningless there);
     # local mode keeps today's model_available() gate. A bare engine value
     # (a config written before #205) reads as local.
+    remote_api = (voice.get("tts_remote_api") or "openai") if engine == "remote" else "openai"
     if engine == "remote":
-        available = bool((voice.get("tts_endpoint") or "").strip())
+        configured = bool((voice.get("tts_endpoint") or "").strip())
+        if remote_api == "moss":
+            # Soft availability: the endpoint is set AND the server says
+            # it is ready. A dead/unloaded MOSS server reads unavailable
+            # without an exception probe; this stays a hint - the next
+            # synthesize is the authoritative answer either way.
+            available = configured and await speak.probe_moss_health(
+                (voice.get("tts_endpoint") or "").strip()
+            )
+        else:
+            available = configured
     else:
         available = speak.model_available()
     # #451: is the active voice Kokoro-family? The frontend mirrors this
@@ -2780,6 +2816,7 @@ async def api_tts_status():
     # is the single decider on the backend.
     return {
         "engine": engine,
+        "remote_api": remote_api,
         "kokoro": speak.kokoro_voice_cfg(voice),
         "available": available,
         # Local-model state, whatever the engine: remote mode keeps the
@@ -2881,11 +2918,13 @@ async def api_tts_synthesize(body: TtsBody):
     voice_cfg = load_config().get("voice") or {}
     engine = voice_cfg.get("tts_engine") or "local"
 
-    # Remote engine (#205): the chunk POSTs through the standard
-    # OpenAI-compatible client; voice/speed default from the tts_* settings
-    # (an explicit body override still wins, like local mode). The WAV
-    # contract to the frontend is unchanged — the remote payload is already
-    # WAV and is piped through byte-for-byte.
+    # Remote engine (#205/#443): the chunk POSTs through the remote
+    # client for the configured flavor - the standard OpenAI-compatible
+    # contract, or the MOSS job API. Voice/speed default from the tts_*
+    # settings (an explicit body override still wins, like local mode;
+    # speed is OpenAI-flavor-only - MOSS has no speed knob). The WAV
+    # contract to the frontend is unchanged - every flavor returns raw
+    # WAV bytes piped through byte-for-byte.
     if engine == "remote":
         voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
         speed = body.speed if body.speed is not None else voice_cfg.get("tts_speed")
@@ -2896,10 +2935,19 @@ async def api_tts_synthesize(body: TtsBody):
         # written→spoken pass is Kokoro-shaping, and a remote engine
         # (moss-tts) reads the written forms natively.
         try:
-            args = _remote_engine_args(voice_cfg, voice, speed)
-            # synthesize_remote is async (httpx.AsyncClient) — awaited
-            # directly; the thread offload is a local-engine concern only.
-            audio = await speak.synthesize_remote(text, *args)
+            if (voice_cfg.get("tts_remote_api") or "openai") == "moss":
+                audio = await speak.synthesize_moss(
+                    text,
+                    endpoint=(voice_cfg.get("tts_endpoint") or "").strip(),
+                    lang=voice_cfg.get("tts_moss_lang") or "en",
+                    ref=voice_cfg.get("tts_moss_ref") or "",
+                    voice=voice,
+                )
+            else:
+                args = _remote_engine_args(voice_cfg, voice, speed)
+                # synthesize_remote is async (httpx.AsyncClient) — awaited
+                # directly; the thread offload is a local-engine concern only.
+                audio = await speak.synthesize_remote(text, *args)
         except speak.SupersededError:
             return JSONResponse({"detail": "superseded"}, status_code=409)
         except speak.RemoteTTSError as e:

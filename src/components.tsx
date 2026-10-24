@@ -7165,6 +7165,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [ttsKey, setTtsKey] = useState('')
   const [ttsKeySaved, setTtsKeySaved] = useState(false)
   const [ttsModel, setTtsModel] = useState('kokoro')
+  // #443: remote dialect (openai-compatible vs. MOSS job API), language
+  // hint, and reference-clip draft for the MOSS flavor.
+  const [ttsRemoteApi, setTtsRemoteApi] = useState<'openai' | 'moss'>('openai')
+  const [ttsMossLang, setTtsMossLang] = useState('en')
+  const [ttsMossRef, setTtsMossRef] = useState('')
   const [ttsTestState, setTtsTestState] = useState<'idle' | 'busy'>('idle')
   const [ttsTestResult, setTtsTestResult] = useState<string | null>(null)
   const [ttsTestOk, setTtsTestOk] = useState(false)
@@ -7278,6 +7283,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setTtsKeySaved(v?.tts_api_key === 'set')
           setTtsKey('')
           setTtsModel(v?.tts_model || 'kokoro')
+          setTtsRemoteApi(v?.tts_remote_api === 'moss' ? 'moss' : 'openai')
+          setTtsMossLang(v?.tts_moss_lang || 'en')
+          setTtsMossRef(v?.tts_moss_ref || '')
+          // The MOSS "voice" is the ref clip; keep the saved voice aligned
+          // so the narration path cannot send a stale/unknown ref name.
+          if (v?.tts_remote_api === 'moss') setTtsVoiceDraft(v?.tts_moss_ref || '')
           setSoundsUi(v?.sounds_enabled !== false)
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
@@ -7343,12 +7354,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     let cancelled = false
     setRemoteProbing(true)
     const t = setTimeout(() => {
-      ttsVoices(endpoint, ttsKey)
+      ttsVoices(endpoint, ttsKey, ttsRemoteApi)
         .then(({ voices, models }) => {
           if (!cancelled) {
             setRemoteVoiceList(voices)
             setRemoteModelList(models)
           }
+        })
         })
         .catch(() => {})
         .finally(() => {
@@ -7360,7 +7372,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       clearTimeout(t)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ttsEngine, ttsEndpoint, ttsKey])
+  }, [ttsEngine, ttsEndpoint, ttsKey, ttsRemoteApi])
 
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string; staticSystemPrompt: boolean }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
@@ -7533,6 +7545,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           // the saved key survives (same masking dance as the dictation key).
           ...(ttsKey ? { tts_api_key: ttsKey } : {}),
           tts_model: effectiveModel,
+          tts_remote_api: ttsRemoteApi,
+          tts_moss_lang: ttsMossLang,
+          tts_moss_ref: ttsMossRef,
           sounds_enabled: soundsEnabled,
         },
         remote: {
@@ -8032,13 +8047,90 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </div>
               {ttsEngine === 'remote' && (
                 <div className="mb-2.5 space-y-1.5">
+                  <div className="flex gap-1.5" role="radiogroup" aria-label="Remote narration dialect">
+                    {(['openai', 'moss'] as const).map((api) => (
+                      <button
+                        key={api}
+                        type="button"
+                        role="radio"
+                        aria-checked={ttsRemoteApi === api}
+                        className={`flex-1 rounded px-2 py-1 font-mono text-xs ${
+                          ttsRemoteApi === api
+                            ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
+                            : 'text-zinc-400 hover:bg-zinc-800'
+                        }`}
+                        onClick={() => setTtsRemoteApi(api)}
+                      >
+                        {api === 'openai' ? 'OpenAI-compatible' : 'MOSS'}
+                      </button>
+                    ))}
+                  </div>
                   <input
                     className={`${settingsInputCls} w-full`}
                     value={ttsEndpoint}
                     onChange={(e) => setTtsEndpoint(e.target.value)}
-                    placeholder="http://herp.local:8081  or  https://api.openai.com"
+                    placeholder={ttsRemoteApi === 'moss' ? 'http://herp.local' : 'http://herp.local:8081  or  https://api.openai.com'}
                     aria-label="Remote narration endpoint"
                   />
+<<<<<<< HEAD
+                  {ttsRemoteApi === 'openai' && (
+                    <div className="flex gap-1.5">
+                      <input
+                        type="password"
+                        className={`${settingsInputCls} min-w-0 flex-1`}
+                        value={ttsKey}
+                        onChange={(e) => setTtsKey(e.target.value)}
+                        placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
+                        aria-label="Remote narration API key"
+                      />
+                      <input
+                        className={`${settingsInputCls} w-28 shrink-0`}
+                        value={ttsModel}
+                        onChange={(e) => setTtsModel(e.target.value)}
+                        placeholder="model"
+                        aria-label="Remote narration model"
+                      />
+                    </div>
+                  )}
+                  {ttsRemoteApi === 'moss' && (
+                    <div className="flex gap-1.5">
+                      <select
+                        className={`${settingsInputCls} w-full`}
+                        value={ttsMossLang}
+                        onChange={(e) => setTtsMossLang(e.target.value)}
+                        aria-label="MOSS language"
+                      >
+                        {[
+                          ['en', 'English'],
+                          ['zh', 'Chinese'],
+                          ['nl', 'Dutch'],
+                          ['fr', 'French'],
+                          ['de', 'German'],
+                          ['it', 'Italian'],
+                          ['es', 'Spanish'],
+                          ['pt', 'Portuguese'],
+                          ['sv', 'Swedish'],
+                          ['da', 'Danish'],
+                        ].map(([code, label]) => (
+                          <option key={code} value={code}>{label}</option>
+                        ))}
+                      </select>
+                      <RemoteVoiceField
+                        voiceDraft={ttsMossRef}
+                        voices={remoteVoiceList}
+                        probing={remoteProbing}
+                        onChange={(v) => {
+                          setTtsMossRef(v)
+                          setTtsVoiceDraft(v)
+                        }}
+                      />
+                    </div>
+                  )}
+                  <p className="text-[10px] leading-relaxed text-zinc-600">
+                    {ttsRemoteApi === 'moss'
+                      ? 'MOSS job API — the base URL is used as-is, with /api/moss paths appended. The voice picker lists reference clips from the server; an empty value is reference-less.'
+                      : 'Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the path is appended). Sentence chunks are sent to that server; the key goes there and nowhere else.'}
+=======
                   <div className="flex gap-1.5">
                     <input
                       type="password"
@@ -8061,6 +8153,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     and nowhere else. Voices (/voices) and models (/v1/models) are probed from the
                     drafts above; CPU-served models can take minutes per chunk, so the first test
                     may be slow.
+>>>>>>> origin/master
                   </p>
                 </div>
               )}
@@ -8148,7 +8241,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       </optgroup>
                     </select>
                     ) : null}
-                    {ttsEngine === 'remote' && (
+                    {ttsEngine === 'remote' && ttsRemoteApi === 'openai' && (
                       <RemoteVoiceField
                         voiceDraft={ttsVoiceDraft}
                         voices={remoteVoiceList}
