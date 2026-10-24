@@ -7361,7 +7361,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             setRemoteModelList(models)
           }
         })
-        })
         .catch(() => {})
         .finally(() => {
           if (!cancelled) setRemoteProbing(false)
