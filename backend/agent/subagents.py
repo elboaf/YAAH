@@ -355,7 +355,7 @@ def _sub_agent_system_prompt(
         # environment grounding (OS/shell/workspace), not this machine's.
         env = host.env_line(workspace)
     else:
-        env = _local_env_line()
+        env = _local_env_line(workspace)
     # #181: derive the prose from the SAME computation as _resolve_tools,
     # so the prompt can never name (or omit) a tool the schemas disagree
     # with. The only prose-only names are the shell line's annotations.

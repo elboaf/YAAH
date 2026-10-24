@@ -486,12 +486,22 @@ def _shell_phrase(windows: bool) -> str:
     return f"the system shell ({shell})"
 
 
-def _local_env_line() -> str:
+def _local_env_line(workspace: str = "") -> str:
+    """Runtime-environment sentence for the local host. Includes the selected
+    workspace's absolute path so sub-agents can construct absolute paths for
+    out-of-workspace targets without guessing. The Default pseudo-workspace
+    resolves to the user's home directory."""
     import platform
 
+    from backend.agent.tools import workspace_root
+
+    ws_path = workspace_root(workspace)
     return (
         f"Runtime environment: {platform.system()} {platform.release()} "
-        f"({platform.machine()}). The bash tool runs commands through "
+        f"({platform.machine()}). The selected workspace is "
+        f"{ws_path}; shell commands start there and file-tool paths resolve "
+        f"relative to it; paths outside the workspace must be absolute. The "
+        f"bash tool runs commands through "
         f"{_shell_phrase(os.name == 'nt')}; use commands and paths valid "
         f"for THIS operating system."
     )
@@ -822,7 +832,7 @@ def _default_system_prompt(workspace: str = "") -> str:
         windows = host.windows
     else:
         windows = os.name == "nt"
-        env = _local_env_line()
+        env = _local_env_line(workspace)
 
     # Build the core tool list (stable regardless of sandbox.enabled).
     # Sandbox_* tools are conditional on sandbox.enabled and belong in the
