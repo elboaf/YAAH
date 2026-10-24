@@ -3214,9 +3214,30 @@ export function DeviceGroups({
               {deviceWorkspaces.map((row) => (
                 <div key={row.path ?? `${device.host_id}:default`}>
                   <button className="flex w-full items-center gap-1.5 truncate rounded py-1 pl-6 pr-1 text-left font-mono text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:opacity-50" disabled={!connected} title={connected ? row.path ?? 'Device home folder' : 'Offline — cached workspace name; reconnect to use'} onClick={() => selectDeviceWorkspace(row.path ?? '')}><span className="truncate">{row.label}</span><span className="ml-auto shrink-0 text-[10px] text-zinc-600" aria-hidden="true">›</span></button>
-                  {localDeviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => (
-                    <button key={`local:${conversation.id}`} className="block w-full truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · locally owned chat using this device's workspace`} onClick={() => onOpenConversation(conversation)}>{conversation.title}<span className="ml-1 font-mono text-[10px] text-zinc-600">local chat</span></button>
-                  ))}
+                  {localDeviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => {
+                    // #482 (owner repro): a locally-owned chat on a device's workspace is
+                    // still a sidebar chat - its turn streams through the local loop into
+                    // the same numeric-keyed statusByConv/finishedByConv/pendingQuestions
+                    // maps every other row reads. Render the same #25 status slot with the
+                    // same precedence (blocked > finished > running), so the yellow tracer
+                    // shows while it works and orange/green on question/finish.
+                    const localKey = String(conversation.id)
+                    const localFinished = finishedByConv[localKey] ?? null
+                    const localRunning = statusByConv[localKey] === 'thinking' || statusByConv[localKey] === 'running-tool'
+                    const localBlocked = pendingQuestions[localKey] != null
+                    const localSlot = localBlocked
+                      ? <span aria-hidden="true" className="run-bar run-bar-orange mr-1.5 shrink-0" title="Waiting for you — a question is pausing this run" />
+                      : localFinished === 'error'
+                        ? <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
+                        : localFinished === 'ok'
+                          ? <span aria-hidden="true" className="run-bar run-bar-green mr-1.5 shrink-0" title="Run finished" />
+                          : localRunning
+                            ? <span aria-hidden="true" className="run-dots mr-1.5 shrink-0" title="Working…"><i /><i /><i /></span>
+                            : null
+                    return (
+                      <button key={`local:${conversation.id}`} className="flex w-full items-center truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · locally owned chat using this device's workspace`} onClick={() => onOpenConversation(conversation)}>{localSlot}{conversation.title}<span className="ml-1 font-mono text-[10px] text-zinc-600">local chat</span></button>
+                    )
+                  })}
                 </div>
               ))}
               {!connected && deviceWorkspaces.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-500">No cached workspaces</p>}
