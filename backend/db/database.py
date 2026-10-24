@@ -793,10 +793,6 @@ async def delete_workspace(workspace_id: int) -> dict:
         await db.close()
 
 
-async def init_db():
-    db = await get_db()
-    await db.close()
-
 
 # ---- Conversation CRUD ----
 
