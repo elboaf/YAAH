@@ -686,6 +686,255 @@ async def synthesize_remote(
             detail = piece_detail  # the answer that stands if refinement stalls
 
 
+# ---- MOSS job API (the owner-run MOSS-TTS server, #443) ----------------------
+# A THIRD narration flavor: the remote MOSS-TTS server on herp.local is NOT
+# OpenAI-compatible - it speaks an async job API (POST a form, poll a jobs
+# map, download the WAV). Verified against its live OpenAPI, 2026-10-18:
+#
+#   POST {base}/api/moss/generate   form: text, lang="en", ref="", wait=false,
+#                                   allow_swap=true
+#     wait=true  -> 200 audio/wav INLINE (24 kHz 16-bit mono)
+#     wait=false -> {"job_id": "...", "status": "queued"}
+#   GET  {base}/api/moss/jobs       -> {jid: {status, text, lang, ref, secs,
+#                                   wav: "/api/moss/jobs/<jid>/download",
+#                                   error, ...}}  (a MAP - no single-job GET)
+#   GET  .../jobs/{jid}/download    -> the WAV bytes
+#   DELETE .../jobs/{jid}           -> {}
+#   GET  {base}/api/moss/refs       -> [{"name": "ardy", "secs": 42.0}, ...]
+#   GET  {base}/api/moss/health     -> {"ok": true, ..., "ready": true}
+#
+# Unknown ref -> 404 (probe-verified): a stale ref name fails loudly, so the
+# Settings picker sends only names the refs list returned, or "" for
+# reference-less synthesis. POST bodies are urlencoded forms (FastAPI), the
+# response is either the raw WAV or a small JSON envelope - never wrapped.
+
+MOSS_WAIT_BUDGET = 600.0  # wait=true POST budget: server-side synthesis time
+# IS the point of wait=true (seconds per chunk on an 8B model), so the
+# per-request cap is far above the OpenAI flavor's REMOTE_TIMEOUT.
+MOSS_POLL_INTERVAL = 0.5
+MOSS_POLL_TIMEOUT = 600.0  # submit->poll->download ceiling (same budget)
+
+
+def moss_url(base: str, path: str) -> str:
+    """{base}{path} with the same base tolerance as _remote_url: a bare
+    host, a trailing slash, or a pasted full path all work. MOSS paths are
+    rooted at /api/moss and are never /v1-suffixed."""
+    trimmed = (base or "").strip().rstrip("/")
+    if not trimmed:
+        raise RemoteTTSError(
+            "MOSS TTS selected but no endpoint configured (Settings \u2192 Voice)",
+            code="not-configured",
+        )
+    if "/api/moss" in trimmed:
+        # A user pasted a full MOSS path; keep everything up to /api/moss.
+        return trimmed.split("/api/moss", 1)[0] + path
+    return trimmed + path
+
+
+async def synthesize_moss(
+    text: str,
+    endpoint: str,
+    lang: str = "en",
+    ref: str = "",
+    voice: str = "",
+) -> bytes:
+    """One chunk through the MOSS job API; returns the server's WAV bytes.
+
+    Fast path: POST generate?wait=true returns the WAV inline (probe-verified
+    ~1 s synthesis for a short probe on the live server). When the server
+    answers the wait form with a job envelope instead, the job is already
+    submitted, so we poll/download directly without re-submitting. The slow
+    path - submit (wait=false), poll the /jobs MAP (there is no single-job
+    GET), download, DELETE - is used when the wait form is explicitly
+    rejected (422/5xx). The job is deleted after a successful download
+    (jobs persist on the server; narration chunks would pile up otherwise).
+
+    Error posture mirrors synthesize_remote: 4xx is final (no retry), 5xx /
+    transport errors retry once, RemoteTTSError carries a user-facing
+    message; the frontend skips the failed chunk and the text stays visible.
+    `voice` is accepted as a ref-clip alias (the MOSS flavor's "voice" IS a
+    ref clip; the saved tts_voice rides the ordinary voice channel).
+    """
+    url = moss_url(endpoint, "/api/moss/generate")
+    ref_name = ref or voice
+    form = {"text": text, "lang": (lang or "en").strip() or "en", "wait": "true"}
+    if ref_name:
+        form["ref"] = ref_name
+
+    last_err: str | None = None
+    for _ in range(REMOTE_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(timeout=MOSS_WAIT_BUDGET) as client:
+                res = await client.post(url, data=form)
+                if res.status_code == 200 and "audio" in (
+                    res.headers.get("content-type") or ""
+                ):
+                    audio = res.content
+                    if not audio:
+                        raise RemoteTTSError("MOSS server returned an empty response")
+                    return audio
+                if res.status_code == 200:
+                    try:
+                        inline = res.json()
+                    except ValueError:
+                        inline = None
+                    if isinstance(inline, dict) and str(inline.get("job_id") or ""):
+                        # A server that ignores wait=true still answers the
+                        # job envelope: the job already exists server-side,
+                        # so pass its id to skip a duplicate submit.
+                        pre_jid = str(inline["job_id"])
+                        try:
+                            return await _moss_job_flow(
+                                client, url, text, lang, ref_name, job_id=pre_jid
+                            )
+                        except (
+                            httpx.TimeoutException,
+                            httpx.TransportError,
+                        ) as e:
+                            raise RemoteTTSError(f"connection failed: {e}") from None
+                    raise RemoteTTSError(_remote_error_detail(res))
+                if res.status_code < 500 and res.status_code != 422:
+                    # A 4xx other than a wait-form mismatch (422) is the
+                    # server's FINAL answer - a bad ref (404), bad auth,
+                    # a malformed form. Retrying or falling back would
+                    # just repeat it; surface the detail now.
+                    raise RemoteTTSError(_remote_error_detail(res))
+                # Wait rejected as a form mismatch (422), or a server
+                # error (5xx): fall back to the async job flow on the
+                # SAME client/budget. Its failures - transport ones
+                # included - are terminal: a retried job flow would
+                # synthesize the chunk twice.
+                try:
+                    return await _moss_job_flow(client, url, text, lang, ref_name)
+                except (
+                    httpx.TimeoutException,
+                    httpx.TransportError,
+                ) as e:
+                    raise RemoteTTSError(f"connection failed: {e}") from None
+        except RemoteTTSError:
+            raise
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            last_err = f"connection failed: {e}"
+    raise RemoteTTSError(last_err or "MOSS TTS failed")
+
+
+async def _moss_job_flow(
+    client: httpx.AsyncClient,
+    generate_url: str,
+    text: str,
+    lang: str,
+    ref: str,
+    job_id: str | None = None,
+) -> bytes:
+    """Submit (when no job_id) -> poll the jobs map -> download -> delete.
+    Polled via the MAP endpoint: the server has no single-job GET. When
+    `job_id` is provided, the caller has already submitted the job (the
+    wait=true envelope), so no duplicate synthesis is created."""
+    import asyncio
+
+    base = generate_url.rsplit("/api/moss", 1)[0]
+    if job_id:
+        jid = job_id
+    else:
+        form = {"text": text, "lang": (lang or "en").strip() or "en", "wait": "false"}
+        if ref:
+            form["ref"] = ref
+        res = await client.post(generate_url, data=form)
+        if res.status_code != 200:
+            raise RemoteTTSError(_remote_error_detail(res))
+        try:
+            body = res.json()
+        except ValueError:
+            raise RemoteTTSError("MOSS server returned a non-JSON job answer") from None
+        if not isinstance(body, dict) or not str(body.get("job_id") or ""):
+            raise RemoteTTSError("MOSS server accepted the job but returned no job id")
+        jid = str(body["job_id"])
+    jobs_url = moss_url(base, "/api/moss/jobs")
+    dl_url = f"{base}/api/moss/jobs/{jid}/download"
+    waited = 0.0
+    while True:
+        await asyncio.sleep(MOSS_POLL_INTERVAL)
+        waited += MOSS_POLL_INTERVAL
+        if waited > MOSS_POLL_TIMEOUT:
+            raise RemoteTTSError(
+                f"MOSS synthesis timed out after {int(MOSS_POLL_TIMEOUT)} s (job {jid})"
+            )
+        res = await client.get(jobs_url)
+        if res.status_code != 200:
+            raise RemoteTTSError(_remote_error_detail(res))
+        try:
+            jobs = res.json()
+        except ValueError:
+            raise RemoteTTSError("MOSS server returned a non-JSON jobs answer") from None
+        job = jobs.get(jid) if isinstance(jobs, dict) else None
+        if job is None:
+            continue  # not registered yet - the map is eventual
+        status = str(job.get("status") or "")
+        if status == "done":
+            break
+        if status == "error":
+            raise RemoteTTSError(str(job.get("error") or "MOSS job failed"))
+        # queued / running / anything else: keep polling
+    res = await client.get(dl_url)
+    if res.status_code != 200:
+        raise RemoteTTSError(_remote_error_detail(res))
+    audio = res.content
+    if not audio:
+        raise RemoteTTSError("MOSS server returned an empty audio download")
+    # Cleanup is best-effort: a failed DELETE must not fail the narration.
+    try:
+        await client.delete(f"{base}/api/moss/jobs/{jid}")
+    except httpx.HTTPError:
+        pass
+    return audio
+
+
+async def probe_moss_refs(endpoint: str, api_key: str = "") -> list[str]:
+    """The reference clips the MOSS server offers (the MOSS "voice" IS a
+    ref clip - zero-shot cloning). [] on ANY failure: the picker falls back
+    to free-text, mirroring probe_remote_voices' posture."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=VOICES_TIMEOUT) as client:
+            res = await client.get(moss_url(endpoint, "/api/moss/refs"), headers=headers)
+    except (httpx.TimeoutException, httpx.TransportError):
+        return []
+    if res.status_code != 200:
+        return []
+    try:
+        body = res.json()
+    except ValueError:
+        return []
+    names: list[str] = []
+    if isinstance(body, list):
+        for item in body:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.append(item["name"])
+            elif isinstance(item, str):
+                names.append(item)
+    return list(dict.fromkeys(n.strip() for n in names if n.strip()))
+
+
+async def probe_moss_health(endpoint: str, api_key: str = "") -> bool:
+    """True when the server answers health with ready/ok truthy. ANY
+    failure reads False - status only uses it for a soft availability hint."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=VOICES_TIMEOUT) as client:
+            res = await client.get(moss_url(endpoint, "/api/moss/health"), headers=headers)
+    except (httpx.TimeoutException, httpx.TransportError):
+        return False
+    if res.status_code != 200:
+        return False
+    try:
+        body = res.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    return bool(body.get("ready", body.get("ok", False)))
+
+
 # ---- Voice discovery (#231): best-effort, non-standard GET /voices --------
 
 

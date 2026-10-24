@@ -91,6 +91,19 @@ DEFAULTS = {
         # Omitted from requests unless the user sets one (OpenAI 0.25-4.0,
         # Kokoro 0.5-2.0 - let the server validate its own range).
         "tts_speed": None,
+        # Which dialect a remote engine speaks (#443): the standard
+        # OpenAI /v1/audio/speech contract ("openai", the default - every
+        # config written before #443 keeps today's behavior) or the
+        # owner-run MOSS-TTS job API ("moss", NOT OpenAI-compatible -
+        # POST /api/moss/generate + jobs + refs on herp.local). Local
+        # Kokoro ignores this key.
+        "tts_remote_api": "openai",
+        # MOSS flavor: target language hint (the server's lang form field)
+        # and the reference-clip name for zero-shot voice cloning. An
+        # empty ref = reference-less synthesis; the MOSS "voice" IS the
+        # ref clip, so Settings keeps tts_voice aligned with this.
+        "tts_moss_lang": "en",
+        "tts_moss_ref": "",
         # #451: no stored flag for this - speak.kokoro_voice() DERIVES the
         # Kokoro-shape gate from tts_engine + tts_model on every call, so
         # a Settings change applies without a restart.
