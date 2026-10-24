@@ -239,6 +239,8 @@ export interface StoredMessage {
   /** Structured text attachments (#142), parsed from the messages column. */
   attachments?: Array<{ name: string; size: number; content?: string; path?: string }> | null
   tool_call_id?: string | null
+  /** #445: server-measured tool-call duration in ms (tool rows only). */
+  duration_ms?: number | null
   tool_calls: Array<{
     id?: string
     type?: string
@@ -256,6 +258,8 @@ export interface StoredMessage {
       name?: string
       tool_call_id?: string
       args?: unknown
+      /** #445: server-measured duration of this nested call. */
+      duration_ms?: number
     }>
   } | null
 }
@@ -705,7 +709,7 @@ export const queueMessage = (
   })
 
 export const steerAgent = (id: number) =>
-  api<{ ok: boolean }>(`/api/agent/${id}/steer`, { method: 'POST' })
+  api<{ ok: boolean; run_ended?: boolean; queued?: Array<{ id: number; text: string; skills?: string[]; images?: string[] }> }>(`/api/agent/${id}/steer`, { method: 'POST' })
 
 /** Answer a pending ask_user question; the blocked agent loop resumes. */
 export const submitAnswer = (id: number, callId: string, answer: string) =>
@@ -996,6 +1000,13 @@ export interface TtsStatus {
   engine: 'local' | 'remote'
   /** Active remote dialect (#443): openai or moss (local reads openai). */
   remote_api?: 'openai' | 'moss'
+  /** #451: the active voice is Kokoro-family - gates the ear-shaping in
+   *  src/speech.ts (mirrors speak.kokoro_voice on the backend). */
+  kokoro: boolean|  /** Active remote dialect (#443): openai or moss (local reads openai). */
+  remote_api?: 'openai' | 'moss'
+  /** #451: the active voice is Kokoro-family - gates the ear-shaping in
+   *  src/speech.ts (mirrors speak.kokoro_voice on the backend). */
+  kokoro: boolean
   /** Whether the ACTIVE engine can speak right now (remote = endpoint
    *  configured; local = model present). */
   available: boolean
@@ -1015,19 +1026,21 @@ export const ttsStatus = () => api<TtsStatus>('/api/tts/status')
 /** Synthesize a one-line sample through the given engine (#205): the
  *  Settings Test button. `engine` defaults to the saved choice server-side;
  *  the UI passes its on-screen draft so Test reflects unsaved edits.
+ *  `model` (optional) is the on-screen remote model draft (#449).
  *  Rejects with the backend's detail â€” a remote engine surfaces the
  *  server's own error message here (and `.status` drives result styling). */
 export async function ttsTest(
   voice: string,
   speed: number,
   engine?: 'local' | 'remote',
+  model?: string,
 ): Promise<{ ok: boolean }> {
   let res: Response
   try {
     res = await fetch(url('/api/tts/test'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ voice, speed, engine }),
+      body: JSON.stringify({ voice, speed, engine, model }),
     })
   } catch {
     signalBackendDown()
@@ -1042,12 +1055,27 @@ export async function ttsTest(
   return res.json()
 }
 
-/** Voice discovery (#231): the names a remote server offers via its
- *  non-standard GET /voices (the reference Kokoro server does; OpenAI
- *  does not). The backend probe NEVER errors â€” an unreachable or
- *  list-less server resolves to [] and the UI falls back to free-text.
- *  Drafts ride in the body so discovery works before the first Save. */
-export async function ttsVoices(endpoint?: string, apiKey?: string, remoteApi?: 'openai' | 'moss'): Promise<string[]> {
+/** Voice + model discovery (#231, #443, #448): the names a remote server
+ *  offers via its non-standard GET /voices, plus the model ids from the
+ *  standard GET /v1/models. The backend probe NEVER errors — an
+ *  unreachable or list-less server resolves to empty lists and the UI
+ *  falls back to free-text. Drafts ride in the body so discovery works
+ *  before the first Save. */
+export async function ttsVoices(
+  endpoint?: string,
+  apiKey?: string,
+  remoteApi?: 'openai' | 'moss',
+): Promise<{ voices: string[]; models: string[] }> {|/** Voice + model discovery (#231, #443, #448): the names a remote server
+ *  offers via its non-standard GET /voices, plus the model ids from the
+ *  standard GET /v1/models. The backend probe NEVER errors — an
+ *  unreachable or list-less server resolves to empty lists and the UI
+ *  falls back to free-text. Drafts ride in the body so discovery works
+ *  before the first Save. */
+export async function ttsVoices(
+  endpoint?: string,
+  apiKey?: string,
+  remoteApi?: 'openai' | 'moss',
+): Promise<{ voices: string[]; models: string[] }> {
   let res: Response
   try {
     res = await fetch(url('/api/tts/voices'), {
@@ -1056,11 +1084,13 @@ export async function ttsVoices(endpoint?: string, apiKey?: string, remoteApi?: 
       body: JSON.stringify({ endpoint, api_key: apiKey, remote_api: remoteApi }),
     })
   } catch {
-    return [] // backend down: free-text fallback, no error noise
+    return { voices: [], models: [] } // backend down: free-text fallback
   }
-  if (!res.ok) return [] // 409 not-configured included: absence of a list is normal
-  const body = (await res.json().catch(() => ({}))) as { voices?: unknown }
-  return Array.isArray(body.voices) ? body.voices.filter((v): v is string => typeof v === 'string') : []
+  if (!res.ok) return { voices: [], models: [] } // 409 not-configured included
+  const body = (await res.json().catch(() => ({}))) as { voices?: unknown; models?: unknown }
+  const strs = (xs: unknown): string[] =>
+    Array.isArray(xs) ? xs.filter((v): v is string => typeof v === 'string') : []
+  return { voices: strs(body.voices), models: strs(body.models) }
 }
 
 /** Fire-and-forget stop handshake: raises the backend's supersede floor to
@@ -1237,6 +1267,19 @@ export const listRemoteDeviceConversations = (hostId: string) =>
     `/api/remote/devices/${encodeURIComponent(hostId)}/conversations`,
   )
 
+export interface RemoteRunning {
+  status: 'online' | 'cached'
+  /** conversation_ids mid-turn (yellow tracer). */
+  running: string[]
+  /** conversation_ids parked on a pending ask_user answer (orange bar). */
+  pending: string[]
+}
+
+export const getRemoteDeviceRunning = (hostId: string) =>
+  api<RemoteRunning>(
+    `/api/remote/devices/${encodeURIComponent(hostId)}/running`,
+  )
+
 export const getRemoteDeviceMessages = (hostId: string, conversationId: string) =>
   api<StoredMessage[]>(
     `/api/remote/devices/${encodeURIComponent(hostId)}/conversations/${encodeURIComponent(conversationId)}/messages`,
@@ -1318,6 +1361,9 @@ export interface AgentEvent {
   call_id?: string
   /** Inner child tool ID, distinct from the parent spawn ID. */
   tool_call_id?: string
+  /** Server-measured wall time of the call in ms (#445); omitted on
+   *  tool_start and for paths that never executed (malformed args). */
+  duration_ms?: number
   /** Namespaced approval gate ID used only to answer access requests. */
   approval_call_id?: string
   /** Spoken briefing for read-aloud (#66) â€” speech-only, never rendered. */
@@ -1351,9 +1397,6 @@ export interface AgentEvent {
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number
   deleted?: number
-  /** The provider+model this turn's chat call is waiting on (model_call).
-   *  Unset between the response arriving and the next call of the turn. */
-  modelCall?: { provider: string; model: string; startedAt: number }
   model?: string
   /** History compaction (adr/0004): how many oldest messages the new
    *  summary row replaced (compacted). */

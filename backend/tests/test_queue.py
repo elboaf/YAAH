@@ -182,3 +182,31 @@ async def test_queue_shape_fifo_and_remove():
     assert loop.remove_queued(1, b["id"]) is True
     assert loop.remove_queued(1, b["id"]) is False
     assert [i["text"] for i in loop.queue_items(1)] == [a["text"]]
+
+
+async def test_steer_after_run_ended_returns_queued_items():
+    """When the steer request arrives after the run ended, the queued items
+    should be returned to the client so it can send them as a fresh turn (#460)."""
+    from backend.main import app
+    from backend.agent.loop import enqueue_message, queue_items, _steer_flags, _running_convs
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+
+    conversation_id = 200
+    enqueue_message(conversation_id, "queued message after run ended")
+
+    # Simulate the run having ended (no steer flag set, not running)
+    if conversation_id in _steer_flags:
+        del _steer_flags[conversation_id]
+    if conversation_id in _running_convs:
+        del _running_convs[conversation_id]
+
+    # The steer should return the queued items with run_ended=True
+    response = client.post(f"/api/agent/{conversation_id}/steer")
+    assert response.status_code == 200
+    result = response.json()
+    assert result["ok"] is True
+    assert result["run_ended"] is True
+    assert len(result["queued"]) == 1
+    assert result["queued"][0]["text"] == "queued message after run ended"

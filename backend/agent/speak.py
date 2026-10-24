@@ -14,6 +14,7 @@ The engine is loaded lazily and kept as a module singleton; synthesis is
 serialized behind a lock (sherpa's OfflineTts is not thread-safe) and
 runs in worker threads via asyncio.to_thread at the endpoint layer.
 """
+import io
 import os
 import re
 import shutil
@@ -21,11 +22,13 @@ import sys
 import tarfile
 import threading
 import time
+import wave
 from pathlib import Path
 
 import httpx
 
 from backend.agent import gitproc
+from backend.agent.config import load_config
 
 # ---- Voice table -----------------------------------------------------------
 # Authoritative sid -> name order for the sherpa-onnx kokoro multi-lang v1.0
@@ -394,17 +397,32 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0, epoch:
 # contract, and api.openai.com works with tts-1 / gpt-4o-mini-tts — never
 # send the newer surface (instructions, stream_format/sse, custom voices).
 
-REMOTE_TIMEOUT = 10.0  # seconds; a LAN GPU box answers well inside this
+# Per-request ceiling, not a wait (#448): a GPU box answers in seconds, but
+# the owner's MOSS-TTS-Realtime box serves on CPU at ~6x realtime and measured
+# 63 s cold / ~118 s warm for one short sentence — the old 10 s (tuned for a
+# GPU LAN box) gave up mid-synthesis and read as "connection failed". 180 s
+# covers the observed CPU profile with slack; a timeout still surfaces fast
+# RELATIVE to the work, and narration stays async.
+REMOTE_TIMEOUT = 180.0
+# Connection establishment keeps a short leash (review, #449): the
+# budget above pays for the server's SYNTHESIS work (read phase). A
+# dead host (powered off, firewall silently dropping packets) must
+# fail in seconds as "connection failed", not burn the full budget
+# and then be mis-reported as "still synthesizing".
+REMOTE_CONNECT_TIMEOUT = 5.0
 REMOTE_ATTEMPTS = 2  # one retry, then the chunk is skipped (the frontend
 # degrades to the visible text — narration must never stall the chat)
 
 
 class RemoteTTSError(RuntimeError):
     """A remote synthesis request failed. The message is user-facing:
-    the synthesize endpoint and Settings' Test button surface it."""
+    the synthesize endpoint and Settings' Test button surface it. timed_out
+    distinguishes "server took too long" (#448: normal for CPU-served
+    models) from "unreachable/refused" — recovery advice differs."""
 
     def __init__(self, message: str, code: str = "remote-failed"):
         super().__init__(message)
+        self.timed_out = False
         # Machine-readable cause for UI branching: "not-configured" (no
         # endpoint set), "remote-failed" (server refused / unreachable).
         self.code = code
@@ -447,32 +465,114 @@ def _remote_error_detail(res: httpx.Response) -> str:
     return f"{status}: {res.text[:200]}".rstrip()
 
 
-async def synthesize_remote(
+# ---- Adaptive input splitting (servers that cap `input`) ---------------------
+# The speech contract caps `input` wherever each server pleases, and each
+# server says so only in its own rejection: OpenAI documents 4096 chars;
+# the MOSS-TTS-Realtime wrapper rejects anything over 48 (its model tops
+# out at ~41 s of audio per request). /voices carries no hint, so the
+# client LEARNS the cap from a "too long" HTTP 4xx: one sentence-bounded
+# re-split at the stated cap (any "too long" 4xx counts; halving the
+# failed input when the rejection states no number), pieces synthesized in order and merged into a single WAV (same
+# server/voice => identical format; stdlib wave). The learned cap is
+# cached per origin, so only the first-ever oversized chunk pays the
+# rejected-request tax. Any OTHER 4xx (bad voice, bad model) is not a
+# length problem: it surfaces verbatim, never split, never retried.
+
+_REMOTE_CAPS: dict[str, int] = {}  # origin -> learned max `input` chars
+
+_SPLITTABLE_ERR = re.compile(r"^HTTP 4\d\d\b")  # a 4xx detail, not a timeout
+_TOO_LONG_RE = re.compile(
+    r"\btoo\s+long\b"
+    r"|(?:chars?|characters?)\s*max"
+    r"|max(?:imum)?\s*(?:of\s+)?\d+\s*(?:chars?|characters?)"
+    r"|(?:at\s+most|up\s+to)\s+\d+\s*(?:chars?|characters?)"
+    r"|(?:chars?|characters?)\s+long\b",
+    re.IGNORECASE,
+)
+_CAP_RE = re.compile(
+    r"(?P<a>\d{1,5})\s*(?:chars?|characters?)\s*max(?:imum)?"
+    r"|max(?:imum)?\s*(?:of\s+)?(?P<b>\d{1,5})\s*(?:chars?|characters?)"
+    r"|(?:at\s+most|up\s+to)\s+(?P<c>\d{1,5})\s*(?:chars?|characters?)",
+    re.IGNORECASE,
+)
+
+
+def _origin_of(url: str) -> str:
+    """scheme://host[:port] of an endpoint URL — the cap-cache key."""
+    m = re.match(r"[a-z][a-z0-9+.-]*://[^/?#]+", url, re.IGNORECASE)
+    return m.group(0).lower() if m else url
+
+
+def _cap_from_error(detail: str) -> int | None:
+    """The input cap a server states in its own rejection ("(48 chars
+    max)", "at most 4096 characters"), or None when it states no number."""
+    m = _CAP_RE.search(detail)
+    if not m:
+        return None
+    n = int(next(g for g in (m.group("a"), m.group("b"), m.group("c")) if g))
+    return n if n > 0 else None
+
+
+def _merge_wavs(chunks: list[bytes]) -> bytes:
+    """Concatenate same-server WAV bytes into one WAV (stdlib wave). A
+    channels/width/rate disagreement is a broken server, surfaced — never
+    glued into garbage audio."""
+    if len(chunks) == 1:
+        return chunks[0]
+    # Decode and validate EVERY piece before the writer opens: a piece
+    # failing inside a live writer would leave it param-less, and the
+    # writer's own close-time wave.Error would mask the clean answer.
+    params = None
+    frames_list: list[bytes] = []
+    for i, data in enumerate(chunks):
+        try:
+            with wave.open(io.BytesIO(data), "rb") as r:
+                p = r.getparams()
+                frames = r.readframes(r.getnframes())
+        except (wave.Error, EOFError) as e:
+            # A piece that is not decodable WAV is a broken server, not
+            # silence - surfaced, never glued into garbage audio.
+            raise RemoteTTSError(
+                f"remote TTS split piece {i + 1} is not valid WAV audio ({e})"
+            ) from e
+        if params is None:
+            params = p
+        elif p[:3] != params[:3]:
+            raise RemoteTTSError(
+                "remote TTS split pieces disagree on audio format "
+                f"(piece {i + 1}: {p.nchannels}ch/{p.sampwidth * 8}-bit/"
+                f"{p.framerate}Hz vs {params.nchannels}ch/"
+                f"{params.sampwidth * 8}-bit/{params.framerate}Hz)"
+            )
+        frames_list.append(frames)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setparams(params)
+        for frames in frames_list:
+            w.writeframes(frames)
+    return out.getvalue()
+
+
+async def _post_remote(
     text: str,
-    endpoint: str,
-    api_key: str,
+    url: str,
     model: str,
     voice: str,
     speed: float | None,
+    headers: dict,
 ) -> bytes:
-    """One chunk through the remote engine; returns the server's WAV bytes
-    (the endpoint pipes them to the frontend untouched, Web Audio decodes).
-
-    Error posture (the spec's contract): a 4xx is the server's final
-    answer — one request, no retry. Timeouts and 5xx get one retry, then
-    RemoteTTSError carries the server's message. An empty 200 body is a
-    broken server, not silence. The endpoint maps failures to 502; the
-    frontend skips the chunk and keeps the text visible.
-    """
-    url = _remote_url(endpoint)
+    """One unwrapped POST with the #205 retry posture (a 4xx is final; one
+    retry for timeouts/5xx). No splitting here — synthesize_remote owns
+    the adaptive-cap logic."""
     body: dict = {"model": model, "input": text, "voice": voice, "response_format": "wav"}
     if speed is not None:
         body["speed"] = speed
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     last_err: str | None = None
+    timed_out = False
     for _ in range(REMOTE_ATTEMPTS):
         try:
-            async with httpx.AsyncClient(timeout=REMOTE_TIMEOUT) as client:
+            timeout = httpx.Timeout(REMOTE_TIMEOUT, connect=REMOTE_CONNECT_TIMEOUT)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 res = await client.post(url, json=body, headers=headers)
             if res.status_code == 200:
                 audio = res.content
@@ -484,9 +584,106 @@ async def synthesize_remote(
                 break  # 4xx: retrying the same request cannot help
         except RemoteTTSError:
             raise
-        except (httpx.TimeoutException, httpx.TransportError) as e:
+        except httpx.ConnectTimeout as e:
+            # Never connected (review, #449): the host never answered
+            # the handshake. That is a connection failure (dead host /
+            # silent firewall), not a slow synthesis - say so.
+            timed_out = False
             last_err = f"connection failed: {e}"
-    raise RemoteTTSError(last_err or "remote TTS failed")
+        except httpx.TimeoutException as e:
+            # A timeout is NOT a connection failure (#448): the server took
+            # the request and is still working (a CPU-served model can run
+            # minutes per request) — say so, or the user debugs a live box.
+            timed_out = True
+            last_err = (
+                f"remote TTS timed out after {REMOTE_TIMEOUT:.0f}s (server still "
+                f"synthesizing?): {e}"
+            )
+        except httpx.TransportError as e:
+            timed_out = False
+            last_err = f"connection failed: {e}"
+    err = RemoteTTSError(last_err or "remote TTS failed")
+    err.timed_out = timed_out
+    raise err
+
+
+async def synthesize_remote(
+    text: str,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    voice: str,
+    speed: float | None,
+) -> bytes:
+    """One chunk through the remote engine; returns the server's WAV bytes
+    (the endpoint pipes them to the frontend untouched, Web Audio decodes).
+
+    If the server rejects the input as too long (see the splitting section
+    above), the chunk re-splits at the server's own cap and the pieces come
+    back merged as one WAV; a piece that STILL fails surfaces the server's
+    answer and drops the whole chunk, like any other failure.
+
+    Error posture (the spec's contract): a 4xx is the server's final
+    answer — one request, no retry. Timeouts and 5xx get one retry, then
+    RemoteTTSError carries the server's message. An empty 200 body is a
+    broken server, not silence. The endpoint maps failures to 502; the
+    frontend skips the chunk and keeps the text visible.
+    """
+    url = _remote_url(endpoint)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    origin = _origin_of(url)
+    cap = _REMOTE_CAPS.get(origin)
+    detail = f"HTTP 400: input too long ({cap} chars max)" if cap else ""
+
+    async def pieces_to_wav(parts: list[str]) -> bytes:
+        wavs = [await _post_remote(p, url, model, voice, speed, headers) for p in parts]
+        return _merge_wavs(wavs)
+
+    # A cap learned earlier for THIS server pre-splits oversized chunks, so
+    # only the first-ever oversized chunk pays the rejected-request tax.
+    # Otherwise the chunk goes verbatim (the #205 contract for servers with
+    # no practical cap), and a "too long" rejection teaches us the cap.
+    if cap is None or len(text) <= cap:
+        try:
+            return await _post_remote(text, url, model, voice, speed, headers)
+        except RemoteTTSError as e:
+            detail = str(e)
+            if not _SPLITTABLE_ERR.match(detail) or not _TOO_LONG_RE.search(detail):
+                raise  # timeouts, bad voice/model: anything but a length rejection
+            stated = _cap_from_error(detail)
+            if stated is not None:
+                cap = stated  # the server's own number is authoritative
+            elif len(text) >= 4:
+                cap = len(text) // 2  # nothing stated: start halving
+            else:
+                raise  # too short to halve and no number stated: answer stands
+
+    # A "too long" 4xx - the server's own admission that `input` is over
+    # its cap. Re-split at the cap and synthesize the pieces in order. A
+    # piece that STILL answers too-long refines the cap further (a stated
+    # number is exact; the no-number halving guess can land high). Any
+    # OTHER failure is final: the server's answer surfaces and the whole
+    # chunk drops - no partial audio, no unbounded shrinking.
+    while True:
+        if cap < 2 or cap >= len(text):
+            raise RemoteTTSError(detail)  # a split cannot shrink this; answer stands
+        _REMOTE_CAPS[origin] = cap
+        pieces = split_sentences(text, min_len=cap, max_len=cap)
+        if len(pieces) < 2:
+            raise RemoteTTSError(detail)  # no usable boundary; answer stands
+        try:
+            return await pieces_to_wav(pieces)
+        except RemoteTTSError as e:
+            piece_detail = str(e)
+            if not _SPLITTABLE_ERR.match(piece_detail) or not _TOO_LONG_RE.search(
+                piece_detail
+            ):
+                raise
+            stated = _cap_from_error(piece_detail)
+            # Only a real refinement (a SMALLER bound) is taken; a lying or
+            # repeating number falls back to halving so the loop terminates.
+            cap = stated if stated is not None and stated < cap else cap // 2
+            detail = piece_detail  # the answer that stands if refinement stalls
 
 
 # ---- MOSS job API (the owner-run MOSS-TTS server, #443) ----------------------
@@ -814,6 +1011,62 @@ async def probe_remote_voices(endpoint: str, api_key: str = "") -> list[str]:
     return _normalize_voices(body)
 
 
+async def probe_remote_models(endpoint: str, api_key: str = "") -> list[str]:
+    """The model ids a server lists at the STANDARD OpenAI GET /v1/models
+    (MOSS-TTS-Realtime serves it; Kokoro-shaped boxes may not). Same
+    posture as voices: ANY failure reads as "no list" — discovery is a
+    nicety, never a requirement."""
+    trimmed = (endpoint or "").strip().rstrip("/")
+    if not trimmed:
+        return []
+    base = trimmed[:-3] if trimmed.endswith("/v1") else trimmed
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=VOICES_TIMEOUT) as client:
+            res = await client.get(base + "/v1/models", headers=headers)
+    except (httpx.TimeoutException, httpx.TransportError):
+        return []
+    if res.status_code != 200:
+        return []
+    try:
+        body = res.json()
+    except ValueError:
+        return []
+    return _normalize_models(body)
+
+
+def _normalize_models(body) -> list[str]:
+    """Model ids from an OpenAI list-shape body ({"data": [{"id": ...}]},
+    the MOSS box's shape), {"models": [...]}, or a bare array of ids
+    (plain strings or {"id": ...} objects) - #448's spec asks for all
+    three dialects. Voices cannot leak in here: this only ever runs on
+    the /v1/models answer, never on a shared endpoint."""
+    if isinstance(body, list):
+        # Bare-array dialect (#448 spec): ids as plain strings or as
+        # OpenAI-shaped objects. Junk entries are dropped, the rest
+        # trimmed + deduplicated, server order preserved.
+        ids = []
+        for v in body:
+            i = v.get("id") if isinstance(v, dict) else v
+            if isinstance(i, str) and i.strip():
+                ids.append(i.strip())
+        return list(dict.fromkeys(ids))
+    if not isinstance(body, dict):
+        return []
+    ids: list[str] = []
+    if isinstance(body.get("data"), list):
+        # OpenAI list shape: entries are objects with an "id" - bare
+        # strings are junk and dropped.
+        for v in body["data"]:
+            i = v.get("id") if isinstance(v, dict) else None
+            if isinstance(i, str) and i.strip():
+                ids.append(i.strip())
+    elif isinstance(body.get("models"), list):
+        # The looser dialect: plain name strings.
+        ids = [v.strip() for v in body["models"] if isinstance(v, str) and v.strip()]
+    return list(dict.fromkeys(ids))
+
+
 # ---- Spoken briefing (two-channel split, #66) ---------------------------------
 # The chat transcript and the TTS input are deliberately DIFFERENT texts. The
 # agent emits a condensed spoken line as a <say> tag at the end of its final
@@ -912,17 +1165,22 @@ def heuristic_briefing(md: str, max_chars: int = SAY_MAX_CHARS) -> str:
     return cut.strip()
 
 
-def spoken_line(briefing: str | None, md: str, max_chars: int = SAY_MAX_CHARS) -> str:
+def spoken_line(
+    briefing: str | None, md: str, max_chars: int = SAY_MAX_CHARS, kokoro: bool | None = None
+) -> str:
     """The final TTS input for a turn: the model-emitted briefing when
     usable, else the heuristic, else the old truncated verbatim prose (the
     fallback is today's behavior, never silence). Everything passes through
     prose_for_speech so no markdown junk reaches the synthesizer, and the
-    hard cap is enforced here — in one place."""
+    hard cap is enforced here — in one place.
+
+    #451: kokoro=None consults kokoro_voice(); a non-Kokoro voice gets the
+    engine-neutral cleanup only."""
     def _finish(text: str) -> str:
         # #206: the speech-normalization pass is the last thing a briefing
         # receives before the synthesizer. The cap is re-enforced after it:
         # spelled-out numbers ("four four three") are longer than digits.
-        out = normalize_for_speech(text)
+        out = normalize_for_speech(text, kokoro=kokoro)
         return _clip(out, max_chars) if len(out) > max_chars else out
 
     prose = prose_for_speech(md, max_chars=10**9)
@@ -1316,15 +1574,45 @@ def _acronyms(text: str) -> str:
     )
 
 
-def normalize_for_speech(text: str) -> str:
+def kokoro_voice_cfg(voice: dict) -> bool:
+    """#451: the Kokoro-shape gate over an already-loaded voice config.
+    Local synthesis is always kokoro; a remote engine is Kokoro-family
+    only when its model name says so (the moss endpoint, api.openai.com
+    tts-1, and every other front-end read written forms natively)."""
+    if (voice.get("tts_engine") or "local") != "remote":
+        return True
+    # An empty remote model name rides the same default _remote_engine_args
+    # sends ("kokoro"), so the classification always matches synthesis.
+    return "kokoro" in (voice.get("tts_model") or "kokoro").lower()
+
+
+def kokoro_voice() -> bool:
+    """#451: kokoro_voice_cfg over the SAVED voice config, read on every
+    call so a Settings change applies without a restart. A config failure
+    reads non-kokoro (skip the Kokoro-only shaping rather than feed a
+    non-espeak engine text it stutters on)."""
+    try:
+        return kokoro_voice_cfg(load_config().get("voice") or {})
+    except Exception:
+        return False
+
+
+def normalize_for_speech(text: str, *, kokoro: bool | None = None) -> str:
     """Deterministic written→spoken pass over TTS INPUT only (the chat
     transcript is untouched). Order matters: markers/SSML first so their
     digits never feed the number rules, then years before bare runs, then
     versionish dotted groups, then long digit runs by context (phones
     group, everything else digit-by-digit), then short numbers, then
-    acronyms."""
+    acronyms.
+
+    #451: everything after stage 1 is Kokoro-shaping — it pre-speaks
+    exactly what non-espeak engines (moss-tts) already read natively, and
+    the letter-spaced acronyms make those engines stutter. kokoro=None
+    consults kokoro_voice(); False runs engine-neutral cleanup only."""
     if not text:
         return text
+    if kokoro is None:
+        kokoro = kokoro_voice()
 
     # 1. SSML tags and emotion markers cannot survive into synthesis.
     t = _SSML_TAG.sub(" ", text)
@@ -1333,6 +1621,9 @@ def normalize_for_speech(text: str) -> str:
     )
     t = re.sub(r"  +", " ", t)
     t = re.sub(r" ([,.!?;:])", r"\1", t)
+    if not kokoro:
+        # #451: non-Kokoro voice — skip the written→spoken shaping below.
+        return t.strip()
 
     # 1.5 Currency amounts ($19.99, $1,299.50, $5) before the year pass:
     # money is never a year, and the $ must not survive into synthesis.

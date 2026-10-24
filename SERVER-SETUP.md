@@ -14,32 +14,38 @@ artifacts:
 | Desktop app | `yaah-desktop-setup.exe` | `yaah-desktop-setup.deb` |
 | Headless server | `yaah-server-setup.exe` | `yaah-server-setup.deb` |
 
-Trust model: the daemon executes shell commands on the host as the user it
-runs as, gated by a passphrase only. Install it on machines you control.
+Trust model: the daemon executes shell commands on the host as the account
+it runs as — your user on Linux, LocalSystem on Windows — gated by a
+passphrase only. Install it on machines you control.
 
 ## Windows
 
 1. Download `yaah-server-setup.exe` and run it **from an elevated
-   (Administrator) prompt** — installing a service requires elevation.
-   Double-clicking also works; it detects it isn't a service start and
-   launches the same wizard.
-2. Answer three prompts:
+   prompt** — installing a service requires elevation. Double-clicking
+   also works; it detects it isn't a service start and launches the same
+   wizard. Admin account: a plain UAC yes/no. Standard account: the popup
+   asks for an administrator's password.
+2. Answer two prompts:
    - the **passphrase** desktop clients must present,
-   - a **display name** (what the client's host switcher shows; defaults to
-     the hostname),
-   - your **Windows account password** — the service runs as your user so
-     its workspace is your real home directory.
+   - a **display name** (what the client's host switcher shows; defaults
+     to the hostname).
 3. The wizard copies itself to `%LOCALAPPDATA%\YAAH\`, registers the
-   `YaahServer` service (automatic startup), turns on crash auto-restart,
-   and starts it.
+   `YaahServer` service (automatic startup, running as **LocalSystem** —
+   no account password involved), records the installing user's profile
+   in the service's `Parameters` registry key, and starts it.
 
-The account must have a password: Windows refuses to run services under
-passwordless accounts (blank-password security policy). The wizard grants
-your account the "Log on as a service" right automatically — without it the
-service fails to start with "did not start due to a logon failure" (the
-programmatic install does not add it the way Services.msc does). If that
-error still appears, re-check the right in secpol.msc; a Group Policy can
-strip it again.
+Run setup from the account whose workspace you want the server to serve:
+the passphrase is stored in that account's `~/.yaah/config.json` and the
+service reads it from there. (If the elevation popup was answered with a
+*different* admin's credentials, the recorded profile is the account the
+elevated process runs under — the one you typed into the popup, not the
+one that launched the exe.)
+
+Because the service runs as LocalSystem there is no stored account
+password to go stale: changing your Windows password, or using a
+passwordless account, cannot break the service — that is the whole point
+of the design. The tradeoff is deliberate: the passphrase now gates full
+command of the machine (as SYSTEM), regardless of who installed it.
 
 First-run firewall note: if you ever ran the exe manually from Downloads,
 Windows' allow rule is pinned to that path. The service runs from
@@ -55,8 +61,10 @@ Manage the service (elevated):
     yaah-server-setup serve       # foreground console run (debugging)
 
 Verify: `curl http://127.0.0.1:8765/api/remote/info` — `workspace_root`
-must be your home. If it says `...system32\config\systemprofile`, the
-service is running as LocalSystem and can't read your passphrase.
+must be the installing user's home. If it says
+`...system32\config\systemprofile`, the service could not read its
+`Parameters\ProfileDir` value (setup prints a warning when that write
+fails) — re-run setup.
 
 Two events in the System log look scary but aren't failures:
 
@@ -106,9 +114,9 @@ Upgrades: install the new deb over the old one — the unit and
 Open the **host switcher** — the host appears automatically via mDNS — or
 enter `ip:8765` directly, and give the passphrase you configured. If the
 host is listed but the password "doesn't work", check the verify output on
-the host itself (the curl above): "no passphrase set" means the daemon is
-reading the wrong home (wrong service account); "wrong passphrase" means a
-plain mismatch.
+the host itself (the curl above): "no passphrase set" means the service
+could not resolve its recorded profile dir (re-run setup); "wrong
+passphrase" means a plain mismatch.
 
 ## Building the artifacts
 

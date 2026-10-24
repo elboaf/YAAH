@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -723,6 +724,15 @@ Interview the user (ask_user tool):
   what remains unchanged, and safe options before asking how to proceed."""
 
 
+def _kokoro_ear() -> bool:
+    """#451: the ear-writing prompt rules apply only when the active voice
+    is a Kokoro-family engine (speak.kokoro_voice). Non-espeak engines
+    read written forms natively and stumble on the taught spellings."""
+    from backend.agent import speak as _speak_mod
+
+    return _speak_mod.kokoro_voice()
+
+
 def _build_spoken_briefing_block() -> str:
     """Spoken briefing variance block (#207).
 
@@ -743,6 +753,13 @@ def _build_spoken_briefing_block() -> str:
         "  The tag is stripped from the chat transcript; the chat text itself stays",
         "  as detailed as you like. Omit the tag when read-aloud is off or when the",
         "  emission is a question (ask_user questions are spoken verbatim already).",
+    ]
+    # #451: the write-for-the-ear rules below are Kokoro-shaping — they
+    # teach spelled digit runs and phonetic homographs that Kokoro's
+    # espeak front-end needs and non-espeak engines (moss-tts) stumble
+    # over ("A P I" pauses where "API" reads perfectly).
+    if _kokoro_ear():
+        lines += [
         "  Write for the ear, not the eye: technical digit runs the way a human",
         "  says them (ports and IPs digit by digit — \"port four four three\" —,",
         "  years as years — \"nineteen ninety-nine\" —, versions as spoken —",
@@ -767,7 +784,10 @@ def _build_spoken_briefing_block() -> str:
         "  emphasis and no SSML or emotion markers like [excited] — the voice",
         "  reads those literally; punctuation is your prosody: commas pace a",
         "  line, one exclamation mark at most, a blank line marks a beat.",
-    ]
+        "The <say> tag content is shaped by these rules and normalised by the",
+        "harness (backend/agent/speak.py) before synthesis; TTS-prep skills are",
+        "not needed for it and must not be loaded on routine turns.",
+        ]
     text = "\n".join(lines) + "\n"
     persona = _say_persona()
     if persona != "neutral":
@@ -909,6 +929,14 @@ async def _try_begin_run_excluding_remote_lease(conversation_id: int) -> bool:
 # user's answer text. Resolved by the /answer API endpoint.
 _pending_answers: dict[str, asyncio.Future] = {}
 
+# Owner-qualified ask_user waits: (owner_id, conversation_id) pairs currently
+# parked on a future awaiting the user's answer. Kept SEPARATE from
+# _pending_answers (keyed by the local numeric conversation_id:call_id) so the
+# backend-truth poller can report which conversations of a given remote owner
+# are blocked, regardless of which window streamed the turn or whether the app
+# restarted. Local waits never carry an owner_id and never enter this set.
+_remote_pending_answers: set[tuple[str, str]] = set()
+
 
 def resolve_answer(conversation_id: int, call_id: str, answer: str) -> bool:
     """Deliver a user answer to a pending ask_user call or approval request.
@@ -922,15 +950,25 @@ def resolve_answer(conversation_id: int, call_id: str, answer: str) -> bool:
 
 
 async def _wait_answer(
-    conversation_id: int, call_id: str, cancel_ev: asyncio.Event
+    conversation_id: int, call_id: str, cancel_ev: asyncio.Event,
+    owner_id: str | None = None,
 ) -> asyncio.Future:
     """Register a pending-answer future and block until the user resolves it
     (POST /answer) or the run is cancelled. The stream stays open and other
     conversations keep running. Raises on cancel so callers can emit their
-    own not-answered result; the future's result is the raw answer string."""
+    own not-answered result; the future's result is the raw answer string.
+
+    When owner_id is supplied (a remote-owned turn), the (owner, conversation)
+    pair is registered in _remote_pending_answers so the backend-truth poller
+    can report the conversation as parked on a pending ask_user, even though
+    this window never streamed the turn. Local waits never pass an owner.
+    """
     key = f"{conversation_id}:{call_id}"
     fut: asyncio.Future = asyncio.get_running_loop().create_future()
     _pending_answers[key] = fut
+    parked = (owner_id, str(conversation_id)) if owner_id is not None else None
+    if parked is not None:
+        _remote_pending_answers.add(parked)
     cancel_task = asyncio.create_task(cancel_ev.wait())
     try:
         done, _ = await asyncio.wait(
@@ -942,17 +980,33 @@ async def _wait_answer(
     finally:
         cancel_task.cancel()
         _pending_answers.pop(key, None)
+        if parked is not None:
+            _remote_pending_answers.discard(parked)
         if not fut.done():
             fut.cancel()
 
 
+async def remote_pending_running_convs(owner_id: str) -> list[str]:
+    """Return the conversation IDs owned by owner_id that are parked on a
+    pending ask_user answer. Empty when the owner has no waiting question."""
+    return [
+        conv for (own, conv) in _remote_pending_answers if own == owner_id
+    ]
+
+
 async def _ask_user(
-    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event
+    conversation_id: int, call_id: str, args: dict, cancel_ev: asyncio.Event,
+    owner_id: str | None = None,
 ) -> dict:
     """Block the loop until the user answers (or the run is cancelled).
-    The stream stays open and other conversations keep running."""
+    The stream stays open and other conversations keep running.
+
+    owner_id, when supplied, marks this wait as belonging to a remote-owned
+    turn so backend_pending_running_convs can report it (issue #457)."""
     try:
-        fut = await _wait_answer(conversation_id, call_id, cancel_ev)
+        fut = await _wait_answer(
+            conversation_id, call_id, cancel_ev, owner_id=owner_id
+        )
     except asyncio.CancelledError:
         return {"answer": None, "note": "user did not answer (run stopped)"}
     return {"answer": fut.result()}
@@ -1917,9 +1971,16 @@ async def _run_agent_claimed(
     # replay stale bytes. A missing/stale freeze means THIS turn builds the
     # head and freezes it.
     frozen_ws = conv.get("frozen_system_prompt_ws")
+    # #451 (review): the head embeds the ear-writing rules, which are
+    # Kokoro-family-only - a freeze is valid only for the voice gate it was
+    # made under, so a voice change refreezes instead of replaying stale
+    # coaching. Byte-stable replay is untouched while the voice stays.
+    frozen_gate = conv.get("frozen_voice_gate")
     frozen_prompt = (
         conv.get("frozen_system_prompt")
-        if static_mode and frozen_ws == (workspace or "")
+        if static_mode
+        and frozen_ws == (workspace or "")
+        and frozen_gate == ("1" if _kokoro_ear() else "0")
         else None
     )
     frozen_turn = static_mode and bool(frozen_prompt)
@@ -2119,6 +2180,8 @@ async def _run_agent_claimed(
     # after a frozen replay was REACHED on a `$skill` turn, persisting a
     # handoff block permanently into the head — self-healing below clears
     # such a poisoned row so the next turn refreezes clean bytes.)
+    # #451 (review): the freeze rides with the voice gate it was made
+    # under; the read site compares it so a voice change refreezes.
     if static_mode and not frozen_turn and not invoked_skill_block:
         try:
             await update_conversation(
@@ -2126,6 +2189,7 @@ async def _run_agent_claimed(
                 touch_updated_at=False,
                 frozen_system_prompt=system_prompt,
                 frozen_system_prompt_ws=workspace or "",
+                frozen_voice_gate="1" if _kokoro_ear() else "0",
             )
         except Exception as e:  # noqa: BLE001 — freezing must not break the turn
             log.warning("frozen_system_prompt_write_failed: %s", e)
@@ -2151,7 +2215,10 @@ async def _run_agent_claimed(
     # model learns it can ask for approval at all).
     if current_access_mode() == "plan":
         tools = tools + [EXIT_PLAN_SCHEMA]
-    async def _record_parent_tool(name: str, args: dict, result: object, tool_workspace: str) -> None:
+    async def _record_parent_tool(
+        name: str, args: dict, result: object, tool_workspace: str,
+        *, duration_ms: int | None = None,
+    ) -> None:
         # Git-activity telemetry was removed with worktree isolation (ADR 0008).
         return None
     steer_ev = asyncio.Event()
@@ -2628,6 +2695,10 @@ async def _run_agent_claimed(
 
             # Execute each regular tool call in order
             for tc in regular_calls:
+                # #445: per-call timer; set only once this call's args
+                # decode (below), so a malformed-args call carries no
+                # duration instead of a stale one from the previous call.
+                _t0 = None
                 if cancel_ev.is_set():
                     async for _fev in _finalize_file_changes():
                         yield _fev
@@ -2656,6 +2727,12 @@ async def _run_agent_claimed(
                     else:
                         result = {"error": f"Invalid JSON arguments: {e}"}
                 else:
+                    # #445: measure once, at the source - the wall
+                    # clock the tool ran under, stamped onto the
+                    # result event and the persisted row so reloads
+                    # and tape replay keep real durations (client
+                    # startedAt/finishedAt stays the live fallback).
+                    _t0 = time.monotonic()
                     yield _ndjson(
                         {
                             "type": "tool_start",
@@ -2827,7 +2904,16 @@ async def _run_agent_claimed(
                         )
                     }
 
-                await _record_parent_tool(name, args, result, turn_workspace)
+                # #445: duration_ms = the server-measured wall time of
+                # this tool call (gate wait included). Malformed-args
+                # paths never started a timer and carry no duration.
+                duration_ms = (
+                    int((time.monotonic() - _t0) * 1000)
+                    if _t0 is not None else None
+                )
+                await _record_parent_tool(
+                    name, args, result, turn_workspace, duration_ms=duration_ms
+                )
                 result_str = _clip_result_str(result)
                 # A tool that attached an image (view_image) becomes a
                 # multimodal parts list for the live LLM call.
@@ -2846,6 +2932,8 @@ async def _run_agent_claimed(
                         "result": result,
                         "image": image_rel,
                         "call_id": tc.get("id", ""),
+                        **({"duration_ms": duration_ms}
+                           if duration_ms is not None else {}),
                     }
                 )
 
@@ -2864,6 +2952,7 @@ async def _run_agent_claimed(
                     tool_calls=[{"id": tc.get("id", ""), "name": name}],
                     tool_call_id=tc.get("id", ""),
                     images=[image_rel] if image_rel else None,
+                    duration_ms=duration_ms,
                 )
 
                 # Steer boundary (#7): the queued message lands after the
@@ -2904,6 +2993,9 @@ async def _run_agent_claimed(
             # Progress events flow through a queue so the generator can
             # yield them live while the batch task runs.
             if spawn_calls and not cancel_ev.is_set():
+                # #445: per-spawn start clocks, filled by the loop
+                # below and consumed after the batch lands.
+                _spawn_t0: dict = {}
                 calls = []
                 for i, tc in enumerate(spawn_calls):
                     try:
@@ -2930,6 +3022,10 @@ async def _run_agent_claimed(
                             "call_id": tc.get("id", ""),
                         }
                     )
+                    # #445: per-spawn wall time - the batch runs the
+                    # spawns in parallel, so this is queue wait plus the
+                    # sub's own runtime.
+                    _spawn_t0[tc.get("id", "")] = time.monotonic()
 
                 queue: asyncio.Queue = asyncio.Queue()
 
@@ -2984,7 +3080,9 @@ async def _run_agent_claimed(
                     )
                 )
 
-                async def _persist_spawn_result(tc: dict, result: dict) -> tuple:
+                async def _persist_spawn_result(
+                    tc: dict, result: dict, *, duration_ms: int | None = None
+                ) -> tuple:
                     """Persist one spawn_agent result row: summary in the
                     tool content, full transcript in its own column.
                     Returns (summary, result_str) for the parent context."""
@@ -2998,6 +3096,7 @@ async def _run_agent_claimed(
                         tool_calls=[{"id": tc.get("id", ""), "name": "spawn_agent"}],
                         tool_call_id=tc.get("id", ""),
                         sub_agent_transcript=summary | {"transcript": transcript},
+                        duration_ms=duration_ms,
                     )
                     return summary, result_str
 
@@ -3059,13 +3158,26 @@ async def _run_agent_claimed(
                     result = batch_results.get(
                         tc.get("id", ""), {"error": "sub-agent produced no result"}
                     )
-                    summary, result_str = await _persist_spawn_result(tc, result)
+                    _t0 = _spawn_t0.pop(tc.get("id", ""), None)
+                    duration_ms = (
+                        int((time.monotonic() - _t0) * 1000)
+                        if _t0 is not None else None
+                    )
+                    await _persist_spawn_result(
+                        tc, result, duration_ms=duration_ms
+                    )
+                    summary = {
+                        k: v for k, v in result.items() if k != "transcript"
+                    }
+                    result_str = _clip_result_str(summary)
                     yield _ndjson(
                         {
                             "type": "tool_result",
                             "name": "spawn_agent",
                             "result": summary,
                             "call_id": tc.get("id", ""),
+                            **({"duration_ms": duration_ms}
+                               if duration_ms is not None else {}),
                         }
                     )
                     messages.append(

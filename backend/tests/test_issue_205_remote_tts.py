@@ -599,3 +599,36 @@ async def test_tts_test_local_engine_failure_surfaces(tts_env, monkeypatch):
         res = await client.post("/api/tts/test", json={"voice": "af_heart", "speed": 1.0})
     assert res.status_code == 503
     assert "engine failed" in res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_tts_test_model_override_wins_over_saved(tts_env, monkeypatch):
+    """#449 review: the Test button sends the on-screen model draft; it
+    must reach the remote request instead of the saved tts_model."""
+    captured = {}
+
+    async def fake_remote(text, endpoint, api_key, model, voice, speed):
+        captured["model"] = model
+        return _wav_bytes()
+
+    monkeypatch.setattr(speak, "synthesize_remote", fake_remote)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.put(
+            "/api/config",
+            json={
+                "voice": {
+                    "tts_engine": "remote",
+                    "tts_endpoint": "http://herp.local:8081",
+                    "tts_model": "saved-model",
+                }
+            },
+        )
+        res = await client.post(
+            "/api/tts/test", json={"voice": "af_heart", "speed": 1.0, "model": "screen-model"}
+        )
+        assert res.status_code == 200
+        assert captured["model"] == "screen-model"
+        # No override -> the saved model flows through (narration parity).
+        res = await client.post("/api/tts/test", json={"voice": "af_heart", "speed": 1.0})
+        assert res.status_code == 200
+        assert captured["model"] == "saved-model"

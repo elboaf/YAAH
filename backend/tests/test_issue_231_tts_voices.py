@@ -154,13 +154,16 @@ async def test_probe_no_auth_header_when_no_key(monkeypatch):
 
 
 async def test_route_returns_voice_list(monkeypatch):
-    """POST /api/tts/voices {endpoint} -> 200 {"voices": [...]}."""
+    """POST /api/tts/voices {endpoint} -> 200 {"voices": [...], "models":
+    [...]} (#448 merged probe). A bare-array body parses on BOTH sides:
+    #448's spec reads bare arrays as models too, and the same shape is a
+    legal voices answer - ambiguity is resolved toward discoverability."""
     transport = _RecordingTransport(lambda req: httpx.Response(200, json=["af_heart", "af_nicole"]))
     monkeypatch.setattr(speak.httpx, "AsyncClient", lambda **kw: _client(transport))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post("/api/tts/voices", json={"endpoint": "http://box:8081"})
     assert res.status_code == 200
-    assert res.json() == {"voices": ["af_heart", "af_nicole"]}
+    assert res.json() == {"voices": ["af_heart", "af_nicole"], "models": ["af_heart", "af_nicole"]}
 
 
 async def test_route_409_without_any_endpoint():
@@ -170,6 +173,7 @@ async def test_route_409_without_any_endpoint():
         res = await client.post("/api/tts/voices", json={})
     assert res.status_code == 409
     assert res.json()["code"] == "not-configured"
+    assert "models" not in res.json()  # the 409 short-circuits before #448's probe
 
 
 async def test_route_draft_key_overrides_stored_key(monkeypatch):
@@ -194,19 +198,25 @@ async def test_route_draft_key_overrides_stored_key(monkeypatch):
         saved = await client.post("/api/tts/voices", json={"endpoint": "http://box:8081"})
 
     assert draft.status_code == saved.status_code == 200
-    # Draft first, stored fallback second — in that order, one probe each.
-    assert seen == ["Bearer sk-draft", "Bearer sk-stored"]
+    # Draft first, stored fallback second — in that order. Each route call
+    # probes twice since #448 (voices, then models), same key both times.
+    assert seen == [
+        "Bearer sk-draft",
+        "Bearer sk-draft",
+        "Bearer sk-stored",
+        "Bearer sk-stored",
+    ]
 
 
 async def test_route_empty_list_when_server_has_no_route(monkeypatch):
-    """A 404 server still answers 200 {"voices": []} — the UI's cue to show
-    free-text, not an error banner."""
+    """A 404 server still answers 200 with empty lists — the UI's cue to
+    show free-text, not an error banner."""
     transport = _RecordingTransport(lambda req: httpx.Response(404, json={"detail": "Not Found"}))
     monkeypatch.setattr(speak.httpx, "AsyncClient", lambda **kw: _client(transport))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post("/api/tts/voices", json={"endpoint": "http://box:8081"})
     assert res.status_code == 200
-    assert res.json() == {"voices": []}
+    assert res.json() == {"voices": [], "models": []}
 
 
 async def test_route_falls_back_to_stored_endpoint(monkeypatch):
@@ -227,4 +237,6 @@ async def test_route_falls_back_to_stored_endpoint(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post("/api/tts/voices", json={})
     assert res.status_code == 200
-    assert seen == ["http://saved:8081/voices"]
+    # #448: each route call probes voices AND models against the saved
+    # endpoint, in that order.
+    assert seen == ["http://saved:8081/voices", "http://saved:8081/v1/models"]

@@ -72,6 +72,9 @@ import {
   localInstanceInfo,
   listRemoteDeviceConversations,
   getRemoteDeviceMessages,
+  getRemoteDeviceRunning,
+  listRemoteDevices,
+  type RemoteRunning,
   remoteDeviceImageUrl,
   remoteMediaRef,
   addRemoteDevice,
@@ -99,10 +102,10 @@ import {
   getLoraCatalog,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
-import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall } from './store'
+import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
-import { useTts, splitSentences, liveProse, spokenLine } from './speech'
+import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
 import { AgentContextPerProvider } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
@@ -784,7 +787,7 @@ function toolTarget(tc: ToolCall): string {
 }
 
 /** One compact chip: glyph + name + target, counting while the call runs. */
-type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'startedAt' | 'finishedAt'>
+type TickerToolCall = Pick<ToolCall, 'id' | 'name' | 'args' | 'result' | 'startedAt' | 'finishedAt' | 'durationMs'>
 
 function ToolChip({ tc }: { tc: TickerToolCall }) {
   const done = tc.result !== undefined
@@ -800,6 +803,15 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
       <span>{tc.name}</span>
       {toolTarget(tc) && <span className="text-zinc-500">{toolTarget(tc)}</span>}
       {!done && <ElapsedBadge startedAt={tc.startedAt} />}
+      {/* #445: server-measured duration beats the client clock pair
+          (correct across reload and tape replay); a finished call
+          without one (pre-#445 row, malformed-args error) stays
+          quiet rather than faking a duration. */}
+      {done && tc.durationMs !== undefined && (
+        <span className="tabular-nums text-zinc-500">
+          {formatElapsed(tc.durationMs)}
+        </span>
+      )}
       {!done && <span className="run-pulse text-amber-300">●</span>}
     </span>
   )
@@ -839,6 +851,15 @@ function formatElapsed(ms: number): string {
   if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`
   if (ms < 60_000) return `${Math.floor(ms / 1000)}s`
   return `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, '0')}`
+}
+
+/** Client-clock duration for a finished live call: the startedAt/
+    finishedAt pair the store stamps on completion, clamped nonnegative.
+    Undefined when either half is missing - only complete pairs are worth
+    rendering. */
+function clientElapsedMs(startedAt?: number, finishedAt?: number): number | undefined {
+  if (typeof startedAt !== 'number' || typeof finishedAt !== 'number') return undefined
+  return Math.max(0, finishedAt - startedAt)
 }
 
 /** Live elapsed time since `startedAt`, tabular so digits don't jitter. */
@@ -3193,9 +3214,30 @@ export function DeviceGroups({
               {deviceWorkspaces.map((row) => (
                 <div key={row.path ?? `${device.host_id}:default`}>
                   <button className="flex w-full items-center gap-1.5 truncate rounded py-1 pl-6 pr-1 text-left font-mono text-[10px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:opacity-50" disabled={!connected} title={connected ? row.path ?? 'Device home folder' : 'Offline — cached workspace name; reconnect to use'} onClick={() => selectDeviceWorkspace(row.path ?? '')}><span className="truncate">{row.label}</span><span className="ml-auto shrink-0 text-[10px] text-zinc-600" aria-hidden="true">›</span></button>
-                  {localDeviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => (
-                    <button key={`local:${conversation.id}`} className="block w-full truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · locally owned chat using this device's workspace`} onClick={() => onOpenConversation(conversation)}>{conversation.title}<span className="ml-1 font-mono text-[10px] text-zinc-600">local chat</span></button>
-                  ))}
+                  {localDeviceConversations.filter((conversation) => conversation.workspace === row.path).slice(0, 3).map((conversation) => {
+                    // #482 (owner repro): a locally-owned chat on a device's workspace is
+                    // still a sidebar chat - its turn streams through the local loop into
+                    // the same numeric-keyed statusByConv/finishedByConv/pendingQuestions
+                    // maps every other row reads. Render the same #25 status slot with the
+                    // same precedence (blocked > finished > running), so the yellow tracer
+                    // shows while it works and orange/green on question/finish.
+                    const localKey = String(conversation.id)
+                    const localFinished = finishedByConv[localKey] ?? null
+                    const localRunning = statusByConv[localKey] === 'thinking' || statusByConv[localKey] === 'running-tool'
+                    const localBlocked = pendingQuestions[localKey] != null
+                    const localSlot = localBlocked
+                      ? <span aria-hidden="true" className="run-bar run-bar-orange mr-1.5 shrink-0" title="Waiting for you — a question is pausing this run" />
+                      : localFinished === 'error'
+                        ? <span aria-hidden="true" className="run-bar run-bar-red mr-1.5 shrink-0" title="Run failed" />
+                        : localFinished === 'ok'
+                          ? <span aria-hidden="true" className="run-bar run-bar-green mr-1.5 shrink-0" title="Run finished" />
+                          : localRunning
+                            ? <span aria-hidden="true" className="run-dots mr-1.5 shrink-0" title="Working…"><i /><i /><i /></span>
+                            : null
+                    return (
+                      <button key={`local:${conversation.id}`} className="flex w-full items-center truncate rounded py-1 pl-10 pr-2 text-left text-[11px] text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200" title={`${conversation.title} · locally owned chat using this device's workspace`} onClick={() => onOpenConversation(conversation)}>{localSlot}{conversation.title}<span className="ml-1 font-mono text-[10px] text-zinc-600">local chat</span></button>
+                    )
+                  })}
                 </div>
               ))}
               {!connected && deviceWorkspaces.length === 0 && <p className="px-6 py-1 text-[10px] text-zinc-500">No cached workspaces</p>}
@@ -4455,11 +4497,23 @@ export function Sidebar() {
 
   // Merged model list: every configured provider, queried in parallel by the
   // backend (keys never reach the browser). Grouped per provider in the dropdown.
+  // Ignore stale refresh responses: mount/save/save-close/button can all
+  // fire refreshModels() concurrently, so an older network response could
+  // resolve last and clobber newer model data. Track the latest request so
+  // only the newest one's result is applied (covers every caller, not just
+  // the disabled button).
+  const latestRefresh = useRef(0)
+
   const refreshModels = useCallback(() => {
+    const requestId = ++latestRefresh.current
     listAvailableModels()
       .then((r) => {
+        if (requestId !== latestRefresh.current) return
         setByProvider(r.providers)
         setActiveProvider(r.active_provider)
+        // Notify useModelList() consumers (ChatScopePickers, EditAgentModal)
+        // that the model list has changed — they'll re-fetch on this event.
+        window.dispatchEvent(new CustomEvent('providers-changed'))
       })
       .catch(() => {})
   }, [])
@@ -4592,6 +4646,17 @@ export function Sidebar() {
             >
               <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
             </select>
+            <button
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+              aria-label="Refresh models"
+              title="Refresh model lists from all providers"
+              onClick={() => refreshModels()}
+              disabled={savingModel}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
+              </svg>
+            </button>
             <DefaultThoughtLevelPicker />
             <button
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
@@ -5966,6 +6031,205 @@ export function AgentRunWatcher() {
 }
 
 /**
+ * Issue #457: remote-device sidebar run-state parity. Local chats have the
+ * AgentRunWatcher polling `/api/agents` every ~5s; remote chats had no
+ * backend-truth equivalent, so a turn started on another window, after an app
+ * restart, or with the transcript dialog closed showed nothing in the sidebar.
+ * This component mirrors that watcher for remote devices: it polls each online
+ * device's dedicated `/api/remote/devices/{host}/running` endpoint on the same
+ * cadence and feeds the existing `remote:<host>:<conv>` keys the sidebar reads
+ * (statusByConv / finishedByConv / pendingQuestions), so the #308 signal slot
+ * for remote rows lights up for yellow-tracer-running, orange-parked-on-question,
+ * and green-finished-unacknowledged exactly as it does for local rows.
+ *
+ * A device's running set is a superset of its pending set, so the derived
+ * finished bar is computed here from the previous->current running transition
+ * (backend need only report running + pending). The on-screen gate reuses
+ * `activeRemoteKey`, the same mirror the local path uses: an on-screen remote
+ * chat never emits its own finished signal. Cached/offline devices expose no
+ * running state (AC 3), so they degrade to nothing.
+ */
+export function RemoteRunWatcher() {
+  useEffect(() => {
+    let alive = true
+    let inFlight = false
+    // Prev->now transitions derive the green finished bar per row.
+    // Persisted across effect remounts so history survives active-chat changes.
+    let prevRunning: Record<string, string[]> = {}
+    // Keys this host previously reported as active (running or pending), so we
+    // can clear stale ones — otherwise a conv that went running->idle would
+    // leave a permanent yellow dot, and a cleared question an orange bar.
+    let prevActive: Record<string, string[]> = {}
+    // Hosts seen as online on the previous poll, so we can detect when they go
+    // offline and clear their stale signals.
+    let prevOnline: Record<string, boolean> = {}
+    const clearHostSignals = (hostId: string) => {
+      const clears: Record<string, AgentStatus> = {}
+      const clearPq: Record<string, null> = {}
+      for (const cid of prevActive[hostId] ?? []) {
+        const key = remoteConversationKey(hostId, cid)
+        clears[key] = 'idle'
+        clearPq[key] = null
+      }
+      if (Object.keys(clears).length > 0) {
+        useAgent.setState((s) => {
+          const nextPq = { ...s.pendingQuestions }
+          for (const k of Object.keys(clearPq)) {
+            delete nextPq[k]
+          }
+          return {
+            statusByConv: { ...s.statusByConv, ...clears },
+            pendingQuestions: nextPq,
+          }
+        })
+      }
+      delete prevRunning[hostId]
+      delete prevActive[hostId]
+      delete prevOnline[hostId]
+    }
+    const fetchOne = async (hostId: string, devices: RemoteDevice[]) => {
+      const device = devices.find((d) => d.host_id === hostId)
+      // Cached/offline devices report nothing (AC 3); skip the request entirely.
+      if (!device || device.status === 'offline' || device.status === 'cached') {
+        return
+      }
+      let res: RemoteRunning
+      try {
+        res = await getRemoteDeviceRunning(hostId)
+      } catch {
+        return
+      }
+      if (!alive) return
+      // Re-read the active key from state each poll so the on-screen gate
+      // reflects the current chat even if the effect hasn't remounted.
+      const currentActiveKey = useAgent.getState().activeRemoteKey
+      const runningSet = new Set(res.running ?? [])
+      const pendingSet = new Set(res.pending ?? [])
+      const prev = prevRunning[hostId] ?? []
+      // A row that was mid-turn last poll and is no longer running just
+      // finished: the green bar fires only for off-screen rows (the on-screen
+      // one already owns its finished signal via activeRemoteKey). finishedByConv
+      // is self-clearing when the chat opens (setActiveRemoteKey deletes it), so
+      // this poller only ever adds 'ok' here.
+      const finishedByConv: Record<string, 'ok' | 'error'> = {}
+      for (const cid of prev) {
+        if (!runningSet.has(cid)) {
+          const key = remoteConversationKey(hostId, cid)
+          if (key !== currentActiveKey) {
+            finishedByConv[key] = 'ok'
+          }
+        }
+      }
+      // The on-screen remote chat is owned by its own dialog stream, which
+      // manages statusByConv/pendingQuestions for its key; the poller must not
+      // clobber it (e.g. flatten a live 'thinking' into 'running-tool').
+      const offscreen = (key: string) => key !== currentActiveKey
+      const statusByConv: Record<string, AgentStatus> = {}
+      const pendingQuestions: Record<string, PendingQuestion> = {}
+      // Pending (orange bar) takes precedence in the row, so it wins in the
+      // status map too. A parked question still counts as running (yellow
+      // tracer) while it is parked.
+      for (const cid of runningSet) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        statusByConv[key] = pendingSet.has(cid) ? 'thinking' : 'running-tool'
+      }
+      for (const cid of pendingSet) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        // A minimal but valid pending card; the sidebar reads the key presence
+        // for the orange bar and the dialog (built for #308) renders the body.
+        pendingQuestions[key] = {
+          callId: '',
+          question: 'Remote turn is waiting for your answer',
+          options: [],
+          convKey: key,
+        }
+      }
+      // Clear any key that was active last poll but is not active now (off-screen
+      // only), so the signal set tracks reality rather than only growing.
+      const clears: Record<string, AgentStatus> = {}
+      for (const cid of prevActive[hostId] ?? []) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        if (!runningSet.has(cid) && !pendingSet.has(cid)) {
+          clears[key] = 'idle'
+        }
+      }
+      // Clear stale pending-question keys (orange bar) for convs that are no
+      // longer pending, so a question that got answered doesn't leave a stuck
+      // orange bar.
+      const clearPq: Record<string, null> = {}
+      for (const cid of prevActive[hostId] ?? []) {
+        const key = remoteConversationKey(hostId, cid)
+        if (!offscreen(key)) continue
+        if (!pendingSet.has(cid)) {
+          clearPq[key] = null
+        }
+      }
+      useAgent.setState((s) => {
+        const nextPq = { ...s.pendingQuestions, ...pendingQuestions }
+        for (const k of Object.keys(clearPq)) {
+          delete nextPq[k]
+        }
+        return {
+          statusByConv: { ...s.statusByConv, ...statusByConv, ...clears },
+          finishedByConv: { ...s.finishedByConv, ...finishedByConv },
+          pendingQuestions: nextPq,
+        }
+      })
+      // A key counts as "active" while running OR pending. Persist the snapshots
+      // for next poll.
+      const activeKeys = Array.from(new Set([...runningSet, ...pendingSet]))
+      prevRunning = { ...prevRunning, [hostId]: Array.from(runningSet) }
+      prevActive = { ...prevActive, [hostId]: activeKeys }
+    }
+    const poll = async () => {
+      if (!alive || inFlight) return
+      inFlight = true
+      try {
+        let devices: RemoteDevice[]
+        try {
+          devices = (await listRemoteDevices()).devices
+        } catch {
+          return
+        }
+        if (!alive) return
+        const online = devices.filter((d) => d.status === 'online')
+        // Detect hosts that were online last poll but are no longer online;
+        // clear their stale signals so the sidebar doesn't show ghost dots.
+        for (const [hostId] of Object.entries(prevOnline)) {
+          if (!online.some((d) => d.host_id === hostId)) {
+            clearHostSignals(hostId)
+          }
+        }
+        for (const device of online) {
+          await fetchOne(device.host_id, devices)
+        }
+        // Track which hosts are currently online for next poll's offline detection.
+        const nowOnline: Record<string, boolean> = {}
+        for (const device of online) {
+          nowOnline[device.host_id] = true
+        }
+        prevOnline = nowOnline
+      } finally {
+        inFlight = false
+      }
+    }
+    void poll()
+    const t = window.setInterval(() => void poll(), 5000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+    // Empty dependency array keeps this effect mounted for the app's lifetime;
+    // activeRemoteKey is re-read from state each poll (not captured), so the
+    // on-screen gate always reflects the current chat.
+  }, [])
+  return null
+}
+
+/**
  * Live follow for agent chats: a scheduled run streams inside the backend —
  * nothing pushes its events to the frontend — so the open chat only updates
  * by reloading history. While the pinned agent of the on-screen chat is
@@ -6562,6 +6826,70 @@ export function RemoteVoiceField({
   )
 }
 
+/** The model value remote requests should actually send (#449 review):
+ *  a blank draft DISPLAYS the first discovered model (RemoteModelField's
+ *  dropdown fallback) but would save/send '' - and the backend would
+ *  then substitute its own default ("kokoro"), which the server can
+ *  reject. Derive the effective choice instead; the draft itself is
+ *  never auto-overwritten. */
+export function effectiveRemoteModel(modelDraft: string, models: string[]): string {
+  if (modelDraft.trim() !== '') return modelDraft
+  return models.length > 0 ? models[0] : modelDraft
+}
+
+/** #448: the remote narration model field — a dropdown when the server
+ *  lists models at the standard /v1/models, free-text otherwise. Mirrors
+ *  RemoteVoiceField exactly: the saved draft stays selectable ("(saved)")
+ *  even when the list dropped it, and an empty draft falls to the first
+ *  server entry. The draft is never auto-overwritten. */
+export function RemoteModelField({
+  modelDraft,
+  models,
+  probing,
+  onChange,
+}: {
+  modelDraft: string
+  models: string[]
+  probing: boolean
+  onChange: (v: string) => void
+}) {
+  if (models.length === 0) {
+    return (
+      <input
+        className={`${settingsInputCls} w-28 shrink-0`}
+        value={modelDraft}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={probing ? 'probing models…' : 'model'}
+        aria-label="Remote narration model"
+      />
+    )
+  }
+  return (
+    <select
+      className={`${settingsInputCls} min-w-0 flex-1`}
+      value={
+        models.includes(modelDraft)
+          ? modelDraft
+          : modelDraft.trim() === ''
+            ? models[0]
+            : modelDraft
+      }
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Remote narration model"
+      title="Models from the server's /v1/models endpoint"
+    >
+      {!models.includes(modelDraft) && modelDraft.trim() !== '' && (
+        <option value={modelDraft}>{modelDraft} (saved)</option>
+      )}
+      {models.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 /** #207: the spoken-briefing toggles as an isolated card (the Settings
  *  modal's Voice tab embeds it; the card is exported for component tests,
  *  same precedent as SandboxSettingsCard). */
@@ -6849,6 +7177,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // endpoint/key changes. Empty list = free-text fallback (OpenAI has no
   // voices endpoint; absence of a list is normal, never an error).
   const [remoteVoiceList, setRemoteVoiceList] = useState<string[]>([])
+  const [remoteModelList, setRemoteModelList] = useState<string[]>([])
+  // What remote requests send for the model: the draft, or the first
+  // discovered model while the draft is blank (#449 review - Test and
+  // Save must send what the dropdown displays).
+  const effectiveModel = effectiveRemoteModel(ttsModel, remoteModelList)
   const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
@@ -6998,6 +7331,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         // (possibly remote) engine can speak is the status endpoint's job.
         setTtsModelReady(s.model_available)
         setTtsDownloading(s.downloading)
+        setKokoroShaping(s.kokoro !== false)
         if (s.tts_voice) setTtsVoiceDraft(s.tts_voice)
       })
       .catch(() => {})
@@ -7014,14 +7348,19 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     const endpoint = ttsEndpoint.trim()
     if (!endpoint) {
       setRemoteVoiceList([])
+      setRemoteModelList([])
       return
     }
     let cancelled = false
     setRemoteProbing(true)
     const t = setTimeout(() => {
       ttsVoices(endpoint, ttsKey, ttsRemoteApi)
-        .then((voices) => {
-          if (!cancelled) setRemoteVoiceList(voices)
+        .then(({ voices, models }) => {
+          if (!cancelled) {
+            setRemoteVoiceList(voices)
+            setRemoteModelList(models)
+          }
+        })
         })
         .catch(() => {})
         .finally(() => {
@@ -7205,7 +7544,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           // Typed key replaces; empty/kept field is dropped server-side so
           // the saved key survives (same masking dance as the dictation key).
           ...(ttsKey ? { tts_api_key: ttsKey } : {}),
-          tts_model: ttsModel,
+          tts_model: effectiveModel,
           tts_remote_api: ttsRemoteApi,
           tts_moss_lang: ttsMossLang,
           tts_moss_ref: ttsMossRef,
@@ -7221,6 +7560,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           api_base: imageGen.api_base.trim(),
         },
       })
+      // #451 (review): a saved voice change must reach the frontend speech
+      // mirror immediately - the Settings and ChatPanel status probes run
+      // only at mount, so without this the next narrations keep the old
+      // shaping until an app restart.
+      try {
+        setKokoroShaping((await ttsStatus()).kokoro !== false)
+      } catch {
+        /* status probe failed: keep the current gate */
+      }
       // Hot-swap the live registration in the Composer; it reports failure
       // (combo taken by another app) through the same reject toast system.
       window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
@@ -7724,6 +8072,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     placeholder={ttsRemoteApi === 'moss' ? 'http://herp.local' : 'http://herp.local:8081  or  https://api.openai.com'}
                     aria-label="Remote narration endpoint"
                   />
+<<<<<<< HEAD
                   {ttsRemoteApi === 'openai' && (
                     <div className="flex gap-1.5">
                       <input
@@ -7781,6 +8130,30 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     {ttsRemoteApi === 'moss'
                       ? 'MOSS job API — the base URL is used as-is, with /api/moss paths appended. The voice picker lists reference clips from the server; an empty value is reference-less.'
                       : 'Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the path is appended). Sentence chunks are sent to that server; the key goes there and nowhere else.'}
+=======
+                  <div className="flex gap-1.5">
+                    <input
+                      type="password"
+                      className={`${settingsInputCls} min-w-0 flex-1`}
+                      value={ttsKey}
+                      onChange={(e) => setTtsKey(e.target.value)}
+                      placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
+                      aria-label="Remote narration API key"
+                    />
+                    <RemoteModelField
+                      modelDraft={ttsModel}
+                      models={remoteModelList}
+                      probing={remoteProbing}
+                      onChange={setTtsModel}
+                    />
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-zinc-600">
+                    Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the
+                    path is appended). Sentence chunks are sent to that server; the key goes there
+                    and nowhere else. Voices (/voices) and models (/v1/models) are probed from the
+                    drafts above; CPU-served models can take minutes per chunk, so the first test
+                    may be slow.
+>>>>>>> origin/master
                   </p>
                 </div>
               )}
@@ -7912,7 +8285,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         setTtsTestResult(null)
                         setTtsTestOk(false)
                         try {
-                          await ttsTest(ttsVoiceDraft, ttsSpeedDraft, ttsEngine)
+                          await ttsTest(
+                            ttsVoiceDraft,
+                            ttsSpeedDraft,
+                            ttsEngine,
+                            effectiveModel,
+                          )
                           setTtsTestResult('ok — synthesis worked')
                           setTtsTestOk(true)
                         } catch (e) {
@@ -9052,6 +9430,17 @@ export function ChatScopePickers() {
         >
           <ModelOptions byProvider={byProvider} value={`${shownProvider}::${shownModel}`} />
         </select>
+        <button
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+          aria-label="Refresh models"
+          title="Refresh model lists from all providers"
+          onClick={() => refresh()}
+          disabled={saving}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
+          </svg>
+        </button>
         <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">effort</span>
         <select
           className="rounded   bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
@@ -9293,7 +9682,13 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   // Hydrate readiness + persisted enabled flag once at mount.
   useEffect(() => {
     ttsStatus()
-      .then((s) => ttsSync({ available: s.available, tts_enabled: s.tts_enabled }))
+      .then((s) => {
+        ttsSync({ available: s.available, tts_enabled: s.tts_enabled })
+        // #451: gate the ear-shaping in speech.ts on the engine family.
+        // `!== false` so an older remote backend (no flag) keeps the
+        // kokoro shaping instead of silently dropping it.
+        setKokoroShaping(s.kokoro !== false)
+      })
       .catch(() => {})
   }, [ttsSync])
   // Briefing-first narration (#66 + #75): while an emission streams, its
@@ -10601,17 +10996,23 @@ export function Composer() {
         appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
       }
     } else if (ev.type === 'tool_result') {
-      finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result)
+      finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result, ev.duration_ms)
       pushLog({ kind: 'tool', name: ev.name, result: ev.result })
-      // Close the call's tape segment: response summary + client-measured time.
+      // Close the call's tape segment: response summary + duration.
+      // #445: the server-measured duration is preferred (it is correct
+      // even when the chip started before this client connected); the
+      // client clock pair stays the fallback for pre-#445 servers.
       {
         const callId = ev.call_id ?? ''
         const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
         const tc = msg?.toolCalls?.slice().reverse().find((t) => t.id === callId)
+        const clientMs = clientElapsedMs(tc?.startedAt, tc?.finishedAt)
         const elapsed =
-          tc?.startedAt && tc?.finishedAt
-            ? formatElapsed(tc.finishedAt - tc.startedAt)
-            : undefined
+          ev.duration_ms !== undefined
+            ? formatElapsed(ev.duration_ms)
+            : clientMs !== undefined
+              ? formatElapsed(clientMs)
+              : undefined
         appendTape(bufKey, tapeChunkForEvent(ev, elapsed) ?? '')
       }
       if (ev.name === 'ask_user') {
@@ -10671,12 +11072,26 @@ export function Composer() {
       } else if (ev.kind === 'tool_progress') {
         if (ev.chunk) subAgentToolProgress(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.chunk)
       } else if (ev.kind === 'tool_result') {
-        const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
-        const childTool = msg?.toolCalls?.find((call) => call.id === spawnCallId)?.subAgent?.tools.find((tool) => tool.id === ev.tool_call_id)
-        const elapsed = childTool?.startedAt ? formatElapsed(Date.now() - childTool.startedAt) : undefined
-        const resultChunk = tapeChunkForEvent(tapeEvent, elapsed)
-        if (resultChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, resultChunk)
-        subAgentToolResult(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.result)
+        // Stamps finishedAt on the child row - the client-clock fallback
+        // below reads that pair.
+        subAgentToolResult(bufKey, curId, spawnCallId, ev.tool_call_id ?? '', ev.result, ev.duration_ms)
+        // #445: server-measured duration preferred; client clock as
+        // the live fallback for servers that do not stamp it.
+        {
+          const msg = (useAgent.getState().messagesByConv[bufKey] ?? []).find((m) => m.id === curId)
+          const childTool = msg?.toolCalls?.find((call) => call.id === spawnCallId)?.subAgent?.tools.find(
+            (tool) => tool.id === ev.tool_call_id,
+          )
+          const clientMs = clientElapsedMs(childTool?.startedAt, childTool?.finishedAt)
+          const elapsed =
+            ev.duration_ms !== undefined
+              ? formatElapsed(ev.duration_ms)
+              : clientMs !== undefined
+                ? formatElapsed(clientMs)
+                : undefined
+          const resultChunk = tapeChunkForEvent(tapeEvent, elapsed)
+          if (resultChunk) appendSubAgentTelemetry(bufKey, curId, spawnCallId, resultChunk)
+        }
       } else if (ev.kind === 'approval_request') {
         setStatus(bufKey, 'running-tool')
         setPendingApproval({
@@ -10690,7 +11105,7 @@ export function Composer() {
         setPendingApproval((a) => (a && a.callId === ev.approval_call_id ? null : a))
       }
     } else if (ev.type === 'sub_agent_done') {
-      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note)
+      finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note, ev.duration_ms)
       appendSubAgentTelemetry(
         bufKey,
         curId,
@@ -11171,7 +11586,38 @@ export function Composer() {
     if (useAgent.getState().pendingQuestions[targetKey] || useAgent.getState().pendingApprovals[targetKey] || useAgent.getState().pendingPlanApprovals[targetKey]) return
     setSteerFlag(targetKey, true)
     try {
-      await steerAgent(targetConversationId)
+      const result = await steerAgent(targetConversationId)
+      // Run ended before steer arrived (#460). If the backend returned queued
+      // items, start a fresh turn with them instead of failing.
+      if (result.run_ended && result.queued && result.queued.length > 0) {
+        setSteerFlag(targetKey, false)
+        // Drain the queue by sending items as fresh turns.
+        for (const item of result.queued) {
+          // Reconcile the queued echo before sending the fresh turn.
+          const echoes = useAgent.getState().queueEchoByConv[targetKey] ?? []
+          const echo = echoes.find((e) => e.id === item.id)
+          let promoted = false
+          if (echo) {
+            markQueuedAsNormal(targetKey, echo.tempId)
+            dropQueuedEcho(targetKey, echo.tempId)
+            promoted = true
+          }
+          // Send the fresh turn. If it fails and we already promoted the echo,
+          // restore it so the item isn't lost (it remains queued for the next
+          // manual send).
+          try {
+            await send(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
+          } catch (e) {
+            if (promoted && echo) {
+              // Re-add the echo so the item survives.
+              const restoredEchoes = useAgent.getState().queueEchoByConv[targetKey] ?? []
+              restoredEchoes.push(echo)
+              setQueueEcho(targetKey, restoredEchoes)
+            }
+            throw e
+          }
+        }
+      }
     } catch (e) {
       setSteerFlag(targetKey, false)
       useAgent.getState().pushToast({

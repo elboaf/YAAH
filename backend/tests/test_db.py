@@ -178,10 +178,9 @@ async def test_messages_say_column_migration_on_legacy_db(monkeypatch, tmp_path)
         )
         await db.commit()
 
-    # Point the module at the legacy file for this test only (get_db and
-    # init_db read DB_PATH at call time); no module reload, no pollution.
+    # Point the module at the legacy file for this test only (get_db
+    # reads DB_PATH at call time); no module reload, no pollution.
     monkeypatch.setattr(database, "DB_PATH", old_db)
-    await database.init_db()
     db = await database.get_db()
     try:
         cur = await db.execute("PRAGMA table_info(messages)")

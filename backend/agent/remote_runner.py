@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import secrets
+import time
 from typing import AsyncIterator
 
 from backend.agent import remote as remote_mod
@@ -464,12 +465,16 @@ async def _run_claimed(
                                    "reason": "cancelled by user"})
                     break
                 name = tc["function"]["name"]
+                _t0: float | None = None
+                duration_ms = None
                 try:
                     args = json.loads(tc["function"]["arguments"] or "{}")
                 except json.JSONDecodeError as e:
                     args = None
                     result = {"error": f"Invalid JSON arguments: {e}"}
                 if args is not None:
+                    # #445: measure at the source (gate wait included).
+                    _t0 = time.monotonic()
                     # Plan-mode gate (issue #178 return trip): the local loop
                     # routes every call through run_gate; the remote turn has
                     # no approval machinery, so it enforces the plan-mode
@@ -494,8 +499,12 @@ async def _run_claimed(
                         yield _ndjson({"type": "tool_start", "name": name,
                                        "args": args, "call_id": tc.get("id", "")})
                         from backend.agent.loop import _ask_user
+                        # #457: owner_id marks this wait so the backend-truth
+                        # poller can report the conversation as parked on a
+                        # pending ask_user, even though no window streamed it.
                         result = await _ask_user(
-                            conversation_id, tc.get("id", ""), args, cancel_event
+                            conversation_id, tc.get("id", ""), args, cancel_event,
+                            owner_id=owner_id,
                         )
                     elif name == "exit_plan":
                         # Route to the loop's handler BEFORE the risk gate
@@ -523,8 +532,16 @@ async def _run_claimed(
                             )
                         except RemoteTurnError as exc:
                             result = {"error": str(exc)}
-                yield _ndjson({"type": "tool_result", "name": name,
-                               "result": result, "call_id": tc.get("id", "")})
+                if _t0 is not None:
+                    duration_ms = int((time.monotonic() - _t0) * 1000)
+                yield _ndjson(
+                    {
+                        "type": "tool_result", "name": name,
+                        "result": result, "call_id": tc.get("id", ""),
+                        **({"duration_ms": duration_ms}
+                           if duration_ms is not None else {}),
+                    }
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
@@ -533,7 +550,9 @@ async def _run_claimed(
                 transcript.append("tool", json.dumps(result),
                                   tool_calls=[{"id": tc.get("id", ""),
                                                "name": name}],
-                                  tool_call_id=tc.get("id", ""))
+                                  tool_call_id=tc.get("id", ""),
+                                  **({"duration_ms": duration_ms}
+                                     if duration_ms is not None else {}))
             else:
                 continue
             break  # cancel inside the tool loop

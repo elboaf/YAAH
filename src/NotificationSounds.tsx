@@ -23,7 +23,6 @@ import { playQuestionPending, playRunFinished } from './sounds'
  * the existing voice-block merge in PUT /api/config — no backend change.
  */
 
-const RUNNING: AgentStatus[] = ['thinking', 'running-tool']
 
 /** Pure transition decision, unit-tested in store.test.ts. */
 export function shouldChimeFinish(

@@ -43,6 +43,19 @@ class RemoteRunRegistry:
         async with self._lock:
             return key in self._runs
 
+    async def running_convs(self, owner_id: str) -> list[str]:
+        """Return the conversation IDs this owner has mid-turn.
+
+        The sidebar's run-state parity (issue #457) needs a coarse truth the
+        local stream cannot provide: a turn started on another window, after an
+        app restart, or with the transcript dialog closed still has to show the
+        yellow tracer on the device's rows. One scan answers every chat on the
+        device, keyed per conversation so a finished bar can be derived on the
+        frontend by the running->not-running transition on that exact row.
+        """
+        async with self._lock:
+            return [cid for (own, cid) in self._runs if own == owner_id]
+
     async def cancel_event(self, owner_id: str, conversation_id: str) -> asyncio.Event | None:
         """Return this run's cancellation signal, if the run is active."""
         key = self._key(owner_id, conversation_id)

@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS messages (
     meta TEXT,                -- #198: JSON object tagging structured rows, e.g.
                               -- {"agent_prompt": true} on a scheduled run's
                               -- persisted effective-prompt user row
+    duration_ms INTEGER,      -- #445: server-measured tool-call wall time;
+                              -- NULL for non-tool rows, malformed-args
+                              -- errors, and pre-#445 history (renders
+                              -- open-ended, never as a fake duration)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -268,6 +272,11 @@ async def get_db() -> aiosqlite.Connection:
         # them differently — a scheduled fire's user row carries
         # {"agent_prompt": true} (collapse-to-chip in agent chats).
         await db.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
+    if "duration_ms" not in cols:
+        # #445: server-measured tool-call duration (ms), stamped by the
+        # agent loop at execution time so reloads and tape replay keep
+        # real durations.
+        await db.execute("ALTER TABLE messages ADD COLUMN duration_ms INTEGER")
     cur = await db.execute("PRAGMA table_info(conversations)")
     conv_cols = {r[1] for r in await cur.fetchall()}
     if "context_tokens" not in conv_cols:
@@ -331,6 +340,15 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN frozen_system_prompt_ws TEXT"
         )
+    if "frozen_voice_gate" not in conv_cols:
+        # #451: the voice gate the freeze was made under ("1" kokoro /
+        # "0" not). The ear-writing rules in the head are Kokoro-family-
+        # only, so a voice change must refreeze the head, not replay
+        # stale coaching. NULL (pre-#451 rows) never matches = one
+        # refreeze on the next turn, then stable.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN frozen_voice_gate TEXT"
+        )
     if "persisted_skill_tail" not in conv_cols:
         # Persisted load_skill tail: the byte-exact "# Loaded skill" tail
         # message a static-mode conversation accumulated through the
@@ -392,9 +410,9 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE workspaces ADD COLUMN position INTEGER")
     # Revision tokens change for every host-side metadata/transcript edit,
     # including legacy local routes, not just commits through the new API.
-    # The conversations trigger is dropped and recreated rather than
-    # IF NOT EXISTS: its UPDATE OF column list is code-owned, and IF NOT
-    # EXISTS would leave upgraded databases on the old list forever.
+    # The two UPDATE triggers are dropped and recreated rather than
+    # IF NOT EXISTS: their UPDATE OF column lists are code-owned, and IF
+    # NOT EXISTS would leave upgraded databases on the old list forever.
     await db.executescript("""
     DROP TRIGGER IF EXISTS conversations_remote_revision_update;
     CREATE TRIGGER conversations_remote_revision_update
@@ -409,8 +427,9 @@ async def get_db() -> aiosqlite.Connection:
         UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
         WHERE id = NEW.conversation_id;
     END;
-    CREATE TRIGGER IF NOT EXISTS messages_remote_revision_update
-    AFTER UPDATE OF role, content, tool_calls, tool_call_id, images, sub_agent_transcript
+    DROP TRIGGER IF EXISTS messages_remote_revision_update;
+    CREATE TRIGGER messages_remote_revision_update
+    AFTER UPDATE OF role, content, tool_calls, tool_call_id, images, sub_agent_transcript, duration_ms
     ON messages BEGIN
         UPDATE conversations SET remote_revision_counter = remote_revision_counter + 1
         WHERE id = NEW.conversation_id;
@@ -774,10 +793,6 @@ async def delete_workspace(workspace_id: int) -> dict:
         await db.close()
 
 
-async def init_db():
-    db = await get_db()
-    await db.close()
-
 
 # ---- Conversation CRUD ----
 
@@ -927,6 +942,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
         "system_prompt_override",
         "frozen_system_prompt",
         "frozen_system_prompt_ws",
+        "frozen_voice_gate",
         "persisted_skill_tail",
         "persisted_skill_tail_ws",
         "model",
@@ -1155,6 +1171,7 @@ async def add_message(
     say: str | None = None,
     say_is_fallback: bool | None = None,
     meta: dict | None = None,
+    duration_ms: int | None = None,
 ):
     db = await get_db()
     try:
@@ -1163,8 +1180,8 @@ async def add_message(
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, tool_calls,"
             " tool_call_id, images, attachments, sub_agent_transcript, say,"
-            " say_is_fallback, meta)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " say_is_fallback, meta, duration_ms)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
@@ -1179,6 +1196,7 @@ async def add_message(
                 # is the heuristic fallback rather than a model <say> briefing.
                 1 if say_is_fallback else (0 if say_is_fallback is not None else None),
                 json.dumps(meta) if meta else None,
+                duration_ms,
             ),
         )
         await db.commit()
@@ -1580,13 +1598,15 @@ async def commit_remote_conversation(
             if role not in ("user", "assistant", "tool", "system"):
                 await db.rollback()
                 raise RemoteProtocolError("invalid_message_role", index=index)
-            columns = "conversation_id, role, content, tool_calls, tool_call_id, images, sub_agent_transcript"
+            columns = ("conversation_id, role, content, tool_calls, tool_call_id,"
+                       " images, sub_agent_transcript, duration_ms")
             values = [
                 conversation_id, role, message.get("content", ""),
                 json.dumps(message["tool_calls"]) if message.get("tool_calls") is not None else None,
                 message.get("tool_call_id"),
                 json.dumps(message["images"]) if message.get("images") else None,
                 json.dumps(message["sub_agent_transcript"]) if message.get("sub_agent_transcript") else None,
+                message.get("duration_ms"),
             ]
             if keep_ids:
                 columns = "id, " + columns

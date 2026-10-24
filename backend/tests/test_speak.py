@@ -590,3 +590,139 @@ async def test_tts_status_exposes_say_toggles(tts_env):
     finally:
         with open(os.environ["YAAH_CONFIG_PATH"], "wb") as f:
             f.write(saved)
+
+
+# ---- #451: the Kokoro-shaping gate ----------------------------------------------
+# The written-to-spoken pass (numbers, versions, acronyms) is Kokoro-shaping:
+# non-espeak engines (moss-tts) read the written forms natively and stutter
+# on the letter-spaced acronyms. kokoro=False keeps only engine-neutral
+# cleanup (SSML/emotion markers, whitespace).
+
+MOSS_CASES = [
+    ("Shipped on port 443 today.", "Shipped on port 443 today."),
+    ("It has worked since 1999.", "It has worked since 1999."),
+    ("The API gateway failed.", "The API gateway failed."),
+    ("and the page UI files.", "and the page UI files."),
+    ("may the best $19.99 win", "may the best $19.99 win"),
+    ("i have $14 in my pocket", "i have $14 in my pocket"),
+    ("Now running v1.0.16-rc.7.", "Now running v1.0.16-rc.7."),
+    ("Call 555-0100 for access.", "Call 555-0100 for access."),
+]
+
+
+@pytest.mark.parametrize("source, expected", MOSS_CASES)
+def test_normalize_for_speech_moss_cases(source, expected):
+    """#451: kokoro=False leaves every written form the engine reads
+    natively untouched (the user's moss stutter cases included)."""
+    assert speak.normalize_for_speech(source, kokoro=False) == expected
+
+
+def test_normalize_moss_still_strips_markers():
+    assert (
+        speak.normalize_for_speech("Done [sighs] at last.", kokoro=False)
+        == "Done at last."
+    )
+    assert (
+        speak.normalize_for_speech('Say it <break time="500ms"/> slowly.', kokoro=False)
+        == "Say it slowly."
+    )
+
+
+def test_normalize_kokoro_forced_keeps_shaping():
+    """The explicit True path is exactly the old behavior."""
+    assert (
+        speak.normalize_for_speech("The API gateway failed.", kokoro=True)
+        == "The A P I gateway failed."
+    )
+
+
+def test_spoken_line_moss_leaves_written_forms():
+    out = speak.spoken_line(
+        "Good - I have the panel API picture and the page UI files.",
+        "chat body",
+        kokoro=False,
+    )
+    assert out == "Good - I have the panel API picture and the page UI files."
+
+
+def test_kokoro_voice_reads_saved_config():
+    """The gate reads the saved voice config: local = kokoro; remote only
+    when the model name says so (case-insensitive)."""
+    from backend.agent.config import load_config, save_config
+
+    def set_voice(**kw):
+        voice = {**(load_config().get("voice") or {}), **kw}
+        save_config({**load_config(), "voice": voice})
+
+    set_voice(tts_engine="local")
+    assert speak.kokoro_voice() is True
+    set_voice(tts_engine="remote", tts_endpoint="http://box", tts_model="moss-tts-8b")
+    assert speak.kokoro_voice() is False
+    set_voice(tts_engine="remote", tts_endpoint="http://box", tts_model="kokoro")
+    assert speak.kokoro_voice() is True
+    set_voice(tts_engine="remote", tts_endpoint="http://box", tts_model="Kokoro-82M")
+    assert speak.kokoro_voice() is True
+
+
+def test_kokoro_voice_failure_reads_false(monkeypatch):
+    monkeypatch.setattr(
+        speak, "load_config", lambda: (_ for _ in ()).throw(RuntimeError("no config"))
+    )
+    assert speak.kokoro_voice() is False
+
+
+@pytest.mark.asyncio
+async def test_tts_status_reports_kokoro_gate():
+    """#451: /api/tts/status ships the gate so the frontend mirror can
+    follow the same decider without duplicating the heuristic."""
+    from backend.agent.config import load_config, save_config
+
+    voice = {
+        **(load_config().get("voice") or {}),
+        "tts_engine": "remote",
+        "tts_endpoint": "http://box",
+        "tts_model": "moss-tts-8b",
+    }
+    save_config({**load_config(), "voice": voice})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        body = (await client.get("/api/tts/status")).json()
+    assert body["kokoro"] is False
+
+
+def test_spoken_line_auto_detects_from_saved_config():
+    """#451: the loop's call shape - spoken_line(say, md), no explicit
+    flag - must follow the SAVED voice config: moss leaves the written
+    forms alone, local kokoro keeps the full shaping."""
+    from backend.agent.config import load_config, save_config
+
+    def set_voice(**kw):
+        voice = {**(load_config().get("voice") or {}), **kw}
+        save_config({**load_config(), "voice": voice})
+
+    say = "Shipped. The panel API and page UI read fine in 1999."
+    try:
+        set_voice(tts_engine="remote", tts_endpoint="http://box", tts_model="moss-tts-8b")
+        moss_out = speak.spoken_line(say, "chat body")
+        set_voice(tts_engine="local")
+        kokoro_out = speak.spoken_line(say, "chat body")
+    finally:
+        set_voice(tts_engine="local", tts_endpoint="", tts_model="kokoro")
+    assert moss_out == say
+    assert "A P I" in kokoro_out and "nineteen ninety-nine" in kokoro_out
+
+
+
+def test_kokoro_voice_empty_remote_model_defaults_to_kokoro():
+    """#451 (review): an empty remote tts_model rides the same default the
+    request sends ("kokoro"), so the gate's classification matches what
+    synthesis actually uses."""
+    from backend.agent.config import load_config, save_config
+
+    voice = {
+        **(load_config().get("voice") or {}),
+        "tts_engine": "remote",
+        "tts_endpoint": "http://box",
+        "tts_model": "",
+    }
+    save_config({**load_config(), "voice": voice})
+    assert speak.kokoro_voice() is True

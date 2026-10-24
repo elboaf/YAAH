@@ -104,6 +104,9 @@ DEFAULTS = {
         # ref clip, so Settings keeps tts_voice aligned with this.
         "tts_moss_lang": "en",
         "tts_moss_ref": "",
+        # #451: no stored flag for this - speak.kokoro_voice() DERIVES the
+        # Kokoro-shape gate from tts_engine + tts_model on every call, so
+        # a Settings change applies without a restart.
     },
     # Persistent memory (issue #169): Settings toggle, opt-in with default
     # OFF. When disabled the memory tools are filtered from the schema, the

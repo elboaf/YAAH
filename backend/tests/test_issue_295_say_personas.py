@@ -57,8 +57,11 @@ def test_neutral_prompt_is_byte_identical_to_absent_key(restored_config):
     without_key = loop._default_system_prompt("")
     _config_with_voice(say_persona="neutral")
     assert loop._default_system_prompt("") == without_key
-    # And the section itself ends where it always did \u2014 no tail bytes.
-    assert _say_section(without_key).endswith("a blank line marks a beat.\n")
+    # And the section itself ends where it should \u2014 no tail bytes beyond
+    # the #456 say-pipeline note.
+    assert _say_section(without_key).endswith(
+        "not needed for it and must not be loaded on routine turns.\n"
+    )
 
 
 def test_unknown_persona_falls_back_to_neutral_bytes(restored_config):

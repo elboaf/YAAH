@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.db.database import add_message, create_conversation, get_messages, init_db
+from backend.db.database import add_message, create_conversation, get_db, get_messages
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ async def test_migration_adds_column_to_existing_database(tmp_path, monkeypatch)
         await raw.commit()
     from backend.db import database
     monkeypatch.setattr(database, "DB_PATH", path)
-    await init_db()
+    db = await get_db()
     async with aiosqlite.connect(path) as raw:
         cur = await raw.execute("SELECT * FROM messages")
         cols = {d[0] for d in cur.description}

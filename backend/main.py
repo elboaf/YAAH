@@ -17,14 +17,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend._version import __version__
-from backend.db.database import init_db
+from backend.db.database import get_db
 
 log = logging.getLogger("yaah.main")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    db = await get_db()
+    await db.close()
     # #132 one-time repair: qualify conversations/agents rows still carrying
     # bare model ids (no routing provider — turns silently followed the
     # sidebar default's provider after a default change). Best-effort: if
@@ -1289,13 +1290,20 @@ async def api_agent_queue_remove(conversation_id: int, item_id: int):
 async def api_agent_steer(conversation_id: int):
     """Interrupt the in-flight step so queued messages land now (#7).
     The run continues at the next boundary with full context."""
-    from backend.agent.loop import agent_is_running, steer_agent
+    from backend.agent.loop import agent_is_running, steer_agent, _drain_queue
 
-    if not agent_is_running(conversation_id):
-        raise HTTPException(status_code=409, detail="conversation is not running")
-    if not steer_agent(conversation_id):
-        raise HTTPException(status_code=409, detail="nothing to steer")
-    return {"ok": True}
+    if agent_is_running(conversation_id):
+        if not steer_agent(conversation_id):
+            raise HTTPException(status_code=409, detail="nothing to steer")
+        return {"ok": True}
+
+    # Run ended before steer arrived (#460). Check for queued items that
+    # need to be sent as a fresh turn. Return them to the client so it can
+    # start the turn with the correct conversation context.
+    items = _drain_queue(conversation_id)
+    if items:
+        return {"ok": True, "run_ended": True, "queued": items}
+    raise HTTPException(status_code=409, detail="conversation is not running")
 
 
 class AnswerBody(BaseModel):
@@ -2640,9 +2648,12 @@ class TtsTestBody(BaseModel):
     voice: str | None = None
     speed: float | None = None
     engine: str | None = None
+    # On-screen draft override for the remote model (#449 review):
+    # Test must send what the UI displays, not the last saved value.
+    model: str | None = None
 
 
-def _remote_engine_args(voice_cfg: dict, voice: str, speed):
+def _remote_engine_args(voice_cfg: dict, voice: str, speed, model_override=None):
     """The (endpoint, api_key, model, voice, speed) the remote engine
     needs from a voice config + request drafts. Raises RemoteTTSError
     ("not-configured") when no endpoint is set — the shared 409 gate for
@@ -2655,10 +2666,14 @@ def _remote_engine_args(voice_cfg: dict, voice: str, speed):
             "remote TTS selected but no endpoint configured (Settings → Voice)",
             code="not-configured",
         )
+    # An explicit override (the Settings Test button's on-screen draft)
+    # wins over the saved model (#449 review); narration passes None
+    # and keeps the saved value.
+    model = (model_override or "").strip() or (voice_cfg.get("tts_model") or "kokoro")
     return (
         endpoint,
         voice_cfg.get("tts_api_key") or "",
-        voice_cfg.get("tts_model") or "kokoro",
+        model,
         voice,
         None if speed is None else float(speed),
     )
@@ -2698,7 +2713,10 @@ async def api_tts_test(body: TtsTestBody):
                 )
             else:
                 await speak.synthesize_remote(
-                    text, *_remote_engine_args(voice_cfg, voice, speed)
+                    text,
+                    *_remote_engine_args(
+                        voice_cfg, voice, speed, model_override=body.model
+                    ),
                 )
         else:
             if not speak.model_available():
@@ -2760,7 +2778,10 @@ async def api_tts_voices(body: TtsVoicesBody | None = None):
             voices = await speak.probe_remote_voices(endpoint, api_key=api_key)
     except speak.RemoteTTSError as e:  # a malformed endpoint, same gate as Test
         return JSONResponse({"detail": str(e), "code": e.code}, status_code=409)
-    return {"voices": voices}
+    # #448: the standard OpenAI model list rides along (— [] on any
+    # failure), so Settings can offer real model ids from one round-trip.
+    models = await speak.probe_remote_models(endpoint, api_key=api_key)
+    return {"voices": voices, "models": models}
 
 
 @app.get("/api/tts/status")
@@ -2790,9 +2811,13 @@ async def api_tts_status():
             available = configured
     else:
         available = speak.model_available()
+    # #451: is the active voice Kokoro-family? The frontend mirrors this
+    # flag to gate the ear-shaping in src/speech.ts; speak.kokoro_voice_cfg
+    # is the single decider on the backend.
     return {
         "engine": engine,
         "remote_api": remote_api,
+        "kokoro": speak.kokoro_voice_cfg(voice),
         "available": available,
         # Local-model state, whatever the engine: remote mode keeps the
         # download UI hidden (spec) but the field honest.
@@ -2906,6 +2931,9 @@ async def api_tts_synthesize(body: TtsBody):
         epoch = body.epoch if body.epoch is not None else 0
         if speak.superseded(epoch):
             return JSONResponse({"detail": "superseded"}, status_code=409)
+        # #451: deliberately NO defensive normalization here - the
+        # written→spoken pass is Kokoro-shaping, and a remote engine
+        # (moss-tts) reads the written forms natively.
         try:
             if (voice_cfg.get("tts_remote_api") or "openai") == "moss":
                 audio = await speak.synthesize_moss(
@@ -2938,9 +2966,10 @@ async def api_tts_synthesize(body: TtsBody):
     voice = body.voice or voice_cfg.get("tts_voice") or speak.DEFAULT_VOICE
     speed = body.speed if body.speed is not None else (voice_cfg.get("tts_speed") or 1.0)
     # #206: defensive normalization at the choke point — live-stream chunks
-    # may carry un-normalized text from older sessions; whatever reaches a
-    # synthesis engine (local today, remote per #205) reads like a human.
-    text = speak.normalize_for_speech(text)
+    # may carry un-normalized text from older sessions. Local synthesis IS
+    # kokoro, so the full written→spoken pass applies (remote synthesis
+    # returned earlier; #451 keeps its input untouched).
+    text = speak.normalize_for_speech(text, kokoro=True)
     # The utterance's generation comes from the frontend (body.epoch); a
     # hand-made request without one gets epoch 0, which any stop invalidates.
     epoch = body.epoch if body.epoch is not None else 0
@@ -3298,6 +3327,38 @@ async def api_remote_device_turn(host_id: str, conversation_id: str, body: Remot
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/remote/devices/{host_id}/running")
+async def api_remote_device_running(host_id: str):
+    """Backend-truth run state for one saved device (issue #457).
+
+    Returns the conversations of this device that are mid-turn (yellow tracer)
+    and the subset parked on a pending ask_user answer (orange bar), read from
+    the registry and the owner-keyed pending-answer tracker. Local chats have
+    this: the agents poller keeps every window's rows fresh regardless of which
+    window started the run. Remote chats had no equivalent, so a turn started
+    on another window, after an app restart, or with the transcript dialog
+    closed showed nothing.
+
+    The conversations-list response intentionally carries no run flags (AC 2):
+    this is a dedicated endpoint the sidebar poller hits alongside the cached
+    conversation list. A device that is offline/cached exposes no running
+    state — signals for a disconnected device degrade to nothing (AC 3).
+    """
+    # A turn is only tracked by this backend's registry when the turn is run
+    # through the local loop on a live owner connection; cached/offline devices
+    # have no live registry view, so they report nothing.
+    if remote_mod.get_remote(host_id) is None:
+        return {"status": "cached", "running": [], "pending": []}
+
+    owner_id = host_id
+    from backend.agent.remote_runner import remote_runs
+    running = await remote_runs.running_convs(owner_id)
+    from backend.agent.loop import remote_pending_running_convs
+    pending = await remote_pending_running_convs(owner_id)
+    return {"status": "online", "running": sorted(set(running)),
+            "pending": sorted(set(pending))}
 
 
 @app.post("/api/remote/devices/{host_id}/turns/{conversation_id}/answer")
