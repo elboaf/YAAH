@@ -1126,6 +1126,7 @@ def test_env_line_names_real_shell(monkeypatch):
     import os
     from backend.agent import loop
 
+    monkeypatch.setenv("HOME", "/home/testuser")
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: None)
     monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
