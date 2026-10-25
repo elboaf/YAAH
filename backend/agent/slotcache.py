@@ -494,6 +494,17 @@ async def _gate_inner(
                 conversation_id, decision["action"], decision["reason"],
             )
             return
+        # ROUND6: a restore onto a slot holding ANY prior content
+        # (warm-up prefill, previous conversation) silently poisons
+        # the server's prefix matcher - restored tokens match 0 and
+        # the turn re-prefills everything (live-verified 2026-10-25:
+        # erase-then-restore -> 7580/7597 cached, 1 s; restore over
+        # prior content -> 0/7591 cached, ~70 s). Erase first: the
+        # bin we restore is the full content the slot needs.
+        try:
+            await _post_action(_router_base(api_base), 0, "erase", preset)
+        except (_Degraded, httpx.HTTPError) as e:
+            log.warning("slotcache: pre-restore erase failed: %s", e)
         try:
             await _post_action(
                 _router_base(api_base), 0, "restore", preset,
