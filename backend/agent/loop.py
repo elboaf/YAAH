@@ -487,12 +487,16 @@ def _shell_phrase(windows: bool) -> str:
     return f"the system shell ({shell})"
 
 
-def _local_env_line() -> str:
+def _local_env_line(workspace: str = "") -> str:
     import platform
+
+    from backend.agent.tools import workspace_root
+
+    ws_path = workspace_root(workspace)
 
     return (
         f"Runtime environment: {platform.system()} {platform.release()} "
-        f"({platform.machine()}). The bash tool runs commands through "
+        f"({platform.machine()}). The selected workspace is {ws_path}; shell commands start there and file-tool paths resolve relative to it; paths outside the workspace must be absolute. The bash tool runs commands through "
         f"{_shell_phrase(os.name == 'nt')}; use commands and paths valid "
         f"for THIS operating system."
     )
