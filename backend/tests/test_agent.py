@@ -1124,8 +1124,10 @@ async def test_bash_timeout_clamp_is_signalled(tmp_path):
 
 def test_env_line_names_real_shell(monkeypatch):
     import os
+    from pathlib import Path
     from backend.agent import loop
 
+    monkeypatch.setattr(Path, "home", lambda: Path("/home/testuser"))
     monkeypatch.setenv("HOME", "/home/testuser")
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: None)
