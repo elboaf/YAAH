@@ -1124,11 +1124,12 @@ async def test_bash_timeout_clamp_is_signalled(tmp_path):
 
 def test_env_line_names_real_shell(monkeypatch):
     import os
-    from pathlib import Path
     from backend.agent import loop
+    from pathlib import Path
 
-    monkeypatch.setattr(Path, "home", lambda: Path("/home/testuser"))
-    monkeypatch.setenv("HOME", "/home/testuser")
+    # workspace_root("") calls Path.home(), which fails on CI runners
+    # where $HOME is unset; patch the import in the loop module's namespace
+    monkeypatch.setattr(loop, "workspace_root", lambda ws: Path("/home/testuser"))
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: None)
     monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
