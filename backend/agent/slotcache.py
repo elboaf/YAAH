@@ -62,6 +62,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -158,7 +159,11 @@ def _write_ledger(api_base: str, model: str, ledger: dict) -> None:
     path = _ledger_path(api_base, model)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(ledger, indent=1), "utf-8")
+        # Atomic replace (issue #557 review): a torn in-place write would
+        # read back as {} on next boot, orphaning every bin in the ledger.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(ledger, indent=1), "utf-8")
+        os.replace(tmp, path)
     except OSError as e:
         log.warning("slotcache: ledger write failed: %s", e)
 
@@ -215,14 +220,17 @@ def _evict_turn_bins(ledger: dict, conversation_id: int) -> list[str]:
     delete API (issue #557 open question 1 - an ops decision), so eviction
     trims the ledger and the budget guard stops unbounded growth. A
     router-side janitor can garbage-collect orphaned .bin files by mtime;
-    the ledger tolerates already-missing files."""
+    the ledger tolerates already-missing files. The NEWEST bin is never
+    evicted: dropping it would leave a cold conversation with no restore
+    point (and restart its turn numbering), so the ledger may sit over
+    budget by one bin (issue #557 review)."""
     bins = _newest_turn_bins(ledger, conversation_id)
     over_count = len(bins) - MAX_BINS_PER_CONVERSATION
     over_bytes = (
         sum(int(b.get("n_written") or 0) for b in bins) - MAX_BYTES_PER_CONVERSATION
     )
     evicted: list[str] = []
-    for entry in bins:  # oldest first
+    for entry in bins[:-1]:  # oldest first; the NEWEST bin is never evicted
         if over_count <= 0 and over_bytes <= 0:
             break
         if over_count >= 0:
@@ -335,7 +343,8 @@ def decide(
     Returns {"action": "skip"|"restore", "bin": str|None, "reason": str}.
     HOT = same child (boot fingerprint) AND id_task unchanged since the
     recorded post-save observation AND that observation was for THIS
-    conversation AND the turn continues an existing conversation. A new
+    conversation under the CURRENT prompt head (prompt_key) AND the turn
+    continues an existing conversation. A new
     conversation is never "hot" (its prefix has no shared tail to protect
     beyond the seed) and restores the seed bin when one exists.
     """
@@ -346,6 +355,7 @@ def decide(
         recorded
         and recorded.get("boot") == boot_now
         and recorded.get("conversation_id") == conversation_id
+        and recorded.get("prompt_key") == base_name
         and recorded.get("id_task") is not None
         and id_task is not None
         and int(recorded["id_task"]) == int(id_task)
@@ -357,7 +367,14 @@ def decide(
         if entry:
             return {"action": "restore", "bin": base_name, "reason": "seed"}
         return {"action": "skip", "bin": None, "reason": "no-seed-yet"}
-    turns = _newest_turn_bins(ledger, conversation_id)
+    # Turn bins are only eligible while their prompt head still matches
+    # (issue #557 review): a rebuilt system prompt would otherwise
+    # cold-restore a checkpoint baked from the old head.
+    turns = [
+        e
+        for e in _newest_turn_bins(ledger, conversation_id)
+        if e.get("prompt_key") == base_name
+    ]
     if turns:
         return {"action": "restore", "bin": turns[-1]["file"], "reason": "cold"}
     # Existing conversation whose bins are all gone (evicted/other harness):
@@ -448,6 +465,7 @@ async def _gate_inner(
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
         ledger = read_ledger(api_base, preset)
+        base_name = base_bin_name(api_base, preset, system_prompt)
         decision = decide(
             slot,
             _SLOT_STATE.get(key),
@@ -455,7 +473,7 @@ async def _gate_inner(
             ledger,
             conversation_id,
             is_new_conversation,
-            base_bin_name(api_base, preset, system_prompt),
+            base_name,
         )
         if decision["action"] != "restore":
             # The probe succeeded: record the observation even on skip, so
@@ -467,6 +485,9 @@ async def _gate_inner(
                 "boot": boot,
                 "conversation_id": conversation_id,
                 "id_task": slot.get("id_task"),
+                # Only a hot decision extends hotness under this prompt
+                # head; any other skip must not (issue #557 review).
+                "prompt_key": base_name if decision["reason"] == "hot" else None,
             }
             log.info(
                 "slotcache: conv %s gate=%s (%s)",
@@ -483,7 +504,9 @@ async def _gate_inner(
             return
         # Record the post-restore observation: saves/restores bump id_task
         # themselves, so the recorded value must be read back afterwards.
-        recorded = await _record_post_task(api_base, preset, conversation_id)
+        recorded = await _record_post_task(
+            api_base, preset, conversation_id, base_name
+        )
         log.info(
             "slotcache: conv %s restored %s (%s)%s",
             conversation_id,
@@ -493,10 +516,13 @@ async def _gate_inner(
         )
 
 
-async def _record_post_task(api_base: str, preset: str, conversation_id: int) -> dict | None:
+async def _record_post_task(
+    api_base: str, preset: str, conversation_id: int, prompt_key: str | None
+) -> dict | None:
     """Re-probe after a save/restore and store the volatile fingerprint for
     this conversation. Best-effort: a failed re-probe leaves no record, so
-    the next gate restores again (conservative)."""
+    the next gate restores again (conservative). prompt_key pins the record
+    to the prompt head it was built from (issue #557 review)."""
     probed = await _probe(api_base, preset)
     if probed is None:
         _SLOT_STATE.pop(_state_key(api_base, preset), None)
@@ -506,6 +532,7 @@ async def _record_post_task(api_base: str, preset: str, conversation_id: int) ->
         "boot": boot_fingerprint(models_entry),
         "conversation_id": conversation_id,
         "id_task": slot.get("id_task"),
+        "prompt_key": prompt_key,
     }
     _SLOT_STATE[_state_key(api_base, preset)] = record
     return record
@@ -517,14 +544,18 @@ async def flush(
     conversation_id: int = 0,
     system_prompt: str = "",
     usage: dict | None = None,
+    is_first_turn: bool = False,
 ) -> None:
     """Turn-end checkpoint: save the slot (holding the just-finished turn's
-    prefix) as this conversation's newest turn bin, and as the persona's
-    seed/BASE bin when that key has no bin yet. Best-effort, never raises.
+    prefix) as this conversation's newest turn bin, and - only on a first
+    turn (is_first_turn, computed in loop.py) - as the persona's seed/BASE
+    bin when that key has no bin yet. Best-effort, never raises.
     Call ONLY after the turn's model activity is done (same rule as gate:
     never while a completion is in flight)."""
     try:
-        await _flush_inner(model, effort, conversation_id, system_prompt, usage)
+        await _flush_inner(
+            model, effort, conversation_id, system_prompt, usage, is_first_turn
+        )
     except Exception as e:  # noqa: BLE001 - degrade silently, always
         log.warning("slotcache: flush degraded: %s", e)
 
@@ -535,6 +566,7 @@ async def _flush_inner(
     conversation_id: int,
     system_prompt: str,
     usage: dict | None,
+    is_first_turn: bool,
 ) -> None:
     from backend.agent import model_client
     from backend.agent.config import load_config
@@ -558,6 +590,11 @@ async def _flush_inner(
         )
     lock = slot_lock(api_base, preset)
     async with lock:
+        # Re-check ownership INSIDE the lock (issue #557 review): a sibling
+        # gate can claim the slot while this flush waits for the lock; the
+        # pre-lock `state` above is then stale. Re-read fresh, not `state`.
+        if (_SLOT_STATE.get(key) or {}).get("conversation_id") != conversation_id:
+            return
         probed = await _probe(api_base, preset)
         if probed is None:
             return
@@ -566,6 +603,7 @@ async def _flush_inner(
         ledger = read_ledger(api_base, preset)
         turn = next_turn_number(ledger, conversation_id)
         bin_name = turn_bin_name(conversation_id, turn)
+        base_name = base_bin_name(api_base, preset, system_prompt)
         router_base = _router_base(api_base)
         try:
             save_resp = await _post_action(
@@ -587,15 +625,16 @@ async def _flush_inner(
             "n_written": int(save_resp.get("n_written") or 0),
             "boot": boot,
             "id_task_at_save": slot.get("id_task"),
+            "prompt_key": base_name,
             "ts": time.time(),
         }
         ledger = _upsert_bin(ledger, entry)
-        # Seed/BASE bin for this persona: if the system key has no bin yet,
-        # save the same (now prefix-warm) state under the seed name. One
-        # extra save (~tens of ms) amortizes across every future
-        # conversation on this persona.
-        if len(system_prompt or "") >= BASE_MIN_SYSTEM_CHARS:
-            base_name = base_bin_name(api_base, preset, system_prompt)
+        # Seed/BASE bin for this persona: only a conversation's FIRST turn
+        # may create it (a pre-cache conversation's first flush would bake
+        # its whole long prefix into the seed - issue #557 review), and
+        # only if the system key has no bin yet. One extra save (~tens of
+        # ms) amortizes across every future conversation on this persona.
+        if is_first_turn and len(system_prompt or "") >= BASE_MIN_SYSTEM_CHARS:
             if not _bin_entry(ledger, base_name):
                 try:
                     base_resp = await _post_action(
@@ -621,7 +660,9 @@ async def _flush_inner(
         for evicted in _evict_turn_bins(ledger, conversation_id):
             log.info("slotcache: evicted %s from ledger (budget)", evicted)
         _write_ledger(api_base, preset, ledger)
-        recorded = await _record_post_task(api_base, preset, conversation_id)
+        recorded = await _record_post_task(
+            api_base, preset, conversation_id, base_name
+        )
         log.info(
             "slotcache: saved %s (%d tokens, %d bytes) for conv %s%s",
             bin_name,

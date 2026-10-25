@@ -30,6 +30,7 @@ TURN1 = {
     "n_written": 1000,
     "boot": "bootA",
     "id_task_at_save": 7,
+    "prompt_key": "sys-x.bin",
     "ts": 1,
 }
 
@@ -40,22 +41,83 @@ def test_gate_skips_when_no_slot_info():
 
 
 def test_hot_when_boot_id_task_and_conversation_match():
-    recorded = {"boot": "bootA", "id_task": 9, "conversation_id": 42}
+    recorded = {
+        "boot": "bootA", "id_task": 9, "conversation_id": 42,
+        "prompt_key": "sys-x.bin",
+    }
     slot = {"id_task": 9}
     d = sc.decide(slot, recorded, "bootA", _led(TURN1), 42, False, "sys-x.bin")
     assert d["action"] == "skip" and d["reason"] == "hot"
 
 
 def test_cold_on_id_task_change():
-    recorded = {"boot": "bootA", "id_task": 9, "conversation_id": 42}
+    recorded = {
+        "boot": "bootA", "id_task": 9, "conversation_id": 42,
+        "prompt_key": "sys-x.bin",
+    }
     d = sc.decide({"id_task": 11}, recorded, "bootA", _led(TURN1), 42, False, "sys-x.bin")
     assert d["action"] == "restore" and d["bin"] == "conv-42-t1.bin"
 
 
 def test_cold_on_boot_change_child_restart():
-    recorded = {"boot": "bootA", "id_task": 9, "conversation_id": 42}
+    recorded = {
+        "boot": "bootA", "id_task": 9, "conversation_id": 42,
+        "prompt_key": "sys-x.bin",
+    }
     d = sc.decide({"id_task": 9}, recorded, "bootB", _led(TURN1), 42, False, "sys-x.bin")
     assert d["action"] == "restore"
+
+
+def test_hot_rejected_when_prompt_head_changed():
+    """Issue #557 review: a rebuilt system prompt (workspace move, prompt
+    edit) must break BOTH hotness and turn-bin eligibility - the slot
+    fingerprint alone would cold-restore a bin baked from the old head."""
+    recorded = {
+        "boot": "bootA", "id_task": 9, "conversation_id": 42,
+        "prompt_key": "sys-old.bin",
+    }
+    d = sc.decide(
+        {"id_task": 9}, recorded, "bootA", _led(TURN1), 42, False, "sys-new.bin"
+    )
+    assert d["action"] == "skip" and d["reason"] == "no-bin"
+
+
+def test_stale_prompt_head_falls_back_to_current_base():
+    recorded = {
+        "boot": "bootA", "id_task": 9, "conversation_id": 42,
+        "prompt_key": "sys-old.bin",
+    }
+    base = {"file": "sys-new.bin", "kind": "base", "n_written": 5}
+    d = sc.decide(
+        {"id_task": 9}, recorded, "bootA", _led(TURN1, base), 42, False, "sys-new.bin"
+    )
+    assert d == {"action": "restore", "bin": "sys-new.bin", "reason": "seed-fallback"}
+
+
+def test_hot_rejected_when_prompt_head_changed():
+    """Issue #557 review: a rebuilt system prompt (workspace move, prompt
+    edit) must break BOTH hotness and turn-bin eligibility - the slot
+    fingerprint alone would cold-restore a bin baked from the old head."""
+    recorded = {
+        "boot": "bootA", "id_task": 9, "conversation_id": 42,
+        "prompt_key": "sys-old.bin",
+    }
+    d = sc.decide(
+        {"id_task": 9}, recorded, "bootA", _led(TURN1), 42, False, "sys-new.bin"
+    )
+    assert d["action"] == "skip" and d["reason"] == "no-bin"
+
+
+def test_stale_prompt_head_falls_back_to_current_base():
+    recorded = {
+        "boot": "bootA", "id_task": 9, "conversation_id": 42,
+        "prompt_key": "sys-old.bin",
+    }
+    base = {"file": "sys-new.bin", "kind": "base", "n_written": 5}
+    d = sc.decide(
+        {"id_task": 9}, recorded, "bootA", _led(TURN1, base), 42, False, "sys-new.bin"
+    )
+    assert d == {"action": "restore", "bin": "sys-new.bin", "reason": "seed-fallback"}
 
 
 def test_new_conversation_never_hot_restores_seed():
@@ -85,7 +147,9 @@ def test_existing_conversation_without_turn_bins_falls_back_to_seed():
 def test_recorded_task_id_none_is_cold():
     # A fresh child omits id_task entirely (verified live) - never hot.
     recorded = {"boot": "bootA", "id_task": None, "conversation_id": 42}
-    d = sc.decide({"id_task": None}, recorded, "bootA", _led(TURN1), 42, False, "s.bin")
+    d = sc.decide(
+        {"id_task": None}, recorded, "bootA", _led(TURN1), 42, False, "sys-x.bin"
+    )
     assert d["action"] == "restore"
 
 
@@ -122,6 +186,30 @@ def test_eviction_respects_byte_budget():
     # Together over the 800 MB budget -> the oldest goes first.
     assert evicted == ["conv-42-t1.bin"]
     assert [b["file"] for b in ledger["bins"]] == ["conv-42-t2.bin"]
+
+
+def test_eviction_keeps_newest_bin_even_over_byte_budget():
+    """Issue #557 review: a single bin over the 800 MB budget (realistic at
+    ~200 MB/bin live) must stay in the ledger - evicting it would leave a
+    cold conversation with no restore point and restart its numbering."""
+    huge = dict(
+        TURN1, file="conv-42-t1.bin", turn=1, ts=1, n_written=900 * 1024 * 1024
+    )
+    ledger = _led(huge)
+    assert sc._evict_turn_bins(ledger, 42) == []
+    assert [b["file"] for b in ledger["bins"]] == ["conv-42-t1.bin"]
+
+
+def test_eviction_keeps_newest_bin_even_over_byte_budget():
+    """Issue #557 review: a single bin over the 800 MB budget (realistic at
+    ~200 MB/bin live) must stay in the ledger - evicting it would leave a
+    cold conversation with no restore point and restart its numbering."""
+    huge = dict(
+        TURN1, file="conv-42-t1.bin", turn=1, ts=1, n_written=900 * 1024 * 1024
+    )
+    ledger = _led(huge)
+    assert sc._evict_turn_bins(ledger, 42) == []
+    assert [b["file"] for b in ledger["bins"]] == ["conv-42-t1.bin"]
 
 
 def test_eviction_never_touches_other_conversations():
@@ -289,6 +377,7 @@ async def test_gate_restores_cold_then_flush_saves(monkeypatch, tmp_path, clean_
         model="", effort="", conversation_id=42,
         system_prompt="S" * 2000,
         usage={"prompt_tokens_details": {"cached_tokens": 40}},
+        is_first_turn=True,
     )
     saves = [f for _, f in router.posts]
     # Turn bin + the persona's seed bin (first save for this key).
@@ -297,6 +386,10 @@ async def test_gate_restores_cold_then_flush_saves(monkeypatch, tmp_path, clean_
     ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
     files = [b["file"] for b in ledger["bins"]]
     assert "conv-42-t1.bin" in files and any(f.startswith("sys-") for f in files)
+    # Atomic ledger write (issue #557 review): no torn-write temp left over.
+    assert not (tmp_path / "led.json.tmp").exists()
+    # Atomic ledger write (issue #557 review): no torn-write temp left over.
+    assert not (tmp_path / "led.json.tmp").exists()
 
     # Second conversation, same persona: gate restores the seed bin.
     await sc.gate(
@@ -321,7 +414,8 @@ async def test_turn_end_flush_saves_and_stays_hot(monkeypatch, tmp_path, clean_e
                   is_new_conversation=True, system_prompt="S" * 2000)
     await sc.flush(model="", effort="", conversation_id=42,
                    system_prompt="S" * 2000,
-                   usage={"prompt_tokens_details": {"cached_tokens": 5}})
+                   usage={"prompt_tokens_details": {"cached_tokens": 5}},
+                   is_first_turn=True)
     posts_after_t1 = len(router.posts)
 
     # Same conversation continues: gate must SKIP (recorded fingerprint
@@ -350,7 +444,39 @@ async def test_flush_without_gate_is_noop(monkeypatch, tmp_path, clean_env, rout
 
 
 @pytest.mark.asyncio
-async def test_degrade_paths_never_raise(monkeypatch, tmp_path, clean_env):
+async def test_flush_non_first_turn_never_seeds(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Issue #557 review: only a conversation's first turn may create the
+    persona seed - a pre-cache conversation's first flush (its turn
+    numbering also starts at 1) must not bake its long prefix in."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000, usage=None, is_first_turn=False)
+    assert not any(f.startswith("sys-") for _, f in router.posts)
+
+
+@pytest.mark.asyncio
+async def test_flush_non_first_turn_never_seeds(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Issue #557 review: only a conversation's first turn may create the
+    persona seed - a pre-cache conversation's first flush (its turn
+    numbering also starts at 1) must not bake its long prefix in."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000, usage=None, is_first_turn=False)
+    assert not any(f.startswith("sys-") for _, f in router.posts)
+
+
+@pytest.mark.asyncio
+async def test_degrade_paths_never_raise(monkeypatch, tmp_path, clean_env, router_cfg):
     async def boom(*a, **k):
         raise RuntimeError("router on fire")
 
@@ -363,7 +489,7 @@ async def test_degrade_paths_never_raise(monkeypatch, tmp_path, clean_env):
 
 
 @pytest.mark.asyncio
-async def test_gate_busy_lock_proceeds_ungated(monkeypatch, tmp_path, clean_env):
+async def test_gate_busy_lock_proceeds_ungated(monkeypatch, tmp_path, clean_env, router_cfg):
     router = _Router()
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
@@ -380,13 +506,14 @@ async def test_gate_busy_lock_proceeds_ungated(monkeypatch, tmp_path, clean_env)
 
 
 @pytest.mark.asyncio
-async def test_unloaded_model_degrades_before_slots_probe(monkeypatch, clean_env):
+async def test_unloaded_model_degrades_before_slots_probe(monkeypatch, clean_env, router_cfg):
     router = _Router()
     router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
     router.install(monkeypatch)
     await sc.gate(model="", effort="", conversation_id=42,
                   is_new_conversation=True, system_prompt="S" * 2000)
     # The hang-avoidance ordering: /v1/models consulted, /slots never hit.
+    assert any("/v1/models" in u for u in router.gets)
     assert not any("/slots?" in u for u in router.gets)
 
 

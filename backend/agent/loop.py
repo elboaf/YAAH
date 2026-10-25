@@ -2656,12 +2656,21 @@ async def _run_agent_claimed(
                 # detached save would race a fast follow-up turn.
                 # Best-effort: failures log, the turn still completes.
                 if include_history:
+                    # First turn = the user row persisted above is history's
+                    # only entry and nothing is compacted. Only this shape may
+                    # create the persona seed bin, so a pre-cache
+                    # conversation's first flush can't bake its long prefix
+                    # into the seed (issue #557 review).
+                    is_first_turn = (
+                        not (prompt_state.get("summary") or "") and len(history) == 1
+                    )
                     await slotcache.flush(
                         model=model_override,
                         effort=effort_override,
                         conversation_id=conversation_id,
                         system_prompt=system_prompt,
                         usage=state.get("usage"),
+                        is_first_turn=is_first_turn,
                     )
 
                 # Replace the mechanical first-message title after a successful
