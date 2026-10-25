@@ -349,7 +349,11 @@ async def test_first_message_bootstraps_base(monkeypatch, tmp_path, clean_env, r
     )
     # Exactly one aux prefill, carrying EXACTLY the system prompt.
     assert len(chats) == 1
-    assert chats[0]["messages"] == [{"role": "system", "content": "S" * 2000}]
+    # System + a one-char user turn: strict templates 500 on system-only.
+    assert chats[0]["messages"] == [
+        {"role": "system", "content": "S" * 2000},
+        {"role": "user", "content": "."},
+    ]
     assert not chats[0].get("tools") and chats[0]["stream"] is False
     # Round-3: generation is capped so a reasoning model can't think
     # under the slot lock.
@@ -426,8 +430,79 @@ async def test_bootstrap_prefill_failure_is_contained(monkeypatch, tmp_path, cle
         model="", effort="", conversation_id=42,
         is_new_conversation=True, system_prompt="S" * 2000,
     )
-    assert router.posts == []
-    assert sc._SLOT_STATE == {}
+    assert router.posts == []  # nothing was saved
+    # But the observation IS recorded: the turn-end flush must still run
+    # (round-4: a failed bootstrap used to disable the conv save too).
+    assert sc._SLOT_STATE
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_failure_still_allows_turn_end_flush(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Live diagnosis 2026-10-25: a failed BASE bootstrap used to leave no
+    observation record, which silently disabled the turn-end conv save.
+    The flush must still checkpoint the conversation."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    _fake_chat(monkeypatch, [], raise_exc=RuntimeError("template on fire"))
+
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    # The probe succeeded, so the conversation is recorded for the flush
+    # even though the bootstrap degraded.
+    assert sc._SLOT_STATE
+
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000, usage=None)
+    assert any(f.startswith("conv-") for _, f in router.posts)
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    assert any(b["kind"] == "turn" for b in ledger["bins"])
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_failure_still_allows_turn_end_flush(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Live diagnosis 2026-10-25: a failed BASE bootstrap used to leave no
+    observation record, which silently disabled the turn-end conv save.
+    The flush must still checkpoint the conversation."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    _fake_chat(monkeypatch, [], raise_exc=RuntimeError("template on fire"))
+
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    # The probe succeeded, so the conversation is recorded for the flush
+    # even though the bootstrap degraded.
+    assert sc._SLOT_STATE
+
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000, usage=None)
+    assert any(f.startswith("conv-") for _, f in router.posts)
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    assert any(b["kind"] == "turn" for b in ledger["bins"])
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_failure_still_allows_turn_end_flush(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Live diagnosis 2026-10-25: a failed BASE bootstrap used to leave no
+    observation record, which silently disabled the turn-end conv save.
+    The flush must still checkpoint the conversation."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    _fake_chat(monkeypatch, [], raise_exc=RuntimeError("template on fire"))
+
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    # The probe succeeded, so the conversation is recorded for the flush
+    # even though the bootstrap degraded.
+    assert sc._SLOT_STATE
+
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000, usage=None)
+    assert any(f.startswith("conv-") for _, f in router.posts)
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    assert any(b["kind"] == "turn" for b in ledger["bins"])
 
 
 @pytest.mark.asyncio

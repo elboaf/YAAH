@@ -435,9 +435,19 @@ async def _gate_inner(
                 # it completes before any generation regardless. Raced
                 # against the turn's cancel event: Stop wins immediately
                 # and tears the request down (issue #389 semantics).
+                # The aux list needs a user turn: strict --jinja chat
+                # templates 500 on system-only input ("No user query
+                # found in messages." - live-verified on the reap50
+                # preset). A one-char user turn satisfies the template;
+                # at restore time the server's prefix match consumes the
+                # system block and discards the fake turn tail, re-
+                # prefilling from the real user text onward.
                 call = asyncio.create_task(
                     model_client.chat(
-                        messages=[{"role": "system", "content": system_prompt}],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": "."},
+                        ],
                         tools=None,
                         stream=False,
                         model=model,
@@ -450,6 +460,17 @@ async def _gate_inner(
                 log.info("slotcache: base bootstrap %s cancelled", base_name)
                 return
             except Exception as e:  # noqa: BLE001 - degrade, never raise
+                # Bootstrap degraded - but the probe SUCCEEDED, so record
+                # the observation anyway: the turn-end flush must still
+                # checkpoint this conversation (a failed BASE bootstrap
+                # used to silently disable the conv save too - live
+                # diagnosis 2026-10-25: zero bins ever landed).
+                _SLOT_STATE[key] = {
+                    "boot": boot,
+                    "conversation_id": conversation_id,
+                    "id_task": slot.get("id_task"),
+                    "prompt_key": None,
+                }
                 log.warning(
                     "slotcache: base prefill %s failed: %s", base_name, e
                 )
