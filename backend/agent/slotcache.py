@@ -175,8 +175,13 @@ async def _probe(api_base: str, preset: str):
     router's /slots never autoloads and HANGS on an unloaded preset, so
     /v1/models is consulted first and an unloaded model degrades before
     the /slots call (issue #557 item 4)."""
+    # The ROUTER surface, not the OpenAI-style api_base: /v1/models and
+    # /slots live at the root, so an api_base of http://host:8080/v1 must
+    # not be prepended again (round-3 review: the doubled /v1/v1/ prefix
+    # 404s and silently disables the whole module).
+    base = _router_base(api_base)
     try:
-        models = await _get_json(api_base, "/v1/models", 5.0)
+        models = await _get_json(base, "/v1/models", 5.0)
     except _Degraded:
         raise
     except Exception as e:  # noqa: BLE001
@@ -198,7 +203,7 @@ async def _probe(api_base: str, preset: str):
         log.info("slotcache: %s not loaded (%s), skipping cache", preset, status.get("value"))
         return None
     try:
-        snapshot = await _get_json(api_base, f"/slots?model={preset}", 3.0)
+        snapshot = await _get_json(base, f"/slots?model={preset}", 3.0)
     except Exception as e:  # noqa: BLE001
         raise _Degraded(f"slots probe failed: {e}") from e
     if not isinstance(snapshot, list) or not snapshot:
@@ -323,14 +328,17 @@ async def gate(
     conversation_id: int = 0,
     is_new_conversation: bool = False,
     system_prompt: str = "",
+    cancel_ev: asyncio.Event | None = None,
 ) -> None:
     """Turn-start probe/restore/bootstrap. Best-effort by contract: never
     raises; any degrade means the turn proceeds exactly as without this
     module. Must only be called BEFORE the turn's first model call (never
-    mid-run)."""
+    mid-run). cancel_ev (when given) aborts a BASE bootstrap mid-prefill
+    the moment the user hits Stop."""
     try:
         await _gate_inner(
-            model, effort, conversation_id, is_new_conversation, system_prompt
+            model, effort, conversation_id, is_new_conversation, system_prompt,
+            cancel_ev,
         )
     except Exception as e:  # noqa: BLE001 - degrade silently, always
         log.warning("slotcache: gate degraded: %s", e)
@@ -342,6 +350,7 @@ async def _gate_inner(
     conversation_id: int,
     is_new_conversation: bool,
     system_prompt: str,
+    cancel_ev: asyncio.Event | None = None,
 ) -> None:
     from backend.agent import model_client
     from backend.agent.config import load_config
@@ -418,13 +427,28 @@ async def _gate_inner(
                 # conversation on this persona; at worst a divergence past
                 # the system block is re-prefilled by the server's normal
                 # prefix matching.
-                await model_client.chat(
-                    messages=[{"role": "system", "content": system_prompt}],
-                    tools=None,
-                    stream=False,
-                    model=model,
-                    effort=effort,
+                from backend.agent.loop import _race_model_call
+
+                # max_tokens=1 bounds generation (a reasoning model could
+                # otherwise think for a long while under the slot lock -
+                # round-3 review); the PREFILL is what banks the BASE and
+                # it completes before any generation regardless. Raced
+                # against the turn's cancel event: Stop wins immediately
+                # and tears the request down (issue #389 semantics).
+                call = asyncio.create_task(
+                    model_client.chat(
+                        messages=[{"role": "system", "content": system_prompt}],
+                        tools=None,
+                        stream=False,
+                        model=model,
+                        effort=effort,
+                        max_tokens=1,
+                    )
                 )
+                await _race_model_call(call, cancel_ev)
+            except model_client.ModelCancelled:
+                log.info("slotcache: base bootstrap %s cancelled", base_name)
+                return
             except Exception as e:  # noqa: BLE001 - degrade, never raise
                 log.warning(
                     "slotcache: base prefill %s failed: %s", base_name, e

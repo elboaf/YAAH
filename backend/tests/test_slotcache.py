@@ -10,6 +10,7 @@ the "wb"-truncate save/overwrite semantics were verified against
 llama.cpp source (server-context.cpp + llama-context.cpp).
 """
 
+import asyncio
 import json
 
 import pytest
@@ -307,10 +308,11 @@ def router_cfg(monkeypatch):
 
 
 def _fake_chat(monkeypatch, calls: list, payload=None, raise_exc=None):
-    async def chat(messages, tools=None, stream=False, model="", effort=""):
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
         calls.append(
             {"messages": messages, "tools": tools, "stream": stream,
-             "model": model, "effort": effort}
+             "model": model, "effort": effort, "max_tokens": max_tokens}
         )
         if raise_exc is not None:
             raise raise_exc
@@ -349,6 +351,9 @@ async def test_first_message_bootstraps_base(monkeypatch, tmp_path, clean_env, r
     assert len(chats) == 1
     assert chats[0]["messages"] == [{"role": "system", "content": "S" * 2000}]
     assert not chats[0].get("tools") and chats[0]["stream"] is False
+    # Round-3: generation is capped so a reasoning model can't think
+    # under the slot lock.
+    assert chats[0]["max_tokens"] == 1
     # The persona BASE was saved, and nothing was restored.
     saves = [f for _, f in router.posts]
     assert len(saves) == 1 and saves[0].startswith("sys-")
@@ -358,6 +363,55 @@ async def test_first_message_bootstraps_base(monkeypatch, tmp_path, clean_env, r
     assert [b["kind"] for b in ledger["bins"]] == ["base"]
     # No torn-write temp left behind.
     assert not (tmp_path / "led.json.tmp").exists()
+
+
+@pytest.mark.asyncio
+async def test_probe_hits_router_surface_not_api_base(monkeypatch, clean_env):
+    """Round-3 regression: _probe must hit the ROUTER surface. An api_base
+    of http://host:8080/v1 must not be prepended again - the doubled
+    /v1/v1/ prefix 404s and silently disables the whole module."""
+    router = _Router()
+    router.install(monkeypatch)
+    probed = await sc._probe("http://h:8080/v1", "x2.m")
+    assert probed is not None
+    assert router.gets == [
+        "http://h:8080/v1/models",
+        "http://h:8080/slots?model=x2.m",
+    ]
+
+
+def test_build_payload_max_tokens_opt_in():
+    """Round-3: real chats carry NO max_tokens (payload byte-identical to
+    before); only an explicit opt-in (aux prefill) caps generation."""
+    from backend.agent.model_client import _build_payload
+
+    cfg = {"model": "m"}
+    assert "max_tokens" not in _build_payload(cfg, None, False)
+    assert _build_payload(cfg, None, False, max_tokens=1)["max_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_is_cancellable(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Round-3: Stop during the BASE bootstrap aborts it - no save, no
+    ledger write, no fingerprint recorded."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
+        await asyncio.Event().wait()  # never completes
+
+    monkeypatch.setattr("backend.agent.model_client.chat", chat)
+    cancel_ev = asyncio.Event()
+    cancel_ev.set()
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  cancel_ev=cancel_ev)
+    assert router.posts == []
+    assert sc._SLOT_STATE == {}
+    # Cancelled before the save: the ledger is never even created.
+    assert not (tmp_path / "led.json").exists()
 
 
 @pytest.mark.asyncio

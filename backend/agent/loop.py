@@ -2266,6 +2266,7 @@ async def _run_agent_claimed(
                 not history and not (prompt_state.get("summary") or "")
             ),
             system_prompt=system_prompt,
+            cancel_ev=cancel_ev,
         )
 
 
