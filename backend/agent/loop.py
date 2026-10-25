@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from backend.agent import model_client
+from backend.agent import slotcache
 from backend.agent import extract as extract_mod
 from backend.agent.prompt_manifest import compact_summary_message
 from backend.agent import file_changes
@@ -2248,6 +2249,22 @@ async def _run_agent_claimed(
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
     # issue #111), then the legacy per-provider value, then the global.
     max_steps = _resolve_max_steps(load_config(), model_override)
+    
+    # Issue #557: disk-backed prompt cache (llama.cpp slot save/restore).
+    # Probe/restore BEFORE the turn's first model call - never mid-run -
+    # so the gate can't disturb a hot slot while completions are in
+    # flight. Best-effort by contract (silent degrade, never raises).
+    if include_history:
+        await slotcache.gate(
+            model=model_override,
+            effort=effort_override,
+            conversation_id=conversation_id,
+            is_new_conversation=(
+                not history and not (prompt_state.get("summary") or "")
+            ),
+            system_prompt=system_prompt,
+        )
+
 
     # Proactive vision probe (issue #430): when the built context carries
     # image parts and the provider is DEFINITIVELY non-vision, strip the
@@ -2629,6 +2646,24 @@ async def _run_agent_claimed(
                     )
                 # (The per-model-call `usage` emission above already covered
                 # the turn's final call — this spot used to re-emit it.)
+                # Issue #557: checkpoint the just-finished prefix as
+                # this conversation's newest slot-cache bin (and the
+                # persona's seed bin when its key is new) - BEFORE the
+                # title call below, an auxiliary completion that would
+                # overwrite the slot's content (and possibly swap
+                # children) ahead of the save. Awaited INLINE - the next
+                # turn's gate must observe the post-save fingerprint; a
+                # detached save would race a fast follow-up turn.
+                # Best-effort: failures log, the turn still completes.
+                if include_history:
+                    await slotcache.flush(
+                        model=model_override,
+                        effort=effort_override,
+                        conversation_id=conversation_id,
+                        system_prompt=system_prompt,
+                        usage=state.get("usage"),
+                    )
+
                 # Replace the mechanical first-message title after a successful
                 # turn. Failures are silent/best-effort; the sidebar receives
                 # the event before the next conversation-list refresh.
