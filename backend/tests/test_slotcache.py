@@ -621,15 +621,144 @@ async def test_unloaded_model_degrades_before_slots_probe(monkeypatch, clean_env
     router = _Router()
     router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
     router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
     chats: list = []
     _fake_chat(monkeypatch, chats)
     await sc.gate(model="", effort="", conversation_id=42,
                   is_new_conversation=True, system_prompt="S" * 2000)
-    # The hang-avoidance ordering: /v1/models consulted, /slots never hit,
-    # no aux prefill against an unloaded child.
+    # The hang-avoidance ordering: /v1/models consulted, /slots never hit.
+    # ROUND5: with an EMPTY ledger there is no bin worth a load cycle, so
+    # the gate still degrades silently - no aux prefill against an
+    # unloaded child.
     assert any("/v1/models" in u for u in router.gets)
     assert not any("/slots?" in u for u in router.gets)
     assert chats == []
+
+
+@pytest.mark.asyncio
+async def test_unloaded_preset_with_seed_warms_and_restores(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """ROUND5 live-diagnosed 2026-10-25: after a router restart the gate
+    used to degrade silently and the turn paid load + FULL prefill with
+    bins sitting unused. Now: seed exists + preset unloaded -> tiny aux
+    warm prefill (spawns the child), re-probe, restore the seed."""
+    name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000)
+    router = _Router()
+    router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
+    router.slot = _slot_payload(id_task=0)
+
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
+        chats.append({"messages": messages, "max_tokens": max_tokens})
+        # The load completed: the router now reports the child loaded.
+        router.models = _models_payload()
+        router.slot = _slot_payload(id_task=1)
+        return {"choices": [{"message": {"content": ""}}]}
+
+    chats: list = []
+    monkeypatch.setattr("backend.agent.model_client.chat", chat)
+    router.install(monkeypatch)
+    _seed_base_ledger(monkeypatch, tmp_path, "S" * 2000)
+
+    await sc.gate(model="", effort="", conversation_id=77,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+
+    # Warm prefill: bare user turn, bounded to one token.
+    assert len(chats) == 1
+    assert chats[0]["messages"] == [{"role": "user", "content": "."}]
+    assert chats[0]["max_tokens"] == 1
+    # Then the normal restore path ran against the LOADED child.
+    assert ("http://h:8080/slots/0?action=restore", name) in router.posts
+
+
+@pytest.mark.asyncio
+async def test_unloaded_preset_without_matching_bins_stays_silent(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """Unloaded + no bins this turn would restore -> degrade as before
+    (no load cycle for a persona that has nothing banked yet)."""
+    router = _Router()
+    router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    sc._write_ledger("http://h:8080/v1", "x2.m", {"bins": []})
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    assert chats == []
+    assert not any("action=restore" in u for u, _ in router.posts)
+
+
+@pytest.mark.asyncio
+async def test_unloaded_preset_router_error_stays_silent(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """A router that ERRORS on /v1/models is not 'unloaded' - degrade
+    exactly as before, never warm on a doubt."""
+    router = _Router()
+    router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
+
+    async def broken_get(url, **kw):
+        raise sc._Degraded("router down")
+
+    async def _get(base, path, timeout):
+        await broken_get(url)
+        return {}  # pragma: no cover
+
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_get_json", _get)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    assert chats == []
+
+
+@pytest.mark.asyncio
+async def test_flush_survives_one_probe_blip(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """ROUND5: a transient probe failure at turn end must not erase the
+    save this turn earned (one bounded retry, then the save lands)."""
+    router = _Router()
+    router.install(monkeypatch)
+    _seed_base_ledger(monkeypatch, tmp_path, "S" * 2000)
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000)
+    assert any("action=restore" in u for u, _ in router.posts)
+
+    real_probe = sc._probe
+    state = {"calls": 0}
+
+    async def flaky(api_base, preset):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return None  # one blip
+        return await real_probe(api_base, preset)
+
+    monkeypatch.setattr(sc, "_probe", flaky)
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000)
+    assert state["calls"] >= 2
+    conv = sc.conv_bin_name(42)
+    assert any(fn == conv for u, fn in router.posts if "action=save" in u)
+
+
+def test_warm_candidate_matrix():
+    base = dict(BASE, file="sys-x.bin", prompt_key="sys-x.bin")
+    conv = dict(CONV, prompt_key="sys-x.bin")
+    # New conversation: the seed is the warm target.
+    assert sc._warm_candidate(_led(base), 42, True, "sys-x.bin") == "sys-x.bin"
+    assert sc._warm_candidate(_led(base), 42, True, "sys-other.bin") is None
+    # Existing conversation: its own conv bin wins.
+    assert sc._warm_candidate(_led(base, conv), 42, False, "sys-x.bin") == "conv-42.bin"
+    # Existing conversation, no conv bin: seed-fallback.
+    assert sc._warm_candidate(_led(base), 42, False, "sys-x.bin") == "sys-x.bin"
+    # Nothing banked: not worth a load cycle.
+    assert sc._warm_candidate(_led(), 42, False, "sys-x.bin") is None
 
 
 @pytest.mark.asyncio

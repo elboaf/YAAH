@@ -214,6 +214,25 @@ async def _probe(api_base: str, preset: str):
     return entry, slot
 
 
+async def _preset_not_loaded(api_base: str, preset: str) -> bool:
+    """True only when the router is up and lists the preset with an
+    explicit not-loaded status (live-verified vocabulary: "unloaded").
+    Any other doubt (HTTP error, absent entry, bad payload) is False -
+    the caller degrades exactly as before."""
+    base = _router_base(api_base)
+    try:
+        models = await _get_json(base, "/v1/models", 5.0)
+    except Exception:  # noqa: BLE001 - any doubt degrades
+        return False
+    if not isinstance(models, dict):
+        return False
+    for m in models.get("data", []):
+        if isinstance(m, dict) and m.get("id") == preset:
+            status = m.get("status") or {}
+            return status.get("value") not in (None, "loaded")
+    return False
+
+
 def boot_fingerprint(models_entry: dict) -> str:
     """Child identity: hash of the spawn args from /v1/models status - the
     only per-child signal the router exposes (no pid; issue #557 item 7).
@@ -371,7 +390,53 @@ async def _gate_inner(
     async with lock:
         probed = await _probe(api_base, preset)
         if probed is None:
-            return
+            # A router restart / idle-unload leaves the preset unloaded
+            # while the bins stay on disk. Degrading here made every
+            # first turn after a restart pay load + FULL prefill with the
+            # cache sitting unused (live-diagnosed 2026-10-25). When the
+            # router is merely between loads and this turn would restore
+            # a bin, warm the child with a tiny aux prefill (llama-swap
+            # spawns on demand) and proceed into the normal decision.
+            if not (await _preset_not_loaded(api_base, preset)):
+                return
+            ledger = read_ledger(api_base, preset)
+            base_name = base_bin_name(api_base, preset, system_prompt)
+            warm_bin = _warm_candidate(
+                ledger, conversation_id, is_new_conversation, base_name
+            )
+            if warm_bin is None:
+                return
+            log.info(
+                "slotcache: %s not loaded, warming to restore %s",
+                preset, warm_bin,
+            )
+            try:
+                from backend.agent.loop import _race_model_call
+
+                call = asyncio.create_task(
+                    model_client.chat(
+                        # Minimal warm prompt: the goal is the LOAD, not a
+                        # cacheable prefix (the restore below replaces the
+                        # slot anyway). Strict --jinja templates accept a
+                        # bare user turn; system-only ones 500.
+                        messages=[{"role": "user", "content": "."}],
+                        tools=None,
+                        stream=False,
+                        model=model,
+                        effort=effort,
+                        max_tokens=1,
+                    )
+                )
+                await _race_model_call(call, cancel_ev)
+            except model_client.ModelCancelled:
+                log.info("slotcache: warm-up cancelled")
+                return
+            except Exception as e:  # noqa: BLE001 - degrade, never raise
+                log.warning("slotcache: warm-up failed: %s", e)
+                return
+            probed = await _probe(api_base, preset)
+            if probed is None:
+                return
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
         ledger = read_ledger(api_base, preset)
@@ -528,6 +593,24 @@ async def _gate_inner(
         )
 
 
+def _warm_candidate(
+    ledger: dict,
+    conversation_id: int,
+    is_new_conversation: bool,
+    base_name: str,
+) -> str | None:
+    """The bin this turn would restore if the child were loaded - the
+    restore branches of decide() minus the hot path (an unloaded child is
+    never hot). None = nothing worth a load cycle."""
+    base_entry = _bin_entry(ledger, base_name)
+    if is_new_conversation:
+        return base_name if base_entry else None
+    conv_entry = _bin_entry(ledger, conv_bin_name(conversation_id))
+    if conv_entry and conv_entry.get("prompt_key") == base_name:
+        return conv_entry.get("file")
+    return base_name if base_entry else None
+
+
 async def _record_post_task(
     api_base: str, preset: str, conversation_id: int, prompt_key: str | None
 ) -> dict | None:
@@ -538,7 +621,11 @@ async def _record_post_task(
     built from (issue #557 review)."""
     probed = await _probe(api_base, preset)
     if probed is None:
-        _SLOT_STATE.pop(_state_key(api_base, preset), None)
+        # Keep any prior record: popping it discarded the flush's
+        # ownership precondition, silently skipping the turn-end save the
+        # conversation DID earn (live-diagnosed 2026-10-25). A stale
+        # record is harmless - the hot-check requires boot+id_task
+        # equality, which a dead child cannot satisfy.
         return None
     models_entry, slot = probed
     record = {
@@ -603,7 +690,13 @@ async def _flush_inner(
             return
         probed = await _probe(api_base, preset)
         if probed is None:
-            return
+            # ROUND5: one bounded retry - a transient probe blip must not
+            # erase a save this turn earned (live: conv-1047's 08:13:35
+            # save only survived because its gate record did).
+            await asyncio.sleep(0.5)
+            probed = await _probe(api_base, preset)
+            if probed is None:
+                return
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
         ledger = read_ledger(api_base, preset)
