@@ -487,12 +487,22 @@ def _shell_phrase(windows: bool) -> str:
     return f"the system shell ({shell})"
 
 
-def _local_env_line() -> str:
+def _local_env_line(workspace: str = "") -> str:
+    """Runtime-environment sentence for the local host. Includes the selected
+    workspace's absolute path so sub-agents can construct absolute paths for
+    out-of-workspace targets without guessing. The Default pseudo-workspace
+    resolves to the user's home directory."""
     import platform
 
+    from backend.agent.tools import workspace_root
+
+    ws_path = workspace_root(workspace)
     return (
         f"Runtime environment: {platform.system()} {platform.release()} "
-        f"({platform.machine()}). The bash tool runs commands through "
+        f"({platform.machine()}). The selected workspace is "
+        f"{ws_path}; shell commands start there and file-tool paths resolve "
+        f"relative to it; paths outside the workspace must be absolute. The "
+        f"bash tool runs commands through "
         f"{_shell_phrase(os.name == 'nt')}; use commands and paths valid "
         f"for THIS operating system."
     )
@@ -823,7 +833,7 @@ def _default_system_prompt(workspace: str = "") -> str:
         windows = host.windows
     else:
         windows = os.name == "nt"
-        env = _local_env_line()
+        env = _local_env_line(workspace)
 
     # Build the core tool list (stable regardless of sandbox.enabled).
     # Sandbox_* tools are conditional on sandbox.enabled and belong in the
@@ -2251,12 +2261,9 @@ async def _run_agent_claimed(
     max_steps = _resolve_max_steps(load_config(), model_override)
     
     # Issue #557: disk-backed prompt cache (llama.cpp slot save/restore).
-    # Probe/restore/bootstrap BEFORE the turn's first model call - never
-    # mid-run - so the gate can't disturb a hot slot while completions
-    # are in flight. A persona with no BASE bin gets one bootstrapped
-    # HERE (aux prefill + save): banked at the first message that needs
-    # it, independent of whether the run finishes. Best-effort by
-    # contract (silent degrade, never raises).
+    # Probe/restore BEFORE the turn's first model call - never mid-run -
+    # so the gate can't disturb a hot slot while completions are in
+    # flight. Best-effort by contract (silent degrade, never raises).
     if include_history:
         await slotcache.gate(
             model=model_override,
@@ -2266,7 +2273,6 @@ async def _run_agent_claimed(
                 not history and not (prompt_state.get("summary") or "")
             ),
             system_prompt=system_prompt,
-            cancel_ev=cancel_ev,
         )
 
 
@@ -2660,12 +2666,21 @@ async def _run_agent_claimed(
                 # detached save would race a fast follow-up turn.
                 # Best-effort: failures log, the turn still completes.
                 if include_history:
+                    # First turn = the user row persisted above is history's
+                    # only entry and nothing is compacted. Only this shape may
+                    # create the persona seed bin, so a pre-cache
+                    # conversation's first flush can't bake its long prefix
+                    # into the seed (issue #557 review).
+                    is_first_turn = (
+                        not (prompt_state.get("summary") or "") and len(history) == 1
+                    )
                     await slotcache.flush(
                         model=model_override,
                         effort=effort_override,
                         conversation_id=conversation_id,
                         system_prompt=system_prompt,
                         usage=state.get("usage"),
+                        is_first_turn=is_first_turn,
                     )
 
                 # Replace the mechanical first-message title after a successful
