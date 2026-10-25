@@ -1127,12 +1127,15 @@ def test_env_line_names_real_shell(monkeypatch):
     from backend.agent import loop
     from pathlib import Path
 
-    # Construct the Path object before patching os.name; otherwise on Linux
-    # the patched "nt" would cause Path("/home/...") to create a WindowsPath,
-    # which cannot be instantiated on a non-Windows system.
-    fake_home = Path("/home/testuser")
-    monkeypatch.setattr(loop, "workspace_root", lambda ws: fake_home)
+    # Construct the Path BEFORE patching os.name to "nt" — on Linux CI,
+    # WindowsPath is not available, so creating Path("...") after the patch
+    # raises NotImplementedError.
+    home = Path("/home/testuser")
 
+    # _local_env_line imports workspace_root locally, so patch it at the
+    # source module (backend.agent.tools) — loop.workspace_root is never used.
+    import backend.agent.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "workspace_root", lambda ws: home)
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: None)
     monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
