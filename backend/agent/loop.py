@@ -494,6 +494,7 @@ def _local_env_line(workspace: str = "") -> str:
     resolves to the user's home directory."""
     import platform
 
+    from backend.agent.tools import workspace_root
 
     ws_path = workspace_root(workspace)
     return (
