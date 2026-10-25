@@ -1,59 +1,25 @@
-"""Disk-backed prompt cache via llama.cpp slot save/restore (issue #557).
+"""Issue #557: disk-backed prompt cache via llama.cpp slot save/restore.
 
-When the active provider is a llama.cpp-class server with the slots API
-enabled (``--slots --slot-save-path``), the harness backs its prompt cache
-with disk files so that:
+Two cache points per (router, model, system prompt) "persona":
 
-- New conversations on the same model + frozen system prompt start from a
-  cached system-prefix bin ("BASE"/seed bin) instead of re-prefilling it.
-- A conversation resumes from disk after the hot (RAM) slot is evicted
-  (child swap, eviction, service restart).
+1. BASE bin - the bare system prompt, bootstrapped at the FIRST MESSAGE
+   that needs it: at the turn-start gate (before any of the turn's model
+   activity) a tiny auxiliary prefill of exactly the system prompt is
+   sent, then the slot is saved under the persona's BASE name. Run
+   completion is irrelevant - a crash or Stop right after the first
+   message still leaves the BASE banked. From then on every NEW
+   conversation on that persona restores the BASE at the gate instead of
+   re-prefilling the system prompt.
+2. Per-conversation bin - ONE stable file per conversation
+   (conv-<id>.bin), OVERWRITTEN by the turn-end flush. Verified against
+   llama.cpp source: the state save opens "wb" (truncate) and appends
+   only its own checkpoint/draft appendix, so re-saving a name replaces
+   the checkpoint cleanly. A conversation that went cold (child swap,
+   restart, sibling eviction) restores its own last checkpoint.
 
-Contract (verified live against the herp router 2026-10-25 - see the
-issue): GET endpoints take ``?model=<preset>``; save/restore/erase POSTs
-carry ``model`` in the JSON body; ``id_task`` is absent on a fresh child
-and bumps with EVERY server task (completions, saves, restores); there is
-no pid and no file-delete API; a ``/slots`` probe against an unloaded
-preset HANGS, so availability is gated on ``/v1/models``
-``status.value == "loaded"`` first. Everything degrades silently: any
-error, 404, or timeout means the completion proceeds exactly as without
-this module.
-
-Bookkeeping rules that fall out of the live probes (each one bit during
-design):
-
-- ``id_task`` is a monotonic task counter, NOT a content indicator. The
-  "slot untouched since my save" fingerprint must therefore be observed
-  AFTER the save/restore (saves themselves bump the counter), and it is
-  valid only while no other task ran on the slot.
-- The gate runs ONLY at the first model step of a turn. Mid-turn the slot
-  legitimately holds newer state than any checkpoint (this turn's earlier
-  steps); restoring there would DESTROY that fresher tail. Mid-turn turns
-  run exactly as today - the server's own prompt-prefix cache does the
-  work.
-- Hotness is per-conversation runtime state: HOT iff the same child
-  (boot fingerprint) AND the recorded task-id matches AND the recorded
-  save belonged to THIS conversation. Anything else restores the newest
-  bin - conservative on purpose (restore is sub-second; a cold re-prefill
-  is minutes).
-- After a harness restart hotness is UNKNOWN -> conservative restore.
-
-Design:
-  seed/BASE bin  ``sys-<hash10>.bin``  key = sha1(api_base + preset + system)
-                 seeded from a conversation's own save when the key is new
-                 (content = system + first-turn tail; prefix-matching makes
-                 the extra tail harmless - a new conversation matches only
-                 the system head it shares).
-  turn bins      ``conv-<id>-t<turn>.bin``  saved after each completed turn.
-  ledger         harness-side JSON per model; the source of truth for what
-                 is on disk. Bin content is opaque and never parsed.
-
-Mid-run checkpointing (the 4-8K-token boundary saves of the original
-design) is intentionally NOT implemented: the save needs the slot mutex
-and would serialize sibling chats against a still-streaming run, and a
-mid-run gate cannot distinguish "my fresher tail" from "another
-conversation's prefix" (both just bump id_task). Turn-end flush covers the
-acceptance criteria; revisit behind the same flush helper.
+The gate runs BEFORE the turn's first model call - never mid-run - and
+the flush only after the turn's model activity is done. Both are
+best-effort by contract: any doubt degrades to "no cache", never raises.
 """
 
 from __future__ import annotations
@@ -68,76 +34,44 @@ from pathlib import Path
 
 import httpx
 
-log = logging.getLogger("yaah.slotcache")
+log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Timeouts: every slots-API call is tightly bounded. A cold/unresponsive
-# router HANGS these endpoints (verified live) - the gate must never add
-# more than a couple of seconds to a turn, and never wait on a model load
-# (the loaded-check on /v1/models runs first for exactly that reason).
-# ---------------------------------------------------------------------------
-_MODELS_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=2.0)
-_SLOTS_GET_TIMEOUT = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
-# Saves/restores move up to gigabytes on the router's tmpfs; generous read
-# budget, still bounded.
-_SLOTS_ACTION_TIMEOUT = httpx.Timeout(connect=2.0, read=30.0, write=5.0, pool=2.0)
-
-# Keep at most this many turn bins per conversation (newest kept), and cap
-# their total size. The per-bin fixed cost is large (~124 MB on the
-# 131k-ctx preset - issue #557 item 8), so the ledger's n_written drives a
-# real byte budget, not a token estimate.
-MAX_BINS_PER_CONVERSATION = 4
-MAX_BYTES_PER_CONVERSATION = 800 * 1024 * 1024
-
-# A system prefix below this size is not worth a seed bin (the warm-up
-# cost amortizes to nothing).
+# Personas with a shorter system prompt are not worth a disk round-trip:
+# the BASE is only bootstrapped when the head is at least this big.
 BASE_MIN_SYSTEM_CHARS = 1024
 
-# The slot mutex belongs to the MODEL (each preset = exactly one child with
-# ONE slot, --parallel 1), not to this process: sibling chats share the
-# model, so they must share the mutex. Cross-process locking is out of
-# scope - only one harness drives the router today.
-_SLOT_LOCKS: dict[str, asyncio.Lock] = {}
 
-# Runtime hotness state per (api_base, preset):
-#   {"boot": <args-hash>, "conv": <conversation_id>, "id_task": <int>}
-# recorded immediately AFTER our last save/restore for that conversation.
-# The ledger is the durable record; this is the volatile fingerprint.
+# ---------------------------------------------------------------------------
+# Volatile per-process slot state
+# ---------------------------------------------------------------------------
+
 _SLOT_STATE: dict[str, dict] = {}
-
-
-class _Degraded(Exception):
-    """Slots feature unavailable/uncertain - the caller degrades silently."""
+_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _state_key(api_base: str, model: str) -> str:
-    return f"{api_base}>{model}"
-
-
-def reset_state() -> None:
-    """Drop volatile fingerprints/locks. Test hook; also the documented
-    reaction to a router restart at runtime (fingerprints are never
-    trusted across a restart)."""
-    _SLOT_STATE.clear()
-    _SLOT_LOCKS.clear()
+    return f"{api_base}::{model}"
 
 
 def slot_lock(api_base: str, model: str) -> asyncio.Lock:
-    """The per-model mutex serializing probe/restore/save for a preset."""
-    key = _state_key(api_base, model)
-    if key not in _SLOT_LOCKS:
-        _SLOT_LOCKS[key] = asyncio.Lock()
-    return _SLOT_LOCKS[key]
+    return _LOCKS.setdefault(_state_key(api_base, model), asyncio.Lock())
 
 
-# ---------------------------------------------------------------------------
-# Ledger: one JSON file per (api_base, preset) under ~/.yaah/slotcache/.
-# The ledger - not the server - is the source of truth for what is on disk.
-# ---------------------------------------------------------------------------
+def reset_state() -> None:
+    _SLOT_STATE.clear()
+    _LOCKS.clear()
 
 
 def _slug(text: str) -> str:
-    return "".join(c if c.isalnum() or c in "-._" else "_" for c in text)[:80]
+    out = []
+    for ch in text:
+        out.append(ch if ch.isalnum() else "-")
+    return "".join(out)[:80]
+
+
+# ---------------------------------------------------------------------------
+# Ledger (bin registry under ~/.yaah/slotcache/<api>/<model>.json)
+# ---------------------------------------------------------------------------
 
 
 def _ledger_path(api_base: str, model: str) -> Path:
@@ -176,8 +110,8 @@ def base_bin_name(api_base: str, model: str, system_prompt: str) -> str:
     return f"sys-{hash10(api_base + model + system_prompt)}.bin"
 
 
-def turn_bin_name(conversation_id: int, turn: int) -> str:
-    return f"conv-{int(conversation_id)}-t{int(turn)}.bin"
+def conv_bin_name(conversation_id: int) -> str:
+    return f"conv-{int(conversation_id)}.bin"
 
 
 def _bin_entry(ledger: dict, name: str) -> dict | None:
@@ -195,116 +129,84 @@ def _upsert_bin(ledger: dict, entry: dict) -> dict:
     return ledger
 
 
-def _newest_turn_bins(ledger: dict, conversation_id: int) -> list[dict]:
-    bins = [
-        e
-        for e in ledger.get("bins", [])
-        if e.get("kind") == "turn" and e.get("conversation_id") == conversation_id
-    ]
-    bins.sort(key=lambda e: e.get("turn") or 0)
-    return bins
-
-
-def next_turn_number(ledger: dict, conversation_id: int) -> int:
-    """One past the highest persisted turn bin for this conversation. Taken
-    from the ledger (not process state) so bin names stay unique across
-    harness restarts."""
-    turns = _newest_turn_bins(ledger, conversation_id)
-    return (turns[-1].get("turn") or 0) + 1 if turns else 1
-
-
-def _evict_turn_bins(ledger: dict, conversation_id: int) -> list[str]:
-    """Enforce the per-conversation count/byte budgets, evicting the OLDEST
-    turn bins. Returns the evicted filenames. Bin DELETION is ledger-only
-    today: the slot-save-path lives on the ROUTER's tmpfs and there is no
-    delete API (issue #557 open question 1 - an ops decision), so eviction
-    trims the ledger and the budget guard stops unbounded growth. A
-    router-side janitor can garbage-collect orphaned .bin files by mtime;
-    the ledger tolerates already-missing files. The NEWEST bin is never
-    evicted: dropping it would leave a cold conversation with no restore
-    point (and restart its turn numbering), so the ledger may sit over
-    budget by one bin (issue #557 review)."""
-    bins = _newest_turn_bins(ledger, conversation_id)
-    over_count = len(bins) - MAX_BINS_PER_CONVERSATION
-    over_bytes = (
-        sum(int(b.get("n_written") or 0) for b in bins) - MAX_BYTES_PER_CONVERSATION
-    )
-    evicted: list[str] = []
-    for entry in bins[:-1]:  # oldest first; the NEWEST bin is never evicted
-        if over_count <= 0 and over_bytes <= 0:
-            break
-        if over_count >= 0:
-            over_count -= 1
-        if over_bytes > 0:
-            over_bytes -= int(entry.get("n_written") or 0)
-        evicted.append(entry.get("file") or "")
-        ledger["bins"] = [b for b in ledger["bins"] if b.get("file") != entry.get("file")]
-    return [f for f in evicted if f]
-
-
 # ---------------------------------------------------------------------------
-# Server probes (return None / raise _Degraded on any doubt)
+# Router probes (return None / raise _Degraded on any doubt)
 # ---------------------------------------------------------------------------
+
+
+class _Degraded(Exception):
+    """Any condition where the only safe move is to skip the cache."""
 
 
 def _router_base(api_base: str) -> str:
-    base = api_base.rstrip("/")
-    return base[: -len("/v1")] if base.endswith("/v1") else base
+    # http://host:8080/v1 -> http://host:8080 (the router's own surface)
+    return api_base.rstrip("/").removesuffix("/v1")
 
 
-async def _get_json(base: str, path: str, timeout: httpx.Timeout) -> object:
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.get(f"{base}{path}")
+async def _get_json(base: str, path: str, timeout: float):
+    import httpx as _hx
+
+    async with _hx.AsyncClient() as client:
+        r = await client.get(base + path, timeout=timeout)
     if r.status_code != 200:
         raise _Degraded(f"HTTP {r.status_code} for {path}")
     return r.json()
 
 
-async def _post_action(
-    base: str, id_slot: int, action: str, model: str, filename: str = ""
-) -> dict:
-    """POST /slots/{id}?action=<act> with the model in the BODY (verified
-    live; the query-param form is also accepted but the body is what the
-    router documents-by-behavior)."""
-    body: dict = {"model": model}
-    if filename:
-        body["filename"] = filename
-    async with httpx.AsyncClient(timeout=_SLOTS_ACTION_TIMEOUT) as client:
-        r = await client.post(f"{base}/slots/{id_slot}?action={action}", json=body)
+async def _post_action(base: str, id_slot: int, action: str, model: str, filename: str = "") -> dict:
+    import httpx as _hx
+
+    async with _hx.AsyncClient() as client:
+        r = await client.post(
+            f"{base}/slots/{id_slot}?action={action}",
+            json={"model": model, "filename": filename},
+            timeout=30.0,
+        )
     if r.status_code != 200:
-        raise _Degraded(f"HTTP {r.status_code} for action={action}")
+        raise _Degraded(f"HTTP {r.status_code} for {action}")
     data = r.json()
     if not isinstance(data, dict):
         raise _Degraded(f"unexpected {action} payload")
     return data
 
 
-async def _probe(api_base: str, preset: str) -> tuple[dict, dict] | None:
-    """(models_entry, slot_snapshot) for a loaded preset's slot 0, or
-    None = degrade.
-
-    Order matters (verified live): /v1/models status FIRST - a /slots
-    probe against an UNLOADED preset HANGS until read-timeout, and the
-    last thing a pre-send gate should do is add a stall to every turn. A
-    busy slot also degrades: the gate must not delay (or disturb) a
-    running completion.
-    """
+async def _probe(api_base: str, preset: str):
+    """/v1/models + /slots, with the unloaded-model hang avoidance: the
+    router's /slots never autoloads and HANGS on an unloaded preset, so
+    /v1/models is consulted first and an unloaded model degrades before
+    the /slots call (issue #557 item 4)."""
+    # The ROUTER surface, not the OpenAI-style api_base: /v1/models and
+    # /slots live at the root, so an api_base of http://host:8080/v1 must
+    # not be prepended again (round-3 review: the doubled /v1/v1/ prefix
+    # 404s and silently disables the whole module).
     base = _router_base(api_base)
     try:
-        models = await _get_json(base, "/v1/models", _MODELS_TIMEOUT)
-        if not isinstance(models, dict):
-            raise _Degraded("bad /v1/models payload")
-        entry = None
-        for m in models.get("data", []):
-            if isinstance(m, dict) and m.get("id") == preset:
-                entry = m
-                break
-        if entry is None or (entry.get("status") or {}).get("value") != "loaded":
-            raise _Degraded(f"{preset} not loaded")
-        snapshot = await _get_json(base, f"/slots?model={preset}", _SLOTS_GET_TIMEOUT)
-    except (_Degraded, httpx.HTTPError, ValueError):
+        models = await _get_json(base, "/v1/models", 5.0)
+    except _Degraded:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise _Degraded(f"models probe failed: {e}") from e
+    entry = next(
+        (
+            m
+            for m in (models.get("data") or [])
+            if isinstance(m, dict) and m.get("id") == preset
+        ),
+        None,
+    )
+    if entry is None:
         return None
-    if not (isinstance(snapshot, list) and snapshot):
+    status = entry.get("status") or {}
+    if status.get("value") != "loaded":
+        # Do NOT touch /slots here: on this router it hangs instead of
+        # erroring, and the caller would rather proceed ungated.
+        log.info("slotcache: %s not loaded (%s), skipping cache", preset, status.get("value"))
+        return None
+    try:
+        snapshot = await _get_json(base, f"/slots?model={preset}", 3.0)
+    except Exception as e:  # noqa: BLE001
+        raise _Degraded(f"slots probe failed: {e}") from e
+    if not isinstance(snapshot, list) or not snapshot:
         return None
     slot = snapshot[0]
     if not isinstance(slot, dict) or slot.get("is_processing"):
@@ -340,13 +242,16 @@ def decide(
     """Pure gate decision: what should happen before this turn's first
     model call.
 
-    Returns {"action": "skip"|"restore", "bin": str|None, "reason": str}.
+    Returns {"action": "skip"|"restore"|"bootstrap", "bin": str|None,
+    "reason": str}.
     HOT = same child (boot fingerprint) AND id_task unchanged since the
     recorded post-save observation AND that observation was for THIS
     conversation under the CURRENT prompt head (prompt_key) AND the turn
-    continues an existing conversation. A new
-    conversation is never "hot" (its prefix has no shared tail to protect
-    beyond the seed) and restores the seed bin when one exists.
+    continues an existing conversation. A new conversation is never "hot"
+    (its prefix has no shared tail to protect beyond the BASE) and
+    restores the BASE bin when one exists, or asks for a bootstrap when
+    the persona has none. An existing conversation restores its own
+    conv bin, falling back to the BASE.
     """
     if slot is None:
         return {"action": "skip", "bin": None, "reason": "no-slot-info"}
@@ -362,27 +267,27 @@ def decide(
         and not is_new_conversation
     ):
         return {"action": "skip", "bin": None, "reason": "hot"}
+    base_entry = _bin_entry(ledger, base_name)
     if is_new_conversation:
-        entry = _bin_entry(ledger, base_name)
-        if entry:
+        if base_entry:
             return {"action": "restore", "bin": base_name, "reason": "seed"}
-        return {"action": "skip", "bin": None, "reason": "no-seed-yet"}
-    # Turn bins are only eligible while their prompt head still matches
-    # (issue #557 review): a rebuilt system prompt would otherwise
-    # cold-restore a checkpoint baked from the old head.
-    turns = [
-        e
-        for e in _newest_turn_bins(ledger, conversation_id)
-        if e.get("prompt_key") == base_name
-    ]
-    if turns:
-        return {"action": "restore", "bin": turns[-1]["file"], "reason": "cold"}
-    # Existing conversation whose bins are all gone (evicted/other harness):
-    # fall back to the seed bin - better than nothing, prefix-match decides.
-    entry = _bin_entry(ledger, base_name)
-    if entry:
-        return {"action": "restore", "bin": base_name, "reason": "seed-fallback"}
-    return {"action": "skip", "bin": None, "reason": "no-bin"}
+        return {"action": "bootstrap", "bin": base_name, "reason": "need-base"}
+    # A conv bin is only eligible while its prompt head still matches
+    # (issue #557 review round 1): a bin baked under an old system prompt
+    # must never be restored under a rebuilt one.
+    conv_entry = _bin_entry(ledger, conv_bin_name(conversation_id))
+    if conv_entry and conv_entry.get("prompt_key") == base_name:
+        return {
+            "action": "restore",
+            "bin": conv_entry.get("file"),
+            "reason": "conv-bin",
+        }
+    if base_entry:
+        return {"action": "restore", "bin": base_name, "reason": "base-fallback"}
+    # No checkpoint of any kind: bootstrapping the persona BASE also warms
+    # this slot for the turn (the aux prefill replaces whatever stale
+    # content the slot holds - its [system] prefix survives either way).
+    return {"action": "bootstrap", "bin": base_name, "reason": "need-base"}
 
 
 # ---------------------------------------------------------------------------
@@ -423,13 +328,17 @@ async def gate(
     conversation_id: int = 0,
     is_new_conversation: bool = False,
     system_prompt: str = "",
+    cancel_ev: asyncio.Event | None = None,
 ) -> None:
-    """Turn-start probe/restore. Best-effort by contract: never raises; any
-    degrade means the turn proceeds exactly as without this module. Must
-    only be called BEFORE the turn's first model call (never mid-run)."""
+    """Turn-start probe/restore/bootstrap. Best-effort by contract: never
+    raises; any degrade means the turn proceeds exactly as without this
+    module. Must only be called BEFORE the turn's first model call (never
+    mid-run). cancel_ev (when given) aborts a BASE bootstrap mid-prefill
+    the moment the user hits Stop."""
     try:
         await _gate_inner(
-            model, effort, conversation_id, is_new_conversation, system_prompt
+            model, effort, conversation_id, is_new_conversation, system_prompt,
+            cancel_ev,
         )
     except Exception as e:  # noqa: BLE001 - degrade silently, always
         log.warning("slotcache: gate degraded: %s", e)
@@ -441,6 +350,7 @@ async def _gate_inner(
     conversation_id: int,
     is_new_conversation: bool,
     system_prompt: str,
+    cancel_ev: asyncio.Event | None = None,
 ) -> None:
     from backend.agent import model_client
     from backend.agent.config import load_config
@@ -475,54 +385,136 @@ async def _gate_inner(
             is_new_conversation,
             base_name,
         )
-        if decision["action"] != "restore":
-            # The probe succeeded: record the observation even on skip, so
-            # (a) the turn-end flush knows this conversation went through
-            # the gate (its precondition), and (b) the fingerprint is fresh
-            # for the next turn's hot-check. id_task here is the observed
-            # value; the flush's post-save re-observation supersedes it.
-            _SLOT_STATE[key] = {
-                "boot": boot,
-                "conversation_id": conversation_id,
-                "id_task": slot.get("id_task"),
-                # Only a hot decision extends hotness under this prompt
-                # head; any other skip must not (issue #557 review).
-                "prompt_key": base_name if decision["reason"] == "hot" else None,
-            }
+        if decision["action"] == "restore":
+            try:
+                await _post_action(
+                    _router_base(api_base), 0, "restore", preset,
+                    filename=decision["bin"],
+                )
+            except (_Degraded, httpx.HTTPError) as e:
+                log.warning("slotcache: restore %s failed: %s", decision["bin"], e)
+                return
+            # Record the post-restore observation: saves/restores bump id_task
+            # themselves, so the recorded value must be read back afterwards.
+            recorded = await _record_post_task(
+                api_base, preset, conversation_id, base_name
+            )
             log.info(
-                "slotcache: conv %s gate=%s (%s)",
-                conversation_id, decision["action"], decision["reason"],
+                "slotcache: conv %s restored %s (%s)%s",
+                conversation_id,
+                decision["bin"],
+                decision["reason"],
+                f" id_task={recorded['id_task']}" if recorded else "",
             )
             return
-        try:
-            await _post_action(
-                _router_base(api_base), 0, "restore", preset,
-                filename=decision["bin"],
+        if decision["action"] == "bootstrap":
+            # Persona BASE missing: bank the system prompt NOW, at the
+            # start of the first message that needs it - independent of
+            # whether this run ever finishes (issue #557 spec: the BASE
+            # exists once prefill is done, crash/Stop notwithstanding).
+            if len(system_prompt or "") < BASE_MIN_SYSTEM_CHARS:
+                _SLOT_STATE[key] = {
+                    "boot": boot,
+                    "conversation_id": conversation_id,
+                    "id_task": slot.get("id_task"),
+                    "prompt_key": None,
+                }
+                return
+            try:
+                # Aux prefill of EXACTLY the system prompt. The chat
+                # template renders it byte-identically to a real call's
+                # head, so the saved BASE prefix-matches every future
+                # conversation on this persona; at worst a divergence past
+                # the system block is re-prefilled by the server's normal
+                # prefix matching.
+                from backend.agent.loop import _race_model_call
+
+                # max_tokens=1 bounds generation (a reasoning model could
+                # otherwise think for a long while under the slot lock -
+                # round-3 review); the PREFILL is what banks the BASE and
+                # it completes before any generation regardless. Raced
+                # against the turn's cancel event: Stop wins immediately
+                # and tears the request down (issue #389 semantics).
+                call = asyncio.create_task(
+                    model_client.chat(
+                        messages=[{"role": "system", "content": system_prompt}],
+                        tools=None,
+                        stream=False,
+                        model=model,
+                        effort=effort,
+                        max_tokens=1,
+                    )
+                )
+                await _race_model_call(call, cancel_ev)
+            except model_client.ModelCancelled:
+                log.info("slotcache: base bootstrap %s cancelled", base_name)
+                return
+            except Exception as e:  # noqa: BLE001 - degrade, never raise
+                log.warning(
+                    "slotcache: base prefill %s failed: %s", base_name, e
+                )
+                return
+            try:
+                save_resp = await _post_action(
+                    _router_base(api_base), 0, "save", preset, filename=base_name
+                )
+            except (_Degraded, httpx.HTTPError) as e:
+                log.warning("slotcache: base save %s failed: %s", base_name, e)
+                return
+            if int(save_resp.get("n_saved") or 0) <= 0:
+                log.info("slotcache: base save %s reported 0 tokens", base_name)
+                return
+            ledger = read_ledger(api_base, preset)
+            ledger = _upsert_bin(
+                ledger,
+                {
+                    "file": base_name,
+                    "kind": "base",
+                    "n_tokens": int(save_resp.get("n_saved") or 0),
+                    "n_written": int(save_resp.get("n_written") or 0),
+                    "boot": boot,
+                    "id_task_at_save": slot.get("id_task"),
+                    "prompt_key": base_name,
+                    "ts": time.time(),
+                },
             )
-        except (_Degraded, httpx.HTTPError) as e:
-            log.warning("slotcache: restore %s failed: %s", decision["bin"], e)
+            _write_ledger(api_base, preset, ledger)
+            recorded = await _record_post_task(
+                api_base, preset, conversation_id, base_name
+            )
+            log.info(
+                "slotcache: base %s bootstrapped (%d tokens) for conv %s%s",
+                base_name,
+                int(save_resp.get("n_saved") or 0),
+                conversation_id,
+                f" id_task={recorded['id_task']}" if recorded else "",
+            )
             return
-        # Record the post-restore observation: saves/restores bump id_task
-        # themselves, so the recorded value must be read back afterwards.
-        recorded = await _record_post_task(
-            api_base, preset, conversation_id, base_name
-        )
+        # Plain skip. The probe succeeded: record the observation even on
+        # skip, so (a) the turn-end flush knows this conversation went
+        # through the gate (its precondition), and (b) the fingerprint is
+        # fresh for the next turn's hot-check. Only a hot decision extends
+        # hotness under this prompt head; any other skip must not.
+        _SLOT_STATE[key] = {
+            "boot": boot,
+            "conversation_id": conversation_id,
+            "id_task": slot.get("id_task"),
+            "prompt_key": base_name if decision["reason"] == "hot" else None,
+        }
         log.info(
-            "slotcache: conv %s restored %s (%s)%s",
-            conversation_id,
-            decision["bin"],
-            decision["reason"],
-            f" id_task={recorded['id_task']}" if recorded else "",
+            "slotcache: conv %s gate=%s (%s)",
+            conversation_id, decision["action"], decision["reason"],
         )
 
 
 async def _record_post_task(
     api_base: str, preset: str, conversation_id: int, prompt_key: str | None
 ) -> dict | None:
-    """Re-probe after a save/restore and store the volatile fingerprint for
-    this conversation. Best-effort: a failed re-probe leaves no record, so
-    the next gate restores again (conservative). prompt_key pins the record
-    to the prompt head it was built from (issue #557 review)."""
+    """Re-probe after a save/restore/prefill and store the volatile
+    fingerprint for this conversation. Best-effort: a failed re-probe
+    leaves no record, so the next gate treats the slot as cold
+    (conservative). prompt_key pins the record to the prompt head it was
+    built from (issue #557 review)."""
     probed = await _probe(api_base, preset)
     if probed is None:
         _SLOT_STATE.pop(_state_key(api_base, preset), None)
@@ -544,18 +536,13 @@ async def flush(
     conversation_id: int = 0,
     system_prompt: str = "",
     usage: dict | None = None,
-    is_first_turn: bool = False,
 ) -> None:
     """Turn-end checkpoint: save the slot (holding the just-finished turn's
-    prefix) as this conversation's newest turn bin, and - only on a first
-    turn (is_first_turn, computed in loop.py) - as the persona's seed/BASE
-    bin when that key has no bin yet. Best-effort, never raises.
-    Call ONLY after the turn's model activity is done (same rule as gate:
-    never while a completion is in flight)."""
+    prefix) as this conversation's ONE bin, overwriting the previous one.
+    Best-effort, never raises. Call ONLY after the turn's model activity
+    is done (same rule as gate: never while a completion is in flight)."""
     try:
-        await _flush_inner(
-            model, effort, conversation_id, system_prompt, usage, is_first_turn
-        )
+        await _flush_inner(model, effort, conversation_id, system_prompt, usage)
     except Exception as e:  # noqa: BLE001 - degrade silently, always
         log.warning("slotcache: flush degraded: %s", e)
 
@@ -566,7 +553,6 @@ async def _flush_inner(
     conversation_id: int,
     system_prompt: str,
     usage: dict | None,
-    is_first_turn: bool,
 ) -> None:
     from backend.agent import model_client
     from backend.agent.config import load_config
@@ -577,8 +563,7 @@ async def _flush_inner(
         return
     api_base = cfg["api_base"].rstrip("/")
     key = _state_key(api_base, preset)
-    state = _SLOT_STATE.get(key) or {}
-    if state.get("conversation_id") != conversation_id:
+    if (_SLOT_STATE.get(key) or {}).get("conversation_id") != conversation_id:
         # This conversation never gated on this slot (subagent turn, busy
         # skip, other conversation owns the fingerprint) - nothing to save.
         return
@@ -592,7 +577,7 @@ async def _flush_inner(
     async with lock:
         # Re-check ownership INSIDE the lock (issue #557 review): a sibling
         # gate can claim the slot while this flush waits for the lock; the
-        # pre-lock `state` above is then stale. Re-read fresh, not `state`.
+        # pre-lock check above is then stale. Re-read fresh.
         if (_SLOT_STATE.get(key) or {}).get("conversation_id") != conversation_id:
             return
         probed = await _probe(api_base, preset)
@@ -601,8 +586,7 @@ async def _flush_inner(
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
         ledger = read_ledger(api_base, preset)
-        turn = next_turn_number(ledger, conversation_id)
-        bin_name = turn_bin_name(conversation_id, turn)
+        bin_name = conv_bin_name(conversation_id)
         base_name = base_bin_name(api_base, preset, system_prompt)
         router_base = _router_base(api_base)
         try:
@@ -620,7 +604,6 @@ async def _flush_inner(
             "file": bin_name,
             "kind": "turn",
             "conversation_id": conversation_id,
-            "turn": turn,
             "n_tokens": n_saved,
             "n_written": int(save_resp.get("n_written") or 0),
             "boot": boot,
@@ -629,36 +612,6 @@ async def _flush_inner(
             "ts": time.time(),
         }
         ledger = _upsert_bin(ledger, entry)
-        # Seed/BASE bin for this persona: only a conversation's FIRST turn
-        # may create it (a pre-cache conversation's first flush would bake
-        # its whole long prefix into the seed - issue #557 review), and
-        # only if the system key has no bin yet. One extra save (~tens of
-        # ms) amortizes across every future conversation on this persona.
-        if is_first_turn and len(system_prompt or "") >= BASE_MIN_SYSTEM_CHARS:
-            if not _bin_entry(ledger, base_name):
-                try:
-                    base_resp = await _post_action(
-                        router_base, 0, "save", preset, filename=base_name
-                    )
-                except (_Degraded, httpx.HTTPError) as e:
-                    log.warning("slotcache: seed save %s failed: %s", base_name, e)
-                else:
-                    if int(base_resp.get("n_saved") or 0) > 0:
-                        ledger = _upsert_bin(
-                            ledger,
-                            {
-                                "file": base_name,
-                                "kind": "base",
-                                "n_tokens": int(base_resp.get("n_saved") or 0),
-                                "n_written": int(base_resp.get("n_written") or 0),
-                                "boot": boot,
-                                "id_task_at_save": slot.get("id_task"),
-                                "ts": time.time(),
-                            },
-                        )
-                        log.info("slotcache: seed bin %s saved", base_name)
-        for evicted in _evict_turn_bins(ledger, conversation_id):
-            log.info("slotcache: evicted %s from ledger (budget)", evicted)
         _write_ledger(api_base, preset, ledger)
         recorded = await _record_post_task(
             api_base, preset, conversation_id, base_name

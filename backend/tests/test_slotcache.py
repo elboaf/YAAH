@@ -1,7 +1,13 @@
-"""Issue #557: slot-cache pure decision core + wire-through contracts.
+"""Issue #557: slot-cache spec rework - two cache points.
+
+1. BASE bin bootstrapped at the gate (aux [system] prefill + save) on the
+   first message that needs it - independent of run completion.
+2. ONE per-conversation bin (conv-<id>.bin), overwritten at each turn end.
 
 No network: every server touch is faked. The live-API behavior itself was
-verified against the real router during fact-checking (see the issue).
+verified against the real router during fact-checking (see the issue);
+the "wb"-truncate save/overwrite semantics were verified against
+llama.cpp source (server-context.cpp + llama-context.cpp).
 """
 
 import asyncio
@@ -21,11 +27,10 @@ def _led(*bins):
     return {"bins": list(bins)}
 
 
-TURN1 = {
-    "file": "conv-42-t1.bin",
+CONV = {
+    "file": "conv-42.bin",
     "kind": "turn",
     "conversation_id": 42,
-    "turn": 1,
     "n_tokens": 100,
     "n_written": 1000,
     "boot": "bootA",
@@ -34,195 +39,125 @@ TURN1 = {
     "ts": 1,
 }
 
+BASE = {
+    "file": "sys-x.bin",
+    "kind": "base",
+    "n_tokens": 90,
+    "n_written": 900,
+    "boot": "bootA",
+    "id_task_at_save": 6,
+    "prompt_key": "sys-x.bin",
+    "ts": 1,
+}
+
+HOT_RECORD = {
+    "boot": "bootA",
+    "id_task": 9,
+    "conversation_id": 42,
+    "prompt_key": "sys-x.bin",
+}
+
 
 def test_gate_skips_when_no_slot_info():
     d = sc.decide(None, None, "bootA", _led(), 42, False, "sys-x.bin")
     assert d == {"action": "skip", "bin": None, "reason": "no-slot-info"}
 
 
-def test_hot_when_boot_id_task_and_conversation_match():
-    recorded = {
-        "boot": "bootA", "id_task": 9, "conversation_id": 42,
-        "prompt_key": "sys-x.bin",
-    }
-    slot = {"id_task": 9}
-    d = sc.decide(slot, recorded, "bootA", _led(TURN1), 42, False, "sys-x.bin")
+def test_hot_when_boot_id_task_conversation_and_prompt_match():
+    d = sc.decide(
+        {"id_task": 9}, dict(HOT_RECORD), "bootA", _led(CONV), 42, False, "sys-x.bin"
+    )
     assert d["action"] == "skip" and d["reason"] == "hot"
 
 
-def test_cold_on_id_task_change():
-    recorded = {
-        "boot": "bootA", "id_task": 9, "conversation_id": 42,
-        "prompt_key": "sys-x.bin",
-    }
-    d = sc.decide({"id_task": 11}, recorded, "bootA", _led(TURN1), 42, False, "sys-x.bin")
-    assert d["action"] == "restore" and d["bin"] == "conv-42-t1.bin"
+def test_cold_on_id_task_change_restores_own_conv_bin():
+    d = sc.decide(
+        {"id_task": 11}, dict(HOT_RECORD), "bootA", _led(CONV), 42, False, "sys-x.bin"
+    )
+    assert d == {"action": "restore", "bin": "conv-42.bin", "reason": "conv-bin"}
 
 
 def test_cold_on_boot_change_child_restart():
-    recorded = {
-        "boot": "bootA", "id_task": 9, "conversation_id": 42,
-        "prompt_key": "sys-x.bin",
-    }
-    d = sc.decide({"id_task": 9}, recorded, "bootB", _led(TURN1), 42, False, "sys-x.bin")
-    assert d["action"] == "restore"
-
-
-def test_hot_rejected_when_prompt_head_changed():
-    """Issue #557 review: a rebuilt system prompt (workspace move, prompt
-    edit) must break BOTH hotness and turn-bin eligibility - the slot
-    fingerprint alone would cold-restore a bin baked from the old head."""
-    recorded = {
-        "boot": "bootA", "id_task": 9, "conversation_id": 42,
-        "prompt_key": "sys-old.bin",
-    }
     d = sc.decide(
-        {"id_task": 9}, recorded, "bootA", _led(TURN1), 42, False, "sys-new.bin"
+        {"id_task": 9}, dict(HOT_RECORD), "bootB", _led(CONV), 42, False, "sys-x.bin"
     )
-    assert d["action"] == "skip" and d["reason"] == "no-bin"
-
-
-def test_stale_prompt_head_falls_back_to_current_base():
-    recorded = {
-        "boot": "bootA", "id_task": 9, "conversation_id": 42,
-        "prompt_key": "sys-old.bin",
-    }
-    base = {"file": "sys-new.bin", "kind": "base", "n_written": 5}
-    d = sc.decide(
-        {"id_task": 9}, recorded, "bootA", _led(TURN1, base), 42, False, "sys-new.bin"
-    )
-    assert d == {"action": "restore", "bin": "sys-new.bin", "reason": "seed-fallback"}
-
-
-def test_hot_rejected_when_prompt_head_changed():
-    """Issue #557 review: a rebuilt system prompt (workspace move, prompt
-    edit) must break BOTH hotness and turn-bin eligibility - the slot
-    fingerprint alone would cold-restore a bin baked from the old head."""
-    recorded = {
-        "boot": "bootA", "id_task": 9, "conversation_id": 42,
-        "prompt_key": "sys-old.bin",
-    }
-    d = sc.decide(
-        {"id_task": 9}, recorded, "bootA", _led(TURN1), 42, False, "sys-new.bin"
-    )
-    assert d["action"] == "skip" and d["reason"] == "no-bin"
-
-
-def test_stale_prompt_head_falls_back_to_current_base():
-    recorded = {
-        "boot": "bootA", "id_task": 9, "conversation_id": 42,
-        "prompt_key": "sys-old.bin",
-    }
-    base = {"file": "sys-new.bin", "kind": "base", "n_written": 5}
-    d = sc.decide(
-        {"id_task": 9}, recorded, "bootA", _led(TURN1, base), 42, False, "sys-new.bin"
-    )
-    assert d == {"action": "restore", "bin": "sys-new.bin", "reason": "seed-fallback"}
-
-
-def test_new_conversation_never_hot_restores_seed():
-    recorded = {"boot": "bootA", "id_task": 9, "conversation_id": 42}
-    d = sc.decide(
-        {"id_task": 9}, recorded, "bootA",
-        _led({"file": "sys-seed.bin", "kind": "base"}), 77, True, "sys-seed.bin"
-    )
-    assert d["action"] == "restore" and d["bin"] == "sys-seed.bin"
-    assert d["reason"] == "seed"
-
-
-def test_new_conversation_without_seed_skips():
-    d = sc.decide({"id_task": 9}, None, "bootA", _led(TURN1), 77, True, "sys-none.bin")
-    assert d["action"] == "skip" and d["reason"] == "no-seed-yet"
-
-
-def test_existing_conversation_without_turn_bins_falls_back_to_seed():
-    d = sc.decide(
-        {"id_task": 9}, None, "bootA",
-        {"bins": [{"file": "sys-s.bin", "kind": "base", "n_written": 1}]},
-        42, False, "sys-s.bin",
-    )
-    assert d["action"] == "restore" and d["reason"] == "seed-fallback"
+    assert d == {"action": "restore", "bin": "conv-42.bin", "reason": "conv-bin"}
 
 
 def test_recorded_task_id_none_is_cold():
     # A fresh child omits id_task entirely (verified live) - never hot.
-    recorded = {"boot": "bootA", "id_task": None, "conversation_id": 42}
+    recorded = dict(HOT_RECORD, id_task=None)
     d = sc.decide(
-        {"id_task": None}, recorded, "bootA", _led(TURN1), 42, False, "sys-x.bin"
+        {"id_task": None}, recorded, "bootA", _led(CONV), 42, False, "sys-x.bin"
     )
     assert d["action"] == "restore"
 
 
-# ---------------------------------------------------------------------------
-# Ledger helpers
-# ---------------------------------------------------------------------------
-
-
-def test_next_turn_number_from_ledger():
-    assert sc.next_turn_number(_led(TURN1), 42) == 2
-    assert sc.next_turn_number(_led(), 42) == 1
-    t2 = dict(TURN1, file="conv-42-t2.bin", turn=2, ts=2)
-    assert sc.next_turn_number(_led(TURN1, t2), 42) == 3
-
-
-def test_eviction_respects_count_budget():
-    bins = [
-        dict(TURN1, file=f"conv-42-t{i}.bin", turn=i, ts=i, n_written=1000)
-        for i in range(1, 7)
-    ]
-    ledger = _led(*bins)
-    evicted = sc._evict_turn_bins(ledger, 42)
-    # MAX_BINS_PER_CONVERSATION = 4 -> oldest two evicted.
-    assert evicted == ["conv-42-t1.bin", "conv-42-t2.bin"]
-    remaining = [b for b in ledger["bins"] if b["kind"] == "turn"]
-    assert len(remaining) == 4
-
-
-def test_eviction_respects_byte_budget():
-    big = dict(TURN1, file="conv-42-t1.bin", turn=1, ts=1, n_written=500 * 1024 * 1024)
-    big2 = dict(TURN1, file="conv-42-t2.bin", turn=2, ts=2, n_written=500 * 1024 * 1024)
-    ledger = _led(big, big2)
-    evicted = sc._evict_turn_bins(ledger, 42)
-    # Together over the 800 MB budget -> the oldest goes first.
-    assert evicted == ["conv-42-t1.bin"]
-    assert [b["file"] for b in ledger["bins"]] == ["conv-42-t2.bin"]
-
-
-def test_eviction_keeps_newest_bin_even_over_byte_budget():
-    """Issue #557 review: a single bin over the 800 MB budget (realistic at
-    ~200 MB/bin live) must stay in the ledger - evicting it would leave a
-    cold conversation with no restore point and restart its numbering."""
-    huge = dict(
-        TURN1, file="conv-42-t1.bin", turn=1, ts=1, n_written=900 * 1024 * 1024
+def test_hot_rejected_when_prompt_head_changed():
+    """Issue #557 review: a rebuilt system prompt (workspace move, prompt
+    edit) must break hotness AND conv-bin eligibility."""
+    d = sc.decide(
+        {"id_task": 9},
+        dict(HOT_RECORD, prompt_key="sys-old.bin"),
+        "bootA",
+        _led(CONV),
+        42,
+        False,
+        "sys-new.bin",
     )
-    ledger = _led(huge)
-    assert sc._evict_turn_bins(ledger, 42) == []
-    assert [b["file"] for b in ledger["bins"]] == ["conv-42-t1.bin"]
+    assert d == {"action": "bootstrap", "bin": "sys-new.bin", "reason": "need-base"}
 
 
-def test_eviction_keeps_newest_bin_even_over_byte_budget():
-    """Issue #557 review: a single bin over the 800 MB budget (realistic at
-    ~200 MB/bin live) must stay in the ledger - evicting it would leave a
-    cold conversation with no restore point and restart its numbering."""
-    huge = dict(
-        TURN1, file="conv-42-t1.bin", turn=1, ts=1, n_written=900 * 1024 * 1024
+def test_stale_prompt_head_falls_back_to_current_base():
+    d = sc.decide(
+        {"id_task": 9},
+        dict(HOT_RECORD, prompt_key="sys-old.bin"),
+        "bootA",
+        _led(CONV, dict(BASE, file="sys-new.bin", prompt_key="sys-new.bin")),
+        42,
+        False,
+        "sys-new.bin",
     )
-    ledger = _led(huge)
-    assert sc._evict_turn_bins(ledger, 42) == []
-    assert [b["file"] for b in ledger["bins"]] == ["conv-42-t1.bin"]
+    assert d == {"action": "restore", "bin": "sys-new.bin", "reason": "base-fallback"}
 
 
-def test_eviction_never_touches_other_conversations():
-    other = dict(TURN1, file="conv-43-t1.bin", conversation_id=43, turn=1, ts=9)
-    ledger = _led(other)
-    assert sc._evict_turn_bins(ledger, 42) == []
-    assert len(ledger["bins"]) == 1
+def test_conv_bin_of_other_prompt_head_is_invisible():
+    """A conv bin baked under an old prompt head must not be restored."""
+    d = sc.decide(
+        {"id_task": 9},
+        dict(HOT_RECORD, prompt_key="sys-old.bin"),
+        "bootA",
+        _led(dict(CONV, prompt_key="sys-old.bin")),
+        42,
+        False,
+        "sys-new.bin",
+    )
+    assert d["action"] == "bootstrap"
 
 
-def test_upsert_replaces_same_name():
-    ledger = sc._upsert_bin(_led(), dict(TURN1))
-    ledger = sc._upsert_bin(ledger, dict(TURN1, n_tokens=999))
-    assert len(ledger["bins"]) == 1 and ledger["bins"][0]["n_tokens"] == 999
+def test_new_conversation_never_hot_restores_base():
+    d = sc.decide(
+        {"id_task": 9}, dict(HOT_RECORD), "bootA", _led(BASE), 77, True, "sys-x.bin"
+    )
+    assert d == {"action": "restore", "bin": "sys-x.bin", "reason": "seed"}
+
+
+def test_new_conversation_without_base_bootstraps():
+    d = sc.decide({"id_task": 9}, None, "bootA", _led(CONV), 77, True, "sys-none.bin")
+    assert d == {"action": "bootstrap", "bin": "sys-none.bin", "reason": "need-base"}
+
+
+def test_existing_conversation_without_conv_bin_falls_back_to_base():
+    d = sc.decide(
+        {"id_task": 9}, None, "bootA", _led(BASE), 42, False, "sys-x.bin"
+    )
+    assert d == {"action": "restore", "bin": "sys-x.bin", "reason": "base-fallback"}
+
+
+def test_existing_conversation_no_checkpoints_bootstraps():
+    # Also warms the slot for the turn - strictly better than skipping.
+    d = sc.decide({"id_task": 9}, None, "bootA", _led(), 42, False, "sys-x.bin")
+    assert d == {"action": "bootstrap", "bin": "sys-x.bin", "reason": "need-base"}
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +170,17 @@ def test_base_bin_name_stable_and_keyed():
     b = sc.base_bin_name("http://h:8080/v1", "x2.m", "SYS")
     c = sc.base_bin_name("http://h:8080/v1", "x2.m", "OTHER")
     assert a == b and a != c and a.startswith("sys-") and a.endswith(".bin")
+
+
+def test_conv_bin_name_is_one_stable_file_per_conversation():
+    assert sc.conv_bin_name(42) == "conv-42.bin"
+    assert sc.conv_bin_name("42") == "conv-42.bin"
+
+
+def test_upsert_replaces_same_name():
+    ledger = sc._upsert_bin(_led(), dict(CONV))
+    ledger = sc._upsert_bin(ledger, dict(CONV, n_tokens=999))
+    assert len(ledger["bins"]) == 1 and ledger["bins"][0]["n_tokens"] == 999
 
 
 def test_cached_tokens_from_usage_blob():
@@ -326,7 +272,8 @@ class _Router:
         async def _post(base, id_slot, action, model, filename=""):
             # _post_action's contract: status-check + unwrap to dict.
             resp = await self.post(
-                f"{base}/slots/{id_slot}?action={action}", json={"model": model, "filename": filename}
+                f"{base}/slots/{id_slot}?action={action}",
+                json={"model": model, "filename": filename},
             )
             if resp.status_code != 200:
                 raise sc._Degraded(f"HTTP {resp.status_code} for {action}")
@@ -341,6 +288,7 @@ def clean_env(monkeypatch):
     sc.reset_state()
     yield
     sc.reset_state()
+
 
 @pytest.fixture
 def router_cfg(monkeypatch):
@@ -359,78 +307,195 @@ def router_cfg(monkeypatch):
     monkeypatch.setattr("backend.agent.model_client.load_config", lambda: cfg)
 
 
+def _fake_chat(monkeypatch, calls: list, payload=None, raise_exc=None):
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
+        calls.append(
+            {"messages": messages, "tools": tools, "stream": stream,
+             "model": model, "effort": effort, "max_tokens": max_tokens}
+        )
+        if raise_exc is not None:
+            raise raise_exc
+        return payload or {"choices": [{"message": {"content": ""}}]}
+
+    monkeypatch.setattr("backend.agent.model_client.chat", chat)
+
+
+def _seed_base_ledger(monkeypatch, tmp_path, system_prompt):
+    """Seed the ledger with the persona BASE under its REAL computed name
+    (base_bin_name hashes api_base+model+system_prompt)."""
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    name = sc.base_bin_name("http://h:8080/v1", "x2.m", system_prompt)
+    sc._write_ledger(
+        "http://h:8080/v1",
+        "x2.m",
+        {"bins": [dict(BASE, file=name, prompt_key=name)]},
+    )
+
+
 @pytest.mark.asyncio
-async def test_gate_restores_cold_then_flush_saves(monkeypatch, tmp_path, clean_env, router_cfg):
+async def test_first_message_bootstraps_base(monkeypatch, tmp_path, clean_env, router_cfg):
+    """THE spec point: the BASE exists after the first message's gate -
+    aux [system] prefill + save - before any of the turn's own activity."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
+    await sc.gate(
+        model="", effort="", conversation_id=42,
+        is_new_conversation=True, system_prompt="S" * 2000,
+    )
+    # Exactly one aux prefill, carrying EXACTLY the system prompt.
+    assert len(chats) == 1
+    assert chats[0]["messages"] == [{"role": "system", "content": "S" * 2000}]
+    assert not chats[0].get("tools") and chats[0]["stream"] is False
+    # Round-3: generation is capped so a reasoning model can't think
+    # under the slot lock.
+    assert chats[0]["max_tokens"] == 1
+    # The persona BASE was saved, and nothing was restored.
+    saves = [f for _, f in router.posts]
+    assert len(saves) == 1 and saves[0].startswith("sys-")
+    assert not any("restore" in u for u, _ in router.posts)
+    # The ledger knows the BASE; the fingerprint is recorded post-save.
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    assert [b["kind"] for b in ledger["bins"]] == ["base"]
+    # No torn-write temp left behind.
+    assert not (tmp_path / "led.json.tmp").exists()
+
+
+@pytest.mark.asyncio
+async def test_probe_hits_router_surface_not_api_base(monkeypatch, clean_env):
+    """Round-3 regression: _probe must hit the ROUTER surface. An api_base
+    of http://host:8080/v1 must not be prepended again - the doubled
+    /v1/v1/ prefix 404s and silently disables the whole module."""
+    router = _Router()
+    router.install(monkeypatch)
+    probed = await sc._probe("http://h:8080/v1", "x2.m")
+    assert probed is not None
+    assert router.gets == [
+        "http://h:8080/v1/models",
+        "http://h:8080/slots?model=x2.m",
+    ]
+
+
+def test_build_payload_max_tokens_opt_in():
+    """Round-3: real chats carry NO max_tokens (payload byte-identical to
+    before); only an explicit opt-in (aux prefill) caps generation."""
+    from backend.agent.model_client import _build_payload
+
+    cfg = {"model": "m"}
+    assert "max_tokens" not in _build_payload(cfg, None, False)
+    assert _build_payload(cfg, None, False, max_tokens=1)["max_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_is_cancellable(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Round-3: Stop during the BASE bootstrap aborts it - no save, no
+    ledger write, no fingerprint recorded."""
     router = _Router()
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
 
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
+        await asyncio.Event().wait()  # never completes
+
+    monkeypatch.setattr("backend.agent.model_client.chat", chat)
+    cancel_ev = asyncio.Event()
+    cancel_ev.set()
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  cancel_ev=cancel_ev)
+    assert router.posts == []
+    assert sc._SLOT_STATE == {}
+    # Cancelled before the save: the ledger is never even created.
+    assert not (tmp_path / "led.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_prefill_failure_is_contained(monkeypatch, tmp_path, clean_env, router_cfg):
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats, raise_exc=RuntimeError("prefill on fire"))
+
     await sc.gate(
         model="", effort="", conversation_id=42,
         is_new_conversation=True, system_prompt="S" * 2000,
     )
-    # New conversation + no seed yet -> skip, but the slot went "hot" for
-    # the conversation, so the flush below is allowed to save.
-    assert all("restore" not in u for u, _ in router.posts)
+    assert router.posts == []
+    assert sc._SLOT_STATE == {}
 
-    await sc.flush(
+
+@pytest.mark.asyncio
+async def test_bootstrap_skips_short_system_prompt(monkeypatch, tmp_path, clean_env, router_cfg):
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
+    await sc.gate(
         model="", effort="", conversation_id=42,
-        system_prompt="S" * 2000,
-        usage={"prompt_tokens_details": {"cached_tokens": 40}},
-        is_first_turn=True,
+        is_new_conversation=True, system_prompt="S" * 100,
     )
-    saves = [f for _, f in router.posts]
-    # Turn bin + the persona's seed bin (first save for this key).
-    assert saves.count("conv-42-t1.bin") == 1
-    assert any(f.startswith("sys-") for f in saves)
-    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
-    files = [b["file"] for b in ledger["bins"]]
-    assert "conv-42-t1.bin" in files and any(f.startswith("sys-") for f in files)
-    # Atomic ledger write (issue #557 review): no torn-write temp left over.
-    assert not (tmp_path / "led.json.tmp").exists()
-    # Atomic ledger write (issue #557 review): no torn-write temp left over.
-    assert not (tmp_path / "led.json.tmp").exists()
+    assert chats == [] and router.posts == []
+    # But the gate still recorded the observation so the turn-end flush
+    # is allowed to checkpoint the conversation.
+    assert sc._SLOT_STATE
 
-    # Second conversation, same persona: gate restores the seed bin.
+
+@pytest.mark.asyncio
+async def test_new_conversation_restores_base_without_prefill(monkeypatch, tmp_path, clean_env, router_cfg):
+    router = _Router()
+    router.install(monkeypatch)
+    _seed_base_ledger(monkeypatch, tmp_path, "S" * 2000)
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
     await sc.gate(
         model="", effort="", conversation_id=43,
         is_new_conversation=True, system_prompt="S" * 2000,
     )
-    assert any(
-        "action=restore" in u and f == next(
-            b["file"] for b in ledger["bins"] if b["kind"] == "base"
-        )
-        for u, f in router.posts
-    )
+    assert chats == []  # BASE exists: no aux prefill
+    base_name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000)
+    assert any("action=restore" in u and f == base_name for u, f in router.posts)
 
 
 @pytest.mark.asyncio
 async def test_turn_end_flush_saves_and_stays_hot(monkeypatch, tmp_path, clean_env, router_cfg):
     router = _Router()
     router.install(monkeypatch)
-    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    _seed_base_ledger(monkeypatch, tmp_path, "S" * 2000)
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
 
     await sc.gate(model="", effort="", conversation_id=42,
                   is_new_conversation=True, system_prompt="S" * 2000)
-    await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000,
-                   usage={"prompt_tokens_details": {"cached_tokens": 5}},
-                   is_first_turn=True)
-    posts_after_t1 = len(router.posts)
-
-    # Same conversation continues: gate must SKIP (recorded fingerprint
-    # matches) and not restore over the fresher hot tail.
-    await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=False, system_prompt="S" * 2000)
-    assert not any("restore" in u for u, _ in router.posts)
-    # The turn-2 flush then saves conv-42-t2.bin.
+    # The persona BASE already existed: the gate restored it, no prefill.
+    assert chats == []
     await sc.flush(model="", effort="", conversation_id=42,
                    system_prompt="S" * 2000,
                    usage={"prompt_tokens_details": {"cached_tokens": 5}})
-    saves = [f for _, f in router.posts]
-    assert saves.count("conv-42-t2.bin") == 1
-    # Seed bin was NOT re-saved (key already has a bin).
-    assert sum(1 for f in saves if f.startswith("sys-")) == 1
+
+    # Same conversation continues: gate must SKIP (recorded fingerprint
+    # matches) and not restore over the fresher hot tail.
+    posts_after_t1 = len(router.posts)
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=False, system_prompt="S" * 2000)
+    assert len(router.posts) == posts_after_t1  # hot: nothing posted
+    # The turn-2 flush then re-saves THE SAME bin name.
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000,
+                   usage={"prompt_tokens_details": {"cached_tokens": 5}})
+    saves = [f for _, f in router.posts if f.startswith("conv-")]
+    assert saves == ["conv-42.bin", "conv-42.bin"]
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    convs = [b for b in ledger["bins"] if b["kind"] == "turn"]
+    assert len(convs) == 1  # overwritten in the ledger, not accumulated
 
 
 @pytest.mark.asyncio
@@ -444,44 +509,13 @@ async def test_flush_without_gate_is_noop(monkeypatch, tmp_path, clean_env, rout
 
 
 @pytest.mark.asyncio
-async def test_flush_non_first_turn_never_seeds(monkeypatch, tmp_path, clean_env, router_cfg):
-    """Issue #557 review: only a conversation's first turn may create the
-    persona seed - a pre-cache conversation's first flush (its turn
-    numbering also starts at 1) must not bake its long prefix in."""
-    router = _Router()
-    router.install(monkeypatch)
-    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
-
-    await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
-    await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000, usage=None, is_first_turn=False)
-    assert not any(f.startswith("sys-") for _, f in router.posts)
-
-
-@pytest.mark.asyncio
-async def test_flush_non_first_turn_never_seeds(monkeypatch, tmp_path, clean_env, router_cfg):
-    """Issue #557 review: only a conversation's first turn may create the
-    persona seed - a pre-cache conversation's first flush (its turn
-    numbering also starts at 1) must not bake its long prefix in."""
-    router = _Router()
-    router.install(monkeypatch)
-    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
-
-    await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
-    await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000, usage=None, is_first_turn=False)
-    assert not any(f.startswith("sys-") for _, f in router.posts)
-
-
-@pytest.mark.asyncio
 async def test_degrade_paths_never_raise(monkeypatch, tmp_path, clean_env, router_cfg):
     async def boom(*a, **k):
         raise RuntimeError("router on fire")
 
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
     monkeypatch.setattr(sc, "_probe", boom)
+    _fake_chat(monkeypatch, [], raise_exc=RuntimeError("prefill on fire"))
     await sc.gate(model="", effort="", conversation_id=1,
                   is_new_conversation=True, system_prompt="S" * 2000)
     await sc.flush(model="", effort="", conversation_id=1,
@@ -493,13 +527,15 @@ async def test_gate_busy_lock_proceeds_ungated(monkeypatch, tmp_path, clean_env,
     router = _Router()
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
     lock = sc.slot_lock("http://h:8080/v1", "x2.m")
     await lock.acquire()
     try:
         await sc.gate(model="", effort="", conversation_id=42,
                       is_new_conversation=False, system_prompt="S" * 2000)
-        # Busy -> no probes, no posts, and no hotness record.
-        assert router.gets == [] and router.posts == []
+        # Busy -> no probes, no posts, no prefill, and no hotness record.
+        assert router.gets == [] and router.posts == [] and chats == []
         assert sc._SLOT_STATE == {}
     finally:
         lock.release()
@@ -510,11 +546,15 @@ async def test_unloaded_model_degrades_before_slots_probe(monkeypatch, clean_env
     router = _Router()
     router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
     router.install(monkeypatch)
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
     await sc.gate(model="", effort="", conversation_id=42,
                   is_new_conversation=True, system_prompt="S" * 2000)
-    # The hang-avoidance ordering: /v1/models consulted, /slots never hit.
+    # The hang-avoidance ordering: /v1/models consulted, /slots never hit,
+    # no aux prefill against an unloaded child.
     assert any("/v1/models" in u for u in router.gets)
     assert not any("/slots?" in u for u in router.gets)
+    assert chats == []
 
 
 @pytest.mark.asyncio
@@ -528,12 +568,8 @@ async def test_resolve_call_cfg_routing_is_respected(monkeypatch, tmp_path, clea
         "model": "gpt",
         "reasoning_effort": "",
         "active_provider": "openai",
-        "providers": {
-            "llamacpp": {"api_base": "http://h:8080/v1", "api_key": "", "model": "x2.m"}
-        },
+        "providers": {"openai": {"api_base": "https://api.openai.com/v1", "api_key": "k", "model": "gpt"}},
     }
-    monkeypatch.setattr(mc, "load_config", lambda: cfg)
     monkeypatch.setattr("backend.agent.config.load_config", lambda: cfg)
-    resolved = mc._resolve_call_cfg(dict(cfg), "llamacpp::x2.m", "")
-    assert resolved["api_base"] == "http://h:8080/v1"
-    assert sc.resolve_preset(resolved) == "x2.m"
+    resolved = mc._resolve_call_cfg(dict(cfg), "openai::gpt", "")
+    assert resolved["model"] == "gpt"

@@ -2251,9 +2251,12 @@ async def _run_agent_claimed(
     max_steps = _resolve_max_steps(load_config(), model_override)
     
     # Issue #557: disk-backed prompt cache (llama.cpp slot save/restore).
-    # Probe/restore BEFORE the turn's first model call - never mid-run -
-    # so the gate can't disturb a hot slot while completions are in
-    # flight. Best-effort by contract (silent degrade, never raises).
+    # Probe/restore/bootstrap BEFORE the turn's first model call - never
+    # mid-run - so the gate can't disturb a hot slot while completions
+    # are in flight. A persona with no BASE bin gets one bootstrapped
+    # HERE (aux prefill + save): banked at the first message that needs
+    # it, independent of whether the run finishes. Best-effort by
+    # contract (silent degrade, never raises).
     if include_history:
         await slotcache.gate(
             model=model_override,
@@ -2263,6 +2266,7 @@ async def _run_agent_claimed(
                 not history and not (prompt_state.get("summary") or "")
             ),
             system_prompt=system_prompt,
+            cancel_ev=cancel_ev,
         )
 
 
@@ -2656,21 +2660,12 @@ async def _run_agent_claimed(
                 # detached save would race a fast follow-up turn.
                 # Best-effort: failures log, the turn still completes.
                 if include_history:
-                    # First turn = the user row persisted above is history's
-                    # only entry and nothing is compacted. Only this shape may
-                    # create the persona seed bin, so a pre-cache
-                    # conversation's first flush can't bake its long prefix
-                    # into the seed (issue #557 review).
-                    is_first_turn = (
-                        not (prompt_state.get("summary") or "") and len(history) == 1
-                    )
                     await slotcache.flush(
                         model=model_override,
                         effort=effort_override,
                         conversation_id=conversation_id,
                         system_prompt=system_prompt,
                         usage=state.get("usage"),
-                        is_first_turn=is_first_turn,
                     )
 
                 # Replace the mechanical first-message title after a successful
