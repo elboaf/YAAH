@@ -1123,28 +1123,30 @@ async def test_bash_timeout_clamp_is_signalled(tmp_path):
 
 
 def test_env_line_names_real_shell(monkeypatch):
-    import os
     from backend.agent import loop
-    from pathlib import Path
 
-    # Construct the Path object before patching os.name; otherwise on Linux
-    # the patched "nt" would cause Path("/home/...") to create a WindowsPath,
-    # which cannot be instantiated on a non-Windows system.
-    fake_home = Path("/home/testuser")
-    monkeypatch.setattr(loop, "workspace_root", lambda ws: fake_home)
+    # Test _shell_phrase directly instead of going through _local_env_line.
+    # This avoids patching os.name, which would break Path() on Linux CI.
+    # resolve_git_bash is imported directly into loop.py, so patch it there.
 
-    monkeypatch.setattr(os, "name", "nt")
-    monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: None)
+    # Case 1: Windows, no Git Bash -> cmd.exe + CMD_TOOLS_NOTE
     monkeypatch.setenv("COMSPEC", r"C:\Windows\system32\cmd.exe")
-    line = loop._local_env_line()
-    assert "cmd.exe" in line
-    assert "findstr" in line
-    monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: r"C:\Git\bin\bash.exe")
-    assert "Git Bash" in loop._local_env_line()
-    assert "POSIX shell syntax" in loop._local_env_line()
-    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(loop, "resolve_git_bash", lambda env=None: None)
+    phrase = loop._shell_phrase(True)
+    assert "cmd.exe" in phrase
+    assert "findstr" in phrase
+
+    # Case 2: Windows, Git Bash found
+    monkeypatch.setattr(loop, "resolve_git_bash",
+                        lambda env=None: r"C:\Gitinash.exe")
+    phrase = loop._shell_phrase(True)
+    assert "Git Bash" in phrase
+    assert "POSIX shell syntax" in phrase
+
+    # Case 3: Linux
     monkeypatch.setenv("SHELL", "/bin/zsh")
-    assert "zsh" in loop._shell_phrase(False)
+    phrase = loop._shell_phrase(False)
+    assert "zsh" in phrase
 
 
 def test_remote_env_line_windows_caveat():
