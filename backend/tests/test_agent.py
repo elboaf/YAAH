@@ -376,7 +376,7 @@ async def test_first_turn_generates_model_title(fake_model, tmp_path, monkeypatc
 
     real_chat = loop.model_client.chat
 
-    async def routed(messages, tools=None, stream=True):
+    async def routed(messages, tools=None, stream=True, **kwargs):
         if stream:
             return await real_chat(messages, tools=tools, stream=True)
         return await fake_title_chat(messages, tools=tools, stream=False)
@@ -400,7 +400,7 @@ async def test_title_skips_renamed_and_agent_chats(fake_model, tmp_path, monkeyp
     cid = await create_conversation("my custom name")
     calls = []
 
-    async def routed(messages, tools=None, stream=True):
+    async def routed(messages, tools=None, stream=True, **kwargs):
         if not stream:
             calls.append("title-call")
             return {"choices": [{"message": {"content": "should not happen"}}]}
@@ -427,7 +427,7 @@ async def test_title_failure_keeps_slice_and_retries_next_turn(fake_model, tmp_p
     cid = await create_conversation("debug crash on startup")
     state = {"calls": 0}
 
-    async def routed(messages, tools=None, stream=True):
+    async def routed(messages, tools=None, stream=True, **kwargs):
         if not stream:
             state["calls"] += 1
             raise RuntimeError("provider down")
