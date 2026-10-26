@@ -403,7 +403,6 @@ def _prune_stale_firewall_rules() -> None:
             current_name = None
 
 
-
 def _service_state() -> str:
     """The installed service's current state ("" when not installed)."""
     import subprocess
