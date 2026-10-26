@@ -761,11 +761,13 @@ async def test_unloaded_preset_with_seed_warms_and_restores(
                   is_new_conversation=True, system_prompt="S" * 2000,
                   tools=TOOLS)
 
-    # Warm prefill: bare user turn, bounded to one token - and carrying the
-    # turn's tools like every real call (the tools block leads the prompt).
+    # Warm prefill: bare user turn, bounded to one token, deliberately
+    # TOOL-LESS (round-6b live verify: the restore discards whatever the
+    # warm-up prefilled - tools here only bought a 5,204-token/~44 s
+    # prefill before the bin was restored and matched in 15 tokens).
     assert len(chats) == 1
     assert chats[0]["messages"] == [{"role": "user", "content": "."}]
-    assert chats[0]["tools"] == [{"type": "function", "function": {"name": "bash"}}]
+    assert chats[0]["tools"] is None
     assert chats[0]["max_tokens"] == 1
     # Then the normal restore path ran against the LOADED child.
     assert ("http://h:8080/slots/0?action=restore", name) in router.posts

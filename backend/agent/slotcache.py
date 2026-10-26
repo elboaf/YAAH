@@ -462,13 +462,16 @@ async def _gate_inner(
                     model_client.chat(
                         # Minimal warm prompt: the goal is the LOAD, not a
                         # cacheable prefix (the restore below replaces the
-                        # slot anyway). Tools MUST ride this call like any
-                        # real one (see gate docstring): the template's
-                        # tools block leads the rendered prompt, so a
-                        # tool-less warm-up would bank nothing useful and
-                        # - worse - the aux bootstrap below would too.
+                        # slot anyway). Deliberately TOOL-LESS: whatever
+                        # this call prefills is discarded by the restore
+                        # (round-6b live verify 2026-10-26 - with tools
+                        # riding along the "warm-up" prefilled 5,204
+                        # tokens / ~44 s before restoring a bin it then
+                        # matched in 15 tokens). Only the AUX BOOTSTRAP
+                        # below needs the turn's tools: what IT prefills
+                        # gets saved.
                         messages=[{"role": "user", "content": "."}],
-                        tools=tools,
+                        tools=None,
                         stream=False,
                         model=model,
                         effort=effort,
