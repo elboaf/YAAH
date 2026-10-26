@@ -18,6 +18,12 @@ import pytest
 from backend.agent import slotcache as sc
 
 
+# The turn's real tool list: every gate/flush call in this file passes it,
+# because the aux bootstrap MUST carry the same tools the real calls will
+# (round-6: the template's tools block leads the rendered prompt).
+TOOLS = [{"type": "function", "function": {"name": "bash"}}]
+
+
 # ---------------------------------------------------------------------------
 # Pure decision core
 # ---------------------------------------------------------------------------
@@ -169,6 +175,16 @@ def test_base_bin_name_stable_and_keyed():
     a = sc.base_bin_name("http://h:8080/v1", "x2.m", "SYS")
     b = sc.base_bin_name("http://h:8080/v1", "x2.m", "SYS")
     c = sc.base_bin_name("http://h:8080/v1", "x2.m", "OTHER")
+    # Round-6: the tools fingerprint is part of the identity - a bin banked
+    # under one tool set must never be found under another (and pre-fix
+    # tool-less bins orphan, since their names can no longer be produced).
+    t1 = sc.base_bin_name("http://h:8080/v1", "x2.m", "SYS", TOOLS)
+    t2 = sc.base_bin_name(
+        "http://h:8080/v1", "x2.m", "SYS",
+        [{"type": "function", "function": {"name": "other_tool"}}],
+    )
+    assert t1 != a and t2 != a and t1 != t2
+    assert sc.tools_fingerprint(None) != sc.tools_fingerprint(TOOLS)
     assert a == b and a != c and a.startswith("sys-") and a.endswith(".bin")
 
 
@@ -325,7 +341,7 @@ def _seed_base_ledger(monkeypatch, tmp_path, system_prompt):
     """Seed the ledger with the persona BASE under its REAL computed name
     (base_bin_name hashes api_base+model+system_prompt)."""
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
-    name = sc.base_bin_name("http://h:8080/v1", "x2.m", system_prompt)
+    name = sc.base_bin_name("http://h:8080/v1", "x2.m", system_prompt, TOOLS)
     sc._write_ledger(
         "http://h:8080/v1",
         "x2.m",
@@ -346,6 +362,7 @@ async def test_first_message_bootstraps_base(monkeypatch, tmp_path, clean_env, r
     await sc.gate(
         model="", effort="", conversation_id=42,
         is_new_conversation=True, system_prompt="S" * 2000,
+        tools=TOOLS,
     )
     # Exactly one aux prefill, carrying EXACTLY the system prompt.
     assert len(chats) == 1
@@ -354,7 +371,11 @@ async def test_first_message_bootstraps_base(monkeypatch, tmp_path, clean_env, r
         {"role": "system", "content": "S" * 2000},
         {"role": "user", "content": "."},
     ]
-    assert not chats[0].get("tools") and chats[0]["stream"] is False
+    # Round-6 live diagnosis: the chat template renders the tools block at
+    # the HEAD of the prompt, so the aux prefill MUST carry the same tools
+    # the turn's real calls will - a tools-less bank matches ~0 tokens.
+    assert chats[0]["tools"] == [{"type": "function", "function": {"name": "bash"}}]
+    assert chats[0]["stream"] is False
     # Round-3: generation is capped so a reasoning model can't think
     # under the slot lock.
     assert chats[0]["max_tokens"] == 1
@@ -384,6 +405,64 @@ async def test_probe_hits_router_surface_not_api_base(monkeypatch, clean_env):
     ]
 
 
+@pytest.mark.asyncio
+async def test_bootstrap_aux_carries_turn_tools(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """ROUND6 live regression (2026-10-25/26): the gate's aux prefill used
+    to send tools=None. The chat template renders the tools block at the
+    HEAD of the prompt, so the banked BASE shared ~no prefix with any real
+    call (which always carries the tool schemas) - sys restores landed and
+    still matched ~0 tokens, every new conversation paid full prefill.
+    Controlled probe on the live router: identical system text matched
+    1181/1192 tokens tool-less, 0/1448 once tools rode along.
+
+    The aux bootstrap (and the warm-up) must therefore carry the SAME
+    tools list the turn's real calls will send."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
+    turn_tools = [
+        {"type": "function", "function": {"name": "bash",
+                                          "description": "shell"}},
+        {"type": "function", "function": {"name": "read_file"}},
+    ]
+    await sc.gate(
+        model="", effort="", conversation_id=43,
+        is_new_conversation=True, system_prompt="S" * 2000,
+        tools=turn_tools,
+    )
+    assert len(chats) == 1
+    assert chats[0]["tools"] == turn_tools
+
+
+@pytest.mark.asyncio
+async def test_gate_without_tools_never_banks(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Round-6 contract: gate() without the turn's tools refuses to act -
+    a tools-less aux bank is worse than no cache (it poisons every real
+    call behind it). Degrade to uncached, never bank tool-less."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
+    await sc.gate(
+        model="", effort="", conversation_id=44,
+        is_new_conversation=True, system_prompt="S" * 2000,
+        tools=None,
+    )
+    assert chats == []
+    assert not any("action=save" in u or "action=restore" in u
+                   for u, _ in router.posts)
+    assert not (tmp_path / "led.json").exists() or json.loads(
+        (tmp_path / "led.json").read_text("utf-8")
+    ).get("bins", []) == []
+
+
 def test_build_payload_max_tokens_opt_in():
     """Round-3: real chats carry NO max_tokens (payload byte-identical to
     before); only an explicit opt-in (aux prefill) caps generation."""
@@ -411,7 +490,8 @@ async def test_bootstrap_is_cancellable(monkeypatch, tmp_path, clean_env, router
     cancel_ev.set()
     await sc.gate(model="", effort="", conversation_id=42,
                   is_new_conversation=True, system_prompt="S" * 2000,
-                  cancel_ev=cancel_ev)
+                  cancel_ev=cancel_ev,
+                  tools=TOOLS)
     assert router.posts == []
     assert sc._SLOT_STATE == {}
     # Cancelled before the save: the ledger is never even created.
@@ -429,7 +509,7 @@ async def test_bootstrap_prefill_failure_is_contained(monkeypatch, tmp_path, cle
     await sc.gate(
         model="", effort="", conversation_id=42,
         is_new_conversation=True, system_prompt="S" * 2000,
-    )
+                  tools=TOOLS)
     assert router.posts == []  # nothing was saved
     # But the observation IS recorded: the turn-end flush must still run
     # (round-4: a failed bootstrap used to disable the conv save too).
@@ -447,13 +527,15 @@ async def test_bootstrap_failure_still_allows_turn_end_flush(monkeypatch, tmp_pa
     _fake_chat(monkeypatch, [], raise_exc=RuntimeError("template on fire"))
 
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     # The probe succeeded, so the conversation is recorded for the flush
     # even though the bootstrap degraded.
     assert sc._SLOT_STATE
 
     await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000, usage=None)
+                   system_prompt="S" * 2000, usage=None,
+                  tools=TOOLS)
     assert any(f.startswith("conv-") for _, f in router.posts)
     ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
     assert any(b["kind"] == "turn" for b in ledger["bins"])
@@ -470,13 +552,15 @@ async def test_bootstrap_failure_still_allows_turn_end_flush(monkeypatch, tmp_pa
     _fake_chat(monkeypatch, [], raise_exc=RuntimeError("template on fire"))
 
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     # The probe succeeded, so the conversation is recorded for the flush
     # even though the bootstrap degraded.
     assert sc._SLOT_STATE
 
     await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000, usage=None)
+                   system_prompt="S" * 2000, usage=None,
+                  tools=TOOLS)
     assert any(f.startswith("conv-") for _, f in router.posts)
     ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
     assert any(b["kind"] == "turn" for b in ledger["bins"])
@@ -493,13 +577,15 @@ async def test_bootstrap_failure_still_allows_turn_end_flush(monkeypatch, tmp_pa
     _fake_chat(monkeypatch, [], raise_exc=RuntimeError("template on fire"))
 
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     # The probe succeeded, so the conversation is recorded for the flush
     # even though the bootstrap degraded.
     assert sc._SLOT_STATE
 
     await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000, usage=None)
+                   system_prompt="S" * 2000, usage=None,
+                  tools=TOOLS)
     assert any(f.startswith("conv-") for _, f in router.posts)
     ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
     assert any(b["kind"] == "turn" for b in ledger["bins"])
@@ -516,7 +602,7 @@ async def test_bootstrap_skips_short_system_prompt(monkeypatch, tmp_path, clean_
     await sc.gate(
         model="", effort="", conversation_id=42,
         is_new_conversation=True, system_prompt="S" * 100,
-    )
+                  tools=TOOLS)
     assert chats == [] and router.posts == []
     # But the gate still recorded the observation so the turn-end flush
     # is allowed to checkpoint the conversation.
@@ -534,9 +620,9 @@ async def test_new_conversation_restores_base_without_prefill(monkeypatch, tmp_p
     await sc.gate(
         model="", effort="", conversation_id=43,
         is_new_conversation=True, system_prompt="S" * 2000,
-    )
+                  tools=TOOLS)
     assert chats == []  # BASE exists: no aux prefill
-    base_name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000)
+    base_name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
     assert any("action=restore" in u and f == base_name for u, f in router.posts)
 
 
@@ -549,23 +635,27 @@ async def test_turn_end_flush_saves_and_stays_hot(monkeypatch, tmp_path, clean_e
     _fake_chat(monkeypatch, chats)
 
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     # The persona BASE already existed: the gate restored it, no prefill.
     assert chats == []
     await sc.flush(model="", effort="", conversation_id=42,
                    system_prompt="S" * 2000,
-                   usage={"prompt_tokens_details": {"cached_tokens": 5}})
+                   usage={"prompt_tokens_details": {"cached_tokens": 5}},
+                  tools=TOOLS)
 
     # Same conversation continues: gate must SKIP (recorded fingerprint
     # matches) and not restore over the fresher hot tail.
     posts_after_t1 = len(router.posts)
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=False, system_prompt="S" * 2000)
+                  is_new_conversation=False, system_prompt="S" * 2000,
+                  tools=TOOLS)
     assert len(router.posts) == posts_after_t1  # hot: nothing posted
     # The turn-2 flush then re-saves THE SAME bin name.
     await sc.flush(model="", effort="", conversation_id=42,
                    system_prompt="S" * 2000,
-                   usage={"prompt_tokens_details": {"cached_tokens": 5}})
+                   usage={"prompt_tokens_details": {"cached_tokens": 5}},
+                  tools=TOOLS)
     saves = [f for _, f in router.posts if f.startswith("conv-")]
     assert saves == ["conv-42.bin", "conv-42.bin"]
     ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
@@ -579,7 +669,8 @@ async def test_flush_without_gate_is_noop(monkeypatch, tmp_path, clean_env, rout
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
     await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000, usage=None)
+                   system_prompt="S" * 2000, usage=None,
+                  tools=TOOLS)
     assert router.posts == []
 
 
@@ -592,9 +683,11 @@ async def test_degrade_paths_never_raise(monkeypatch, tmp_path, clean_env, route
     monkeypatch.setattr(sc, "_probe", boom)
     _fake_chat(monkeypatch, [], raise_exc=RuntimeError("prefill on fire"))
     await sc.gate(model="", effort="", conversation_id=1,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     await sc.flush(model="", effort="", conversation_id=1,
-                   system_prompt="S" * 2000, usage=None)
+                   system_prompt="S" * 2000, usage=None,
+                  tools=TOOLS)
 
 
 @pytest.mark.asyncio
@@ -608,7 +701,8 @@ async def test_gate_busy_lock_proceeds_ungated(monkeypatch, tmp_path, clean_env,
     await lock.acquire()
     try:
         await sc.gate(model="", effort="", conversation_id=42,
-                      is_new_conversation=False, system_prompt="S" * 2000)
+                      is_new_conversation=False, system_prompt="S" * 2000,
+                  tools=TOOLS)
         # Busy -> no probes, no posts, no prefill, and no hotness record.
         assert router.gets == [] and router.posts == [] and chats == []
         assert sc._SLOT_STATE == {}
@@ -625,7 +719,8 @@ async def test_unloaded_model_degrades_before_slots_probe(monkeypatch, clean_env
     chats: list = []
     _fake_chat(monkeypatch, chats)
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     # The hang-avoidance ordering: /v1/models consulted, /slots never hit.
     # ROUND5: with an EMPTY ledger there is no bin worth a load cycle, so
     # the gate still degrades silently - no aux prefill against an
@@ -643,14 +738,15 @@ async def test_unloaded_preset_with_seed_warms_and_restores(
     used to degrade silently and the turn paid load + FULL prefill with
     bins sitting unused. Now: seed exists + preset unloaded -> tiny aux
     warm prefill (spawns the child), re-probe, restore the seed."""
-    name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000)
+    name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
     router = _Router()
     router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
     router.slot = _slot_payload(id_task=0)
 
     async def chat(messages, tools=None, stream=False, model="", effort="",
                    max_tokens=None):
-        chats.append({"messages": messages, "max_tokens": max_tokens})
+        chats.append({"messages": messages, "max_tokens": max_tokens,
+                      "tools": tools})
         # The load completed: the router now reports the child loaded.
         router.models = _models_payload()
         router.slot = _slot_payload(id_task=1)
@@ -662,11 +758,14 @@ async def test_unloaded_preset_with_seed_warms_and_restores(
     _seed_base_ledger(monkeypatch, tmp_path, "S" * 2000)
 
     await sc.gate(model="", effort="", conversation_id=77,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
 
-    # Warm prefill: bare user turn, bounded to one token.
+    # Warm prefill: bare user turn, bounded to one token - and carrying the
+    # turn's tools like every real call (the tools block leads the prompt).
     assert len(chats) == 1
     assert chats[0]["messages"] == [{"role": "user", "content": "."}]
+    assert chats[0]["tools"] == [{"type": "function", "function": {"name": "bash"}}]
     assert chats[0]["max_tokens"] == 1
     # Then the normal restore path ran against the LOADED child.
     assert ("http://h:8080/slots/0?action=restore", name) in router.posts
@@ -686,7 +785,8 @@ async def test_unloaded_preset_without_matching_bins_stays_silent(
     chats: list = []
     _fake_chat(monkeypatch, chats)
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     assert chats == []
     assert not any("action=restore" in u for u, _ in router.posts)
 
@@ -713,7 +813,8 @@ async def test_unloaded_preset_router_error_stays_silent(
     chats: list = []
     _fake_chat(monkeypatch, chats)
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     assert chats == []
 
 
@@ -727,7 +828,8 @@ async def test_flush_survives_one_probe_blip(
     router.install(monkeypatch)
     _seed_base_ledger(monkeypatch, tmp_path, "S" * 2000)
     await sc.gate(model="", effort="", conversation_id=42,
-                  is_new_conversation=True, system_prompt="S" * 2000)
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
     assert any("action=restore" in u for u, _ in router.posts)
 
     real_probe = sc._probe
@@ -741,7 +843,8 @@ async def test_flush_survives_one_probe_blip(
 
     monkeypatch.setattr(sc, "_probe", flaky)
     await sc.flush(model="", effort="", conversation_id=42,
-                   system_prompt="S" * 2000)
+                   system_prompt="S" * 2000,
+                  tools=TOOLS)
     assert state["calls"] >= 2
     conv = sc.conv_bin_name(42)
     assert any(fn == conv for u, fn in router.posts if "action=save" in u)

@@ -2273,8 +2273,10 @@ async def _run_agent_claimed(
                 not history and not (prompt_state.get("summary") or "")
             ),
             system_prompt=system_prompt,
+            tools=tools,
             cancel_ev=cancel_ev,
         )
+
 
 
     # Proactive vision probe (issue #430): when the built context carries
@@ -2673,6 +2675,7 @@ async def _run_agent_claimed(
                         conversation_id=conversation_id,
                         system_prompt=system_prompt,
                         usage=state.get("usage"),
+                        tools=tools,
                     )
 
                 # Replace the mechanical first-message title after a successful
