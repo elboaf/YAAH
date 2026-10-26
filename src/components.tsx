@@ -5788,7 +5788,7 @@ function AgentsDialog({
   }
 
   return (
-    <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className={AGENT_DLG_OVERLAY} onMouseUp={(e) => e.target === e.currentTarget && onClose()}>
       {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
           units double-zoom and the panel outgrows the screen (its body is
           overflow-y-auto — the cap is what makes the scrollbar appear). */}
@@ -7614,7 +7614,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
+      onMouseUp={(e) => e.target === e.currentTarget && onClose()}
     >
       {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
           units would double-zoom. Header/footer pinned, body scrolls. */}
