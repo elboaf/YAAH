@@ -262,6 +262,9 @@ class _Router:
         self.gets: list[str] = []
         self.posts: list[tuple[str, str]] = []
         self.task_bump = True
+        # ROUND6C: names in this set make action=restore return 500, the
+        # way the real router fails on a bin file that no longer exists.
+        self.fail_restores: set[str] = set()
 
     async def get(self, url, **kw):
         self.gets.append(url)
@@ -272,7 +275,10 @@ class _Router:
         return _FakeResp(404)
 
     async def post(self, url, json=None, **kw):
-        self.posts.append((url, (json or {}).get("filename", "")))
+        fname = (json or {}).get("filename", "")
+        self.posts.append((url, fname))
+        if "action=restore" in url and fname in self.fail_restores:
+            return _FakeResp(500, {"error": "Unable to restore slot"})
         if self.task_bump:
             self.slot = _slot_payload((self.slot[0].get("id_task") or 0) + 1)
         return _FakeResp(200, {"id_slot": 0, "n_saved": 120, "n_written": 4096})
@@ -461,6 +467,92 @@ async def test_gate_without_tools_never_banks(monkeypatch, tmp_path, clean_env, 
     assert not (tmp_path / "led.json").exists() or json.loads(
         (tmp_path / "led.json").read_text("utf-8")
     ).get("bins", []) == []
+
+
+@pytest.mark.asyncio
+async def test_stale_sys_bin_dropped_and_fresh_base_bootstrapped(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """ROUND6C live regression (2026-10-26): the user deleted the bins on
+    the router; the ledger still listed one. Every new conversation then
+    restored a nonexistent file (HTTP 500), returned, and NOTHING ever
+    bootstrapped again - and the turn-end flush skipped the conv save.
+    Permanent bankless state + full prefill forever. The gate must drop
+    the dead entry AND bootstrap a fresh BASE in the same turn."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    stale = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    sc._write_ledger(
+        "http://h:8080/v1", "x2.m",
+        {"bins": [dict(BASE, file=stale, prompt_key=stale)]},
+    )
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+    router.fail_restores.add(stale)
+    writes: list[list[str]] = []
+    real_write = sc._write_ledger
+
+    def spy_write(a, m, ledger):
+        writes.append([b["file"] for b in ledger.get("bins", [])])
+        real_write(a, m, ledger)
+
+    monkeypatch.setattr(sc, "_write_ledger", spy_write)
+
+    await sc.gate(
+        model="", effort="", conversation_id=45,
+        is_new_conversation=True, system_prompt="S" * 2000,
+        tools=TOOLS,
+    )
+
+    # The dead restore was attempted exactly once, then written off.
+    assert ("http://h:8080/slots/0?action=restore", stale) in router.posts
+    # The aux bootstrap ran in the SAME turn and its BASE was saved.
+    assert len(chats) == 1
+    assert chats[0]["tools"] == TOOLS
+    saves = [f for u, f in router.posts if "action=save" in u]
+    assert saves and saves[0].startswith("sys-")
+    # The dead entry was dropped from the ledger before the fresh BASE
+    # (same name - same identity) was re-banked under it.
+    assert any(stale not in w for w in writes)
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    files = [b["file"] for b in ledger["bins"]]
+    assert saves[0] in files
+
+
+@pytest.mark.asyncio
+async def test_stale_conv_bin_falls_back_to_live_base(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """A stale CONV bin must not cost a bootstrap prefill when the persona
+    BASE is intact: drop the conv entry, restore the BASE instead."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    base = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    sc._write_ledger(
+        "http://h:8080/v1", "x2.m",
+        {"bins": [
+            dict(BASE, file=base, prompt_key=base),
+            dict(CONV, file="conv-46.bin", prompt_key=base),
+        ]},
+    )
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+    router.fail_restores.add("conv-46.bin")
+
+    await sc.gate(
+        model="", effort="", conversation_id=46,
+        is_new_conversation=False, system_prompt="S" * 2000,
+        tools=TOOLS,
+    )
+
+    assert ("http://h:8080/slots/0?action=restore", "conv-46.bin") in router.posts
+    assert ("http://h:8080/slots/0?action=restore", base) in router.posts
+    assert chats == []  # no aux prefill: the BASE fallback sufficed
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    files = [b["file"] for b in ledger["bins"]]
+    assert "conv-46.bin" not in files and base in files
 
 
 def test_build_payload_max_tokens_opt_in():
