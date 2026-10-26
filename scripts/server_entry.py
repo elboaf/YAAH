@@ -241,6 +241,11 @@ def _handle_service_command(argv: list[str]) -> int | None:
     # HandleCommandLine's own convention puts flags BEFORE the verb
     # (`exe --startup auto install --username …`), so look for the verb
     # anywhere in argv, not just at the front.
+    # Clean firewall rules when removing (issue #465).
+    if "remove" in argv:
+        win32serviceutil.HandleCommandLine(cls, argv=[""] + argv)
+        _configure_firewall(_installed_exe(), remove=True)
+        return 0
     if any(a in verbs for a in argv):
         win32serviceutil.HandleCommandLine(cls, argv=[""] + argv)
         return 0
@@ -294,6 +299,68 @@ def _installed_exe() -> "os.PathLike | str":
     """Where this exe lives when installed (%LOCALAPPDATA%\\YAAH)."""
     local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(local, WIN_INSTALL_DIR, "yaah-server-setup.exe")
+
+
+def _netsh_firewall(*args):
+    """Run a netsh advfirewall firewall command.
+
+    Returns (ok, stdout): ok is True when netsh exited 0, stdout is
+    the command's output.
+    """
+    import subprocess
+
+    cmd = ["netsh", "advfirewall", "firewall"] + list(args)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return result.returncode == 0, result.stdout
+
+
+# (rule name, protocol, port) for the two inbound rules YAAH needs.
+FIREWALL_RULES = [
+    ("YAAH Server", "TCP", "8765"),
+    ("YAAH mDNS", "UDP", "5353"),
+]
+
+
+def _configure_firewall(installed: str, remove: bool = False) -> None:
+    """Add or remove Windows Firewall inbound rules for the YAAH server.
+
+    Two rules are managed (FIREWALL_RULES):
+      - "YAAH Server" - TCP 8765 (remote-exec API)
+      - "YAAH mDNS"   - UDP 5353 (mDNS advertising, in-process beacon)
+
+    Rules are scoped to the installed exe's path so only that process
+    can bind these ports. Both Public and Private profiles are enabled.
+
+    On setup each rule is deleted before it is added: delete is a
+    harmless no-op when the rule does not exist, and it guarantees a
+    stale same-named rule (e.g. one pinned to a Downloads copy of the
+    exe left by the manual workaround) can never shadow the clean
+    rule. Locale-proof: no output parsing, exit codes only.
+    """
+    for name, proto, port in FIREWALL_RULES:
+        ok, _out = _netsh_firewall("delete", "rule",
+                                   "name={}".format(name))
+        if remove:
+            if ok:
+                print("removed firewall rule: {}".format(name))
+            else:
+                print("warning: no rule removed for {} - if rules "
+                      "exist, re-run remove from an elevated "
+                      "prompt".format(name))
+            continue
+        ok, _out = _netsh_firewall("add", "rule",
+                                   "name={}".format(name),
+                                   "dir=in", "action=allow",
+                                   "protocol={}".format(proto),
+                                   "localport={}".format(port),
+                                   "program={}".format(installed),
+                                   "profile=public,private", "enable=yes")
+        if ok:
+            print("firewall rule in place: {}".format(name))
+        else:
+            print("warning: could not create firewall rule: {}".format(
+                name))
+            print("manual fix: run setup again from an elevated prompt")
 
 
 def _service_state() -> str:
@@ -450,6 +517,10 @@ def _run_setup_wizard(launch_profile: str | None = None) -> int:
         return 1
 
     print()
+    # Configure Windows Firewall so remote clients can reach us
+    # without a manual netsh command (issue #465).
+    _configure_firewall(installed)
+
     print("done: YAAH Headless Server is installed and running.")
     print("connect from the YAAH desktop app: host switcher (mDNS) or "
           "direct IP:8765 with the passphrase above.")
