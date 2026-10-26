@@ -7086,6 +7086,7 @@ export function InterfaceScaleCard({
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
+  const overlayPressed = useRef(false)
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean; staticSystemPrompt: boolean }>>({})
   // No longer in Settings — the chat model bar is the sole writer of active_provider.
   const [newName, setNewName] = useState('')
@@ -7615,7 +7616,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onMouseUp={(e) => e.target === e.currentTarget && onClose()}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }}
     >
       {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
           units would double-zoom. Header/footer pinned, body scrolls. */}
