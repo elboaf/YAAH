@@ -276,10 +276,10 @@ When an earlier summary is included in the input, preserve its existing
 section content and *add* new facts to the relevant sections. Do not
 replace earlier content — fold new facts into the existing sections.
 
-Write at most 400 words, plain prose or terse bullets (the platform
-may keep up to 12,000 characters). Reply with JSON
-only, no fences: {"summary": "..."} or with the 8
-section headings directly as markdown."""
+Write at most 600 words of terse bullets (the section shape bounds
+length naturally; the platform may keep up to 12,000 characters).
+Reply with the 8 section headings directly as markdown; a bare JSON
+envelope {"summary": "..."} is also accepted."""
 
 async def summarize_messages(
     cut_messages: list, model_override: str = "", cancel_event=None
@@ -320,17 +320,27 @@ async def summarize_messages(
 
 
 def _extract_summary(text: str) -> str:
-    """Pull the ``summary`` string out of a JSON reply, or parse the
-    ``##`` section headings from raw markdown, or fall through to the
-    raw text for unsectioned-but-substantive replies.
+    """Pull the summary out of a model reply: the raw 8-section markdown
+    document (the #563 shape) or a JSON envelope; "" when neither is
+    recognized (the caller then substitutes prose/excerpt fallbacks).
 
-    Returns the extracted summary (never empty — callers fall through
-    to the verbatim excerpt for empty results)."""
+    The sectioned document wins over an embedded JSON blob: a summary
+    that quotes {"summary": ...} in its anchors must not be truncated
+    to that blob. The JSON path fires only for envelope-style replies —
+    the whole reply is the object, optionally fenced."""
     if not text:
         return ""
 
-    # Path 1: JSON envelope (backward compat with old format).
-    m = re.search(r"\{.*\}", text, re.DOTALL)
+    def _markdown_doc() -> str:
+        h = re.search(r"^##\s+", text, re.MULTILINE)
+        return text[h.start():].strip() if h else ""
+
+    stripped = re.sub(r"^```[a-zA-Z]*\s*", "", text.strip())
+    if not stripped.startswith("{"):
+        # Not a JSON envelope: the reply is the markdown document.
+        return _markdown_doc()
+    # JSON envelope (pre-#563 format) — extract only when it parses.
+    m = re.search(r"\{.*\}", stripped, re.DOTALL)
     if m:
         try:
             parsed = json.loads(m.group(0))
@@ -340,15 +350,8 @@ def _extract_summary(text: str) -> str:
             s = parsed.get("summary")
             if isinstance(s, str) and s.strip():
                 return s.strip()
-
-    # Path 2: Raw markdown with ## section headings (handoff-shaped
-    # output). Extract everything after the first ## heading.
-    heading = re.search(r"^##\s+", text, re.MULTILINE)
-    if heading:
-        return text[heading.start():].strip()
-
-    # Path 3: Nothing recognized — caller will fall through to excerpt.
-    return ""
+    # Unparseable envelope or missing summary key: markdown, else empty.
+    return _markdown_doc()
 
 
 async def compact_history_for_context(

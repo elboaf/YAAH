@@ -460,7 +460,7 @@ def test_summarizer_prompt_states_real_clamp():
     """#191: the prompt the summarizer model reads must state the clamp
     the consumer actually enforces, not just the advisory word budget."""
     assert "12,000" in comp._SUMMARIZER_PROMPT
-    assert "400 words" in comp._SUMMARIZER_PROMPT
+    assert "600 words" in comp._SUMMARIZER_PROMPT
 
 
 # -------------------------------------------- #563 handoff-shaped prompt
@@ -484,11 +484,10 @@ def test_summarizer_prompt_contains_all_8_sections():
 
 def test_summarizer_prompt_includes_folding_instruction():
     """#563: the prompt must tell the model to fold new facts into
-    existing sections during cumulative compaction, not replace them."""
-    assert "add" in comp._SUMMARIZER_PROMPT.lower()
-    # "Do not" and "replace" are on separate lines in the triple-quoted prompt
-    assert "Do not" in comp._SUMMARIZER_PROMPT
-    assert "replace" in comp._SUMMARIZER_PROMPT.lower()
+    existing sections during cumulative compaction, not replace them.
+    Distinctive phrases so the test fails if the instruction is removed."""
+    assert "fold new facts into the existing sections" in comp._SUMMARIZER_PROMPT
+    assert "Do not\nreplace earlier content" in comp._SUMMARIZER_PROMPT
 
 
 def test_extract_summary_parses_raw_markdown_sections():
@@ -515,11 +514,19 @@ def test_extract_summary_parses_raw_markdown_sections():
     assert comp._extract_summary(md) == md
 
 
-def test_extract_summary_handles_mixed_json_and_markdown():
-    """#563: JSON takes priority when both patterns match, so
-    backward-compat JSON replies still extract correctly."""
-    text = '{ "summary": "old format" }'
-    assert comp._extract_summary(text) == "old format"
+def test_extract_summary_sectioned_doc_beats_embedded_json():
+    """#563 review: a sectioned document that merely quotes a JSON blob
+    with a "summary" key (plausible in Concrete anchors) must keep the
+    blob as content, not be truncated to it. The markdown document wins;
+    the JSON path only fires for envelope-style replies (leading '{',
+    optionally fenced) — the pre-#563 format."""
+    md = (
+        "## Next focus\n"
+        'Ship it. Anchor: {"summary": "bait"}\n\n'
+        "## Redaction note\n"
+        "None."
+    )
+    assert comp._extract_summary(md) == md
 
 
 def test_extract_summary_returns_empty_for_prose_without_headings():
