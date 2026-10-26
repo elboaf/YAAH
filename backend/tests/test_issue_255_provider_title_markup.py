@@ -57,7 +57,7 @@ async def test_provider_warning_in_first_message_does_not_block_auto_title(
     prompt = f"{warning} help me fix the flaky test suite"
     cid = await create_conversation(prompt[:40])
 
-    async def routed(messages, tools=None, stream=True):
+    async def routed(messages, tools=None, stream=True, **kwargs):
         if not stream:
             assert "system_warning" not in (messages[-1].get("content") or ""), (
                 "provider markup must not be fed to the title model"

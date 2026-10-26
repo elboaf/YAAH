@@ -248,16 +248,12 @@ async def _generate_conversation_title(
         )
 
     try:
-        call = asyncio.create_task(
-            model_client.chat(
-                title_prompt,
-                tools=None,
-                stream=False,
-                model=model_override,
-                effort=effort_override,
-                max_tokens=32,
-            )
-        )
+        title_kwargs = {"tools": None, "stream": False, "max_tokens": 32}
+        if model_override:
+            title_kwargs["model"] = model_override
+        if effort_override:
+            title_kwargs["effort"] = effort_override
+        call = asyncio.create_task(model_client.chat(title_prompt, **title_kwargs))
         data = await _race_model_call(call, cancel_ev)
         title = _extract(data)
         if _is_conversational_reply(title):
@@ -270,14 +266,7 @@ async def _generate_conversation_title(
                 "response to it (no 'I can't', no 'Happy to')."
             )
             retry_call = asyncio.create_task(
-                model_client.chat(
-                    retry_prompt,
-                    tools=None,
-                    stream=False,
-                    model=model_override,
-                    effort=effort_override,
-                    max_tokens=32,
-                )
+                model_client.chat(retry_prompt, **title_kwargs)
             )
             data = await _race_model_call(retry_call, cancel_ev)
             title = _extract(data)
