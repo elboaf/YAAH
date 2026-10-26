@@ -228,11 +228,14 @@ def _classify_timeout(e: Exception, provider: str, started: float) -> ModelTimeo
     )
 
 
-def _build_payload(cfg: dict, tools: list | None, stream: bool) -> dict:
+def _build_payload(
+    cfg: dict, tools: list | None, stream: bool, max_tokens: int | None = None
+) -> dict:
     """The chat-completions request body. Pure so the param-gating rules are
     unit-testable without HTTP."""
     # Let the selected model/provider apply its own generation defaults and
-    # output cap. Temperature and max_tokens are intentionally not sent.
+    # output cap. Temperature is intentionally not sent, and max_tokens
+    # only when a caller explicitly caps the call (slotcache aux prefill).
     payload = {
         "model": cfg["model"],
         "messages": [],
@@ -243,6 +246,8 @@ def _build_payload(cfg: dict, tools: list | None, stream: bool) -> dict:
     effort = (cfg.get("reasoning_effort") or "").strip().lower()
     if effort and len(effort) <= 64:
         payload["reasoning_effort"] = effort
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if stream:
         # Ask for exact usage (usage.prompt_tokens = what this call actually
         # fed the model) even in streaming mode. OpenAI-compatible servers
@@ -305,6 +310,7 @@ async def chat(
     stream: bool = False,
     model: str = "",
     effort: str | None = "",
+    max_tokens: int | None = None,
 ) -> dict | AsyncIterator[dict]:
     """Call the model. Returns full response dict, or async iterator of
     streaming deltas if stream=True.
@@ -312,7 +318,9 @@ async def chat(
     model/effort: per-call overrides for scheduled agents (issue #41) and,
     since #51/#76, for per-chat scoping — see _resolve_call_cfg for the
     precedence (effort None = the reasoning_effort param is explicitly NOT
-    sent this call, regardless of the global setting)."""
+    sent this call, regardless of the global setting).
+    max_tokens: opt-in generation cap (slotcache's aux prefill, #557);
+    left unset for normal calls, whose provider defaults apply."""
     cfg = _resolve_call_cfg(dict(load_config()), model, effort)
     if not cfg["providers"]:
         raise ModelError(
@@ -321,7 +329,7 @@ async def chat(
     if not cfg["api_key"] and "openai.com" in cfg["api_base"]:
         raise ModelError("No API key configured. Set AGENT_API_KEY or edit data/config.json")
 
-    payload = _build_payload(cfg, tools, stream)
+    payload = _build_payload(cfg, tools, stream, max_tokens=max_tokens)
     payload["messages"] = messages
     log.info("model call: base=%s model=%s tools_sent=%d stream=%s",
              cfg["api_base"], cfg["model"], len(tools or []), stream)

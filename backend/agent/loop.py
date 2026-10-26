@@ -2273,6 +2273,7 @@ async def _run_agent_claimed(
                 not history and not (prompt_state.get("summary") or "")
             ),
             system_prompt=system_prompt,
+            cancel_ev=cancel_ev,
         )
 
 
@@ -2657,30 +2658,21 @@ async def _run_agent_claimed(
                 # (The per-model-call `usage` emission above already covered
                 # the turn's final call — this spot used to re-emit it.)
                 # Issue #557: checkpoint the just-finished prefix as
-                # this conversation's newest slot-cache bin (and the
-                # persona's seed bin when its key is new) - BEFORE the
-                # title call below, an auxiliary completion that would
+                # this conversation's single slot-cache bin (the persona's
+                # BASE was already banked at the gate's bootstrap) - BEFORE
+                # the title call below, an auxiliary completion that would
                 # overwrite the slot's content (and possibly swap
                 # children) ahead of the save. Awaited INLINE - the next
                 # turn's gate must observe the post-save fingerprint; a
                 # detached save would race a fast follow-up turn.
                 # Best-effort: failures log, the turn still completes.
                 if include_history:
-                    # First turn = the user row persisted above is history's
-                    # only entry and nothing is compacted. Only this shape may
-                    # create the persona seed bin, so a pre-cache
-                    # conversation's first flush can't bake its long prefix
-                    # into the seed (issue #557 review).
-                    is_first_turn = (
-                        not (prompt_state.get("summary") or "") and len(history) == 1
-                    )
                     await slotcache.flush(
                         model=model_override,
                         effort=effort_override,
                         conversation_id=conversation_id,
                         system_prompt=system_prompt,
                         usage=state.get("usage"),
-                        is_first_turn=is_first_turn,
                     )
 
                 # Replace the mechanical first-message title after a successful
