@@ -3590,6 +3590,10 @@ export function ConversationList({
     if (e.button !== 0) return
     dragMovedRef.current = false
     setDragWs({ id: wsId, y: e.clientY })
+    // Issue #478: capture the pointer so the drag survives the cursor leaving
+    // the header mid-drag — without it, the drag ends the moment the pointer
+    // stream stops reaching the header.
+    e.currentTarget.setPointerCapture(e.pointerId)
   }
   useEffect(() => {
     if (dragWs === null) return
@@ -5703,6 +5707,12 @@ function AgentsDialog({
   editAgentId: string | null
   onClose: () => void
 }) {
+  const overlayPressed = useRef(false)
+  useEffect(() => {
+    const onWindowMouseup = () => { overlayPressed.current = false; };
+    window.addEventListener('mouseup', onWindowMouseup);
+    return () => window.removeEventListener('mouseup', onWindowMouseup);
+  }, []);
   const agents = useAgent((s) => s.agents)
   const refreshAgents = useAgent((s) => s.refreshAgents)
   const pushToast = useAgent((s) => s.pushToast)
@@ -5788,7 +5798,7 @@ function AgentsDialog({
   }
 
   return (
-    <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }>
       {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
           units double-zoom and the panel outgrows the screen (its body is
           overflow-y-auto — the cap is what makes the scrollbar appear). */}
@@ -7085,6 +7095,12 @@ export function InterfaceScaleCard({
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
+  const overlayPressed = useRef(false)
+  useEffect(() => {
+    const onWindowMouseup = () => { overlayPressed.current = false; };
+    window.addEventListener('mouseup', onWindowMouseup);
+    return () => window.removeEventListener('mouseup', onWindowMouseup);
+  }, []);
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean; staticSystemPrompt: boolean }>>({})
   // No longer in Settings — the chat model bar is the sole writer of active_provider.
   const [newName, setNewName] = useState('')
@@ -7614,7 +7630,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }
     >
       {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
           units would double-zoom. Header/footer pinned, body scrolls. */}
