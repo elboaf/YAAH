@@ -172,13 +172,13 @@ def test_existing_conversation_no_checkpoints_bootstraps():
 
 
 def test_base_bin_name_stable_and_keyed():
-    a = sc.base_bin_name("http://h:8080/v1", "x2.m", "SYS")
-    b = sc.base_bin_name("http://h:8080/v1", "x2.m", "SYS")
-    c = sc.base_bin_name("http://h:8080/v1", "x2.m", "OTHER")
+    a = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "SYS")
+    b = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "SYS")
+    c = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "OTHER")
     # Round-6: the tools fingerprint is part of the identity - a bin banked
     # under one tool set must never be found under another (and pre-fix
     # tool-less bins orphan, since their names can no longer be produced).
-    t1 = sc.base_bin_name("http://h:8080/v1", "x2.m", "SYS", TOOLS)
+    t1 = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "SYS", TOOLS)
     t2 = sc.base_bin_name(
         "http://h:8080/v1", "x2.m", "SYS",
         [{"type": "function", "function": {"name": "other_tool"}}],
@@ -347,7 +347,7 @@ def _seed_base_ledger(monkeypatch, tmp_path, system_prompt):
     """Seed the ledger with the persona BASE under its REAL computed name
     (base_bin_name hashes api_base+model+system_prompt)."""
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
-    name = sc.base_bin_name("http://h:8080/v1", "x2.m", system_prompt, TOOLS)
+    name = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", system_prompt, TOOLS)
     sc._write_ledger(
         "http://h:8080/v1",
         "x2.m",
@@ -482,7 +482,7 @@ async def test_stale_sys_bin_dropped_and_fresh_base_bootstrapped(
     router = _Router()
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
-    stale = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    stale = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "S" * 2000, TOOLS)
     sc._write_ledger(
         "http://h:8080/v1", "x2.m",
         {"bins": [dict(BASE, file=stale, prompt_key=stale)]},
@@ -529,7 +529,7 @@ async def test_stale_conv_bin_falls_back_to_live_base(
     router = _Router()
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
-    base = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    base = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "S" * 2000, TOOLS)
     sc._write_ledger(
         "http://h:8080/v1", "x2.m",
         {"bins": [
@@ -553,6 +553,79 @@ async def test_stale_conv_bin_falls_back_to_live_base(
     ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
     files = [b["file"] for b in ledger["bins"]]
     assert "conv-46.bin" not in files and base in files
+
+
+def test_cache_identity_bin_relevant_args():
+    """Bin identity = gguf + KV types + ctx + flash-attn + parallel.
+    Device lists / splits are PLACEMENT and must not change identity
+    (whole-layer dealing produces identical per-layer cache bytes)."""
+    base = ["--ctx-size", "131072", "--flash-attn", "on", "--parallel", "1"]
+    e_cuda0 = {"status": {"args": [
+        "--model", "/m/a.gguf", "--device", "CUDA0",
+        "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", *base,
+    ]}}
+    e_split = {"status": {"args": [
+        "--model", "/m/a.gguf", "--device", "CUDA0,CUDA1",
+        "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", *base,
+    ]}}
+    e_q4 = {"status": {"args": [
+        "--model", "/m/a.gguf", "--device", "CUDA0,CUDA1",
+        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0", *base,
+    ]}}
+    e_other = {"status": {"args": [
+        "--model", "/m/other.gguf", "--device", "CUDA0",
+        "--cache-type-k", "q8_0", "--cache-type-v", "q8_0", *base,
+    ]}}
+    # Same gguf, CUDA0-only vs split across two GPUs: SAME bin identity.
+    assert sc.cache_identity(e_cuda0) == sc.cache_identity(e_split)
+    # Different KV quantization or different gguf: DIFFERENT.
+    assert sc.cache_identity(e_cuda0) != sc.cache_identity(e_q4)
+    assert sc.cache_identity(e_cuda0) != sc.cache_identity(e_other)
+    # No parseable --model: identity unknown, preset fallback applies.
+    assert sc.cache_identity({"status": {"args": ["--port", "1"]}}) is None
+    assert sc.cache_key(e_cuda0, "lane0") == sc.cache_identity(e_cuda0)
+    assert sc.cache_key(e_split, "laneX") == sc.cache_identity(e_split)
+    assert sc.cache_key(None, "p") == "preset-p"
+    assert sc.cache_key({"status": {"args": ["--port", "1"]}}, "p") == "preset-p"
+
+
+@pytest.mark.asyncio
+async def test_legacy_ledger_migrates_once_and_never_resurrects(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """The cache-key ledger seeds from the legacy preset ledger exactly
+    once (when the cache-key file does not exist). Keying off emptiness
+    instead would resurrect #567-dropped stale entries forever."""
+    router = _Router()
+    router.install(monkeypatch)
+    legacy_path = tmp_path / "legacy-preset.json"
+    ck_path = tmp_path / "cache-key.json"
+    monkeypatch.setattr(sc, "_legacy_ledger_path", lambda a, m: legacy_path)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, k: ck_path)
+    base = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "S" * 2000, TOOLS)
+    legacy_path.write_text(
+        json.dumps({"bins": [dict(BASE, file=base, prompt_key=base)]}),
+        encoding="utf-8",
+    )
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
+    # First new-conversation gate: migrates, finds the BASE, restores it.
+    await sc.gate(
+        model="", effort="", conversation_id=47,
+        is_new_conversation=True, system_prompt="S" * 2000,
+        tools=TOOLS,
+    )
+    assert ("http://h:8080/slots/0?action=restore", base) in router.posts
+    migrated = json.loads(ck_path.read_text("utf-8"))
+    assert [b["file"] for b in migrated["bins"]] == [base]
+
+    # Simulate a #567 drop-to-empty on the cache-key ledger. The legacy
+    # file is still on disk - migration must NOT resurrect it.
+    ck_path.write_text(json.dumps({"bins": []}), encoding="utf-8")
+    again = sc._load_ledger_migrating("http://h:8080/v1", "x2.m",
+                                      "preset-x2.m")
+    assert again.get("bins") == []
 
 
 def test_build_payload_max_tokens_opt_in():
@@ -714,7 +787,7 @@ async def test_new_conversation_restores_base_without_prefill(monkeypatch, tmp_p
         is_new_conversation=True, system_prompt="S" * 2000,
                   tools=TOOLS)
     assert chats == []  # BASE exists: no aux prefill
-    base_name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    base_name = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "S" * 2000, TOOLS)
     assert any("action=restore" in u and f == base_name for u, f in router.posts)
 
 
@@ -830,7 +903,7 @@ async def test_unloaded_preset_with_seed_warms_and_restores(
     used to degrade silently and the turn paid load + FULL prefill with
     bins sitting unused. Now: seed exists + preset unloaded -> tiny aux
     warm prefill (spawns the child), re-probe, restore the seed."""
-    name = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    name = sc.base_bin_name("http://h:8080/v1", "preset-x2.m", "S" * 2000, TOOLS)
     router = _Router()
     router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
     router.slot = _slot_payload(id_task=0)

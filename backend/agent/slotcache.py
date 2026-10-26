@@ -81,23 +81,62 @@ def _slug(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _ledger_path(api_base: str, model: str) -> Path:
+def _ledger_path(api_base: str, cache_key_str: str) -> Path:
+    """The cache-key ledger: shared by every preset whose spawn args
+    produce the same bin-relevant identity (same gguf + KV settings)."""
     from backend.agent.config import CONFIG_PATH
 
     root = Path(CONFIG_PATH).parent  # ~/.yaah (or the test redirect)
-    return root / "slotcache" / _slug(api_base) / f"{_slug(model)}.json"
+    return (
+        root / "slotcache" / _slug(api_base)
+        / f"cache-{_slug(cache_key_str)}.json"
+    )
 
 
-def read_ledger(api_base: str, model: str) -> dict:
+def _legacy_ledger_path(api_base: str, preset: str) -> Path:
+    """Pre-identity ledger (keyed by preset name). Read ONCE per gate
+    for migration, so bins earned before the cache-key change survive."""
+    from backend.agent.config import CONFIG_PATH
+
+    root = Path(CONFIG_PATH).parent  # ~/.yaah (or the test redirect)
+    return root / "slotcache" / _slug(api_base) / f"{_slug(preset)}.json"
+
+
+def _read_ledger_file(path: Path) -> dict:
     try:
-        data = json.loads(_ledger_path(api_base, model).read_text("utf-8"))
+        data = json.loads(path.read_text("utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _write_ledger(api_base: str, model: str, ledger: dict) -> None:
-    path = _ledger_path(api_base, model)
+def read_ledger(api_base: str, cache_key_str: str) -> dict:
+    return _read_ledger_file(_ledger_path(api_base, cache_key_str))
+
+
+def _load_ledger_migrating(api_base: str, preset: str, ck: str) -> dict:
+    """Cache-key ledger, seeding from the legacy preset ledger on first
+    read so the key change does not orphan live bins (the entries keep
+    their router-side filenames; restores work unchanged)."""
+    path = _ledger_path(api_base, ck)
+    if not path.exists():
+        # Seed exactly once, when the cache-key ledger does not exist yet.
+        # Keying off "empty" instead would resurrect dropped/stale entries
+        # from the legacy file forever (a #567 drop-to-empty would be
+        # re-seeded on the very next gate).
+        legacy = _read_ledger_file(_legacy_ledger_path(api_base, preset))
+        if legacy.get("bins"):
+            _write_ledger(api_base, ck, legacy)
+            log.info(
+                "slotcache: migrated %d ledger bins to cache key %s",
+                len(legacy["bins"]), ck,
+            )
+            return legacy
+    return _read_ledger_file(path)
+
+
+def _write_ledger(api_base: str, cache_key_str: str, ledger: dict) -> None:
+    path = _ledger_path(api_base, cache_key_str)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic replace (issue #557 review): a torn in-place write would
@@ -123,15 +162,17 @@ def tools_fingerprint(tools: list | None) -> str:
 
 
 def base_bin_name(
-    api_base: str, model: str, system_prompt: str, tools: list | None = None,
+    api_base: str, cache_key_str: str, system_prompt: str,
+    tools: list | None = None,
 ) -> str:
-    # tools_fingerprint() folds the tool schemas into the identity: the
-    # pre-tools-fingerprint names (sys-<hash of api+model+prompt>) cannot
-    # be produced by this function anymore, so every pre-fix tool-less bin
-    # orphans naturally (there is no bin-delete API - orphaning IS the
+    # Keyed by the CACHE identity (bin-relevant spawn args), not the
+    # preset name: presets of the same gguf with the same KV settings
+    # share one BASE. tools_fingerprint() folds the tool schemas in too:
+    # the pre-round-6b names cannot be produced anymore, so those bins
+    # orphan naturally (there is no bin-delete API - orphaning IS the
     # cleanup).
     return (
-        f"sys-{hash10(api_base + model + system_prompt)}"
+        f"sys-{hash10(api_base + cache_key_str + system_prompt)}"
         f"-{tools_fingerprint(tools)}.bin"
     )
 
@@ -251,23 +292,26 @@ async def _probe(api_base: str, preset: str):
     return entry, slot
 
 
-async def _preset_not_loaded(api_base: str, preset: str) -> bool:
-    """True only when the router is up and lists the preset with an
-    explicit not-loaded status (live-verified vocabulary: "unloaded").
-    Any other doubt (HTTP error, absent entry, bad payload) is False -
-    the caller degrades exactly as before."""
+async def _unloaded_entry(api_base: str, preset: str) -> dict | None:
+    """The /v1/models entry ONLY when the router lists the preset with
+    an explicit not-loaded status (live-verified vocabulary:
+    "unloaded"). Any other doubt (HTTP error, absent entry, bad
+    payload) is None - the caller degrades exactly as before. The
+    entry (with its template spawn args) lets the warm branch key the
+    ledger by cache identity even before the child exists."""
     base = _router_base(api_base)
     try:
         models = await _get_json(base, "/v1/models", 5.0)
     except Exception:  # noqa: BLE001 - any doubt degrades
-        return False
+        return None
     if not isinstance(models, dict):
-        return False
+        return None
     for m in models.get("data", []):
         if isinstance(m, dict) and m.get("id") == preset:
             status = m.get("status") or {}
-            return status.get("value") not in (None, "loaded")
-    return False
+            if status.get("value") not in (None, "loaded"):
+                return m
+    return None
 
 
 def boot_fingerprint(models_entry: dict) -> str:
@@ -279,6 +323,46 @@ def boot_fingerprint(models_entry: dict) -> str:
     best available restart signal."""
     args = (models_entry.get("status") or {}).get("args") or []
     return hash10(json.dumps(args))
+
+
+# Args that change what a slot bin MEANS (llama.cpp refuses or
+# silently mismatches a restore when any of these differ). Everything
+# else a spawn line carries is plumbing.
+_VALUE_FLAGS = {
+    "--model", "--cache-type-k", "--cache-type-v", "--ctx-size",
+    "--flash-attn", "--parallel",
+}
+
+
+def cache_identity(models_entry: dict) -> str | None:
+    """Short hash of the bin-relevant spawn args: gguf path, KV cache
+    types, ctx size, flash-attn, parallel. Deliberately EXCLUDES
+    device lists and split modes (whole-layer dealing produces
+    identical per-layer cache bytes, so a bin earned on a CUDA0-only
+    load restores into a CUDA0+CUDA1 split of the same gguf) and
+    port/host/alias. None when the entry exposes no parseable args
+    (the caller falls back to preset keying)."""
+    args = (models_entry.get("status") or {}).get("args") or []
+    picked: dict[str, str] = {}
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _VALUE_FLAGS and i + 1 < len(args):
+            picked[tok] = args[i + 1]
+            i += 2
+        else:
+            i += 1
+    if "--model" not in picked:
+        return None
+    return hash10(json.dumps(picked, sort_keys=True))
+
+
+def cache_key(models_entry: dict | None, preset: str) -> str:
+    """Ledger/bin identity for a lane: the bin-relevant-args hash when
+    the router exposes them, else the preset name (legacy behavior -
+    bins stay CORRECT, just not shared across same-gguf presets)."""
+    ident = cache_identity(models_entry) if models_entry else None
+    return ident if ident else f"preset-{preset}"
 
 
 # ---------------------------------------------------------------------------
@@ -453,10 +537,12 @@ async def _gate_inner(
             # router is merely between loads and this turn would restore
             # a bin, warm the child with a tiny aux prefill (llama-swap
             # spawns on demand) and proceed into the normal decision.
-            if not (await _preset_not_loaded(api_base, preset)):
+            unloaded = await _unloaded_entry(api_base, preset)
+            if unloaded is None:
                 return
-            ledger = read_ledger(api_base, preset)
-            base_name = base_bin_name(api_base, preset, system_prompt, tools)
+            ck = cache_key(unloaded, preset)
+            ledger = _load_ledger_migrating(api_base, preset, ck)
+            base_name = base_bin_name(api_base, ck, system_prompt, tools)
             warm_bin = _warm_candidate(
                 ledger, conversation_id, is_new_conversation, base_name
             )
@@ -501,8 +587,9 @@ async def _gate_inner(
                 return
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
-        ledger = read_ledger(api_base, preset)
-        base_name = base_bin_name(api_base, preset, system_prompt, tools)
+        ck = cache_key(models_entry, preset)
+        ledger = _load_ledger_migrating(api_base, preset, ck)
+        base_name = base_bin_name(api_base, ck, system_prompt, tools)
         decision = decide(
             slot,
             _SLOT_STATE.get(key),
@@ -552,7 +639,7 @@ async def _gate_inner(
                     break
                 except (_Degraded, httpx.HTTPError) as e:
                     log.warning("slotcache: restore %s failed: %s", cand, e)
-                    fresh = read_ledger(api_base, preset)
+                    fresh = read_ledger(api_base, ck)
                     dropped = _drop_bin(fresh, cand)
                     if dropped is not None:
                         _write_ledger(api_base, preset, dropped)
@@ -665,7 +752,7 @@ async def _gate_inner(
             if int(save_resp.get("n_saved") or 0) <= 0:
                 log.info("slotcache: base save %s reported 0 tokens", base_name)
                 return
-            ledger = read_ledger(api_base, preset)
+            ledger = read_ledger(api_base, ck)
             ledger = _upsert_bin(
                 ledger,
                 {
@@ -827,9 +914,10 @@ async def _flush_inner(
                 return
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
-        ledger = read_ledger(api_base, preset)
+        ck = cache_key(models_entry, preset)
+        ledger = _load_ledger_migrating(api_base, preset, ck)
         bin_name = conv_bin_name(conversation_id)
-        base_name = base_bin_name(api_base, preset, system_prompt, tools)
+        base_name = base_bin_name(api_base, ck, system_prompt, tools)
         router_base = _router_base(api_base)
         try:
             save_resp = await _post_action(
