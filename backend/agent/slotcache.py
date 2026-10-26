@@ -147,6 +147,17 @@ def _bin_entry(ledger: dict, name: str) -> dict | None:
     return None
 
 
+def _drop_bin(ledger: dict, name: str) -> dict | None:
+    """Remove one bin entry from the ledger. Returns the updated ledger,
+    or None when the entry was not present (nothing to write)."""
+    bins = ledger.get("bins", [])
+    kept = [b for b in bins if b.get("file") != name]
+    if len(kept) == len(bins):
+        return None
+    ledger["bins"] = kept
+    return ledger
+
+
 def _upsert_bin(ledger: dict, entry: dict) -> dict:
     bins = [b for b in ledger.get("bins", []) if b.get("file") != entry["file"]]
     bins.append(entry)
@@ -501,6 +512,7 @@ async def _gate_inner(
             is_new_conversation,
             base_name,
         )
+        restore_failed = False  # every candidate stale -> bootstrap below
         if decision["action"] == "restore":
             # ROUND6: a restore onto a slot holding ANY prior content
             # (warm-up prefill, previous conversation) silently poisons
@@ -513,28 +525,62 @@ async def _gate_inner(
                 await _post_action(_router_base(api_base), 0, "erase", preset)
             except (_Degraded, httpx.HTTPError) as e:
                 log.warning("slotcache: pre-restore erase failed: %s", e)
-            try:
-                await _post_action(
-                    _router_base(api_base), 0, "restore", preset,
-                    filename=decision["bin"],
+            # ROUND6C (2026-10-26): a failed restore is a STALE LEDGER
+            # ENTRY - the ledger and the router's bin directory genuinely
+            # diverge (user deleted the files, tmpfs wiped, bin from a
+            # dead child). Dropping the entry is necessary but not
+            # sufficient: returning here left the persona permanently
+            # bankless (every new conversation retried the same dead
+            # restore, nothing bootstrapped, and the flush skipped the
+            # conv save - live: "no bins EVER, full prefill"). So each
+            # failed restore drops its entry, tries the next candidate
+            # (a stale CONV bin falls back to the persona BASE - cheaper
+            # than a bootstrap prefill), and only when every candidate is
+            # stale does the turn fall through to the bootstrap branch,
+            # which prefills + saves a fresh BASE this same turn.
+            candidates = [decision["bin"]]
+            if decision["bin"] != base_name and _bin_entry(ledger, base_name):
+                candidates.append(base_name)
+            restored = None
+            for cand in candidates:
+                try:
+                    await _post_action(
+                        _router_base(api_base), 0, "restore", preset,
+                        filename=cand,
+                    )
+                    restored = cand
+                    break
+                except (_Degraded, httpx.HTTPError) as e:
+                    log.warning("slotcache: restore %s failed: %s", cand, e)
+                    fresh = read_ledger(api_base, preset)
+                    dropped = _drop_bin(fresh, cand)
+                    if dropped is not None:
+                        _write_ledger(api_base, preset, dropped)
+                    log.info(
+                        "slotcache: dropped stale bin %s from ledger", cand,
+                    )
+            if restored is None:
+                restore_failed = True
+                log.info(
+                    "slotcache: all restore candidates stale; "
+                    "bootstrapping a fresh BASE",
                 )
-            except (_Degraded, httpx.HTTPError) as e:
-                log.warning("slotcache: restore %s failed: %s", decision["bin"], e)
+            else:
+                # Record the post-restore observation: saves/restores bump
+                # id_task themselves, so the recorded value must be read
+                # back afterwards.
+                recorded = await _record_post_task(
+                    api_base, preset, conversation_id, base_name
+                )
+                log.info(
+                    "slotcache: conv %s restored %s (%s)%s",
+                    conversation_id,
+                    restored,
+                    decision["reason"],
+                    f" id_task={recorded['id_task']}" if recorded else "",
+                )
                 return
-            # Record the post-restore observation: saves/restores bump id_task
-            # themselves, so the recorded value must be read back afterwards.
-            recorded = await _record_post_task(
-                api_base, preset, conversation_id, base_name
-            )
-            log.info(
-                "slotcache: conv %s restored %s (%s)%s",
-                conversation_id,
-                decision["bin"],
-                decision["reason"],
-                f" id_task={recorded['id_task']}" if recorded else "",
-            )
-            return
-        if decision["action"] == "bootstrap":
+        if decision["action"] == "bootstrap" or restore_failed:
             # Persona BASE missing: bank the system prompt NOW, at the
             # start of the first message that needs it - independent of
             # whether this run ever finishes (issue #557 spec: the BASE
