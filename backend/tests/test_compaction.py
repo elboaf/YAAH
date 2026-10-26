@@ -463,6 +463,72 @@ def test_summarizer_prompt_states_real_clamp():
     assert "400 words" in comp._SUMMARIZER_PROMPT
 
 
+# -------------------------------------------- #563 handoff-shaped prompt
+
+
+def test_summarizer_prompt_contains_all_8_sections():
+    """#563: the new prompt must list all 8 mandatory section headings."""
+    expected = [
+        "## Next focus",
+        "## Goals and explicit instructions",
+        "## Decisions made",
+        "## Attempts and failures",
+        "## Concrete anchors",
+        "## Artifact pointers",
+        "## Suggested skills",
+        "## Redaction note",
+    ]
+    for heading in expected:
+        assert heading in comp._SUMMARIZER_PROMPT, f"Missing section heading: {heading}"
+
+
+def test_summarizer_prompt_includes_folding_instruction():
+    """#563: the prompt must tell the model to fold new facts into
+    existing sections during cumulative compaction, not replace them."""
+    assert "add" in comp._SUMMARIZER_PROMPT.lower()
+    # "Do not" and "replace" are on separate lines in the triple-quoted prompt
+    assert "Do not" in comp._SUMMARIZER_PROMPT
+    assert "replace" in comp._SUMMARIZER_PROMPT.lower()
+
+
+def test_extract_summary_parses_raw_markdown_sections():
+    """#563: _extract_summary must handle raw markdown (no JSON) with
+    ## section headings — the model may output the sections directly."""
+    md = (
+        "## Next focus\n"
+        "Implementing the feature.\n\n"
+        "## Goals and explicit instructions\n"
+        "Do X.\n\n"
+        "## Decisions made\n"
+        "None.\n\n"
+        "## Attempts and failures\n"
+        "None.\n\n"
+        "## Concrete anchors\n"
+        "src/main.py.\n\n"
+        "## Artifact pointers\n"
+        "None.\n\n"
+        "## Suggested skills\n"
+        "None.\n\n"
+        "## Redaction note\n"
+        "None."
+    )
+    assert comp._extract_summary(md) == md
+
+
+def test_extract_summary_handles_mixed_json_and_markdown():
+    """#563: JSON takes priority when both patterns match, so
+    backward-compat JSON replies still extract correctly."""
+    text = '{ "summary": "old format" }'
+    assert comp._extract_summary(text) == "old format"
+
+
+def test_extract_summary_returns_empty_for_prose_without_headings():
+    """#563: plain prose without ## headings returns empty so the
+    caller falls through to the verbatim excerpt."""
+    prose = "The session implemented a feature that added sorting."
+    assert comp._extract_summary(prose) == ""
+
+
 def test_summary_injection_label_describes_job():
     """#191: the injected summary is labeled as actionable continuity
     state, not 'for context only'."""

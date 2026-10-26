@@ -243,21 +243,43 @@ def _excerpt(cut_messages: list) -> str:
     return "\n".join(lines)
 
 
-_SUMMARIZER_PROMPT = (
-    "You compress the earlier portion of an AI agent session into a compact "
-    "continuity summary. The conversation transcript remains preserved for "
-    "review and search; this summary is only a bounded replacement in future "
-    "model prompts. If an earlier summary is included, merge its important "
-    "facts with the newly summarized messages.\n"
-    "Preserve: the user's goals and explicit instructions; decisions made and "
-    "why; concrete anchors — file paths, branch names, commands, "
-    "function/variable names, error messages; what was attempted and what "
-    "failed; the current state and obvious next steps.\n"
-    "Write at most 400 words, plain prose or terse bullets (the platform "
-    "may keep up to 12,000 characters). Reply with JSON "
-    "only, no fences: {\"summary\": \"...\"}"
-)
+_SUMMARIZER_PROMPT = """You compress the earlier portion of an AI agent session into a compact continuity summary. The conversation transcript remains preserved for review and search; this summary is only a bounded replacement in future model prompts. Write your reply as a structured document with exactly these eight section headings, in this order. A section with nothing to say says `None` (or `N/A`) rather than being dropped.
 
+## Next focus
+What the next session/turn is for. Carry the continuation plan forward.
+
+## Goals and explicit instructions
+The user's stated goals, constraints, verbatim asks.
+
+## Decisions made
+Decisions the session made, with the why.
+
+## Attempts and failures
+What was tried, what failed, error messages.
+
+## Concrete anchors
+File paths, branch names, commands, function/variable names, error strings.
+
+## Artifact pointers
+Specs, ADRs, issues, commits, diffs referenced by path or URL — do not
+duplicate content that already lives in those artifacts.
+
+## Suggested skills
+Which skills the next context should load.
+
+## Redaction note
+What was redacted, or `None`.
+
+Each section uses terse bullets in plain style.
+
+When an earlier summary is included in the input, preserve its existing
+section content and *add* new facts to the relevant sections. Do not
+replace earlier content — fold new facts into the existing sections.
+
+Write at most 400 words, plain prose or terse bullets (the platform
+may keep up to 12,000 characters). Reply with JSON
+only, no fences: {"summary": "..."} or with the 8
+section headings directly as markdown."""
 
 async def summarize_messages(
     cut_messages: list, model_override: str = "", cancel_event=None
@@ -298,21 +320,34 @@ async def summarize_messages(
 
 
 def _extract_summary(text: str) -> str:
-    """Pull the `summary` string out of a possibly-fenced JSON reply;
-    empty string when the reply carries none."""
+    """Pull the ``summary`` string out of a JSON reply, or parse the
+    ``##`` section headings from raw markdown, or fall through to the
+    raw text for unsectioned-but-substantive replies.
+
+    Returns the extracted summary (never empty — callers fall through
+    to the verbatim excerpt for empty results)."""
     if not text:
         return ""
+
+    # Path 1: JSON envelope (backward compat with old format).
     m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return ""
-    try:
-        parsed = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return ""
-    if isinstance(parsed, dict):
-        s = parsed.get("summary")
-        if isinstance(s, str) and s.strip():
-            return s.strip()
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            s = parsed.get("summary")
+            if isinstance(s, str) and s.strip():
+                return s.strip()
+
+    # Path 2: Raw markdown with ## section headings (handoff-shaped
+    # output). Extract everything after the first ## heading.
+    heading = re.search(r"^##\s+", text, re.MULTILINE)
+    if heading:
+        return text[heading.start():].strip()
+
+    # Path 3: Nothing recognized — caller will fall through to excerpt.
     return ""
 
 
