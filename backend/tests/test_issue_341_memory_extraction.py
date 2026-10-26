@@ -445,7 +445,7 @@ async def _run_one_turn(monkeypatch, ws, message, title_impl, schedule_impl):
     generation are replaced at their module seams."""
     scheduled = []
 
-    async def title_or_rec(cid, text):
+    async def title_or_rec(cid, text, model_override="", effort_override="", cancel_ev=None):
         if title_impl is not None:
             await title_impl(cid, text)
         scheduled.append(("title", cid, text))
