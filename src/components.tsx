@@ -10278,7 +10278,6 @@ export function Composer() {
   // free-text "Something else…" box. Dictated in a different language than
   // the labels? Rejected with a hint (a match would not mean what the user
   // thinks it means).
-  const [pttHotkey, setPttHotkey] = useState('') // currently registered accelerator
   const pttHeldRef = useRef(false)
   const pttTargetRef = useRef<{ conversationId: number | null; workspace: string } | null>(null)
   const pttBusyRef = useRef(false) // a release is still transcribing/sending
@@ -10519,7 +10518,7 @@ export function Composer() {
     if (registeredHotkeyRef.current) {
       const old = registeredHotkeyRef.current
       registeredHotkeyRef.current = null
-      setPttHotkey('')
+      
       await gss.unregister(old).catch(() => {})
     }
     if (!hk) return
@@ -10527,7 +10526,7 @@ export function Composer() {
     // goes stale on press/release closures.
     await gss.register(hk, (e) => pttHandlerRef.current(e as { state: string }))
     registeredHotkeyRef.current = hk
-    setPttHotkey(hk)
+    
   }
 
   useEffect(() => {
