@@ -248,8 +248,6 @@ def _handle_service_command(argv: list[str]) -> int | None:
         return 0
     if any(a in verbs for a in argv):
         win32serviceutil.HandleCommandLine(cls, argv=[""] + argv)
-        # Prune stale YAAH rules after removal (issue #465).
-        _prune_stale_firewall_rules()
         return 0
     return None
 
@@ -302,23 +300,18 @@ def _installed_exe() -> "os.PathLike | str":
     local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(local, WIN_INSTALL_DIR, "yaah-server-setup.exe")
 
-# Module-level store for _netsh_firewall to share stdout with _prune.
-_last_netsh_output = ""
-
 
 def _netsh_firewall(*args):
     """Run a netsh advfirewall firewall command.
 
-    Returns True on success (exit code 0), False otherwise.
-    Sets _last_netsh_output for callers that need the raw stdout.
+    Returns (ok, stdout): ok is True when netsh exited 0, stdout is
+    the command's output (useful for `show rule` parsing).
     """
     import subprocess
 
     cmd = ["netsh", "advfirewall", "firewall"] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    global _last_netsh_output  # noqa: PLW0603
-    _last_netsh_output = result.stdout
-    return result.returncode == 0
+    return result.returncode == 0, result.stdout
 
 
 def _configure_firewall(installed: str, remove: bool = False) -> None:
@@ -341,9 +334,12 @@ def _configure_firewall(installed: str, remove: bool = False) -> None:
 
     if remove:
         for name, _proto, _port in rules:
-            if _netsh_firewall("delete", "rule",
-                               "name={}".format(name)):
+            ok, _out = _netsh_firewall("delete", "rule",
+                                       "name={}".format(name))
+            if ok:
                 print("removed firewall rule: {}".format(name))
+        # Also sweep any stale YAAH rules left at prior install paths.
+        _prune_stale_firewall_rules()
         return
 
     # Prune stale YAAH rules before the skip-check so the clean
@@ -351,17 +347,19 @@ def _configure_firewall(installed: str, remove: bool = False) -> None:
     _prune_stale_firewall_rules()
 
     for name, proto, port in rules:
-        if _netsh_firewall("show", "rule",
-                           "name={}".format(name)):
+        ok, _out = _netsh_firewall("show", "rule",
+                                   "name={}".format(name))
+        if ok:
             print("firewall rule already exists: {}".format(name))
             continue
-        if not _netsh_firewall("add", "rule",
-                               "name={}".format(name),
-                               "dir=in", "action=allow",
-                               "protocol={}".format(proto),
-                               "localport={}".format(port),
-                               "program={}".format(installed),
-                               "profile=public,private", "enable=yes"):
+        ok, _out = _netsh_firewall("add", "rule",
+                                   "name={}".format(name),
+                                   "dir=in", "action=allow",
+                                   "protocol={}".format(proto),
+                                   "localport={}".format(port),
+                                   "program={}".format(installed),
+                                   "profile=public,private", "enable=yes")
+        if not ok:
             print("warning: could not create firewall rule: {}".format(
                 name))
             print("manual fix: run setup again from an elevated prompt")
@@ -377,20 +375,29 @@ def _prune_stale_firewall_rules() -> None:
     netsh output uses colon-delimited field names (e.g. "Rule Name:"
     or "Program:") so we strip and split on ":" before matching.
     """
-    if not _netsh_firewall("show", "rule", "name=all"):
+    ok, stdout = _netsh_firewall("show", "rule", "name=all")
+    if not ok:
         return
-    lines = _last_netsh_output.splitlines()
+    installed = _installed_exe()
     current_name = None
-    for line in lines:
-        stripped = line.strip().lower()
-        if stripped.startswith("rule name:"):
-            current_name = stripped.split(":", 1)[1].strip().strip('"'')
-        elif stripped.startswith("program:"):
-            prog = stripped.split(":", 1)[1].strip().strip('"'')
-            if current_name and "YAAH" in current_name:
-                if prog != _installed_exe() and os.path.exists(prog):
-                    _netsh_firewall("delete", "rule",
-                                    "name={}".format(current_name))
+    for line in stdout.splitlines():
+        field, sep, value = line.strip().partition(":")
+        if not sep:
+            continue
+        field = field.lower()
+        value = value.strip().strip('"')
+        if field == "rule name":
+            current_name = value
+        elif field == "program" and current_name:
+            # Case-insensitive compare: netsh may report the path with
+            # different casing than _installed_exe() builds it.
+            if (current_name.upper().startswith("YAAH")
+                    and value != installed
+                    and value.upper() != installed.upper()
+                    and os.path.exists(value)):
+                ok, _out = _netsh_firewall("delete", "rule",
+                                           "name={}".format(current_name))
+                if ok:
                     print("removed stale firewall rule: {}".format(
                         current_name))
             current_name = None
