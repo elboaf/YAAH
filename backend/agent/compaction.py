@@ -311,34 +311,53 @@ async def summarize_messages(
     text = str(content).strip()
     summary = _extract_summary(text)
     if not summary:
-        # No JSON envelope: accept substantive unfenced prose (a weaker
-        # model that summarized without following the format). Short
-        # filler/refusals get the clipped verbatim excerpt instead — the
-        # prefix is never lost to an "I don't know" reply.
-        summary = text if len(text) >= 80 else excerpt[:4_000]
+        # Extraction found nothing. A reply that carries section headings
+        # but was rejected as malformed must not become the persisted
+        # summary: keep the verbatim excerpt instead. Plain unheaded
+        # prose stays on the >=80-char substantive fallback (a weaker
+        # model that summarized without following the format); short
+        # filler/refusals get the excerpt too — the prefix is never
+        # lost to an "I don't know" reply.
+        if re.search(r"^##\s+", text, re.MULTILINE):
+            summary = excerpt[:4_000]
+        else:
+            summary = text if len(text) >= 80 else excerpt[:4_000]
     return summary[:_SUMMARY_MAX_CHARS]
 
 
 def _extract_summary(text: str) -> str:
     """Pull the summary out of a model reply: the raw 8-section markdown
     document (the #563 shape) or a JSON envelope; "" when neither is
-    recognized (the caller then substitutes prose/excerpt fallbacks).
+    recognized (the caller then substitutes excerpt/prose fallbacks).
 
-    The sectioned document wins over an embedded JSON blob: a summary
-    that quotes {"summary": ...} in its anchors must not be truncated
-    to that blob. The JSON path fires only for envelope-style replies —
-    the whole reply is the object, optionally fenced."""
+    Any reply carrying a ## section heading is treated as the sectioned
+    document — including one that leads with a JSON blob: sections after
+    {"summary": ...} are newer content and must not be dropped. A
+    degenerate headed reply (a heading but too little content) returns ""
+    so the caller keeps the excerpt. The JSON path fires only for
+    envelope-style replies with no headings anywhere — the whole reply
+    is the object, optionally fenced. Shape is requested, not
+    gate-kept: unheaded prose is the caller's fallback, not an error."""
     if not text:
         return ""
 
     def _markdown_doc() -> str:
+        """The sectioned document (from the first ## heading on), or ""
+        when the headed content is too short to be a real summary."""
         h = re.search(r"^##\s+", text, re.MULTILINE)
-        return text[h.start():].strip() if h else ""
+        if not h:
+            return ""
+        doc = text[h.start():].strip()
+        return doc if len(doc) >= 80 else ""
 
+    if re.search(r"^##\s+", text, re.MULTILINE):
+        # Headed reply: always the sectioned document, even when a JSON
+        # blob precedes it.
+        return _markdown_doc()
     stripped = re.sub(r"^```[a-zA-Z]*\s*", "", text.strip())
     if not stripped.startswith("{"):
-        # Not a JSON envelope: the reply is the markdown document.
-        return _markdown_doc()
+        # Unheaded, non-envelope: caller applies the prose fallback.
+        return ""
     # JSON envelope (pre-#563 format) — extract only when it parses.
     m = re.search(r"\{.*\}", stripped, re.DOTALL)
     if m:
@@ -350,8 +369,8 @@ def _extract_summary(text: str) -> str:
             s = parsed.get("summary")
             if isinstance(s, str) and s.strip():
                 return s.strip()
-    # Unparseable envelope or missing summary key: markdown, else empty.
-    return _markdown_doc()
+    # Unparseable envelope or missing summary key: nothing recognized.
+    return ""
 
 
 async def compact_history_for_context(
