@@ -251,7 +251,7 @@ async def _generate_conversation_title(
         title_kwargs = {"tools": None, "stream": False, "max_tokens": 32}
         if model_override:
             title_kwargs["model"] = model_override
-        if effort_override:
+        if effort_override is not None:
             title_kwargs["effort"] = effort_override
         call = asyncio.create_task(model_client.chat(title_prompt, **title_kwargs))
         data = await _race_model_call(call, cancel_ev)
