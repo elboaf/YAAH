@@ -3590,6 +3590,10 @@ export function ConversationList({
     if (e.button !== 0) return
     dragMovedRef.current = false
     setDragWs({ id: wsId, y: e.clientY })
+    // Issue #478: capture the pointer so the drag survives the cursor leaving
+    // the header mid-drag — without it, the drag ends the moment the pointer
+    // stream stops reaching the header.
+    e.currentTarget.setPointerCapture(e.pointerId)
   }
   useEffect(() => {
     if (dragWs === null) return
@@ -7626,7 +7630,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }
     >
       {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
           units would double-zoom. Header/footer pinned, body scrolls. */}
