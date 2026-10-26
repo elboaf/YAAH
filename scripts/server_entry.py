@@ -344,7 +344,9 @@ def _configure_firewall(installed: str, remove: bool = False) -> None:
             if ok:
                 print("removed firewall rule: {}".format(name))
             else:
-                print("no existing firewall rule: {}".format(name))
+                print("warning: no rule removed for {} - if rules "
+                      "exist, re-run remove from an elevated "
+                      "prompt".format(name))
             continue
         ok, _out = _netsh_firewall("add", "rule",
                                    "name={}".format(name),
