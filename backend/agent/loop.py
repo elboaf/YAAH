@@ -175,12 +175,22 @@ def _clean_title(title: str) -> str:
 
 
 async def _generate_conversation_title(
-    conversation_id: int, user_text: str
+    conversation_id: int,
+    user_text: str,
+    model_override: str = "",
+    effort_override: str | None = "",
+    cancel_ev: asyncio.Event | None = None,
 ) -> str | None:
     """Replace the generated first-message slice with a concise model title.
 
     Runs after the first successful turn. Manual titles and pinned agent chat
     names are left alone; provider errors or unusable responses are best-effort.
+
+    model_override/effort_override: route the call via the chat's scoped model
+    (issue #549) so a pinned fast provider wins over a slow global default.
+    A modest max_tokens cap keeps thinking models from wandering into
+    reasoning_content; cancel_ev lets Stop cut the call instead of blocking
+    done for minutes.
     """
     conv = await get_conversation(conversation_id)
     if (conv or {}).get("chat_type") == "agent":
@@ -238,7 +248,17 @@ async def _generate_conversation_title(
         )
 
     try:
-        data = await model_client.chat(title_prompt, tools=None, stream=False)
+        call = asyncio.create_task(
+            model_client.chat(
+                title_prompt,
+                tools=None,
+                stream=False,
+                model=model_override,
+                effort=effort_override,
+                max_tokens=32,
+            )
+        )
+        data = await _race_model_call(call, cancel_ev)
         title = _extract(data)
         if _is_conversational_reply(title):
             # The model answered or refused the quoted message instead of
@@ -249,10 +269,22 @@ async def _generate_conversation_title(
                 "with ONLY a 3-6 word title of what the USER wants — never a "
                 "response to it (no 'I can't', no 'Happy to')."
             )
-            data = await model_client.chat(retry_prompt, tools=None, stream=False)
+            retry_call = asyncio.create_task(
+                model_client.chat(
+                    retry_prompt,
+                    tools=None,
+                    stream=False,
+                    model=model_override,
+                    effort=effort_override,
+                    max_tokens=32,
+                )
+            )
+            data = await _race_model_call(retry_call, cancel_ev)
             title = _extract(data)
             if _is_conversational_reply(title):
                 return None
+    except model_client.ModelCancelled:
+        return None
     except Exception:  # noqa: BLE001 — title generation must not fail the turn
         return None
 
@@ -2681,7 +2713,13 @@ async def _run_agent_claimed(
                 # Replace the mechanical first-message title after a successful
                 # turn. Failures are silent/best-effort; the sidebar receives
                 # the event before the next conversation-list refresh.
-                title = await _generate_conversation_title(conversation_id, user_text)
+                title = await _generate_conversation_title(
+                    conversation_id,
+                    user_text,
+                    model_override,
+                    effort_override,
+                    cancel_ev,
+                )
                 if title:
                     yield _ndjson({"type": "title", "title": title})
                 # Background memory extraction (#341/#345): detached beside
