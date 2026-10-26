@@ -305,7 +305,7 @@ def _netsh_firewall(*args):
     """Run a netsh advfirewall firewall command.
 
     Returns (ok, stdout): ok is True when netsh exited 0, stdout is
-    the command's output (useful for `show rule` parsing).
+    the command's output.
     """
     import subprocess
 
@@ -314,43 +314,37 @@ def _netsh_firewall(*args):
     return result.returncode == 0, result.stdout
 
 
+# (rule name, protocol, port) for the two inbound rules YAAH needs.
+FIREWALL_RULES = [
+    ("YAAH Server", "TCP", "8765"),
+    ("YAAH mDNS", "UDP", "5353"),
+]
+
+
 def _configure_firewall(installed: str, remove: bool = False) -> None:
     """Add or remove Windows Firewall inbound rules for the YAAH server.
 
-    Two rules are managed:
-      - "YAAH Server"   - TCP 8765 (remote-exec API)
-      - "YAAH mDNS"     - UDP 5353 (mDNS advertising)
+    Two rules are managed (FIREWALL_RULES):
+      - "YAAH Server" - TCP 8765 (remote-exec API)
+      - "YAAH mDNS"   - UDP 5353 (mDNS advertising, in-process beacon)
 
     Rules are scoped to the installed exe's path so only that process
     can bind these ports. Both Public and Private profiles are enabled.
 
-    Prunes stale YAAH rules that point at a prior install location
-    (e.g. a Downloads folder copy) so the clean rule always wins.
+    On setup each rule is deleted before it is added: delete is a
+    harmless no-op when the rule does not exist, and it guarantees a
+    stale same-named rule (e.g. one pinned to a Downloads copy of the
+    exe left by the manual workaround) can never shadow the clean
+    rule. Locale-proof: no output parsing, exit codes only.
     """
-    rules = [
-        ("YAAH Server", "TCP", "8765"),
-        ("YAAH mDNS", "UDP", "5353"),
-    ]
-
-    if remove:
-        for name, _proto, _port in rules:
-            ok, _out = _netsh_firewall("delete", "rule",
-                                       "name={}".format(name))
+    for name, proto, port in FIREWALL_RULES:
+        ok, _out = _netsh_firewall("delete", "rule",
+                                   "name={}".format(name))
+        if remove:
             if ok:
                 print("removed firewall rule: {}".format(name))
-        # Also sweep any stale YAAH rules left at prior install paths.
-        _prune_stale_firewall_rules()
-        return
-
-    # Prune stale YAAH rules before the skip-check so the clean
-    # rule always wins, even if a same-named stale rule exists.
-    _prune_stale_firewall_rules()
-
-    for name, proto, port in rules:
-        ok, _out = _netsh_firewall("show", "rule",
-                                   "name={}".format(name))
-        if ok:
-            print("firewall rule already exists: {}".format(name))
+            else:
+                print("no existing firewall rule: {}".format(name))
             continue
         ok, _out = _netsh_firewall("add", "rule",
                                    "name={}".format(name),
@@ -359,48 +353,12 @@ def _configure_firewall(installed: str, remove: bool = False) -> None:
                                    "localport={}".format(port),
                                    "program={}".format(installed),
                                    "profile=public,private", "enable=yes")
-        if not ok:
+        if ok:
+            print("firewall rule in place: {}".format(name))
+        else:
             print("warning: could not create firewall rule: {}".format(
                 name))
             print("manual fix: run setup again from an elevated prompt")
-
-
-def _prune_stale_firewall_rules() -> None:
-    """Delete stale YAAH firewall rules pointing at prior install locations.
-
-    A prior manual install might have left rules pinned to ephemeral
-    paths (e.g. Downloads). Only YAAH-named rules are pruned --
-    non-YAAH rules are left untouched (issue #465).
-
-    netsh output uses colon-delimited field names (e.g. "Rule Name:"
-    or "Program:") so we strip and split on ":" before matching.
-    """
-    ok, stdout = _netsh_firewall("show", "rule", "name=all")
-    if not ok:
-        return
-    installed = _installed_exe()
-    current_name = None
-    for line in stdout.splitlines():
-        field, sep, value = line.strip().partition(":")
-        if not sep:
-            continue
-        field = field.lower()
-        value = value.strip().strip('"')
-        if field == "rule name":
-            current_name = value
-        elif field == "program" and current_name:
-            # Case-insensitive compare: netsh may report the path with
-            # different casing than _installed_exe() builds it.
-            if (current_name.upper().startswith("YAAH")
-                    and value != installed
-                    and value.upper() != installed.upper()
-                    and os.path.exists(value)):
-                ok, _out = _netsh_firewall("delete", "rule",
-                                           "name={}".format(current_name))
-                if ok:
-                    print("removed stale firewall rule: {}".format(
-                        current_name))
-            current_name = None
 
 
 def _service_state() -> str:
