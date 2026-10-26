@@ -10,6 +10,13 @@ Two cache points per (router, model, system prompt) "persona":
    message still leaves the BASE banked. From then on every NEW
    conversation on that persona restores the BASE at the gate instead of
    re-prefilling the system prompt.
+
+   ROUND-6 CORRECTION: the aux prefill MUST carry the same tool schemas
+   the turn's real calls will. Chat templates render the tools block at
+   the HEAD of the prompt, so a tools-less bank shares ~no prefix with
+   any real call (live-diagnosed 2026-10-25: identical system text
+   matched 1181/1192 tokens tool-less, 0/1448 with tools). The tools
+   fingerprint is therefore part of the BASE bin's identity.
 2. Per-conversation bin - ONE stable file per conversation
    (conv-<id>.bin), OVERWRITTEN by the turn-end flush. Verified against
    llama.cpp source: the state save opens "wb" (truncate) and appends
@@ -106,8 +113,27 @@ def hash10(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
 
 
-def base_bin_name(api_base: str, model: str, system_prompt: str) -> str:
-    return f"sys-{hash10(api_base + model + system_prompt)}.bin"
+def tools_fingerprint(tools: list | None) -> str:
+    """Stable short hash of the call's tool schemas. The chat template
+    renders the tools block at the HEAD of the prompt (round-6 live
+    diagnosis), so it belongs in the BASE identity: a bin banked under a
+    different tool set shares ~no prefix with the real call and must not
+    be found."""
+    return hash10(json.dumps(tools or [], sort_keys=True))
+
+
+def base_bin_name(
+    api_base: str, model: str, system_prompt: str, tools: list | None = None,
+) -> str:
+    # tools_fingerprint() folds the tool schemas into the identity: the
+    # pre-tools-fingerprint names (sys-<hash of api+model+prompt>) cannot
+    # be produced by this function anymore, so every pre-fix tool-less bin
+    # orphans naturally (there is no bin-delete API - orphaning IS the
+    # cleanup).
+    return (
+        f"sys-{hash10(api_base + model + system_prompt)}"
+        f"-{tools_fingerprint(tools)}.bin"
+    )
 
 
 def conv_bin_name(conversation_id: int) -> str:
@@ -347,17 +373,35 @@ async def gate(
     conversation_id: int = 0,
     is_new_conversation: bool = False,
     system_prompt: str = "",
+    tools: list | None = None,
     cancel_ev: asyncio.Event | None = None,
 ) -> None:
     """Turn-start probe/restore/bootstrap. Best-effort by contract: never
-    raises; any degrade means the turn proceeds exactly as without this
+    raises; any degrade means the turn follows exactly as without this
     module. Must only be called BEFORE the turn's first model call (never
     mid-run). cancel_ev (when given) aborts a BASE bootstrap mid-prefill
-    the moment the user hits Stop."""
+    the moment the user hits Stop.
+
+    tools: REQUIRED to be the same list the turn's real calls will send.
+    The chat template renders the tools block at the HEAD of the prompt
+    (live-diagnosed 2026-10-25: a tools-less aux prefill banks a prompt
+    whose first tokens differ from any real call's - restored/prefilled
+    sys content then matched ~0 tokens and every new conversation paid
+    full prefill; a controlled probe showed identical system text
+    matching 1181/1192 tokens tool-less and 0/1448 with tools). It also
+    keys the BASE bin name, so a bin banked under one tool set is never
+    restored under another. None degrades to no caching, never to a
+    tools-less bank."""
+    if tools is None:
+        log.warning(
+            "slotcache: gate without tools - refusing to bank a "
+            "tool-less BASE (round-6); turn proceeds uncached",
+        )
+        return
     try:
         await _gate_inner(
             model, effort, conversation_id, is_new_conversation, system_prompt,
-            cancel_ev,
+            tools, cancel_ev,
         )
     except Exception as e:  # noqa: BLE001 - degrade silently, always
         log.warning("slotcache: gate degraded: %s", e)
@@ -369,6 +413,7 @@ async def _gate_inner(
     conversation_id: int,
     is_new_conversation: bool,
     system_prompt: str,
+    tools: list | None = None,
     cancel_ev: asyncio.Event | None = None,
 ) -> None:
     from backend.agent import model_client
@@ -400,7 +445,7 @@ async def _gate_inner(
             if not (await _preset_not_loaded(api_base, preset)):
                 return
             ledger = read_ledger(api_base, preset)
-            base_name = base_bin_name(api_base, preset, system_prompt)
+            base_name = base_bin_name(api_base, preset, system_prompt, tools)
             warm_bin = _warm_candidate(
                 ledger, conversation_id, is_new_conversation, base_name
             )
@@ -417,10 +462,13 @@ async def _gate_inner(
                     model_client.chat(
                         # Minimal warm prompt: the goal is the LOAD, not a
                         # cacheable prefix (the restore below replaces the
-                        # slot anyway). Strict --jinja templates accept a
-                        # bare user turn; system-only ones 500.
+                        # slot anyway). Tools MUST ride this call like any
+                        # real one (see gate docstring): the template's
+                        # tools block leads the rendered prompt, so a
+                        # tool-less warm-up would bank nothing useful and
+                        # - worse - the aux bootstrap below would too.
                         messages=[{"role": "user", "content": "."}],
-                        tools=None,
+                        tools=tools,
                         stream=False,
                         model=model,
                         effort=effort,
@@ -440,7 +488,7 @@ async def _gate_inner(
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
         ledger = read_ledger(api_base, preset)
-        base_name = base_bin_name(api_base, preset, system_prompt)
+        base_name = base_bin_name(api_base, preset, system_prompt, tools)
         decision = decide(
             slot,
             _SLOT_STATE.get(key),
@@ -524,7 +572,14 @@ async def _gate_inner(
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": "."},
                         ],
-                        tools=None,
+                        # The template renders the tools block at the HEAD
+                        # of the prompt (round-6 live diagnosis): the aux
+                        # prefill MUST carry the same tools the turn's real
+                        # calls will, or the banked BASE shares ~no prefix
+                        # with them and every new conversation re-prefills
+                        # from token 0 - the exact bug this module exists
+                        # to prevent.
+                        tools=tools,
                         stream=False,
                         model=model,
                         effort=effort,
@@ -655,13 +710,25 @@ async def flush(
     conversation_id: int = 0,
     system_prompt: str = "",
     usage: dict | None = None,
+    tools: list | None = None,
 ) -> None:
     """Turn-end checkpoint: save the slot (holding the just-finished turn's
     prefix) as this conversation's ONE bin, overwriting the previous one.
     Best-effort, never raises. Call ONLY after the turn's model activity
-    is done (same rule as gate: never while a completion is in flight)."""
+    is done (same rule as gate: never while a completion is in flight).
+    tools: the same list gate() got - it keys the prompt head (base_name).
+    None skips the save: a flush-recorded prompt_key computed without the
+    tools fingerprint would not match the next gate's, silently demoting
+    every later turn to base-fallback."""
+    if tools is None:
+        log.warning(
+            "slotcache: flush without tools - skipping (prompt-key "
+            "integrity, round-6)",
+        )
+        return
     try:
-        await _flush_inner(model, effort, conversation_id, system_prompt, usage)
+        await _flush_inner(model, effort, conversation_id, system_prompt, usage,
+                           tools)
     except Exception as e:  # noqa: BLE001 - degrade silently, always
         log.warning("slotcache: flush degraded: %s", e)
 
@@ -672,6 +739,7 @@ async def _flush_inner(
     conversation_id: int,
     system_prompt: str,
     usage: dict | None,
+    tools: list | None = None,
 ) -> None:
     from backend.agent import model_client
     from backend.agent.config import load_config
@@ -712,7 +780,7 @@ async def _flush_inner(
         boot = boot_fingerprint(models_entry)
         ledger = read_ledger(api_base, preset)
         bin_name = conv_bin_name(conversation_id)
-        base_name = base_bin_name(api_base, preset, system_prompt)
+        base_name = base_bin_name(api_base, preset, system_prompt, tools)
         router_base = _router_base(api_base)
         try:
             save_resp = await _post_action(
