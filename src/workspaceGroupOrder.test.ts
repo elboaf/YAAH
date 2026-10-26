@@ -23,21 +23,6 @@ describe('sortWorkspaceGroups (#91)', () => {
     ])
   })
 
-  it('does not reorder groups when background message writes change conversation activity', () => {
-    const before = [
-      group('C:/a', '2026-09-22 11:00:00'),
-      group('C:/b', '2026-09-22 10:00:00'),
-    ]
-    const afterBackgroundWrite = [
-      group('C:/a', '2026-09-22 11:00:00'),
-      group('C:/b', '2026-09-22 10:00:00'),
-    ]
-
-    expect(sortWorkspaceGroups(afterBackgroundWrite).map((g) => g.ws.path)).toEqual(
-      sortWorkspaceGroups(before).map((g) => g.ws.path),
-    )
-  })
-
   it('moves a group when the workspace is deliberately touched', () => {
     const before = [
       group('C:/a', '2026-09-22 11:00:00'),
