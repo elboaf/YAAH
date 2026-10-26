@@ -5704,6 +5704,11 @@ function AgentsDialog({
   onClose: () => void
 }) {
   const overlayPressed = useRef(false)
+  useEffect(() => {
+    const onWindowMouseup = () => { overlayPressed.current = false; };
+    window.addEventListener('mouseup', onWindowMouseup);
+    return () => window.removeEventListener('mouseup', onWindowMouseup);
+  }, []);
   const agents = useAgent((s) => s.agents)
   const refreshAgents = useAgent((s) => s.refreshAgents)
   const pushToast = useAgent((s) => s.pushToast)
@@ -7087,6 +7092,11 @@ export function InterfaceScaleCard({
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const overlayPressed = useRef(false)
+  useEffect(() => {
+    const onWindowMouseup = () => { overlayPressed.current = false; };
+    window.addEventListener('mouseup', onWindowMouseup);
+    return () => window.removeEventListener('mouseup', onWindowMouseup);
+  }, []);
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean; staticSystemPrompt: boolean }>>({})
   // No longer in Settings — the chat model bar is the sole writer of active_provider.
   const [newName, setNewName] = useState('')
