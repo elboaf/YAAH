@@ -5788,7 +5788,7 @@ function AgentsDialog({
   }
 
   return (
-    <div className={AGENT_DLG_OVERLAY} onMouseUp={(e) => e.target === e.currentTarget && onClose()}>
+    <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }}>
       {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
           units double-zoom and the panel outgrows the screen (its body is
           overflow-y-auto — the cap is what makes the scrollbar appear). */}
