@@ -460,7 +460,120 @@ def test_summarizer_prompt_states_real_clamp():
     """#191: the prompt the summarizer model reads must state the clamp
     the consumer actually enforces, not just the advisory word budget."""
     assert "12,000" in comp._SUMMARIZER_PROMPT
-    assert "400 words" in comp._SUMMARIZER_PROMPT
+    assert "600 words" in comp._SUMMARIZER_PROMPT
+
+
+# -------------------------------------------- #563 handoff-shaped prompt
+
+
+def test_summarizer_prompt_contains_all_8_sections():
+    """#563: the new prompt must list all 8 mandatory section headings."""
+    expected = [
+        "## Next focus",
+        "## Goals and explicit instructions",
+        "## Decisions made",
+        "## Attempts and failures",
+        "## Concrete anchors",
+        "## Artifact pointers",
+        "## Suggested skills",
+        "## Redaction note",
+    ]
+    for heading in expected:
+        assert heading in comp._SUMMARIZER_PROMPT, f"Missing section heading: {heading}"
+
+
+def test_summarizer_prompt_includes_folding_instruction():
+    """#563: the prompt must tell the model to fold new facts into
+    existing sections during cumulative compaction, not replace them.
+    Distinctive phrases so the test fails if the instruction is removed."""
+    assert "fold new facts into the existing sections" in comp._SUMMARIZER_PROMPT
+    assert "Do not\nreplace earlier content" in comp._SUMMARIZER_PROMPT
+
+
+def test_extract_summary_parses_raw_markdown_sections():
+    """#563: _extract_summary must handle raw markdown (no JSON) with
+    ## section headings — the model may output the sections directly."""
+    md = (
+        "## Next focus\n"
+        "Implementing the feature.\n\n"
+        "## Goals and explicit instructions\n"
+        "Do X.\n\n"
+        "## Decisions made\n"
+        "None.\n\n"
+        "## Attempts and failures\n"
+        "None.\n\n"
+        "## Concrete anchors\n"
+        "src/main.py.\n\n"
+        "## Artifact pointers\n"
+        "None.\n\n"
+        "## Suggested skills\n"
+        "None.\n\n"
+        "## Redaction note\n"
+        "None."
+    )
+    assert comp._extract_summary(md) == md
+
+
+def test_extract_summary_sectioned_doc_beats_embedded_json():
+    """#563 review: a sectioned document that merely quotes a JSON blob
+    with a "summary" key (plausible in Concrete anchors) must keep the
+    blob as content, not be truncated to it."""
+    md = (
+        "## Next focus\n"
+        'Ship it. Anchor: {"summary": "bait"}\n\n'
+        "## Concrete anchors\n"
+        "backend/agent/compaction.py, tests in backend/tests/test_compaction.py.\n\n"
+        "## Redaction note\n"
+        "None."
+    )
+    assert comp._extract_summary(md) == md
+
+
+def test_extract_summary_leading_json_then_sections_keeps_document():
+    """CodeRabbit #571: a hybrid reply that leads with a JSON object and
+    continues into sectioned markdown is the sectioned document — the
+    envelope parse must not discard the sections that follow it."""
+    text = (
+        '{"summary": "draft"}\n'
+        "## Next focus\n"
+        "Finish the export path in backend/export.py.\n\n"
+        "## Concrete anchors\n"
+        "branch issue-563, function _extract_summary.\n\n"
+        "## Redaction note\n"
+        "None."
+    )
+    doc = comp._extract_summary(text)
+    assert doc.startswith("## Next focus")
+    assert "Finish the export path" in doc
+    assert "draft" not in doc
+
+
+def test_extract_summary_degenerate_headed_reply_is_rejected():
+    """CodeRabbit #571: a heading with too little content behind it is
+    not a summary — "" so the caller keeps the verbatim excerpt."""
+    assert comp._extract_summary("## Oops\n\nsorry") == ""
+
+
+def test_extract_summary_returns_empty_for_prose_without_headings():
+    """#563: plain prose without ## headings returns empty so the
+    caller falls through to the verbatim excerpt."""
+    prose = "The session implemented a feature that added sorting."
+    assert comp._extract_summary(prose) == ""
+
+
+@pytest.mark.asyncio
+async def test_summarize_headed_but_rejected_reply_keeps_excerpt(monkeypatch):
+    """CodeRabbit #571: a reply that carries headings but fails
+    extraction (degenerate headed content) is replaced by the verbatim
+    excerpt — never persisted as-is, never takes the prose fallback."""
+    async def fake_chat(messages, tools=None, stream=False, model=""):
+        return {"choices": [{"message": {"content": "## Oops\n\nshort"}}]}
+
+    monkeypatch.setattr(comp.model_client, "chat", fake_chat)
+    monkeypatch.setattr(comp, "summarize_messages", REAL_SUMMARIZE)
+    out = await comp.summarize_messages([_msg("user", "hello world" * 10)])
+    assert "hello world" in out  # excerpt, not the malformed reply
+    assert "Oops" not in out
 
 
 def test_summary_injection_label_describes_job():

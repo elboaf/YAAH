@@ -243,21 +243,43 @@ def _excerpt(cut_messages: list) -> str:
     return "\n".join(lines)
 
 
-_SUMMARIZER_PROMPT = (
-    "You compress the earlier portion of an AI agent session into a compact "
-    "continuity summary. The conversation transcript remains preserved for "
-    "review and search; this summary is only a bounded replacement in future "
-    "model prompts. If an earlier summary is included, merge its important "
-    "facts with the newly summarized messages.\n"
-    "Preserve: the user's goals and explicit instructions; decisions made and "
-    "why; concrete anchors — file paths, branch names, commands, "
-    "function/variable names, error messages; what was attempted and what "
-    "failed; the current state and obvious next steps.\n"
-    "Write at most 400 words, plain prose or terse bullets (the platform "
-    "may keep up to 12,000 characters). Reply with JSON "
-    "only, no fences: {\"summary\": \"...\"}"
-)
+_SUMMARIZER_PROMPT = """You compress the earlier portion of an AI agent session into a compact continuity summary. The conversation transcript remains preserved for review and search; this summary is only a bounded replacement in future model prompts. Write your reply as a structured document with exactly these eight section headings, in this order. A section with nothing to say says `None` (or `N/A`) rather than being dropped.
 
+## Next focus
+What the next session/turn is for. Carry the continuation plan forward.
+
+## Goals and explicit instructions
+The user's stated goals, constraints, verbatim asks.
+
+## Decisions made
+Decisions the session made, with the why.
+
+## Attempts and failures
+What was tried, what failed, error messages.
+
+## Concrete anchors
+File paths, branch names, commands, function/variable names, error strings.
+
+## Artifact pointers
+Specs, ADRs, issues, commits, diffs referenced by path or URL — do not
+duplicate content that already lives in those artifacts.
+
+## Suggested skills
+Which skills the next context should load.
+
+## Redaction note
+What was redacted, or `None`.
+
+Each section uses terse bullets in plain style.
+
+When an earlier summary is included in the input, preserve its existing
+section content and *add* new facts to the relevant sections. Do not
+replace earlier content — fold new facts into the existing sections.
+
+Write at most 600 words of terse bullets (the section shape bounds
+length naturally; the platform may keep up to 12,000 characters).
+Reply with the 8 section headings directly as markdown; a bare JSON
+envelope {"summary": "..."} is also accepted."""
 
 async def summarize_messages(
     cut_messages: list, model_override: str = "", cancel_event=None
@@ -289,30 +311,65 @@ async def summarize_messages(
     text = str(content).strip()
     summary = _extract_summary(text)
     if not summary:
-        # No JSON envelope: accept substantive unfenced prose (a weaker
-        # model that summarized without following the format). Short
-        # filler/refusals get the clipped verbatim excerpt instead — the
-        # prefix is never lost to an "I don't know" reply.
-        summary = text if len(text) >= 80 else excerpt[:4_000]
+        # Extraction found nothing. A reply that carries section headings
+        # but was rejected as malformed must not become the persisted
+        # summary: keep the verbatim excerpt instead. Plain unheaded
+        # prose stays on the >=80-char substantive fallback (a weaker
+        # model that summarized without following the format); short
+        # filler/refusals get the excerpt too — the prefix is never
+        # lost to an "I don't know" reply.
+        if re.search(r"^##\s+", text, re.MULTILINE):
+            summary = excerpt[:4_000]
+        else:
+            summary = text if len(text) >= 80 else excerpt[:4_000]
     return summary[:_SUMMARY_MAX_CHARS]
 
 
 def _extract_summary(text: str) -> str:
-    """Pull the `summary` string out of a possibly-fenced JSON reply;
-    empty string when the reply carries none."""
+    """Pull the summary out of a model reply: the raw 8-section markdown
+    document (the #563 shape) or a JSON envelope; "" when neither is
+    recognized (the caller then substitutes excerpt/prose fallbacks).
+
+    Any reply carrying a ## section heading is treated as the sectioned
+    document — including one that leads with a JSON blob: sections after
+    {"summary": ...} are newer content and must not be dropped. A
+    degenerate headed reply (a heading but too little content) returns ""
+    so the caller keeps the excerpt. The JSON path fires only for
+    envelope-style replies with no headings anywhere — the whole reply
+    is the object, optionally fenced. Shape is requested, not
+    gate-kept: unheaded prose is the caller's fallback, not an error."""
     if not text:
         return ""
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
+
+    def _markdown_doc() -> str:
+        """The sectioned document (from the first ## heading on), or ""
+        when the headed content is too short to be a real summary."""
+        h = re.search(r"^##\s+", text, re.MULTILINE)
+        if not h:
+            return ""
+        doc = text[h.start():].strip()
+        return doc if len(doc) >= 80 else ""
+
+    if re.search(r"^##\s+", text, re.MULTILINE):
+        # Headed reply: always the sectioned document, even when a JSON
+        # blob precedes it.
+        return _markdown_doc()
+    stripped = re.sub(r"^```[a-zA-Z]*\s*", "", text.strip())
+    if not stripped.startswith("{"):
+        # Unheaded, non-envelope: caller applies the prose fallback.
         return ""
-    try:
-        parsed = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return ""
-    if isinstance(parsed, dict):
-        s = parsed.get("summary")
-        if isinstance(s, str) and s.strip():
-            return s.strip()
+    # JSON envelope (pre-#563 format) — extract only when it parses.
+    m = re.search(r"\{.*\}", stripped, re.DOTALL)
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            s = parsed.get("summary")
+            if isinstance(s, str) and s.strip():
+                return s.strip()
+    # Unparseable envelope or missing summary key: nothing recognized.
     return ""
 
 
