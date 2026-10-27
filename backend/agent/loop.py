@@ -2280,6 +2280,14 @@ async def _run_agent_claimed(
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
     # issue #111), then the legacy per-provider value, then the global.
     max_steps = _resolve_max_steps(load_config(), model_override)
+    # Mid-turn compaction re-check: at most one fold per turn (adr/0004's
+    # monotonic gate — the turn-start pass plus this boundary check share it).
+    _turn_compacted = False
+    # Image-strip state for the mid-turn rebuild: the note the proactive
+    # vision probe / #428 retry merged into the head (None = no strip ran).
+    # On a mid-turn fold the head is rebuilt from the live snapshot, so the
+    # replayed tail must be re-stripped with the same note re-applied.
+    _image_strip_note: str | None = None
     
     # Issue #557: disk-backed prompt cache (llama.cpp slot save/restore).
     # Probe/restore BEFORE the turn's first model call - never mid-run -
@@ -2320,6 +2328,7 @@ async def _run_agent_claimed(
             model_client.merge_note_into_first_system(
                 messages, model_client.IMAGE_NOVISION_NOTE
             )
+            _image_strip_note = model_client.IMAGE_NOVISION_NOTE
             yield _ndjson({
                 "type": "note",
                 "text": (
@@ -2333,6 +2342,9 @@ async def _run_agent_claimed(
                 _vcfg["api_base"], _vcfg["model"], _n_stripped,
             )
 
+    # Bound before the loop: the mid-turn compaction check at the top of
+    # step 0 reads it before _model_step assigns the per-step dict.
+    state: dict = {}
     try:
         for _step in range(max_steps) if max_steps > 0 else itertools.count():
             if cancel_ev.is_set():
@@ -2345,6 +2357,129 @@ async def _run_agent_claimed(
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
+            # Mid-turn trigger re-check: the turn-start pass only saw the
+            # prompt as of the previous turn's last call. A long agentic
+            # turn keeps appending tool results and can cross the trigger
+            # (and the window itself) on an in-turn call — the live shape
+            # was 65,159 measured on call N, then a hard 400 on call N+1
+            # before any turn-start pass could ever see it. Re-consult the
+            # SAME trigger with the call's just-measured prompt_tokens and
+            # fold through the normal compaction pass; the running context
+            # swaps to summary + fresh tail for every later call this turn.
+            if (
+                include_history
+                and not _turn_compacted
+                and state.get("usage")
+            ):
+                from backend.agent import compaction as compaction_mod
+
+                _measured = (state["usage"] or {}).get("prompt_tokens")
+                # Same model resolution as the turn-start pass (and the
+                # usage persist below): the override, else the GLOBAL
+                # model — a chat without an override must consult its
+                # model's own model_compaction entry, not fall back to
+                # the global block. Bare ids stay bare (the entry keys
+                # are bare); scoped ids reduce to their model part.
+                _model_id = model_override or load_config().get("model") or None
+                _bare = _model_id.partition("::")[2] if _model_id else ""
+                _window = await compaction_mod.resolve_window(
+                    _model_id, load_config()
+                )
+                if compaction_mod.should_compact(
+                    _measured, _window, _bare or None
+                ):
+                    _cevents = []
+                    for _cev in await _maybe_compact(
+                        conversation_id,
+                        model_id=_model_id,
+                        cancel_ev=cancel_ev,
+                    ):
+                        _cevents.append(_cev)
+                        yield _ndjson(_cev)
+                    if _cevents:
+                        # One mid-turn ATTEMPT per turn once the pass has a
+                        # real outcome (folded or failed). A silent skip
+                        # (no safe cut yet) stays unlatched: the next step
+                        # boundary rechecks against the grown transcript.
+                        _turn_compacted = True
+                    for _cev in _cevents:
+                        if _cev.get("type") == "compacted":
+                            # Rebuild the running context exactly the way
+                            # the turn-start replay builds it, so the very
+                            # next call of THIS turn matches what the next
+                            # turn would replay:
+                            # - head: snapshot the LIVE first system message
+                            #   (it carries this turn's mid-run merges —
+                            #   invoked skills, load_skill bodies in
+                            #   non-static mode, plan/sandbox notes — not
+                            #   the pristine turn-start system_prompt).
+                            # - summary message via compact_summary_message
+                            #   (user role, strict-template safe).
+                            # - fresh tail via load_history: same
+                            #   _replay_rows rules PLUS the
+                            #   KEEP_RECENT_IMAGES pruning.
+                            # - the persisted "# Loaded skill:" tail re-read
+                            #   from the row (the source of truth — this
+                            #   turn's static-mode load_skill calls already
+                            #   merged into it) at the marker-keyed slot.
+                            _head_snapshot = (
+                                dict(messages[0]) if messages else None
+                            )
+                            _row_now = (
+                                await get_conversation(conversation_id) or {}
+                            )
+                            _persisted_tail = (
+                                str(_row_now.get("persisted_skill_tail") or "")
+                                if _skill_tail_ws_valid(_row_now, workspace)
+                                else ""
+                            )
+                            _ps = await get_prompt_summary(conversation_id)
+                            _through = int(_ps.get("through_message_id") or 0)
+                            messages.clear()
+                            messages.append(
+                                _head_snapshot
+                                or {"role": "system", "content": system_prompt}
+                            )
+                            _cmsg = compact_summary_message(_ps)
+                            if _cmsg is not None:
+                                messages.append(_cmsg)
+                            messages.extend(
+                                await load_history(
+                                    conversation_id, through_message_id=_through
+                                )
+                            )
+                            if _persisted_tail:
+                                _slot = skill_registry.skill_tail_index(messages)
+                                if _slot is None:
+                                    _slot = 1 + (1 if _cmsg is not None else 0)
+                                messages.insert(
+                                    _slot,
+                                    {"role": "user", "content": _persisted_tail},
+                                )
+                            # Preserve this turn's image-strip state: the
+                            # proactive vision probe (or the #428 rejection
+                            # retry) already stripped image parts and noted
+                            # why into the head; messages.clear() threw both
+                            # away. Re-strip the replayed tail and re-apply
+                            # the note so later calls don't resend pixels
+                            # the provider already refused.
+                            if _image_strip_note:
+                                messages, _ = model_client.strip_image_parts(
+                                    messages
+                                )
+                                # The snapshot head already carries the note
+                                # (both strip paths merged it before this
+                                # rebuild) — merge_note appends blindly, so
+                                # only add it when actually missing.
+                                _head0 = messages[0] if messages else None
+                                if not (
+                                    _head0
+                                    and _image_strip_note
+                                    in str(_head0.get("content") or "")
+                                ):
+                                    model_client.merge_note_into_first_system(
+                                        messages, _image_strip_note
+                                    )
             # The retry must wrap the whole stream consumption, not just the
             # chat() call: with stream=True the HTTP request only fires when
             # iteration starts, so a ModelError surfaces at the first chunk.
@@ -2533,6 +2668,7 @@ async def _run_agent_claimed(
                     model_client.merge_note_into_first_system(
                         messages, model_client.IMAGE_REJECTION_NOTE
                     )
+                    _image_strip_note = model_client.IMAGE_REJECTION_NOTE
                     yield _ndjson({
                         "type": "note",
                         "text": (

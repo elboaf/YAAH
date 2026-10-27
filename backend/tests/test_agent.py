@@ -209,6 +209,188 @@ async def collect(agent_gen):
 
 
 @pytest.mark.asyncio
+async def test_midturn_usage_crossing_folds_context_mid_turn(
+    fake_model, tmp_path, monkeypatch
+):
+    """A long agentic turn that crosses the compaction trigger MID-TURN
+    folds before the next model call instead of 400ing at the window.
+
+    Repro of the live failure (conv 1090, "rewiew pr #580"): every turn
+    STARTED under the 60k trigger so the turn-start pass legitimately
+    skipped; the turn's own ~23 calls then grew the prompt past the
+    trigger AND the window and the provider hard-failed. The step loop
+    must re-consult the trigger at the step boundary, fold through the
+    normal compaction pass (persisted prompt state + `compacted` event),
+    and continue on summary + fresh tail — once per turn (adr/0004)."""
+    from backend.db.database import (
+        create_conversation,
+        get_conversation,
+        get_messages,
+        get_prompt_summary,
+        set_conversation_usage,
+    )
+    from backend.agent import compaction as compaction_mod
+
+    # Per-model trigger 60k, window 65k — the live shape (65159 > 60000).
+    cfg = {
+        "enabled": True,
+        "trigger_tokens": 0,
+        "per_model_enabled": True,
+        "per_model_trigger_tokens": 300_000,
+        "model_compaction": {
+            "x2.qwen36-reap50-Q4_K_M-imat": {
+                "enabled": True,
+                "trigger_tokens": 60_000,
+            }
+        },
+        "model": "",
+    }
+    monkeypatch.setattr(compaction_mod, "_compaction_cfg", lambda: cfg)
+    # The fixture transcript is tiny; shrink the keep budget and tail floor
+    # so the cut math has a legal boundary (the live session had 176 rows —
+    # boundary shape is covered by the find_cut_index unit tests).
+    monkeypatch.setattr(compaction_mod, "COMPACTION_KEEP_FRACTION", 0.001)
+    monkeypatch.setattr(compaction_mod, "COMPACTION_MIN_TAIL_MESSAGES", 2)
+    # Same contract as test_compaction.py: the summarizer model call is
+    # stubbed; this test is about the loop's trigger re-check + wiring.
+    async def fake_summarize(cut_messages, model_override="", cancel_event=None):
+        return f"SYNTHETIC SUMMARY of {len(cut_messages)} messages"
+
+    monkeypatch.setattr(compaction_mod, "summarize_messages", fake_summarize)
+
+    async def fake_resolve_window(model, cfg=None):
+        return 65_000
+
+    monkeypatch.setattr(compaction_mod, "resolve_window", fake_resolve_window)
+
+    # The scoped model override needs its owning provider in config.
+    _fcfg = {
+        "providers": {
+            "llamacpp": {
+                "api_base": "http://test-router/v1",
+                "api_key": "",
+                "model": "x2.qwen36-reap50-Q4_K_M-imat",
+            }
+        },
+        "active_provider": "llamacpp",
+        "model": "llamacpp::x2.qwen36-reap50-Q4_K_M-imat",
+        "api_base": "http://test-router/v1",
+        "api_key": "",
+    }
+    monkeypatch.setattr(loop, "load_config", lambda: _fcfg)
+    monkeypatch.setattr(loop.model_client, "load_config", lambda: _fcfg)
+    monkeypatch.setattr(compaction_mod, "load_config", lambda: _fcfg)
+    # slotcache (and any function-local `from ...config import load_config`)
+    # resolves the attribute at call time on the config module itself.
+    import backend.agent.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda: _fcfg)
+
+    async def no_title(*_args):
+        return None
+
+    monkeypatch.setattr(loop, "_generate_conversation_title", no_title)
+    # The scripted tools call real bash: keep the access gate out of the way.
+    monkeypatch.setattr(loop, "current_access_mode", lambda: "full")
+
+    # The scoped-override call path passes model=/effort= kwargs the
+    # fake_model fixture's fake does not accept: re-patch with the full
+    # signature, consuming the same script queue. Every call's context is
+    # captured so the assertions can pin the post-fold rebuild shape.
+    captured: list[list[dict]] = []
+
+    async def fake_chat(messages, tools=None, stream=True, model="", effort=None):
+        captured.append([dict(m) for m in messages])
+        events = fake_model.pop(0) if fake_model else [{"type": "finish"}]
+        return FakeStream(events)
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+
+    # Real add_message for the loop's transcript writes; the compaction
+    # pass then sees actual transcript rows (test DB is throwaway).
+    real_add_message = loop.add_message
+
+    cid = await create_conversation("midturn fold", model="llamacpp::x2.qwen36-reap50-Q4_K_M-imat")
+
+    # Turn 1: a small exchange, measured 50k (under the 60k trigger — the
+    # turn-start pass must skip, matching the live session's last clean turn).
+    fake_model.append([{"type": "content", "text": "quick answer."}, {"type": "finish"}])
+    events1 = await collect(loop.run_agent(cid, "start something", str(tmp_path)))
+    assert events1[-1]["type"] == "done"
+    assert await get_conversation(cid) is not None
+    await real_add_message(
+        cid, "user", "next instruction, this is a long running agentic session"
+    )
+    await set_conversation_usage(cid, 50_000, "llamacpp::x2.qwen36-reap50-Q4_K_M-imat")
+
+    # Turn 2: the model loops on tools. Its scripted usage climbs: first
+    # two calls under the trigger, third at 65159 (over trigger, under the
+    # 65000 window? no — over BOTH, as live). The step boundary after the
+    # second tool result must fold before call three is attempted.
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "echo one"}'},
+        }]},
+        {"type": "usage", "usage": {"prompt_tokens": 52_000}},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c2", "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "echo two"}'},
+        }]},
+        {"type": "usage", "usage": {"prompt_tokens": 65_159}},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([{"type": "content", "text": "folded and continuing."}, {"type": "finish"}])
+
+    events2 = await collect(
+        loop.run_agent(
+            cid, "keep going", str(tmp_path),
+            model_override="llamacpp::x2.qwen36-reap50-Q4_K_M-imat",
+        )
+    )
+
+    kinds = [e["type"] for e in events2]
+    assert "error" not in kinds, f"turn errored: {events2[0]}"
+    assert "compacted" in kinds, f"no mid-turn fold; events: {kinds}"
+    compaction_count = kinds.count("compacted")
+    assert compaction_count == 1, f"expected exactly one fold, got {compaction_count}"
+
+    # Prompt state was persisted (watermark + summary), transcript intact.
+    state = await get_prompt_summary(cid)
+    assert state["summary"].startswith("SYNTHETIC SUMMARY")
+    assert state["through_message_id"] > 0
+    rows = await get_messages(cid)
+    assert state["through_message_id"] <= rows[-1]["id"]
+
+    # The turn completed instead of dying at the provider's ceiling.
+    assert events2[-1]["type"] == "done"
+    assert any(
+        e["type"] == "text" and "folded and continuing" in e["text"] for e in events2
+    )
+
+    # The rebuild actually reshaped the running context: the final call
+    # (after the fold) carries the user-role compaction summary at [1],
+    # the pre-watermark rows are gone, and the turn's live end (the c2
+    # call + its tool result) survived. Deletes this block -> these fail.
+    assert len(captured) == 4
+    # captured[0] is turn 1's single call; captured[1..3] are turn 2's.
+    assert any(
+        m.get("role") == "user" and "start something" in str(m.get("content"))
+        for m in captured[1]
+    ), "pre-fold turn-2 call should replay the full history"
+    assert captured[-1][1]["role"] == "user"
+    assert "SYNTHETIC SUMMARY" in str(captured[-1][1]["content"])
+    assert not any(
+        "start something" in str(m.get("content")) for m in captured[-1]
+    ), "folded row must be absent from the post-fold context"
+    assert any("echo two" in str(m.get("tool_calls") or "") for m in captured[-1])
+    assert any("two" in str(m.get("content")) for m in captured[-1])
+
+
+@pytest.mark.asyncio
 async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path, monkeypatch):
     from backend.db.database import create_conversation, get_messages
 
