@@ -11284,8 +11284,7 @@ export function Composer() {
     // unknown names stay literal text, and the token text rides in the body
     // verbatim so the model sees the in-context usage. Menu chips are just
     // the rendered view of these tokens — there is no separate chip list.
-    const knownSkillNames = new Set(skills.map((s) => s.name))
-    const invokedSkills = opts?.skills ?? deriveInvokedSkills(displayText, knownSkillNames)
+    const invokedSkills = opts?.skills ?? deriveInvokedSkills(displayText, knownSkillNamesSet)
     // Captured draft: if the turn fails before the agent answers, the
     // composer gets it back — a failed send must not cost the prompt.
     const draft = { input, attachments, images }
@@ -11511,7 +11510,7 @@ export function Composer() {
         ? `[${attachments.length} attachment${attachments.length === 1 ? '' : 's'}]`
         : text
     const skillNames = fromComposer
-      ? deriveInvokedSkills(displayText, new Set(skills.map((s) => s.name)))
+      ? deriveInvokedSkills(displayText, knownSkillNamesSet)
       : []
     if (fromComposer && images.length > 4) {
       useAgent.getState().pushToast({
