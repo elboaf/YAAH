@@ -295,8 +295,12 @@ async def test_midturn_usage_crossing_folds_context_mid_turn(
 
     # The scoped-override call path passes model=/effort= kwargs the
     # fake_model fixture's fake does not accept: re-patch with the full
-    # signature, consuming the same script queue.
+    # signature, consuming the same script queue. Every call's context is
+    # captured so the assertions can pin the post-fold rebuild shape.
+    captured: list[list[dict]] = []
+
     async def fake_chat(messages, tools=None, stream=True, model="", effort=None):
+        captured.append([dict(m) for m in messages])
         events = fake_model.pop(0) if fake_model else [{"type": "finish"}]
         return FakeStream(events)
 
@@ -366,6 +370,24 @@ async def test_midturn_usage_crossing_folds_context_mid_turn(
     assert any(
         e["type"] == "text" and "folded and continuing" in e["text"] for e in events2
     )
+
+    # The rebuild actually reshaped the running context: the final call
+    # (after the fold) carries the user-role compaction summary at [1],
+    # the pre-watermark rows are gone, and the turn's live end (the c2
+    # call + its tool result) survived. Deletes this block -> these fail.
+    assert len(captured) == 4
+    # captured[0] is turn 1's single call; captured[1..3] are turn 2's.
+    assert any(
+        m.get("role") == "user" and "start something" in str(m.get("content"))
+        for m in captured[1]
+    ), "pre-fold turn-2 call should replay the full history"
+    assert captured[-1][1]["role"] == "user"
+    assert "SYNTHETIC SUMMARY" in str(captured[-1][1]["content"])
+    assert not any(
+        "start something" in str(m.get("content")) for m in captured[-1]
+    ), "folded row must be absent from the post-fold context"
+    assert any("echo two" in str(m.get("tool_calls") or "") for m in captured[-1])
+    assert any("two" in str(m.get("content")) for m in captured[-1])
 
 
 @pytest.mark.asyncio
