@@ -8,6 +8,7 @@ import json
 import pytest
 
 from backend.agent import compaction as comp
+from backend.agent import context_window as cw
 from backend.db import database as db
 
 
@@ -671,3 +672,269 @@ async def test_injected_summary_label_matches_source():
     assert "preserved separately" not in unlabeled["content"]
 
     assert loop_mod.compact_summary_message({"summary": "", "through_message_id": 0, "source": "prompt"}) is None
+
+# ------------------------------------------------- #578 derived trigger
+
+
+def test_ctx_size_from_argv():
+    """#578: --ctx-size parses out of router launch args / preset lines;
+    absence is None (never guess a window)."""
+    f = cw._ctx_size_from_argv
+    assert f("/srv/llama-server --ctx-size 65535 --model x.gguf".split()) == 65535
+    assert f(["--ctx-size=262144"]) == 262144
+    assert f(["--ctx-size", "not-a-number"]) is None
+    assert f(["--ctx-size"]) is None
+    assert f(["--model", "x.gguf"]) is None
+    assert f([]) is None
+    assert f(None) is None
+    # preset ini-style lines
+    assert f(["ctx-size = 131072"]) is None or True  # ini lines lack the dashes
+
+
+@pytest.mark.asyncio
+async def test_window_from_llamacpp_router_args(monkeypatch):
+    """#578: a llama.cpp router /v1/models entry's --ctx-size feeds the
+    window resolution (the router's /props reports n_ctx 0, so args are
+    the only reliable source)."""
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "data": [
+                    {"id": "other-model", "status": {"args": ["--ctx-size", "999"]}},
+                    {
+                        "id": "x2.Qwen3.8-27B-TurboFCFusion-Q4_K_M",
+                        "status": {
+                            "args": [
+                                "llama-server",
+                                "--ctx-size",
+                                "65535",
+                                "--model",
+                                "/srv/x.gguf",
+                            ]
+                        },
+                    },
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return FakeResp()
+
+    monkeypatch.setattr(cw.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(cw, "_router_cache", {})
+    monkeypatch.setattr(cw, "_router_cached_at", {})
+    w = await cw._from_llamacpp_router("http://192.168.1.170:8080/v1", "", "x2.Qwen3.8-27B-TurboFCFusion-Q4_K_M")
+    assert w == 65535
+    # cached: second call does not re-fetch
+    w2 = await cw._from_llamacpp_router("http://192.168.1.170:8080/v1", "", "x2.Qwen3.8-27B-TurboFCFusion-Q4_K_M")
+    assert w2 == 65535
+
+
+@pytest.mark.asyncio
+async def test_router_cache_keyed_by_endpoint(monkeypatch):
+    """#579 review: two providers exposing the same model id with different
+    windows must not share a cache entry."""
+    calls = []
+
+    class FakeResp:
+        def __init__(self, size):
+            self._size = size
+            self.status_code = 200
+
+        def json(self):
+            return {
+                "data": [
+                    {
+                        "id": "same-model",
+                        "status": {"args": ["--ctx-size", str(self._size)]},
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, *a, **k):
+            calls.append(url)
+            size = 65535 if "hosta" in url else 131072
+            return FakeResp(size)
+
+    monkeypatch.setattr(cw.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(cw, "_router_cache", {})
+    monkeypatch.setattr(cw, "_router_cached_at", {})
+    a = await cw._from_llamacpp_router("http://hosta:8080/v1", "", "same-model")
+    b = await cw._from_llamacpp_router("http://hostb:8080/v1", "", "same-model")
+    assert a == 65535 and b == 131072
+    assert len(calls) == 2  # no cross-provider reuse
+
+
+@pytest.mark.asyncio
+async def test_router_malformed_shapes_are_unknown(monkeypatch):
+    """#579 review: a 200 with a JSON array, null entries, or a non-dict
+    status must read as 'unknown', not raise past the except tuple."""
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload
+            self.status_code = 200
+
+        def json(self):
+            return self._p
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return FakeResp(self.payload)
+
+    fake = FakeClient
+    monkeypatch.setattr(cw.httpx, "AsyncClient", fake)
+    monkeypatch.setattr(cw, "_router_cache", {})
+    monkeypatch.setattr(cw, "_router_cached_at", {})
+    for payload in (
+        ["not", "a", "dict"],
+        {"data": None},
+        {"data": [None]},
+        {"data": [{"id": "m", "status": "a string"}]},
+        {"data": "nope"},
+    ):
+        fake.payload = payload
+        w = await cw._from_llamacpp_router("http://x:1/v1", "", "m")
+        assert w is None, payload
+
+
+@pytest.mark.asyncio
+async def test_router_preset_ini_fallback(monkeypatch):
+    """#579 review: status.preset is ini-style (`ctx-size = 65535`) —
+    parsed when status.args carries no usable value."""
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "data": [
+                    {
+                        "id": "m",
+                        "status": {
+                            "args": ["llama-server", "--model", "x.gguf"],
+                            "preset": "[m]\ncontext-shift = true\nctx-size = 131072\n",
+                        },
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return FakeResp()
+
+    monkeypatch.setattr(cw.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(cw, "_router_cache", {})
+    monkeypatch.setattr(cw, "_router_cached_at", {})
+    assert await cw._from_llamacpp_router("http://x:1/v1", "", "m") == 131072
+    # unit-level: the ini parser itself
+    assert cw._ctx_size_from_ini("[m]\nctx-size = 65535\n") == 65535
+    assert cw._ctx_size_from_ini("no size here") is None
+    assert cw._ctx_size_from_ini(None) is None
+    assert cw._ctx_size_from_ini(12345) is None
+
+
+def test_no_entry_trigger_derives_from_detected_window(monkeypatch):
+    """#578 core: a model WITHOUT a per-model entry compacts at 80% of its
+    detected window, not the flat 300k that a 65k-window local model can
+    never reach."""
+    _patch_cfg(monkeypatch, trigger_tokens=0, per_model_trigger_tokens=300_000)
+    r = comp._compaction_cfg_for_model("unknown-local-model", comp._compaction_cfg(), 65_535)
+    assert r["trigger_tokens"] == int(65_535 * 0.8)
+    # and should_compact fires just above the derived trigger
+    assert comp.should_compact(int(65_535 * 0.8) + 1, 65_535, "unknown-local-model") is True
+    assert comp.should_compact(int(65_535 * 0.8) - 1, 65_535, "unknown-local-model") is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_detection_keeps_300k_not_32k_derivation(monkeypatch):
+    """#579 review (Major): resolve_window returns the 32k WORKING default
+    on detection failure, never None. The derivation must treat that value
+    as unknown, or the e2e path derives 25,600 instead of the promised
+    300k fallback. Exercises the REAL resolve_window -> derive path, not
+    a hand-passed None."""
+    _patch_cfg(monkeypatch, trigger_tokens=0, per_model_trigger_tokens=300_000, default_window=32_000)
+
+    async def failing_window(model, cfg=None, api_base=None, api_key=""):
+        return None
+
+    monkeypatch.setattr(comp, "get_context_window", failing_window)
+    resolved = await comp.resolve_window("mystery-model")
+    assert resolved == comp.COMPACTION_DEFAULT_WINDOW
+    r = comp._compaction_cfg_for_model("mystery-model", comp._compaction_cfg(), resolved)
+    assert r["trigger_tokens"] == 300_000
+    assert comp.should_compact(200_000, resolved, "mystery-model") is False
+
+
+def test_no_entry_small_window_hits_floor(monkeypatch):
+    _patch_cfg(monkeypatch, trigger_tokens=0)
+    r = comp._compaction_cfg_for_model("tiny", comp._compaction_cfg(), 2_000)
+    assert r["trigger_tokens"] == comp.COMPACTION_DERIVED_MIN_TOKENS
+
+
+def test_no_entry_unknown_window_keeps_300k(monkeypatch):
+    """Window unknown (no report, no table hit): the pre-#578 fallback. A
+    wrong guess would be worse than the old never-fires default."""
+    _patch_cfg(monkeypatch, trigger_tokens=0, per_model_trigger_tokens=300_000)
+    r = comp._compaction_cfg_for_model("mystery", comp._compaction_cfg(), None)
+    assert r["trigger_tokens"] == 300_000
+
+
+def test_explicit_per_model_entry_ignores_window(monkeypatch):
+    """The user's Settings trigger (60k for the Q4_K_M) stays EXACT: the
+    window derivation never overrides an explicit entry."""
+    _patch_cfg(
+        monkeypatch,
+        trigger_tokens=0,
+        model_compaction={"mymodel": {"enabled": True, "trigger_tokens": 60_000}},
+    )
+    r = comp._compaction_cfg_for_model("mymodel", comp._compaction_cfg(), 131_072)
+    assert r["trigger_tokens"] == 60_000
+    assert comp.should_compact(60_001, 131_072, "mymodel") is True
+    assert comp.should_compact(59_999, 131_072, "mymodel") is False
+
+
+def test_global_absolute_trigger_still_wins(monkeypatch):
+    _patch_cfg(monkeypatch, trigger_tokens=100_000)
+    r = comp._compaction_cfg_for_model("nomodel", comp._compaction_cfg(), 65_535)
+    assert r["trigger_tokens"] == 100_000

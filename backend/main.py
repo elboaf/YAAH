@@ -469,20 +469,26 @@ async def api_conversation_context(conversation_id: int):
 
         raise HTTPException(status_code=404, detail="conversation not found")
     from backend.agent.context_window import get_context_window
+    from backend.agent.compaction import split_model_route
 
     cfg = load_config()
     # The chip resolves against the model THIS chat actually uses (#51) —
     # the conversation's pinned model, falling back to the global default
-    # (pre-upgrade rows). "provider::model" pins strip to the bare id: the
-    # window depends on the model, not the provider routing.
+    # (pre-upgrade rows). The window depends on the model, but the probe
+    # rides the OWNING provider's endpoint (#578) — a pinned chat on a
+    # non-active provider must query that provider's catalog, not the
+    # active one's.
     model = conv.get("model") or cfg.get("model") or None
-    if model and "::" in model:
-        model = model.partition("::")[2] or model
+    bare, api_base, api_key = split_model_route(model or "", cfg) if model else ("", "", "")
     return {
         "context_tokens": conv.get("context_tokens"),
         "context_model": conv.get("context_model"),
-        "model": model,
-        "context_window": await get_context_window(model, cfg),
+        "model": bare or model,
+        "context_window": (
+            await get_context_window(bare, cfg, api_base=api_base, api_key=api_key)
+            if bare
+            else None
+        ),
     }
 
 
@@ -490,14 +496,26 @@ async def api_conversation_context(conversation_id: int):
 async def api_context_window(model: str = ""):
     """Resolved context window for one model id (Settings pre-fills the
     override field with it). Resolution: per-model setting -> provider
-    report -> built-in table -> null."""
+    report -> llama.cpp router launch args -> built-in table -> null.
+    "provider::model" probes the OWNING provider's endpoint (#578) —
+    the Settings editor lists every provider's models, and probing the
+    active provider's base for another provider's model reports the
+    wrong catalog (or nothing)."""
     from backend.agent.context_window import get_context_window
+    from backend.agent.compaction import split_model_route
 
     cfg = load_config()
-    bare = model.partition("::")[2] if "::" in model else model
+    if not model:
+        return {"model": "", "context_window": None}
+    if "::" in model:
+        bare, api_base, api_key = split_model_route(model, cfg)
+    else:
+        bare, api_base, api_key = model, cfg.get("api_base") or "", cfg.get("api_key") or ""
     return {
         "model": bare,
-        "context_window": await get_context_window(bare, cfg) if bare else None,
+        "context_window": await get_context_window(
+            bare, cfg, api_base=api_base, api_key=api_key
+        ),
     }
 
 

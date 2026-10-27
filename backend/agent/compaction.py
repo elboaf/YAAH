@@ -24,6 +24,15 @@ COMPACTION_ENABLED = True
 # Purely a token threshold — no fraction-of-window component. The per-model
 # Settings editor overrides this per model (300k shown as the default).
 COMPACTION_TRIGGER_TOKENS = 0
+# Models WITHOUT a per-model Settings entry: the trigger is this fraction
+# of the DETECTED context window (#578) — the shipped 300k absolute token
+# default never fires for a 65k-window local model, so those conversations
+# grew unbounded. Explicit per-model entries (and a positive global
+# compaction.trigger_tokens) keep their exact absolute semantics.
+COMPACTION_WINDOW_FRACTION = 0.80
+# Floor for the derived trigger so a tiny detected window cannot make
+# compaction churn on every other turn.
+COMPACTION_DERIVED_MIN_TOKENS = 8_000
 # Compact DOWN to this fraction of the window: the recent tail stays
 # verbatim, the summarized prefix carries the rest.
 COMPACTION_KEEP_FRACTION = 0.40
@@ -75,9 +84,21 @@ def _compaction_cfg() -> dict:
     return cfg
 
 
-def _compaction_cfg_for_model(bare_model: str, ccfg: dict) -> dict:
+def _compaction_cfg_for_model(bare_model: str, ccfg: dict, context_window: int | None = None) -> dict:
     """Compaction settings for one bare model id: the per-model entry
-    (config.model_compaction) when present, else the shipped defaults."""
+    (config.model_compaction) when present, else the shipped defaults.
+
+    `context_window` (when the caller already resolved it) only affects
+    the NO-ENTRY fallback: instead of the flat 300k default — which can
+    exceed a local model's real window and so never fire (#578) — the
+    trigger derives from the window (COMPACTION_WINDOW_FRACTION). An
+    explicit per-model entry keeps its exact absolute semantics.
+
+    COMPACTION_DEFAULT_WINDOW is resolve_window's WORKING default for cut
+    math, not a detection: passing it (like None/0) means unknown, so an
+    undetected model keeps the 300k trigger instead of deriving from the
+    32k guess (CodeRabbit round on PR #579).
+    """
     entry = (ccfg.get("model_compaction") or {}).get(bare_model)
     if isinstance(entry, dict):
         cfg = dict(ccfg)
@@ -90,16 +111,25 @@ def _compaction_cfg_for_model(bare_model: str, ccfg: dict) -> dict:
     cfg = dict(ccfg)
     cfg["enabled"] = bool(ccfg.get("per_model_enabled", True))
     # No per-model entry: a configured global trigger_tokens (> 0) applies;
-    # otherwise the shipped default (300k).
+    # otherwise the trigger derives from the model's detected window (or,
+    # when the window is unknown, the shipped 300k default — same as
+    # before #578).
     try:
         cfg["trigger_tokens"] = int(ccfg.get("trigger_tokens") or 0)
     except (TypeError, ValueError):
         cfg["trigger_tokens"] = 0
     if cfg["trigger_tokens"] <= 0:
-        try:
-            cfg["trigger_tokens"] = max(int(ccfg.get("per_model_trigger_tokens") or 0), 0)
-        except (TypeError, ValueError):
-            cfg["trigger_tokens"] = 300_000
+        derived = 0
+        if context_window and context_window != COMPACTION_DEFAULT_WINDOW:
+            derived = int(context_window * COMPACTION_WINDOW_FRACTION)
+            derived = max(derived, COMPACTION_DERIVED_MIN_TOKENS)
+        if derived > 0:
+            cfg["trigger_tokens"] = derived
+        else:
+            try:
+                cfg["trigger_tokens"] = max(int(ccfg.get("per_model_trigger_tokens") or 0), 0)
+            except (TypeError, ValueError):
+                cfg["trigger_tokens"] = 300_000
     return cfg
 
 
@@ -138,15 +168,32 @@ def _content_text(content) -> str:
     return str(content)
 
 
+def split_model_route(model: str, cfg: dict) -> tuple[str, str, str]:
+    """(bare model id, api_base, api_key) for a model id: "provider::model"
+    probes the OWNING provider's endpoint; a bare id probes the active
+    provider. Unknown provider names degrade to the active provider's
+    endpoint (the pre-#578 behavior)."""
+    if "::" in model:
+        provider, bare = model.split("::", 1)
+        p = (cfg.get("providers") or {}).get(provider)
+        if p:
+            return bare, p.get("api_base") or "", p.get("api_key") or ""
+        return bare, cfg.get("api_base") or "", cfg.get("api_key") or ""
+    return model, cfg.get("api_base") or "", cfg.get("api_key") or ""
+
+
 async def resolve_window(model: str | None, cfg: dict | None = None) -> int:
     """Resolved context window for the model, falling back to the
     configured default when nothing better exists. Accepts
-    "provider::model" overrides and strips the provider prefix (the
-    window is a property of the model, not the route)."""
+    "provider::model" overrides: the window is a property of the model,
+    but the probe (router /v1/models, Ollama /api/show) must hit the
+    OWNING provider's base, not whichever provider happens to be active."""
     ccfg = _compaction_cfg()
     if model:
-        bare = model.partition("::")[2] if "::" in model else model
-        window = await get_context_window(bare, cfg or load_config())
+        bare, api_base, api_key = split_model_route(model, cfg or load_config())
+        window = await get_context_window(
+            bare, cfg or load_config(), api_base=api_base, api_key=api_key
+        )
         if window:
             return int(window)
     return COMPACTION_DEFAULT_WINDOW
@@ -157,14 +204,20 @@ def should_compact(context_tokens: int | None, context_window: int, model: str |
 
     Purely a token value (no fraction-of-window component): compaction
     fires when measured tokens exceed trigger_tokens. `context_window`
-    only guards the call (0 = unknown window, don't fire).
+    guards the call (0 = unknown window, don't fire) AND feeds the
+    no-entry trigger derivation (80% of the window, #578) — so an
+    unconfigured model with a detected window compacts at a sane
+    fraction of what it can actually hold, instead of at a flat 300k
+    it can never reach. COMPACTION_DEFAULT_WINDOW counts as unknown for
+    the derivation (resolve_window's working default is not a detection,
+    CodeRabbit round on PR #579).
 
     `model` (bare id) selects the per-model settings when present;
     without it the global compaction block applies.
     """
     ccfg = _compaction_cfg()
     if model:
-        ccfg = _compaction_cfg_for_model(model, ccfg)
+        ccfg = _compaction_cfg_for_model(model, ccfg, context_window)
     if not ccfg["enabled"] or not context_tokens or not context_window:
         return False
     absolute = int(ccfg.get("trigger_tokens") or 0)
@@ -406,11 +459,14 @@ async def compact_history_for_context(
         cfg_model = cfg.get("model") or ""
         bare = cfg_model.partition("::")[2] if "::" in cfg_model else cfg_model
     # Per-model settings: the model's own entry decides on/off + trigger.
+    # The resolved window feeds the NO-ENTRY trigger fallback (80% of the
+    # detected window instead of the flat 300k default, #578) — resolve it
+    # BEFORE the per-model pass so the derivation can use it.
+    window = model_window or await resolve_window(model_id or cfg.get("model"), cfg)
     if bare:
-        ccfg = _compaction_cfg_for_model(bare, ccfg)
+        ccfg = _compaction_cfg_for_model(bare, ccfg, window)
         if not ccfg["enabled"]:
             return None
-    window = model_window or await resolve_window(model_id or cfg.get("model"), cfg)
     measured = conv.get("context_tokens")
     if not should_compact(measured, window, bare or None):
         return None
