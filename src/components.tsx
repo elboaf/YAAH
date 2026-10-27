@@ -766,7 +766,7 @@ function toolGlyphColor(name: string): string {
 function pickArg(obj: Record<string, unknown>, ...keys: string[]): string | undefined {
   for (const k of keys) {
     const v = obj[k]
-    if (typeof v === 'string' && v) return v
+    if (typeof v === 'string' && v && v.trim()) return v
   }
   return undefined
 }
