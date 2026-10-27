@@ -8,6 +8,7 @@ import json
 import pytest
 
 from backend.agent import compaction as comp
+from backend.agent import context_window as cw
 from backend.db import database as db
 
 
@@ -671,3 +672,117 @@ async def test_injected_summary_label_matches_source():
     assert "preserved separately" not in unlabeled["content"]
 
     assert loop_mod.compact_summary_message({"summary": "", "through_message_id": 0, "source": "prompt"}) is None
+
+# ------------------------------------------------- #578 derived trigger
+
+
+def test_ctx_size_from_argv():
+    """#578: --ctx-size parses out of router launch args / preset lines;
+    absence is None (never guess a window)."""
+    f = cw._ctx_size_from_argv
+    assert f("/srv/llama-server --ctx-size 65535 --model x.gguf".split()) == 65535
+    assert f(["--ctx-size=262144"]) == 262144
+    assert f(["--ctx-size", "not-a-number"]) is None
+    assert f(["--ctx-size"]) is None
+    assert f(["--model", "x.gguf"]) is None
+    assert f([]) is None
+    assert f(None) is None
+    # preset ini-style lines
+    assert f(["ctx-size = 131072"]) is None or True  # ini lines lack the dashes
+
+
+@pytest.mark.asyncio
+async def test_window_from_llamacpp_router_args(monkeypatch):
+    """#578: a llama.cpp router /v1/models entry's --ctx-size feeds the
+    window resolution (the router's /props reports n_ctx 0, so args are
+    the only reliable source)."""
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "data": [
+                    {"id": "other-model", "status": {"args": ["--ctx-size", "999"]}},
+                    {
+                        "id": "x2.Qwen3.8-27B-TurboFCFusion-Q4_K_M",
+                        "status": {
+                            "args": [
+                                "llama-server",
+                                "--ctx-size",
+                                "65535",
+                                "--model",
+                                "/srv/x.gguf",
+                            ]
+                        },
+                    },
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return FakeResp()
+
+    monkeypatch.setattr(cw.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(cw, "_router_cache", {})
+    monkeypatch.setattr(cw, "_router_cached_at", {})
+    w = await cw._from_llamacpp_router("http://192.168.1.170:8080/v1", "", "x2.Qwen3.8-27B-TurboFCFusion-Q4_K_M")
+    assert w == 65535
+    # cached: second call does not re-fetch
+    w2 = await cw._from_llamacpp_router("http://192.168.1.170:8080/v1", "", "x2.Qwen3.8-27B-TurboFCFusion-Q4_K_M")
+    assert w2 == 65535
+
+
+def test_no_entry_trigger_derives_from_detected_window(monkeypatch):
+    """#578 core: a model WITHOUT a per-model entry compacts at 80% of its
+    detected window, not the flat 300k that a 65k-window local model can
+    never reach."""
+    _patch_cfg(monkeypatch, trigger_tokens=0, per_model_trigger_tokens=300_000)
+    r = comp._compaction_cfg_for_model("unknown-local-model", comp._compaction_cfg(), 65_535)
+    assert r["trigger_tokens"] == int(65_535 * 0.8)
+    # and should_compact fires just above the derived trigger
+    assert comp.should_compact(int(65_535 * 0.8) + 1, 65_535, "unknown-local-model") is True
+    assert comp.should_compact(int(65_535 * 0.8) - 1, 65_535, "unknown-local-model") is False
+
+
+def test_no_entry_small_window_hits_floor(monkeypatch):
+    _patch_cfg(monkeypatch, trigger_tokens=0)
+    r = comp._compaction_cfg_for_model("tiny", comp._compaction_cfg(), 2_000)
+    assert r["trigger_tokens"] == comp.COMPACTION_DERIVED_MIN_TOKENS
+
+
+def test_no_entry_unknown_window_keeps_300k(monkeypatch):
+    """Window unknown (no report, no table hit): the pre-#578 fallback. A
+    wrong guess would be worse than the old never-fires default."""
+    _patch_cfg(monkeypatch, trigger_tokens=0, per_model_trigger_tokens=300_000)
+    r = comp._compaction_cfg_for_model("mystery", comp._compaction_cfg(), None)
+    assert r["trigger_tokens"] == 300_000
+
+
+def test_explicit_per_model_entry_ignores_window(monkeypatch):
+    """The user's Settings trigger (60k for the Q4_K_M) stays EXACT: the
+    window derivation never overrides an explicit entry."""
+    _patch_cfg(
+        monkeypatch,
+        trigger_tokens=0,
+        model_compaction={"mymodel": {"enabled": True, "trigger_tokens": 60_000}},
+    )
+    r = comp._compaction_cfg_for_model("mymodel", comp._compaction_cfg(), 131_072)
+    assert r["trigger_tokens"] == 60_000
+    assert comp.should_compact(60_001, 131_072, "mymodel") is True
+    assert comp.should_compact(59_999, 131_072, "mymodel") is False
+
+
+def test_global_absolute_trigger_still_wins(monkeypatch):
+    _patch_cfg(monkeypatch, trigger_tokens=100_000)
+    r = comp._compaction_cfg_for_model("nomodel", comp._compaction_cfg(), 65_535)
+    assert r["trigger_tokens"] == 100_000

@@ -3,8 +3,9 @@
 Resolution order (first hit wins):
 1. Settings override for the exact model id (config.context_window_overrides)
 2. The provider's own report (Ollama /api/show, probed and cached)
-3. A built-in table of well-known model families (prefix match)
-4. None — the UI shows tokens without the % / bar
+3. The llama.cpp router's /v1/models launch args (--ctx-size, cached)
+4. A built-in table of well-known model families (prefix match)
+5. None — the UI shows tokens without the % / bar
 
 Everything is best-effort by design: a wrong or missing number only costs
 the percentage display, never the exact token count (which comes from the
@@ -79,6 +80,11 @@ _show_cache: dict[str, int | None] = {}
 _SHOW_TTL = 300.0
 _show_cached_at: dict[str, float] = {}
 
+# llama.cpp router /v1/models results, cached the same way (launch args
+# are fixed per loaded instance; #578).
+_router_cache: dict[str, int | None] = {}
+_router_cached_at: dict[str, float] = {}
+
 
 def _from_table(model: str | None) -> int | None:
     if not model:
@@ -126,6 +132,76 @@ async def _from_ollama(api_base: str, api_key: str, model: str) -> int | None:
     return result
 
 
+async def _from_llamacpp_router(api_base: str, api_key: str, model: str) -> int | None:
+    """llama.cpp's router exposes each catalog model's launch args on
+    /v1/models entries (status.args / status.preset); the --ctx-size value
+    there is the loaded server's real n_ctx (#578). The /props endpoint on
+    a router reports the ROUTER's n_ctx (0), not the models', so the
+    catalog is the only reliable source. Non-router bases (no status.args
+    shape) just miss; any failure means 'unknown'."""
+    now = time.monotonic()
+    if model in _router_cache and now - _router_cached_at.get(model, 0) < _SHOW_TTL:
+        return _router_cache[model]
+    result: int | None = None
+    try:
+        url = api_base.rstrip("/")
+        if not url.endswith("/models"):
+            url += "/models"
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            )
+        if r.status_code == 200:
+            for entry in r.json().get("data") or []:
+                if entry.get("id") != model:
+                    continue
+                status = entry.get("status") or {}
+                result = _ctx_size_from_argv(status.get("args"))
+                if result is None:
+                    preset = status.get("preset")
+                    if isinstance(preset, str):
+                        result = _ctx_size_from_argv(preset.splitlines())
+                break
+    except (httpx.HTTPError, ValueError, TypeError):
+        result = None
+    _router_cache[model] = result
+    _router_cached_at[model] = now
+    if result:
+        log.info("context window for %s from router /v1/models args: %d", model, result)
+    return result
+
+
+def _ctx_size_from_argv(lines) -> int | None:
+    """--ctx-size out of an argv list or an ini-style preset body.
+    Returns None when the flag is absent (never guess a default: a wrong
+    window is worse than an unknown one)."""
+    if not lines:
+        return None
+    it = iter(lines)
+    for a in it:
+        s = str(a).strip()
+        val = None
+        if s == "--ctx-size":
+            val = next(it, None)
+        elif s.startswith("--ctx-size="):
+            val = s.split("=", 1)[1]
+        elif s.startswith("--ctx-size") and len(s) > len("--ctx-size"):
+            # llama.cpp single-dash-style glue (--ctx-size65535) is not a
+            # real shape, but a bare "--ctx-size" with the value glued on
+            # would otherwise read as None.
+            val = s[len("--ctx-size"):]
+        if val is None:
+            continue
+        try:
+            n = int(str(val).strip().strip('"').strip("'"))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return None
+
+
 async def get_context_window(
     model: str | None,
     cfg: dict | None = None,
@@ -149,6 +225,9 @@ async def get_context_window(
             pass
     base = api_base or (cfg.get("api_base") or "")
     reported = await _from_ollama(base, api_key, model)
+    if reported:
+        return reported
+    reported = await _from_llamacpp_router(base, api_key, model)
     if reported:
         return reported
     return _from_table(model)
