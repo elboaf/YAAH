@@ -103,7 +103,7 @@ async def test_should_compact_absolute_threshold(monkeypatch):
     assert comp.should_compact(999_999, 1_000_000) is False
 
 
-def test_find_cut_index_respects_user_boundary():
+def test_find_cut_index_keeps_pairs_whole():
     msgs = [
         _msg("user", _big(900)),
         _msg("assistant", _big(900), tool_calls=_tc(cid="c1")),
@@ -113,11 +113,23 @@ def test_find_cut_index_respects_user_boundary():
         _msg("assistant", _big(900)),
     ]
     # Keep budget so small the walk eats everything: the boundary slides
-    # back to the LAST user message (index 4) and the tool pair stays
-    # intact inside the verbatim tail.
+    # left only far enough to leave a non-tool row at the cut (#591) —
+    # the LAST assistant row, not the last user row. The tool pair at
+    # (1, 2) stays whole inside the summarized prefix; a cut before an
+    # assistant row never splits a pair.
     cut = comp.find_cut_index(msgs, keep_tokens=1, min_tail=1)
-    assert cut == 4
-    assert msgs[cut]["role"] == "user"
+    assert cut == 5
+    assert msgs[cut]["role"] == "assistant"
+
+
+def test_find_cut_index_assistant_boundary_ok():
+    # No user row at all in the tail region: an assistant boundary is a
+    # legal cut (#591) — the pre-cut shape is irrelevant once the tail
+    # replays from the DB.
+    msgs = [_msg("assistant", _big(900)), _msg("assistant", _big(900))]
+    cut = comp.find_cut_index(msgs, keep_tokens=1, min_tail=1)
+    assert cut == 1
+    assert msgs[cut]["role"] == "assistant"
 
 
 def test_find_cut_index_min_tail_floor():
@@ -138,19 +150,48 @@ def test_find_cut_index_nothing_to_do():
     assert comp.find_cut_index(msgs[:4], keep_tokens=1, min_tail=6) == 0
 
 
-def test_find_cut_index_no_user_boundary():
-    msgs = [_msg("assistant", _big(900)), _msg("assistant", _big(900))]
-    assert comp.find_cut_index(msgs, keep_tokens=1, min_tail=1) == 0
+def test_find_cut_index_no_legal_boundary():
+    # Realistic no-legal-boundary shape: the history opens with a COMPLETE
+    # pair (intact, as real data always is) and the whole history fits in
+    # the keep budget — nothing to fold.
+    msgs = [
+        _msg("user", _big(900)),
+        _msg("assistant", _big(900), tool_calls=_tc(cid="c0")),
+        _msg("tool", _big(900), tool_call_id="c0"),
+        _msg("assistant", _big(900)),
+    ]
+    assert comp.find_cut_index(msgs, keep_tokens=10**9, min_tail=1) == 0
+
+
+def test_find_cut_index_one_turn_agentic_chat_folds():
+    """#591 live repro (conv 1097): a 63-row conversation that is ONE
+    turn — user prompt at row 0, then 62 assistant/tool rows of continuous
+    tool-running. The user-only boundary rule deadlocked the slide (cut 0
+    at any trigger); the fold must be able to start before an assistant
+    row instead."""
+    msgs: list[dict] = [_msg("user", _big(200))]
+    for i in range(60):
+        msgs.append(_msg("assistant", _big(300), tool_calls=_tc(cid=f"c{i}")))
+        msgs.append(_msg("tool", _big(500), tool_call_id=f"c{i}"))
+    msgs.append(_msg("assistant", _big(900)))
+    # Budget small enough that the raw walk lands mid-history (here: on a
+    # tool row). The fold MUST happen — assert the cut itself: it slides
+    # left off tool rows and lands on an assistant row, keeping every
+    # assistant->tool pair whole and the tail above the floor.
+    cut = comp.find_cut_index(msgs, keep_tokens=2_000, min_tail=6)
+    assert cut > 0
+    assert msgs[cut]["role"] == "assistant"
 
 
 def test_find_cut_index_normal_cut():
     msgs = _make_history()
-    # Keep ~1/3 of the history's tokens: boundary lands on a user msg
-    # and roughly a third of the messages stay verbatim.
+    # Keep ~1/3 of the history's tokens: boundary lands on a legal cut
+    # row (user, or assistant — never mid-pair) and roughly a third of
+    # the messages stay verbatim.
     total_tokens = comp.estimate_tokens(msgs)
     cut = comp.find_cut_index(msgs, keep_tokens=total_tokens // 3, min_tail=2)
     assert 0 < cut < len(msgs)
-    assert msgs[cut]["role"] == "user"
+    assert msgs[cut]["role"] != "tool"
 
 
 def test_extract_summary_fences_and_garbage():
