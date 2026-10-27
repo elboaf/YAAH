@@ -2280,6 +2280,9 @@ async def _run_agent_claimed(
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
     # issue #111), then the legacy per-provider value, then the global.
     max_steps = _resolve_max_steps(load_config(), model_override)
+    # Mid-turn compaction re-check: at most one fold per turn (adr/0004's
+    # monotonic gate — the turn-start pass plus this boundary check share it).
+    _turn_compacted = False
     
     # Issue #557: disk-backed prompt cache (llama.cpp slot save/restore).
     # Probe/restore BEFORE the turn's first model call - never mid-run -
@@ -2333,6 +2336,9 @@ async def _run_agent_claimed(
                 _vcfg["api_base"], _vcfg["model"], _n_stripped,
             )
 
+    # Bound before the loop: the mid-turn compaction check at the top of
+    # step 0 reads it before _model_step assigns the per-step dict.
+    state: dict = {}
     try:
         for _step in range(max_steps) if max_steps > 0 else itertools.count():
             if cancel_ev.is_set():
@@ -2344,6 +2350,84 @@ async def _run_agent_claimed(
                     pass
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
+
+            # Mid-turn trigger re-check: the turn-start pass only saw the
+            # prompt as of the previous turn's last call. A long agentic
+            # turn keeps appending tool results and can cross the trigger
+            # (and the window itself) on an in-turn call — the live shape
+            # was 65,159 measured on call N, then a hard 400 on call N+1
+            # before any turn-start pass could ever see it. Re-consult the
+            # SAME trigger with the call's just-measured prompt_tokens and
+            # fold through the normal compaction pass; the running context
+            # swaps to summary + fresh tail for every later call this turn.
+            if (
+                include_history
+                and not _turn_compacted
+                and state.get("usage")
+            ):
+                from backend.agent import compaction as compaction_mod
+
+                _measured = (state["usage"] or {}).get("prompt_tokens")
+                _window = await compaction_mod.resolve_window(
+                    model_override or None, load_config()
+                )
+                if compaction_mod.should_compact(
+                    _measured,
+                    _window,
+                    # The per-model entry keys on the BARE model id.
+                    (model_override or "").partition("::")[2] or None,
+                ):
+                    _cevents = []
+                    for _cev in await _maybe_compact(
+                        conversation_id,
+                        model_id=model_override or None,
+                        cancel_ev=cancel_ev,
+                    ):
+                        _cevents.append(_cev)
+                        yield _ndjson(_cev)
+                    if _cevents:
+                        # One mid-turn ATTEMPT per turn once the pass has a
+                        # real outcome (folded or failed). A silent skip
+                        # (no safe cut yet) stays unlatched: the next step
+                        # boundary rechecks against the grown transcript.
+                        _turn_compacted = True
+                    for _cev in _cevents:
+                        if _cev.get("type") == "compacted":
+                            _tail = await get_messages(conversation_id)
+                            _ps = await get_prompt_summary(conversation_id)
+                            _through = int(_ps.get("through_message_id") or 0)
+                            messages.clear()
+                            messages.append(
+                                {"role": "system", "content": system_prompt}
+                            )
+                            messages.append(
+                                compact_summary_message(_ps)
+                                or {"role": "user", "content": ""}
+                            )
+                            _fresh = [
+                                r for r in _tail if int(r["id"]) > _through
+                            ]
+                            for _row in _replay_rows(_fresh):
+                                messages.append(_row)
+                            # Skills the turn loaded (load_skill) must survive
+                            # the rebuild: re-insert the tail message at the
+                            # same marker-keyed slot the replay path uses.
+                            if loaded_skills:
+                                _block = skill_registry.bodies_for_prompt(loaded_skills)
+                                if _block:
+                                    if static_mode:
+                                        messages.insert(
+                                            1,
+                                            {
+                                                "role": "user",
+                                                "content": invoked_skills_wrapper(_block),
+                                            },
+                                        )
+                                    else:
+                                        messages[0]["content"] = (
+                                            f"{messages[0]['content']}\n\n---\n\n"
+                                            f"{invoked_skills_wrapper(_block)}"
+                                        )
 
             # The retry must wrap the whole stream consumption, not just the
             # chat() call: with stream=True the HTTP request only fires when
