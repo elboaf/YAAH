@@ -473,30 +473,23 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   // trace chip rather than prose.
   const summary = (() => {
     const a = approval.args ?? {}
-    const pick = (...keys: string[]) => {
-      for (const k of keys) {
-        const v = a[k]
-        if (typeof v === 'string' && v.trim()) return v
-      }
-      return ''
-    }
     switch (approval.tool) {
       case 'bash':
       case 'powershell':
-        return pick('command')
+        return pickArg(a, 'command')
       case 'write_file':
       case 'create_file':
-        return pick('path', 'file_path')
+        return pickArg(a, 'path', 'file_path')
       case 'edit_file':
-        return pick('path', 'file_path')
+        return pickArg(a, 'path', 'file_path')
       case 'delete_file':
       case 'move_file':
-        return pick('path', 'src', 'dst')
+        return pickArg(a, 'path', 'src', 'dst')
       case 'git_commit':
-        return pick('message')
+        return pickArg(a, 'message')
       case 'git_push':
       case 'git_pull':
-        return `${approval.tool === 'git_push' ? 'push' : 'pull'} ${pick('remote') || 'origin'}`
+        return `${approval.tool === 'git_push' ? 'push' : 'pull'} ${pickArg(a, 'remote') || 'origin'}`
       default: {
         const kv = Object.entries(a)
           .filter(([, v]) => typeof v === 'string' && v.length < 80)
