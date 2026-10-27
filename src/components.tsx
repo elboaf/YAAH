@@ -100,13 +100,14 @@ import {
   type SandboxStatus,
   probeImageProvider,
   getLoraCatalog,
+  getCompactionEffective,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
-import { AgentContextPerProvider } from './AgentContextPerProvider'
+import { AgentContextPerProvider, familyBaseId, providerEntryModels } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
@@ -7396,10 +7397,28 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (!expanded) return
     const name = expanded
-    const entryModels = (provEntryModels[name] ?? []).length
-      ? provEntryModels[name]
-      : [providers[name]?.model].filter((m): m is string => !!m)
-    setProvEntryModels((s) => (s[name]?.length ? s : { ...s, [name]: entryModels }))
+    // Saved entries are the source of truth (#588 fault A): every
+    // config.model_compaction id whose family base belongs to THIS
+    // provider seeds an editor entry here, so a chat running any of
+    // those ids can see (and edit) its entry without the default-model
+    // keyhole. The provider's current default model stays listed even
+    // when it has no entry (the auto-fallback case, shown as such).
+    // A saved entry belongs to THIS provider when its family base matches
+    // the default model's OR any catalog model's (router-slot prefixes
+    // rotate, so the entry the default-model keyhole once saved may sit
+    // under a prefix the catalog no longer lists verbatim).
+    const entryModels = providerEntryModels(
+      Object.keys(modelComp),
+      providers[name]?.model,
+      providerModels[name] ?? [],
+    )
+    // Additive merge: session edits (added/removed entries) survive, and
+    // entries that only became classifiable when the catalog landed are
+    // added when it does.
+    setProvEntryModels((s) => ({
+      ...s,
+      [name]: [...new Set([...(s[name] ?? []), ...entryModels])],
+    }))
     for (const model of entryModels) {
       const detected = detectedWindows[model]
       if (detected === undefined) {
@@ -7420,7 +7439,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       // the compaction draft).
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded])
+  }, [expanded, providerModels])
 
   // Live hotkey capture: the next non-modifier keydown becomes the
   // accelerator. Capture-phase listener so Esc cancels the capture instead
@@ -7455,6 +7474,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [capturingHotkey])
+
+  // Effective compaction behavior for the expanded provider's entry ids
+  // (#588 fault B): the readouts + the entryKey come from the backend's
+  // alias-aware resolver, not from a frontend re-implementation.
+  const expandedIds = expanded ? (provEntryModels[expanded] ?? []) : []
+  const compEff = useCompactionEffective(expandedIds)
 
   const applyPreset = (target: string, presetName: string) => {
     const p = presets[presetName]
@@ -7806,6 +7831,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                               onCompK: (v: number | '') =>
                                 setCompDraft((s) => ({ ...s, [m]: v })),
                               ctxAuto: detectedWindows[m] ?? null,
+                              effective: compEff[m]
+                                ? { enabled: compEff[m].enabled, triggerK: Math.round(compEff[m].trigger_tokens / 1000) }
+                                : null,
+                              entryKey: compEff[m]?.entry_key ?? null,
+                              siblings: Object.keys(modelComp).filter(
+                                (id) => id !== m && familyBaseId(id) === familyBaseId(m),
+                              ),
                             }))}
                             onAddModel={(id) => {
                               // Append a new entry (unlimited entries allowed)
@@ -8827,6 +8859,53 @@ function useCompactionConfig(): { enabled: boolean; trigger_tokens: number } {
   return cfg ?? { enabled: true, trigger_tokens: 0 }
 }
 
+/** Effective per-model compaction behavior (#588): what the runtime
+ *  actually does for a model id — the entry that covers it (exact or
+ *  alias) and the trigger that will fire, or the auto fallback. Cached
+ *  per page load like the global config above; Settings changes refresh
+ *  on the next reload of this module's cache. */
+interface CompactionEffective {
+  model: string
+  entry: boolean
+  entry_key: string | null
+  enabled: boolean
+  trigger_tokens: number
+  keep_tokens: number
+  window: number | null
+}
+
+const effCache: Record<string, CompactionEffective> = {}
+const effInflight = new Set<string>()
+
+/** Fetch the effective compaction behavior for each id once per page
+ *  load; ids already cached (or in flight) are not re-fetched, and later
+ *  subscribers (another provider expanded, a chat switching models) get
+ *  their own fetch. Failures leave the cache untouched — no readout
+ *  beats a wrong one — and the next subscriber retries. */
+export function useCompactionEffective(ids: string[]): Record<string, CompactionEffective> {
+  const [, bump] = useState(0)
+  const key = ids.filter(Boolean).join('|')
+  useEffect(() => {
+    const unique = key ? key.split('|') : []
+    const missing = unique.filter((m) => !(m in effCache) && !effInflight.has(m))
+    if (!missing.length) return
+    for (const m of missing) effInflight.add(m)
+    Promise.all(
+      missing.map((m) =>
+        getCompactionEffective(m)
+          .then((r) => [m, r] as const)
+          .catch(() => null),
+      ),
+    ).then((rows) => {
+      for (const row of rows) if (row) effCache[row[0]] = row[1]
+      for (const m of missing) effInflight.delete(m)
+      bump((n) => n + 1)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+  return effCache
+}
+
 /** Where the dial's fill flips to warning colors: compaction first, then
  *  the dumb zone (the more severe of the two marks the color for the moment
  *  the count passes it). */
@@ -8880,6 +8959,12 @@ function DialTick({ frac, color }: { frac: number; color: string }) {
  *  page load. */
 export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
   const compaction = useCompactionConfig()
+  // The tick must sit at THIS chat model's effective trigger (#588): a
+  // per-model entry (its own or an alias sibling's) fires there, not the
+  // global value the old tick showed. Global stays the fallback while
+  // the probe has no answer (and for models without an entry — the
+  // backend then reports the derived fallback as the trigger anyway).
+  const eff = useCompactionEffective(info && info.model ? [info.model] : [])
   if (!info) return null
   const windowTokens = info.window
   // The dial ALWAYS scales out of 200k, regardless of the model's context
@@ -8892,8 +8977,15 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
   // unclamped percentage (see tooltip note on DUMB_ZONE_TOKENS).
   const rawFrac = info.tokens / scale
   const frac = rawFrac % 1
-  // Absolute compaction threshold (pure token value, no window fraction).
-  const trigger = compaction.enabled && compaction.trigger_tokens > 0 ? compaction.trigger_tokens : null
+  // Absolute compaction threshold (pure token value, no window fraction),
+  // per this chat's model when known (#588); global value as the fallback.
+  const effModel = info.model ? eff[info.model] : undefined
+  const fallbackTrigger = compaction.enabled && compaction.trigger_tokens > 0 ? compaction.trigger_tokens : null
+  const trigger = effModel
+    ? effModel.enabled && effModel.trigger_tokens > 0
+      ? effModel.trigger_tokens
+      : null
+    : fallbackTrigger
   const triggerFrac = trigger !== null ? Math.min(1, trigger / scale) : null
   const dumbFrac = DUMB_ZONE_TOKENS / scale
   const dumbVisible = dumbFrac < 1

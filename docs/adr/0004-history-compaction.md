@@ -20,12 +20,16 @@ decision is exact and provider-agnostic. When the window is unknown,
 the estimate fallback is ~4 chars/token over a conservative default
 budget — enough to still protect small local models.
 
-**Budget = fraction of the window, headroom for the reply.** Compaction
-fires when measured tokens exceed `context * COMPACTION_TRIGGER_FRACTION`
-(default 0.70). The history is compacted down to
-`context * COMPACTION_KEEP_FRACTION` (default 0.40), leaving room for
-the system prompt, tool plumbing, and a long reply without re-tripping
-the trigger every turn.
+**Budget = fraction of the window (or of the trigger), headroom for the
+reply.** Compaction fires when measured tokens exceed the effective
+absolute trigger: a model's own `config.model_compaction` entry when it
+has one, else `context * COMPACTION_TRIGGER_FRACTION` (default 0.70 of
+the detected window, #578). The history is compacted down to
+`effective * COMPACTION_KEEP_FRACTION` (default 0.40), where `effective`
+is min(trigger, window): an absolute 24k trigger must be able to fold at
+~24k, which a 40%-of-window keep mathematically forbids (#588 fault C).
+When the trigger sits at or above the window, the window fraction is the
+smaller keep and the ship shape holds.
 
 **Old turns become a prompt-only summary; the recent tail stays verbatim.**
 `compaction.py` considers unsummarized transcript messages and sums
@@ -52,6 +56,20 @@ over all persisted textual message fields, including tool calls/results and
 sub-agent transcript snapshots, plus the prompt summary. Results are capped
 and include source metadata and excerpts. It is not available to runs whose
 history is disabled.
+
+**Per-model entries are reachable and their behavior is visible.**
+`config.model_compaction` keys are bare model ids, but router catalogs
+rotate slot-prefixed aliases of the same base model ("1.Tiel-...",
+"x2.Tiel-..."), so an exact-id lookup makes saved entries unreachable
+(#588 fault A). Entry resolution goes through the identity module
+(`model_settings.py`): exact id first, then the family base (slot
+prefixes stripped), then a sibling alias of the same base. Different
+models that share a slot prefix stay different models. The Settings
+editor lists every saved entry of the provider's model family (plus the
+default model, entry or not), and both Settings and the context dial
+read the effective behavior from `/api/compaction/effective` — "fires
+at Xk" or "no entry, auto fallback at Yk" — instead of hiding the
+fallback (#588 fault B).
 
 **Model-call loop keeps appending to the in-memory `messages` after
 compaction.** The persisted summary lives in the DB, but the turn's

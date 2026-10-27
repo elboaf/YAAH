@@ -519,6 +519,51 @@ async def api_context_window(model: str = ""):
     }
 
 
+@app.get("/api/compaction/effective")
+async def api_compaction_effective(model: str = ""):
+    """Effective compaction behavior for one model id (#588 fault B): the
+    per-model entry that covers it -- resolved through the #588 alias
+    identity, so a chat running ANY sibling router-slot alias sees the
+    saved entry -- plus the trigger that will actually fire and the keep
+    budget the cut math will hold back. Settings renders the "fires at
+    Xk" vs "no entry -- auto fallback" readout from this; the context
+    dial ticks at the effective trigger. No model: the global block's
+    shape, entry false."""
+    from backend.agent import model_settings
+    from backend.agent.compaction import (
+        _compaction_cfg,
+        _compaction_cfg_for_model,
+        keep_budget_tokens,
+        resolve_window,
+    )
+
+    cfg = load_config()
+    ccfg = _compaction_cfg()
+    bare = model_settings.bare_model_id(model)
+    if not bare:
+        return {
+            "model": "",
+            "entry": False,
+            "entry_key": None,
+            "enabled": bool(ccfg.get("enabled", True)),
+            "trigger_tokens": int(ccfg.get("trigger_tokens") or 0),
+            "keep_tokens": 0,
+            "window": None,
+        }
+    window = await resolve_window(model, cfg)
+    eff = _compaction_cfg_for_model(bare, ccfg, window)
+    key = model_settings.model_entry_key(bare, cfg)
+    return {
+        "model": bare,
+        "entry": key is not None,
+        "entry_key": key,
+        "enabled": bool(eff.get("enabled", True)),
+        "trigger_tokens": int(eff.get("trigger_tokens") or 0),
+        "keep_tokens": keep_budget_tokens(eff, window),
+        "window": int(window) if window else None,
+    }
+
+
 @app.get("/api/workspaces/git-branches")
 async def api_workspace_git_branches(workspace: str = ""):
     """Current branch and local branch names for an unsaved draft workspace.
