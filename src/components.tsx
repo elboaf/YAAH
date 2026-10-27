@@ -11931,8 +11931,6 @@ export function Composer() {
         />
         {/* Unified toolbar: host + mode on the left, attach/mic/send on the
             right — one hairline-separated row inside the composer card. */}
-        {/* Unified toolbar: host + mode on the left, attach/mic/send on the
-            right — one hairline-separated row inside the composer card. */}
         <div className="flex items-center gap-1   px-1.5 py-1.5">
           <AccessModeControl />
           <div className="ml-auto flex items-center gap-1">
