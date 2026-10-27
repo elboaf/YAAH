@@ -1,7 +1,6 @@
 /** A sidebar workspace group, narrowed to the fields used for ordering. */
 export interface WorkspaceGroupOrder {
   ws: { path: string | null; last_opened_at: string | null; position?: number | null }
-  items: readonly { updated_at: string }[]
 }
 
 /** Keep Default first; sort other groups by deliberate workspace activity.
