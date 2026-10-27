@@ -9,6 +9,49 @@
 import type React from 'react'
 import { useState } from 'react'
 
+/** Family base of a model id (#588): router-slot prefixes ("1.", "x2.",
+ *  digits/short tokens before a known local-model family) collapse so an
+ *  entry saved for one alias covers its siblings at runtime — the same
+ *  rule the backend's model_settings.family_base_id applies. Settings
+ *  uses it only to GROUP saved entries under the right provider's
+ *  editor; the effective-trigger readout comes from the backend. */
+const FAMILY_STEMS = [
+  'tiel', 'qwen', 'llama', 'mistral', 'phi', 'gemma', 'deepseek', 'glm',
+  'kimi', 'codestral', 'mixtral', 'smollm', 'falcon', 'starcoder',
+  'wizardcoder',
+]
+
+export function familyBaseId(model: string): string {
+  const m = /^(?:(?:[a-z]|[a-z]?\d){1,4})\./.exec(model)
+  if (m) {
+    const rest = model.slice(m[0].length)
+    if (FAMILY_STEMS.some((stem) => rest.toLowerCase().startsWith(stem))) return rest
+  }
+  return model
+}
+
+/** Saved per-model entry ids that belong to THIS provider's editor: every
+ *  saved id whose family base matches the provider's default model or any
+ *  catalog model, plus the default model itself (shown even without an
+ *  entry, as the auto-fallback case). Deduplicated, saved ids first. */
+export function providerEntryModels(
+  savedIds: string[],
+  defaultModel: string | undefined,
+  catalog: string[],
+): string[] {
+  const familyOf = (id: string) => familyBaseId(id).toLowerCase()
+  const families = new Set([
+    ...(defaultModel ? [familyOf(defaultModel)] : []),
+    ...catalog.map(familyOf),
+  ])
+  return [
+    ...new Set([
+      ...savedIds.filter((id) => families.has(familyOf(id))),
+      ...(defaultModel ? [defaultModel] : []),
+    ]),
+  ]
+}
+
 /** One configured model's settings + change handlers (owned by the parent). */
 export interface ModelEntry {
   model: string
@@ -22,6 +65,16 @@ export interface ModelEntry {
   onCompK: (v: number | '') => void
   /** Detected (auto-resolved) window for this model, or null. */
   ctxAuto: number | null
+  /** Effective behavior readout (#588 fault B): fires at the entry
+   *  trigger ("fires at 24k") vs the auto fallback ("no entry — auto
+   *  fallback (~105k)"). Null = the backend probe has not answered yet
+   *  (readout renders nothing rather than a wrong claim). */
+  effective: { enabled: boolean; triggerK: number } | null
+  /** The saved entry this model resolves to (exact or alias), when one
+   *  exists — lets the editor say which key covers this model. */
+  entryKey: string | null
+  /** Model ids sharing this entry's family base (alias siblings). */
+  siblings: string[]
 }
 
 interface AgentCtxPerProviderProps {
@@ -152,6 +205,23 @@ export function AgentContextPerProvider({
             {e.ctxAuto != null
               ? `context window (detected): ${e.ctxAuto.toLocaleString()} tokens`
               : 'context window: not detected — no % readout for this model'}
+          </p>
+          {/* Effective-behavior readout (#588 fault B): what the runtime
+              actually does for THIS model id, entry or fallback. */}
+          <p
+            className="mt-0.5 text-[10px] text-zinc-500"
+            data-effective={e.effective ? (e.effective.enabled ? 'entry' : 'disabled') : 'unknown'}
+          >
+            {!e.effective
+              ? null
+              : !e.effective.enabled
+                ? 'compaction off — this model keeps its full history'
+                : e.entryKey
+                  ? `fires at ${e.effective.triggerK}k${e.entryKey !== e.model ? ` (via ${e.entryKey})` : ''}`
+                  : `no entry — auto fallback (~${e.effective.triggerK}k)`}
+            {e.effective && e.entryKey && e.siblings.length > 0 && (
+              <span className="text-zinc-600"> · shared by {e.siblings.length} alias{e.siblings.length === 1 ? '' : 'es'}</span>
+            )}
           </p>
         </div>
       ))}
