@@ -473,30 +473,23 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   // trace chip rather than prose.
   const summary = (() => {
     const a = approval.args ?? {}
-    const pick = (...keys: string[]) => {
-      for (const k of keys) {
-        const v = a[k]
-        if (typeof v === 'string' && v.trim()) return v
-      }
-      return ''
-    }
     switch (approval.tool) {
       case 'bash':
       case 'powershell':
-        return pick('command')
+        return pickArg(a, 'command')
       case 'write_file':
       case 'create_file':
-        return pick('path', 'file_path')
+        return pickArg(a, 'path', 'file_path')
       case 'edit_file':
-        return pick('path', 'file_path')
+        return pickArg(a, 'path', 'file_path')
       case 'delete_file':
       case 'move_file':
-        return pick('path', 'src', 'dst')
+        return pickArg(a, 'path', 'src', 'dst')
       case 'git_commit':
-        return pick('message')
+        return pickArg(a, 'message')
       case 'git_push':
       case 'git_pull':
-        return `${approval.tool === 'git_push' ? 'push' : 'pull'} ${pick('remote') || 'origin'}`
+        return `${approval.tool === 'git_push' ? 'push' : 'pull'} ${pickArg(a, 'remote') || 'origin'}`
       default: {
         const kv = Object.entries(a)
           .filter(([, v]) => typeof v === 'string' && v.length < 80)
@@ -769,17 +762,19 @@ function toolGlyphColor(name: string): string {
   return 'text-zinc-400'
 }
 
+/** Pick the first truthy string value from obj among the given keys. */
+function pickArg(obj: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === 'string' && v && v.trim()) return v
+  }
+  return undefined
+}
+
 /** Short human target for a call: the file, query, or command it acts on. */
 function toolTarget(tc: ToolCall): string {
   const a = (tc.args ?? {}) as Record<string, unknown>
-  const pick = (...keys: string[]) => {
-    for (const k of keys) {
-      const v = a[k]
-      if (typeof v === 'string' && v) return v
-    }
-    return undefined
-  }
-  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url', 'question',
+  const t = (pickArg(a, 'path', 'file_path', 'query', 'pattern', 'command', 'url', 'question',
     ...(tc.name ?? '').startsWith('memory_') ? ['name'] : []) ?? '')
     .replace(/\s+/g, ' ')
     .trim()
