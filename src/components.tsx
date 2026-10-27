@@ -769,17 +769,19 @@ function toolGlyphColor(name: string): string {
   return 'text-zinc-400'
 }
 
+/** Pick the first truthy string value from obj among the given keys. */
+function pickArg(obj: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === 'string' && v) return v
+  }
+  return undefined
+}
+
 /** Short human target for a call: the file, query, or command it acts on. */
 function toolTarget(tc: ToolCall): string {
   const a = (tc.args ?? {}) as Record<string, unknown>
-  const pick = (...keys: string[]) => {
-    for (const k of keys) {
-      const v = a[k]
-      if (typeof v === 'string' && v) return v
-    }
-    return undefined
-  }
-  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url', 'question',
+  const t = (pickArg(a, 'path', 'file_path', 'query', 'pattern', 'command', 'url', 'question',
     ...(tc.name ?? '').startsWith('memory_') ? ['name'] : []) ?? '')
     .replace(/\s+/g, ' ')
     .trim()
