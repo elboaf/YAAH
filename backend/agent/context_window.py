@@ -103,8 +103,9 @@ async def _from_ollama(api_base: str, api_key: str, model: str) -> int | None:
     if ":11434" not in api_base:
         return None
     now = time.monotonic()
-    if model in _show_cache and now - _show_cached_at.get(model, 0) < _SHOW_TTL:
-        return _show_cache[model]
+    key = _cache_key(api_base, model)
+    if key in _show_cache and now - _show_cached_at.get(key, 0) < _SHOW_TTL:
+        return _show_cache[key]
     native = api_base.split("/v1")[0].rstrip("/")
     result: int | None = None
     try:
@@ -125,8 +126,8 @@ async def _from_ollama(api_base: str, api_key: str, model: str) -> int | None:
                 result = int(info["context_length"])
     except (httpx.HTTPError, ValueError, TypeError):
         result = None
-    _show_cache[model] = result
-    _show_cached_at[model] = now
+    _show_cache[key] = result
+    _show_cached_at[key] = now
     if result:
         log.info("context window for %s from ollama /api/show: %d", model, result)
     return result
@@ -140,8 +141,9 @@ async def _from_llamacpp_router(api_base: str, api_key: str, model: str) -> int 
     catalog is the only reliable source. Non-router bases (no status.args
     shape) just miss; any failure means 'unknown'."""
     now = time.monotonic()
-    if model in _router_cache and now - _router_cached_at.get(model, 0) < _SHOW_TTL:
-        return _router_cache[model]
+    key = _cache_key(api_base, model)
+    if key in _router_cache and now - _router_cached_at.get(key, 0) < _SHOW_TTL:
+        return _router_cache[key]
     result: int | None = None
     try:
         url = api_base.rstrip("/")
@@ -153,23 +155,60 @@ async def _from_llamacpp_router(api_base: str, api_key: str, model: str) -> int 
                 headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
             )
         if r.status_code == 200:
-            for entry in r.json().get("data") or []:
-                if entry.get("id") != model:
-                    continue
-                status = entry.get("status") or {}
-                result = _ctx_size_from_argv(status.get("args"))
-                if result is None:
-                    preset = status.get("preset")
-                    if isinstance(preset, str):
-                        result = _ctx_size_from_argv(preset.splitlines())
-                break
+            payload = r.json()
+            # Shape-validate before field access (#579 review): a 200 with
+            # a JSON array or {"data": [null]} must read as 'unknown', not
+            # raise AttributeError past the except tuple.
+            entries = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict) or entry.get("id") != model:
+                        continue
+                    status = entry.get("status")
+                    if not isinstance(status, dict):
+                        break
+                    result = _ctx_size_from_argv(status.get("args"))
+                    if result is None:
+                        result = _ctx_size_from_ini(status.get("preset"))
+                    break
     except (httpx.HTTPError, ValueError, TypeError):
         result = None
-    _router_cache[model] = result
-    _router_cached_at[model] = now
+    _router_cache[key] = result
+    _router_cached_at[key] = now
     if result:
         log.info("context window for %s from router /v1/models args: %d", model, result)
     return result
+
+
+def _cache_key(api_base: str, model: str) -> str:
+    """Cache identity for the provider-routed probes: (endpoint, model).
+    Two providers exposing the same bare model id with different windows
+    must not share an entry (CodeRabbit round on PR #579; the same
+    identity rule as the Ollama cache below)."""
+    return f"{(api_base or '').rstrip('/')}|{model}"
+
+
+def _ctx_size_from_ini(preset) -> int | None:
+    """ctx-size out of a llama.cpp router preset body (ini-style lines,
+    `ctx-size = 65535`; also accepts the key with dashes). Returns None
+    when absent — never guess."""
+    if not isinstance(preset, str):
+        return None
+    for line in preset.splitlines():
+        s = line.strip()
+        if "=" not in s:
+            continue
+        k, _, v = s.partition("=")
+        k = k.strip().strip('"').strip("'").lower().lstrip("-")
+        if k not in {"ctx-size", "ctx.size", "ctxsize"}:
+            continue
+        try:
+            n = int(v.strip().strip('"').strip("'"))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return None
 
 
 def _ctx_size_from_argv(lines) -> int | None:

@@ -93,6 +93,11 @@ def _compaction_cfg_for_model(bare_model: str, ccfg: dict, context_window: int |
     exceed a local model's real window and so never fire (#578) — the
     trigger derives from the window (COMPACTION_WINDOW_FRACTION). An
     explicit per-model entry keeps its exact absolute semantics.
+
+    COMPACTION_DEFAULT_WINDOW is resolve_window's WORKING default for cut
+    math, not a detection: passing it (like None/0) means unknown, so an
+    undetected model keeps the 300k trigger instead of deriving from the
+    32k guess (CodeRabbit round on PR #579).
     """
     entry = (ccfg.get("model_compaction") or {}).get(bare_model)
     if isinstance(entry, dict):
@@ -106,15 +111,16 @@ def _compaction_cfg_for_model(bare_model: str, ccfg: dict, context_window: int |
     cfg = dict(ccfg)
     cfg["enabled"] = bool(ccfg.get("per_model_enabled", True))
     # No per-model entry: a configured global trigger_tokens (> 0) applies;
-    # otherwise the trigger derives from the model's context window (or, when
-    # the window is unknown, the shipped 300k default — same as before #578).
+    # otherwise the trigger derives from the model's detected window (or,
+    # when the window is unknown, the shipped 300k default — same as
+    # before #578).
     try:
         cfg["trigger_tokens"] = int(ccfg.get("trigger_tokens") or 0)
     except (TypeError, ValueError):
         cfg["trigger_tokens"] = 0
     if cfg["trigger_tokens"] <= 0:
         derived = 0
-        if context_window and context_window > 0:
+        if context_window and context_window != COMPACTION_DEFAULT_WINDOW:
             derived = int(context_window * COMPACTION_WINDOW_FRACTION)
             derived = max(derived, COMPACTION_DERIVED_MIN_TOKENS)
         if derived > 0:
@@ -202,7 +208,9 @@ def should_compact(context_tokens: int | None, context_window: int, model: str |
     no-entry trigger derivation (80% of the window, #578) — so an
     unconfigured model with a detected window compacts at a sane
     fraction of what it can actually hold, instead of at a flat 300k
-    it can never reach.
+    it can never reach. COMPACTION_DEFAULT_WINDOW counts as unknown for
+    the derivation (resolve_window's working default is not a detection,
+    CodeRabbit round on PR #579).
 
     `model` (bare id) selects the per-model settings when present;
     without it the global compaction block applies.
