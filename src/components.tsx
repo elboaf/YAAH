@@ -10949,7 +10949,7 @@ export function Composer() {
   // before writing final status — buffered text must never land after
   // 'idle'/'error', and a Stop must not orphan a scheduled rAF.
   const streamBufferFlushers = new Map<string, () => void>()
-  const handleStreamEvent = (bufKey: string, asstId: string) => {
+  const handleStreamEvent = (bufKey: string, asstId: string, throwOnError?: boolean) => {
     let curId = asstId
     let awaitingPostSteerEmission = false
     // True while text is allowed to flow without an emission separator: the
