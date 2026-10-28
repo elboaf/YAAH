@@ -334,12 +334,12 @@ const MdThStream = ({ children }: { children?: ReactNode }) => (
     {streamOwnText(children)}
   </th>
 )
-const MdH1 = ({ children }: { children?: ReactNode }) => <h1>{streamOwnText(children)}</h1>
-const MdH2 = ({ children }: { children?: ReactNode }) => <h2>{streamOwnText(children)}</h2>
-const MdH3 = ({ children }: { children?: ReactNode }) => <h3>{streamOwnText(children)}</h3>
-const MdH4 = ({ children }: { children?: ReactNode }) => <h4>{streamOwnText(children)}</h4>
-const MdH5 = ({ children }: { children?: ReactNode }) => <h5>{streamOwnText(children)}</h5>
-const MdH6 = ({ children }: { children?: ReactNode }) => <h6>{streamOwnText(children)}</h6>
+// All six heading levels are identical except the tag name; one factory
+// replaces the six identical components (ponytail #271).
+const headingTag = (level: number) => {
+  const Tag = `h${level}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
+  return ({ children }: { children?: ReactNode }) => <Tag>{streamOwnText(children)}</Tag>
+}
 
 // Frozen at module load: the same component identities on every render of
 // every message (#275). React reconciles by element-type identity, so these
@@ -357,12 +357,12 @@ const MARKDOWN_COMPONENTS = {
   strong: MdStrong,
   em: MdEm,
   del: MdDel,
-  h1: MdH1,
-  h2: MdH2,
-  h3: MdH3,
-  h4: MdH4,
-  h5: MdH5,
-  h6: MdH6,
+  h1: headingTag(1),
+  h2: headingTag(2),
+  h3: headingTag(3),
+  h4: headingTag(4),
+  h5: headingTag(5),
+  h6: headingTag(6),
 }
 
 /**
