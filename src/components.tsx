@@ -7108,22 +7108,27 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // the primary selectors render from.
   const { byProvider: subagentByProvider } = useModelList()
   const [activeTab, setActiveTab] = useState<'connect' | 'talk' | 'automate' | 'advanced'>('connect')
-  // Per-model compaction: model id -> settings (per-provider editors).
-  const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
-  // Per-model step budgets (issue #111): model id -> draft ('' = untouched,
-  // saves as the model's explicit 200-default entry only when edited).
-  const [modelSteps, setModelSteps] = useState<Record<string, number | ''>>({})
-  // Editor drafts for the expanded provider: the list of configured models
-  // (each with its OWN compaction + steps, keyed by model id) + models
-  // manually added to a provider's editor (not in the catalog).
-  const [compEnabledDraft, setCompEnabledDraft] = useState<Record<string, boolean>>({})
-  const [compDraft, setCompDraft] = useState<Record<string, number | ''>>({})
-  /** Models manually added to a provider's editor (not in the catalog). */
-  const [extraModels, setExtraModels] = useState<Record<string, string[]>>({})
-  /** Models explicitly configured per provider, in order (issue #111: the
-   *  editor renders one entry per model here — unlimited entries). Starts
-   *  with the provider's current model; onAddModel appends. */
+  // Per-model agent settings (#111, rebuilt after the draft-overlay
+  // regression): ONE authoritative map — model id -> { comp?, steps? } —
+  // loaded from config and shipped as-is on Save. Absence IS deletion:
+  // the payload mirrors this map exactly, so a removed entry stays removed
+  // and an edit sticks. comp absent = the row has no saved compaction
+  // entry (runtime auto-fallback applies); steps absent = the 200 default
+  // applies. (The old design kept separate overlay drafts and unioned them
+  // with the SAVED copy at save time, which resurrected removed entries,
+  // dropped edits for models without a saved entry, and stranded phantom
+  // rows.)
+  const [compMap, setCompMap] = useState<
+    Record<string, { comp?: { enabled: boolean; trigger_tokens: number }; steps?: number }>
+  >({})
+  /** Model ids manually added to a provider's editor this session (the
+   *  derived entry list starts from the saved map + the catalog). */
   const [provEntryModels, setProvEntryModels] = useState<Record<string, string[]>>({})
+  /** Entries the user removed this session, per provider. Removal must be
+   *  remembered per-session because the entry list re-derives from the
+   *  saved map whenever the provider re-expands — without this, a removed
+   *  row resurrected on reopen (the reported phantom bug). */
+  const [removedEntries, setRemovedEntries] = useState<Record<string, string[]>>({})
   // Model catalogs per provider (from /api/models/available, fetched once).
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({})
   // Resolved (detected) context windows per model id, for pre-filling.
@@ -7269,11 +7274,24 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setMaxSteps(c.max_steps ?? '')
           setSubagentProvider(c.subagent_provider ?? '')
           setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
-          setModelComp(c.model_compaction ?? {})
-          setModelSteps(
+          // One authoritative map (#588 fault A follow-up): saved compaction
+          // entries + saved per-model steps land in the one structure the
+          // editor edits and Save ships. Models with only one kind of saved
+          // setting keep their row (comp absent = no compaction entry;
+          // steps absent = the 200 default applies).
+          setCompMap(
             Object.fromEntries(
-              Object.entries((c as unknown as { model_steps?: Record<string, number> }).model_steps ?? {}).map(
-                ([m, v]) => [m, v] as const,
+              [...new Set([...Object.keys(c.model_compaction ?? {}), ...Object.keys(c.model_steps ?? {})])].map(
+                (m) =>
+                  [
+                    m,
+                    {
+                      ...(c.model_compaction?.[m] && { comp: c.model_compaction[m] }),
+                      ...(typeof (c as unknown as { model_steps?: Record<string, number> }).model_steps?.[m] === 'number'
+                        ? { steps: (c as unknown as { model_steps?: Record<string, number> }).model_steps![m] }
+                        : {}),
+                    },
+                  ] as const,
               ),
             ),
           )
@@ -7388,55 +7406,47 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string; staticSystemPrompt: boolean }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
 
-  // Per-provider editor hydration: when a provider is expanded, seed its
-  // entry list (the provider's current model first) and each entry model's
-  // drafts from the saved per-model maps — the saved compaction trigger, or
-  // the shipped 300k default. Seeds only blank fields so the user's typing
-  // is never overwritten; drafts are model-keyed, so values survive edits
-  // to other entries.
+  // Per-provider editor hydration: when a provider is expanded, derive its
+  // entry list (saved compMap entries belonging to this provider + its
+  // default model + session additions) and resolve detected context
+  // windows. The compMap IS the draft — no seeding of overlay copies — so
+  // untouched rows ship nothing and edits land in exactly one place.
   useEffect(() => {
     if (!expanded) return
     const name = expanded
     // Saved entries are the source of truth (#588 fault A): every
-    // config.model_compaction id whose family base belongs to THIS
-    // provider seeds an editor entry here, so a chat running any of
-    // those ids can see (and edit) its entry without the default-model
-    // keyhole. The provider's current default model stays listed even
-    // when it has no entry (the auto-fallback case, shown as such).
-    // A saved entry belongs to THIS provider when its family base matches
-    // the default model's OR any catalog model's (router-slot prefixes
-    // rotate, so the entry the default-model keyhole once saved may sit
-    // under a prefix the catalog no longer lists verbatim).
+    // compMap id whose family base belongs to THIS provider seeds an
+    // editor entry here, so a chat running any of those ids can see (and
+    // edit) its entry without the default-model keyhole. The provider's
+    // current default model stays listed even when it has no entry (the
+    // auto-fallback case, shown as such). A saved entry belongs to THIS
+    // provider when its family base matches the default model's OR any
+    // catalog model's (router-slot prefixes rotate, so the entry the
+    // default-model keyhole once saved may sit under a prefix the
+    // catalog no longer lists verbatim).
     const entryModels = providerEntryModels(
-      Object.keys(modelComp),
+      Object.keys(compMap),
       providers[name]?.model,
       providerModels[name] ?? [],
     )
-    // Additive merge: session edits (added/removed entries) survive, and
-    // entries that only became classifiable when the catalog landed are
-    // added when it does.
-    setProvEntryModels((s) => ({
-      ...s,
-      [name]: [...new Set([...(s[name] ?? []), ...entryModels])],
-    }))
+    // Derived entries ∪ session additions, minus session removals:
+    // removals must survive re-derivation (the pre-rebuild bug — derived
+    // rows resurrected on every reopen).
+    setProvEntryModels((s) => {
+      const removed = new Set(removedEntries[name] ?? [])
+      return {
+        ...s,
+        [name]: [...new Set([...entryModels, ...(s[name] ?? [])])].filter((m) => !removed.has(m)),
+      }
+    })
     for (const model of entryModels) {
+      if (removedEntries[name]?.includes(model)) continue
       const detected = detectedWindows[model]
       if (detected === undefined) {
         getResolvedContextWindow(model)
           .then((r) => setDetectedWindows((d) => ({ ...d, [model]: r.context_window })))
           .catch(() => setDetectedWindows((d) => ({ ...d, [model]: null })))
       }
-      setCompDraft((s) => {
-        if (s[model] !== undefined && s[model] !== '') return s
-        const saved = modelComp[model]?.trigger_tokens
-        return { ...s, [model]: saved ? saved / 1000 : COMPACTION_DEFAULT_K }
-      })
-      setCompEnabledDraft((s) =>
-        s[model] !== undefined ? s : { ...s, [model]: modelComp[model]?.enabled ?? true },
-      )
-      // modelSteps needs no seeding: a model without an edited draft shows
-      // the 200 default and only writes on change (same '' semantics as
-      // the compaction draft).
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, providerModels])
@@ -7532,27 +7542,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           ...(p.apiKeyInput ? { api_key: p.apiKeyInput } : {}),
         }
       }
-      // Per-model agent settings (issue #111): steps + compaction both key
-      // on the model id; the context window is not a setting — it's
-      // detected and shown read-only in the editor.
+      // Per-model agent settings (issue #111): one authoritative map —
+      // steps ship under model_steps; a row's comp block ships to
+      // model_compaction when present (absent = untouched = runtime
+      // defaults). The maps ship AS-IS: a removed row ships absent, an
+      // edited value ships edited — no overlay resurrection.
       const outSteps: Record<string, number> = {}
-      for (const [model, ms] of Object.entries(modelSteps)) {
-        if (typeof ms === 'number') outSteps[model] = ms
+      for (const [model, v] of Object.entries(compMap)) {
+        if (typeof v.steps === 'number') outSteps[model] = v.steps
       }
-      const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = { ...modelComp }
-      for (const model of new Set([
-        ...Object.keys(modelComp),
-        ...Object.keys(compDraft),
-        ...Object.keys(compEnabledDraft),
-      ])) {
-        const en = compEnabledDraft[model]
-        if (en !== undefined) {
-          const tk = compDraft[model]
-          outComp[model] = {
-            enabled: en,
-            trigger_tokens: tk === '' || tk === undefined ? 0 : Number(tk) * 1000,
-          }
-        }
+      const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = {}
+      for (const [model, v] of Object.entries(compMap)) {
+        if (v.comp) outComp[model] = v.comp
       }
       await updateConfig({
         providers: out,
@@ -7813,50 +7814,86 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                               + compaction (issue #111). */}
                           <AgentContextPerProvider
                             name={name}
-                            models={[
-                              ...(providerModels[name] ?? []),
-                              ...(extraModels[name] ?? []).filter(
-                                (id) => !(providerModels[name] ?? []).includes(id),
-                              ),
-                            ]}
-                            entries={(provEntryModels[name] ?? []).map((m) => ({
+                            models={providerModels[name] ?? []}
+                            entries={(provEntryModels[name] ?? []).filter((m) => m in compMap).map((m) => ({
                               model: m,
-                              steps: modelSteps[m] ?? '',
+                              steps: compMap[m].steps ?? '',
                               onSteps: (v: number | '') =>
-                                setModelSteps((s) => ({ ...s, [m]: v })),
-                              compEnabled: compEnabledDraft[m] ?? true,
+                                setCompMap((s) => {
+                                  const next = { ...s }
+                                  const comp = next[m]?.comp
+                                  if (v === '') {
+                                    // Blank steps = "default applies": the row ships
+                                    // only its comp block, or vanishes entirely when
+                                    // it has none.
+                                    if (comp) next[m] = { comp }
+                                    else delete next[m]
+                                  } else {
+                                    next[m] = { ...(next[m] ?? {}), steps: v }
+                                  }
+                                  return next
+                                }),
+                              compEnabled: compMap[m].comp?.enabled ?? true,
                               onCompEnabled: (v: boolean) =>
-                                setCompEnabledDraft((s) => ({ ...s, [m]: v })),
-                              compK: compDraft[m] ?? COMPACTION_DEFAULT_K,
+                                setCompMap((s) => {
+                                  const cur = s[m] ?? {}
+                                  const comp = cur.comp ?? { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 }
+                                  return { ...s, [m]: { ...cur, comp: { ...comp, enabled: v } } }
+                                }),
+                              compK: compMap[m].comp ? compMap[m].comp!.trigger_tokens / 1000 : COMPACTION_DEFAULT_K,
                               onCompK: (v: number | '') =>
-                                setCompDraft((s) => ({ ...s, [m]: v })),
+                                setCompMap((s) => {
+                                  const cur = s[m] ?? {}
+                                  const comp = cur.comp ?? { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 }
+                                  return { ...s, [m]: { ...cur, comp: { ...comp, trigger_tokens: (v === '' ? 0 : v) * 1000 } } }
+                                }),
                               ctxAuto: detectedWindows[m] ?? null,
                               effective: compEff[m]
                                 ? { enabled: compEff[m].enabled, triggerK: Math.round(compEff[m].trigger_tokens / 1000) }
                                 : null,
                               entryKey: compEff[m]?.entry_key ?? null,
-                              siblings: Object.keys(modelComp).filter(
+                              siblings: Object.keys(compMap).filter(
                                 (id) => id !== m && familyBaseId(id) === familyBaseId(m),
                               ),
                             }))}
                             onAddModel={(id) => {
-                              // Append a new entry (unlimited entries allowed)
-                              // and register it in the dropdown when it's not
-                              // in the catalog.
+                              // A new entry: a row in the editor plus an
+                              // (enabled, default-trigger) comp block so the user's
+                              // edit targets a real entry — and the add PERSISTS
+                              // on Save (pre-rebuild, fresh rows were gated out of
+                              // the save payload by a stale overlay map).
                               setProvEntryModels((s) => ({
                                 ...s,
                                 [name]: (s[name] ?? []).includes(id) ? (s[name] ?? []) : [...(s[name] ?? []), id],
                               }))
-                              setExtraModels((s) => ({
+                              setRemovedEntries((s) => ({
                                 ...s,
-                                [name]: (s[name] ?? []).includes(id) ? (s[name] ?? []) : [...(s[name] ?? []), id],
+                                [name]: (s[name] ?? []).filter((m) => m !== id),
                               }))
+                              setCompMap((s) =>
+                                s[id]
+                                  ? s
+                                  : { ...s, [id]: { comp: { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 } } },
+                              )
                             }}
                             onRemoveModel={(id) => {
+                              // Removal = absence (in the entry list and in the
+                              // map Save ships). The session-removals memory keeps
+                              // re-derivation from resurrecting the row on reopen.
                               setProvEntryModels((s) => ({
                                 ...s,
                                 [name]: (s[name] ?? []).filter((m) => m !== id),
                               }))
+                              setRemovedEntries((s) => ({
+                                ...s,
+                                [name]: [...new Set([...(s[name] ?? []), id])],
+                              }))
+                              setCompMap((s) => {
+                                if (!(id in s)) return s
+                                const next = { ...s }
+                                delete next[id]
+                                return next
+                              })
                             }}
                             compactionDefaultK={COMPACTION_DEFAULT_K}
                             maxStepsDefault={MAX_STEPS_DEFAULT}
