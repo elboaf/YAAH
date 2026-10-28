@@ -120,6 +120,7 @@ import { classifyDrop } from './dropFiles'
 import { parseModelScope, qualifyModelScope } from './modelScope'
 import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
+import { INLINE_LIMIT_BYTES } from './attachments'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
 import { stripProviderMarkup } from './providerMarkup'
@@ -10168,7 +10169,7 @@ interface ImageAttachment {
 const MAX_IMAGE_BYTES = 5_000_000
 // Files at or under this ride inline in the message as a fenced block;
 // anything bigger is staged in the workspace and referenced by path.
-const INLINE_LIMIT_BYTES = 100_000
+
 const MAX_TEXT_BYTES = 2_000_000
 
 /** Exported for the say wire-contract test (#226); App composes it here. */
