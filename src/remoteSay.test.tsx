@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { cleanup, render, fireEvent, screen } from '@testing-library/react'
 import { RemoteTranscriptDialog } from './components'
 import { useAgent } from './store'
-import { useRemoteConversations } from './remoteConversationStore'
+import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 
 const { getRemoteDeviceMessages, streamRemoteTurn } = vi.hoisted(() => ({
   getRemoteDeviceMessages: vi.fn(),
@@ -75,7 +75,7 @@ describe('remote composer captures say briefings (#226)', () => {
     expect(asst?.say).toBe('Remote briefing line.')
     // The transcript cache the dialog renders from carries it too.
     expect(
-      useRemoteConversations.getState().getTranscript('host-a', '7')?.filter((m) => m.role === 'assistant').pop()?.say,
+      useRemoteConversations.getState().transcripts[remoteConversationKey('host-a', '7')]?.filter((m) => m.role === 'assistant').pop()?.say,
     ).toBe('Remote briefing line.')
   })
 })

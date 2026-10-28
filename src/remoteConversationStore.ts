@@ -7,16 +7,13 @@ export const remoteConversationKey = (hostId: string, conversationId: string) =>
 
 interface RemoteConversationState {
   transcripts: Record<string, ChatMessage[]>
-  getTranscript: (hostId: string, conversationId: string) => ChatMessage[] | undefined
   setTranscript: (hostId: string, conversationId: string, messages: ChatMessage[]) => void
   clearHost: (hostId: string) => void
 }
 
 /** In-memory cache only; the backend remains the durable, offline transcript cache. */
-export const useRemoteConversations = create<RemoteConversationState>((set, get) => ({
+export const useRemoteConversations = create<RemoteConversationState>((set) => ({
   transcripts: {},
-  getTranscript: (hostId, conversationId) =>
-    get().transcripts[remoteConversationKey(hostId, conversationId)],
   setTranscript: (hostId, conversationId, messages) =>
     set((state) => ({
       transcripts: {

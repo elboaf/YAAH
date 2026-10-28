@@ -82,8 +82,8 @@ describe('read-only remote transcript viewer', () => {
     expect(getRemoteDeviceMessages).toHaveBeenCalledWith('host-b', '7')
     expect(useAgent.getState().conversationId).toBe(7)
     expect(useAgent.getState().messagesByConv['7'][0].content).toBe('local transcript')
-    expect(useRemoteConversations.getState().getTranscript('host-a', '7')?.[0].content).toBe('transcript from host-a')
-    expect(useRemoteConversations.getState().getTranscript('host-b', '7')?.[0].content).toBe('transcript from host-b')
+    expect(useRemoteConversations.getState().transcripts[remoteConversationKey('host-a', '7')]?.[0].content).toBe('transcript from host-a')
+    expect(useRemoteConversations.getState().transcripts[remoteConversationKey('host-b', '7')]?.[0].content).toBe('transcript from host-b')
     expect(useRemoteConversations.getState().transcripts[remoteConversationKey('host-a', '7')]).toBeDefined()
     // #110: remote chats are no longer read-only — each dialog offers a composer.
     expect(screen.getAllByLabelText('Message this device chat')).toHaveLength(2)
