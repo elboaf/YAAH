@@ -10759,19 +10759,11 @@ export function Composer() {
   // same menu serves "$": the query is the unfinished $name at the very end
   // of the input; picking one adds a chip and strips the token, same as /.
   useEffect(() => {
-    if (input.startsWith('/')) {
+    const mq = menuQuery(input)
+    if (mq) {
       setSkillMenuOpen(true)
-      setSkillTrigger('/')
-      setSkillQuery(input.slice(1))
-      setSkillIndex(0)
-      setSkillNavigated(false)
-      return
-    }
-    const dollar = /\$([A-Za-z0-9_-]*)$/.exec(input)
-    if (dollar) {
-      setSkillMenuOpen(true)
-      setSkillTrigger('$')
-      setSkillQuery(dollar[1])
+      setSkillTrigger(mq.trigger)
+      setSkillQuery(mq.query)
       setSkillIndex(0)
       setSkillNavigated(false)
       return
