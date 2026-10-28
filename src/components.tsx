@@ -100,13 +100,14 @@ import {
   type SandboxStatus,
   probeImageProvider,
   getLoraCatalog,
+  getCompactionEffective,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
-import { AgentContextPerProvider } from './AgentContextPerProvider'
+import { AgentContextPerProvider, familyBaseId, providerEntryModels } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
@@ -473,30 +474,23 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   // trace chip rather than prose.
   const summary = (() => {
     const a = approval.args ?? {}
-    const pick = (...keys: string[]) => {
-      for (const k of keys) {
-        const v = a[k]
-        if (typeof v === 'string' && v.trim()) return v
-      }
-      return ''
-    }
     switch (approval.tool) {
       case 'bash':
       case 'powershell':
-        return pick('command')
+        return pickArg(a, 'command')
       case 'write_file':
       case 'create_file':
-        return pick('path', 'file_path')
+        return pickArg(a, 'path', 'file_path')
       case 'edit_file':
-        return pick('path', 'file_path')
+        return pickArg(a, 'path', 'file_path')
       case 'delete_file':
       case 'move_file':
-        return pick('path', 'src', 'dst')
+        return pickArg(a, 'path', 'src', 'dst')
       case 'git_commit':
-        return pick('message')
+        return pickArg(a, 'message')
       case 'git_push':
       case 'git_pull':
-        return `${approval.tool === 'git_push' ? 'push' : 'pull'} ${pick('remote') || 'origin'}`
+        return `${approval.tool === 'git_push' ? 'push' : 'pull'} ${pickArg(a, 'remote') || 'origin'}`
       default: {
         const kv = Object.entries(a)
           .filter(([, v]) => typeof v === 'string' && v.length < 80)
@@ -769,17 +763,19 @@ function toolGlyphColor(name: string): string {
   return 'text-zinc-400'
 }
 
+/** Pick the first truthy string value from obj among the given keys. */
+function pickArg(obj: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === 'string' && v && v.trim()) return v
+  }
+  return undefined
+}
+
 /** Short human target for a call: the file, query, or command it acts on. */
 function toolTarget(tc: ToolCall): string {
   const a = (tc.args ?? {}) as Record<string, unknown>
-  const pick = (...keys: string[]) => {
-    for (const k of keys) {
-      const v = a[k]
-      if (typeof v === 'string' && v) return v
-    }
-    return undefined
-  }
-  const t = (pick('path', 'file_path', 'query', 'pattern', 'command', 'url', 'question',
+  const t = (pickArg(a, 'path', 'file_path', 'query', 'pattern', 'command', 'url', 'question',
     ...(tc.name ?? '').startsWith('memory_') ? ['name'] : []) ?? '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -7112,22 +7108,27 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // the primary selectors render from.
   const { byProvider: subagentByProvider } = useModelList()
   const [activeTab, setActiveTab] = useState<'connect' | 'talk' | 'automate' | 'advanced'>('connect')
-  // Per-model compaction: model id -> settings (per-provider editors).
-  const [modelComp, setModelComp] = useState<Record<string, { enabled: boolean; trigger_tokens: number }>>({})
-  // Per-model step budgets (issue #111): model id -> draft ('' = untouched,
-  // saves as the model's explicit 200-default entry only when edited).
-  const [modelSteps, setModelSteps] = useState<Record<string, number | ''>>({})
-  // Editor drafts for the expanded provider: the list of configured models
-  // (each with its OWN compaction + steps, keyed by model id) + models
-  // manually added to a provider's editor (not in the catalog).
-  const [compEnabledDraft, setCompEnabledDraft] = useState<Record<string, boolean>>({})
-  const [compDraft, setCompDraft] = useState<Record<string, number | ''>>({})
-  /** Models manually added to a provider's editor (not in the catalog). */
-  const [extraModels, setExtraModels] = useState<Record<string, string[]>>({})
-  /** Models explicitly configured per provider, in order (issue #111: the
-   *  editor renders one entry per model here — unlimited entries). Starts
-   *  with the provider's current model; onAddModel appends. */
+  // Per-model agent settings (#111, rebuilt after the draft-overlay
+  // regression): ONE authoritative map — model id -> { comp?, steps? } —
+  // loaded from config and shipped as-is on Save. Absence IS deletion:
+  // the payload mirrors this map exactly, so a removed entry stays removed
+  // and an edit sticks. comp absent = the row has no saved compaction
+  // entry (runtime auto-fallback applies); steps absent = the 200 default
+  // applies. (The old design kept separate overlay drafts and unioned them
+  // with the SAVED copy at save time, which resurrected removed entries,
+  // dropped edits for models without a saved entry, and stranded phantom
+  // rows.)
+  const [compMap, setCompMap] = useState<
+    Record<string, { comp?: { enabled: boolean; trigger_tokens: number }; steps?: number }>
+  >({})
+  /** Model ids manually added to a provider's editor this session (the
+   *  derived entry list starts from the saved map + the catalog). */
   const [provEntryModels, setProvEntryModels] = useState<Record<string, string[]>>({})
+  /** Entries the user removed this session, per provider. Removal must be
+   *  remembered per-session because the entry list re-derives from the
+   *  saved map whenever the provider re-expands — without this, a removed
+   *  row resurrected on reopen (the reported phantom bug). */
+  const [removedEntries, setRemovedEntries] = useState<Record<string, string[]>>({})
   // Model catalogs per provider (from /api/models/available, fetched once).
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({})
   // Resolved (detected) context windows per model id, for pre-filling.
@@ -7273,11 +7274,24 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setMaxSteps(c.max_steps ?? '')
           setSubagentProvider(c.subagent_provider ?? '')
           setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
-          setModelComp(c.model_compaction ?? {})
-          setModelSteps(
+          // One authoritative map (#588 fault A follow-up): saved compaction
+          // entries + saved per-model steps land in the one structure the
+          // editor edits and Save ships. Models with only one kind of saved
+          // setting keep their row (comp absent = no compaction entry;
+          // steps absent = the 200 default applies).
+          setCompMap(
             Object.fromEntries(
-              Object.entries((c as unknown as { model_steps?: Record<string, number> }).model_steps ?? {}).map(
-                ([m, v]) => [m, v] as const,
+              [...new Set([...Object.keys(c.model_compaction ?? {}), ...Object.keys(c.model_steps ?? {})])].map(
+                (m) =>
+                  [
+                    m,
+                    {
+                      ...(c.model_compaction?.[m] && { comp: c.model_compaction[m] }),
+                      ...(typeof (c as unknown as { model_steps?: Record<string, number> }).model_steps?.[m] === 'number'
+                        ? { steps: (c as unknown as { model_steps?: Record<string, number> }).model_steps![m] }
+                        : {}),
+                    },
+                  ] as const,
               ),
             ),
           )
@@ -7392,40 +7406,50 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string; staticSystemPrompt: boolean }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
 
-  // Per-provider editor hydration: when a provider is expanded, seed its
-  // entry list (the provider's current model first) and each entry model's
-  // drafts from the saved per-model maps — the saved compaction trigger, or
-  // the shipped 300k default. Seeds only blank fields so the user's typing
-  // is never overwritten; drafts are model-keyed, so values survive edits
-  // to other entries.
+  // Per-provider editor hydration: when a provider is expanded, derive its
+  // entry list (saved compMap entries belonging to this provider + its
+  // default model + session additions) and resolve detected context
+  // windows. The compMap IS the draft — no seeding of overlay copies — so
+  // untouched rows ship nothing and edits land in exactly one place.
   useEffect(() => {
     if (!expanded) return
     const name = expanded
-    const entryModels = (provEntryModels[name] ?? []).length
-      ? provEntryModels[name]
-      : [providers[name]?.model].filter((m): m is string => !!m)
-    setProvEntryModels((s) => (s[name]?.length ? s : { ...s, [name]: entryModels }))
+    // Saved entries are the source of truth (#588 fault A): every
+    // compMap id whose family base belongs to THIS provider seeds an
+    // editor entry here, so a chat running any of those ids can see (and
+    // edit) its entry without the default-model keyhole. The provider's
+    // current default model stays listed even when it has no entry (the
+    // auto-fallback case, shown as such). A saved entry belongs to THIS
+    // provider when its family base matches the default model's OR any
+    // catalog model's (router-slot prefixes rotate, so the entry the
+    // default-model keyhole once saved may sit under a prefix the
+    // catalog no longer lists verbatim).
+    const entryModels = providerEntryModels(
+      Object.keys(compMap),
+      providers[name]?.model,
+      providerModels[name] ?? [],
+    )
+    // Derived entries ∪ session additions, minus session removals:
+    // removals must survive re-derivation (the pre-rebuild bug — derived
+    // rows resurrected on every reopen).
+    setProvEntryModels((s) => {
+      const removed = new Set(removedEntries[name] ?? [])
+      return {
+        ...s,
+        [name]: [...new Set([...entryModels, ...(s[name] ?? [])])].filter((m) => !removed.has(m)),
+      }
+    })
     for (const model of entryModels) {
+      if (removedEntries[name]?.includes(model)) continue
       const detected = detectedWindows[model]
       if (detected === undefined) {
         getResolvedContextWindow(model)
           .then((r) => setDetectedWindows((d) => ({ ...d, [model]: r.context_window })))
           .catch(() => setDetectedWindows((d) => ({ ...d, [model]: null })))
       }
-      setCompDraft((s) => {
-        if (s[model] !== undefined && s[model] !== '') return s
-        const saved = modelComp[model]?.trigger_tokens
-        return { ...s, [model]: saved ? saved / 1000 : COMPACTION_DEFAULT_K }
-      })
-      setCompEnabledDraft((s) =>
-        s[model] !== undefined ? s : { ...s, [model]: modelComp[model]?.enabled ?? true },
-      )
-      // modelSteps needs no seeding: a model without an edited draft shows
-      // the 200 default and only writes on change (same '' semantics as
-      // the compaction draft).
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded])
+  }, [expanded, providerModels])
 
   // Live hotkey capture: the next non-modifier keydown becomes the
   // accelerator. Capture-phase listener so Esc cancels the capture instead
@@ -7460,6 +7484,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [capturingHotkey])
+
+  // Effective compaction behavior for the expanded provider's entry ids
+  // (#588 fault B): the readouts + the entryKey come from the backend's
+  // alias-aware resolver, not from a frontend re-implementation.
+  const expandedIds = expanded ? (provEntryModels[expanded] ?? []) : []
+  const compEff = useCompactionEffective(expandedIds)
 
   const applyPreset = (target: string, presetName: string) => {
     const p = presets[presetName]
@@ -7512,27 +7542,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           ...(p.apiKeyInput ? { api_key: p.apiKeyInput } : {}),
         }
       }
-      // Per-model agent settings (issue #111): steps + compaction both key
-      // on the model id; the context window is not a setting — it's
-      // detected and shown read-only in the editor.
+      // Per-model agent settings (issue #111): one authoritative map —
+      // steps ship under model_steps; a row's comp block ships to
+      // model_compaction when present (absent = untouched = runtime
+      // defaults). The maps ship AS-IS: a removed row ships absent, an
+      // edited value ships edited — no overlay resurrection.
       const outSteps: Record<string, number> = {}
-      for (const [model, ms] of Object.entries(modelSteps)) {
-        if (typeof ms === 'number') outSteps[model] = ms
+      for (const [model, v] of Object.entries(compMap)) {
+        if (typeof v.steps === 'number') outSteps[model] = v.steps
       }
-      const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = { ...modelComp }
-      for (const model of new Set([
-        ...Object.keys(modelComp),
-        ...Object.keys(compDraft),
-        ...Object.keys(compEnabledDraft),
-      ])) {
-        const en = compEnabledDraft[model]
-        if (en !== undefined) {
-          const tk = compDraft[model]
-          outComp[model] = {
-            enabled: en,
-            trigger_tokens: tk === '' || tk === undefined ? 0 : Number(tk) * 1000,
-          }
-        }
+      const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = {}
+      for (const [model, v] of Object.entries(compMap)) {
+        if (v.comp) outComp[model] = v.comp
       }
       await updateConfig({
         providers: out,
@@ -7793,43 +7814,86 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                               + compaction (issue #111). */}
                           <AgentContextPerProvider
                             name={name}
-                            models={[
-                              ...(providerModels[name] ?? []),
-                              ...(extraModels[name] ?? []).filter(
-                                (id) => !(providerModels[name] ?? []).includes(id),
-                              ),
-                            ]}
-                            entries={(provEntryModels[name] ?? []).map((m) => ({
+                            models={providerModels[name] ?? []}
+                            entries={(provEntryModels[name] ?? []).filter((m) => m in compMap).map((m) => ({
                               model: m,
-                              steps: modelSteps[m] ?? '',
+                              steps: compMap[m].steps ?? '',
                               onSteps: (v: number | '') =>
-                                setModelSteps((s) => ({ ...s, [m]: v })),
-                              compEnabled: compEnabledDraft[m] ?? true,
+                                setCompMap((s) => {
+                                  const next = { ...s }
+                                  const comp = next[m]?.comp
+                                  if (v === '') {
+                                    // Blank steps = "default applies": the row ships
+                                    // only its comp block, or vanishes entirely when
+                                    // it has none.
+                                    if (comp) next[m] = { comp }
+                                    else delete next[m]
+                                  } else {
+                                    next[m] = { ...(next[m] ?? {}), steps: v }
+                                  }
+                                  return next
+                                }),
+                              compEnabled: compMap[m].comp?.enabled ?? true,
                               onCompEnabled: (v: boolean) =>
-                                setCompEnabledDraft((s) => ({ ...s, [m]: v })),
-                              compK: compDraft[m] ?? COMPACTION_DEFAULT_K,
+                                setCompMap((s) => {
+                                  const cur = s[m] ?? {}
+                                  const comp = cur.comp ?? { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 }
+                                  return { ...s, [m]: { ...cur, comp: { ...comp, enabled: v } } }
+                                }),
+                              compK: compMap[m].comp ? compMap[m].comp!.trigger_tokens / 1000 : COMPACTION_DEFAULT_K,
                               onCompK: (v: number | '') =>
-                                setCompDraft((s) => ({ ...s, [m]: v })),
+                                setCompMap((s) => {
+                                  const cur = s[m] ?? {}
+                                  const comp = cur.comp ?? { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 }
+                                  return { ...s, [m]: { ...cur, comp: { ...comp, trigger_tokens: (v === '' ? 0 : v) * 1000 } } }
+                                }),
                               ctxAuto: detectedWindows[m] ?? null,
+                              effective: compEff[m]
+                                ? { enabled: compEff[m].enabled, triggerK: Math.round(compEff[m].trigger_tokens / 1000) }
+                                : null,
+                              entryKey: compEff[m]?.entry_key ?? null,
+                              siblings: Object.keys(compMap).filter(
+                                (id) => id !== m && familyBaseId(id) === familyBaseId(m),
+                              ),
                             }))}
                             onAddModel={(id) => {
-                              // Append a new entry (unlimited entries allowed)
-                              // and register it in the dropdown when it's not
-                              // in the catalog.
+                              // A new entry: a row in the editor plus an
+                              // (enabled, default-trigger) comp block so the user's
+                              // edit targets a real entry — and the add PERSISTS
+                              // on Save (pre-rebuild, fresh rows were gated out of
+                              // the save payload by a stale overlay map).
                               setProvEntryModels((s) => ({
                                 ...s,
                                 [name]: (s[name] ?? []).includes(id) ? (s[name] ?? []) : [...(s[name] ?? []), id],
                               }))
-                              setExtraModels((s) => ({
+                              setRemovedEntries((s) => ({
                                 ...s,
-                                [name]: (s[name] ?? []).includes(id) ? (s[name] ?? []) : [...(s[name] ?? []), id],
+                                [name]: (s[name] ?? []).filter((m) => m !== id),
                               }))
+                              setCompMap((s) =>
+                                s[id]
+                                  ? s
+                                  : { ...s, [id]: { comp: { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 } } },
+                              )
                             }}
                             onRemoveModel={(id) => {
+                              // Removal = absence (in the entry list and in the
+                              // map Save ships). The session-removals memory keeps
+                              // re-derivation from resurrecting the row on reopen.
                               setProvEntryModels((s) => ({
                                 ...s,
                                 [name]: (s[name] ?? []).filter((m) => m !== id),
                               }))
+                              setRemovedEntries((s) => ({
+                                ...s,
+                                [name]: [...new Set([...(s[name] ?? []), id])],
+                              }))
+                              setCompMap((s) => {
+                                if (!(id in s)) return s
+                                const next = { ...s }
+                                delete next[id]
+                                return next
+                              })
                             }}
                             compactionDefaultK={COMPACTION_DEFAULT_K}
                             maxStepsDefault={MAX_STEPS_DEFAULT}
@@ -8832,6 +8896,53 @@ function useCompactionConfig(): { enabled: boolean; trigger_tokens: number } {
   return cfg ?? { enabled: true, trigger_tokens: 0 }
 }
 
+/** Effective per-model compaction behavior (#588): what the runtime
+ *  actually does for a model id — the entry that covers it (exact or
+ *  alias) and the trigger that will fire, or the auto fallback. Cached
+ *  per page load like the global config above; Settings changes refresh
+ *  on the next reload of this module's cache. */
+interface CompactionEffective {
+  model: string
+  entry: boolean
+  entry_key: string | null
+  enabled: boolean
+  trigger_tokens: number
+  keep_tokens: number
+  window: number | null
+}
+
+const effCache: Record<string, CompactionEffective> = {}
+const effInflight = new Set<string>()
+
+/** Fetch the effective compaction behavior for each id once per page
+ *  load; ids already cached (or in flight) are not re-fetched, and later
+ *  subscribers (another provider expanded, a chat switching models) get
+ *  their own fetch. Failures leave the cache untouched — no readout
+ *  beats a wrong one — and the next subscriber retries. */
+export function useCompactionEffective(ids: string[]): Record<string, CompactionEffective> {
+  const [, bump] = useState(0)
+  const key = ids.filter(Boolean).join('|')
+  useEffect(() => {
+    const unique = key ? key.split('|') : []
+    const missing = unique.filter((m) => !(m in effCache) && !effInflight.has(m))
+    if (!missing.length) return
+    for (const m of missing) effInflight.add(m)
+    Promise.all(
+      missing.map((m) =>
+        getCompactionEffective(m)
+          .then((r) => [m, r] as const)
+          .catch(() => null),
+      ),
+    ).then((rows) => {
+      for (const row of rows) if (row) effCache[row[0]] = row[1]
+      for (const m of missing) effInflight.delete(m)
+      bump((n) => n + 1)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+  return effCache
+}
+
 /** Where the dial's fill flips to warning colors: compaction first, then
  *  the dumb zone (the more severe of the two marks the color for the moment
  *  the count passes it). */
@@ -8885,6 +8996,12 @@ function DialTick({ frac, color }: { frac: number; color: string }) {
  *  page load. */
 export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
   const compaction = useCompactionConfig()
+  // The tick must sit at THIS chat model's effective trigger (#588): a
+  // per-model entry (its own or an alias sibling's) fires there, not the
+  // global value the old tick showed. Global stays the fallback while
+  // the probe has no answer (and for models without an entry — the
+  // backend then reports the derived fallback as the trigger anyway).
+  const eff = useCompactionEffective(info && info.model ? [info.model] : [])
   if (!info) return null
   const windowTokens = info.window
   // The dial ALWAYS scales out of 200k, regardless of the model's context
@@ -8897,8 +9014,15 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
   // unclamped percentage (see tooltip note on DUMB_ZONE_TOKENS).
   const rawFrac = info.tokens / scale
   const frac = rawFrac % 1
-  // Absolute compaction threshold (pure token value, no window fraction).
-  const trigger = compaction.enabled && compaction.trigger_tokens > 0 ? compaction.trigger_tokens : null
+  // Absolute compaction threshold (pure token value, no window fraction),
+  // per this chat's model when known (#588); global value as the fallback.
+  const effModel = info.model ? eff[info.model] : undefined
+  const fallbackTrigger = compaction.enabled && compaction.trigger_tokens > 0 ? compaction.trigger_tokens : null
+  const trigger = effModel
+    ? effModel.enabled && effModel.trigger_tokens > 0
+      ? effModel.trigger_tokens
+      : null
+    : fallbackTrigger
   const triggerFrac = trigger !== null ? Math.min(1, trigger / scale) : null
   const dumbFrac = DUMB_ZONE_TOKENS / scale
   const dumbVisible = dumbFrac < 1
@@ -10862,7 +10986,7 @@ export function Composer() {
   // before writing final status — buffered text must never land after
   // 'idle'/'error', and a Stop must not orphan a scheduled rAF.
   const streamBufferFlushers = new Map<string, () => void>()
-  const handleStreamEvent = (bufKey: string, asstId: string) => {
+  const handleStreamEvent = (bufKey: string, asstId: string, throwOnError?: boolean) => {
     let curId = asstId
     let awaitingPostSteerEmission = false
     // True while text is allowed to flow without an emission separator: the
@@ -11210,6 +11334,7 @@ export function Composer() {
     opts?: {
       interrupt?: boolean
       queueHandoff?: boolean
+      throwOnError?: boolean
       target?: { conversationId: number | null; workspace: string }
       images?: string[]
       skills?: string[]
@@ -11289,8 +11414,7 @@ export function Composer() {
     // unknown names stay literal text, and the token text rides in the body
     // verbatim so the model sees the in-context usage. Menu chips are just
     // the rendered view of these tokens — there is no separate chip list.
-    const knownSkillNames = new Set(skills.map((s) => s.name))
-    const invokedSkills = opts?.skills ?? deriveInvokedSkills(displayText, knownSkillNames)
+    const invokedSkills = opts?.skills ?? deriveInvokedSkills(displayText, knownSkillNamesSet)
     // Captured draft: if the turn fails before the agent answers, the
     // composer gets it back — a failed send must not cost the prompt.
     const draft = { input, attachments, images }
@@ -11414,6 +11538,7 @@ export function Composer() {
         // workspace again instead of freezing on the old one.
         useAgent.getState().clearOrphanedDraftPin()
         textareaRef.current?.focus()
+        if (opts?.throwOnError) throw e
       }
     } finally {
       setSending(false)
@@ -11516,7 +11641,7 @@ export function Composer() {
         ? `[${attachments.length} attachment${attachments.length === 1 ? '' : 's'}]`
         : text
     const skillNames = fromComposer
-      ? deriveInvokedSkills(displayText, new Set(skills.map((s) => s.name)))
+      ? deriveInvokedSkills(displayText, knownSkillNamesSet)
       : []
     if (fromComposer && images.length > 4) {
       useAgent.getState().pushToast({
@@ -11572,6 +11697,8 @@ export function Composer() {
       // items, start a fresh turn with them instead of failing.
       if (result.run_ended && result.queued && result.queued.length > 0) {
         setSteerFlag(targetKey, false)
+        // Prevent the done handler from wiping echoes until all items are sent.
+        pendingQueueAutosendRef.current[targetKey] = result.queued
         // Drain the queue by sending items as fresh turns.
         for (const item of result.queued) {
           // Reconcile the queued echo before sending the fresh turn.
@@ -11587,7 +11714,7 @@ export function Composer() {
           // restore it so the item isn't lost (it remains queued for the next
           // manual send).
           try {
-            await send(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
+            await send(item.text, { queueHandoff: true, throwOnError: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
           } catch (e) {
             if (promoted && echo) {
               // Re-add the echo so the item survives.
@@ -11929,8 +12056,6 @@ export function Composer() {
             e.target.value = ''
           }}
         />
-        {/* Unified toolbar: host + mode on the left, attach/mic/send on the
-            right — one hairline-separated row inside the composer card. */}
         {/* Unified toolbar: host + mode on the left, attach/mic/send on the
             right — one hairline-separated row inside the composer card. */}
         <div className="flex items-center gap-1   px-1.5 py-1.5">

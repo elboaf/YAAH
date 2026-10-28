@@ -517,6 +517,23 @@ export const getResolvedContextWindow = (model: string) =>
     `/api/context-window?model=${encodeURIComponent(model)}`,
   )
 
+/** Effective compaction behavior for one model id (#588): the per-model
+ *  entry that covers it (resolved through the alias identity, so a chat
+ *  running any sibling router-slot alias sees the saved entry), the
+ *  trigger that will actually fire, and the keep budget the cut math
+ *  holds back. Settings renders its "fires at Xk / no entry — auto
+ *  fallback" readout from this; the context dial ticks at the trigger. */
+export const getCompactionEffective = (model: string) =>
+  api<{
+    model: string
+    entry: boolean
+    entry_key: string | null
+    enabled: boolean
+    trigger_tokens: number
+    keep_tokens: number
+    window: number | null
+  }>(`/api/compaction/effective?model=${encodeURIComponent(model)}`)
+
 // ---------------------------------------------------------------- files
 
 export interface FileEntry {
@@ -1051,7 +1068,7 @@ export async function ttsTest(
 
 /** Voice + model discovery (#231, #443, #448): the names a remote server
  *  offers via its non-standard GET /voices, plus the model ids from the
- *  standard GET /v1/models. The backend probe NEVER errors � an
+ *  standard GET /v1/models. The backend probe NEVER errors—an
  *  unreachable or list-less server resolves to empty lists and the UI
  *  falls back to free-text. Drafts ride in the body so discovery works
  *  before the first Save. */

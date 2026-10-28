@@ -11,7 +11,7 @@ import json
 import logging
 import re
 
-from backend.agent import model_client
+from backend.agent import model_client, model_settings
 from backend.agent.config import load_config
 from backend.agent.context_window import get_context_window
 
@@ -99,7 +99,10 @@ def _compaction_cfg_for_model(bare_model: str, ccfg: dict, context_window: int |
     undetected model keeps the 300k trigger instead of deriving from the
     32k guess (CodeRabbit round on PR #579).
     """
-    entry = (ccfg.get("model_compaction") or {}).get(bare_model)
+    # Entry resolution goes through the identity module (#588 fault A):
+    # exact bare id, else the family base, else a sibling router-slot
+    # alias -- an entry saved for "1.Tiel-..." covers "x2.Tiel-...".
+    entry = model_settings.model_entry(bare_model, ccfg)
     if isinstance(entry, dict):
         cfg = dict(ccfg)
         cfg["enabled"] = bool(entry.get("enabled", True))
@@ -224,15 +227,44 @@ def should_compact(context_tokens: int | None, context_window: int, model: str |
     return absolute > 0 and context_tokens > absolute
 
 
+def keep_budget_tokens(ccfg: dict, window: int) -> int:
+    """Est-tokens the cut math must keep verbatim (find_cut_index's
+    `keep_tokens`).
+
+    Ship shape: COMPACTION_KEEP_FRACTION of the WINDOW, so post-cut calls
+    land at a sane fraction of what the model holds (ADR-0004). An
+    absolute per-model trigger at or below the window shrinks the budget
+    to that fraction of the TRIGGER (#588 fault C): the 24k entry must be
+    able to fold at ~24k, which window-fraction math (52k keep on a
+    131k window) mathematically forbids. Disabled or triggerless configs
+    (and a trigger above the window, where the window fraction is
+    already the smaller keep) keep the ship shape.
+    """
+    budget = int(window * COMPACTION_KEEP_FRACTION)
+    if not ccfg.get("enabled", True):
+        return budget
+    try:
+        trigger = int(ccfg.get("trigger_tokens") or 0)
+    except (TypeError, ValueError):
+        trigger = 0
+    if 0 < trigger < window:
+        return int(trigger * COMPACTION_KEEP_FRACTION)
+    return budget
+
+
 def find_cut_index(messages: list, keep_tokens: int, min_tail: int = 0) -> int:
     """Index of the first message of the VERBATIM TAIL: messages[:cut]
     are the compaction candidates.
 
     Walks from the end backwards until ~keep_tokens are gathered, then
-    slides the boundary LEFT to the nearest user message so the summary
-    never splits an assistant tool_calls -> tool pair. Returns 0 when
-    there is nothing safe to summarize (too little history, or every
-    boundary candidate would leave less than min_tail messages).
+    slides the boundary LEFT onto a row the summary cut may start on:
+    `user`, or `assistant` (a cut before an assistant row leaves any
+    assistant->tool pairs whole inside the tail — API-valid when the
+    DB-backed tail replays them). A `tool` row is the one illegal start
+    (it would orphan its result behind the watermark and get silently
+    dropped on every replay). Returns 0 when there is nothing safe to
+    summarize (too little history, or every boundary candidate would
+    leave less than min_tail messages).
     """
     n = len(messages)
     if n <= min_tail:
@@ -250,13 +282,16 @@ def find_cut_index(messages: list, keep_tokens: int, min_tail: int = 0) -> int:
             break
     else:
         return 0  # whole history fits the keep budget: nothing to fold
-    # Slide left to a user boundary (a summary that begins mid-pair is
-    # API-invalid once replayed). cut == n means the walk ate everything:
-    # the boundary is virtual, so step back from the end.
-    while cut > 0 and (cut >= n or messages[cut].get("role") != "user"):
+    # Slide left off any `tool` row only: a cut before an assistant row
+    # keeps every assistant->tool pair whole (the tail replays from the
+    # DB, so the pre-cut shape is irrelevant; #591). Demanding a `user`
+    # boundary here deadlocked one-turn agentic chats — 60+ tool rows
+    # after a single user message gave the slide nowhere to land, so the
+    # fold never fired at any trigger (#591 live repro, conv 1097).
+    while cut > 0 and (cut >= n or messages[cut].get("role") == "tool"):
         cut -= 1
-    # No user boundary found, or the tail would dip below the floor:
-    # keep everything verbatim this turn.
+    # No legal boundary (the slide fell off the front), or the tail would
+    # dip below the floor: keep everything verbatim this pass.
     if cut <= 0 or n - cut < min_tail:
         return 0
     return cut
@@ -453,11 +488,7 @@ async def compact_history_for_context(
     if not conv:
         return None
     cfg = load_config()
-    if model_id:
-        bare = model_id.partition("::")[2] if "::" in model_id else model_id
-    else:
-        cfg_model = cfg.get("model") or ""
-        bare = cfg_model.partition("::")[2] if "::" in cfg_model else cfg_model
+    bare = model_settings.bare_model_id(model_id or cfg.get("model"))
     # Per-model settings: the model's own entry decides on/off + trigger.
     # The resolved window feeds the NO-ENTRY trigger fallback (80% of the
     # detected window instead of the flat 300k default, #578) — resolve it
@@ -477,7 +508,7 @@ async def compact_history_for_context(
     # Only unsummarized transcript rows participate in the next cut. The
     # transcript itself remains untouched; the watermark affects prompt replay.
     pending = [r for r in rows if r["id"] > watermark]
-    keep_budget = int(window * COMPACTION_KEEP_FRACTION)
+    keep_budget = keep_budget_tokens(ccfg, window)
     cut = find_cut_index(pending, keep_budget, COMPACTION_MIN_TAIL_MESSAGES)
     if cut <= 0:
         log.info(
