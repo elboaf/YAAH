@@ -7100,7 +7100,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [providers, setProviders] = useState<Record<string, { api_base: string; model: string; apiKeyInput: string; savedKey: boolean; staticSystemPrompt: boolean }>>({})
   // No longer in Settings — the chat model bar is the sole writer of active_provider.
   const [newName, setNewName] = useState('')
-  const [maxSteps, setMaxSteps] = useState<number | ''>('')
   // Sub-agent routing draft (#383): '' = sub-agent: auto (the parent's
   // model); a value is a complete "provider::model" scope.
   const [subagentProvider, setSubagentProvider] = useState('')
@@ -7271,7 +7270,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             }
           }
           setProviders(next)
-          setMaxSteps(c.max_steps ?? '')
           setSubagentProvider(c.subagent_provider ?? '')
           setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
           // One authoritative map (#588 fault A follow-up): saved compaction
@@ -7557,7 +7555,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       }
       await updateConfig({
         providers: out,
-        max_steps: maxSteps === '' ? undefined : Number(maxSteps),
         subagent_provider: subagentProvider,
         model_steps: outSteps,
         model_compaction: outComp,
