@@ -2081,47 +2081,35 @@ export function PreviewModal() {
       .catch((e) => setErr(String(e)))
   }, [workspace, previewPath])
 
-  useEffect(() => {
-    if (!previewPath) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPreviewPath(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [previewPath, setPreviewPath])
-
   if (!previewPath) return null
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8"
-      onClick={() => setPreviewPath(null)}
+    <DialogShell
+      onClose={() => setPreviewPath(null)}
+      panelClassName="flex max-h-[90%] w-full max-w-3xl flex-col overflow-hidden rounded-lg   bg-zinc-900 shadow-2xl"
+      panelRole="dialog"
+      panelLabel={`Preview: ${previewPath}`}
     >
-      <div
-        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg   bg-zinc-900 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between   px-3 py-2">
-          <h2 className="truncate font-mono text-xs text-zinc-300">{previewPath}</h2>
-          <button
-            className="ml-2 text-[10px] text-zinc-500 hover:text-zinc-300"
-            onClick={() => setPreviewPath(null)}
-          >
-            close
-          </button>
-        </div>
-        {err && <p className="p-2 text-[10px] text-red-400">{err}</p>}
-        {file && (
-          <div className="flex-1 overflow-auto">
-            <CodeBlock code={file.content} lang={langOf(file.path)} />
-            {file.truncated && (
-              <p className="px-2 pb-2 text-[10px] text-zinc-500">
-                Showing lines 1-{file.end_line} of {file.total_lines}.
-              </p>
-            )}
-          </div>
-        )}
+      <div className="flex items-center justify-between   px-3 py-2">
+        <h2 className="truncate font-mono text-xs text-zinc-300">{previewPath}</h2>
+        <button
+          className="ml-2 text-[10px] text-zinc-500 hover:text-zinc-300"
+          onClick={() => setPreviewPath(null)}
+        >
+          close
+        </button>
       </div>
-    </div>
+      {err && <p className="p-2 text-[10px] text-red-400">{err}</p>}
+      {file && (
+        <div className="flex-1 overflow-auto">
+          <CodeBlock code={file.content} lang={langOf(file.path)} />
+          {file.truncated && (
+            <p className="px-2 pb-2 text-[10px] text-zinc-500">
+              Showing lines 1-{file.end_line} of {file.total_lines}.
+            </p>
+          )}
+        </div>
+      )}
+    </DialogShell>
   )
 }
 
