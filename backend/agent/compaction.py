@@ -257,10 +257,14 @@ def find_cut_index(messages: list, keep_tokens: int, min_tail: int = 0) -> int:
     are the compaction candidates.
 
     Walks from the end backwards until ~keep_tokens are gathered, then
-    slides the boundary LEFT to the nearest user message so the summary
-    never splits an assistant tool_calls -> tool pair. Returns 0 when
-    there is nothing safe to summarize (too little history, or every
-    boundary candidate would leave less than min_tail messages).
+    slides the boundary LEFT onto a row the summary cut may start on:
+    `user`, or `assistant` (a cut before an assistant row leaves any
+    assistant->tool pairs whole inside the tail — API-valid when the
+    DB-backed tail replays them). A `tool` row is the one illegal start
+    (it would orphan its result behind the watermark and get silently
+    dropped on every replay). Returns 0 when there is nothing safe to
+    summarize (too little history, or every boundary candidate would
+    leave less than min_tail messages).
     """
     n = len(messages)
     if n <= min_tail:
@@ -278,13 +282,16 @@ def find_cut_index(messages: list, keep_tokens: int, min_tail: int = 0) -> int:
             break
     else:
         return 0  # whole history fits the keep budget: nothing to fold
-    # Slide left to a user boundary (a summary that begins mid-pair is
-    # API-invalid once replayed). cut == n means the walk ate everything:
-    # the boundary is virtual, so step back from the end.
-    while cut > 0 and (cut >= n or messages[cut].get("role") != "user"):
+    # Slide left off any `tool` row only: a cut before an assistant row
+    # keeps every assistant->tool pair whole (the tail replays from the
+    # DB, so the pre-cut shape is irrelevant; #591). Demanding a `user`
+    # boundary here deadlocked one-turn agentic chats — 60+ tool rows
+    # after a single user message gave the slide nowhere to land, so the
+    # fold never fired at any trigger (#591 live repro, conv 1097).
+    while cut > 0 and (cut >= n or messages[cut].get("role") == "tool"):
         cut -= 1
-    # No user boundary found, or the tail would dip below the floor:
-    # keep everything verbatim this turn.
+    # No legal boundary (the slide fell off the front), or the tail would
+    # dip below the floor: keep everything verbatim this pass.
     if cut <= 0 or n - cut < min_tail:
         return 0
     return cut
