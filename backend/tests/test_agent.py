@@ -391,6 +391,108 @@ async def test_midturn_usage_crossing_folds_context_mid_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_midturn_watch_uses_conversation_model_not_global(
+    fake_model, tmp_path, monkeypatch
+):
+    from backend.db.database import (
+        create_conversation,
+        set_conversation_usage,
+    )
+    from backend.agent import compaction as compaction_mod
+
+    CHAT_MODEL = "Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-Q4_K_M"
+    GLOBAL_MODEL = "x2.Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M"
+    cfg = {
+        "enabled": True,
+        "trigger_tokens": 0,
+        "per_model_enabled": True,
+        "per_model_trigger_tokens": 300_000,
+        "model_compaction": {
+            CHAT_MODEL: {"enabled": True, "trigger_tokens": 63_000},
+            GLOBAL_MODEL: {"enabled": True, "trigger_tokens": 125_000},
+        },
+        "model": "",
+    }
+    monkeypatch.setattr(compaction_mod, "_compaction_cfg", lambda: cfg)
+    monkeypatch.setattr(compaction_mod, "COMPACTION_KEEP_FRACTION", 0.001)
+    monkeypatch.setattr(compaction_mod, "COMPACTION_MIN_TAIL_MESSAGES", 2)
+
+    async def fake_summarize(cut_messages, model_override="", cancel_event=None):
+        return f"SYNTHETIC SUMMARY of {len(cut_messages)} messages"
+
+    monkeypatch.setattr(compaction_mod, "summarize_messages", fake_summarize)
+
+    async def fake_resolve_window(model, cfg=None):
+        return 65_535
+
+    monkeypatch.setattr(compaction_mod, "resolve_window", fake_resolve_window)
+
+    _fcfg = {
+        "providers": {
+            "llamacpp": {
+                "api_base": "http://test-router/v1",
+                "api_key": "",
+                "model": GLOBAL_MODEL,
+            }
+        },
+        "active_provider": "llamacpp",
+        # The global default is the OTHER model — the whole point.
+        "model": f"llamacpp::{GLOBAL_MODEL}",
+        "api_base": "http://test-router/v1",
+        "api_key": "",
+    }
+    monkeypatch.setattr(loop, "load_config", lambda: _fcfg)
+    monkeypatch.setattr(loop.model_client, "load_config", lambda: _fcfg)
+    monkeypatch.setattr(compaction_mod, "load_config", lambda: _fcfg)
+    import backend.agent.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda: _fcfg)
+
+    async def no_title(*_args):
+        return None
+
+    monkeypatch.setattr(loop, "_generate_conversation_title", no_title)
+    monkeypatch.setattr(loop, "current_access_mode", lambda: "full")
+
+    # No model_override: the chat is an old-style default-model chat whose
+    # model came from a global default that has since CHANGED. The
+    # conversation row carries CHAT_MODEL from its earlier calls.
+    cid = await create_conversation("wrong-global", model=f"llamacpp::{CHAT_MODEL}")
+    await set_conversation_usage(cid, 45_000, f"llamacpp::{CHAT_MODEL}")
+
+    # One turn, three calls: usage crosses CHAT_MODEL's 63k trigger
+    # mid-turn (65_000 > 63_000) while staying under GLOBAL_MODEL's 125k.
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "echo one"}'},
+        }]},
+        {"type": "usage", "usage": {"prompt_tokens": 50_000}},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([
+        {"type": "tool_calls", "tool_calls": [{
+            "id": "c2", "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "echo two"}'},
+        }]},
+        {"type": "usage", "usage": {"prompt_tokens": 65_000}},
+        {"type": "finish", "reason": "tool_calls"},
+    ])
+    fake_model.append([{"type": "content", "text": "folded and continuing."}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "keep going", str(tmp_path)))
+
+    kinds = [e["type"] for e in events]
+    assert "error" not in kinds, f"turn errored: {events[0]}"
+    assert "compacted" in kinds, (
+        "mid-turn watch consulted the GLOBAL model's entry (125k) and "
+        f"skipped the fold — must consult the conversation's model; events: {kinds}"
+    )
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_run_emits_persisted_per_file_change_summary(fake_model, tmp_path, monkeypatch):
     from backend.db.database import create_conversation, get_messages
 

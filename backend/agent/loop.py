@@ -2375,12 +2375,23 @@ async def _run_agent_claimed(
 
                 _measured = (state["usage"] or {}).get("prompt_tokens")
                 # Same model resolution as the turn-start pass (and the
-                # usage persist below): the override, else the GLOBAL
-                # model — a chat without an override must consult its
-                # model's own model_compaction entry, not fall back to
-                # the global block. Bare ids stay bare (the entry keys
-                # are bare); scoped ids reduce to their model part.
-                _model_id = model_override or load_config().get("model") or None
+                # usage persist below): the override, else the
+                # CONVERSATION's recorded model, else the global — the
+                # global can change after this chat started, and gating
+                # the mid-turn check on another model's entry left a
+                # 63k-trigger chat unguarded under a 125k entry until the
+                # provider 400 killed the turn (#1103 post-mortem).
+                # Bare ids stay bare (the entry keys are bare); scoped ids
+                # reduce to their model part.
+                _row_now = (
+                    await get_conversation(conversation_id) or {}
+                )
+                _model_id = (
+                    model_override
+                    or _row_now.get("context_model")
+                    or load_config().get("model")
+                    or None
+                )
                 _bare = _model_id.partition("::")[2] if _model_id else ""
                 _window = await compaction_mod.resolve_window(
                     _model_id, load_config()
@@ -2396,11 +2407,21 @@ async def _run_agent_claimed(
                     ):
                         _cevents.append(_cev)
                         yield _ndjson(_cev)
-                    if _cevents:
+                    if _cevents and any(
+                        _cev.get("type") in ("compacted", "compaction_failed")
+                        for _cev in _cevents
+                    ):
                         # One mid-turn ATTEMPT per turn once the pass has a
-                        # real outcome (folded or failed). A silent skip
-                        # (no safe cut yet) stays unlatched: the next step
+                        # real outcome. A `compaction_failed` latches too —
+                        # but ONLY because retrying the same doomed pass on
+                        # every boundary is churn (#389 shape); the turn's
+                        # NEXT turn-start pass re-arms. A silent skip (no
+                        # safe cut yet) stays unlatched: the next step
                         # boundary rechecks against the grown transcript.
+                        # (Pre-#594, a failed attempt and a successful fold
+                        # latched identically — one summarizer stumble
+                        # disbanded the trigger watch for the rest of a
+                        # 65-minute turn and the provider 400 followed.)
                         _turn_compacted = True
                     for _cev in _cevents:
                         if _cev.get("type") == "compacted":
@@ -2730,8 +2751,17 @@ async def _run_agent_claimed(
                 # The context chip must resolve against the model THIS chat
                 # actually ran on (#51) — the global default is only the
                 # fallback for override-less callers (e.g. old callers).
+                # The stamp must PRESERVE an existing context_model: the
+                # first call fixes the chat's model identity, and a later
+                # change of the global knob must not rewrite history —
+                # the fold trigger reads this column to decide, and a
+                # re-stamped row guards the chat with another model's
+                # entry (#1103: 63k-entry chat silently under a 125k
+                # entry after the default moved; the turn 400ed).
+                _row_now = await get_conversation(conversation_id) or {}
                 _model_id = (
                     model_override
+                    or _row_now.get("context_model")
                     or load_config().get("model")
                     or None
                 )
