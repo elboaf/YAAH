@@ -4443,7 +4443,7 @@ export function DefaultThoughtLevelPicker() {
 }
 
 export function Sidebar() {
-  const { newConversation, workspace, setWorkspace, clearLog, refreshGlobals } = useAgent()
+  const { newConversation, workspace, setWorkspace, refreshGlobals } = useAgent()
   const globalModel = useAgent((s) => s.globalModel)
   // null = backend hasn't answered the config probe yet; '' = genuinely no
   // provider configured. The "add a provider" banner must only render on ''
@@ -4573,7 +4573,7 @@ export function Sidebar() {
               className="min-w-0 flex-1 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500"
               onClick={() => {
                 newConversation()
-                clearLog()
+
               }}
             >
               New chat
@@ -10203,7 +10203,7 @@ export function Composer() {
     setPendingApproval,
     setPendingPlanApproval,
     setContext,
-    pushLog,
+
     appendRawMessage,
     setCompaction,
     setAbortController,
@@ -10332,6 +10332,25 @@ export function Composer() {
     }
   }, [])
 
+  // Shared mic-start with error triage (used by both click-dictation and PTT).
+  const startRecorder = async () => {
+    const rec = new VoiceRecorder()
+    try {
+      await rec.start()
+    } catch (e) {
+      const err = e as DOMException
+      const reason =
+        err?.name === 'NotAllowedError'
+          ? 'permission denied'
+          : err?.name === 'NotFoundError'
+            ? 'no microphone found'
+            : err?.message || 'unknown error'
+      pushReject(`Microphone unavailable — ${reason}`)
+      return null
+    }
+    return rec
+  }
+
   const toggleDictation = async () => {
     if (voiceState === 'transcribing') return
     if (voiceState === 'recording') {
@@ -10354,20 +10373,8 @@ export function Composer() {
       return
     }
     // idle → recording
-    const rec = new VoiceRecorder()
-    try {
-      await rec.start()
-    } catch (e) {
-      const err = e as DOMException
-      const reason =
-        err?.name === 'NotAllowedError'
-          ? 'permission denied'
-          : err?.name === 'NotFoundError'
-            ? 'no microphone found'
-            : err?.message || 'unknown error'
-      pushReject(`Microphone unavailable — ${reason}`)
-      return
-    }
+    const rec = await startRecorder()
+    if (!rec) return
     recorderRef.current = rec
     setVoiceState('recording')
   }
@@ -10485,20 +10492,8 @@ export function Composer() {
       recorderRef.current = null
       setVoiceState('idle')
     }
-    const rec = new VoiceRecorder()
-    try {
-      await rec.start()
-    } catch (e) {
-      const err = e as DOMException
-      const reason =
-        err?.name === 'NotAllowedError'
-          ? 'permission denied'
-          : err?.name === 'NotFoundError'
-            ? 'no microphone found'
-            : err?.message || 'unknown error'
-      pushReject(`Microphone unavailable — ${reason}`)
-      return
-    }
+    const rec = await startRecorder()
+    if (!rec) return
     recorderRef.current = rec
     pttHeldRef.current = true
     pttTargetRef.current = pttTarget
@@ -11036,8 +11031,6 @@ export function Composer() {
       // content offsets are computed from message content, and a segment
       // boundary computed over un-flushed text would be wrong (#279).
       textDeltas.flush()
-      startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
-      pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       // Telemetry tape: every tool event of the turn flows into one
       // per-conversation line that survives gaps and turn boundaries.
       appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
@@ -11080,7 +11073,7 @@ export function Composer() {
       }
     } else if (ev.type === 'tool_result') {
       finishToolCall(bufKey, curId, ev.call_id ?? '', ev.result, ev.duration_ms)
-      pushLog({ kind: 'tool', name: ev.name, result: ev.result })
+
       // Close the call's tape segment: response summary + duration.
       // #445: the server-measured duration is preferred (it is correct
       // even when the chip started before this client connected); the
@@ -11116,7 +11109,6 @@ export function Composer() {
       startPostSteerEmission()
       setStatus(bufKey, 'running-tool')
       startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
-      pushLog({ kind: 'tool', name: ev.name, args: ev.args })
       setPendingApproval({
         callId: ev.call_id ?? '',
         tool: ev.name ?? 'tool',
@@ -11138,7 +11130,7 @@ export function Composer() {
         ev.prompt ?? '',
       )
       appendTape(bufKey, `\n▸ spawned ${ev.agent_type ?? 'sub-agent'}    `)
-      pushLog({ kind: 'tool', name: 'spawn_agent', args: { agent_type: ev.agent_type, prompt: ev.prompt } })
+
     } else if (ev.type === 'sub_agent_progress') {
       const spawnCallId = ev.call_id ?? ''
       const tapeEvent: AgentEvent = { ...ev, type: ev.kind as AgentEvent['type'] }
@@ -11195,7 +11187,7 @@ export function Composer() {
         ev.call_id ?? '',
         `\n${ev.status === 'completed' ? '✓' : ev.status === 'cancelled' ? '■' : '!'} ${ev.status ?? 'completed'} · ${ev.turns ?? 0} turns    `,
       )
-      pushLog({ kind: 'tool', name: 'spawn_agent', result: { status: ev.status, turns: ev.turns } })
+
     } else if (ev.type === 'error') {
       textDeltas.flush()
       setStatus(bufKey, 'error')
@@ -11268,13 +11260,6 @@ export function Composer() {
       setCompaction(bufKey, {
         summarized: ev.summarized_messages,
         summary: ev.summary ?? '',
-      })
-    } else if (ev.type === 'compaction_failed') {
-      // Soft-fail surfacing: the turn proceeds on the full history.
-      pushLog({
-        kind: 'system',
-        name: 'compaction',
-        result: { skipped: true, error: ev.error ?? 'unknown error' },
       })
     } else if (ev.type === 'usage') {
       // Exact context size of the latest model call — now emitted per call
