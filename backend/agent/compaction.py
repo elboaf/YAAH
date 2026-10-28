@@ -488,12 +488,25 @@ async def compact_history_for_context(
     if not conv:
         return None
     cfg = load_config()
-    bare = model_settings.bare_model_id(model_id or cfg.get("model"))
+    # Whose settings apply: an explicit override wins; otherwise the
+    # conversation's own recorded model — NOT the current global default.
+    # The global can change (or point at a different provider family)
+    # after this chat started, and consulting its entry here would gate
+    # this chat's fold on another model's trigger (#1103 post-mortem:
+    # entry 63k, global's entry 125k, turn died at 65,939 with the fold
+    # skipped as "nothing to do"). The stored context_model is what the
+    # past calls actually ran.
+    effective_model_id = (
+        model_id
+        or conv.get("context_model")
+        or cfg.get("model")
+    )
+    bare = model_settings.bare_model_id(effective_model_id)
     # Per-model settings: the model's own entry decides on/off + trigger.
     # The resolved window feeds the NO-ENTRY trigger fallback (80% of the
     # detected window instead of the flat 300k default, #578) — resolve it
     # BEFORE the per-model pass so the derivation can use it.
-    window = model_window or await resolve_window(model_id or cfg.get("model"), cfg)
+    window = model_window or await resolve_window(effective_model_id, cfg)
     if bare:
         ccfg = _compaction_cfg_for_model(bare, ccfg, window)
         if not ccfg["enabled"]:
@@ -535,10 +548,14 @@ async def compact_history_for_context(
     # not wired.
     if cancel_event is not None:
         summary = await summarize_messages(
-            summary_input, ccfg.get("model") or "", cancel_event=cancel_event
+            summary_input,
+            ccfg.get("model") or effective_model_id or "",
+            cancel_event=cancel_event,
         )
     else:
-        summary = await summarize_messages(summary_input, ccfg.get("model") or "")
+        summary = await summarize_messages(
+            summary_input, ccfg.get("model") or effective_model_id or ""
+        )
     if cancel_event is not None and cancel_event.is_set():
         # Stop fired between the summarizer and the DB write (#389):
         # persist nothing — a cancelled turn must not mutate prompt state.
