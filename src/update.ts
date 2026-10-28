@@ -8,13 +8,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { IS_TAURI } from './api'
 
 /** Latest-release info worth surfacing, or null when up to date / unsure. */
-export interface UpdateInfo {
+interface UpdateInfo {
   version: string
   htmlUrl: string
 }
 
 /** Chip lifecycle: quiet -> update found -> downloading -> handing off. */
-export type UpdatePhase = 'idle' | 'ready' | 'downloading' | 'installing' | 'error'
+type UpdatePhase = 'idle' | 'ready' | 'downloading' | 'installing' | 'error'
 
 /**
  * Prerelease-aware semver comparison (#62): major.minor.patch, then the
@@ -24,7 +24,7 @@ export type UpdatePhase = 'idle' | 'ready' | 'downloading' | 'installing' | 'err
  * (junk segments as 0 — a garbage tag must never produce a false
  * "update available").
  */
-export function compareVersions(a: string, b: string): number {
+function compareVersions(a: string, b: string): number {
   const parse = (v: string) => {
     const m = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/.exec(v.trim())
     return m
@@ -53,12 +53,12 @@ export function compareVersions(a: string, b: string): number {
 }
 
 /** "1.0.7-rc.2" -> true; stable and junk versions -> false (#62). */
-export function isRcVersion(version: string): boolean {
+function isRcVersion(version: string): boolean {
   return /^\d+\.\d+\.\d+-rc\.\d+$/.test(version.trim())
 }
 
 /** "v0.20.1" -> "0.20.1"; anything without a numeric core stays null. */
-export function tagToVersion(tag: string): string | null {
+function tagToVersion(tag: string): string | null {
   const m = /^v?(\d+\.\d+\.\d+)$/.exec(tag.trim())
   return m ? m[1] : null
 }
@@ -68,7 +68,7 @@ export function tagToVersion(tag: string): string | null {
  * `-rc.N` tags, which the strict parser must keep rejecting so a stable
  * install can never be offered a pre-release.
  */
-export function tagToVersionWithRc(tag: string): string | null {
+function tagToVersionWithRc(tag: string): string | null {
   const m = /^v?(\d+\.\d+\.\d+(?:-rc\.\d+)?)$/.exec(tag.trim())
   return m ? m[1] : null
 }
@@ -82,7 +82,7 @@ export function tagToVersionWithRc(tag: string): string | null {
 /** Cap a single check (#36) so a hung connection can't stall the poll loop. */
 const CHECK_TIMEOUT_MS = 300 * 1000
 
-export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo | null> {
+async function checkForUpdate(currentVersion: string): Promise<UpdateInfo | null> {
   if (!IS_TAURI) return null
   try {
     const res = await fetch('https://api.github.com/repos/elboaf/YAAH/releases/latest', {
@@ -109,7 +109,7 @@ export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo
  * pre-releases, and tagToVersion keeps rejecting -rc tags — the core #62
  * guarantee is those two layers, not this function).
  */
-export async function checkForRcUpdate(currentVersion: string): Promise<UpdateInfo | null> {
+async function checkForRcUpdate(currentVersion: string): Promise<UpdateInfo | null> {
   if (!IS_TAURI) return null
   try {
     const res = await fetch('https://api.github.com/repos/elboaf/YAAH/releases?per_page=10', {
@@ -149,12 +149,12 @@ const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000
  * `<tag>/download/<asset>` path serves the current asset for that tag even
  * if a later release supersedes it while we're mid-download.
  */
-export function installerUrlFor(tag: string): string {
+function installerUrlFor(tag: string): string {
   return `${RELEASES_BASE}/download/${encodeURIComponent(tag)}/${DESKTOP_ASSET}`
 }
 
 /** True on Windows (Tauri) — the only platform with the installer handoff. */
-export function isWindowsPlatform(): boolean {
+function isWindowsPlatform(): boolean {
   return navigator.userAgent.includes('Windows')
 }
 
