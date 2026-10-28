@@ -4728,7 +4728,7 @@ function McpSection() {
   const [fieldErr, setFieldErr] = useState<Record<string, string>>({})
   const [expanded, setExpanded] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
-  const [masked, setMasked] = useState(true)
+  const masked = true
   const [cmdWarn, setCmdWarn] = useState<string | null>(null)
   const [more, setMore] = useState(false)
 
