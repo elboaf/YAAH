@@ -10949,7 +10949,7 @@ export function Composer() {
   // before writing final status — buffered text must never land after
   // 'idle'/'error', and a Stop must not orphan a scheduled rAF.
   const streamBufferFlushers = new Map<string, () => void>()
-  const handleStreamEvent = (bufKey: string, asstId: string) => {
+  const handleStreamEvent = (bufKey: string, asstId: string, throwOnError?: boolean) => {
     let curId = asstId
     let awaitingPostSteerEmission = false
     // True while text is allowed to flow without an emission separator: the
@@ -11297,6 +11297,7 @@ export function Composer() {
     opts?: {
       interrupt?: boolean
       queueHandoff?: boolean
+      throwOnError?: boolean
       target?: { conversationId: number | null; workspace: string }
       images?: string[]
       skills?: string[]
@@ -11500,6 +11501,7 @@ export function Composer() {
         // workspace again instead of freezing on the old one.
         useAgent.getState().clearOrphanedDraftPin()
         textareaRef.current?.focus()
+        if (opts?.throwOnError) throw e
       }
     } finally {
       setSending(false)
@@ -11658,6 +11660,8 @@ export function Composer() {
       // items, start a fresh turn with them instead of failing.
       if (result.run_ended && result.queued && result.queued.length > 0) {
         setSteerFlag(targetKey, false)
+        // Prevent the done handler from wiping echoes until all items are sent.
+        pendingQueueAutosendRef.current[targetKey] = result.queued
         // Drain the queue by sending items as fresh turns.
         for (const item of result.queued) {
           // Reconcile the queued echo before sending the fresh turn.
@@ -11673,7 +11677,7 @@ export function Composer() {
           // restore it so the item isn't lost (it remains queued for the next
           // manual send).
           try {
-            await send(item.text, { queueHandoff: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
+            await send(item.text, { queueHandoff: true, throwOnError: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
           } catch (e) {
             if (promoted && echo) {
               // Re-add the echo so the item survives.
