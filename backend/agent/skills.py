@@ -17,6 +17,7 @@ invocable by the user.
 import os
 import re
 import shutil
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -171,7 +172,7 @@ def parse_skill_md(path: Path) -> Skill | None:
     body = text
     if m:
         try:
-            loaded = _yaml_load(m.group(1))
+            loaded = yaml.safe_load(m.group(1))
         except Exception:  # noqa: BLE001 — bad YAML: skill is unusable
             return None
         if isinstance(loaded, dict):
@@ -202,20 +203,6 @@ def parse_skill_md(path: Path) -> Skill | None:
     )
 
 
-def _yaml_load(raw: str) -> object:
-    """yaml.safe_load, with a flat 'key: value' fallback so a missing yaml
-    package degrades instead of making every skill unparsable."""
-    try:
-        import yaml
-
-        return yaml.safe_load(raw)
-    except ImportError:
-        out: dict = {}
-        for line in raw.splitlines():
-            if ":" in line and not line.strip().startswith("#"):
-                k, _, v = line.partition(":")
-                out[k.strip()] = v.strip().strip("'\"")
-        return out
 
 
 def scan_skills() -> dict[str, Skill]:

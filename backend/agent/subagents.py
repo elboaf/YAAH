@@ -32,7 +32,7 @@ from pathlib import Path
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
-from backend.agent.skills import _yaml_load
+import yaml
 from backend.agent.tools import (
     MEMORY_TOOLS,
     execute_tool,
@@ -173,7 +173,7 @@ def parse_agent_md(path: Path) -> AgentDef | None:
     body = text
     if m:
         try:
-            loaded = _yaml_load(m.group(1))
+            loaded = yaml.safe_load(m.group(1))
         except Exception:  # noqa: BLE001 — bad YAML: definition is unusable
             return None
         if isinstance(loaded, dict):
