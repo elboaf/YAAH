@@ -169,7 +169,6 @@ export function useUpdateCheck(): {
   progress: number // 0..1, only meaningful while downloading
   error: string | null
   install: () => void
-  openReleases: () => void
 } {
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [phase, setPhase] = useState<UpdatePhase>('idle')
@@ -289,21 +288,6 @@ export function useUpdateCheck(): {
     })()
   }, [update])
 
-  const openReleases = useCallback(() => {
-    const url = update?.htmlUrl ?? `${RELEASES_BASE}/latest`
-    if (IS_TAURI) {
-      void (async () => {
-        try {
-          const { invoke } = await import('@tauri-apps/api/core')
-          await invoke('open_releases_page', { url })
-        } catch {
-          window.open(url, '_blank')
-        }
-      })()
-    } else {
-      window.open(url, '_blank')
-    }
-  }, [update])
 
-  return { update, phase, progress, error, install, openReleases }
+  return { update, phase, progress, error, install }
 }
