@@ -103,7 +103,8 @@ import {
   getCompactionEffective,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
-import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
+import { normalizeAskOptions } from './askOptions'
+import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -2780,7 +2781,8 @@ export function RemoteTranscriptDialog({
           useAgent.getState().setPendingQuestion({
             callId: ev.call_id ?? '',
             question: a.question ?? '',
-            options: a.options ?? [],
+            // #564: normalize the model-owned payload (see askOptions.ts).
+            options: normalizeAskOptions(a.options),
             convKey: remoteKey,
           })
         }
@@ -9630,9 +9632,12 @@ export function _resetNarrationDedupeForTests(): void {
 }
 
 export function ChatPanel() {  const conversationId = useAgent((s) => s.conversationId)
-  const messages = useAgent(
-    (s) => s.messagesByConv[s.conversationId === null ? 'draft' : String(s.conversationId)] ?? [],
-  )
+  // #564: the old inline selector ended in `?? []` — a fresh array identity
+  // on every store check once no messages were cached for the key, which
+  // useSyncExternalStore reads as "store changed" → infinite re-render →
+  // "Maximum update depth exceeded" → the whole tree unmounted (the grey
+  // window on any chat click). selectMessages returns a stable reference.
+  const messages = useAgent(selectMessages)
   const status = useStatus()
   const error = useError()
   const pendingQuestion = useAgent((s) => {
@@ -11042,7 +11047,8 @@ export function Composer() {
         setPendingQuestion({
           callId: ev.call_id ?? '',
           question: a.question ?? '',
-          options: a.options ?? [],
+          // #564: normalize the model-owned payload (see askOptions.ts).
+          options: normalizeAskOptions(a.options),
           convKey: bufKey,
         })
       }

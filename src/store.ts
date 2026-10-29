@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { getConfig, listAgents, type ScheduledAgent, type StoredMessage } from './api'
+import { normalizeAskOptions } from './askOptions'
 
 let toastSeq = 0
 
@@ -103,6 +104,20 @@ export interface ChatMessage {
 }
 
 export type AgentStatus = 'idle' | 'thinking' | 'running-tool' | 'error'
+
+// #564: a zustand selector must return a STABLE reference for the same
+// state — `?? []` inside a selector manufactures a fresh array on every
+// store check, so useSyncExternalStore "changes" every render and React
+// tears the tree down (Maximum update depth exceeded → the uniform grey
+// window). One shared frozen empty array keeps every selector stable.
+export const EMPTY_MESSAGES: readonly ChatMessage[] = Object.freeze([])
+
+/** Stable messages-for-conversation selector (see EMPTY_MESSAGES above). */
+export function selectMessages(s: { conversationId: number | null; messagesByConv: Record<string, ChatMessage[]> }): readonly ChatMessage[] {
+  const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+  return s.messagesByConv[key] ?? EMPTY_MESSAGES
+}
+
 
 /** A live ask_user question waiting for the user's answer. */
 export interface PendingQuestion {
@@ -497,7 +512,9 @@ export function tapeQuestionAction(
       op: 'set',
       callId: ev.call_id ?? '',
       question: a.question ?? '',
-      options: a.options ?? [],
+      // #564: the model owns this payload — a non-array here used to reach
+      // AskUserCard's .map and unmount the whole tree. Normalize hard.
+      options: normalizeAskOptions(a.options),
       convKey,
     }
   }
