@@ -160,14 +160,7 @@ export interface PendingPlanApproval {
 
 
 /** One line in the right-panel activity log. */
-export interface LogEntry {
-  id: number
-  kind: 'tool' | 'system'
-  time: string
-  name?: string
-  args?: unknown
-  result?: unknown
-}
+
 
 interface AgentState {
   conversationId: number | null
@@ -261,7 +254,6 @@ interface AgentState {
    */
   draftScope: { model: string; effort: string; subagent_model: string } | null
   setDraftScope: (scope: { model?: string; effort?: string; subagent_model?: string }) => void
-  log: LogEntry[]
   /** File currently open in the preview side panel (Q44). */
   previewPath: string | null
   setPreviewPath: (p: string | null) => void
@@ -367,9 +359,6 @@ interface AgentState {
    *  several conversations can stream at once). */
   abortByConv: Record<string, AbortController>
   setAbortController: (key: string, c: AbortController | null) => void
-  pushLog: (e: Omit<LogEntry, 'id' | 'time'>) => void
-  clearLog: () => void
-
   appendUserMessage: (
     key: string,
     text: string,
@@ -446,7 +435,6 @@ interface AgentState {
 
 let nextId = 1
 const genId = () => `m${nextId++}`
-let nextLogId = 1
 
 /**
  * Update one of the per-conversation pending-gate maps (ask_user question /
@@ -521,9 +509,6 @@ export function tapeQuestionAction(
   if (ev.type === 'tool_result') return { op: 'clear', convKey }
   return null
 }
-
-const now = () =>
-  new Date().toLocaleTimeString([], { hour12: false })
 
 // The workspace is remembered across restarts: seeded synchronously from
 // localStorage so the field is correct on first paint, then mirrored to the
@@ -688,7 +673,6 @@ export const useAgent = create<AgentState>((set, get) => ({
   setError: (key, error) =>
     set((s) => ({ errorByConv: { ...s.errorByConv, [key]: error } })),
   workspace: loadStoredWorkspace(),
-  log: [],
   previewPath: null,
   setPreviewPath: (previewPath) => set({ previewPath }),
   lightboxSrc: null,
@@ -861,13 +845,6 @@ export const useAgent = create<AgentState>((set, get) => ({
     })
     if (!opts?.preserveSelection) persistConversationId(id)
   },
-
-  pushLog: (e) =>
-    set((s) => ({
-      log: [...s.log, { ...e, id: nextLogId++, time: now() }].slice(-200),
-    })),
-
-  clearLog: () => set({ log: [] }),
 
   abortByConv: {},
   setAbortController: (key, c) =>
