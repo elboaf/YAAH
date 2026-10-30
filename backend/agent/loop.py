@@ -3101,32 +3101,31 @@ async def _run_agent_claimed(
                             # Approved (None) -> execute for real now; a
                             # denial/plan-block carries its own error result.
                             if result is None:
-                                if result is None:
-                                    box = {}
-                                    async for pev in _execute_with_progress(
-                                        name,
-                                        args,
-                                        turn_workspace,
-                                        tc.get("id", ""),
-                                        box,
-                                        cancel_ev=cancel_ev,
-                                        steer_ev=steer_ev,
-                                        # #303: the approved re-exec is the
-                                        # same tool call — it needs the chat
-                                        # id like the direct path (this is
-                                        # the COMMON path for mutating tools
-                                        # under ask mode).
-                                        conversation_id=conversation_id,
-                                        # #346: and the same canonical
-                                        # memory key as the direct path.
-                                        memory_workspace=memory_workspace,
-                                        # #439: same corpus as the direct
-                                        # path (this is the COMMON path for
-                                        # mutating tools under ask mode).
-                                        user_text=turn_user_text,
-                                    ):
-                                        yield _ndjson(pev)
-                                    result = box.get("result")
+                                box = {}
+                                async for pev in _execute_with_progress(
+                                    name,
+                                    args,
+                                    turn_workspace,
+                                    tc.get("id", ""),
+                                    box,
+                                    cancel_ev=cancel_ev,
+                                    steer_ev=steer_ev,
+                                    # #303: the approved re-exec is the
+                                    # same tool call — it needs the chat
+                                    # id like the direct path (this is
+                                    # the COMMON path for mutating tools
+                                    # under ask mode).
+                                    conversation_id=conversation_id,
+                                    # #346: and the same canonical
+                                    # memory key as the direct path.
+                                    memory_workspace=memory_workspace,
+                                    # #439: same corpus as the direct
+                                    # path (this is the COMMON path for
+                                    # mutating tools under ask mode).
+                                    user_text=turn_user_text,
+                                ):
+                                    yield _ndjson(pev)
+                                result = box.get("result")
 
                 # Steering (#7): a steer interrupt lands the queued message
                 # NOW. Replace the tool result's error text, clear the flag,
