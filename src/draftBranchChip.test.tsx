@@ -40,7 +40,7 @@ describe('draft card branch chip', () => {
       workspace: 'C:/repos/project',
       draftDestination: null,
     })
-    useRemote.setState({ scope: { connected: false }, devices: [] })
+    useRemote.setState({ devices: [] })
   })
 
   afterEach(() => {
