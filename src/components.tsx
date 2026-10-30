@@ -9077,7 +9077,6 @@ function DraftDestinationCard() {
   const pinDraftDestination = useAgent((s) => s.pinDraftDestination)
   const setDraftScope = useAgent((s) => s.setDraftScope)
   const devices = useRemote((s) => s.devices)
-  const scope = useRemote((s) => s.scope)
   const [rows, setRows] = useState<WorkspaceRow[]>([])
   const [remoteAdd, setRemoteAdd] = useState(false)
   const [remotePath, setRemotePath] = useState('')

@@ -44,7 +44,6 @@ describe('draft destination card on a remote workspace (#335)', () => {
       draftScope: { model: '', effort: '', subagent_model: '' },
     })
     useRemote.setState({
-      scope: { connected: false },
       devices: [
         { host_id: 'h', url: 'http://host', name: 'Host', status: 'online', workspaces: [] },
       ],

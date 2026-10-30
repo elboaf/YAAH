@@ -43,7 +43,6 @@ describe('draft destination card (#90)', () => {
       draftDestination: null,
     })
     useRemote.setState({
-      scope: { connected: false },
       devices: [],
     })
   })
@@ -67,7 +66,6 @@ describe('draft destination card (#90)', () => {
 
   it('does not offer cached workspaces as destinations while their device is offline', async () => {
     useRemote.setState({
-      scope: { connected: false },
       devices: [{ host_id: 'saved-host', url: 'http://host', name: 'Host', status: 'offline', workspaces: [] }],
     })
     listLocalWorkspaces.mockResolvedValue([
@@ -87,7 +85,6 @@ describe('draft destination card (#90)', () => {
       draftDestination: null,
     })
     useRemote.setState({
-      scope: { connected: false },
       devices: [
         {
           host_id: 'saved-host',

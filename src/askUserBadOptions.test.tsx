@@ -70,7 +70,7 @@ describe('tapeQuestionAction (#564 ingestion)', () => {
 })
 
 describe('ErrorBoundary (#564 last line of defense)', () => {
-  function Bomb() {
+  function Bomb(): never {
     throw new Error('render boom')
   }
 
