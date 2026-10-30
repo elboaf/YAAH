@@ -158,10 +158,6 @@ export interface PendingPlanApproval {
   convKey: string
 }
 
-
-/** One line in the right-panel activity log. */
-
-
 interface AgentState {
   conversationId: number | null
   /**
