@@ -1,20 +1,17 @@
 /** Per-provider "Agent & context" editor, shown inside the expanded
  *  provider row on the Providers tab (issue #111). It renders ONE ENTRY PER
- *  CONFIGURED MODEL; each entry owns its model (catalog dropdown), max
- *  steps, and history compaction (toggle + threshold). There is NO
- *  provider-level max steps. The context window is NOT a setting: the
- *  detected value (provider report -> built-in table) shows read-only as
- *  the reference for the context gauge. */
+ *  CONFIGURED MODEL; each entry owns its model (catalog dropdown) and max
+ *  steps. There is NO provider-level max steps. The context window is NOT
+ *  a setting: the detected value (provider report -> built-in table) shows
+ *  read-only as the reference for the context gauge. */
 
 import type React from 'react'
 import { useState } from 'react'
 
-/** Family base of a model id (#588): router-slot prefixes ("1.", "x2.",
+/** Family base of a model id: router-slot prefixes ("1.", "x2.",
  *  digits/short tokens before a known local-model family) collapse so an
- *  entry saved for one alias covers its siblings at runtime — the same
- *  rule the backend's model_settings.family_base_id applies. Settings
- *  uses it only to GROUP saved entries under the right provider's
- *  editor; the effective-trigger readout comes from the backend. */
+ *  entry saved under one alias groups with its siblings. Settings uses it
+ *  only to GROUP saved entries under the right provider's editor. */
 const FAMILY_STEMS = [
   'tiel', 'qwen', 'llama', 'mistral', 'phi', 'gemma', 'deepseek', 'glm',
   'kimi', 'codestral', 'mixtral', 'smollm', 'falcon', 'starcoder',
@@ -58,23 +55,8 @@ export interface ModelEntry {
   /** Per-model step budget; '' = untouched (default applies). */
   steps: number | ''
   onSteps: (v: number | '') => void
-  compEnabled: boolean
-  onCompEnabled: (v: boolean) => void
-  /** Compaction trigger draft in k tokens; '' = untouched. */
-  compK: number | ''
-  onCompK: (v: number | '') => void
   /** Detected (auto-resolved) window for this model, or null. */
   ctxAuto: number | null
-  /** Effective behavior readout (#588 fault B): fires at the entry
-   *  trigger ("fires at 24k") vs the auto fallback ("no entry — auto
-   *  fallback (~105k)"). Null = the backend probe has not answered yet
-   *  (readout renders nothing rather than a wrong claim). */
-  effective: { enabled: boolean; triggerK: number } | null
-  /** The saved entry this model resolves to (exact or alias), when one
-   *  exists — lets the editor say which key covers this model. */
-  entryKey: string | null
-  /** Model ids sharing this entry's family base (alias siblings). */
-  siblings: string[]
 }
 
 interface AgentCtxPerProviderProps {
@@ -88,7 +70,6 @@ interface AgentCtxPerProviderProps {
   onAddModel: (id: string) => void
   /** Remove a model entry from this provider's editor. */
   onRemoveModel?: (id: string) => void
-  compactionDefaultK: number
   maxStepsDefault: number
   inputCls: string
 }
@@ -99,7 +80,6 @@ export function AgentContextPerProvider({
   entries,
   onAddModel,
   onRemoveModel,
-  compactionDefaultK,
   maxStepsDefault,
   inputCls,
 }: AgentCtxPerProviderProps) {
@@ -169,59 +149,10 @@ export function AgentContextPerProvider({
             {maxStepsDefault} by default · 0 = unlimited (Stop still works)
           </p>
 
-          {/* Per-model compaction. The trigger is a plain token value; the
-              detected context window below is read-only reference. */}
-          <div className="mt-1.5 flex items-center gap-2.5">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={e.compEnabled}
-              aria-label={`Enable history compaction for ${e.model}`}
-              className={`relative h-4 w-8 shrink-0 rounded-full transition-colors ${
-                e.compEnabled ? 'bg-blue-600' : 'bg-zinc-700'
-              }`}
-              onClick={() => e.onCompEnabled(!e.compEnabled)}
-            >
-              <span
-                className={`absolute top-0.5 h-3 w-3 rounded-full bg-zinc-100 transition-all ${
-                  e.compEnabled ? 'left-4.5' : 'left-0.5'
-                }`}
-              />
-            </button>
-            <span className="text-[10px] text-zinc-400">{e.compEnabled ? 'On' : 'Off'} — fold old history past</span>
-            <input
-              type="number"
-              min="0"
-              aria-label={`Compaction trigger for ${e.model}`}
-              className={`${inputCls} w-20 shrink-0`}
-              value={e.compK}
-              onChange={(ev) => e.onCompK(ev.target.value === '' ? '' : Number(ev.target.value))}
-            />
-            <span className="text-[10px] text-zinc-600">
-              k tokens (default {compactionDefaultK}k)
-            </span>
-          </div>
           <p className="mt-1 font-mono text-[10px] text-zinc-600">
             {e.ctxAuto != null
               ? `context window (detected): ${e.ctxAuto.toLocaleString()} tokens`
               : 'context window: not detected — no % readout for this model'}
-          </p>
-          {/* Effective-behavior readout (#588 fault B): what the runtime
-              actually does for THIS model id, entry or fallback. */}
-          <p
-            className="mt-0.5 text-[10px] text-zinc-500"
-            data-effective={e.effective ? (e.effective.enabled ? 'entry' : 'disabled') : 'unknown'}
-          >
-            {!e.effective
-              ? null
-              : !e.effective.enabled
-                ? 'compaction off — this model keeps its full history'
-                : e.entryKey
-                  ? `fires at ${e.effective.triggerK}k${e.entryKey !== e.model ? ` (via ${e.entryKey})` : ''}`
-                  : `no entry — auto fallback (~${e.effective.triggerK}k)`}
-            {e.effective && e.entryKey && e.siblings.length > 0 && (
-              <span className="text-zinc-600"> · shared by {e.siblings.length} alias{e.siblings.length === 1 ? '' : 'es'}</span>
-            )}
           </p>
         </div>
       ))}

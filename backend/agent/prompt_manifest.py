@@ -10,14 +10,14 @@ text; the harness only injects at the seams the tests already use
 DB/config/memory/skills roots, scripted model_client.chat).
 
 Combo id grammar (flags in canonical order):
-  <win|posix>-<family>[-plan|-noskills|-nomemory|-override|-compaction|-sandboxonly]
+  <win|posix>-<family>[-plan|-noskills|-nomemory|-override|-sandboxonly]
 Families:
   local        full chat turn through loop.run_agent_turn
   remote       chat turn over a remote-namespaced workspace (fixture host)
   remote-offline  remote workspace whose owning device is NOT registered
                  (the real offline note from remote_runner._system_prompt)
   subagents    built-in sub-agent prompts (general-purpose, explore)
-  auxiliary    auxiliary model prompts: compaction summarizer + title gen
+  auxiliary    auxiliary model prompts: title gen
 
 Non-Windows renders: the prompt builders read os.name LIVE, so the harness
 flips os.name around the pure builders (test_agent.py precedent). The
@@ -105,7 +105,6 @@ def _warm_lazy_imports():
                 "skills": False,
                 "memory": False,
                 "override": False,
-                "compaction": False,
                 "policy": False,
             },
         )
@@ -144,7 +143,6 @@ SECTION_OPENINGS = [
     ("windows-sandbox", "# Windows Sandbox (for tests that need isolation)"),
     ("skills-index", "Skills available (load with the load_skill tool"),
     ("subagent-index", "Sub-agents available"),
-    ("compaction-summary", "Earlier conversation summary ("),
     ("identity", "You are an expert AI coding agent"),
     ("subagent-base", "You are a sub-agent (agent_type:"),
     ("tools", "You have tools: "),
@@ -157,40 +155,6 @@ SECTION_OPENINGS = [
 ]
 
 SEPARATOR = "\n\n---\n\n"
-COMPACT_SUMMARY_PREFIX = (
-    "Earlier conversation summary (decisions and state to continue from;"
-    " the full transcript is preserved separately):"
-)
-# Legacy summaries came from the old destructive compaction path, which
-# deleted the summarized transcript rows -- the preservation claim would be
-# false for them, so they keep the unqualified label.
-COMPACT_SUMMARY_PREFIX_LEGACY = (
-    "Earlier conversation summary (decisions and state to continue from):"
-)
-
-
-def compact_summary_message(prompt_state: dict) -> dict | None:
-    """Build the injected compaction-summary message for a prompt state.
-
-    Returns None when there is no summary to inject. The label is chosen
-    by the summary's source: prompt-only compaction leaves every
-    transcript row in place, legacy compaction does not.
-    """
-    summary = (prompt_state.get("summary") or "").strip()
-    if not summary:
-        return None
-    source = prompt_state.get("source") or ""
-    prefix = (
-        COMPACT_SUMMARY_PREFIX if source == "prompt" else COMPACT_SUMMARY_PREFIX_LEGACY
-    )
-    # Role user, not system: strict chat templates (some llama.cpp builds'
-    # qwen template) raise "System message must be at the beginning" for any
-    # system message after the first — a conversation that crossed the
-    # compaction boundary would 500 on EVERY later turn. A user-role summary
-    # message is template-legal and precedes the replayed history either way.
-    return {"role": "user", "content": prefix + "\n" + summary}
-
-
 def _name_section(text: str) -> str:
     for name, prefix in SECTION_OPENINGS:
         if text.startswith(prefix):
@@ -379,37 +343,33 @@ def _reset_remotes() -> None:
 
 
 def _iter_local(windows: bool) -> list:
-    """Every local combo id, generated from toggles (2^6 on each platform:
-    combo ids enumerate plan/skills/memory/override/compaction/policy; the
-    former screenshot (noshot) axis died with host computer use (#339)."""
+    """Every local combo id, generated from toggles (2^5 on each platform:
+    combo ids enumerate plan/skills/memory/override/policy."""
     out = []
     prefix = "win" if windows else "posix"
     for plan in (0, 1):
         for skills in (0, 1):
             for memory in (0, 1):
                 for override in (0, 1):
-                    for compaction in (0, 1):
-                        for policy in (0, 1):
-                            parts = [f"{prefix}-local"]
-                            if plan:
-                                parts.append("plan")
-                            if not skills:
-                                parts.append("noskills")
-                            if not memory:
-                                parts.append("nomemory")
-                            if override:
-                                parts.append("override")
-                            if compaction:
-                                parts.append("compaction")
-                            if policy:
-                                parts.append("sandboxonly")
-                            out.append("-".join(parts))
+                    for policy in (0, 1):
+                        parts = [f"{prefix}-local"]
+                        if plan:
+                            parts.append("plan")
+                        if not skills:
+                            parts.append("noskills")
+                        if not memory:
+                            parts.append("nomemory")
+                        if override:
+                            parts.append("override")
+                        if policy:
+                            parts.append("sandboxonly")
+                        out.append("-".join(parts))
     return out
 
 
 _REMOTE_VARIANTS = [
-    "normal", "plan", "noskills", "nomemory", "compaction", "sandboxonly",
-    "plan-skills-memory-compaction-sandboxonly",
+    "normal", "plan", "noskills", "nomemory", "sandboxonly",
+    "plan-skills-memory-sandboxonly",
 ]
 
 
@@ -472,7 +432,6 @@ def _split_combo(combo: str) -> dict:
             # schemas include a memory tool).
             "memory": "subagents" in parts,
                 "override": False,
-            "compaction": False,
             "policy": False,
         }
     flags = {
@@ -480,7 +439,6 @@ def _split_combo(combo: str) -> dict:
         "skills": "noskills" not in parts,
         "memory": "nomemory" not in parts,
         "override": "override" in parts,
-        "compaction": "compaction" in parts,
         "policy": "sandboxonly" in parts,
     }
     family = parts[1]
@@ -492,7 +450,6 @@ def _split_combo(combo: str) -> dict:
             "skills": "noskills" not in parts,
             "memory": "nomemory" not in parts,
             "override": False,
-            "compaction": "compaction" in parts,
             "policy": "sandboxonly" in parts,
         }
         return {"kind": kind, **flags}
@@ -645,7 +602,7 @@ def _drive_turn(flags: dict) -> dict:
     _ensure_backend()
     from backend.agent import loop
     from backend.db.database import (
-        add_message, compact_conversation, create_conversation,
+        add_message, create_conversation,
         delete_conversation, update_conversation,
     )
 
@@ -706,22 +663,6 @@ def _drive_turn(flags: dict) -> dict:
                     system_prompt_override="You are a pirate. Speak in pirate.",
                 )
             await add_message(cid, "user", "fixture first user message")
-            if flags["compaction"]:
-                # Persist a summary through the REAL compaction persistence
-                # (compact_conversation) -- exactly what _maybe_compact leaves
-                # behind; run_agent_turn reads it via get_prompt_summary.
-                # The watermark must be THIS conversation's message id, not a
-                # literal: #184 -- a stale literal is rejected by
-                # compact_conversation's monotonic-watermark guard and the
-                # summary silently never persists.
-                through_id = await add_message(
-                    cid, "assistant", "fixture prior assistant reply"
-                )
-                await compact_conversation(
-                    cid,
-                    "Fixture summary of the earlier conversation.",
-                    through_id,
-                )
             policy = "sandbox-only" if flags["policy"] else None
             async for _event in loop._run_agent_claimed(
                 cid, "fixture user message", workspace,
@@ -794,21 +735,9 @@ def render_local_family(combo: str, flags: dict) -> dict:
             if s.get("function", {}).get("name") in allowed
         ]
     messages = captured["messages"]
-    system_messages = [m for m in messages if m.get("role") == "system"]
-    # The compaction summary rides a USER-role message right after the head
-    # (strict templates reject any second system message), so identify it by
-    # its known opening — never by role, and never let replayed history rows
-    # into the manifest surface.
-    tail_injections = [
-        m for m in messages[1:]
-        if m.get("role") == "user"
-        and str(m.get("content") or "").startswith(
-            ("Earlier conversation summary (",)
-        )
-    ]
-    manifest_messages = (
-        system_messages[:1] + tail_injections + system_messages[1:]
-    )
+    # Only the system messages surface in the manifest — never replayed
+    # history rows.
+    manifest_messages = [m for m in messages if m.get("role") == "system"]
     sep = chr(10) * 2 + "====" + chr(10) * 2
     rendered = _canonicalize_chat_ids(
         sep.join(str(m.get("content") or "") for m in manifest_messages)
@@ -823,10 +752,6 @@ def render_local_family(combo: str, flags: dict) -> dict:
     return {
         "combo": combo,
         "kind": flags["kind"],
-        # Sections across ALL prompt-head messages: the compaction summary
-        # rides its own message after the head (loop.py; user role for
-        # template compatibility), so slicing only the first one hid it from
-        # every manifest (#184).
         "sections": [
             section
             for m in manifest_messages
@@ -927,14 +852,12 @@ def render_subagents(combo: str, flags: dict) -> dict:
 
 def render_auxiliary(combo: str, flags: dict) -> dict:
     """kind-auxiliary-prompts: auxiliary model-call prompts CAPTURED by
-    driving their real producers with a scripted model client -- the
-    compaction summarizer through compaction.summarize_messages, the title
+    driving their real producers with a scripted model client -- the title
     prompt through loop._generate_conversation_title. No prompt text is
     copied into this module."""
     import asyncio
 
     _ensure_backend()
-    from backend.agent import compaction as compaction_mod
     from backend.agent import loop as loop_mod
     from backend.db.database import (
         add_message, create_conversation, delete_conversation,
@@ -956,10 +879,6 @@ def render_auxiliary(combo: str, flags: dict) -> dict:
 
     async def _capture() -> None:
         loop_mod.model_client.chat = fake_chat
-        await compaction_mod.summarize_messages([
-            {"role": "user", "content": "fixture transcript one"},
-            {"role": "assistant", "content": "fixture transcript two"},
-        ])
         cid = await create_conversation("manifest")
         await update_conversation(cid, title="fixture user message")
         await add_message(cid, "user", "fixture user message")
@@ -967,14 +886,9 @@ def render_auxiliary(combo: str, flags: dict) -> dict:
         await delete_conversation(cid)
 
     asyncio.run(_capture())
-    summarizer_system = captured_calls[0][0]["content"]
-    title_system = captured_calls[1][0]["content"]
-    title_user = captured_calls[1][1]["content"]
+    title_system = captured_calls[0][0]["content"]
+    title_user = captured_calls[0][1]["content"]
     prompts = {
-        "compaction_summarizer": {
-            "builder": "backend/agent/compaction.py:summarize_messages (captured)",
-            "text": summarizer_system,
-        },
         "title_generation": {
             "builder": "backend/agent/loop.py:_generate_conversation_title (captured)",
             "text": title_system + chr(10) * 2 + "[user] " + title_user,

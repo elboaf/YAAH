@@ -3,17 +3,11 @@
   "kind": "auxiliary",
   "sections": [],
   "system_messages": [],
-  "total_bytes": 1278,
-  "rendered_sha256": "7982ee5bb3071ba0ecbd53d00a9dbac50092e79836ce078028e438a1479aa0b2",
+  "total_bytes": 545,
+  "rendered_sha256": "17ba23f58a83af03a1857934233da99c478d5354400fbd4e4f8f49d1864af0db",
   "tool_schemas": [],
   "subagent_prompts": {},
   "auxiliary_prompts": {
-    "compaction_summarizer": {
-      "builder": "backend/agent/compaction.py:summarize_messages (captured)",
-      "bytes": 733,
-      "sha256": "e03e4eff0b8b446cef0d9edf0c637cc72a823926fb3116c8afae22f9e8df0750",
-      "text": "You compress the earlier portion of an AI agent session into a compact continuity summary. The conversation transcript remains preserved for review and search; this summary is only a bounded replacement in future model prompts. If an earlier summary is included, merge its important facts with the newly summarized messages.\nPreserve: the user's goals and explicit instructions; decisions made and why; concrete anchors — file paths, branch names, commands, function/variable names, error messages; what was attempted and what failed; the current state and obvious next steps.\nWrite at most 400 words, plain prose or terse bullets (the platform may keep up to 12,000 characters). Reply with JSON only, no fences: {\"summary\": \"...\"}"
-    },
     "title_generation": {
       "builder": "backend/agent/loop.py:_generate_conversation_title (captured)",
       "bytes": 545,

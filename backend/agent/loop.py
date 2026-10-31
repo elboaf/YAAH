@@ -30,7 +30,7 @@ from typing import AsyncIterator
 from backend.agent import model_client
 from backend.agent import slotcache
 from backend.agent import extract as extract_mod
-from backend.agent.prompt_manifest import compact_summary_message
+
 from backend.agent import file_changes
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
@@ -58,7 +58,6 @@ from backend.db.database import (
     get_db,
     get_last_user_message,
     get_messages,
-    get_prompt_summary,
     set_conversation_usage,
     touch_updated_at,
     update_conversation,
@@ -287,21 +286,21 @@ async def _generate_conversation_title(
 # Issue #389 helpers -------------------------------------------------------
 #
 # Stop used to be discovered only at step boundaries: the in-flight
-# provider stream (or a non-streaming call — compaction's summarizer) kept
+# provider stream (or a non-streaming call) kept
 # running to completion, still burning tokens against a run the user had
 # already stopped. These helpers race model calls against the cancel
 # event, close the abandoned stream immediately (releasing the provider
 # connection), and translate the cancel into ModelCancelled so the run
 # loop settles the turn as `stopped` instead of surfacing a bogus API
 # error. Sub-agents already raced their own model calls; these bring the
-# parent loop (and compaction) in line.
+# parent loop in line.
 
 
 def _cancel_wait_task(cancel_ev: asyncio.Event | None):
     """A never-settling awaitable when cancel_ev is None (racing is then a
     no-op and the model call runs to completion), else a task that fires
     the moment the user hits Stop. The None case exists so the racing
-    helpers can be used with OPTIONAL cancellation (compaction) without
+    helpers can be used with optional cancellation without
     branchy call sites."""
     if cancel_ev is None:
         return asyncio.get_running_loop().create_future()
@@ -418,39 +417,6 @@ async def _race_stream_iter(stream, cancel_ev: asyncio.Event | None):
                     # generator close, the propagating GeneratorExit).
                     log.exception("stream teardown during cancel failed")
 
-
-async def _maybe_compact(
-    conversation_id: int, model_id: str | None = None, cancel_ev: asyncio.Event | None = None
-) -> list[dict]:
-    """Prompt-compaction pass (adr/0004) before the turn's first model call.
-
-    The provider's measured prompt_tokens for the PREVIOUS call in this
-    conversation (persisted per conversation) is compared against the
-    model's context window; over the trigger fraction, an old transcript
-    prefix is summarized in separate prompt state. Events returned here
-    must be emitted BEFORE the first model call.
-
-    Best-effort by contract: any failure yields a `compaction_failed`
-    event (surfaced in the UI) and never fails the turn. Runs at most
-    once per turn — after a pass, context_tokens is NULL, so a repeat
-    call no-ops at the trigger until the next real measurement lands.
-
-    cancel_ev: the turn's Stop event (#389) — the summarizer's model call
-    is raced against it so Stop cuts a slow compaction call too.
-    """
-    from backend.agent import compaction as compaction_mod
-
-    try:
-        result = await compaction_mod.compact_history_for_context(
-            conversation_id, model_id=model_id, cancel_event=cancel_ev
-        )
-    except model_client.ModelCancelled:
-        # Stop during compaction (#389): end the turn as a stop, not a
-        # compaction failure.
-        raise
-    except Exception as e:  # never fail the turn over housekeeping
-        return [{"type": "compaction_failed", "error": str(e)[:300]}]
-    return [result] if result else []
 
 DEFAULT_MAX_STEPS = 200
 
@@ -1765,13 +1731,9 @@ def _replay_rows(
     return out
 
 
-async def load_history(
-    conversation_id: int, through_message_id: int = 0
-) -> list:
-    """Load transcript rows after the prompt-compaction watermark."""
+async def load_history(conversation_id: int) -> list:
+    """Load the full conversation transcript for replay."""
     rows = await get_messages(conversation_id)
-    if through_message_id:
-        rows = [r for r in rows if int(r["id"]) > through_message_id]
     return _prune_old_images(_replay_rows(rows))
 
 
@@ -2132,42 +2094,18 @@ async def _run_agent_claimed(
     # the transcript still exists in the chat, it just doesn't feed the
     # model, so the current turn's text is appended explicitly (it only
     # reaches the model through the replayed history otherwise).
-    # The cancel event is registered BEFORE compaction and any other setup
-    # awaits (issue #389): Stop during setup must find the event, and the
-    # compaction summarizer below races against it.
+    # The cancel event is registered BEFORE setup awaits (issue #389):
+    # Stop during setup must find the event.
     cancel_ev = asyncio.Event()
     _cancel_events[conversation_id] = cancel_ev
 
-    # Compaction (adr/0004): before rebuilding the context, check whether
-    # the last MEASURED call outgrew the model's window; if so the oldest
-    # messages are folded into one persisted summary. Any event surfaces
-    # ahead of everything else this turn yields. Fresh-context agents
-    # (memory off) have no history to compact.
-    if include_history:
-        for _cev in await _maybe_compact(
-            conversation_id, model_id=model_override or None, cancel_ev=cancel_ev
-        ):
-            yield _ndjson(_cev)
 
-    prompt_state = (
-        await get_prompt_summary(conversation_id)
-        if include_history else {"summary": "", "through_message_id": 0}
-    )
+
     history = (
-        await load_history(
-            conversation_id,
-            through_message_id=int(prompt_state.get("through_message_id") or 0),
-        )
-        if include_history else []
+        await load_history(conversation_id) if include_history else []
     )
     messages = [{"role": "system", "content": system_prompt}]
-    compact_msg = (
-        compact_summary_message(prompt_state)
-        if include_history and prompt_state.get("summary")
-        else None
-    )
-    if compact_msg is not None:
-        messages.append(compact_msg)
+
     # Static mode, invoked skills: the this-turn-only instruction bodies ride
     # in a tail message instead of the head — the head stays byte-identical
     # to what previous turns cached (and the freeze turn must not bake the
@@ -2181,14 +2119,13 @@ async def _run_agent_claimed(
     # so the strict prompt prefix (head + tail + history) keeps matching
     # across turns — and the skill's instructions genuinely stay "in this
     # conversation", which is what the load_skill contract promises.
-    # The slot is found by marker (skill_tail_index), not hardcoded at
-    # messages[1]: a compacted conversation carries its compaction-summary
-    # message at [1], and the loader's merge must hit the SAME message the
-    # replay built, never a second tail next to it.
+    # The slot is found by marker (skill_tail_index), not hardcoded:
+    # the loader's merge must hit the SAME message the replay built,
+    # never a second tail next to it.
     if persisted_skill_tail:
         tail_slot = skill_registry.skill_tail_index(messages)
         if tail_slot is None:
-            tail_slot = 1 + (1 if compact_msg is not None else 0)
+            tail_slot = 1
         messages.insert(
             tail_slot,
             {"role": "user", "content": persisted_skill_tail},
@@ -2280,9 +2217,7 @@ async def _run_agent_claimed(
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
     # issue #111), then the legacy per-provider value, then the global.
     max_steps = _resolve_max_steps(load_config(), model_override)
-    # Mid-turn compaction re-check: at most one fold per turn (adr/0004's
-    # monotonic gate — the turn-start pass plus this boundary check share it).
-    _turn_compacted = False
+
     # Image-strip state for the mid-turn rebuild: the note the proactive
     # vision probe / #428 retry merged into the head (None = no strip ran).
     # On a mid-turn fold the head is rebuilt from the live snapshot, so the
@@ -2298,9 +2233,7 @@ async def _run_agent_claimed(
             model=model_override,
             effort=effort_override,
             conversation_id=conversation_id,
-            is_new_conversation=(
-                not history and not (prompt_state.get("summary") or "")
-            ),
+            is_new_conversation=not history,
             system_prompt=system_prompt,
             tools=tools,
             cancel_ev=cancel_ev,
@@ -2342,8 +2275,6 @@ async def _run_agent_claimed(
                 _vcfg["api_base"], _vcfg["model"], _n_stripped,
             )
 
-    # Bound before the loop: the mid-turn compaction check at the top of
-    # step 0 reads it before _model_step assigns the per-step dict.
     state: dict = {}
     try:
         for _step in range(max_steps) if max_steps > 0 else itertools.count():
@@ -2357,150 +2288,6 @@ async def _run_agent_claimed(
                 yield _ndjson({"type": "stopped", "reason": "cancelled by user"})
                 return
 
-            # Mid-turn trigger re-check: the turn-start pass only saw the
-            # prompt as of the previous turn's last call. A long agentic
-            # turn keeps appending tool results and can cross the trigger
-            # (and the window itself) on an in-turn call — the live shape
-            # was 65,159 measured on call N, then a hard 400 on call N+1
-            # before any turn-start pass could ever see it. Re-consult the
-            # SAME trigger with the call's just-measured prompt_tokens and
-            # fold through the normal compaction pass; the running context
-            # swaps to summary + fresh tail for every later call this turn.
-            if (
-                include_history
-                and not _turn_compacted
-                and state.get("usage")
-            ):
-                from backend.agent import compaction as compaction_mod
-
-                _measured = (state["usage"] or {}).get("prompt_tokens")
-                # Same model resolution as the turn-start pass (and the
-                # usage persist below): the override, else the
-                # CONVERSATION's recorded model, else the global — the
-                # global can change after this chat started, and gating
-                # the mid-turn check on another model's entry left a
-                # 63k-trigger chat unguarded under a 125k entry until the
-                # provider 400 killed the turn (#1103 post-mortem).
-                # Bare ids stay bare (the entry keys are bare); scoped ids
-                # reduce to their model part.
-                _row_now = (
-                    await get_conversation(conversation_id) or {}
-                )
-                _model_id = (
-                    model_override
-                    or _row_now.get("context_model")
-                    or load_config().get("model")
-                    or None
-                )
-                _bare = _model_id.partition("::")[2] if _model_id else ""
-                _window = await compaction_mod.resolve_window(
-                    _model_id, load_config()
-                )
-                if compaction_mod.should_compact(
-                    _measured, _window, _bare or None
-                ):
-                    _cevents = []
-                    for _cev in await _maybe_compact(
-                        conversation_id,
-                        model_id=_model_id,
-                        cancel_ev=cancel_ev,
-                    ):
-                        _cevents.append(_cev)
-                        yield _ndjson(_cev)
-                    if _cevents and any(
-                        _cev.get("type") in ("compacted", "compaction_failed")
-                        for _cev in _cevents
-                    ):
-                        # One mid-turn ATTEMPT per turn once the pass has a
-                        # real outcome. A `compaction_failed` latches too —
-                        # but ONLY because retrying the same doomed pass on
-                        # every boundary is churn (#389 shape); the turn's
-                        # NEXT turn-start pass re-arms. A silent skip (no
-                        # safe cut yet) stays unlatched: the next step
-                        # boundary rechecks against the grown transcript.
-                        # (Pre-#594, a failed attempt and a successful fold
-                        # latched identically — one summarizer stumble
-                        # disbanded the trigger watch for the rest of a
-                        # 65-minute turn and the provider 400 followed.)
-                        _turn_compacted = True
-                    for _cev in _cevents:
-                        if _cev.get("type") == "compacted":
-                            # Rebuild the running context exactly the way
-                            # the turn-start replay builds it, so the very
-                            # next call of THIS turn matches what the next
-                            # turn would replay:
-                            # - head: snapshot the LIVE first system message
-                            #   (it carries this turn's mid-run merges —
-                            #   invoked skills, load_skill bodies in
-                            #   non-static mode, plan/sandbox notes — not
-                            #   the pristine turn-start system_prompt).
-                            # - summary message via compact_summary_message
-                            #   (user role, strict-template safe).
-                            # - fresh tail via load_history: same
-                            #   _replay_rows rules PLUS the
-                            #   KEEP_RECENT_IMAGES pruning.
-                            # - the persisted "# Loaded skill:" tail re-read
-                            #   from the row (the source of truth — this
-                            #   turn's static-mode load_skill calls already
-                            #   merged into it) at the marker-keyed slot.
-                            _head_snapshot = (
-                                dict(messages[0]) if messages else None
-                            )
-                            _row_now = (
-                                await get_conversation(conversation_id) or {}
-                            )
-                            _persisted_tail = (
-                                str(_row_now.get("persisted_skill_tail") or "")
-                                if _skill_tail_ws_valid(_row_now, workspace)
-                                else ""
-                            )
-                            _ps = await get_prompt_summary(conversation_id)
-                            _through = int(_ps.get("through_message_id") or 0)
-                            messages.clear()
-                            messages.append(
-                                _head_snapshot
-                                or {"role": "system", "content": system_prompt}
-                            )
-                            _cmsg = compact_summary_message(_ps)
-                            if _cmsg is not None:
-                                messages.append(_cmsg)
-                            messages.extend(
-                                await load_history(
-                                    conversation_id, through_message_id=_through
-                                )
-                            )
-                            if _persisted_tail:
-                                _slot = skill_registry.skill_tail_index(messages)
-                                if _slot is None:
-                                    _slot = 1 + (1 if _cmsg is not None else 0)
-                                messages.insert(
-                                    _slot,
-                                    {"role": "user", "content": _persisted_tail},
-                                )
-                            # Preserve this turn's image-strip state: the
-                            # proactive vision probe (or the #428 rejection
-                            # retry) already stripped image parts and noted
-                            # why into the head; messages.clear() threw both
-                            # away. Re-strip the replayed tail and re-apply
-                            # the note so later calls don't resend pixels
-                            # the provider already refused.
-                            if _image_strip_note:
-                                messages, _ = model_client.strip_image_parts(
-                                    messages
-                                )
-                                # The snapshot head already carries the note
-                                # (both strip paths merged it before this
-                                # rebuild) — merge_note appends blindly, so
-                                # only add it when actually missing.
-                                _head0 = messages[0] if messages else None
-                                if not (
-                                    _head0
-                                    and _image_strip_note
-                                    in str(_head0.get("content") or "")
-                                ):
-                                    model_client.merge_note_into_first_system(
-                                        messages, _image_strip_note
-                                    )
             # The retry must wrap the whole stream consumption, not just the
             # chat() call: with stream=True the HTTP request only fires when
             # iteration starts, so a ModelError surfaces at the first chunk.

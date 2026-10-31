@@ -22,9 +22,9 @@ PFX = "win" if HOST_WIN else "posix"
 # the whole matrix twice inside the test suite.
 REPRESENTATIVES = [
     f"{PFX}-local",
-    f"{PFX}-local-plan-compaction",
-    f"{PFX}-local-override-compaction",
-    f"{PFX}-remote-plan-skills-memory-compaction-sandboxonly",
+    f"{PFX}-local-plan",
+    f"{PFX}-local-override",
+    f"{PFX}-remote-plan-skills-memory-sandboxonly",
     f"{PFX}-remote-offline-plan",
     f"kind-subagents-{PFX}-skills",
     "kind-auxiliary-prompts",
@@ -68,11 +68,12 @@ def test_git_editor_recipe_rendered_exactly_once_per_win_local_combo():
 
 def test_matrix_shape():
     combos = pm.iter_combos()
-    # 151 since #339 removed the shot/noshot axis (64 win-local combos
-    # halved); was 215 before host computer use was retired.
-    assert len(combos) == 151
+    # 85 since #620 removed the compaction axis (win-local combos halved
+    # 2x: 64 total); was 151 after #339, 215 before host computer use
+    # was retired.
+    assert len(combos) == 85
     assert len(set(combos)) == len(combos)
-    assert "win-local-plan-compaction" in combos
+    assert "win-local-plan" in combos
     assert "posix-remote-offline-normal" in combos
     assert "kind-subagents-posix-skills" in combos
     assert "kind-auxiliary-prompts" in combos
@@ -114,7 +115,7 @@ def test_platform_sections_match_host_prefix():
     (flipped on a Windows host, native elsewhere). #339 removed the
     computer-use section outright; the sandbox section stays win-only."""
     if HOST_WIN:
-        win = pm.render_combo("win-local-compaction")
+        win = pm.render_combo("win-local")
         posix = pm.render_combo("posix-local")
         win_names = [s["name"] for s in win["sections"]]
         posix_names = [s["name"] for s in posix["sections"]]
@@ -150,7 +151,7 @@ def test_no_glued_section_headers():
 def test_sandbox_fragment_uses_standard_separator():
     """#173: the sandbox fragment joins with the same SEPARATOR as every
     other appended fragment, never raw."""
-    text = pm.render_combo("win-local-compaction")["rendered_text"]
+    text = pm.render_combo("win-local")["rendered_text"]
     assert pm.SEPARATOR + "# Windows Sandbox" in text
 
 
@@ -216,7 +217,7 @@ def test_no_duplicated_guidance_clusters_win_local():
     exactly once per rendered win-local prompt (string counts in the
     manifest). The sandbox section is the single home for the
     test-environment rule, containment rules, and toolkit persistence."""
-    text = pm.render_combo("win-local-compaction")["rendered_text"]
+    text = pm.render_combo("win-local")["rendered_text"]
     # SYN-12: test-environment rule (loop.py guidelines copy vs sandbox.py)
     assert text.count("Choose the test environment") == 1
     # SYN-17: sandbox containment x3 (never host equivalent / never host
@@ -242,12 +243,11 @@ def test_exit_plan_flow_once_per_render_all_win_local_variants():
     from backend.agent.loop import EXIT_PLAN_SCHEMA, _plan_block_result
 
     plan_combos = [
-        "win-local-plan-compaction",
+        "win-local-plan",
         "win-local-noskills-nomemory-plan",
     ]
     other_combos = [
         "win-local",
-        "win-local-compaction",
         "win-local-override-sandboxonly",
     ]
     for combo in plan_combos:
@@ -296,8 +296,8 @@ def test_posix_local_env_line_grammatical():
 
 
 def test_skills_axis_flips_skills_index_section():
-    with_skills = pm.render_combo(f"{PFX}-local-compaction")
-    without = pm.render_combo(f"{PFX}-local-noskills-compaction")
+    with_skills = pm.render_combo(f"{PFX}-local")
+    without = pm.render_combo(f"{PFX}-local-noskills")
     with_names = [s["name"] for s in with_skills["sections"]]
     without_names = [s["name"] for s in without["sections"]]
     assert "skills-index" in with_names
@@ -305,8 +305,8 @@ def test_skills_axis_flips_skills_index_section():
 
 
 def test_memory_axis_flips_memory_section():
-    with_memory = pm.render_combo(f"{PFX}-local-compaction")
-    without = pm.render_combo(f"{PFX}-local-nomemory-compaction")
+    with_memory = pm.render_combo(f"{PFX}-local")
+    without = pm.render_combo(f"{PFX}-local-nomemory")
     with_names = [s["name"] for s in with_memory["sections"]]
     without_names = [s["name"] for s in without["sections"]]
     assert "persistent-memory" in with_names
@@ -314,8 +314,8 @@ def test_memory_axis_flips_memory_section():
 
 
 def test_override_replaces_base_prompt_wholesale():
-    overridden = pm.render_combo(f"{PFX}-local-override-compaction")
-    plain = pm.render_combo(f"{PFX}-local-compaction")
+    overridden = pm.render_combo(f"{PFX}-local-override")
+    plain = pm.render_combo(f"{PFX}-local")
     over_names = [s["name"] for s in overridden["sections"]]
     plain_names = [s["name"] for s in plain["sections"]]
     assert "override" in over_names
@@ -328,13 +328,13 @@ def test_no_screenshot_axis_or_tool_anywhere():
     """#339: the shot/noshot axis and the screenshot tool are gone."""
     for combo in pm._iter_local(True):
         assert "noshot" not in combo
-    tools = {t["name"] for t in pm.render_combo("win-local-compaction")["tool_schemas"]}
+    tools = {t["name"] for t in pm.render_combo("win-local")["tool_schemas"]}
     assert "screenshot" not in tools
 
 
 def test_offline_note_only_for_offline_remote():
     offline = pm.render_combo(f"{PFX}-remote-offline-plan")
-    online = pm.render_combo(f"{PFX}-remote-plan-skills-memory-compaction-sandboxonly")
+    online = pm.render_combo(f"{PFX}-remote-plan-skills-memory-sandboxonly")
     assert "the workspace's owning device is offline" in offline["rendered_text"]
     assert "the workspace's owning device is offline" not in online["rendered_text"]
 
@@ -347,7 +347,7 @@ def test_windows_flip_on_posix_does_not_instantiate_windowspath(
     os.name to 'nt' without rebinding Path. Any pathlib.Path() call made
     under the flip (here, a probe module) instantiates a real WindowsPath
     and raises 'cannot instantiate WindowsPath on your system' -- the exact
-    Linux-CI failure in test_compaction_manifests_contain_summary_section.
+    Linux-CI failure in the manifest determinism tests.
     The flip must rebind Path to a WindowsPath subclass on posix hosts too,
     mirroring the Windows-host branch."""
     assert not HOST_WIN
@@ -387,39 +387,9 @@ def test_posix_target_flip_render_keeps_full_path_api():
     host AND keep the full concrete API. A pure-path probe cannot catch
     this (it never touches the filesystem); a real render can."""
     manifest = pm.render_combo(
-        f"{'posix' if HOST_WIN else 'win'}-local-plan-compaction"
+        f"{'posix' if HOST_WIN else 'win'}-local-plan"
     )
-    names = [s["name"] for s in manifest["sections"]]
-    assert "compaction-summary" in names
     assert manifest["total_bytes"] > 0
-
-
-def test_compaction_manifests_contain_summary_section():
-    """#184: every combo that names compaction must actually render the
-    compaction-summary section -- the fixture watermark must be live
-    (relative to the fixture conversation), never consumed by the
-    warm-up turn."""
-    for combo in pm.iter_combos():
-        if "compaction" not in pm._split_combo(combo) or not pm._split_combo(
-            combo
-        )["compaction"]:
-            continue
-        if combo == "kind-auxiliary-prompts":
-            continue
-        manifest = pm.render_combo(combo)
-        names = [s["name"] for s in manifest["sections"]]
-        assert "compaction-summary" in names, (
-            f"{combo}: -compaction combo rendered without the "
-            "compaction-summary section (stale fixture watermark?)"
-        )
-
-
-def test_compaction_summary_text_present_in_rendered_bytes():
-    """#184: the summary text the fixture persists must reach the model
-    bytes for a representative local compaction render."""
-    manifest = pm.render_combo(f"{PFX}-local-plan-compaction")
-    text = json.dumps(manifest)
-    assert "Fixture summary of the earlier conversation." in text
 
 
 def test_remote_offline_plan_note_rendered_and_differs_from_normal():
@@ -468,7 +438,6 @@ def test_subagent_kind_covers_builtins():
 def test_auxiliary_kind_captures_both_prompts():
     manifest = pm.render_combo("kind-auxiliary-prompts")
     prompts = manifest["auxiliary_prompts"]
-    assert "compaction_summarizer" in prompts
     assert "title_generation" in prompts
     for entry in prompts.values():
         assert entry["bytes"] > 0
@@ -476,7 +445,7 @@ def test_auxiliary_kind_captures_both_prompts():
 
 
 @pytest.mark.parametrize("manifest", [
-    "win-remote-normal.json", "win-remote-compaction.json",
+    "win-remote-normal.json",
 ])
 def test_remote_manifests_carry_no_stripped_schemas(manifest: str) -> None:
     # Inherited from the deleted inventory-refs guard (#196/#300 -> ADR-0011):
