@@ -270,3 +270,16 @@ async def get_context_window(
     if reported:
         return reported
     return _from_table(model)
+
+
+def split_model_route(model: str, cfg: dict) -> tuple[str, str, str]:
+    """Parse "provider::model" into (bare, base, key) for this provider's endpoint.
+
+    Unknown providers degrade to the active provider's endpoint.
+    """
+    if "::" in model:
+        provider, bare = model.split("::", 1)
+        p = (cfg.get("providers") or {}).get(provider)
+        if p:
+            return bare, p.get("api_base") or "", p.get("api_key") or ""
+    return model, cfg.get("api_base") or "", cfg.get("api_key") or ""

@@ -144,44 +144,6 @@ def test_load_skill_tail_mode_uses_user_role_not_system(skills_dir):
     assert all(m["role"] != "system" for m in messages[1:])
 
 
-def test_load_skill_first_tail_goes_below_compaction_summary(skills_dir):
-    """The replay side builds head + summary + tail; the loader's FIRST
-    insert (no existing tail message yet) must use the same order. Before
-    this fix it inserted at index 1, ABOVE the summary — the prompt order
-    flipped between the loading turn and the next turn, re-prefilling the
-    cache from the tail slot."""
-    skill_registry.scan_skills()
-    loaded: list[str] = []
-    summary_msg = {
-        "role": "user",
-        "content": (
-            "Earlier conversation summary (decisions and state to continue"
-            " from; the full transcript is preserved separately):\n\nstuff"
-        ),
-    }
-    messages = [
-        {"role": "system", "content": "frozen head"},
-        summary_msg,
-        {"role": "user", "content": "hi"},
-    ]
-    skill_registry.load_skill_into_messages(
-        {"name": "review"}, loaded, messages, tail=True
-    )
-    # Tail landed BELOW the summary (index 2), summary untouched at [1].
-    assert messages[1] is summary_msg
-    assert "# Loaded skill: review" in messages[2]["content"]
-    # And without a summary the first tail still rides directly at [1].
-    messages2 = [
-        {"role": "system", "content": "frozen head"},
-        {"role": "user", "content": "hi"},
-    ]
-    skill_registry.load_skill_into_messages(
-        {"name": "review"}, [], messages2, tail=True
-    )
-    assert messages2[1]["content"].startswith("# Loaded skill:")
-    assert messages2[2]["role"] == "user"
-
-
 def test_load_skill_schema_registered():
     from backend.agent.tools import get_schemas
 

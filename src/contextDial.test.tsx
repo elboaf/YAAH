@@ -51,7 +51,8 @@ describe('ContextChip context dial (#135)', () => {
     expect(svg.querySelector('path')!.getAttribute('d')).toBe(
       `M 12 ${12 - r} A ${r} ${r} 0 0 1 ${endX} ${endY}`,
     )
-    // Threshold ticks: compaction tick silent (trigger_tokens=0 means null trigger); dumb-zone tick removed (#387) -> zero lines.
+    // Threshold ticks: none (the compaction trigger tick is gone; the
+    // dumb-zone tick was removed in #387) -> zero lines.
     const lines = svg.querySelectorAll('line')
     expect(lines).toHaveLength(0)
   })

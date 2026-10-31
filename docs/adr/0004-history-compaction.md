@@ -1,5 +1,7 @@
 # History compaction: summarize the oldest turns behind a token budget
 
+(Superseded 2026-10-31 by ADR 0020 — the feature was removed entirely, #620.)
+
 YAAH replays the full persisted history on every turn
 (`load_history` -> the model call). Tool results are clipped at write
 time, system rows are not replayed, images are pruned, and sub-agent

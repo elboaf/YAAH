@@ -312,13 +312,6 @@ export interface AgentConfig {
   context_window_overrides?: Record<string, number>
   /** Per-model context windows (model id -> { context_window }). */
   model_context?: Record<string, { context_window: number }>
-  /** History compaction; trigger_tokens is an absolute threshold (0 = off). */
-  compaction?: {
-    enabled: boolean
-    trigger_tokens: number
-  }
-  /** Per-model compaction settings (model id -> settings). */
-  model_compaction?: Record<string, { enabled: boolean; trigger_tokens: number }>
   /** Image generation (sd-server): own Settings block; api_base doubles
    *  as the configured flag for the generate_image tool. */
   image_generation?: { provider: string; api_base: string; size: string }
@@ -433,15 +426,6 @@ export const updateConfig = (
     context_window_overrides: Record<string, number | null>
     /** Per-model context windows: the authoritative map when present. */
     model_context?: Record<string, { context_window: number | null }>
-    compaction: {
-      enabled?: boolean
-      trigger_tokens?: number
-    }
-    /** Per-model compaction settings: authoritative map when present. */
-    model_compaction?: Record<string, {
-      enabled: boolean | null
-      trigger_tokens: number | null
-    }>
     /** Per-model step budgets: authoritative map when present (#111). */
     model_steps?: Record<string, number>
     voice?: Partial<AgentConfig['voice']>
@@ -516,23 +500,6 @@ export const getResolvedContextWindow = (model: string) =>
   api<{ model: string; context_window: number | null }>(
     `/api/context-window?model=${encodeURIComponent(model)}`,
   )
-
-/** Effective compaction behavior for one model id (#588): the per-model
- *  entry that covers it (resolved through the alias identity, so a chat
- *  running any sibling router-slot alias sees the saved entry), the
- *  trigger that will actually fire, and the keep budget the cut math
- *  holds back. Settings renders its "fires at Xk / no entry — auto
- *  fallback" readout from this; the context dial ticks at the trigger. */
-export const getCompactionEffective = (model: string) =>
-  api<{
-    model: string
-    entry: boolean
-    entry_key: string | null
-    enabled: boolean
-    trigger_tokens: number
-    keep_tokens: number
-    window: number | null
-  }>(`/api/compaction/effective?model=${encodeURIComponent(model)}`)
 
 // ---------------------------------------------------------------- files
 
@@ -1342,8 +1309,6 @@ export interface AgentEvent {
     | 'sub_agent_progress'
     | 'sub_agent_done'
     | 'file_changes'
-    | 'compacted'
-    | 'compaction_failed'
     | 'model_call'
     | 'title'
     | 'usage'
@@ -1398,12 +1363,6 @@ export interface AgentEvent {
   added?: number
   deleted?: number
   model?: string
-  /** History compaction (adr/0004): how many oldest messages the new
-   *  summary row replaced (compacted). */
-  summarized_messages?: number
-  /** The continuity summary text that replaced them (compacted). */
-  summary?: string
-  /** Why the compaction pass was skipped (compaction_failed). */
   error?: string
 }
 

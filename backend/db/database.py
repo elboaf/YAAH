@@ -283,12 +283,6 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_tokens INTEGER")
     if "context_model" not in conv_cols:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_model TEXT")
-    if "prompt_summary" not in conv_cols:
-        await db.execute("ALTER TABLE conversations ADD COLUMN prompt_summary TEXT")
-    if "prompt_summary_through_message_id" not in conv_cols:
-        await db.execute(
-            "ALTER TABLE conversations ADD COLUMN prompt_summary_through_message_id INTEGER"
-        )
     if "chat_type" not in conv_cols:
         # 'chat' = a normal conversation; 'agent' = a scheduled agent's pinned
         # chat (issue #41). Existing rows are normal chats by default.
@@ -849,9 +843,6 @@ async def list_conversations():
             "SELECT * FROM conversations ORDER BY updated_at DESC"
         )
         rows = [dict(r) for r in await cur.fetchall()]
-        for row in rows:
-            row.pop("prompt_summary", None)
-            row.pop("prompt_summary_through_message_id", None)
         return rows
     finally:
         await db.close()
@@ -873,9 +864,6 @@ async def _get_conversation_row(conversation_id: int) -> dict | None:
         )
         row = await cur.fetchone()
         result = dict(row) if row else None
-        if result:
-            result.pop("prompt_summary", None)
-            result.pop("prompt_summary_through_message_id", None)
         return result
     finally:
         await db.close()
@@ -1100,61 +1088,6 @@ async def set_conversation_usage(
             (tokens, model, conversation_id),
         )
         await db.commit()
-    finally:
-        await db.close()
-
-
-async def compact_conversation(
-    conversation_id: int, summary: str, through_message_id: int
-) -> int:
-    """Persist prompt-only compaction without changing transcript rows.
-
-    The prompt summary is a bounded cumulative summary through a message
-    watermark. User-facing reads and exports continue to see every original
-    row. A concurrent append does not affect the boundary; a missing or
-    stale watermark is rejected. Returns the count of transcript messages
-    covered by the summary, or zero when the update could not be applied.
-    """
-    db = await get_db()
-    try:
-        await db.execute("BEGIN")
-        cur = await db.execute(
-            "SELECT prompt_summary_through_message_id FROM conversations WHERE id = ?",
-            (conversation_id,),
-        )
-        conv = await cur.fetchone()
-        if conv is None:
-            await db.rollback()
-            return 0
-        previous_id = conv["prompt_summary_through_message_id"] or 0
-        if through_message_id <= previous_id:
-            await db.rollback()
-            return 0
-        cur = await db.execute(
-            "SELECT COUNT(*) AS count, MAX(id) AS max_id FROM messages"
-            " WHERE conversation_id = ? AND id > ? AND id <= ?",
-            (conversation_id, previous_id, through_message_id),
-        )
-        boundary = await cur.fetchone()
-        count = boundary["count"]
-        if not count or boundary["max_id"] != through_message_id:
-            await db.rollback()
-            return 0
-        cur = await db.execute(
-            "UPDATE conversations SET prompt_summary = ?,"
-            " prompt_summary_through_message_id = ?,"
-            " context_tokens = NULL, context_model = NULL"
-            " WHERE id = ? AND COALESCE(prompt_summary_through_message_id, 0) = ?",
-            (summary, through_message_id, conversation_id, previous_id),
-        )
-        if cur.rowcount != 1:
-            await db.rollback()
-            return 0
-        await db.commit()
-        return count
-    except Exception:
-        await db.rollback()
-        raise
     finally:
         await db.close()
 
@@ -1486,8 +1419,6 @@ async def get_remote_conversation_snapshot(conversation_id: int) -> dict | None:
         conversation["revision"] = _revision_token(
             conversation.pop("remote_revision_counter")
         )
-        conversation.pop("prompt_summary", None)
-        conversation.pop("prompt_summary_through_message_id", None)
         cur = await db.execute(
             "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
@@ -1717,60 +1648,6 @@ async def get_messages(conversation_id: int):
         await db.close()
 
 
-async def get_prompt_summary(conversation_id: int) -> dict:
-    """Return prompt-only compaction state, recognizing legacy summary rows.
-
-    Old versions stored a summary as the first system row after deleting the
-    transcript prefix. Those rows remain visible and searchable, but are
-    treated as the initial prompt summary when no new-style summary exists.
-    Failure markers are normally appended after user messages and are never
-    mistaken for summaries.
-    """
-    db = await get_db()
-    try:
-        cur = await db.execute(
-            "SELECT prompt_summary, prompt_summary_through_message_id"
-            " FROM conversations WHERE id = ?",
-            (conversation_id,),
-        )
-        conv = await cur.fetchone()
-        if conv is None:
-            return {"summary": "", "through_message_id": 0, "source": ""}
-        if conv["prompt_summary"]:
-            return {
-                "summary": conv["prompt_summary"],
-                "through_message_id": conv["prompt_summary_through_message_id"] or 0,
-                "source": "prompt",
-            }
-        cur = await db.execute(
-            "SELECT id, role, content FROM messages WHERE conversation_id = ?"
-            " ORDER BY id LIMIT 1",
-            (conversation_id,),
-        )
-        legacy = await cur.fetchone()
-        # Destructive legacy compaction placed its replacement system row at
-        # the transcript's first id. Failure notices were appended after prior
-        # user/assistant rows and must never become prompt summaries.
-        if (
-            legacy and legacy["role"] == "system"
-            and not str(legacy["content"]).startswith("turn failed:")
-        ):
-            cur = await db.execute(
-                "SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'user'"
-                " AND id > ? LIMIT 1",
-                (conversation_id, legacy["id"]),
-            )
-            if await cur.fetchone():
-                return {
-                    "summary": legacy["content"],
-                    "through_message_id": legacy["id"],
-                    "source": "legacy",
-                }
-        return {"summary": "", "through_message_id": 0, "source": ""}
-    finally:
-        await db.close()
-
-
 async def search_conversation_history(
     conversation_id: int, query: str, max_results: int = 10
 ) -> dict:
@@ -1784,7 +1661,6 @@ async def search_conversation_history(
         max_results = 10
     needle = query.casefold()
     rows = await get_messages(conversation_id)
-    state = await get_prompt_summary(conversation_id)
 
     def _excerpt(text: str, pos: int) -> str:
         """±160 chars around the match, with ellipses at the clipped ends."""
@@ -1821,13 +1697,6 @@ async def search_conversation_history(
                     break
         if stopped:
             break
-    summary = state["summary"]
-    summary_pos = summary.casefold().find(needle)
-    if summary_pos >= 0:
-        excerpt = _excerpt(summary, summary_pos)
-        candidates.append({"message_id": None, "role": "prompt_summary", "field": "prompt_summary", "excerpt": excerpt})
-        if len(candidates) > max_results:
-            stopped = True
     return {
         "matches": candidates[:max_results],
         "count": len(candidates[:max_results]),

@@ -468,8 +468,7 @@ async def api_conversation_context(conversation_id: int):
     if conv is None:
 
         raise HTTPException(status_code=404, detail="conversation not found")
-    from backend.agent.context_window import get_context_window
-    from backend.agent.compaction import split_model_route
+    from backend.agent.context_window import get_context_window, split_model_route
 
     cfg = load_config()
     # The chip resolves against the model THIS chat actually uses (#51) —
@@ -501,8 +500,7 @@ async def api_context_window(model: str = ""):
     the Settings editor lists every provider's models, and probing the
     active provider's base for another provider's model reports the
     wrong catalog (or nothing)."""
-    from backend.agent.context_window import get_context_window
-    from backend.agent.compaction import split_model_route
+    from backend.agent.context_window import get_context_window, split_model_route
 
     cfg = load_config()
     if not model:
@@ -519,49 +517,7 @@ async def api_context_window(model: str = ""):
     }
 
 
-@app.get("/api/compaction/effective")
-async def api_compaction_effective(model: str = ""):
-    """Effective compaction behavior for one model id (#588 fault B): the
-    per-model entry that covers it -- resolved through the #588 alias
-    identity, so a chat running ANY sibling router-slot alias sees the
-    saved entry -- plus the trigger that will actually fire and the keep
-    budget the cut math will hold back. Settings renders the "fires at
-    Xk" vs "no entry -- auto fallback" readout from this; the context
-    dial ticks at the effective trigger. No model: the global block's
-    shape, entry false."""
-    from backend.agent import model_settings
-    from backend.agent.compaction import (
-        _compaction_cfg,
-        _compaction_cfg_for_model,
-        keep_budget_tokens,
-        resolve_window,
-    )
 
-    cfg = load_config()
-    ccfg = _compaction_cfg()
-    bare = model_settings.bare_model_id(model)
-    if not bare:
-        return {
-            "model": "",
-            "entry": False,
-            "entry_key": None,
-            "enabled": bool(ccfg.get("enabled", True)),
-            "trigger_tokens": int(ccfg.get("trigger_tokens") or 0),
-            "keep_tokens": 0,
-            "window": None,
-        }
-    window = await resolve_window(model, cfg)
-    eff = _compaction_cfg_for_model(bare, ccfg, window)
-    key = model_settings.model_entry_key(bare, cfg)
-    return {
-        "model": bare,
-        "entry": key is not None,
-        "entry_key": key,
-        "enabled": bool(eff.get("enabled", True)),
-        "trigger_tokens": int(eff.get("trigger_tokens") or 0),
-        "keep_tokens": keep_budget_tokens(eff, window),
-        "window": int(window) if window else None,
-    }
 
 
 @app.get("/api/workspaces/git-branches")
@@ -1124,8 +1080,6 @@ class ConfigUpdate(BaseModel):
     context_window_overrides: dict[str, int | None] | None = None
     model_context: dict[str, dict[str, int | None]] | None = None
     access_mode: str | None = None
-    compaction: dict | None = None
-    model_compaction: dict[str, dict] | None = None
     # Per-model step budgets (issue #111): model id -> steps (0 = unlimited).
     # Values are validated in the merge (bad entries dropped, not a 422).
     model_steps: dict[str, object] | None = None
@@ -2356,14 +2310,7 @@ async def api_get_config():
         "context_window_overrides": cfg.get("context_window_overrides") or {},
         # Per-model context windows (the per-model Settings editor).
         "model_context": cfg.get("model_context") or {},
-        # History compaction (Settings edits these; trigger_tokens is an
-        # absolute token threshold, 0 = fraction-of-window only).
-        "compaction": {
-            "enabled": (cfg.get("compaction") or {}).get("enabled", True),
-            "trigger_tokens": (cfg.get("compaction") or {}).get("trigger_tokens", 0),
-        },
-        # Per-model compaction settings (the per-model Settings editor).
-        "model_compaction": cfg.get("model_compaction") or {},
+
         # Per-model step budgets (the per-model Settings editor).
         "model_steps": cfg.get("model_steps") or {},
         # Access mode: ask | plan | full (header control; see
@@ -2512,31 +2459,7 @@ async def api_set_config(body: ConfigUpdate):
         updates["access_mode"] = mode if mode in ("ask", "plan", "full") else "ask"
     # Compaction merges over the stored block (a Settings save that only
     # touches enabled must not reset trigger_tokens, and vice versa).
-    comp = updates.get("compaction")
-    if isinstance(comp, dict):
-        existing = load_config().get("compaction") or {}
-        merged_c = {**existing, **comp}
-        merged_c["enabled"] = bool(merged_c.get("enabled", True))
-        try:
-            merged_c["trigger_tokens"] = max(int(merged_c.get("trigger_tokens") or 0), 0)
-        except (TypeError, ValueError):
-            merged_c["trigger_tokens"] = 0
-        updates["compaction"] = merged_c
-    # Per-model compaction merges the same way: each entry's fields are
-    # normalized (None clears the field, numbers are clamped >= 0).
-    mcomp = updates.get("model_compaction")
-    if isinstance(mcomp, dict):
-        merged_m: dict[str, dict] = {}
-        for model_id, entry in mcomp.items():
-            if not isinstance(entry, dict):
-                continue
-            out: dict = {"enabled": bool(entry.get("enabled", True))}
-            try:
-                out["trigger_tokens"] = max(int(entry.get("trigger_tokens") or 0), 0)
-            except (TypeError, ValueError):
-                out["trigger_tokens"] = 0
-            merged_m[str(model_id)] = out
-        updates["model_compaction"] = merged_m
+
     # Per-model step budgets: each value must be an int >= 0 (0 = unlimited);
     # anything else is dropped rather than persisted raw.
     msteps = updates.get("model_steps")
