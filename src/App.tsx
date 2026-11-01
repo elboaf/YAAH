@@ -98,7 +98,7 @@ export function BackendRecoveryBanner() {
         <button
           type="button"
           onClick={restart}
-          className="ml-2 rounded border border-red-400/50 px-2 py-0.5 text-xs font-semibold text-red-100 hover:bg-red-800/70"
+          className="ml-2 rounded border border-red-400/50 px-2 py-0.5 text-xs font-semibold text-red-100 hover:bg-red-800/70 focus:outline-none focus:ring-2 focus:ring-red-500"
         >
           Restart backend
         </button>
@@ -224,7 +224,7 @@ function RestoreSession() {
 
 export default function App() {
   return (
-    <div className="relative flex h-full w-full bg-zinc-900 text-zinc-100">
+    <div className="relative flex h-full w-full bg-[#1e1e1e] text-[#d4d4d4] font-sans">
       {/* #287: suppress the WebView2 default context menu outside editables
           and images — Back/Refresh/Save as/Print is browser chrome, not Yaah
           UI. Mount-first so the capture listener registers before anything

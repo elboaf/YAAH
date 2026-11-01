@@ -793,7 +793,7 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
         done
             ? 'bg-zinc-800/70 text-zinc-400'
-            : 'bg-zinc-700/60 text-zinc-200'
+            : 'bg-zinc-700/60 terminal-text'
       }`}
     >
       <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
@@ -1095,7 +1095,7 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
     if (inlineImages.length > 0) {
       const savedTo = typeof resultObjInline.saved_to === 'string' ? resultObjInline.saved_to : ''
       return (
-        <div className="my-1 font-mono text-[11px]">
+        <div className="my-1 font-mono text-[11px] terminal-text">
           {/* Audit parity with every other tool row: the chip toggles an
               expander carrying the call's args (prompt, size, seed) and
               the full result - the image stays inline and untouched. */}
@@ -4502,7 +4502,7 @@ export function Sidebar() {
         <div className="relative mt-auto   pt-2">
           <div className="mb-1.5 flex items-center gap-1.5">
             <button
-              className="min-w-0 flex-1 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500"
+              className="min-w-0 flex-1 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
               onClick={() => {
                 newConversation()
 
