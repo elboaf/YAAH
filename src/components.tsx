@@ -1039,11 +1039,26 @@ function ToolTicker({
   )
 }
 
+/** Shared call-name counting + render (reused by TraceLine and QuestionAnchor). */
+function CallNameCounts({ calls }: { calls: ToolCall[] }) {
+  const byName = new Map<string, number>()
+  for (const tc of calls) byName.set(tc.name, (byName.get(tc.name) ?? 0) + 1)
+  return (
+    <>
+      {[...byName].map(([n, c], i) => (
+        <span key={n}>
+          {i > 0 && <span className="text-zinc-700"> · </span>}
+          <span className={toolGlyphColor(n)}>{toolGlyph(n)}</span> {n}
+          {c > 1 ? ` ×${c}` : ''}
+        </span>
+      ))}
+    </>
+  )
+}
+
 /** Finished turn's collapsed trace: one line, expandable to full detail. */
 function TraceLine({ calls }: { calls: ToolCall[] }) {
   const [open, setOpen] = useState(false)
-  const byName = new Map<string, number>()
-  for (const tc of calls) byName.set(tc.name, (byName.get(tc.name) ?? 0) + 1)
   return (
     <div className="my-1">
       <button
@@ -1055,13 +1070,7 @@ function TraceLine({ calls }: { calls: ToolCall[] }) {
           {calls.length} call{calls.length === 1 ? '' : 's'}
         </span>
         <span className="truncate">
-          {[...byName].map(([n, c], i) => (
-            <span key={n}>
-              {i > 0 && <span className="text-zinc-700"> · </span>}
-              <span className={toolGlyphColor(n)}>{toolGlyph(n)}</span> {n}
-              {c > 1 ? ` ×${c}` : ''}
-            </span>
-          ))}
+          <CallNameCounts calls={calls} />
         </span>
       </button>
       {open && (
@@ -1898,8 +1907,6 @@ function PlanningFold({ msg, body }: { msg: ChatMessage; body: ReactNode }) {
  *  Open by default, collapsible; works live and after reload. */
 function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
   const [open, setOpen] = useState(true)
-  const byName = new Map<string, number>()
-  for (const t of after) byName.set(t.name, (byName.get(t.name) ?? 0) + 1)
   const result = (tc.result ?? {}) as { answer?: string | null }
   const answer =
     typeof result.answer === 'string' && result.answer ? result.answer : null
@@ -1926,13 +1933,7 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
           {after.length > 0 && (
             <p className="mt-1.5 truncate font-mono text-[11px] text-zinc-500">
               <span className="mr-1.5 text-zinc-600">→ did next:</span>
-              {[...byName].map(([n, c], i) => (
-                <span key={n}>
-                  {i > 0 && <span className="text-zinc-700"> · </span>}
-                  <span className={toolGlyphColor(n)}>{toolGlyph(n)}</span> {n}
-                  {c > 1 ? ` ×${c}` : ''}
-                </span>
-              ))}
+              <CallNameCounts calls={after} />
             </p>
           )}
         </div>
