@@ -100,7 +100,6 @@ import {
   type SandboxStatus,
   probeImageProvider,
   getLoraCatalog,
-  getCompactionEffective,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
@@ -108,7 +107,7 @@ import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, 
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
-import { AgentContextPerProvider, familyBaseId, providerEntryModels } from './AgentContextPerProvider'
+import { AgentContextPerProvider, providerEntryModels } from './AgentContextPerProvider'
 import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
@@ -985,21 +984,16 @@ export function tapeChunkForEvent(ev: AgentEvent, elapsed?: string): string | nu
  *  edge; the row never grows past the chat panel's width. The telemetry tape
  *  runs in a window directly below, whose right edge lines up with the
  *  newest chip's right edge — tape and chip read as one column. Renders even
- *  with zero tool calls (compaction chip / tape only): the tape must not
- *  depend on a tool call existing, or early-turn thinking has no strip. */
+ *  with zero tool calls (tape only): the tape must not depend on a tool
+ *  call existing, or early-turn thinking has no strip. */
 function ToolTicker({
   calls,
   telemetry,
-  showCompaction = true,
 }: {
   calls: ToolCall[]
   /** Optional per-run tape for nested agents; otherwise use the chat tape. */
   telemetry?: string
-  showCompaction?: boolean
 }) {
-  const compaction = useAgent((s) =>
-    showCompaction ? s.compactionByConv[s.bufferKey()] : undefined,
-  )
   const tape = useAgent((s) => telemetry ?? s.tapeByConv[s.bufferKey()] ?? '')
   const recent = calls.slice(-12)
   const rowRef = useRef<HTMLDivElement>(null)
@@ -1010,7 +1004,7 @@ function ToolTicker({
   }, [calls])
   const fade =
     'linear-gradient(to right, black 72%, rgba(0,0,0,0.35) 90%, transparent 100%)'
-  if (!calls.length && !compaction && !tape) return null
+  if (!calls.length && !tape) return null
   return (
     <div className="my-1 w-full min-w-0">
       <div
@@ -1031,9 +1025,6 @@ function ToolTicker({
             <ToolChip tc={tc} />
           </span>
         ))}
-        {compaction && (
-          <CompactionChip summarized={compaction.summarized} summary={compaction.summary} />
-        )}
       </div>
       {calls.length ? (
         tapeWidth !== null && tapeWidth > 0 && (
@@ -1045,33 +1036,6 @@ function ToolTicker({
         <AgentTelemetry tape={tape} />
       )}
     </div>
-  )
-}
-
-/** Live compaction notice (adr/0004): a chip in the ticker row, expandable
- *  to the continuity summary. The durable transcript divider (rendered from
- *  the persisted system row on history reload) still marks the position. */
-function CompactionChip({ summarized, summary }: { summarized?: number; summary: string }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <span className="relative shrink-0">
-      <button
-        onClick={() => setOpen(!open)}
-        className="inline-flex items-center gap-1.5 rounded bg-zinc-800/70 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400 hover:text-zinc-200"
-        title={summary}
-      >
-        <span className="text-zinc-500">✂</span>
-        <span>
-          context compacted
-          {typeof summarized === 'number' && summarized > 0 ? ` (${summarized} msgs)` : ''}
-        </span>
-      </button>
-      {open && (
-        <div className="absolute left-0 top-full z-10 mt-1 max-h-72 w-96 overflow-auto whitespace-pre-wrap rounded   bg-zinc-900 p-2 font-mono text-[11px] text-zinc-400">
-          {summary}
-        </div>
-      )}
-    </span>
   )
 }
 
@@ -1360,7 +1324,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
 function SubAgentToolTicker({ tools, telemetry }: { tools: SubAgentToolCall[]; telemetry: string }) {
   return (
     <div className="min-w-0   pl-2">
-      <ToolTicker calls={tools} telemetry={telemetry} showCompaction={false} />
+      <ToolTicker calls={tools} telemetry={telemetry} />
     </div>
   )
 }
@@ -1375,29 +1339,6 @@ function MessageBody({ content }: { content: string }) {
   return <AgentMarkdown content={content} />
 }
 
-/** Collapsible record of a history compaction (adr/0004): marks where the
- *  summarized prefix used to be; expands to the summary itself. */
-function CompactionDivider({ summarized, summary }: { summarized?: number; summary: string }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="my-1 border-l-2 pl-2">
-      <button
-        onClick={() => setOpen(!open)}
-        className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
-      >
-        <span className="mr-1.5">{open ? '\u25bc' : '\u25b6'}</span>
-        earlier context summarized to stay within the model's window
-        {typeof summarized === 'number' && summarized > 0 ? ` (${summarized} messages)` : ''}
-        {' — details above this line are condensed'}
-      </button>
-      {open && (
-        <div className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap   pl-2 font-mono text-[11px] text-zinc-400">
-          {summary}
-        </div>
-      )}
-    </div>
-  )
-}
 
 type FileChange = { path: string; added: number; deleted: number; binary?: boolean }
 type FileChangeSummary = {
@@ -1625,17 +1566,6 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
       }
     } catch {
       // not JSON — fall through
-    }
-    // Legacy history compaction marker (adr/0004): old versions stored a
-    // summary as a system row after deleting the summarized transcript.
-    try {
-      const parsed: unknown = JSON.parse(msg.content)
-      if (parsed && typeof parsed === 'object' && 'compaction' in (parsed as object)) {
-        const c = (parsed as { compaction: { summarized_messages?: number; summary: string } }).compaction
-        return <CompactionDivider summarized={c.summarized_messages} summary={c.summary} />
-      }
-    } catch {
-      // not JSON — fall through to the failure-marker render
     }
     return (
       <div className="font-mono text-[11px] text-red-400/90">
@@ -6247,7 +6177,6 @@ export function AgentChatLiveFollow() {
     let alive = true
     // Fresh fire: drop the previous run's tape before the new events land.
     useAgent.getState().resetTape(String(conversationId))
-    useAgent.getState().clearCompaction(String(conversationId))
     let offset = 0
     const drainTape = async (final = false) => {
       const res = await getAgentTape(conversationId, offset)
@@ -7099,17 +7028,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const { byProvider: subagentByProvider } = useModelList()
   const [activeTab, setActiveTab] = useState<'connect' | 'talk' | 'automate' | 'advanced'>('connect')
   // Per-model agent settings (#111, rebuilt after the draft-overlay
-  // regression): ONE authoritative map — model id -> { comp?, steps? } —
+  // regression): ONE authoritative map — model id -> { steps? } —
   // loaded from config and shipped as-is on Save. Absence IS deletion:
   // the payload mirrors this map exactly, so a removed entry stays removed
-  // and an edit sticks. comp absent = the row has no saved compaction
-  // entry (runtime auto-fallback applies); steps absent = the 200 default
-  // applies. (The old design kept separate overlay drafts and unioned them
-  // with the SAVED copy at save time, which resurrected removed entries,
-  // dropped edits for models without a saved entry, and stranded phantom
-  // rows.)
+  // and an edit sticks. steps absent = the 200 default applies. (The old
+  // design kept separate overlay drafts and unioned them with the SAVED
+  // copy at save time, which resurrected removed entries, dropped edits
+  // for models without a saved entry, and stranded phantom rows.)
   const [compMap, setCompMap] = useState<
-    Record<string, { comp?: { enabled: boolean; trigger_tokens: number }; steps?: number }>
+    Record<string, { steps?: number }>
   >({})
   /** Model ids manually added to a provider's editor this session (the
    *  derived entry list starts from the saved map + the catalog). */
@@ -7123,8 +7050,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({})
   // Resolved (detected) context windows per model id, for pre-filling.
   const [detectedWindows, setDetectedWindows] = useState<Record<string, number | null>>({})
-  /** Default history-compaction trigger (k tokens) shown in the field. */
-  const COMPACTION_DEFAULT_K = 300
   /** Default per-provider max steps (0 = unlimited). */
   const MAX_STEPS_DEFAULT = 200
   // Interface scale draft (100–200% slider, #171) — applied live on drag,
@@ -7263,19 +7188,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setProviders(next)
           setSubagentProvider(c.subagent_provider ?? '')
           setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
-          // One authoritative map (#588 fault A follow-up): saved compaction
-          // entries + saved per-model steps land in the one structure the
-          // editor edits and Save ships. Models with only one kind of saved
-          // setting keep their row (comp absent = no compaction entry;
-          // steps absent = the 200 default applies).
+          // One authoritative map (#588 fault A follow-up): saved per-model
+          // steps land in the one structure the editor edits and Save ships.
           setCompMap(
             Object.fromEntries(
-              [...new Set([...Object.keys(c.model_compaction ?? {}), ...Object.keys(c.model_steps ?? {})])].map(
+              Object.keys(c.model_steps ?? {}).map(
                 (m) =>
                   [
                     m,
                     {
-                      ...(c.model_compaction?.[m] && { comp: c.model_compaction[m] }),
                       ...(typeof (c as unknown as { model_steps?: Record<string, number> }).model_steps?.[m] === 'number'
                         ? { steps: (c as unknown as { model_steps?: Record<string, number> }).model_steps![m] }
                         : {}),
@@ -7474,12 +7395,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [capturingHotkey])
 
-  // Effective compaction behavior for the expanded provider's entry ids
-  // (#588 fault B): the readouts + the entryKey come from the backend's
-  // alias-aware resolver, not from a frontend re-implementation.
-  const expandedIds = expanded ? (provEntryModels[expanded] ?? []) : []
-  const compEff = useCompactionEffective(expandedIds)
-
   const applyPreset = (target: string, presetName: string) => {
     const p = presets[presetName]
     if (!p) return
@@ -7532,23 +7447,16 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         }
       }
       // Per-model agent settings (issue #111): one authoritative map —
-      // steps ship under model_steps; a row's comp block ships to
-      // model_compaction when present (absent = untouched = runtime
-      // defaults). The maps ship AS-IS: a removed row ships absent, an
-      // edited value ships edited — no overlay resurrection.
+      // steps ship under model_steps. The map ships AS-IS: a removed row
+      // ships absent, an edited value ships edited — no overlay resurrection.
       const outSteps: Record<string, number> = {}
       for (const [model, v] of Object.entries(compMap)) {
         if (typeof v.steps === 'number') outSteps[model] = v.steps
-      }
-      const outComp: Record<string, { enabled: boolean; trigger_tokens: number }> = {}
-      for (const [model, v] of Object.entries(compMap)) {
-        if (v.comp) outComp[model] = v.comp
       }
       await updateConfig({
         providers: out,
         subagent_provider: subagentProvider,
         model_steps: outSteps,
-        model_compaction: outComp,
         ui_scale: uiScale,
         voice: {
           engine: voiceEngine,
@@ -7799,7 +7707,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                           {/* Static system prompt is now unconditional for all providers (issue #390). */}
                           {/* Per-provider agent & context: one entry per
                               configured model, each with its own max steps
-                              + compaction (issue #111). */}
+                              (issue #111). */}
                           <AgentContextPerProvider
                             name={name}
                             models={providerModels[name] ?? []}
@@ -7809,47 +7717,22 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                               onSteps: (v: number | '') =>
                                 setCompMap((s) => {
                                   const next = { ...s }
-                                  const comp = next[m]?.comp
                                   if (v === '') {
-                                    // Blank steps = "default applies": the row ships
-                                    // only its comp block, or vanishes entirely when
-                                    // it has none.
-                                    if (comp) next[m] = { comp }
-                                    else delete next[m]
+                                    // Blank steps = "default applies": the row
+                                    // vanishes (absence is deletion).
+                                    delete next[m]
                                   } else {
                                     next[m] = { ...(next[m] ?? {}), steps: v }
                                   }
                                   return next
                                 }),
-                              compEnabled: compMap[m].comp?.enabled ?? true,
-                              onCompEnabled: (v: boolean) =>
-                                setCompMap((s) => {
-                                  const cur = s[m] ?? {}
-                                  const comp = cur.comp ?? { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 }
-                                  return { ...s, [m]: { ...cur, comp: { ...comp, enabled: v } } }
-                                }),
-                              compK: compMap[m].comp ? compMap[m].comp!.trigger_tokens / 1000 : COMPACTION_DEFAULT_K,
-                              onCompK: (v: number | '') =>
-                                setCompMap((s) => {
-                                  const cur = s[m] ?? {}
-                                  const comp = cur.comp ?? { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 }
-                                  return { ...s, [m]: { ...cur, comp: { ...comp, trigger_tokens: (v === '' ? 0 : v) * 1000 } } }
-                                }),
                               ctxAuto: detectedWindows[m] ?? null,
-                              effective: compEff[m]
-                                ? { enabled: compEff[m].enabled, triggerK: Math.round(compEff[m].trigger_tokens / 1000) }
-                                : null,
-                              entryKey: compEff[m]?.entry_key ?? null,
-                              siblings: Object.keys(compMap).filter(
-                                (id) => id !== m && familyBaseId(id) === familyBaseId(m),
-                              ),
                             }))}
                             onAddModel={(id) => {
-                              // A new entry: a row in the editor plus an
-                              // (enabled, default-trigger) comp block so the user's
-                              // edit targets a real entry — and the add PERSISTS
-                              // on Save (pre-rebuild, fresh rows were gated out of
-                              // the save payload by a stale overlay map).
+                              // A new entry: a row in the editor. The add PERSISTS
+                              // on Save once a value is entered (pre-rebuild,
+                              // fresh rows were gated out of the save payload by
+                              // a stale overlay map).
                               setProvEntryModels((s) => ({
                                 ...s,
                                 [name]: (s[name] ?? []).includes(id) ? (s[name] ?? []) : [...(s[name] ?? []), id],
@@ -7858,11 +7741,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                                 ...s,
                                 [name]: (s[name] ?? []).filter((m) => m !== id),
                               }))
-                              setCompMap((s) =>
-                                s[id]
-                                  ? s
-                                  : { ...s, [id]: { comp: { enabled: true, trigger_tokens: COMPACTION_DEFAULT_K * 1000 } } },
-                              )
                             }}
                             onRemoveModel={(id) => {
                               // Removal = absence (in the entry list and in the
@@ -7883,7 +7761,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                                 return next
                               })
                             }}
-                            compactionDefaultK={COMPACTION_DEFAULT_K}
                             maxStepsDefault={MAX_STEPS_DEFAULT}
                             inputCls={settingsInputCls}
                           />
@@ -8854,93 +8731,12 @@ export function GitChipCluster({
 }
 
 /** Context thresholds for the status-strip bar (mirrors the backend):
- *  - compaction trigger (adr/0004): the absolute config.trigger_tokens
- *    value — past it the NEXT turn rewrites history before the model sees
- *    it, so the visible count is no longer the full transcript.
  *  - the "dumb zone": past ~120k tokens model quality measurably degrades
- *    on most families, independent of the hard window.
- *  Config values come from /api/config (cached per page load — Settings
- *  changes refresh on the next reload of this module's cache). */
+ *    on most families, independent of the hard window. */
 const DUMB_ZONE_TOKENS = 120_000
 
-let compactionCfgCache: { enabled: boolean; trigger_tokens: number } | null = null
-let compactionCfgPromise: Promise<void> | null = null
-function useCompactionConfig(): { enabled: boolean; trigger_tokens: number } {
-  const [cfg, setCfg] = useState(compactionCfgCache)
-  useEffect(() => {
-    if (compactionCfgCache) return
-    compactionCfgPromise ??= getConfig()
-      .then((c) => {
-        compactionCfgCache = {
-          enabled: c.compaction?.enabled ?? true,
-          trigger_tokens: c.compaction?.trigger_tokens ?? 0,
-        }
-      })
-      .catch(() => {
-        compactionCfgCache = { enabled: true, trigger_tokens: 0 }
-      })
-      .then(() => setCfg(compactionCfgCache))
-  }, [])
-  return cfg ?? { enabled: true, trigger_tokens: 0 }
-}
-
-/** Effective per-model compaction behavior (#588): what the runtime
- *  actually does for a model id — the entry that covers it (exact or
- *  alias) and the trigger that will fire, or the auto fallback. Cached
- *  per page load like the global config above; Settings changes refresh
- *  on the next reload of this module's cache. */
-interface CompactionEffective {
-  model: string
-  entry: boolean
-  entry_key: string | null
-  enabled: boolean
-  trigger_tokens: number
-  keep_tokens: number
-  window: number | null
-}
-
-const effCache: Record<string, CompactionEffective> = {}
-const effInflight = new Set<string>()
-
-/** Fetch the effective compaction behavior for each id once per page
- *  load; ids already cached (or in flight) are not re-fetched, and later
- *  subscribers (another provider expanded, a chat switching models) get
- *  their own fetch. Failures leave the cache untouched — no readout
- *  beats a wrong one — and the next subscriber retries. */
-export function useCompactionEffective(ids: string[]): Record<string, CompactionEffective> {
-  const [, bump] = useState(0)
-  const key = ids.filter(Boolean).join('|')
-  useEffect(() => {
-    const unique = key ? key.split('|') : []
-    const missing = unique.filter((m) => !(m in effCache) && !effInflight.has(m))
-    if (!missing.length) return
-    for (const m of missing) effInflight.add(m)
-    Promise.all(
-      missing.map((m) =>
-        getCompactionEffective(m)
-          .then((r) => [m, r] as const)
-          .catch(() => null),
-      ),
-    ).then((rows) => {
-      for (const row of rows) if (row) effCache[row[0]] = row[1]
-      for (const m of missing) effInflight.delete(m)
-      bump((n) => n + 1)
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key])
-  return effCache
-}
-
-/** Where the dial's fill flips to warning colors: compaction first, then
- *  the dumb zone (the more severe of the two marks the color for the moment
- *  the count passes it). */
-function contextDialColor(
-  tokens: number,
-  trigger: number | null,
-  dumbVisible: boolean,
-): string {
+function contextDialColor(tokens: number, dumbVisible: boolean): string {
   if (dumbVisible && tokens >= DUMB_ZONE_TOKENS) return '#ef4444' // red-500
-  if (trigger !== null && tokens >= trigger) return '#f59e0b' // amber-500
   return '#10b981' // emerald-500
 }
 
@@ -8954,42 +8750,13 @@ function tokenCountColor(tokens: number): string {
   return 'text-blue-600'
 }
 
-/** One tick on the dial rim: a short radial line just outside the ring,
- *  pointing at the angle its threshold sits at. */
-function DialTick({ frac, color }: { frac: number; color: string }) {
-  const a = frac * 2 * Math.PI - Math.PI / 2
-  const r1 = 9.2
-  const r2 = 11.2
-  return (
-    <line
-      x1={12 + r1 * Math.cos(a)}
-      y1={12 + r1 * Math.sin(a)}
-      x2={12 + r2 * Math.cos(a)}
-      y2={12 + r2 * Math.sin(a)}
-      stroke={color}
-      strokeWidth="1"
-      strokeLinecap="round"
-    />
-  )
-}
 
 /** Context gauge (status strip): a circular dial whose fill arc is the
  *  exact context size against the model's window, climbing with every
- *  model call during a run. One rim tick marks the compaction trigger:
- *  - compaction trigger (light tick, adr/0004): the absolute
- *    Settings trigger_tokens value — past it the NEXT turn rewrites
- *    history, so the visible count is no longer the full transcript.
- *  Nothing renders until the first turn completes (the count comes from
- *  the API's usage report). Config arrives from /api/config, cached per
- *  page load. */
+ *  model call during a run. The dial color crosses into the dumb zone
+ *  past DUMB_ZONE_TOKENS. Nothing renders until the first turn completes
+ *  (the count comes from the API's usage report). */
 export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
-  const compaction = useCompactionConfig()
-  // The tick must sit at THIS chat model's effective trigger (#588): a
-  // per-model entry (its own or an alias sibling's) fires there, not the
-  // global value the old tick showed. Global stays the fallback while
-  // the probe has no answer (and for models without an entry — the
-  // backend then reports the derived fallback as the trigger anyway).
-  const eff = useCompactionEffective(info && info.model ? [info.model] : [])
   if (!info) return null
   const windowTokens = info.window
   // The dial ALWAYS scales out of 200k, regardless of the model's context
@@ -9002,19 +8769,9 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
   // unclamped percentage (see tooltip note on DUMB_ZONE_TOKENS).
   const rawFrac = info.tokens / scale
   const frac = rawFrac % 1
-  // Absolute compaction threshold (pure token value, no window fraction),
-  // per this chat's model when known (#588); global value as the fallback.
-  const effModel = info.model ? eff[info.model] : undefined
-  const fallbackTrigger = compaction.enabled && compaction.trigger_tokens > 0 ? compaction.trigger_tokens : null
-  const trigger = effModel
-    ? effModel.enabled && effModel.trigger_tokens > 0
-      ? effModel.trigger_tokens
-      : null
-    : fallbackTrigger
-  const triggerFrac = trigger !== null ? Math.min(1, trigger / scale) : null
   const dumbFrac = DUMB_ZONE_TOKENS / scale
   const dumbVisible = dumbFrac < 1
-  const fill = contextDialColor(info.tokens, trigger, dumbVisible)
+  const fill = contextDialColor(info.tokens, dumbVisible)
   // Arc geometry: a 24x24 viewBox dial, ring from 12 o'clock clockwise.
   const r = 8.5
   const arcFrac = frac
@@ -9044,8 +8801,6 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
           <path d={arcPath} fill="none" stroke={fill} strokeWidth="2.6" strokeLinecap="round" />
         )}
         {/* Threshold ticks on the rim. */}
-        {triggerFrac !== null && <DialTick frac={triggerFrac} color="#d4d4d8" />}
-        {/* red dumb-zone tick removed (#387): keep only the compaction trigger tick */}
         {/* Hub readout: true, unclamped percentage of the fixed dial. */}
         <text
           x="12"
@@ -10209,10 +9964,8 @@ export function Composer() {
     setContext,
 
     appendRawMessage,
-    setCompaction,
     setAbortController,
     removeMessage,
-    clearCompaction,
   } = useAgent()
   const status = useStatus()
   // Live ask_user card, for PTT question routing (mirror kept in a ref below
@@ -11257,15 +11010,6 @@ export function Composer() {
       // The waiting readout is driven by streamAgentTurn's onModelCall hook;
       // this branch only keeps the status dot honest.
       setStatus(bufKey, 'thinking')
-    } else if (ev.type === 'compacted') {
-      // Prompt compaction (adr/0004) ran before the first model call:
-      // surface it as a chip in the ticker row (store-driven), not a
-      // transcript message. The full transcript remains untouched; only
-      // prompt-summary state and its replay watermark are updated.
-      setCompaction(bufKey, {
-        summarized: ev.summarized_messages,
-        summary: ev.summary ?? '',
-      })
     } else if (ev.type === 'usage') {
       // Exact context size of the latest model call — now emitted per call
       // (live ticks during the run), not just at turn end. Numeric
@@ -11404,9 +11148,6 @@ export function Composer() {
     // turn. (Resume remains for when the user wants the same turn continued.)
     setTurnError(bufKey, null)
     setSendingKey(bufKey)
-    // Fresh turn: the previous run's compaction chip is stale — clear it
-    // alongside the tape so the ticker row starts clean.
-    clearCompaction(bufKey)
     const userId = appendUserMessage(
       bufKey,
       displayText,

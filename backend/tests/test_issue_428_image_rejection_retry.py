@@ -115,8 +115,8 @@ def _rejecting_provider(status=500,
             payload = json.loads(raw)
             msgs = payload.get("messages") or []
         except Exception:
-            # Not model_client's request shape (e.g. the title probe or a
-            # compaction pass) - no image parts to count.
+            # Not model_client's request shape (e.g. the title probe) - no
+            # image parts to count.
             msgs = []
         calls["system_counts"].append(
             sum(1 for m in msgs if m.get("role") == "system"))

@@ -23,7 +23,7 @@ from backend.agent import speak
 
 # Windows: console children of the windowed app pop up a visible console
 # window; suppress it. POSIX subprocess has no creationflags parameter.
-_NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
+from backend.agent.gitproc import NO_WINDOW as _NO_WINDOW
 
 # Model file names we know how to prefer, best bundled candidate first.
 PREFERRED_MODELS = (

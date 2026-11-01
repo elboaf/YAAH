@@ -165,8 +165,6 @@ DEFAULTS = {
     # "full" = run everything without confirmation. Read at gate time so a
     # header switch applies to the next tool call of a running turn.
     "access_mode": "ask",
-    # Per-model compaction settings (model id -> {enabled, trigger_tokens}).
-    "model_compaction": {},
     # Sub-agent routing: which provider/model sub-agents (spawn_agent)
     # chat through, independent of the parent conversation's provider.
     # "" = inherit the parent's provider (today's behavior). Otherwise a

@@ -871,8 +871,7 @@ TOOLS_SCHEMA += [
             "name": "search_conversation_history",
             "description": (
                 "Search all persisted text in this conversation, including "
-                "messages before and after context compaction, tool activity, "
-                "sub-agent transcripts, and the prompt summary. Provide a "
+                "messages, tool activity, and sub-agent transcripts. Provide a "
                 "case-insensitive plain-text query; results contain short excerpts."
             ),
             "parameters": {

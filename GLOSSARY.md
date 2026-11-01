@@ -94,7 +94,7 @@ Model-context text authored outside the harness at runtime — project notes, th
 _Avoid_: dynamic content; attachments (those ride messages, not the prompt)
 
 **Auxiliary prompt**:
-A one-off prompt for a model call that is not a chat turn, such as compaction summaries or title generation.
+A one-off prompt for a model call that is not a chat turn, such as title generation.
 _Avoid_: side prompt, internal prompt
 
 **Sub-agent prompt**:

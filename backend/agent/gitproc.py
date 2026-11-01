@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from pathlib import Path
 
 # Windows: suppress the console window a console child of the windowed

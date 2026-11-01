@@ -32,17 +32,6 @@ SEPARATOR = "\n\n---\n\n"
 # builds the prompt first.
 SKILL_TAIL_MARKER = "# Loaded skill:"
 
-# Compaction-summary messages start with one of these — imported from the
-# authoritative source (prompt_manifest) rather than duplicated literals;
-# the import is lazy because prompt_manifest imports this module lazily.
-def _summary_prefixes() -> tuple:
-    from backend.agent.prompt_manifest import (
-        COMPACT_SUMMARY_PREFIX,
-        COMPACT_SUMMARY_PREFIX_LEGACY,
-    )
-
-    return (COMPACT_SUMMARY_PREFIX, COMPACT_SUMMARY_PREFIX_LEGACY)
-
 # YAAH_SKILLS_PATH lets the test suite redirect this (default is the
 # user's real ~/.yaah/skills).
 SKILLS_DIR = Path(
@@ -315,10 +304,7 @@ def bodies_for_prompt(names: list[str]) -> str:
 def skill_tail_index(messages: list) -> int | None:
     """Index of the conversation's skill-tail message, or None.
 
-    The persisted tail replays at the first user message AFTER the head —
-    but a compacted conversation carries a compaction-summary message
-    there, and the tail replay then sits one slot further down (the
-    summary is prefix-stable and must never be displaced or merged into).
+    The persisted tail replays at the first user message AFTER the head.
     Keying on the marker instead of a fixed slot keeps the tail in exactly
     one message, whichever side (this loader or the loop's replay) builds
     the prompt first.
@@ -383,17 +369,8 @@ def load_skill_into_messages(
                     f"{messages[tail_idx]['content']}{SEPARATOR}{block}"
                 )
             else:
-                # No existing tail: insert BELOW a compaction summary if one
-                # is present — the replay side puts the persisted tail after
-                # the summary, and the two must agree or the prompt order
-                # flips between the loading turn and the next turn.
-                tail_slot = 1 if not any(
-                    isinstance(m, dict)
-                    and str(m.get("content", "")).startswith(
-                        _summary_prefixes()
-                    )
-                    for m in messages[1:3]
-                ) else 2
+                # No existing tail: insert at the first user slot.
+                tail_slot = 1
                 messages.insert(tail_slot, {"role": "user", "content": block})
             tail_block = block
         else:
