@@ -298,6 +298,18 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_tokens INTEGER")
     if "context_model" not in conv_cols:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_model TEXT")
+    if "cost_spent" not in conv_cols:
+        # Per-session cumulative billed cost (issue #627). NULL = never
+        # tracked / unknown provider. OpenRouter reports exact billed
+        # amount in usage.cost; other providers leave it NULL.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN cost_spent REAL"
+        )
+    if "completion_tokens_total" not in conv_cols:
+        # Per-session cumulative output tokens across all turns (#627).
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN completion_tokens_total INTEGER"
+        )
     if "chat_type" not in conv_cols:
         # 'chat' = a normal conversation; 'agent' = a scheduled agent's pinned
         # chat (issue #41). Existing rows are normal chats by default.
@@ -1044,6 +1056,31 @@ async def set_conversation_usage(
             (tokens, model, conversation_id),
         )
         await db.commit()
+
+
+async def add_conversation_cost(
+    conversation_id: int, cost: float, completion_tokens: int
+):
+    """Accumulate billed cost and output tokens for this conversation.
+
+    cost may be None (provider didn't report it) — in that case only
+    completion tokens are tracked. Uses atomic column increment so
+    concurrent model calls within a turn don't race.
+    """
+    db = await get_db()
+    try:
+        if cost is not None:
+            await db.execute(
+                "UPDATE conversations SET cost_spent = COALESCE(cost_spent, 0) + ? WHERE id = ?",
+                (cost, conversation_id),
+            )
+        await db.execute(
+            "UPDATE conversations SET completion_tokens_total = COALESCE(completion_tokens_total, 0) + ? WHERE id = ?",
+            (completion_tokens, conversation_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
 
 
 async def add_message(

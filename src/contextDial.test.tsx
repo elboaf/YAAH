@@ -3,7 +3,7 @@ import { render } from '@testing-library/react'
 import { ContextChip } from './components'
 
 function info(tokens: number) {
-  return { tokens, window: 200_000, model: 'test-model' }
+  return { tokens, window: 200_000, model: 'test-model', cost: null }
 }
 
 const TOOLTIP_LINES = [
