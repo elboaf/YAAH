@@ -4264,11 +4264,21 @@ export function ModelOptions({
 export function useModelList() {
   const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
   const [activeProvider, setActiveProvider] = useState<string | null>(null)
+  // Ignore stale refresh responses: mount/save/close/button can all fire
+  // refresh() concurrently, so an older network response could resolve
+  // last and clobber newer model data. Track the latest request so only
+  // the newest one's result is applied (covers every caller).
+  const latestRefresh = useRef(0)
   const refresh = useCallback(() => {
+    const requestId = ++latestRefresh.current
     listAvailableModels()
       .then((r) => {
+        if (requestId !== latestRefresh.current) return
         setByProvider(r.providers)
-        setActiveProvider(r.active_provider || '')
+        setActiveProvider(r.active_provider)
+        // Notify other consumers (ChatScopePickers, EditAgentModal) that
+        // the model list has changed — they'll re-fetch on this event.
+        window.dispatchEvent(new CustomEvent('providers-changed'))
       })
       .catch(() => {})
   }, [])
@@ -4378,13 +4388,10 @@ export function DefaultThoughtLevelPicker() {
 export function Sidebar() {
   const { newConversation, workspace, setWorkspace, refreshGlobals } = useAgent()
   const globalModel = useAgent((s) => s.globalModel)
-  // null = backend hasn't answered the config probe yet; '' = genuinely no
-  // provider configured. The "add a provider" banner must only render on ''
-  // — a configured llama.cpp server whose /models probe fails or is slow is
-  // not an unconfigured setup.
-  const [activeProvider, setActiveProvider] = useState<string | null>(null)
-  // name -> {models, error?} for every configured provider
-  const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
+  // useModelList hook manages the provider-grouped model list — no local
+  // state duplication. Stale-response protection and cross-component
+  // notification now live in the hook.
+  const { byProvider, activeProvider, refresh: refreshModels } = useModelList()
   const [savingModel, setSavingModel] = useState(false)
   const [modelError, setModelError] = useState('')
   const [showSettings, setShowSettings] = useState(false)
@@ -4417,35 +4424,11 @@ export function Sidebar() {
       ? `${parsedGlobal.provider}::${parsedGlobal.model}`
       : `${activeProvider ?? ''}::${globalModel}`
 
-  // Merged model list: every configured provider, queried in parallel by the
-  // backend (keys never reach the browser). Grouped per provider in the dropdown.
-  // Ignore stale refresh responses: mount/save/save-close/button can all
-  // fire refreshModels() concurrently, so an older network response could
-  // resolve last and clobber newer model data. Track the latest request so
-  // only the newest one's result is applied (covers every caller, not just
-  // the disabled button).
-  const latestRefresh = useRef(0)
-
-  const refreshModels = useCallback(() => {
-    const requestId = ++latestRefresh.current
-    listAvailableModels()
-      .then((r) => {
-        if (requestId !== latestRefresh.current) return
-        setByProvider(r.providers)
-        setActiveProvider(r.active_provider)
-        // Notify useModelList() consumers (ChatScopePickers, EditAgentModal)
-        // that the model list has changed — they'll re-fetch on this event.
-        window.dispatchEvent(new CustomEvent('providers-changed'))
-      })
-      .catch(() => {})
-  }, [])
-
   useEffect(() => {
     // #51: the sidebar picker is now the DEFAULT for new chats (the store's
     // globalModel drives both this select and fresh drafts' header pickers).
     refreshGlobals()
-    refreshModels()
-  }, [refreshGlobals, refreshModels])
+  }, [refreshGlobals])
 
   // value encoding "provider::model" keeps providers with clashing ids apart
   const pickModel = (value: string) => {
@@ -4453,13 +4436,11 @@ export function Sidebar() {
     if (idx < 0) return
     const provider = value.slice(0, idx)
     const m = value.slice(idx + 2)
-    const previousProvider = activeProvider
     // #132: compare against the qualified global (globalModel is qualified
     // from /api/config now), not the bare id.
     if (!m || qualifyModelScope(globalModel, activeProvider ?? '') === `${provider}::${m}`) return
     setSavingModel(true)
     setModelError('')
-    setActiveProvider(provider)
     const keepEffort = modelReasoningEfforts(byProvider, `${provider}::${m}`).includes(
       useAgent.getState().globalEffort,
     )
@@ -4468,7 +4449,6 @@ export function Sidebar() {
       .then(refreshGlobals)
       .then(refreshModels)
       .catch((e) => {
-        setActiveProvider(previousProvider)
         setModelError(`Could not save model: ${String((e as Error).message ?? e)}`)
       })
       .finally(() => setSavingModel(false))
@@ -4619,7 +4599,6 @@ export function Sidebar() {
         <SettingsModal
           onClose={() => {
             setShowSettings(false)
-            getConfig().then((c) => setActiveProvider(c.active_provider)).catch(() => {})
             refreshGlobals()
             refreshModels()
           }}
