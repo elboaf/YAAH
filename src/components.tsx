@@ -8604,7 +8604,6 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
   // Cost display: authoritative billed amount from OpenRouter. Shows
   // nothing (no fake $0.00) when the provider doesn't report cost.
   const showCost = info.cost !== null && info.cost > 0
-  const costValue = info.cost
   return (
     <span
       className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"
@@ -8613,7 +8612,7 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
         'This is the recommended max context tracker.',
         'This is not a rule, but starting a new chat is recommended before the dial reaches 100%',
         'Over 120k context causes inefficient, inconsistent, and generally poor model behavior, not to mention higher token usage.',
-        showCost ? `Session cost: $${costValue.toFixed(4)}` : undefined,
+        showCost ? `Session cost: $${info.cost!.toFixed(4)}` : undefined,
       ].filter(Boolean).join('\n')}
     >
       <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" className="shrink-0">
@@ -8642,7 +8641,7 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
       </span>
       {showCost && (
         <span className="text-emerald-400">
-          (${costValue.toFixed(4)})
+          (${info.cost!.toFixed(4)})
         </span>
       )}
     </span>
