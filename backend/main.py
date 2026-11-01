@@ -488,6 +488,8 @@ async def api_conversation_context(conversation_id: int):
             if bare
             else None
         ),
+        "cost_spent": conv.get("cost_spent"),
+        "completion_tokens_total": conv.get("completion_tokens_total"),
     }
 
 

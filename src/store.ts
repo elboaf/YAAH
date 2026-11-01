@@ -290,12 +290,12 @@ interface AgentState {
   setSayInChat: (on: boolean) => void
 
   /**
-   * Per-conversation context-size readout: exact usage.prompt_tokens of the
-   * latest model call, plus the resolved context window it fills. Written
-   * from the stream's usage event; cleared when the conversation is deleted.
+   * Per-conversation context-size and cost readout: exact usage.prompt_tokens
+   * of the latest model call, cumulative billed cost and completion tokens
+   * for the session (#627). Written from the stream's usage event.
    */
-  contextByConv: Record<string, { tokens: number; window: number | null; model: string | null }>
-  setContext: (convId: number, tokens: number, window: number | null, model: string | null) => void
+  contextByConv: Record<string, { tokens: number; window: number | null; model: string | null; cost: number | null; completionTokens: number | null }>
+  setContext: (convId: number, tokens: number, window: number | null, model: string | null, cost?: number | null, completionTokens?: number | null) => void
 
   /**
    * Live model-generated chat titles (issue #60), keyed by convKey. The
@@ -698,11 +698,11 @@ export const useAgent = create<AgentState>((set, get) => ({
   setSayInChat: (on) => set({ sayInChat: on }),
 
   contextByConv: {},
-  setContext: (convId, tokens, window, model) =>
+  setContext: (convId, tokens, window, model, cost = null, completionTokens = null) =>
     set((s) => ({
       contextByConv: {
         ...s.contextByConv,
-        [String(convId)]: { tokens, window, model },
+        [String(convId)]: { tokens, window, model, cost, completionTokens },
       },
     })),
 

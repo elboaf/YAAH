@@ -8754,9 +8754,10 @@ function tokenCountColor(tokens: number): string {
 /** Context gauge (status strip): a circular dial whose fill arc is the
  *  exact context size against the model's window, climbing with every
  *  model call during a run. The dial color crosses into the dumb zone
- *  past DUMB_ZONE_TOKENS. Nothing renders until the first turn completes
- *  (the count comes from the API's usage report). */
-export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null } | undefined }) {
+ *  past DUMB_ZONE_TOKENS. Also shows cumulative billed cost when the
+ *  provider reports it (#627). Nothing renders until the first turn
+ *  completes (the count comes from the API's usage report). */
+export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null; cost: number | null } | undefined }) {
   if (!info) return null
   const windowTokens = info.window
   // The dial ALWAYS scales out of 200k, regardless of the model's context
@@ -8783,6 +8784,10 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
     arcFrac > 0
       ? `M 12 ${12 - r} A ${r} ${r} 0 ${largeArc} 1 ${endX.toFixed(3)} ${endY.toFixed(3)}`
       : ''
+  // Cost display: authoritative billed amount from OpenRouter. Shows
+  // nothing (no fake $0.00) when the provider doesn't report cost.
+  const showCost = info.cost !== null && info.cost > 0
+  const costValue = info.cost
   return (
     <span
       className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"
@@ -8791,7 +8796,8 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
         'This is the recommended max context tracker.',
         'This is not a rule, but starting a new chat is recommended before the dial reaches 100%',
         'Over 120k context causes inefficient, inconsistent, and generally poor model behavior, not to mention higher token usage.',
-      ].join('\n')}
+        showCost ? `Session cost: $${costValue.toFixed(4)}` : undefined,
+      ].filter(Boolean).join('\n')}
     >
       <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" className="shrink-0">
         {/* Track: full ring, dim. */}
@@ -8817,6 +8823,11 @@ export function ContextChip({ info }: { info: { tokens: number; window: number |
       <span className={tokenCountColor(info.tokens)}>
         {fmtTok(info.tokens)} tok
       </span>
+      {showCost && (
+        <span className="text-emerald-400">
+          (${costValue.toFixed(4)})
+        </span>
+      )}
     </span>
   )
 }
@@ -9492,7 +9503,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     getContext(conversationId)
       .then((c) => {
         if (cancelled || c.context_tokens === null || c.context_tokens <= 0) return
-        setContext(conversationId, c.context_tokens, c.context_window, c.context_model)
+        setContext(conversationId, c.context_tokens, c.context_window, c.context_model, c.cost_spent ?? null)
       })
       .catch(() => {})
     // Git cluster readout: TTL-cached backend read (branch, dirty, counts,
@@ -11014,19 +11025,20 @@ export function Composer() {
       // Exact context size of the latest model call — now emitted per call
       // (live ticks during the run), not just at turn end. Numeric
       // conversation ids only — the draft buffer has no row yet; the
-      // open-time fetch covers it.
+      // open-time fetch covers it. turn_cost carries the session's
+      // accumulated billed cost so far (#627).
       const convId = Number(bufKey)
       if (Number.isInteger(convId) && convId > 0) {
         // Window re-resolution is sticky: once resolved, reuse the known
         // value instead of re-fetching per tick.
         const known = useAgent.getState().contextByConv[String(convId)]
         if (known?.window) {
-          setContext(convId, ev.usage_tokens ?? 0, known.window, ev.model ?? known.model ?? null)
+          setContext(convId, ev.usage_tokens ?? 0, known.window, ev.model ?? known.model ?? null, ev.turn_cost ?? null)
         } else {
-          setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null)
+          setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null, ev.turn_cost ?? null)
           getContext(convId)
             .then((c) => {
-              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model)
+              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model, ev.turn_cost ?? c.cost_spent ?? null)
             })
             .catch(() => {})
         }

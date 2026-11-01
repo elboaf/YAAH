@@ -147,6 +147,10 @@ export interface ContextInfo {
   model: string | null
   /** Resolved context window (override -> provider -> table), null = unknown. */
   context_window: number | null
+  /** Cumulative billed cost for this conversation (issue #627). */
+  cost_spent: number | null
+  /** Cumulative completion tokens for this conversation (#627). */
+  completion_tokens_total: number | null
 }
 
 export const getContext = (id: number) =>
@@ -1358,6 +1362,8 @@ export interface AgentEvent {
   kind?: string
   /** Exact context size (usage.prompt_tokens) of the turn's final model call. */
   usage_tokens?: number
+  /** Turn's accumulated billed cost so far (#627). */
+  turn_cost?: number
   /** Net workspace changes made during this run. */
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number
