@@ -25,6 +25,17 @@ os.environ["YAAH_IMAGES_DIR"] = os.path.join(_TMP, "images")
 os.environ["YAAH_NO_HOSTING"] = "1"
 
 
+@pytest.fixture
+def _reset_saved_devices():
+    """Save and clear remote_devices config for isolated remote device tests."""
+    from backend.agent import config as cfgmod
+    saved = cfgmod.load_config()
+    saved_devices = saved.get("remote_devices", [])
+    cfgmod.save_config({"remote_devices": []})
+    yield
+    cfgmod.save_config({"remote_devices": saved_devices})
+
+
 @pytest.fixture(autouse=True)
 def _restore_global_config():
     """Config is the one GLOBAL the suite shares through the redirected

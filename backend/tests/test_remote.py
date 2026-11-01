@@ -1166,7 +1166,7 @@ async def test_remote_url_rejects_embedded_credentials():
 
 
 @pytest.mark.asyncio
-async def test_device_connect_saves_profile_without_changing_active_scope(monkeypatch):
+async def test_device_connect_saves_profile_without_changing_active_scope(monkeypatch, _reset_saved_devices):
 
     import json
     import backend.main as main_mod
