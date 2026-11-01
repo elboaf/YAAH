@@ -4276,9 +4276,6 @@ export function useModelList() {
         if (requestId !== latestRefresh.current) return
         setByProvider(r.providers)
         setActiveProvider(r.active_provider)
-        // Notify other consumers (ChatScopePickers, EditAgentModal) that
-        // the model list has changed — they'll re-fetch on this event.
-        window.dispatchEvent(new CustomEvent('providers-changed'))
       })
       .catch(() => {})
   }, [])
@@ -4552,7 +4549,10 @@ export function Sidebar() {
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
               aria-label="Refresh models"
               title="Refresh model lists from all providers"
-              onClick={() => refreshModels()}
+              onClick={() => {
+                refreshModels()
+                window.dispatchEvent(new CustomEvent('providers-changed'))
+              }}
               disabled={savingModel}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
