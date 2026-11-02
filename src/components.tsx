@@ -1760,6 +1760,12 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
         interleaved.push(
           seg.anchor.name === 'spawn_agent' && seg.anchor.subAgent ? (
             <SubAgentBlock key={seg.key} run={seg.anchor.subAgent} />
+          ) : seg.anchor.name === 'spawn_agent' ? (
+            // Failed spawn (unknown agent type / empty prompt): the backend
+            // errors before emitting sub_agent_spawned, so this call never
+            // grows a subAgent — render its error as a plain tool row, not
+            // an answered question (and not the QuestionAnchor fallback).
+            <ToolCallRow key={seg.key} tc={seg.anchor} />
           ) : isInlineImageAnchor(seg.anchor) ? (
             // #401: the generated image IS the message - ToolCallRow's
             // inline branch shows the artwork with its audit chip + [+]

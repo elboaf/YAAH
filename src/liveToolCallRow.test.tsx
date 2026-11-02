@@ -112,4 +112,41 @@ describe('live tool_start creates the call row (b1f4629 regression)', () => {
     )
     void fetchMock
   })
+
+  it('renders a FAILED spawn_agent as a tool row, not an answered question', async () => {
+    // Backend errors a spawn before emitting sub_agent_spawned (unknown
+    // agent type, empty prompt): the call row never grows a subAgent, and
+    // the message-level anchor branch used to fall through to
+    // QuestionAnchor — rendering the error as an "answered question" card.
+    currentScript =
+      '{"type":"tool_start","name":"spawn_agent","call_id":"call_sp1","args":{"agent_type":"bogus","prompt":""}}\n' +
+      '{"type":"tool_result","name":"spawn_agent","call_id":"call_sp1","result":{"error":"unknown agent type: bogus"}}\n' +
+      '{"type":"done"}\n'
+    render(<Composer />)
+    const box = document.querySelector('textarea') as unknown as HTMLElement
+    fireEvent.change(box, { target: { value: 'delegate nothing' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+
+    await waitFor(() => {
+      const msgs = useAgent.getState().messagesByConv['77'] ?? []
+      const asst = msgs.find((m) => m.role === 'assistant')
+      const tc = asst?.toolCalls?.find((t) => t.id === 'call_sp1')
+      expect(tc?.result).toBeTruthy()
+      expect((tc!.result as { error?: string }).error).toContain('bogus')
+    })
+
+    const msgs = useAgent.getState().messagesByConv['77'] ?? []
+    const asst = msgs.find((m) => m.role === 'assistant')!
+    const { container } = render(<MessageView msg={asst} />)
+    // The error text must be reachable via the audit expander, and no
+    // question card may render for a spawn call.
+    const expander = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('spawn_agent'),
+    )
+    expect(expander).toBeTruthy()
+    fireEvent.click(expander!)
+    expect(container.textContent).toContain('unknown agent type')
+    expect(container.textContent).not.toContain('✓ answered')
+    void fetchMock
+  })
 })
