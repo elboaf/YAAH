@@ -4647,7 +4647,6 @@ function McpSection() {
   const [fieldErr, setFieldErr] = useState<Record<string, string>>({})
   const [expanded, setExpanded] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
-  const masked = true
   const [cmdWarn, setCmdWarn] = useState<string | null>(null)
   const [more, setMore] = useState(false)
 
@@ -4870,7 +4869,7 @@ function McpSection() {
           setEnv,
           'env: KEY=value (one per line)',
           'Server env',
-          masked ? 'password' : 'text',
+          'password',
         )}
         <p className="mt-0.5 text-[10px] text-zinc-600">
           Use $&#123;env:VAR&#125; as the value to reference an environment variable without
@@ -4885,7 +4884,7 @@ function McpSection() {
           setHeaders,
           'headers: Authorization=Bearer token (one per line)',
           'Server headers',
-          masked ? 'password' : 'text',
+          'password',
         )}
         {fieldError('headers')}
       </div>
