@@ -132,6 +132,12 @@ import { openExternal } from './openExternal'
 // `<system_*>` control text (captured by the title slice before the
 // sanitize fix landed). The sidebar renders the dedicated warning triangle
 // for these rows instead of letting the raw text occupy the title slot.
+// Draft-vs-conversation buffer key: null => "draft" (the unsaved new-chat scope),
+// otherwise the conversation ID as a string. Matches the store's bufferKey() impl.
+function bufferKeyFor(conversationId: number | null): string {
+  return conversationId === null ? "draft" : String(conversationId)
+}
+
 export function hasProviderMarkup(title: string): boolean {
   return /^<system_\w+>/.test(title)
 }
@@ -9381,19 +9387,19 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   const status = useStatus()
   const error = useError()
   const pendingQuestion = useAgent((s) => {
-    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    const key = s.bufferKey()
     // A question belongs to the turn that asked it: only render when its
     // conversation is on screen (a hidden turn's ask must not leak here).
     return s.pendingQuestions[key] ?? null
   })
   const pendingApproval = useAgent((s) => {
-    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    const key = s.bufferKey()
     // Same screen-scoping as questions: a hidden turn's approval request
     // must not render over an unrelated conversation.
     return s.pendingApprovals[key] ?? null
   })
   const pendingPlanApproval = useAgent((s) => {
-    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    const key = s.bufferKey()
     return s.pendingPlanApprovals[key] ?? null
   })
   // #52: the transcript scrolls in THIS container (the bottomRef div is its
@@ -9455,7 +9461,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   // assistant emission or a user row while the turn keeps running — keying
   // liveness on the absolute tail would flip the active ticker to a finished
   // TraceLine summary mid-run. Key it on the last ASSISTANT message instead.
-  const bufKey = conversationId === null ? 'draft' : String(conversationId)
+  const bufKey = useAgent.getState().bufferKey()
   const liveId = (() => {
     if (!(streaming || agentRunLive) || messages.length === 0) return null
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -9826,12 +9832,12 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           <AskUserCard key={pendingQuestion.callId} pending={pendingQuestion} />
         </div>
       )}
-      {pendingApproval && pendingApproval.convKey === (conversationId === null ? 'draft' : String(conversationId)) && (
+      {pendingApproval && pendingApproval.convKey === (useAgent.getState().bufferKey()) && (
         <div className="  border-orange-800/60 px-4 pb-3 pt-3">
           <ApprovalCard key={pendingApproval.callId} approval={pendingApproval} />
         </div>
       )}
-      {pendingPlanApproval && pendingPlanApproval.convKey === (conversationId === null ? 'draft' : String(conversationId)) && (
+      {pendingPlanApproval && pendingPlanApproval.convKey === (useAgent.getState().bufferKey()) && (
         <div className="  border-sky-800/60 px-4 pb-3 pt-3">
           <PlanApprovalCard key={pendingPlanApproval.callId} pending={pendingPlanApproval} />
         </div>
@@ -9957,18 +9963,18 @@ export function Composer() {
   // Live ask_user card, for PTT question routing (mirror kept in a ref below
   // so the global-hotkey handlers never go stale).
   const pendingQuestion = useAgent((s) => {
-    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    const key = s.bufferKey()
     return s.pendingQuestions[key] ?? null
   })
   // Same gate pattern for the access-mode approval and plan-approval cards:
   // a pending gate in THIS conversation must block steering/queuing (the
   // composer input is the gate's answer channel).
   const pendingApproval = useAgent((s) => {
-    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    const key = s.bufferKey()
     return s.pendingApprovals[key] ?? null
   })
   const pendingPlanApproval = useAgent((s) => {
-    const key = s.conversationId === null ? 'draft' : String(s.conversationId)
+    const key = s.bufferKey()
     return s.pendingPlanApprovals[key] ?? null
   })
   const [input, setInput] = useState('')
@@ -9985,7 +9991,7 @@ export function Composer() {
   const [sending, setSending] = useState(false)
   // Issue #7 queue: echoes of messages queued during this run (transcript
   // rows marked queued) + pill open state + steer-in-flight flag.
-  const bufKeyForQueue = conversationId === null ? 'draft' : String(conversationId)
+  const bufKeyForQueue = useAgent.getState().bufferKey()
   const queueEchoes = useAgent((s) => s.queueEchoByConv[bufKeyForQueue])
   const setQueueEcho = useAgent((s) => s.setQueueEcho)
   const dropQueuedEcho = useAgent((s) => s.dropQueuedEcho)
@@ -10340,7 +10346,7 @@ export function Composer() {
         )
         return
       }
-      const targetKey = releaseTarget.conversationId === null ? 'draft' : String(releaseTarget.conversationId)
+      const targetKey = bufferKeyFor(releaseTarget.conversationId)
       const targetStatus = useAgent.getState().statusByConv[targetKey]
       if ((targetStatus === 'thinking' || targetStatus === 'running-tool') && releaseTarget.conversationId !== null) {
         await steerInput(text.trim(), releaseTarget.conversationId)
@@ -10454,7 +10460,7 @@ export function Composer() {
   // that failed, so switching chats must hide it — and Resume must target the
   // failed conversation, not whichever chat happens to be on screen.
   const [turnErrorByConv, setTurnErrorByConv] = useState<Record<string, string>>({})
-  const screenKey = conversationId === null ? 'draft' : String(conversationId)
+  const screenKey = useAgent.getState().bufferKey()
   const turnError = turnErrorByConv[screenKey] ?? null
   const setTurnError = (key: string, message: string | null) =>
     setTurnErrorByConv((m) => {
@@ -11064,7 +11070,7 @@ export function Composer() {
     const text = (pttText ?? input).trim()
     if (
       (!text && (isPtt || (attachments.length === 0 && images.length === 0))) ||
-      (sendingKey === (targetConversationId === null ? 'draft' : String(targetConversationId)) && !opts?.queueHandoff)
+      (sendingKey === (bufferKeyFor(targetConversationId)) && !opts?.queueHandoff)
     )
       return
     // Agent chat (issue #41): typed messages NEVER trigger a run — each one
@@ -11131,7 +11137,7 @@ export function Composer() {
     // the user switches to another conversation mid-stream (Q11: free).
     // `let` because adopting a newly created conversation re-keys the
     // buffer: events before adoption target 'draft', after it the real id.
-    let bufKey = targetConversationId === null ? 'draft' : String(targetConversationId)
+    let bufKey = bufferKeyFor(targetConversationId)
     const entryKey = bufKey
     setError(bufKey, null)
     // A new send supersedes a failed turn: drop the stale mid-stream banner
@@ -11311,7 +11317,7 @@ export function Composer() {
     // scoped to the conversation on screen (issue #10: a background chat's
     // run must keep running).
     if (conversationId !== null) void cancelAgent(conversationId).catch(() => {})
-    const key = conversationId === null ? 'draft' : String(conversationId)
+    const key = useAgent.getState().bufferKey()
     useAgent.getState().abortByConv[key]?.abort()
   }
 
@@ -11823,7 +11829,7 @@ export function Composer() {
                 )}
               </button>
             )}
-            {streaming || sendingKey === (conversationId === null ? 'draft' : String(conversationId)) ? (
+            {streaming || sendingKey === (useAgent.getState().bufferKey()) ? (
               <>
                 <button
                   className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
