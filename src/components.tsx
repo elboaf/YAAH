@@ -1294,7 +1294,7 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
         {open ? (
           run.text ? (
             <div className="text-sm leading-relaxed text-zinc-200" data-subagent-full-text="">
-              <MessageBody content={run.text} />
+              <AgentMarkdown content={run.text} />
               {running && <span className="stream-caret" />}
             </div>
           ) : null
@@ -1316,10 +1316,12 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
           </div>
         ) : null}
         {running ? (
-          <SubAgentToolTicker tools={run.tools} telemetry={run.telemetry} />
+          <div className="min-w-0 pl-2">
+            <ToolTicker calls={run.tools} telemetry={run.telemetry} />
+          </div>
         ) : (
           <>
-            {run.tools.length > 0 && <SubAgentTraceLine tools={run.tools} />}
+            {run.tools.length > 0 && <TraceLine calls={run.tools} />}
             {run.telemetry && <AgentTelemetry tape={run.telemetry} compact />}
           </>
         )}
@@ -1330,24 +1332,6 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
 
 /** Live nested calls use the normal horizontal ticker; finished calls use the
  *  same expandable trace rows as the parent conversation. */
-function SubAgentToolTicker({ tools, telemetry }: { tools: SubAgentToolCall[]; telemetry: string }) {
-  return (
-    <div className="min-w-0   pl-2">
-      <ToolTicker calls={tools} telemetry={telemetry} />
-    </div>
-  )
-}
-
-/** Finished nested tools stay behind the same expandable summary as a normal chat. */
-function SubAgentTraceLine({ tools }: { tools: SubAgentToolCall[] }) {
-  return <TraceLine calls={tools} />
-}
-
-/** Agent message body: full markdown rendering (see src/markdown.tsx). */
-function MessageBody({ content }: { content: string }) {
-  return <AgentMarkdown content={content} />
-}
-
 
 type FileChange = { path: string; added: number; deleted: number; binary?: boolean }
 type FileChangeSummary = {
@@ -1702,7 +1686,7 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
     <>
       {chatText ? (
         <div className="text-sm leading-relaxed text-zinc-200">
-          <MessageBody content={chatText} />
+          <AgentMarkdown content={chatText} />
         </div>
       ) : null}
       {showSayLine ? (
@@ -1784,7 +1768,7 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
           <div key={seg.key} data-agent-emission="" className="text-sm leading-relaxed text-zinc-200">
             {/* Say-only emission fallback: empty content + a captured
                 briefing renders the briefing as the body (not a blank row). */}
-            <MessageBody content={seg.content || chatText} />
+            <AgentMarkdown content={seg.content || chatText} />
           </div>,
         )
       }
@@ -1805,7 +1789,7 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
       if (cut > cursor) {
         segments.push(
           <div key={`qa-seg-${cursor}`} className="text-sm leading-relaxed text-zinc-200">
-            <MessageBody content={msg.content.slice(cursor, cut)} />
+            <AgentMarkdown content={msg.content.slice(cursor, cut)} />
           </div>,
         )
         cursor = cut
@@ -1815,7 +1799,7 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
     if (cursor < msg.content.length) {
       segments.push(
         <div key={`qa-seg-${cursor}`} className="text-sm leading-relaxed text-zinc-200">
-          <MessageBody content={msg.content.slice(cursor)} />
+          <AgentMarkdown content={msg.content.slice(cursor)} />
         </div>,
       )
     }
@@ -1993,8 +1977,6 @@ function MessageStopButton({ msgId }: { msgId: string }) {
     </button>
   )
 }
-
-
 // ---------------------------------------------------------------- preview modal (Q44)
 
 /** File preview as a modal overlay over the chat; Esc or backdrop closes. */
@@ -2795,8 +2777,6 @@ export function RemoteTranscriptDialog({
       streamingRef.current = false
     }
   }
-
-
   return (
     <DialogShell onClose={editing ? () => void cancelEditing() : onClose} panelClassName="flex max-h-[85%] w-full max-w-3xl flex-col rounded-lg   bg-zinc-900 shadow-2xl" panelRole="dialog" panelLabel={`Remote transcript: ${title}`}>
       <header className="flex items-start justify-between gap-4   px-4 py-3">
@@ -3390,8 +3370,6 @@ export function ConversationList({
       }
     }
   }, [finishedByConv, refresh])
-
-
   // Expanded state persists per workspace (Q14); a group with no remembered
   // state starts expanded.
   useEffect(() => {
@@ -7822,8 +7800,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </SettingsCard>
               </>
             )}
-
-
             {activeTab === 'talk' && (
               <>
                 <SettingsCard title="Voice dictation" className="col-span-2">
@@ -8357,8 +8333,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     </div>
   )
 }
-
-
 // ---------------------------------------------------------------- chat
 
 /** Message images are data URLs while live (just sent) and backend rel
@@ -8511,8 +8485,6 @@ export function GitChipCluster({
     setBranchesLoaded(false)
     setMenuOpen(false)
   }, [conversationId])
-
-
   // Click-outside closes the checkout dropdown.
   useEffect(() => {
     if (!menuOpen) return
@@ -8677,8 +8649,6 @@ export function GitChipCluster({
           )}
         </div>
       )}
-
-
       {/* Sync readout (#350): two short hashes — the checked-out branch's
           tip, its upstream's tip — click = copy,
           each colored by its own divergence; directional sync indicator
@@ -8734,8 +8704,6 @@ function tokenCountColor(tokens: number): string {
   if (tokens >= 100_000) return 'text-yellow-500'
   return 'text-blue-600'
 }
-
-
 /** Context gauge (status strip): a circular dial whose fill arc is the
  *  exact context size against the model's window, climbing with every
  *  model call during a run. The dial color crosses into the dumb zone
@@ -8827,8 +8795,6 @@ function DraftDestinationCard() {
   const dest = draftDestination ?? workspace
   const destRef = useRef(dest)
   destRef.current = dest
-
-
   useEffect(() => {
     let cancelled = false
     const load = parseNsWorkspace(dest) ? listWorkspaces() : listLocalWorkspaces()
@@ -9356,8 +9322,6 @@ export function ChatScopePickers() {
 // fallback (no tag at all) is guarded by the msgId key only, and stays
 // once-per-message per mount — the mount-level lastSpokenMsgIdRef below.
 const lastSpokenSayByMsg = new Map<string, string>()
-
-
 function recordSaySpoken(msgId: string, say: string): void {
   lastSpokenSayByMsg.set(msgId, say)
   if (lastSpokenSayByMsg.size > 200) {
