@@ -7049,7 +7049,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     api_base: '',
   })
   const [saving, setSaving] = useState(false)
-  const [saved, setSaved] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // The one provider whose fields are open; collapsed rows show a summary.
   const [expanded, setExpanded] = useState<string | null>(null)
