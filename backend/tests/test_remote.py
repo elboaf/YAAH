@@ -1202,7 +1202,103 @@ async def test_device_connect_saves_profile_without_changing_active_scope(monkey
     assert remote_mod.get_remote() is active
     profiles = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))["remote_devices"]
     assert profiles[0]["host_id"] == "saved-host"
-    assert "passphrase" not in profiles[0]
+    assert profiles[0]["passphrase"] == "secret"
+
+async def test_device_reconnect_uses_saved_passphrase(monkeypatch, _reset_saved_devices):
+    """Reconnect without passphrase should use the one stored in the profile."""
+    import json
+    import backend.main as main_mod
+
+    body = {
+        **remote_mod.host_info(),
+        "host_id": "reconnect-host",
+        "protocol": remote_mod.PROTOCOL_VERSION,
+        "instance_id": "remote-two",
+        "app_version": "1",
+    }
+    _FakeAsyncClient.body = body
+    _FakeAsyncClient.verify_status = 200
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeAsyncClient)
+
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/devices",
+            json={"url": "http://10.0.0.6:8765", "passphrase": "my-secret"},
+        )
+        assert res.status_code == 200
+
+    # Disconnect the session (profile with passphrase still saved)
+    async with await _client() as c:
+        await c.post("/api/remote/devices/reconnect-host/disconnect")
+
+    # Verify profile was saved with passphrase
+    profiles = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))["remote_devices"]
+    assert profiles[0]["passphrase"] == "my-secret"
+
+    # Reconnect WITHOUT providing passphrase — should use saved one
+    async with await _client() as c:
+        res = await c.post("/api/remote/devices/reconnect-host/connect", json={})
+        assert res.status_code == 200
+        assert res.json()["status"] == "online"
+
+async def test_public_remote_device_never_leaks_passphrase(monkeypatch, _reset_saved_devices):
+    """The API response should never include the passphrase, even when stored."""
+    import json
+    import backend.main as main_mod
+
+    body = {
+        **remote_mod.host_info(),
+        "host_id": "leak-host",
+        "protocol": remote_mod.PROTOCOL_VERSION,
+        "instance_id": "remote-four",
+        "app_version": "1",
+    }
+    _FakeAsyncClient.body = body
+    _FakeAsyncClient.verify_status = 200
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeAsyncClient)
+
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/devices",
+            json={"url": "http://10.0.0.8:8765", "passphrase": "top-secret"},
+        )
+        assert res.status_code == 200
+        assert "passphrase" not in res.json()
+
+async def test_device_reconnect_falls_back_to_prompt_when_saved_passphrase_fails(monkeypatch, _reset_saved_devices):
+    """If saved passphrase is rejected, return 401 so UI can ask."""
+    import json
+    import backend.main as main_mod
+
+    body = {
+        **remote_mod.host_info(),
+        "host_id": "rotate-host",
+        "protocol": remote_mod.PROTOCOL_VERSION,
+        "instance_id": "remote-three",
+        "app_version": "1",
+    }
+    _FakeAsyncClient.body = body
+    _FakeAsyncClient.verify_status = 200
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeAsyncClient)
+
+    async with await _client() as c:
+        res = await c.post(
+            "/api/remote/devices",
+            json={"url": "http://10.0.0.7:8765", "passphrase": "old-pass"},
+        )
+        assert res.status_code == 200
+
+    async with await _client() as c:
+        await c.post("/api/remote/devices/rotate-host/disconnect")
+
+    # Simulate passphrase rotation on remote: verify now fails
+    _FakeAsyncClient.verify_status = 401
+
+    # Reconnect without providing passphrase — should fail with 401
+    async with await _client() as c:
+        res = await c.post("/api/remote/devices/rotate-host/connect", json={})
+        assert res.status_code == 401
+        assert "passphrase" in res.json()["detail"]
 
 
 @pytest.mark.asyncio

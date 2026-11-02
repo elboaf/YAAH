@@ -2899,6 +2899,8 @@ export function DeviceGroups({
   const [error, setError] = useState<string | null>(null)
   const [working, setWorking] = useState<string | null>(null)
   const [passByDevice, setPassByDevice] = useState<Record<string, string>>({})
+  // Devices that need passphrase input (saved credential was rejected)
+  const [passRequired, setPassRequired] = useState<Record<string, boolean>>({})
   const [removeConfirmId, setRemoveConfirmId] = useState<string | null>(null)
   const [disconnectConfirmId, setDisconnectConfirmId] = useState<string | null>(null)
   const [refreshingDevices, setRefreshingDevices] = useState(false)
@@ -2972,10 +2974,17 @@ export function DeviceGroups({
     try {
       await connectRemoteDevice(device.host_id, passphrase)
       setPassByDevice((current) => ({ ...current, [device.host_id]: '' }))
+      setPassRequired((current) => ({ ...current, [device.host_id]: false }))
       await useRemote.getState().refreshDevices()
       onChange()
     } catch (e) {
-      setDeviceErrors((current) => ({ ...current, [device.host_id]: connectError(errorMessage(e)) }))
+      const msg = connectError(errorMessage(e))
+      setDeviceErrors((current) => ({ ...current, [device.host_id]: msg }))
+      // If this looks like an auth failure, mark the device as needing a passphrase
+      const lower = errorMessage(e).toLowerCase()
+      if (lower.includes('passphrase') || lower.includes('auth') || lower.includes('401') || lower.includes('403')) {
+        setPassRequired((current) => ({ ...current, [device.host_id]: true }))
+      }
     } finally {
       setWorking(null)
     }
@@ -3110,16 +3119,18 @@ export function DeviceGroups({
                 reconnect too. Enter submits. */}
             {!connected && (
               <div className="flex items-center gap-1 px-6 pb-1 pt-0.5">
-                <input
-                  className="min-w-0 flex-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-200 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
-                  type="password"
-                  autoComplete="new-password"
-                  aria-label={`Passphrase for ${device.name}`}
-                  placeholder="Passphrase (set on that device’s YAAH instance)"
-                  value={passByDevice[device.host_id] ?? ''}
-                  onChange={(event) => setPassByDevice((current) => ({ ...current, [device.host_id]: event.target.value }))}
-                  onKeyDown={(event) => { if (event.key === 'Enter' && working === null) void askToConnect(device) }}
-                />
+                {passRequired[device.host_id] && (
+                  <input
+                    className="min-w-0 flex-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-200 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                    type="password"
+                    autoComplete="new-password"
+                    aria-label={`Passphrase for ${device.name}`}
+                    placeholder="Passphrase (set on that device’s YAAH instance)"
+                    value={passByDevice[device.host_id] ?? ''}
+                    onChange={(event) => setPassByDevice((current) => ({ ...current, [device.host_id]: event.target.value }))}
+                    onKeyDown={(event) => { if (event.key === 'Enter' && working === null) void askToConnect(device) }}
+                  />
+                )}
                 <button className="shrink-0 rounded bg-zinc-700 px-2 py-0.5 text-[10px] text-zinc-100 hover:bg-zinc-600 disabled:opacity-50" disabled={working !== null} onClick={() => void askToConnect(device)}>{working === device.host_id ? 'Connecting…' : 'Connect…'}</button>
               </div>
             )}
