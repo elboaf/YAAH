@@ -2584,7 +2584,7 @@ export function RemoteTranscriptDialog({
         setLeaseToken(null)
         setEditing(false)
         setDraftMessages(null)
-        setSyncMessage(`Edit lease lost: ${String((error as Error).message ?? error)}`)
+        setSyncMessage(`Edit lease lost: ${errorMessage(error)}`)
       })
     }, 45_000)
     return () => window.clearInterval(timer)
@@ -2601,7 +2601,7 @@ export function RemoteTranscriptDialog({
       setDraftMessages(buildMessages(snapshot.messages).map((message) => scopeRemoteMedia(message, hostId)))
       setEditing(true)
     } catch (error) {
-      setSyncMessage(`Could not acquire edit lease: ${String((error as Error).message ?? error)}`)
+      setSyncMessage(`Could not acquire edit lease: ${errorMessage(error)}`)
     } finally { setBusy(false) }
   }
 
@@ -2639,7 +2639,7 @@ export function RemoteTranscriptDialog({
       setEditing(false)
       setDraftMessages(null)
     } catch (error) {
-      setSyncMessage(`Changes remain pending locally. Retry sync when the device reconnects: ${String((error as Error).message ?? error)}`)
+      setSyncMessage(`Changes remain pending locally. Retry sync when the device reconnects: ${errorMessage(error)}`)
       void syncPendingRemoteDeviceCommits(hostId, conversationId).catch(() => {})
     } finally { setBusy(false) }
   }
@@ -2782,7 +2782,7 @@ export function RemoteTranscriptDialog({
         // A question parked when the stream died can never be answered.
         useAgent.getState().setPendingQuestion((q) => (q && q.convKey === remoteKey ? null : q))
         setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
-        setSendNote(`Turn failed — ${String((error as Error).message ?? error)}`)
+        setSendNote(`Turn failed — ${errorMessage(error)}`)
       } else {
         // The turn never started (offline/409): roll the optimistic rows back
         // and restore the draft so nothing is lost.
@@ -2795,7 +2795,7 @@ export function RemoteTranscriptDialog({
         })
         setTranscript(hostId, conversationId, useAgent.getState().messagesByConv[remoteKey] ?? [])
         setComposerText(text)
-        setSendNote(`Message could not be sent — ${String((error as Error).message ?? error)}`)
+        setSendNote(`Message could not be sent — ${errorMessage(error)}`)
       }
     } finally {
       streamingRef.current = false
@@ -3025,7 +3025,7 @@ export function DeviceGroups({
       await useRemote.getState().refreshDevices()
       onChange()
     } catch (e) {
-      setError(errorMessage(e).replace(/^\\d+:\\s*/, ''))
+      setError(errorMessage(e).replace(/^\d+:\s*/, ''))
     } finally {
       setWorking(null)
     }
