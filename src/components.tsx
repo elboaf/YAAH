@@ -4754,6 +4754,17 @@ function McpSection() {
     )
   }
 
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true)
+    try {
+      await fn()
+    } catch (e) {
+      setErr('row', String((e as { message?: string }).message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const submit = async (target?: string) => {
     const errs: Record<string, string> = {}
     const remote = kind === 'http' || kind === 'sse'
@@ -4775,8 +4786,7 @@ function McpSection() {
       setFieldErr(errs)
       return
     }
-    setBusy(true)
-    try {
+    await run(async () => {
       const body = {
         name: name.trim(),
         ...(remote
@@ -4794,33 +4804,19 @@ function McpSection() {
       const saved = await addMcpServer(body)
       setServers(saved.servers)
       resetForm()
-    } catch (e) {
-      setErr('row', String((e as { message?: string }).message ?? e))
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   const remove = async (server: string) => {
-    setBusy(true)
-    try {
+    await run(async () => {
       setServers((await removeMcpServer(server)).servers)
-    } catch (e) {
-      setErr('row', String((e as { message?: string }).message ?? e))
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   const retryOne = async (server: string) => {
-    setBusy(true)
-    try {
+    await run(async () => {
       setServers((await reloadMcpServers(server)).servers)
-    } catch (e) {
-      setErr('row', String((e as { message?: string }).message ?? e))
-    } finally {
-      setBusy(false)
-    }
+    })
   }
 
   const toggleEdit = (srv: McpServerInfo) => {
