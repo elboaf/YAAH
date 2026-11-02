@@ -5353,7 +5353,6 @@ export function AgentForm({
       .then((r) => {
         if (!alive) return
         setByProvider(r.providers)
-        setActiveProvider(r.active_provider)
       })
       .catch(() => {})
     return () => {
