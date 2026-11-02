@@ -188,6 +188,53 @@ def test_base_bin_name_stable_and_keyed():
     assert a == b and a != c and a.startswith("sys-") and a.endswith(".bin")
 
 
+# Issue #639: the persona identity keys on the STABLE CORE of the head, not
+# the full bytes - the tail embeds live content (AGENTS.md notes, the
+# persistent-memory index, plan/sandbox policy notes) that changes between
+# conversations without changing the persona.
+
+NOTES = "\n\n---\n\n# Project notes (C:/w/AGENTS.md)\n\nbe nice\n"
+MEM = "\n\n---\n\n# Persistent memory (yours \u2014 for THIS project)\n\n- [m](m.md) x\n"
+
+
+def test_stable_core_cuts_at_earliest_volatile_marker():
+    core = "CORE" * 200
+    sep = "\n\n---\n\n"
+    assert sc.stable_core(core) == core  # marker-free: byte-exact passthrough
+    # The cut lands at the earliest marker heading; the constant leading
+    # separator rides in the core (constant bytes, harmless to a hash).
+    assert sc.stable_core(core + MEM) == core + sep
+    assert sc.stable_core(core + NOTES) == core + sep
+    # Appends are ordered (notes -> memory -> policy): the EARLIEST marker
+    # wins, so later appends cannot sneak into the core.
+    assert sc.stable_core(core + NOTES + MEM) == core + sep
+    assert sc.stable_core(core + MEM + NOTES) == core + sep
+    assert sc.stable_core(core + sep + "# Access mode: PLAN\n\nplan text") == core + sep
+    assert sc.stable_core(
+        core + sep + "# Scheduled agent: sandbox-only policy\n\npolicy"
+    ) == core + sep
+    # The markers must appear mid-prompt to count: a position-0 hit means
+    # the whole prompt IS the volatile block and there is no core to key.
+    assert sc.stable_core("# Project notes (x/AGENTS.md)\nbody") == (
+        "# Project notes (x/AGENTS.md)\nbody"
+    )
+
+
+def test_base_bin_name_ignores_volatile_tail():
+    core = "CORE" * 200
+    fresh = core + MEM
+    after_memory_save = core + MEM.replace("- [m](m.md) x", "- [m](m.md) x\n- [new](n.md) y")
+    # A memory save / AGENTS.md edit / plan-mode flip between conversations
+    # must NOT mint a second persona: same bin name, same file, overwrite.
+    assert sc.base_bin_name("http://h:8080/v1", "x2.m", fresh, TOOLS) == (
+        sc.base_bin_name("http://h:8080/v1", "x2.m", after_memory_save, TOOLS)
+    )
+    # ...but a real core change still does.
+    assert sc.base_bin_name("http://h:8080/v1", "x2.m", fresh, TOOLS) != (
+        sc.base_bin_name("http://h:8080/v1", "x2.m", "OTHER" * 200 + MEM, TOOLS)
+    )
+
+
 def test_conv_bin_name_is_one_stable_file_per_conversation():
     assert sc.conv_bin_name(42) == "conv-42.bin"
     assert sc.conv_bin_name("42") == "conv-42.bin"
@@ -699,6 +746,68 @@ async def test_bootstrap_skips_short_system_prompt(monkeypatch, tmp_path, clean_
     # But the gate still recorded the observation so the turn-end flush
     # is allowed to checkpoint the conversation.
     assert sc._SLOT_STATE
+
+
+@pytest.mark.asyncio
+async def test_new_conversation_restores_base_despite_volatile_tail(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """Issue #639 end-to-end: a memory save / AGENTS.md edit between
+    conversations changes the head's volatile TAIL only. The persona's
+    BASE must still restore - no aux prefill, no second persona bin.
+    Before the fix this minted a fresh BASE and paid an ~11.5k-token
+    inline bootstrap before the user's first token."""
+    router = _Router()
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
+    core = "STABLE CORE " * 150  # > BASE_MIN_SYSTEM_CHARS
+    await sc.gate(
+        model="", effort="", conversation_id=42,
+        is_new_conversation=True, system_prompt=core + MEM,
+        tools=TOOLS,
+    )
+    # Mint 1 (no BASE yet): bootstrap - ONE aux prefill carrying the FULL
+    # prompt, ledgered under the core-derived name.
+    assert len(chats) == 1
+    assert chats[0]["messages"][0]["content"] == core + MEM
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    name = ledger["bins"][0]["file"]
+
+    # Mint 2: NEW conversation, memory index changed in between. The name
+    # survives the tail change: restore-only gate, zero aux chats.
+    sc.reset_state()
+    chats.clear()
+    router.posts.clear()
+    await sc.gate(
+        model="", effort="", conversation_id=99,
+        is_new_conversation=True, system_prompt=core + MEM.replace(
+            "- [m](m.md) x", "- [m](m.md) x\n- [new](n.md) y"
+        ),
+        tools=TOOLS,
+    )
+    assert chats == []  # no aux prefill
+    actions = [u.rsplit("action=", 1)[1] for u, _ in router.posts]
+    assert actions == ["erase", "restore"]  # pre-restore erase + the restore
+    assert router.posts[-1][1] == name  # same persona bin, not a new one
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    assert [b["file"] for b in ledger["bins"]] == [name]  # ONE bin, not two
+
+    # Mint 3: tail unchanged - still a restore, still the same single bin.
+    sc.reset_state()
+    chats.clear()
+    router.posts.clear()
+    await sc.gate(
+        model="", effort="", conversation_id=111,
+        is_new_conversation=True, system_prompt=core + MEM,
+        tools=TOOLS,
+    )
+    assert chats == []
+    actions = [u.rsplit("action=", 1)[1] for u, _ in router.posts]
+    assert actions == ["erase", "restore"]
+    assert router.posts[-1][1] == name
 
 
 @pytest.mark.asyncio
