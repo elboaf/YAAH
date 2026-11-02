@@ -122,6 +122,34 @@ def tools_fingerprint(tools: list | None) -> str:
     return hash10(json.dumps(tools or [], sort_keys=True))
 
 
+def stable_core(system_prompt: str) -> str:
+    """Issue #639: the volatile-tail-free prefix of the prompt head.
+
+    The head embeds live content AFTER its stable core (project notes from
+    AGENTS.md, the persistent-memory index, plan/sandbox policy notes -
+    loop.py appends those blocks per turn). Hashing the full bytes gave
+    every memory save / landed commit / mode toggle a NEW persona
+    identity: the ledger minted 12 BASEs in 4 days on one preset and each
+    mint paid an inline ~11.5k-token aux prefill. Identity therefore keys
+    on the stable core only; volatile-tail drift is absorbed by the
+    server's prefix matcher (it re-prefills only past the changed block).
+
+    Cut at the EARLIEST marker: the appends are ordered (notes -> memory
+    -> policy), so the first hit is the shortest stable prefix. Unknown
+    volatile blocks are not detected - a marker-free prompt is core-exact
+    and degrades to today's behavior, never to a wrong restore.
+    """
+    markers = (
+        "# Project notes (",
+        "# Persistent memory (yours",
+        "# Access mode: PLAN",
+        "# Scheduled agent: sandbox-only policy",
+    )
+    cuts = [system_prompt.find(m) for m in markers]
+    hits = [c for c in cuts if c > 0]
+    return system_prompt[: min(hits)] if hits else system_prompt
+
+
 def base_bin_name(
     api_base: str, model: str, system_prompt: str, tools: list | None = None,
 ) -> str:
@@ -130,8 +158,12 @@ def base_bin_name(
     # be produced by this function anymore, so every pre-fix tool-less bin
     # orphans naturally (there is no bin-delete API - orphaning IS the
     # cleanup).
+    # Issue #639: the prompt side of the identity is the STABLE CORE, not
+    # the full bytes - a volatile-tail change (memory index, AGENTS.md,
+    # plan/sandbox notes) must keep the persona's bin name. The full
+    # prompt still drives the aux prefill and the MIN_SYSTEM_CHARS gate.
     return (
-        f"sys-{hash10(api_base + model + system_prompt)}"
+        f"sys-{hash10(api_base + model + stable_core(system_prompt))}"
         f"-{tools_fingerprint(tools)}.bin"
     )
 
