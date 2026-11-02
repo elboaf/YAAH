@@ -120,7 +120,7 @@ import { classifyDrop } from './dropFiles'
 import { parseModelScope, qualifyModelScope } from './modelScope'
 import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
-import { INLINE_LIMIT_BYTES } from './attachments'
+import { INLINE_LIMIT_BYTES, type Attachment } from './attachments'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
 import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
 import { stripProviderMarkup } from './providerMarkup'
@@ -9870,17 +9870,6 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   )
 }
 
-/** A staged text file. Small files ride inline (`content`); larger ones are
- *  copied into <workspace>/.yaah-attachments and referenced by `savedPath`,
- *  which the agent's workspace-sandboxed read_file tool can open on demand. */
-interface Attachment {
-  name: string
-  content?: string
-  path?: string
-  /** Legacy field name (pre-#142 composer state); normalized to `path` on send. */
-  savedPath?: string
-  size: number
-}
 
 /** Image staged for sending; dataUrl doubles as the thumbnail src. */
 interface ImageAttachment {
