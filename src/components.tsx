@@ -1,4 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useVoiceAnswer } from "./use-voice-answer";
 import {
   listConversations,
   createConversation,
@@ -342,22 +343,16 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
   // anything else becomes the free-text answer. PTT transcription is slow
   // relative to a click, so a stale event for an already-answered question
   // must be dropped, not submitted to whatever ask came next.
-  useEffect(() => {
-    const onVoiceAnswer = (e: Event) => {
-      const { callId, answer: ans } = (e as CustomEvent<{ callId: string; answer: string }>).detail
-      if (callId !== pending.callId || !ans || submitting) return
-      const labels = pending.options.map((o) => o.label)
-      const picked = matchOptionLabel(ans, labels)
-      if (picked) {
-        answer(picked)
-      } else {
-        setCustomOpen(true)
-        setCustom(ans)
-        setVoiceSeeded(true)
-      }
+  useVoiceAnswer('yaah-answer-ask', pending.callId, submitting, (ans) => {
+    const labels = pending.options.map((o) => o.label)
+    const picked = matchOptionLabel(ans, labels)
+    if (picked) {
+      answer(picked)
+    } else {
+      setCustomOpen(true)
+      setCustom(ans)
+      setVoiceSeeded(true)
     }
-    window.addEventListener('yaah-answer-ask', onVoiceAnswer)
-    return () => window.removeEventListener('yaah-answer-ask', onVoiceAnswer)
   })
 
   return (
@@ -453,22 +448,16 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   // Plan-mode exit lives in the status strip (PlanExitButton): plan mode
   // never holds a pending approval — blocked calls fail immediately and the
   // model presents its plan as text, so there is no card to hang the exit on.
-  useEffect(() => {
-    const onVoiceAnswer = (e: Event) => {
-      const { callId, answer: ans } = (e as CustomEvent<{ callId: string; answer: string }>).detail
-      if (callId !== approval.callId || !ans || submitting) return
-      const norm = ans.trim().toLowerCase()
-      if (norm === 'approve' || norm === 'yes' || norm === 'ok' || norm === 'approve it' || norm === 'allow') {
-        respond('approve')
-      } else if (norm === 'deny' || norm === 'no' || norm === 'deny it' || norm === 'reject' || norm === 'stop') {
-        respond('deny')
-      } else {
-        // Anything else is guidance: deny, telling the model why.
-        respond(ans)
-      }
+  useVoiceAnswer('yaah-answer-ask', approval.callId, submitting, (ans) => {
+    const norm = ans.trim().toLowerCase()
+    if (norm === 'approve' || norm === 'yes' || norm === 'ok' || norm === 'approve it' || norm === 'allow') {
+      respond('approve')
+    } else if (norm === 'deny' || norm === 'no' || norm === 'deny it' || norm === 'reject' || norm === 'stop') {
+      respond('deny')
+    } else {
+      // Anything else is guidance: deny, telling the model why.
+      respond(ans)
     }
-    window.addEventListener('yaah-answer-ask', onVoiceAnswer)
-    return () => window.removeEventListener('yaah-answer-ask', onVoiceAnswer)
   })
 
   // One-line arg summary per tool, mono-styled, so the card reads like a
@@ -630,15 +619,9 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
   // Push-to-talk routing: PTT release dispatches 'yaah-answer-plan' (its own
   // event — the ask/approval cards answer a different vocabulary). "Approve"
   // wording approves; anything else becomes change-request feedback.
-  useEffect(() => {
-    const onVoiceAnswer = (e: Event) => {
-      const { callId, answer: ans } = (e as CustomEvent<{ callId: string; answer: string }>).detail
-      if (callId !== pending.callId || !ans || submitting) return
-      if (ans === 'approve') respond('approve')
-      else respond(ans)
-    }
-    window.addEventListener('yaah-answer-plan', onVoiceAnswer)
-    return () => window.removeEventListener('yaah-answer-plan', onVoiceAnswer)
+  useVoiceAnswer('yaah-answer-plan', pending.callId, submitting, (ans) => {
+    if (ans === 'approve') respond('approve')
+    else respond(ans)
   })
 
   return (
