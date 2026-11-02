@@ -90,7 +90,8 @@ describe('settings modal restores the persisted zoom synchronously (#171 return 
     fireEvent.click(
       screen.getAllByRole('button', { name: 'Save' }).find((b) => b.className.includes('bg-blue-600'))!,
     )
-    await waitFor(() => expect(screen.getByRole('button', { name: /Saved!/i })).toBeTruthy())
+    // Saved! label is gone (removed as dead state); save completes synchronously
+    await new Promise(r => setTimeout(r, 100))
     const n = events.length
     unmount()
     expect(events.length).toBe(n) // saved scale IS the live zoom — no-op restore

@@ -62,12 +62,8 @@ describe('scale slider is inert while Save is pending (#171 return trip)', () =>
       await waitFor(() => expect(slider().disabled).toBe(true))
 
       resolveUpdate?.()
-      await waitFor(() =>
-        expect(
-          screen.getAllByRole('button', { name: /Saved!/i }).length,
-        ).toBeGreaterThan(0),
-      )
-      expect(slider().disabled).toBe(false) // interactive again once settled
+      // Saved! label is gone (removed as dead state); Save button returns immediately
+      await waitFor(() => expect(slider().disabled).toBe(false))
       expect(events).toEqual([1.5, 1.5]) // save-completion re-emits the saved scale
     } finally {
       window.removeEventListener('ui-scale-changed', onEvt)
