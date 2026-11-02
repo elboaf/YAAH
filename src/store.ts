@@ -953,23 +953,27 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
-        [key]: (s.messagesByConv[key] ?? []).map((m) =>
-          m.id === msgId
-            ? {
-                ...m,
-                toolCalls: [
-                  ...(m.toolCalls ?? []),
-                  {
-                    id: callId || `t${(m.toolCalls?.length ?? 0) + 1}`,
-                    name,
-                    args,
-                    startedAt: Date.now(),
-                    contentOffset: m.content.length,
-                  },
-                ],
-              }
-            : m,
-        ),
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId) return m
+          // One row per call id: gated tools emit tool_start AND
+          // approval_request for the same id — an unconditional append
+          // left a stuck result-less twin chip on every gated call.
+          const id = callId || `t${(m.toolCalls?.length ?? 0) + 1}`
+          if ((m.toolCalls ?? []).some((t) => t.id === id)) return m
+          return {
+            ...m,
+            toolCalls: [
+              ...(m.toolCalls ?? []),
+              {
+                id,
+                name,
+                args,
+                startedAt: Date.now(),
+                contentOffset: m.content.length,
+              },
+            ],
+          }
+        }),
       },
     }))
   },

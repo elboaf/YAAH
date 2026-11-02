@@ -10768,6 +10768,11 @@ export function Composer() {
       // content offsets are computed from message content, and a segment
       // boundary computed over un-flushed text would be wrong (#279).
       textDeltas.flush()
+      // Create the call row NOW: tool_result attaches results to calls by
+      // id, and a result arriving with no started call is silently dropped
+      // — every live chip/rich render (inline images, #401) vanished with
+      // this row (lost in the b1f4629 mic-triage extraction).
+      startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       // Telemetry tape: every tool event of the turn flows into one
       // per-conversation line that survives gaps and turn boundaries.
       appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
