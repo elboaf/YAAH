@@ -8336,7 +8336,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               title={loaded ? undefined : 'Settings are still loading'}
               onClick={save}
             >
-              {saved ? 'Saved!' : saving ? 'Saving…' : 'Save'}
+              {saving ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>
