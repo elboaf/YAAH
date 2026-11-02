@@ -7520,7 +7520,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           Object.entries(s.finishedByConv).filter(([, v]) => v !== 'error'),
         ),
       }))
-      setSaved(true)
       setTimeout(onClose, 600)
     } catch (e) {
       setErr(String(e))
