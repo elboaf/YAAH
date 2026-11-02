@@ -127,6 +127,12 @@ import { stripProviderMarkup } from './providerMarkup'
 import { createPortal } from 'react-dom'
 import { transcriptSelection, googleSearchUrl } from './selectionSearch'
 import { openExternal } from './openExternal'
+// Tauri invoke rejections are plain strings, not Errors — `(e as Error).message`
+// would print "undefined" and hide the real (permission) cause.
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
 
 // Issue #255: true when a stored title still carries provider-injected
 // `<system_*>` control text (captured by the title slice before the
@@ -2565,7 +2571,7 @@ export function RemoteTranscriptDialog({
         if (!cancelled) setTranscript(hostId, conversationId, buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
       })
       .catch((e) => {
-        if (!cancelled) setError(String((e as Error).message ?? e))
+        if (!cancelled) setError(errorMessage(e))
       })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
@@ -2945,7 +2951,7 @@ export function DeviceGroups({
       setDeviceChats((current) => ({ ...current, [hostId]: result.conversations }))
       setDeviceChatStatus((current) => ({ ...current, [hostId]: result.status }))
     } catch (e) {
-      if (isCurrent()) setDeviceChatErrors((current) => ({ ...current, [hostId]: String((e as Error).message ?? e) }))
+      if (isCurrent()) setDeviceChatErrors((current) => ({ ...current, [hostId]: errorMessage(e) }))
     } finally {
       if (isCurrent()) setLoadingDeviceChats((current) => ({ ...current, [hostId]: false }))
     }
@@ -2980,7 +2986,7 @@ export function DeviceGroups({
       await useRemote.getState().refreshDevices()
       onChange()
     } catch (e) {
-      setDeviceErrors((current) => ({ ...current, [device.host_id]: connectError(String((e as Error).message ?? e)) }))
+      setDeviceErrors((current) => ({ ...current, [device.host_id]: connectError(errorMessage(e)) }))
     } finally {
       setWorking(null)
     }
@@ -2992,7 +2998,7 @@ export function DeviceGroups({
       const [found, me] = await Promise.all([discoverHosts(), localInstanceInfo()])
       setHosts(found.hosts.filter((host) => host.iid && host.iid !== me.instance_id))
     } catch (e) {
-      setError(String((e as Error).message ?? e))
+      setError(errorMessage(e))
     } finally {
       setScanning(false)
     }
@@ -3019,7 +3025,7 @@ export function DeviceGroups({
       await useRemote.getState().refreshDevices()
       onChange()
     } catch (e) {
-      setError(String((e as Error).message ?? e).replace(/^\\d+:\\s*/, ''))
+      setError(errorMessage(e).replace(/^\\d+:\\s*/, ''))
     } finally {
       setWorking(null)
     }
@@ -3032,7 +3038,7 @@ export function DeviceGroups({
       await useRemote.getState().refreshDevices()
       onChange()
     } catch (e) {
-      setDeviceErrors((current) => ({ ...current, [device.host_id]: `Could not remove ${device.name}: ${String((e as Error).message ?? e)}` }))
+      setDeviceErrors((current) => ({ ...current, [device.host_id]: `Could not remove ${device.name}: ${errorMessage(e)}` }))
     } finally {
       setWorking(null)
     }
@@ -3094,7 +3100,7 @@ export function DeviceGroups({
             await useRemote.getState().refreshDevices()
             onChange()
           } catch (e) {
-            setDeviceErrors((current) => ({ ...current, [device.host_id]: `Could not add folder on ${device.name}: ${String((e as Error).message ?? e)}` }))
+            setDeviceErrors((current) => ({ ...current, [device.host_id]: `Could not add folder on ${device.name}: ${errorMessage(e)}` }))
           } finally {
             setWorking(null)
           }
@@ -4363,7 +4369,7 @@ export function DefaultThoughtLevelPicker() {
       await updateConfig({ reasoning_effort: value })
       await refreshGlobals()
     } catch (e) {
-      setError(`Could not save thought level: ${String((e as Error).message ?? e)}`)
+      setError(`Could not save thought level: ${errorMessage(e)}`)
     } finally {
       setSaving(false)
     }
@@ -4452,7 +4458,7 @@ export function Sidebar() {
       .then(refreshGlobals)
       .then(refreshModels)
       .catch((e) => {
-        setModelError(`Could not save model: ${String((e as Error).message ?? e)}`)
+        setModelError(`Could not save model: ${errorMessage(e)}`)
       })
       .finally(() => setSavingModel(false))
   }
@@ -8104,7 +8110,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                           .then(() => setTtsDownloading(false))
                           .catch((e) => {
                             setTtsDownloading(false)
-                            setTtsDlErr(String((e as Error).message ?? e))
+                            setTtsDlErr(errorMessage(e))
                           })
                       }}
                     >
@@ -8899,7 +8905,7 @@ function DraftDestinationCard() {
       setRemoteAdd(false)
       setRemotePath('')
     } catch (e) {
-      setErr(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
+      setErr(errorMessage(e).replace(/^\d+:\s*/, ''))
     }
   }
 
@@ -8957,7 +8963,7 @@ function DraftDestinationCard() {
       }
     } catch (e) {
       if (destRef.current === dest) {
-        setGitError(String((e as Error).message ?? e).replace(/^\d+:\s*/, ''))
+        setGitError(errorMessage(e).replace(/^\d+:\s*/, ''))
       }
     } finally {
       if (destRef.current === dest) setGitBusy(false)
@@ -10362,9 +10368,7 @@ export function Composer() {
   // by Settings via the 'ptt-hotkey-changed' event. Pressed/Released are also
   // bridged onto window events so tests (and the capture UI) can drive the
   // handlers without the Tauri plugin.
-  // Tauri invoke rejections are plain strings, not Errors — `(e as Error)
-  // .message` would print "undefined" and hide the real (permission) cause.
-  const pttErrMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
+
 
   const registeredHotkeyRef = useRef<string | null>(null)
   const pttHandlerRef = useRef<(e: { state: string }) => void>(() => {})
@@ -10408,7 +10412,7 @@ export function Composer() {
       } catch (e) {
         if (!disposed) {
           pushReject(
-            `Push-to-talk hotkey could not be registered (${pttErrMsg(e)}) — pick another in Settings`,
+            `Push-to-talk hotkey could not be registered (${errorMessage(e)}) — pick another in Settings`,
           )
         }
       }
@@ -10421,7 +10425,7 @@ export function Composer() {
         })
         .catch((err) => {
           pushReject(
-            `Hotkey ${hk || '(disabled)'} could not be registered (${pttErrMsg(err)})`,
+            `Hotkey ${hk || '(disabled)'} could not be registered (${errorMessage(err)})`,
           )
         })
     }
@@ -11084,7 +11088,7 @@ export function Composer() {
           useAgent.getState().pushToast({
             kind: 'error',
             title: 'Could not save standing instruction',
-            body: String((e as Error).message ?? e),
+            body: errorMessage(e),
           })
         }
         setInput('')
@@ -11295,7 +11299,7 @@ export function Composer() {
         settleSubAgents(bufKey, tailId)
       } else {
         setStatus(bufKey, 'error')
-        setTurnError(bufKey, String((e as Error).message ?? e))
+        setTurnError(bufKey, errorMessage(e))
         settleSubAgents(bufKey, lastAssistantId(bufKey) ?? asstId)
       }
     } finally {
@@ -11377,7 +11381,7 @@ export function Composer() {
       useAgent.getState().pushToast({
         kind: 'error',
         title: 'Could not queue message',
-        body: `${String((e as Error).message ?? e)}. Your draft was kept; send it normally if the run has ended.`,
+        body: `${errorMessage(e)}. Your draft was kept; send it normally if the run has ended.`,
       })
       return false
     }
@@ -11430,7 +11434,7 @@ export function Composer() {
       useAgent.getState().pushToast({
         kind: 'error',
         title: 'Could not steer',
-        body: `${String((e as Error).message ?? e)}. The message remains queued; use Stop to end the run, or leave it for the next boundary.`,
+        body: `${errorMessage(e)}. The message remains queued; use Stop to end the run, or leave it for the next boundary.`,
       })
     } finally {
       // The flag clears when the injection lands (user_injected) or when
