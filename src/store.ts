@@ -953,23 +953,27 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
-        [key]: (s.messagesByConv[key] ?? []).map((m) =>
-          m.id === msgId
-            ? {
-                ...m,
-                toolCalls: [
-                  ...(m.toolCalls ?? []),
-                  {
-                    id: callId || `t${(m.toolCalls?.length ?? 0) + 1}`,
-                    name,
-                    args,
-                    startedAt: Date.now(),
-                    contentOffset: m.content.length,
-                  },
-                ],
-              }
-            : m,
-        ),
+        [key]: (s.messagesByConv[key] ?? []).map((m) => {
+          if (m.id !== msgId) return m
+          // One row per call id: gated tools emit tool_start AND
+          // approval_request for the same id — an unconditional append
+          // left a stuck result-less twin chip on every gated call.
+          const id = callId || `t${(m.toolCalls?.length ?? 0) + 1}`
+          if ((m.toolCalls ?? []).some((t) => t.id === id)) return m
+          return {
+            ...m,
+            toolCalls: [
+              ...(m.toolCalls ?? []),
+              {
+                id,
+                name,
+                args,
+                startedAt: Date.now(),
+                contentOffset: m.content.length,
+              },
+            ],
+          }
+        }),
       },
     }))
   },
@@ -1029,10 +1033,17 @@ export const useAgent = create<AgentState>((set, get) => ({
       const msgs = s.messagesByConv[key] ?? []
       const idx = msgs.findIndex((m) => m.id === msgId)
       if (idx === -1) return {}
-      const call = msgs[idx].toolCalls?.find((t) => t.name === 'exit_plan')
-      const decision = (call?.result ?? null) as { decision?: string } | null
-      if (decision?.decision !== 'approved') return {}
-      const plan = (call?.args ?? {}) as { plan?: unknown }
+      // Select the APPROVED exit_plan, not the first: a revision round
+      // leaves two calls in this message (revised, then approved), and the
+      // first-match lookup split on nothing (the approved result never
+      // matched), leaving execution inside the collapsed planning message.
+      const call = msgs[idx].toolCalls?.find(
+        (t) =>
+          ((t.result ?? null) as { decision?: string } | null)?.decision ===
+          'approved',
+      )
+      if (!call) return {}
+      const plan = (call.args ?? {}) as { plan?: unknown }
       newId = genId()
       const next = msgs.slice()
       next.splice(idx + 1, 0, {

@@ -326,6 +326,36 @@ describe('splitAtPlanApproval (live)', () => {
     expect(useAgent.getState().splitAtPlanApproval('t', 'a')).toBeNull()
     expect(useAgent.getState().messagesByConv.t).toHaveLength(1)
   })
+
+  it('splits on the APPROVED call when a revision round precedes it (first-match regression)', () => {
+    // Revision flow: the model re-presents the plan after feedback, so the
+    // message carries the revised call first, then the approved one. The
+    // first-match lookup picked the revised call, whose decision is not
+    // 'approved' — the split silently failed and execution stayed inside
+    // the collapsed planning message.
+    useAgent.setState((s) => ({
+      messagesByConv: {
+        ...s.messagesByConv,
+        t: [
+          {
+            id: 'a',
+            role: 'assistant',
+            content: 'planning, revised, approved',
+            toolCalls: [
+              { id: 'c1', name: 'exit_plan', args: { plan: 'V1' }, result: { decision: 'revised', feedback: 'more detail' } },
+              { id: 'c2', name: 'exit_plan', args: { plan: 'V2' }, result: { decision: 'approved' } },
+            ],
+          },
+        ],
+      },
+    }))
+    const newId = useAgent.getState().splitAtPlanApproval('t', 'a')
+    expect(newId).toBeTruthy()
+    const msgs = useAgent.getState().messagesByConv.t
+    expect(msgs).toHaveLength(2)
+    // The plan text must come from the APPROVED call, not the revised one.
+    expect(msgs[1].implementsPlan).toBe('V2')
+  })
 })
 
 // ------------------------------------------------------------------ #10

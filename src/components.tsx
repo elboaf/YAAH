@@ -1760,6 +1760,12 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
         interleaved.push(
           seg.anchor.name === 'spawn_agent' && seg.anchor.subAgent ? (
             <SubAgentBlock key={seg.key} run={seg.anchor.subAgent} />
+          ) : seg.anchor.name === 'spawn_agent' ? (
+            // Failed spawn (unknown agent type / empty prompt): the backend
+            // errors before emitting sub_agent_spawned, so this call never
+            // grows a subAgent — render its error as a plain tool row, not
+            // an answered question (and not the QuestionAnchor fallback).
+            <ToolCallRow key={seg.key} tc={seg.anchor} />
           ) : isInlineImageAnchor(seg.anchor) ? (
             // #401: the generated image IS the message - ToolCallRow's
             // inline branch shows the artwork with its audit chip + [+]
@@ -10768,6 +10774,11 @@ export function Composer() {
       // content offsets are computed from message content, and a segment
       // boundary computed over un-flushed text would be wrong (#279).
       textDeltas.flush()
+      // Create the call row NOW: tool_result attaches results to calls by
+      // id, and a result arriving with no started call is silently dropped
+      // — every live chip/rich render (inline images, #401) vanished with
+      // this row (lost in the b1f4629 mic-triage extraction).
+      startToolCall(bufKey, curId, ev.call_id ?? '', ev.name ?? 'tool', ev.args)
       // Telemetry tape: every tool event of the turn flows into one
       // per-conversation line that survives gaps and turn boundaries.
       appendTape(bufKey, tapeChunkForEvent(ev) ?? '')
