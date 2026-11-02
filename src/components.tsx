@@ -5345,7 +5345,6 @@ export function AgentForm({
   // "provider::model" to route the run at a specific provider — the backend
   // resolves both (model_client.chat swaps base/key/model as needed).
   const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
-  const [activeProvider, setActiveProvider] = useState('')
   const refreshAgents = useAgent((s) => s.refreshAgents)
 
   useEffect(() => {
@@ -5517,25 +5516,7 @@ export function AgentForm({
           >
             {/* head option: this field is an override — blank = active model */}
             <option value="">default (inherit active model)</option>
-            {Object.entries(byProvider).map(([name, pm]) => (
-              <optgroup
-                key={name}
-                label={pm.error ? `${name} (${pm.error})` : name}
-              >
-                {pm.models.map((m) => (
-                  <option key={`${name}::${m}`} value={name === activeProvider ? m : `${name}::${m}`}>
-                    {m}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-            {/* saved override isn't in any group (e.g. its provider is down or removed) */}
-            {model !== '' && !Object.values(byProvider).some((pm) => pm.models.includes(model)) && (
-              <option value={model}>{model}</option>
-            )}
-            {Object.keys(byProvider).length === 0 && model !== '' && (
-              <option value={model}>{model}</option>
-            )}
+            <ModelOptions byProvider={byProvider} value={model} />
           </select>
         </label>
         <label>
