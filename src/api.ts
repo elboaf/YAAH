@@ -60,6 +60,44 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
  * so no credentials or headers are sent here (mirrors the edit-API contract
  * test above: the browser never holds the host passphrase).
  */
+// Shared NDJSON stream reader: parse lines from a Response body, dispatch
+// events, and track the currently-running model call for UI readout. Used
+// by both streamRemoteTurn and streamAgentTurn.
+export async function streamNdjson(
+  res: Response,
+  onEvent: AgentEventHandler,
+  onModelCall?: (mc: { provider: string; model: string; startedAt: number } | null) => void,
+) {
+  if (!res.body) {
+    throw new Error('Response body is null')
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim()
+      buf = buf.slice(idx + 1)
+      if (!line) continue
+      const ev = JSON.parse(line) as AgentEvent
+      if (ev.type === 'model_call') {
+        onModelCall?.({
+          provider: ev.provider ?? '',
+          model: ev.model ?? '',
+          startedAt: Date.now(),
+        })
+      } else {
+        onModelCall?.(null)
+      }
+      onEvent(ev)
+    }
+  }
+}
+
 export async function streamRemoteTurn(
   hostId: string,
   conversationId: string,
@@ -89,31 +127,7 @@ export async function streamRemoteTurn(
   if (!res.ok || !res.body) {
     throw new Error(`Remote turn error ${res.status}: ${await res.text()}`)
   }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    let idx: number
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim()
-      buf = buf.slice(idx + 1)
-      if (!line) continue
-      const ev = JSON.parse(line) as AgentEvent
-      if (ev.type === 'model_call') {
-        onModelCall?.({
-          provider: ev.provider ?? '',
-          model: ev.model ?? '',
-          startedAt: Date.now(),
-        })
-      } else {
-        onModelCall?.(null)
-      }
-      onEvent(ev)
-    }
-  }
+  await streamNdjson(res, onEvent, onModelCall)
 }
 
 export const cancelRemoteDeviceTurn = (hostId: string, conversationId: string) =>
@@ -1403,33 +1417,5 @@ export async function streamAgentTurn(
   if (!res.ok || !res.body) {
     throw new Error(`Agent error ${res.status}: ${await res.text()}`)
   }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    let idx: number
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim()
-      buf = buf.slice(idx + 1)
-      if (!line) continue
-      const ev = JSON.parse(line) as AgentEvent
-      if (ev.type === 'model_call') {
-        onModelCall?.({
-          provider: ev.provider ?? '',
-          model: ev.model ?? '',
-          startedAt: Date.now(),
-        })
-      } else {
-        // Any other stream activity — including `thinking` deltas — means the
-        // model is already responding to us, so the waiting readout must go
-        // away. Reasoning tokens are tokens: only a fully silent call
-        // (request sent, nothing back yet) counts as "waiting".
-        onModelCall?.(null)
-      }
-      onEvent(ev)
-    }
-  }
+  await streamNdjson(res, onEvent, onModelCall)
 }
