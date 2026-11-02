@@ -5,16 +5,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // tries saved credential; on 401, UI shows passphrase field.
 
 // Mock the api module
+const mockConnectRemoteDevice = vi.fn()
 vi.mock('./api', () => ({
   listRemoteDevices: vi.fn(),
-  connectRemoteDevice: vi.fn(),
+  connectRemoteDevice: (...args: unknown[]) => mockConnectRemoteDevice(...args),
 }))
 
 import { connectRemoteDevice } from './api'
 
 describe('remote device reconnect passphrase logic (#458)', () => {
   it('connect button sends empty passphrase, backend uses saved credential', async () => {
-    // Simulate: user clicks Connect on offline device with no passphrase entered
     const device = {
       host_id: 'device-1',
       url: 'http://10.0.0.5:8765',
@@ -23,13 +23,11 @@ describe('remote device reconnect passphrase logic (#458)', () => {
       cached_workspaces: [],
     }
 
-    // Backend should try the saved passphrase and succeed
-    connectRemoteDevice.mockResolvedValueOnce({ status: 'online' })
+    mockConnectRemoteDevice.mockResolvedValueOnce({ status: 'online' })
 
-    // Call with empty passphrase (user didn't type anything)
     const result = await connectRemoteDevice(device.host_id, '')
     expect(result.status).toBe('online')
-    expect(connectRemoteDevice).toHaveBeenCalledWith(device.host_id, '')
+    expect(mockConnectRemoteDevice).toHaveBeenCalledWith(device.host_id, '')
   })
 
   it('after 401 error, passphrase field appears and user can retry with new passphrase', async () => {
@@ -41,8 +39,7 @@ describe('remote device reconnect passphrase logic (#458)', () => {
       cached_workspaces: [],
     }
 
-    // First attempt fails with 401 (wrong passphrase)
-    connectRemoteDevice.mockRejectedValueOnce(new Error('wrong passphrase'))
+    mockConnectRemoteDevice.mockRejectedValueOnce(new Error('wrong passphrase'))
 
     try {
       await connectRemoteDevice(device.host_id, '')
@@ -52,9 +49,7 @@ describe('remote device reconnect passphrase logic (#458)', () => {
       expect(String(e)).toContain('passphrase')
     }
 
-    // After 401, the UI should show the passphrase field (passRequired = true)
-    // User enters new passphrase and retries
-    connectRemoteDevice.mockResolvedValueOnce({ status: 'online' })
+    mockConnectRemoteDevice.mockResolvedValueOnce({ status: 'online' })
     const result = await connectRemoteDevice(device.host_id, 'new-passphrase')
     expect(result.status).toBe('online')
   })
