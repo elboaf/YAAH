@@ -31,11 +31,9 @@ import os
 
 from backend.agent.remote import parse_ns, remote_for_workspace
 
-# Windows: suppress the console window a console child of the windowed app
-# would pop up. POSIX: own process group (mirrors gitinfo/tools).
-_SUBPROCESS_FLAGS = (
-    {"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}
-)
+# Shared subprocess spawn conventions live in gitproc.py.
+from backend.agent.gitproc import NO_WINDOW, NEW_SESSION
+_SUBPROCESS_FLAGS = {**NO_WINDOW, **NEW_SESSION}
 
 # The channel rides the host's bash tool (max 300s there); this layer is a
 # read-only UI poll — git answers in milliseconds or the host is dying.

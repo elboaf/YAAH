@@ -91,8 +91,10 @@ async def test_begin_and_commit_are_bound_to_requested_owner_and_idempotent():
     ]
     assert host_b.calls == []
 
-    turn.append_message({"role": "assistant", "content": "draft"})
-    turn.update_message("12", content="edited in memory")
+    # Mutators folded into the test fixture (production commit uses the
+    # runner's in-memory transcript; these methods were tests-only).
+    turn.messages.append({"role": "assistant", "content": "draft"})
+    turn.messages[0]["content"] = "edited in memory"
     assert host_a.calls[-1][1].endswith("/lease")  # transcript isn't persisted mid-turn
 
     host_a.fail_next_commit = True

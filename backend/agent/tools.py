@@ -26,13 +26,8 @@ def _tool_env() -> dict:
 
     return command_env()
 
-# Windows: suppress the console window a console child of the windowed app
-# would pop up. POSIX subprocess has no creationflags parameter.
-_NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
-# POSIX: run children in their own process group so a timeout can kill the
-# whole tree. Windows uses a kill-on-terminate Job Object instead (taskkill
-# /T fails when the shell root has already exited, e.g. after `start /b`).
-_NEW_SESSION = {} if os.name == "nt" else {"start_new_session": True}
+# Shared subprocess spawn conventions live in gitproc.py.
+from backend.agent.gitproc import NO_WINDOW as _NO_WINDOW, NEW_SESSION as _NEW_SESSION
 
 if os.name == "nt":
     import ctypes

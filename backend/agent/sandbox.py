@@ -67,7 +67,7 @@ MAX_RUN_TIMEOUT = 900
 BUSY_WAIT_DEFAULT = 10
 MAX_OUTPUT_CHARS = 20_000
 
-_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+from backend.agent.gitproc import CREATE_NO_WINDOW as _CREATE_NO_WINDOW
 
 _ENABLE_NUDGE = (
     "Windows Sandbox is not available on this machine. The user can check "

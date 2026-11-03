@@ -21,6 +21,8 @@ NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}
 # POSIX: run children in their own process group so a timeout can kill
 # the whole tree. Windows uses a kill-on-terminate Job Object instead.
 NEW_SESSION = {} if os.name == "nt" else {"start_new_session": True}
+# Int form for creationflags= keyword (POSIX accepts but ignores it).
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
 def exe_dir() -> Path:

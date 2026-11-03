@@ -108,25 +108,6 @@ class RemoteTurn:
             raise RemoteTurnUnavailable("remote turn no longer holds an edit lease")
         return self._lease_token
 
-    def append_message(self, message: dict) -> None:
-        """Append a copied transcript item in memory; no host write occurs."""
-        self._ensure_open()
-        if not isinstance(message, dict):
-            raise TypeError("message must be a dict")
-        self.messages.append(copy.deepcopy(message))
-        # A subsequent edit changes the request; assign a fresh idempotency key.
-        self._invalidate_pending_commit()
-
-    def update_message(self, message_id: str | int, **changes: Any) -> None:
-        """Update exactly one existing message in memory, preserving its identity."""
-        self._ensure_open()
-        target = str(message_id)
-        matches = [message for message in self.messages if str(message.get("id")) == target]
-        if len(matches) != 1:
-            raise KeyError(f"expected one message with id {target!r}; found {len(matches)}")
-        matches[0].update(copy.deepcopy(changes))
-        self._invalidate_pending_commit()
-
     async def renew_lease(self) -> dict:
         """Extend this turn's host lease; failure means the turn must stop."""
         self._ensure_open()
@@ -258,10 +239,6 @@ class RemoteTurn:
     def _ensure_open(self) -> None:
         if self._closed or not self._lease_token:
             raise RemoteTurnUnavailable("remote turn is closed or no longer holds a lease")
-
-    def _invalidate_pending_commit(self) -> None:
-        self._commit_payload = None
-        self._commit_id = None
 
     def _lease_path(self) -> str:
         return f"/api/remote/conversations/{quote(self.identity.conversation_id, safe='')}/lease"
