@@ -15,6 +15,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import logging
+import subprocess
 import os
 import threading
 import time
@@ -918,22 +919,32 @@ def _find_sandbox_window(user32=None) -> int:
     if os.name != "nt" or not hasattr(ctypes, "windll"):
         return 0
     user32 = user32 or ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
     wintypes = ctypes.wintypes
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    found: list[tuple[int, int]] = []
 
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.QueryFullProcessImageNameW.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.LPWSTR,
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    # Filter by PID set from tasklist rather than probing each window's
+    # process image with OpenProcess/QueryFullProcessImageNameW.
+    sandbox_pids = set()
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq WindowsSandboxClient.exe",
+             "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, creationflags=0x08000000, timeout=15,
+        ).stdout
+        for line in out.splitlines():
+            parts = [p.strip().strip('"') for p in line.split('","')]
+            if len(parts) >= 2 and parts[0].lower() == "windowssandboxclient.exe":
+                try:
+                    sandbox_pids.add(int(parts[1]))
+                except ValueError:
+                    continue
+    except Exception:  # noqa: BLE001
+        return 0
+
+    if not sandbox_pids:
+        return 0
+
+    found: list[tuple[int, int]] = []
     user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
     user32.EnumWindows.restype = wintypes.BOOL
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -949,26 +960,12 @@ def _find_sandbox_window(user32=None) -> int:
             return True
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        process = kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
-        )
-        if not process:
-            return True
-        try:
-            buf = ctypes.create_unicode_buffer(1024)
-            size = wintypes.DWORD(len(buf))
-            if (
-                kernel32.QueryFullProcessImageNameW(process, 0, buf, ctypes.byref(size))
-                and buf.value.replace("\\", "/").rsplit("/", 1)[-1].lower()
-                == "windowssandboxclient.exe"
-            ):
-                rect = wintypes.RECT()
-                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    width = max(0, rect.right - rect.left)
-                    height = max(0, rect.bottom - rect.top)
-                    found.append((width * height, int(hwnd)))
-        finally:
-            kernel32.CloseHandle(process)
+        if pid.value in sandbox_pids:
+            rect = wintypes.RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                width = max(0, rect.right - rect.left)
+                height = max(0, rect.bottom - rect.top)
+                found.append((width * height, int(hwnd)))
         return True
 
     user32.EnumWindows(callback_type(_callback), 0)
