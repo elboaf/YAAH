@@ -77,7 +77,7 @@ async def test_install_git_adds_installed_wrapper_to_live_path(monkeypatch, tmp_
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     result = await gitenv.run_install_git("unused")
     assert result["installed"] is True
-    assert str(git.parent) in os.environ["PATH"].split(";")
+    assert str(git.parent) in os.environ["PATH"].split(os.pathsep)
     assert result["git"] == str(git)
 
 
