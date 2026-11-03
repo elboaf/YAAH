@@ -36,16 +36,26 @@ def bundled_gh_bin_dir() -> Path | None:
     return None
 
 
+def _find_path_key(env: dict) -> str:
+    """Case-insensitive lookup for the PATH key (Windows: 'Path' vs 'PATH')."""
+    return next((key for key in env if key.casefold() == "path"), "PATH")
+
+
+def _prepend_to_path(env: dict, directory: str) -> None:
+    """Dedupe-prepend a directory to the environment's PATH (in-place)."""
+    path_key = _find_path_key(env)
+    existing = env.get(path_key, "")
+    separator = ";" if os.name == "nt" else os.pathsep
+    entries = existing.split(separator) if existing else []
+    if not any(entry.casefold() == directory.casefold() for entry in entries):
+        env[path_key] = directory + (separator + existing if existing else "")
+
+
 def command_env(env: dict | None = None) -> dict:
     """Copy an environment and prepend the bundled CLI directory to PATH."""
     result = dict(os.environ if env is None else env)
     gh_bin = bundled_gh_bin_dir()
     if gh_bin is None:
         return result
-
-    path_key = next((key for key in result if key.casefold() == "path"), "PATH")
-    existing = result.get(path_key, "")
-    entries = existing.split(os.pathsep) if existing else []
-    if not any(entry.casefold() == str(gh_bin).casefold() for entry in entries):
-        result[path_key] = str(gh_bin) + (os.pathsep + existing if existing else "")
+    _prepend_to_path(result, str(gh_bin))
     return result

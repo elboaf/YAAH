@@ -93,12 +93,7 @@ async def run_install_git(workspace: str) -> dict:
     ), None)
     git = find_git() or (str(installed_git) if installed_git else None)
     if installed_git:
-        path_key = next((key for key in os.environ if key.casefold() == "path"), "PATH")
-        current = os.environ.get(path_key, "")
-        directory = str(installed_git.parent)
-        separator = ";" if _is_windows() else os.pathsep
-        entries = current.split(separator)
-        if directory.casefold() not in {p.casefold() for p in entries}:
-            os.environ[path_key] = directory + (separator + current if current else "")
+        from backend.agent.ghenv import _prepend_to_path
+        _prepend_to_path(os.environ, str(installed_git.parent))
     return {"ok": rc == 0, "installed": True, "git": git,
             "note": "Installed. Git and Git Bash are available to subsequent tool calls now."}
