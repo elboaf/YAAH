@@ -446,14 +446,17 @@ async def api_list_conversations():
     # Agent chats are a chat_type on the row itself (issue #41); the UI
     # pins them under their workspace from this field.
     return await list_conversations()
+async def _conv_or_404(conversation_id: int):
+    """Fetch a conversation or raise 404. Replaces the repeated get-or-404 dance."""
+    conv = await _conv_or_404(conversation_id)
+    return conv
+
+
 
 
 @app.get("/api/conversations/{conversation_id}")
 async def api_get_conversation(conversation_id: int):
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     return conv
 
 
@@ -464,10 +467,7 @@ async def api_conversation_context(conversation_id: int):
     display it against. Window resolution: Settings override for this model
     -> provider-reported value -> built-in table -> null (UI shows tokens
     without the %/bar)."""
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     from backend.agent.context_window import get_context_window, split_model_route
 
     cfg = load_config()
@@ -614,9 +614,7 @@ async def api_conversation_branch_select(conversation_id: int, body: BranchSelec
     selector is gone; this moves the ONE tree. Git's own refusals surface
     verbatim - nothing is stashed or discarded by harness code."""
 
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     branch = body.branch.strip()
     if not branch:
         return {"ok": False, "error": "checkout target is empty"}
@@ -641,10 +639,7 @@ async def api_conversation_git_branch(conversation_id: int):
     direct world has one tree and no per-chat picks: the endpoint reads
     the workspace truth (None when blank, offline, or non-git; a remote
     chat reads the host through the gateway, #333)."""
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     from backend.agent.gitinfo import current_git_branch
     from backend.agent.tools import workspace_root
 
@@ -673,10 +668,7 @@ async def api_conversation_git_info(conversation_id: int):
     ONE workspace tree (the direct world; #359). TTL-cached in gitinfo
     (one git burst per ~2s per workspace) - the UI polls this while a
     session is open."""
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     from backend.agent.gitinfo import git_workspace_info
     from backend.agent.tools import workspace_root
 
@@ -701,10 +693,7 @@ async def api_conversation_git_info(conversation_id: int):
 @app.get("/api/conversations/{conversation_id}/git-branches")
 async def api_conversation_git_branches(conversation_id: int):
     """Local branch names for the chip's checkout dropdown (not a repo -> [])."""
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     from backend.agent.gitinfo import list_local_branches
     from backend.agent.tools import workspace_root
 
@@ -733,10 +722,7 @@ async def _conversation_git_root(conversation_id: int):
     callers; non-repo workspaces surface git's own failure)."""
     from backend.agent.tools import workspace_root
 
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     ws = conv.get("workspace") or ""
     if not ws.strip() or ws.startswith("remote:"):
         return None
@@ -877,9 +863,7 @@ async def _ui_git_locked(root, conversation_id: int, action: str, body: GitComma
 @app.patch("/api/conversations/{conversation_id}")
 async def api_update_conversation(conversation_id: int, body: ConversationUpdate):
 
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     # #51/#76: a pinned agent chat must never silently diverge from its
     # agent — the header selectors there write through PATCH /api/agents/{id}
     # instead (the UI routes them; a stale client gets told where to write).
@@ -919,9 +903,7 @@ async def api_move_conversation(conversation_id: int, body: ConversationMove):
 
     from backend.agent.loop import agent_is_running, queue_items
 
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     if agent_is_running(conversation_id):
         raise HTTPException(
             status_code=409,
@@ -2222,9 +2204,7 @@ def _proxy_result(res):
 @app.get("/api/conversations/{conversation_id}/export")
 async def api_export_conversation(conversation_id: int):
     """Export a conversation as a Markdown transcript."""
-    conv = await get_conversation(conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    conv = await _conv_or_404(conversation_id)
     rows = await get_messages(conversation_id)
 
     lines = [f"# {conv['title']}", ""]
