@@ -3141,9 +3141,20 @@ def _remote_device_profiles() -> list[dict]:
 
 
 def _save_remote_device_profiles(profiles: list[dict]) -> None:
-    from backend.agent.config import save_config
-    safe = [{key: value for key, value in profile.items() if key != "passphrase"} for profile in profiles]
-    save_config({"remote_devices": safe})
+    """Save device profiles including passphrases. On Unix, chmod the config
+    to owner-only (0600) since it now contains secrets."""
+    from backend.agent.config import save_config, CONFIG_PATH
+    import os
+    import stat
+
+    save_config({"remote_devices": profiles})
+    # Restrict the config file to owner-readable/writable only (Unix only).
+    # On Windows, the controlling host is the trust anchor (like YAAH_PASSPHRASE).
+    if os.name == "posix":
+        try:
+            os.chmod(CONFIG_PATH, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
 
 
 def _public_remote_device(profile: dict) -> dict:
@@ -3499,7 +3510,7 @@ async def api_add_remote_device(body: RemoteDeviceConnect):
     if profile is None:
         profile = {"host_id": host.host_id, "cached_workspaces": []}
         profiles.append(profile)
-    profile.update({"url": host.url, "name": host.name, "os": host.info.get("os"), "status": "online"})
+    profile.update({"url": host.url, "name": host.name, "os": host.info.get("os"), "passphrase": body.passphrase, "status": "online"})
     _save_remote_device_profiles(profiles)
     return _public_remote_device(profile)
 
@@ -3510,9 +3521,14 @@ async def api_connect_remote_device(host_id: str, body: RemoteDeviceReconnect):
     profile = next((item for item in profiles if item.get("host_id") == host_id), None)
     if profile is None:
         raise HTTPException(status_code=404, detail="remote device not found")
-    host = await _connect_remote_session(profile.get("url", ""), body.passphrase, make_active=False)
+    # Use the provided passphrase, or fall back to the saved one
+    passphrase = body.passphrase or profile.get("passphrase", "")
+    host = await _connect_remote_session(profile.get("url", ""), passphrase, make_active=False)
     if host.host_id != host_id:
         raise HTTPException(status_code=409, detail="the URL now identifies a different remote device")
+    # If the user supplied a new passphrase, save it for future reconnects
+    if body.passphrase:
+        profile["passphrase"] = body.passphrase
     profile.update({"name": host.name, "os": host.info.get("os"), "status": "online"})
     _save_remote_device_profiles(profiles)
     return _public_remote_device(profile)
