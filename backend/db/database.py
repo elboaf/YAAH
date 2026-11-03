@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import aiosqlite
+from contextlib import asynccontextmanager
 
 
 def _default_data_dir() -> Path:
@@ -231,6 +232,20 @@ CREATE TABLE IF NOT EXISTS app_meta (
     value TEXT NOT NULL
 );
 """
+
+
+@asynccontextmanager
+async def open_db():
+    """Context manager that replaces the open/close/rollback dance."""
+    db = await get_db()
+    try:
+        yield db
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        raise
+    finally:
+        await db.close()
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -528,8 +543,7 @@ async def repair_bare_model_scopes() -> dict:
             if not pm.get("error") and model_id in (pm.get("models") or [])
         ]
 
-    db = await get_db()
-    try:
+    async with open_db() as db:
         repaired = 0
         found = 0
         # #383: subagent_model columns follow the same complete-or-empty
@@ -567,8 +581,6 @@ async def repair_bare_model_scopes() -> dict:
                     repaired += 1
         await db.commit()
         return {"repaired": repaired, "found": found}
-    finally:
-        await db.close()
 
 
 async def migrate_workspaces(db: aiosqlite.Connection):
@@ -635,8 +647,7 @@ async def list_workspaces() -> list[dict]:
     but get a missing marker); Default always exists. `conversation_count`
     feeds the remove-workspace warning.
     """
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT w.id, w.path, w.label, w.last_opened_at, w.position,"
             " (SELECT COUNT(*) FROM conversations c"
@@ -650,8 +661,6 @@ async def list_workspaces() -> list[dict]:
             else:
                 r["exists"] = os.path.isdir(r["path"])
         return rows
-    finally:
-        await db.close()
 
 
 async def reorder_workspaces(ordered_ids: list[int]) -> None:
@@ -661,21 +670,17 @@ async def reorder_workspaces(ordered_ids: list[int]) -> None:
     rows stay NULL — 'never manually ordered' — and NULL must never be
     backfilled, or rows the user never dragged read as hand-placed.
     """
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         for i, wid in enumerate(ordered_ids):
             await db.execute(
                 "UPDATE workspaces SET position = ? WHERE id = ?", (i, wid)
             )
         await db.commit()
-    finally:
-        await db.close()
 
 
 async def get_workspace_by_path(path: str | None) -> dict | None:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT * FROM workspaces WHERE path IS ?" if path is None
             else "SELECT * FROM workspaces WHERE path = ?",
@@ -683,8 +688,6 @@ async def get_workspace_by_path(path: str | None) -> dict | None:
         )
         row = await cur.fetchone()
         return dict(row) if row else None
-    finally:
-        await db.close()
 
 
 async def upsert_workspace(path: str) -> dict:
@@ -694,8 +697,7 @@ async def upsert_workspace(path: str) -> dict:
     only in case or trailing slashes are the same folder.
     """
     resolved = str(Path(path).resolve())
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute("SELECT * FROM workspaces")
         for row in await cur.fetchall():
             if row["path"] is not None and str(Path(row["path"]).resolve()).lower() == resolved.lower():
@@ -716,24 +718,19 @@ async def upsert_workspace(path: str) -> dict:
             "SELECT * FROM workspaces WHERE path = ?", (resolved,)
         )
         return dict(await cur.fetchone())
-    finally:
-        await db.close()
 
 
 async def touch_workspace(path: str | None):
     """Mark a workspace as just-used (switch or turn start)."""
     if path is None:
         return
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute(
             "UPDATE workspaces SET last_opened_at = datetime('now')"
             " WHERE path = ?",
             (path,),
         )
         await db.commit()
-    finally:
-        await db.close()
 
 
 async def delete_workspace(workspace_id: int) -> dict:
@@ -741,8 +738,7 @@ async def delete_workspace(workspace_id: int) -> dict:
 
     Returns {'relocated': n}. Raises ValueError for the Default row.
     """
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,))
         row = await cur.fetchone()
@@ -779,12 +775,6 @@ async def delete_workspace(workspace_id: int) -> dict:
         except OSError:
             pass
         return {"relocated": relocated}
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 
@@ -823,8 +813,7 @@ async def create_conversation(
     model = qualify_model_scope(model or "")
     subagent_model = qualify_model_scope(subagent_model or "")
     workspace = normalize_workspace(workspace)
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "INSERT INTO conversations (title, workspace, chat_type, model, effort, subagent_model)"
             " VALUES (?, ?, ?, ?, ?, ?)",
@@ -832,20 +821,15 @@ async def create_conversation(
         )
         await db.commit()
         return cur.lastrowid
-    finally:
-        await db.close()
 
 
 async def list_conversations():
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT * FROM conversations ORDER BY updated_at DESC"
         )
         rows = [dict(r) for r in await cur.fetchall()]
         return rows
-    finally:
-        await db.close()
 
 
 async def get_conversation(conversation_id: int) -> dict | None:
@@ -857,22 +841,18 @@ async def get_conversation(conversation_id: int) -> dict | None:
 
 async def _get_conversation_row(conversation_id: int) -> dict | None:
     """The raw row read: one SELECT."""
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
         )
         row = await cur.fetchone()
         result = dict(row) if row else None
         return result
-    finally:
-        await db.close()
 
 
 async def delete_conversation(conversation_id: int) -> bool:
     """Delete a conversation and all its messages (FK cascade)."""
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
@@ -880,12 +860,6 @@ async def delete_conversation(conversation_id: int) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 class RemoteProtocolError(Exception):
@@ -959,8 +933,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
             updates["subagent_model"], load_config().get("active_provider") or ""
         )
     sets = ", ".join(f"{k} = ?" for k in updates)
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await assert_no_active_remote_edit_lease(db, conversation_id)
         if touch_updated_at:
@@ -976,12 +949,6 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
             )
         await db.commit()
         return True
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def touch_updated_at(conversation_id: int) -> None:
@@ -991,16 +958,13 @@ async def touch_updated_at(conversation_id: int) -> None:
     Uses strftime with %f for microsecond resolution to avoid two fast
     runs finishing in the same second from colliding on sort position.
     """
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await assert_no_active_remote_edit_lease(db, conversation_id)
         await db.execute(
             "UPDATE conversations SET updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?",
             (conversation_id,),
         )
         await db.commit()
-    finally:
-        await db.close()
 
 
 async def move_conversation(conversation_id: int, target: str | None) -> dict | None:
@@ -1024,8 +988,7 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
     # ''/'.' mean Default and must land as NULL, not '' (#382): the sidebar
     # groups under Default by matching the registry's NULL path.
     target = normalize_workspace(target)
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
@@ -1067,12 +1030,6 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
         )
         await db.commit()
         return {"workspace": target, "target_id": target_id}
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def set_conversation_usage(
@@ -1081,15 +1038,12 @@ async def set_conversation_usage(
     """Record the context size (usage.prompt_tokens) of the latest model call
     in this conversation, plus the model id that produced it. Deliberately
     does NOT touch updated_at — a context readout must not re-sort the list."""
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute(
             "UPDATE conversations SET context_tokens = ?, context_model = ? WHERE id = ?",
             (tokens, model, conversation_id),
         )
         await db.commit()
-    finally:
-        await db.close()
 
 
 async def add_message(
@@ -1106,8 +1060,7 @@ async def add_message(
     meta: dict | None = None,
     duration_ms: int | None = None,
 ):
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
@@ -1134,19 +1087,12 @@ async def add_message(
         )
         await db.commit()
         return cur.lastrowid
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def upsert_remote_conversation(host_id: str, conversation: dict, messages: list[dict]) -> None:
     """Replace one cached remote transcript atomically; IDs are host-scoped."""
     cid = str(conversation["id"])
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN")
         cur = await db.execute(
             "SELECT sync_status FROM remote_conversations WHERE host_id=? AND conversation_id=?",
@@ -1180,11 +1126,6 @@ async def upsert_remote_conversation(host_id: str, conversation: dict, messages:
                  json.dumps(message)),
             )
         await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def queue_remote_commit(
@@ -1196,8 +1137,7 @@ async def queue_remote_commit(
 
     cid = str(conversation_id)
     commit_id = commit_id or secrets.token_urlsafe(24)
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await db.execute(
             "INSERT INTO remote_pending_commits(host_id, conversation_id, commit_id, base_revision, conversation_json, messages_json) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1215,17 +1155,10 @@ async def queue_remote_commit(
             )
         await db.commit()
         return commit_id
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def pending_remote_commits(host_id: str, conversation_id: str | None = None) -> list[dict]:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         sql = "SELECT * FROM remote_pending_commits WHERE host_id=?"
         params: tuple = (host_id,)
         if conversation_id is not None:
@@ -1238,13 +1171,10 @@ async def pending_remote_commits(host_id: str, conversation_id: str | None = Non
             row["conversation"] = json.loads(row.pop("conversation_json"))
             row["messages"] = json.loads(row.pop("messages_json"))
         return rows
-    finally:
-        await db.close()
 
 
 async def acknowledge_remote_commit(host_id: str, conversation_id: str, commit_id: str, revision: str) -> bool:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute(
             "DELETE FROM remote_pending_commits WHERE host_id=? AND conversation_id=? AND commit_id=?",
@@ -1263,20 +1193,15 @@ async def acknowledge_remote_commit(host_id: str, conversation_id: str, commit_i
                 )
         await db.commit()
         return cur.rowcount > 0
-    finally:
-        await db.close()
 
 
 async def list_remote_conversations(host_id: str) -> list[dict]:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT host_id, conversation_id, title, workspace, updated_at, revision, sync_status FROM remote_conversations WHERE host_id=? ORDER BY updated_at DESC",
             (host_id,),
         )
         return [dict(row) for row in await cur.fetchall()]
-    finally:
-        await db.close()
 
 
 def _revision_token(counter: int) -> str:
@@ -1290,8 +1215,7 @@ async def acquire_remote_edit_lease(
     import secrets
 
     lease_seconds = 120
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute(
             "SELECT remote_revision_counter FROM conversations WHERE id = ?",
@@ -1337,19 +1261,12 @@ async def acquire_remote_edit_lease(
         await db.commit()
         return {"lease_token": token, "expires_at": expires_at,
                 "revision": current_revision, "lease_seconds": lease_seconds}
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def renew_remote_edit_lease(conversation_id: int, lease_token: str) -> dict:
 
     lease_seconds = 120
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         now = int(time.time())
         cur = await db.execute(
@@ -1368,17 +1285,10 @@ async def renew_remote_edit_lease(conversation_id: int, lease_token: str) -> dic
         await db.commit()
         return {"lease_token": lease_token, "expires_at": expires_at,
                 "lease_seconds": lease_seconds}
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def release_remote_edit_lease(conversation_id: int, lease_token: str) -> bool:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute(
             "SELECT lease_token, expires_at FROM remote_edit_leases WHERE conversation_id = ?",
@@ -1397,17 +1307,10 @@ async def release_remote_edit_lease(conversation_id: int, lease_token: str) -> b
         )
         await db.commit()
         return True
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def get_remote_conversation_snapshot(conversation_id: int) -> dict | None:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN")
         cur = await db.execute(
             "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
@@ -1430,8 +1333,6 @@ async def get_remote_conversation_snapshot(conversation_id: int) -> dict | None:
                 message[field] = json.loads(raw) if raw else ([] if field == "images" else None)
         return {"conversation": conversation, "messages": messages,
                 "revision": conversation["revision"]}
-    finally:
-        await db.close()
 
 
 async def commit_remote_conversation(
@@ -1450,8 +1351,7 @@ async def commit_remote_conversation(
     request_hash = hashlib.sha256(
         json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).hexdigest()
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute(
             "SELECT request_hash, response_json FROM remote_conversation_commits"
@@ -1569,17 +1469,10 @@ async def commit_remote_conversation(
         )
         await db.commit()
         return result
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
 
 
 async def get_remote_messages(host_id: str, conversation_id: str) -> list[dict] | None:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT payload FROM remote_messages WHERE host_id=? AND conversation_id=? ORDER BY position",
             (host_id, str(conversation_id)),
@@ -1592,8 +1485,6 @@ async def get_remote_messages(host_id: str, conversation_id: str) -> list[dict] 
             )
             return [] if await cur.fetchone() else None
         return [json.loads(row["payload"]) for row in rows]
-    finally:
-        await db.close()
 
 
 async def get_last_user_message(conversation_id: int) -> str | None:
@@ -1602,8 +1493,7 @@ async def get_last_user_message(conversation_id: int) -> str | None:
     composed. None when the conversation has no user rows (the caller
     then matches nothing). Attachment scaffolding is stripped downstream
     (loras._match_text)."""
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT content FROM messages"
             " WHERE conversation_id = ? AND role = 'user'"
@@ -1612,13 +1502,10 @@ async def get_last_user_message(conversation_id: int) -> str | None:
         )
         row = await cur.fetchone()
         return (row["content"] if row else None) or None
-    finally:
-        await db.close()
 
 
 async def get_messages(conversation_id: int):
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
@@ -1644,8 +1531,6 @@ async def get_messages(conversation_id: int):
             # fire's user row -> {"agent_prompt": true}); None when absent.
             r["meta"] = json.loads(r["meta"]) if r.get("meta") else None
         return rows
-    finally:
-        await db.close()
 
 
 async def search_conversation_history(
@@ -1721,21 +1606,17 @@ async def create_agent(fields: dict) -> dict:
     fields = {k: v for k, v in fields.items() if k in allowed}
     cols = ", ".join(fields)
     marks = ", ".join("?" for _ in fields)
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute(
             f"INSERT INTO agents ({cols}) VALUES ({marks})", tuple(fields.values())
         )
         await db.commit()
         cur = await db.execute("SELECT * FROM agents WHERE id = ?", (fields["id"],))
         return dict(await cur.fetchone())
-    finally:
-        await db.close()
 
 
 async def list_agents(workspace: str | None = None) -> list[dict]:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         if workspace is None:
             cur = await db.execute("SELECT * FROM agents ORDER BY created_at")
         else:
@@ -1744,18 +1625,13 @@ async def list_agents(workspace: str | None = None) -> list[dict]:
                 (workspace,),
             )
         return [dict(r) for r in await cur.fetchall()]
-    finally:
-        await db.close()
 
 
 async def get_agent(agent_id: str) -> dict | None:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
         row = await cur.fetchone()
         return dict(row) if row else None
-    finally:
-        await db.close()
 
 
 async def get_agent_for_conversation(conversation_id: int) -> dict | None:
@@ -1764,15 +1640,12 @@ async def get_agent_for_conversation(conversation_id: int) -> dict | None:
     Agent chats' model/effort resolve through their agent at send time and
     their header selectors write through to the agent, so the agent's
     values ARE the chat's."""
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT * FROM agents WHERE conversation_id = ?", (conversation_id,)
         )
         row = await cur.fetchone()
         return dict(row) if row else None
-    finally:
-        await db.close()
 
 
 async def update_agent(agent_id: str, fields: dict) -> dict | None:
@@ -1781,8 +1654,7 @@ async def update_agent(agent_id: str, fields: dict) -> dict | None:
     if not fields:
         return await get_agent(agent_id)
     sets = ", ".join(f"{k} = ?" for k in fields)
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute(
             f"UPDATE agents SET {sets}, updated_at = datetime('now') WHERE id = ?",
             (*fields.values(), agent_id),
@@ -1791,35 +1663,26 @@ async def update_agent(agent_id: str, fields: dict) -> dict | None:
         cur = await db.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
         row = await cur.fetchone()
         return dict(row) if row else None
-    finally:
-        await db.close()
 
 
 async def delete_agent(agent_id: str) -> bool:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
         await db.commit()
         return cur.rowcount > 0
-    finally:
-        await db.close()
 
 
 async def list_instructions(agent_id: str) -> list[dict]:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "SELECT * FROM agent_instructions WHERE agent_id = ? ORDER BY id",
             (agent_id,),
         )
         return [dict(r) for r in await cur.fetchall()]
-    finally:
-        await db.close()
 
 
 async def add_instruction(agent_id: str, content: str) -> dict:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "INSERT INTO agent_instructions (agent_id, content) VALUES (?, ?)",
             (agent_id, content),
@@ -1829,33 +1692,25 @@ async def add_instruction(agent_id: str, content: str) -> dict:
             "SELECT * FROM agent_instructions WHERE id = ?", (cur.lastrowid,)
         )
         return dict(await cur.fetchone())
-    finally:
-        await db.close()
 
 
 async def update_instruction(instruction_id: int, content: str) -> bool:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "UPDATE agent_instructions SET content = ? WHERE id = ?",
             (content, instruction_id),
         )
         await db.commit()
         return cur.rowcount > 0
-    finally:
-        await db.close()
 
 
 async def delete_instruction(instruction_id: int) -> bool:
-    db = await get_db()
-    try:
+    async with open_db() as db:
         cur = await db.execute(
             "DELETE FROM agent_instructions WHERE id = ?", (instruction_id,)
         )
         await db.commit()
         return cur.rowcount > 0
-    finally:
-        await db.close()
 
 
 async def trim_agent_transcript(conversation_id: int, keep_runs: int):
@@ -1863,8 +1718,7 @@ async def trim_agent_transcript(conversation_id: int, keep_runs: int):
     turns. A run starts at its (persisted) user message, so the transcript is
     cut just before the Nth-from-last user row; delete_message-by-range keeps
     tool/assistant rows attached to their run."""
-    db = await get_db()
-    try:
+    async with open_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await assert_no_active_remote_edit_lease(db, conversation_id)
         cur = await db.execute(
@@ -1882,9 +1736,3 @@ async def trim_agent_transcript(conversation_id: int, keep_runs: int):
             (conversation_id, cutoff),
         )
         await db.commit()
-    except Exception:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    finally:
-        await db.close()
