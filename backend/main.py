@@ -448,7 +448,11 @@ async def api_list_conversations():
     return await list_conversations()
 async def _conv_or_404(conversation_id: int):
     """Fetch a conversation or raise 404. Replaces the repeated get-or-404 dance."""
-    conv = await _conv_or_404(conversation_id)
+    from backend.db.database import get_conversation
+
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
     return conv
 
 
@@ -639,24 +643,18 @@ async def api_conversation_git_branch(conversation_id: int):
     direct world has one tree and no per-chat picks: the endpoint reads
     the workspace truth (None when blank, offline, or non-git; a remote
     chat reads the host through the gateway, #333)."""
-    conv = await _conv_or_404(conversation_id)
     from backend.agent.gitinfo import current_git_branch
-    from backend.agent.tools import workspace_root
-
     from backend.agent.remote import parse_ns
 
+    conv = await _conv_or_404(conversation_id)
     ws = conv.get("workspace") or ""
-    # #333/#335: a remote chat reads the HOST's checked-out branch through
-    # the gateway (offline -> None, the explicit offline posture) - never
-    # through workspace_root, whose Path.resolve() mangles the namespaced
-    # string into a client-local path.
+    # #333/#335: remote chats read through the gateway with the raw
+    # namespaced string - workspace_root's Path.resolve() would
+    # mangle it into a client-local path.
     if parse_ns(ws) is not None:
         return {"branch": await current_git_branch(ws)}
-    if not ws.strip():
-        return {"branch": None}
-    try:
-        root = workspace_root(ws)
-    except ValueError:
+    root = await _conversation_git_root(conversation_id)
+    if root is None:
         return {"branch": None}
     return {"branch": await current_git_branch(root)}
 
@@ -668,24 +666,18 @@ async def api_conversation_git_info(conversation_id: int):
     ONE workspace tree (the direct world; #359). TTL-cached in gitinfo
     (one git burst per ~2s per workspace) - the UI polls this while a
     session is open."""
-    conv = await _conv_or_404(conversation_id)
     from backend.agent.gitinfo import git_workspace_info
-    from backend.agent.tools import workspace_root
-
-    ws = conv.get("workspace") or ""
-    if not ws.strip():
-        return {"info": None}
     from backend.agent.remote import parse_ns
 
+    conv = await _conv_or_404(conversation_id)
+    ws = conv.get("workspace") or ""
+    # #333: remote chats read through the gateway with the raw
+    # namespaced string - workspace_root's Path.resolve() would
+    # mangle it into a client-local path.
     if parse_ns(ws) is not None:
-        # #333: remote chats read through the gateway with the raw
-        # namespaced string - workspace_root's Path.resolve() would
-        # mangle it into a client-local path. Offline passes through as
-        # the explicit state the strip renders.
         return {"info": await git_workspace_info(ws)}
-    try:
-        root = workspace_root(ws)
-    except ValueError:
+    root = await _conversation_git_root(conversation_id)
+    if root is None:
         return {"info": None}
     return {"info": await git_workspace_info(root)}
 
@@ -693,23 +685,18 @@ async def api_conversation_git_info(conversation_id: int):
 @app.get("/api/conversations/{conversation_id}/git-branches")
 async def api_conversation_git_branches(conversation_id: int):
     """Local branch names for the chip's checkout dropdown (not a repo -> [])."""
-    conv = await _conv_or_404(conversation_id)
     from backend.agent.gitinfo import list_local_branches
-    from backend.agent.tools import workspace_root
-
     from backend.agent.remote import parse_ns
 
+    conv = await _conv_or_404(conversation_id)
     ws = conv.get("workspace") or ""
     # #335: the chip's dropdown lists the HOST's branches through the
     # gateway; offline renders the same explicit empty answer the git-info
     # strip already shows.
     if parse_ns(ws) is not None:
         return {"branches": await list_local_branches(ws)}
-    if not ws.strip():
-        return {"branches": []}
-    try:
-        root = workspace_root(ws)
-    except ValueError:
+    root = await _conversation_git_root(conversation_id)
+    if root is None:
         return {"branches": []}
     branches = await list_local_branches(root)
     return {"branches": branches}
