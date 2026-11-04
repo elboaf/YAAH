@@ -3158,14 +3158,12 @@ async def api_remote_device_conversations(host_id: str):
     session = remote_mod.get_remote(host_id)
     if session is not None:
         try:
-            remote_rows = _proxy_result(await session.proxy("GET", "/api/remote/conversations"))
+            remote_rows = await _proxy_or_503(session, "GET", "/api/remote/conversations", detail="remote device unavailable")
             for row in remote_rows:
                 conv_id = str(row["id"])
-                messages = _proxy_result(await session.proxy(
-                    "GET", f"/api/remote/conversations/{conv_id}/messages"
-                ))
+                messages = await _proxy_or_503(session, "GET", f"/api/remote/conversations/{conv_id}/messages", detail="remote device unavailable")
                 await upsert_remote_conversation(host_id, row, messages)
-        except (httpx.HTTPError, HTTPException) as exc:
+        except HTTPException as exc:
             cached = await list_remote_conversations(host_id)
             if not cached:
                 raise HTTPException(status_code=503, detail="remote device unavailable and no cached conversations") from exc
@@ -3185,9 +3183,7 @@ async def api_remote_device_snapshot(host_id: str, conversation_id: str):
                 status_code=409,
                 detail={"code": "pending_sync_conflict", "pending": sync_result["pending"], "conflict": sync_result.get("conflict")},
             )
-        snapshot = _proxy_result(await session.proxy(
-            "GET", f"/api/remote/conversations/{conversation_id}/snapshot"
-        ))
+        snapshot = await _proxy_or_503(session, "GET", f"/api/remote/conversations/{conversation_id}/snapshot", detail="could not refresh remote conversation")
         await upsert_remote_conversation(host_id, snapshot["conversation"], snapshot["messages"])
         return snapshot
     except (httpx.HTTPError, HTTPException) as exc:
@@ -3215,12 +3211,7 @@ async def api_remote_device_lease(host_id: str, conversation_id: str, body: Remo
         raise HTTPException(status_code=503, detail="remote device is offline; edits require a live owner")
     method = "POST"
     request = {"lease_token": body.lease_token} if body.lease_token else {"revision": body.revision, "holder_id": body.holder_id}
-    try:
-        return _proxy_result(await session.proxy(method, f"/api/remote/conversations/{conversation_id}/lease", json_body=request))
-    except (httpx.HTTPError, HTTPException) as exc:
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=503, detail="remote lease request failed") from exc
+    return await _proxy_or_503(session, method, f"/api/remote/conversations/{conversation_id}/lease", json_body=request, detail="remote lease request failed")
 
 
 @app.delete("/api/remote/devices/{host_id}/conversations/{conversation_id}/lease")
@@ -3228,12 +3219,7 @@ async def api_remote_device_release_lease(host_id: str, conversation_id: str, bo
     session = _remote_device_session(host_id)
     if session is None:
         raise HTTPException(status_code=503, detail="remote device is offline")
-    try:
-        return _proxy_result(await session.proxy("DELETE", f"/api/remote/conversations/{conversation_id}/lease", json_body={"lease_token": body.lease_token}))
-    except (httpx.HTTPError, HTTPException) as exc:
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=503, detail="remote lease release failed") from exc
+    return await _proxy_or_503(session, "DELETE", f"/api/remote/conversations/{conversation_id}/lease", json_body={"lease_token": body.lease_token}, detail="remote lease release failed")
 
 
 @app.post("/api/remote/devices/{host_id}/conversations/{conversation_id}/commit")
@@ -3244,18 +3230,9 @@ async def api_remote_device_commit(host_id: str, conversation_id: str, body: Rem
     if body.commit_id not in {entry["commit_id"] for entry in await pending_remote_commits(host_id, conversation_id)}:
         await queue_remote_commit(host_id, conversation_id, body.revision, body.conversation, body.messages, body.commit_id)
     request = body.model_dump()
-    try:
-        result = _proxy_result(await session.proxy("POST", f"/api/remote/conversations/{conversation_id}/commit", json_body=request))
-        await acknowledge_remote_commit(host_id, conversation_id, body.commit_id, result["revision"])
-        return result
-    except (httpx.HTTPError, HTTPException) as exc:
-        # The durable request stays queued. A lost acknowledgement can be retried
-        # with the exact same commit ID and host idempotency makes that safe.
-        if isinstance(exc, HTTPException):
-            # Keep rejected/conflicted intents durable too. A human must refresh
-            # or resolve the conflict; never label their local edit as synced.
-            raise
-        raise HTTPException(status_code=503, detail="commit outcome unknown; pending commit retained") from exc
+    result = await _proxy_or_503(session, "POST", f"/api/remote/conversations/{conversation_id}/commit", json_body=request, detail="commit outcome unknown; pending commit retained")
+    await acknowledge_remote_commit(host_id, conversation_id, body.commit_id, result["revision"])
+    return result
 
 
 class RemoteDeviceTurn(BaseModel):
@@ -3371,10 +3348,9 @@ async def api_remote_device_sync_pending(host_id: str, conversation_id: str):
     synced = 0
     for entry in await pending_remote_commits(host_id, conversation_id):
         try:
-            result = _proxy_result(await session.proxy(
-                "POST", f"/api/remote/conversations/{conversation_id}/commit",
+            result = await _proxy_or_503(session, "POST", f"/api/remote/conversations/{conversation_id}/commit",
                 json_body={"lease_token": "", "revision": entry["base_revision"], "commit_id": entry["commit_id"], "conversation": entry["conversation"], "messages": entry["messages"]},
-            ))
+                detail="remote commit failed")
         except HTTPException as exc:
             # Acquire a fresh lease at the queued base revision and retry the
             # same idempotent commit, preserving conflict rather than overwriting.
@@ -3396,13 +3372,11 @@ async def api_remote_device_messages(host_id: str, conversation_id: str):
     session = remote_mod.get_remote(host_id)
     if session is not None:
         try:
-            rows = _proxy_result(await session.proxy("GET", "/api/remote/conversations"))
+            rows = await _proxy_or_503(session, "GET", "/api/remote/conversations", detail="remote device unavailable")
             conversation = next((row for row in rows if str(row.get("id")) == str(conversation_id)), None)
             if conversation is None:
                 raise HTTPException(status_code=404, detail="conversation not found")
-            messages = _proxy_result(await session.proxy(
-                "GET", f"/api/remote/conversations/{conversation_id}/messages"
-            ))
+            messages = await _proxy_or_503(session, "GET", f"/api/remote/conversations/{conversation_id}/messages", detail="remote device unavailable")
             await upsert_remote_conversation(host_id, conversation, messages)
         except (httpx.HTTPError, HTTPException):
             pass
@@ -3469,7 +3443,7 @@ async def api_remote_devices():
         session = remote_mod.get_remote(profile.get("host_id", ""))
         if session is not None:
             try:
-                rows = _proxy_result(await session.proxy("GET", "/api/workspaces/local"))
+                rows = await _proxy_or_503(session, "GET", "/api/workspaces/local", detail="remote device unavailable")
                 profile["cached_workspaces"] = [{**row, "path": remote_mod.ns_path(session.host_id, row.get("path")),
                     "owner_id": session.host_id, "device_status": "online"} for row in rows]
                 profile.update({"name": session.name, "os": session.info.get("os"), "status": "online"})
