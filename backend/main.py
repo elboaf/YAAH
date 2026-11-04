@@ -724,8 +724,6 @@ _GIT_ACTIONS = {"status", "commit", "push", "pull", "checkout"}
 async def _run_ui_git(root, *args: str) -> dict:
     """One UI-initiated git command, shell-free (argument list exec — a
     crafted branch name or commit message cannot become a second command)."""
-    import asyncio
-
     from backend.agent.tools import _NO_WINDOW, _NEW_SESSION
 
     try:
