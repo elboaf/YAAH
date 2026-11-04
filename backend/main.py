@@ -448,7 +448,7 @@ async def api_list_conversations():
     return await list_conversations()
 async def _conv_or_404(conversation_id: int):
     """Fetch a conversation or raise 404. Replaces the repeated get-or-404 dance."""
-    from backend.db import get_conversation
+    from backend.db.database import get_conversation
 
     conv = await get_conversation(conversation_id)
     if conv is None:
