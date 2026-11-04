@@ -2,7 +2,7 @@
 
 ![YAAH box art - the AI coding agent for everyone - Halloween edition](docs/assets/box-art-halloween.png)
 
-**YAAH** = **Y**et **A**nother **A**gent/**H**arness.
+**YAAH** = **Y**et **A**nother **A**gent **H**arness.
 
 YAAH is a desktop AI coding agent: a model with real tools on your machine —
 shell, files, git, search — and every tool call shown transparently. See
@@ -33,43 +33,10 @@ companion files) and `yaah-server-setup.deb` on Linux (systemd daemon,
 passphrase via `/etc/yaah/yaah.conf`). See
 [SERVER-SETUP.md](SERVER-SETUP.md) for the full installation guide.
 
-For a plain foreground run without installing, the same binary also works
-from a shell (`serve` verb on Windows; bare binary on Linux):
-
-```
-yaah-server serve --passphrase <secret>
-```
-
-Then connect from the YAAH desktop app: the server appears in the host
-switcher automatically, or enter the device's IP directly (default port
-8765), using the same passphrase.
-
-| Option | Meaning |
-| --- | --- |
-| `--host H` | bind address (default `0.0.0.0`) |
-| `--port P` | listen port (default `8765`) |
-| `--passphrase SECRET` | save the passphrase clients must present |
-| `--display-name NAME` | name shown in the desktop app's host switcher |
-| `--no-hosting` | skip LAN discovery; connect by direct IP only |
-
-`--passphrase` and `--display-name` persist to `~/.yaah/config.json` — the
-same store the desktop app's Settings writes — so they survive restarts and
-both apps see the same values. Without a passphrase the server still starts
-and is discoverable, but every remote exec request is refused (401).
-
 The server build is deliberately lean: no voice (whisper/sherpa-onnx)
 dependencies, because a remote client only forwards workspace tools to its
 host — and #339 removed the host computer-use stack entirely, for every
 host. GUI control lives inside the Windows Sandbox via windows-mcp.
-
-## Building from source
-
-```
-npm ci
-bash scripts/build_sidecar.sh   # desktop backend (PyInstaller)
-npx tauri build                 # desktop installers
-bash scripts/build_server.sh    # headless server -> dist/yaah-server
-```
 
 ## Bundled tools and licenses
 
@@ -84,9 +51,3 @@ environment variable.
 GitHub CLI is an independent project; YAAH is not affiliated with or endorsed
 by GitHub. See the [GitHub CLI license](https://github.com/cli/cli/blob/trunk/LICENSE)
 and [license-compliance notes](https://github.com/cli/cli/blob/trunk/docs/license-compliance.md).
-
-## Tests
-
-```
-python -m pytest
-```
