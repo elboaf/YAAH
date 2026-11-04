@@ -57,6 +57,60 @@ _Avoid_: transcript
 A bounded, cumulative summary of transcript messages used in place of an older prefix in future model context. It does not replace or edit transcript messages.
 _Avoid_: compacted history, replacement transcript
 
+### Retrieval
+
+**Conversation search**:
+Keyword and semantic retrieval over the conversation transcript store. The
+human searches across all workspaces from the UI; an agent searches its
+current workspace plus any configured related workspaces; sub-agents stay
+pinned to their own conversation. Results label their kind — chat text,
+tool activity, sub-agent transcripts — so humans can separate them.
+_Avoid_: RAG (acronym jargon; say what is searched); conflating the
+human reach with the agent reach
+
+**Chunk**:
+The smallest unit a retrieval index stores: one message, one section of
+a file, one issue comment — carried with the metadata needed to show
+where it came from.
+_Avoid_: message (chunks also come from sources beyond the transcript)
+
+**Embedding model**:
+A stateless text-to-vector function reached through an OpenAI-compatible
+embeddings endpoint. It holds no data; YAAH's stores hold the text and
+the returned vectors. Vectors from different models are incompatible.
+_Avoid_: saying the model "stores" or "learns" the indexed content
+
+**Vector index**:
+The semantic search index over chunks, recording which embedding model
+(name, dimensions) produced its vectors. Search degrades to keyword-only
+when the configured model doesn't match the index or no endpoint is
+configured.
+_Avoid_: assuming vectors identify their source model (they don't; the
+record does)
+
+**Index rebuild**:
+Full re-embedding of every chunk, required when the embedding model
+changes. Always user-triggered (Settings), never automatic at boot.
+_Avoid_: silent model swap; auto-rebuild on startup
+
+**Related workspaces**:
+The configured set of other workspaces whose conversations an agent's
+search may additionally see — for projects whose applications interact
+even though their codebases are separate.
+_Avoid_: global agent search (agent reach is always explicit)
+
+**Hybrid search**:
+One ranked list built from both keyword matches and vector similarity.
+Neither replaces the other: exact identifiers favor keywords, concepts
+favor vectors.
+_Avoid_: treating keyword and semantic search as competing replacements
+
+**Local model server**:
+A locally managed model-serving process run by YAAH, serving models
+named in a pluggable manifest. The embedding model is its first tenant,
+not its definition.
+_Avoid_: naming it embeddings-only (the name must outlive the feature)
+
 ### Model scoping
 
 **Model scope**:
