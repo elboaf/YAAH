@@ -96,7 +96,7 @@ describe('conversation row "…" menu (#127)', () => {
   })
 
   it('menu is presented as expanded to the toggle while open (Escape dismissal lives in the sidebar, guarded there)', () => {
-    // The Escape listener lives in the sidebar component; guard the
+    // The Escape listener now uses the useEscClose hook; guard the
     // component-level contract by asserting the menu is open to begin with
     // and that the toggle reflects expanded state (aria-expanded).
     openMenu()
