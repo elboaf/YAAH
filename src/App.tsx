@@ -5,6 +5,8 @@ import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, Image
 import { NativeMenuGate } from './nativeMenu'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
+// PROTOTYPE (issue #643) — throwaway preview layer, dev-only mount, delete with the verdict.
+import { Prototype643SurfaceDepth } from './prototype-643-surface-depth'
 
 /**
  * Recovery banner: when any API call finds the backend unreachable, poll
@@ -248,6 +250,8 @@ export default function App() {
           its wiring stay in components.tsx — restore by re-adding the mount:
           <FilesPanel /> */}
       <ChatPanel />
+      {/* PROTOTYPE (#643) dev-only floating variant switcher — delete with the verdict. */}
+      {import.meta.env.DEV && <Prototype643SurfaceDepth />}
       <PreviewModal />
       <ImageLightbox />
       <ToastStack />
