@@ -7035,39 +7035,60 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [expanded, setExpanded] = useState<string | null>(null)
   // Provider awaiting removal confirmation (its saved key dies with it).
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
-  // Voice dictation: engine choice + cloud (BYOK) credentials.
-  const [voiceEngine, setVoiceEngine] = useState<'local' | 'cloud'>('local')
+  // Voice dictation draft: engine choice + cloud (BYOK) credentials + PTT hotkey.
+  // Grouped into one object so save/load handle all voice settings atomically.
+  const [voiceDraft, setVoiceDraft] = useState<{
+    engine: 'local' | 'cloud'
+    cloud_endpoint: string
+    cloud_key: string
+    cloud_key_saved: boolean
+    cloud_model: string
+    ptt_hotkey: string
+  }>({
+    engine: 'local',
+    cloud_endpoint: '',
+    cloud_key: '',
+    cloud_key_saved: false,
+    cloud_model: '',
+    ptt_hotkey: '',
+  })
   const [voiceLocalReady, setVoiceLocalReady] = useState(false)
   const [voiceLocalModel, setVoiceLocalModel] = useState<string | null>(null)
-  const [cloudEndpoint, setCloudEndpoint] = useState('')
-  const [cloudKey, setCloudKey] = useState('')
-  const [cloudKeySaved, setCloudKeySaved] = useState(false)
-  const [cloudModel, setCloudModel] = useState('')
-  // Push-to-talk hotkey (Tauri accelerator string); captured live from the
-  // keyboard when the user clicks "record".
-  const [pttHotkeyDraft, setPttHotkeyDraft] = useState('')
   const [capturingHotkey, setCapturingHotkey] = useState(false)
-  // Read-aloud (TTS): voice + speed drafts; model download state.
-  const [ttsVoiceDraft, setTtsVoiceDraft] = useState('af_heart')
-  const [ttsSpeedDraft, setTtsSpeedDraft] = useState(1.0)
-  // #207: spoken-briefing drafts. Emissions default ON (absent key reads
-  // enabled — no migration); in-chat display defaults hidden. #295:
-  // narrator persona draft; unknown/unset reads neutral (backend enum).
-  const [sayEmissions, setSayEmissions] = useState(true)
-  const [sayInChatUi, setSayInChatUi] = useState(false)
-  const [sayPersonaUi, setSayPersonaUi] = useState('neutral')
-  // Narration engine (#205): local Kokoro or a remote OpenAI-compatible
-  // /v1/audio/speech endpoint; drafts for its credentials + Test probe.
-  const [ttsEngine, setTtsEngine] = useState<'local' | 'remote'>('local')
-  const [ttsEndpoint, setTtsEndpoint] = useState('')
-  const [ttsKey, setTtsKey] = useState('')
-  const [ttsKeySaved, setTtsKeySaved] = useState(false)
-  const [ttsModel, setTtsModel] = useState('kokoro')
-  // #443: remote dialect (openai-compatible vs. MOSS job API), language
-  // hint, and reference-clip draft for the MOSS flavor.
-  const [ttsRemoteApi, setTtsRemoteApi] = useState<'openai' | 'moss'>('openai')
-  const [ttsMossLang, setTtsMossLang] = useState('en')
-  const [ttsMossRef, setTtsMossRef] = useState('')
+  // Read-aloud (TTS) draft: voice, speed, narration engine, remote endpoint/key,
+  // spoken-briefing settings, and notification sounds. Grouped so save/load
+  // handle all read-aloud settings atomically.
+  const [ttsDraft, setTtsDraft] = useState<{
+    voice: string
+    speed: number
+    say_emissions: boolean
+    say_in_chat: boolean
+    say_persona: string
+    engine: 'local' | 'remote'
+    endpoint: string
+    key: string
+    key_saved: boolean
+    model: string
+    remote_api: 'openai' | 'moss'
+    moss_lang: string
+    moss_ref: string
+    sounds_enabled: boolean
+  }>({
+    voice: 'af_heart',
+    speed: 1.0,
+    say_emissions: true,
+    say_in_chat: false,
+    say_persona: 'neutral',
+    engine: 'local',
+    endpoint: '',
+    key: '',
+    key_saved: false,
+    model: 'kokoro',
+    remote_api: 'openai',
+    moss_lang: 'en',
+    moss_ref: '',
+    sounds_enabled: true,
+  })
   const [ttsTestState, setTtsTestState] = useState<'idle' | 'busy'>('idle')
   const [ttsTestResult, setTtsTestResult] = useState<string | null>(null)
   const [ttsTestOk, setTtsTestOk] = useState(false)
@@ -7079,7 +7100,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // What remote requests send for the model: the draft, or the first
   // discovered model while the draft is blank (#449 review - Test and
   // Save must send what the dropdown displays).
-  const effectiveModel = effectiveRemoteModel(ttsModel, remoteModelList)
+  const effectiveModel = effectiveRemoteModel(ttsDraft.model, remoteModelList)
   const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
   const [soundsEnabled, setSoundsUi] = useState(true)
@@ -7091,10 +7112,16 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Playback failures (preview or chat) surface here too — the toggle
   // tooltip is invisible when the user is inside Settings.
   const ttsUiError = useTts((s) => s.error)
-  // LAN hosting: on by default; passphrase gates remote tool execution.
-  const [remoteHost, setRemoteHost] = useState(true)
-  const [remotePass, setRemotePass] = useState('')
-  const [remoteName, setRemoteName] = useState('')
+  // LAN hosting draft: hosting enabled, passphrase, display name.
+  const [remoteDraft, setRemoteDraft] = useState<{
+    hosting_enabled: boolean
+    passphrase: string
+    display_name: string
+  }>({
+    hosting_enabled: true,
+    passphrase: '',
+    display_name: '',
+  })
   // Config load state: Save stays disabled until a load SUCCEEDED — saving
   // the empty initial copy would wipe every stored provider (the merge
   // treats an absent provider as deleted).
@@ -7174,33 +7201,41 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setUiScale(quantizeUiScale(Number(c.ui_scale) || 1.0))
           scaleSavedRef.current = quantizeUiScale(Number(c.ui_scale) || 1.0)
           const v = c.voice
-          setVoiceEngine(v?.engine === 'cloud' ? 'cloud' : 'local')
-          setCloudEndpoint(v?.cloud_endpoint ?? '')
-          setCloudKeySaved(v?.cloud_api_key === 'set')
-          setCloudModel(v?.cloud_model || '')
-          setPttHotkeyDraft(v?.ptt_hotkey ?? '')
-          setTtsVoiceDraft(v?.tts_voice || 'af_heart')
-          setTtsSpeedDraft(v?.tts_speed ?? 1.0)
-          setSayEmissions(v?.say_emissions !== false)
-          setSayInChatUi(v?.say_in_chat === true)
-          setSayPersonaUi(v?.say_persona ?? 'neutral')
-          setTtsEngine(v?.tts_engine === 'remote' ? 'remote' : 'local')
-          setTtsEndpoint(v?.tts_endpoint ?? '')
-          setTtsKeySaved(v?.tts_api_key === 'set')
-          setTtsKey('')
-          setTtsModel(v?.tts_model || 'kokoro')
-          setTtsRemoteApi(v?.tts_remote_api === 'moss' ? 'moss' : 'openai')
-          setTtsMossLang(v?.tts_moss_lang || 'en')
-          setTtsMossRef(v?.tts_moss_ref || '')
+          setVoiceDraft({
+            engine: v?.engine === 'cloud' ? 'cloud' : 'local',
+            cloud_endpoint: v?.cloud_endpoint ?? '',
+            cloud_key: '',
+            cloud_key_saved: v?.cloud_api_key === 'set',
+            cloud_model: v?.cloud_model || '',
+            ptt_hotkey: v?.ptt_hotkey ?? '',
+          })
+          setTtsDraft({
+            voice: v?.tts_voice || 'af_heart',
+            speed: v?.tts_speed ?? 1.0,
+            say_emissions: v?.say_emissions !== false,
+            say_in_chat: v?.say_in_chat === true,
+            say_persona: v?.say_persona ?? 'neutral',
+            engine: v?.tts_engine === 'remote' ? 'remote' : 'local',
+            endpoint: v?.tts_endpoint ?? '',
+            key: '',
+            key_saved: v?.tts_api_key === 'set',
+            model: v?.tts_model || 'kokoro',
+            remote_api: v?.tts_remote_api === 'moss' ? 'moss' : 'openai',
+            moss_lang: v?.tts_moss_lang || 'en',
+            moss_ref: v?.tts_moss_ref || '',
+            sounds_enabled: v?.sounds_enabled !== false,
+          })
           // The MOSS "voice" is the ref clip; keep the saved voice aligned
           // so the narration path cannot send a stale/unknown ref name.
           if (v?.tts_remote_api === 'moss') setTtsVoiceDraft(v?.tts_moss_ref || '')
           setSoundsUi(v?.sounds_enabled !== false)
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
-          setRemoteHost(c.remote?.hosting_enabled ?? true)
-          setRemotePass(c.remote?.passphrase ?? '')
-          setRemoteName(c.remote?.display_name ?? '')
+          setRemoteDraft({
+            hosting_enabled: c.remote?.hosting_enabled ?? true,
+            passphrase: c.remote?.passphrase ?? '',
+            display_name: c.remote?.display_name ?? '',
+          })
           setLoaded(true)
           setErr(null)
           return
@@ -7250,8 +7285,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // cache keeps re-renders from re-probing; failures leave the cache
   // untouched (a stale list beats no list).
   useEffect(() => {
-    if (ttsEngine !== 'remote') return
-    const endpoint = ttsEndpoint.trim()
+    if (ttsDraft.engine !== 'remote') return
+    const endpoint = ttsDraft.endpoint.trim()
     if (!endpoint) {
       setRemoteVoiceList([])
       setRemoteModelList([])
@@ -7260,7 +7295,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     let cancelled = false
     setRemoteProbing(true)
     const t = setTimeout(() => {
-      ttsVoices(endpoint, ttsKey, ttsRemoteApi)
+      ttsVoices(endpoint, ttsDraft.key, ttsDraft.remote_api)
         .then(({ voices, models }) => {
           if (!cancelled) {
             setRemoteVoiceList(voices)
@@ -7277,7 +7312,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       clearTimeout(t)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ttsEngine, ttsEndpoint, ttsKey, ttsRemoteApi])
+  }, [ttsDraft.engine, ttsDraft.endpoint, ttsDraft.key, ttsDraft.remote_api])
 
   const patchProvider = (name: string, patch: Partial<{ api_base: string; model: string; apiKeyInput: string; staticSystemPrompt: boolean }>) =>
     setProviders((ps) => ({ ...ps, [name]: { ...ps[name], ...patch } }))
@@ -7425,33 +7460,33 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         model_steps: outSteps,
         ui_scale: uiScale,
         voice: {
-          engine: voiceEngine,
-          cloud_endpoint: cloudEndpoint,
+          engine: voiceDraft.engine,
+          cloud_endpoint: voiceDraft.cloud_endpoint,
           // Typed key replaces; empty/kept field is dropped server-side so
           // the saved key survives.
-          ...(cloudKey ? { cloud_api_key: cloudKey } : {}),
-          cloud_model: cloudModel,
-          ptt_hotkey: pttHotkeyDraft,
-          tts_voice: ttsVoiceDraft,
-          tts_speed: ttsSpeedDraft,
-          say_emissions: sayEmissions,
-          say_in_chat: sayInChatUi,
-          say_persona: sayPersonaUi,
-          tts_engine: ttsEngine,
-          tts_endpoint: ttsEndpoint,
+          ...(voiceDraft.cloud_key ? { cloud_api_key: voiceDraft.cloud_key } : {}),
+          cloud_model: voiceDraft.cloud_model,
+          ptt_hotkey: voiceDraft.ptt_hotkey,
+          tts_voice: ttsDraft.voice,
+          tts_speed: ttsDraft.speed,
+          say_emissions: ttsDraft.say_emissions,
+          say_in_chat: ttsDraft.say_in_chat,
+          say_persona: ttsDraft.say_persona,
+          tts_engine: ttsDraft.engine,
+          tts_endpoint: ttsDraft.endpoint,
           // Typed key replaces; empty/kept field is dropped server-side so
           // the saved key survives (same masking dance as the dictation key).
-          ...(ttsKey ? { tts_api_key: ttsKey } : {}),
+          ...(ttsDraft.key ? { tts_api_key: ttsDraft.key } : {}),
           tts_model: effectiveModel,
-          tts_remote_api: ttsRemoteApi,
-          tts_moss_lang: ttsMossLang,
-          tts_moss_ref: ttsMossRef,
-          sounds_enabled: soundsEnabled,
+          tts_remote_api: ttsDraft.remote_api,
+          tts_moss_lang: ttsDraft.moss_lang,
+          tts_moss_ref: ttsDraft.moss_ref,
+          sounds_enabled: ttsDraft.sounds_enabled,
         },
         remote: {
-          hosting_enabled: remoteHost,
-          passphrase: remotePass,
-          display_name: remoteName,
+          hosting_enabled: remoteDraft.hosting_enabled,
+          passphrase: remoteDraft.passphrase,
+          display_name: remoteDraft.display_name,
         },
         image_generation: {
           provider: 'sdcpp',
@@ -7469,7 +7504,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       }
       // Hot-swap the live registration in the Composer; it reports failure
       // (combo taken by another app) through the same reject toast system.
-      window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: pttHotkeyDraft }))
+      window.dispatchEvent(new CustomEvent('ptt-hotkey-changed', { detail: voiceDraft.ptt_hotkey }))
       // Quantized (issue #133): the applied zoom must never carry subpixel
       // noise — App.tsx quantizes again on its side, this keeps the value
       // the settings UI round-trips clean at the source.
@@ -7813,19 +7848,19 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     key={engine}
                     type="button"
                     role="radio"
-                    aria-checked={voiceEngine === engine}
+                    aria-checked={voiceDraft.engine === engine}
                     className={`flex-1 rounded   px-2 py-1.5 font-mono text-xs ${
-                      voiceEngine === engine
+                      voiceDraft.engine === engine
                         ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
                         : ' text-zinc-400 hover:bg-zinc-800'
                     }`}
-                    onClick={() => setVoiceEngine(engine)}
+                    onClick={() => setVoiceDraft({ ...voiceDraft, engine })}
                   >
                     {engine === 'local' ? 'local whisper' : 'cloud (BYOK)'}
                   </button>
                 ))}
               </div>
-              {voiceEngine === 'local' ? (
+              {voiceDraft.engine === 'local' ? (
                 <p className="text-[10px] leading-relaxed text-zinc-600">
                   {voiceLocalReady ? (
                     <>
@@ -7844,8 +7879,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <div className="space-y-1.5">
                   <input
                     className={`${settingsInputCls} w-full`}
-                    value={cloudEndpoint}
-                    onChange={(e) => setCloudEndpoint(e.target.value)}
+                    value={voiceDraft.cloud_endpoint}
+                    onChange={(e) => setVoiceDraft({ ...voiceDraft, cloud_endpoint: e.target.value })}
                     placeholder="https://api.openai.com/v1  or  http://192.168.1.10:8080/inference"
                     aria-label="Cloud transcription endpoint"
                   />
@@ -7853,15 +7888,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     <input
                       type="password"
                       className={`${settingsInputCls} min-w-0 flex-1`}
-                      value={cloudKey}
-                      onChange={(e) => setCloudKey(e.target.value)}
-                      placeholder={cloudKeySaved ? 'key saved (optional)' : 'API key (optional)'}
+                      value={voiceDraft.cloud_key}
+                      onChange={(e) => setVoiceDraft({ ...voiceDraft, cloud_key: e.target.value })}
+                      placeholder={voiceDraft.cloud_key_saved ? 'key saved (optional)' : 'API key (optional)'}
                       aria-label="Cloud transcription API key"
                     />
                     <input
                       className={`${settingsInputCls} w-28 shrink-0`}
-                      value={cloudModel}
-                      onChange={(e) => setCloudModel(e.target.value)}
+                      value={voiceDraft.cloud_model}
+                      onChange={(e) => setVoiceDraft({ ...voiceDraft, cloud_model: e.target.value })}
                       placeholder="model (optional)"
                       aria-label="Cloud transcription model"
                     />
@@ -7887,7 +7922,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     onClick={() => setCapturingHotkey(true)}
                     aria-label="Record push-to-talk hotkey"
                   >
-                    {capturingHotkey ? 'press keys…' : pttHotkeyDraft || 'set hotkey'}
+                    {capturingHotkey ? 'press keys…' : voiceDraft.ptt_hotkey || 'set hotkey'}
                   </button>
                   <button
                     type="button"
@@ -7911,10 +7946,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <input
                   type="checkbox"
                   className="accent-blue-600"
-                  checked={soundsEnabled}
+                  checked={ttsDraft.sounds_enabled}
                   onChange={(e) => {
                     setSoundsEnabled(e.target.checked)
-                    setSoundsUi(e.target.checked)
+                    setTtsDraft({ ...ttsDraft, sounds_enabled: e.target.checked })
                   }}
                 />
                 Chime when a run finishes and when a question needs an answer
@@ -7927,12 +7962,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </SettingsCard>
 
             <SaySettingsCard
-              sayEmissions={sayEmissions}
-              sayInChat={sayInChatUi}
-              sayPersona={sayPersonaUi}
-              onSayEmissions={setSayEmissions}
-              onSayInChat={setSayInChatUi}
-              onSayPersona={setSayPersonaUi}
+              sayEmissions={ttsDraft.say_emissions}
+              sayInChat={ttsDraft.say_in_chat}
+              sayPersona={ttsDraft.say_persona}
+              onSayEmissions={(v) => setTtsDraft({ ...ttsDraft, say_emissions: v })}
+              onSayInChat={(v) => setTtsDraft({ ...ttsDraft, say_in_chat: v })}
+              onSayPersona={(v) => setTtsDraft({ ...ttsDraft, say_persona: v })}
             />
 
             <SettingsCard title="Read aloud" className="col-span-2">
@@ -7942,19 +7977,19 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     key={engine}
                     type="button"
                     role="radio"
-                    aria-checked={ttsEngine === engine}
+                    aria-checked={ttsDraft.engine === engine}
                     className={`flex-1 rounded   px-2 py-1.5 font-mono text-xs ${
-                      ttsEngine === engine
+                      ttsDraft.engine === engine
                         ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
                         : ' text-zinc-400 hover:bg-zinc-800'
                     }`}
-                    onClick={() => setTtsEngine(engine)}
+                    onClick={() => setTtsDraft({ ...ttsDraft, engine })}
                   >
                     {engine === 'local' ? 'local (on-device)' : 'remote (OpenAI-compatible)'}
                   </button>
                 ))}
               </div>
-              {ttsEngine === 'remote' && (
+              {ttsDraft.engine === 'remote' && (
                 <div className="mb-2.5 space-y-1.5">
                   <div className="flex gap-1.5" role="radiogroup" aria-label="Remote narration dialect">
                     {(['openai', 'moss'] as const).map((api) => (
@@ -7962,13 +7997,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         key={api}
                         type="button"
                         role="radio"
-                        aria-checked={ttsRemoteApi === api}
+                        aria-checked={ttsDraft.remote_api === api}
                         className={`flex-1 rounded px-2 py-1 font-mono text-xs ${
-                          ttsRemoteApi === api
+                          ttsDraft.remote_api === api
                             ? 'border-blue-600 bg-blue-600/15 text-zinc-100'
                             : 'text-zinc-400 hover:bg-zinc-800'
                         }`}
-                        onClick={() => setTtsRemoteApi(api)}
+                        onClick={() => setTtsDraft({ ...ttsDraft, remote_api: api })}
                       >
                         {api === 'openai' ? 'OpenAI-compatible' : 'MOSS'}
                       </button>
@@ -7976,35 +8011,35 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   </div>
                   <input
                     className={`${settingsInputCls} w-full`}
-                    value={ttsEndpoint}
-                    onChange={(e) => setTtsEndpoint(e.target.value)}
-                    placeholder={ttsRemoteApi === 'moss' ? 'http://herp.local' : 'http://herp.local:8081  or  https://api.openai.com'}
+                    value={ttsDraft.endpoint}
+                    onChange={(e) => setTtsDraft({ ...ttsDraft, endpoint: e.target.value })}
+                    placeholder={ttsDraft.remote_api === 'moss' ? 'http://herp.local' : 'http://herp.local:8081  or  https://api.openai.com'}
                     aria-label="Remote narration endpoint"
                   />
-                  {ttsRemoteApi === 'openai' && (
+                  {ttsDraft.remote_api === 'openai' && (
                     <div className="flex gap-1.5">
                       <input
                         type="password"
                         className={`${settingsInputCls} min-w-0 flex-1`}
-                        value={ttsKey}
-                        onChange={(e) => setTtsKey(e.target.value)}
-                        placeholder={ttsKeySaved ? 'key saved (optional)' : 'API key (optional)'}
+                        value={ttsDraft.key}
+                        onChange={(e) => setTtsDraft({ ...ttsDraft, key: e.target.value })}
+                        placeholder={ttsDraft.key_saved ? 'key saved (optional)' : 'API key (optional)'}
                         aria-label="Remote narration API key"
                       />
                       <RemoteModelField
-                        modelDraft={ttsModel}
+                        modelDraft={ttsDraft.model}
                         models={remoteModelList}
                         probing={remoteProbing}
-                        onChange={setTtsModel}
+                        onChange={(v) => setTtsDraft({ ...ttsDraft, model: v })}
                       />
                     </div>
                   )}
-                  {ttsRemoteApi === 'moss' && (
+                  {ttsDraft.remote_api === 'moss' && (
                     <div className="flex gap-1.5">
                       <select
                         className={`${settingsInputCls} w-full`}
-                        value={ttsMossLang}
-                        onChange={(e) => setTtsMossLang(e.target.value)}
+                        value={ttsDraft.moss_lang}
+                        onChange={(e) => setTtsDraft({ ...ttsDraft, moss_lang: e.target.value })}
                         aria-label="MOSS language"
                       >
                         {[
@@ -8034,14 +8069,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     </div>
                   )}
                   <p className="text-[10px] leading-relaxed text-zinc-600">
-                    {ttsRemoteApi === 'moss'
+                    {ttsDraft.remote_api === 'moss'
                       ? 'MOSS job API — the base URL is used as-is, with /api/moss paths appended. The voice picker lists reference clips from the server; an empty value is reference-less.'
                       : 'Standard OpenAI-compatible /v1/audio/speech endpoint — a base URL is fine (the path is appended). Sentence chunks are sent to that server; the key goes there and nowhere else. Voices (/voices) and models (/v1/models) are probed from the drafts above; CPU-served models can take minutes per chunk, so the first test may be slow.'}
                   </p>
 
                 </div>
               )}
-              {!ttsModelReady && ttsEngine === 'local' ? (
+              {!ttsModelReady && ttsDraft.engine === 'local' ? (
                 <div>
                   <p className="mb-1.5 text-[10px] leading-relaxed text-zinc-600">
                     The agent can read its responses aloud with an on-device voice (Kokoro —
@@ -8096,11 +8131,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               ) : (
                 <div className="space-y-1.5">
                   <div className="flex gap-1.5">
-                    {ttsEngine === 'local' ? (
+                    {ttsDraft.engine === 'local' ? (
                     <select
                       className={`${settingsInputCls} w-full`}
-                      value={ttsVoiceDraft}
-                      onChange={(e) => setTtsVoiceDraft(e.target.value)}
+                      value={ttsDraft.voice}
+                      onChange={(e) => setTtsDraft({ ...ttsDraft, voice: e.target.value })}
                       aria-label="Read-aloud voice"
                     >
                       <optgroup label="American English — female">
@@ -8125,7 +8160,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       </optgroup>
                     </select>
                     ) : null}
-                    {ttsEngine === 'remote' && ttsRemoteApi === 'openai' && (
+                    {ttsDraft.engine === 'remote' && ttsDraft.remote_api === 'openai' && (
                       <RemoteVoiceField
                         voiceDraft={ttsVoiceDraft}
                         voices={remoteVoiceList}
@@ -8138,7 +8173,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       className="shrink-0 rounded   px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
                       title="Preview this voice"
                       aria-label="Preview voice"
-                      onClick={() => previewVoice(ttsVoiceDraft, ttsSpeedDraft)}
+                      onClick={() => previewVoice(ttsDraft.voice, ttsDraft.speed)}
                     >
                       ▶
                     </button>
@@ -8150,13 +8185,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       min="0.5"
                       max="2"
                       step="0.05"
-                      value={ttsSpeedDraft}
+                      value={ttsDraft.speed}
                       onChange={(e) => setTtsSpeedDraft(Number(e.target.value))}
                       className="flex-1 accent-blue-500"
                       aria-label="Speaking rate"
                     />
                     <span className="w-10 shrink-0 text-right font-mono text-[10px] text-zinc-400">
-                      {ttsSpeedDraft.toFixed(2)}×
+                      {ttsDraft.speed.toFixed(2)}×
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
@@ -8170,9 +8205,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         setTtsTestOk(false)
                         try {
                           await ttsTest(
-                            ttsVoiceDraft,
-                            ttsSpeedDraft,
-                            ttsEngine,
+                            ttsDraft.voice,
+                            ttsDraft.speed,
+                            ttsDraft.engine,
                             effectiveModel,
                           )
                           setTtsTestResult('ok — synthesis worked')
@@ -8202,7 +8237,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   <p className="text-[10px] leading-relaxed text-zinc-600">
                     Reads each finished response aloud (prose only — code is skipped). Toggle
                     anytime with the speaker button under the chat.{' '}
-                    {ttsEngine === 'local'
+                    {ttsDraft.engine === 'local'
                       ? 'The voice model stays on this machine.'
                       : 'A failed chunk is skipped — the text stays visible.'}
                   </p>
@@ -8231,8 +8266,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   <input
                     type="checkbox"
                     className="accent-blue-600"
-                    checked={remoteHost}
-                    onChange={(e) => setRemoteHost(e.target.checked)}
+                    checked={remoteDraft.hosting_enabled}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, hosting_enabled: e.target.checked })}
                   />
                   Let other YAAH instances on this network use this machine
                 </label>
@@ -8240,15 +8275,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   <input
                     className={`${settingsInputCls} min-w-0 flex-1`}
                     type="password"
-                    value={remotePass}
-                    onChange={(e) => setRemotePass(e.target.value)}
+                    value={remoteDraft.passphrase}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, passphrase: e.target.value })}
                     placeholder="passphrase (required to accept remote tools)"
                     aria-label="Hosting passphrase"
                   />
                   <input
                     className={`${settingsInputCls} w-32 shrink-0`}
-                    value={remoteName}
-                    onChange={(e) => setRemoteName(e.target.value)}
+                    value={remoteDraft.display_name}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, display_name: e.target.value })}
                     placeholder="display name (optional)"
                     aria-label="Host display name"
                   />
