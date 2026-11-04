@@ -121,17 +121,13 @@ async def remote_auth_guard(request, call_next):
     must present the host's passphrase. A host with no passphrase set
     refuses all remote access, so binding 0.0.0.0 with hosting on exposes
     nothing unauthenticated."""
-    import ipaddress
 
     from fastapi.responses import JSONResponse
 
     from backend.agent.config import load_config
 
     client_host = (request.client.host if request.client else "") or ""
-    try:
-        is_local = not client_host or ipaddress.ip_address(client_host).is_loopback
-    except ValueError:
-        is_local = True  # non-IP client (ASGI test transport) = local tooling
+    is_local = _is_loopback_client(client_host)
     marked = bool(request.headers.get("x-yaah-remote"))
     # The handshake and health probes stay open from anywhere: they carry no
     # secrets and are how a client learns the protocol/instance id before it
