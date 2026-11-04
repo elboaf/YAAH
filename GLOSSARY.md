@@ -43,6 +43,26 @@ never read as data (a missing repo is data; unreachability is not).
 _Avoid_: silent absence; conflating a non-repo workspace with an
 unreachable host
 
+### Sidebar
+
+**Pinned chat**:
+A chat the user parked mid-job and means to return to. Pinning reorders
+only: the chat floats above unpinned chats but below agent chats within
+its workspace group. The user sets and clears pins freely; the agent
+living in a chat may pin that chat, and may unpin it only after the
+user confirms the chat's actual job is plainly complete — a finished
+run is not a finished job.
+_Avoid_: pinned scope (per-chat model/effort selection); the agent-chat
+precedence (that's chat_type, not a pin); branch pin (removed with
+ADR-0010); star (the independent favorite marker)
+
+**Starred chat**:
+A user-only favorite marker on a chat. A star changes nothing about
+ordering, visibility, or behavior — it marks the row so the user can
+find it again. Agents never set or clear stars; the user alone
+controls them.
+_Avoid_: using star as an ordering signal; agent-written stars
+
 ### Conversation history
 
 **Conversation transcript**:
