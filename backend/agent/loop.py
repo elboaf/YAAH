@@ -52,6 +52,7 @@ from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.agent.shell import resolve_git_bash, windows_bash_note
 from backend.db.database import (
     RemoteProtocolError,
+    add_conversation_cost,
     add_message,
     assert_no_active_remote_edit_lease,
     get_conversation,
@@ -2292,6 +2293,11 @@ async def _run_agent_claimed(
             # chat() call: with stream=True the HTTP request only fires when
             # iteration starts, so a ModelError surfaces at the first chunk.
             state: dict = {"content": "", "tool_calls": None, "finish": None}
+            # Turn-level cost accumulators: additive across model calls
+            # in this turn (#627). Unlike prompt_tokens (last-call-wins),
+            # cost and completion tokens sum across calls.
+            turn_cost = 0.0
+            turn_completion_tokens = 0
 
             async def _model_step() -> AsyncIterator[str]:
                 """One chat call, consumed to completion, yielding UI event
@@ -2557,15 +2563,28 @@ async def _run_agent_claimed(
                         conversation_id, int(usage["prompt_tokens"]), _model_id
                     )
                 )
+
+                # Accumulate billed cost and completion tokens for this turn
+                # (#627). cost is per-call authoritative from OpenRouter;
+                # other providers leave it None.
+                _call_cost = usage.get("cost")
+                if _call_cost is not None:
+                    turn_cost += float(_call_cost)
+                _call_completion = usage.get("completion_tokens", 0)
+                if _call_completion is not None:
+                    turn_completion_tokens += int(_call_completion)
+
                 # Live context-strip tick: emit after EVERY model call, not
                 # only the turn's last one — the status strip's bar must
                 # climb while the run is still in progress. The frontend
                 # treats this as authoritative for the running conversation.
+                # Include the turn's accumulated cost so far (#627).
                 yield _ndjson(
                     {
                         "type": "usage",
                         "usage_tokens": int(usage["prompt_tokens"]),
                         "model": _model_id,
+                        "turn_cost": turn_cost,
                     }
                 )
 
@@ -2684,6 +2703,18 @@ async def _run_agent_claimed(
                     yield _fev
                 # #388: bump updated_at once per run (not per message) so the
                 # sidebar re-sorts to the top when the turn completes.
+                # Issue #627: persist the turn's accumulated billed cost and
+                # completion tokens. cost may be None (non-OpenRouter provider).
+                # Only persist if something actually accumulated — don't write
+                # zeros for providers that don't report.
+                if turn_cost > 0 or turn_completion_tokens > 0:
+                    try:
+                        await add_conversation_cost(
+                            conversation_id, turn_cost if turn_cost > 0 else None, turn_completion_tokens
+                        )
+                    except Exception:  # noqa: BLE001
+                        # Best-effort: cost tracking shouldn't fail the turn
+                        pass
                 try:
                     await touch_updated_at(conversation_id)
                 except Exception:  # noqa: BLE001
