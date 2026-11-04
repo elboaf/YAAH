@@ -1567,3 +1567,61 @@ async def test_connect_refuses_wrong_passphrase(monkeypatch):
     assert "wrong passphrase" in res.json()["detail"]
     assert remote_mod.get_remote() is None
     _FakeAsyncClient.verify_status = 200
+
+
+@pytest.mark.parametrize(
+    "status_code,body,expect_detail",
+    [
+        (200, {"ok": True}, None),
+        (404, {"detail": "not found"}, "not found"),
+        (500, {"detail": "internal"}, "internal"),
+    ],
+)
+async def test_proxy_or_503_unwraps(status_code, body, expect_detail):
+    """_proxy_or_503 unwraps successful responses and raises for host errors."""
+    import httpx
+    from backend.main import _proxy_or_503, HTTPException
+
+    class FakeSession:
+        async def proxy(self, method, path, **kw):
+            return httpx.Response(status_code, json=body)
+
+    if expect_detail is None:
+        result = await _proxy_or_503(
+            FakeSession(), "GET", "/test", detail="failure", json_body={"x": 1}
+        )
+        assert result == body
+    else:
+        with pytest.raises(HTTPException) as exc_info:
+            await _proxy_or_503(FakeSession(), "GET", "/test", detail="failure")
+        assert exc_info.value.detail == expect_detail
+
+
+async def test_proxy_or_503_remaps_httpx_errors():
+    """_proxy_or_503 converts httpx transport errors to 503."""
+    import httpx
+    from backend.main import _proxy_or_503, HTTPException
+
+    class FakeSession:
+        async def proxy(self, method, path, **kw):
+            raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _proxy_or_503(FakeSession(), "GET", "/test", detail="remote unavailable")
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "remote unavailable"
+
+
+async def test_proxy_or_503_passes_httpx_errors():
+    """_proxy_or_503 lets HTTPException pass through unchanged."""
+    import httpx
+    from backend.main import _proxy_or_503, HTTPException
+
+    class FakeSession:
+        async def proxy(self, method, path, **kw):
+            raise HTTPException(status_code=409, detail="lease held")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _proxy_or_503(FakeSession(), "GET", "/test", detail="remote unavailable")
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "lease held"
