@@ -7184,7 +7184,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           })
           // The MOSS "voice" is the ref clip; keep the saved voice aligned
           // so the narration path cannot send a stale/unknown ref name.
-          if (v?.tts_remote_api === 'moss') setTtsVoiceDraft(v?.tts_moss_ref || '')
+          if (v?.tts_remote_api === 'moss') setTtsDraft((d) => ({ ...d, voice: v?.tts_moss_ref || '' }))
           setSoundsUi(v?.sounds_enabled !== false)
           // Passphrase is stored plaintext by design (like provider keys),
           // so Settings can show and edit it directly.
@@ -7230,7 +7230,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         setTtsModelReady(s.model_available)
         setTtsDownloading(s.downloading)
         setKokoroShaping(s.kokoro !== false)
-        if (s.tts_voice) setTtsVoiceDraft(s.tts_voice)
+        if (s.tts_voice) setTtsDraft((d) => ({ ...d, voice: s.tts_voice }))
       })
       .catch(() => {})
   }, [])
@@ -7346,7 +7346,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       else if (/^[`\-=[\];'",./\\]$/.test(key)) main = key.toUpperCase()
       if (!main) return // unrepresentable key — wait for another
       parts.push(main)
-      setPttHotkeyDraft(parts.join('+'))
+      setVoiceDraft((d) => ({ ...d, ptt_hotkey: parts.join('+') }))
       setCapturingHotkey(false)
     }
     window.addEventListener('keydown', onKey, true)
@@ -7882,7 +7882,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   <button
                     type="button"
                     className="rounded   px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800"
-                    onClick={() => setPttHotkeyDraft('')}
+                    onClick={() => setVoiceDraft((d) => ({ ...d, ptt_hotkey: '' }))}
                     aria-label="Disable push-to-talk hotkey"
                   >
                     off
@@ -8013,12 +8013,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                         ))}
                       </select>
                       <RemoteVoiceField
-                        voiceDraft={ttsMossRef}
+                        voiceDraft={ttsDraft.moss_ref}
                         voices={remoteVoiceList}
                         probing={remoteProbing}
                         onChange={(v) => {
-                          setTtsMossRef(v)
-                          setTtsVoiceDraft(v)
+                          setTtsDraft((d) => ({ ...d, moss_ref: v }))
+                          setTtsDraft((d) => ({ ...d, voice: v }))
                         }}
                       />
                     </div>
@@ -8117,10 +8117,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                     ) : null}
                     {ttsDraft.engine === 'remote' && ttsDraft.remote_api === 'openai' && (
                       <RemoteVoiceField
-                        voiceDraft={ttsVoiceDraft}
+                        voiceDraft={ttsDraft.voice}
                         voices={remoteVoiceList}
                         probing={remoteProbing}
-                        onChange={setTtsVoiceDraft}
+                        onChange={(v) => setTtsDraft((d) => ({ ...d, voice: v }))}
                       />
                     )}
                     <button
@@ -8141,7 +8141,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                       max="2"
                       step="0.05"
                       value={ttsDraft.speed}
-                      onChange={(e) => setTtsSpeedDraft(Number(e.target.value))}
+                      onChange={(e) => setTtsDraft((d) => ({ ...d, speed: Number(e.target.value) }))}
                       className="flex-1 accent-blue-500"
                       aria-label="Speaking rate"
                     />
