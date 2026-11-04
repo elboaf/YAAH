@@ -1,3 +1,4 @@
+import { useEscClose } from './useEscClose'
 import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { useVoiceAnswer } from "./use-voice-answer"
 import {
@@ -2086,15 +2087,7 @@ export function ImageLightbox() {
   }, [zoom])
 
   // Esc closes, matching PreviewModal and the dialog shells.
-  useEffect(() => {
-    if (!lightboxSrc) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setLightboxSrc(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [lightboxSrc, setLightboxSrc])
-
+  useEscClose(!!lightboxSrc, () => setLightboxSrc(null))
   if (!lightboxSrc) return null
   const src = imageSrc(lightboxSrc)
   const zoomed = zoom > 0
@@ -2206,15 +2199,7 @@ export function ImageLightbox() {
 /** Shared modal chrome: scrim, Esc, backdrop click. All in-app dialogs
  *  build on this so Esc/backdrop behavior matches PreviewModal. */
 function DialogShell({ children, onClose, panelClassName, panelRole, panelLabel }: { children: React.ReactNode; onClose: () => void; panelClassName?: string; panelRole?: 'dialog' | 'alertdialog'; panelLabel?: string }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-  // Focus trap: Tab cycles inside the panel so keyboard focus can't wander
-  // to controls hidden under the scrim.
+  useEscClose(true, onClose)
   const trapRef = useRef<HTMLDivElement | null>(null)
   const trapTab = (e: React.KeyboardEvent) => {
     if (e.key !== 'Tab' || !trapRef.current) return
@@ -3435,15 +3420,7 @@ export function ConversationList({
 
   // Esc closes an open row menu — the app-wide dialog contract (dialogs,
   // settings, preview all dismiss on Escape; the row menu is no exception).
-  useEffect(() => {
-    if (menuOpenId === null) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMenuOpenId(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [menuOpenId])
-
+  useEscClose(menuOpenId !== null, () => setMenuOpenId(null))
   // Conversations are local-owned even when their selected workspace belongs
   // to a remote. Keep the transcript under that device while preserving the
   // local conversation ID and local read/write APIs.
@@ -9404,15 +9381,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   }, [])
   // Review: the menu does not take focus when it opens, so an Escape hit
   // anywhere must close it (a global keydown listener, removed on close).
-  useEffect(() => {
-    if (searchMenu === null) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setSearchMenu(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [searchMenu !== null])
-  // Review: keep the at-cursor menu inside the viewport when opened near an
+  useEscClose(searchMenu !== null, () => setSearchMenu(null))
   // edge — clamp against the fixed menu size (w-44 = 11rem = 176px) and a
   // small measured height.
   const MENU_MAX_W = 176
