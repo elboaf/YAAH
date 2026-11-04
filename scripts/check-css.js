@@ -9,7 +9,10 @@
 // mode into a hard build failure instead.
 //
 // It asserts on utilities from every layer that silently vanished that day:
-//   - .bg-zinc-900  : theme-dependent color utility (theme layer compiled)
+//   - .bg-zinc-800  : theme-dependent color utility (theme layer compiled)
+//   - #252525       : the RETUNED zinc-800 surface value (#643 full migration,
+//                     Terminal-as-Accent). If the theme compiles but the palette
+//                     regressed to raw zinc, this catches it.
 //   - .flex {       : plain structural utility (utility layer present at all)
 //   - JetBrains Mono: theme.fontFamily override from tailwind.config.js
 // If a redesign genuinely removes one of these, update the list here
@@ -33,7 +36,8 @@ try {
 
 // Each canary: [needle, what its absence means]
 const canaries = [
-  ['.bg-zinc-900', 'theme-dependent color utility missing -- the Tailwind theme layer did not compile'],
+  ['.bg-zinc-800', 'theme-dependent color utility missing -- the Tailwind theme layer did not compile'],
+  ['#252525', 'retuned Terminal-as-Accent surface value missing -- the zinc ladder regressed to raw zinc (#643)'],
   ['.flex{', 'basic structural utilities missing -- the Tailwind utility layer did not compile'],
   ['JetBrains Mono', 'font-family theme override missing -- fonts will fall back to browser defaults'],
 ]

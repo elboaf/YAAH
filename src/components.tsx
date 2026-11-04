@@ -170,7 +170,7 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
                 ? 'bg-emerald-950/60 text-emerald-300'
                 : l.kind === 'del'
                   ? 'bg-red-950/60 text-red-300'
-                  : 'text-zinc-400'
+                  : 'text-zinc-400 terminal-text'
             }
           >
             <span className="select-none opacity-60">{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}</span>
@@ -451,7 +451,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
         </p>
       )}
       {commandLike && (
-        <pre className="mb-2 overflow-y-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] text-zinc-300">
+        <pre className="mb-2 overflow-y-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] terminal-text">
           {String(approval.args?.command ?? '')}
         </pre>
       )}
@@ -658,7 +658,7 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
         done
-            ? 'bg-zinc-800/70 text-zinc-400'
+            ? 'bg-zinc-950/70 terminal-text'
             : 'bg-zinc-700/60 terminal-text'
       }`}
     >
@@ -753,7 +753,7 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
     <div
       ref={wrapRef}
       data-agent-telemetry=""
-      className={`overflow-hidden ${compact ? 'mt-1 rounded bg-zinc-950/50 px-1.5 py-0.5' : ''}`}
+      className={`overflow-hidden terminal-text ${compact ? 'mt-1 rounded bg-zinc-950/50 px-1.5 py-0.5' : ''}`}
       style={{
         maskImage:
           'linear-gradient(to right, transparent 0%, black 14%, black 100%)',
@@ -763,7 +763,7 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
     >
       <span
         ref={tapeRef}
-        className="block whitespace-pre font-mono text-[10px] leading-4 text-zinc-400"
+        className="block whitespace-pre font-mono text-[10px] leading-4 terminal-text"
         style={{ transform: `translateX(${offset}px)` }}
       >
         {visibleTape}
@@ -928,7 +928,7 @@ function TraceLine({ calls }: { calls: ToolCall[] }) {
   return (
     <div className="my-1">
       <button
-        className="flex max-w-full items-center gap-2 font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
+        className="flex max-w-full items-center gap-2 font-mono text-[11px] terminal-text hover:text-zinc-300"
         onClick={() => setOpen((o) => !o)}
       >
         <span className="text-zinc-600">{open ? '▾' : '▸'}</span>
@@ -1080,9 +1080,9 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
   }
 
   return (
-    <div className="font-mono text-[11px]">
+    <div className="my-1 font-mono text-[11px]">
       <button
-        className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-zinc-800/60"
+        className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left terminal-text hover:bg-zinc-800/60"
         onClick={() => setOpen((o) => !o)}
       >
         <ToolChip tc={tc} />
@@ -1457,10 +1457,10 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
     return (
       <div className="flex justify-end">
         <div
-          className={`max-w-[85%] rounded   px-3 py-2 text-sm ${
+          className={`max-w-[85%] rounded-lg border px-3 py-2 text-sm ${
             msg.queued
-              ? 'border-dashed bg-zinc-800/60 text-zinc-100'
-              : ' bg-zinc-800/60 text-zinc-100'
+              ? 'border-dashed border-zinc-600 bg-zinc-800/60 text-zinc-100'
+              : ' border-blue-500/45 bg-[rgba(74,144,217,0.08)] text-[#e6eef7]'
           }`}
         >
           {msg.queued && (
@@ -1672,8 +1672,11 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
   }
 
   return (
-    <div className="border-l-2 pl-3">
-      <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-600">
+    <div
+      data-agent-card=""
+      className="rounded-lg border border-zinc-700 bg-zinc-800 p-3"
+    >
+      <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-500">
         agent
         {/* Stop control on the message currently being read aloud. */}
         <MessageStopButton msgId={msg.id} />
@@ -1732,7 +1735,7 @@ function PlanningFold({ msg, body }: { msg: ChatMessage; body: ReactNode }) {
   const [open, setOpen] = useState(false)
   const n = msg.toolCalls?.length ?? 0
   return (
-    <div className="border-l-2 border-sky-800/50 pl-3">
+    <div className="rounded-lg border border-sky-800/50 bg-zinc-800 p-3">
       <button
         className="flex w-full items-center gap-2 py-0.5 text-left font-mono text-[10px] uppercase tracking-widest text-sky-400 hover:text-sky-300"
         onClick={() => setOpen((o) => !o)}
@@ -1787,7 +1790,7 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
         <div className="  border-orange-800/40 px-2.5 py-2">
           <AskUserTrace tc={tc} />
           {after.length > 0 && (
-            <p className="mt-1.5 truncate font-mono text-[11px] text-zinc-500">
+            <p className="mt-1.5 truncate font-mono text-[11px] terminal-text">
               <span className="mr-1.5 text-zinc-600">→ did next:</span>
               <CallNameCounts calls={after} />
             </p>
@@ -4312,7 +4315,7 @@ export function Sidebar() {
 
   return (
     <>
-      <aside className="flex w-64 min-w-[220px] flex-col   bg-zinc-900 p-2 text-sm">
+      <aside className="flex w-64 min-w-[220px] flex-col   bg-zinc-900 p-2 text-sm border-r border-zinc-700">
         <ConversationList addingDevice={addingDevice} setAddingDevice={setAddingDevice} />
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}
@@ -11358,10 +11361,11 @@ export function Composer() {
         </div>
       )}
       <div
-        className={`rounded   bg-zinc-800/50 ${
+        data-composer=""
+        className={`rounded-lg border bg-zinc-800/50 transition-colors ${
           dragOver
-            ? 'border-dashed border-blue-500'
-            : ' focus-within:border-blue-500'
+            ? 'border-blue-500 border-dashed'
+            : ' border-zinc-700 focus-within:border-blue-500'
         }`}
       >
         {/* Staged content lives inside the card: everything the message is
