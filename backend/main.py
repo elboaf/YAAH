@@ -380,7 +380,6 @@ async def api_reorder_workspaces(body: ReorderWorkspaces):
 @app.post("/api/workspaces")
 async def api_add_workspace(body: NewWorkspace):
     """Register a folder on its explicit owner, or locally for local paths."""
-    import os
 
     host = _workspace_host(body.path, body.owner_id)
     if host is None:
@@ -1172,7 +1171,6 @@ async def api_save_attachment(body: NewAttachment):
     workspace-sandboxed read_file tool can open it on demand. Proxied to
     the host while a remote session is active (the file lands in the
     host's workspace, where its read_file will look)."""
-    import os
 
     host = _workspace_host(body.workspace)
     if host is not None:
@@ -2534,7 +2532,6 @@ async def api_transcribe(request: Request):
     from backend.agent import transcribe
 
     import asyncio
-    import os
 
     pcm = await request.body()
     if len(pcm) > MAX_AUDIO_BYTES:
@@ -2813,8 +2810,6 @@ async def api_tts_download():
     ({"stage": "download"|"extract"|"done"|"error", ...}). One download at
     a time — a second concurrent request is refused with 409."""
     import asyncio
-    import json
-
     from backend.agent import speak
     from fastapi.responses import StreamingResponse
 
@@ -3111,7 +3106,6 @@ def _save_remote_device_profiles(profiles: list[dict]) -> None:
     """Save device profiles including passphrases. On Unix, chmod the config
     to owner-only (0600) since it now contains secrets."""
     from backend.agent.config import save_config, CONFIG_PATH
-    import os
     import stat
 
     save_config({"remote_devices": profiles})
@@ -3521,7 +3515,6 @@ async def api_remove_remote_device(host_id: str):
 
 async def _connect_remote_session(url: str, passphrase: str, *, make_active: bool):
     from urllib.parse import urlsplit
-    import re
     url = url.strip()
     if url and not url.startswith(("http://", "https://")):
         url = f"http://{url}"
