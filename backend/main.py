@@ -948,6 +948,7 @@ async def api_add_message(conversation_id: int, body: NewMessage):
 from fastapi.responses import StreamingResponse
 
 from backend.agent.config import (
+    CONFIG_PATH,
     load_config,
     qualify_model_scope,
     save_config,
