@@ -129,6 +129,7 @@ import { stripProviderMarkup } from './providerMarkup'
 import { createPortal } from 'react-dom'
 import { transcriptSelection, googleSearchUrl } from './selectionSearch'
 import { openExternal } from './openExternal'
+import { ApprovalCardShell, FreeTextAnswer, useCardSubmit } from "./approvalCards"
 // Tauri invoke rejections are plain strings, not Errors — `(e as Error).message`
 // would print "undefined" and hide the real (permission) cause.
 function errorMessage(e: unknown): string {
@@ -311,56 +312,30 @@ function levenshtein(a: string, b: string): number {
   return prev[n]
 }
 
+// AskUserCard: uses shared useCardSubmit with custom remote send
 function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: { hostId: string; conversationId: string } }) {
   const conversationId = useAgent((s) => s.conversationId)
   const setPendingQuestion = useAgent((s) => s.setPendingQuestion)
-  const [customOpen, setCustomOpen] = useState(false)
-  const [custom, setCustom] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-  // Set when push-to-talk routes a transcript into the free-text box, so the
-  // field opens pre-filled and visibly active instead of silently eating it.
-  const [voiceSeeded, setVoiceSeeded] = useState(false)
-
-  const answer = (text: string) => {
-    if (submitting) return
-    // Remote ask_user (#308 follow-up): the pending future lives under the
-    // remote conversation ID on the device turn answer endpoint.
-    const send = remote
+  const sendAnswer = (text: string): Promise<unknown> => {
+    return remote
       ? submitRemoteAnswer(remote.hostId, remote.conversationId, pending.callId, text)
       : conversationId === null
         ? Promise.reject(new Error('no conversation'))
         : submitAnswer(conversationId, pending.callId, text)
-    setSubmitting(true)
-    setErr(null)
-    send
-      .then(() => {
-        // Clear only if this is still the same question (a newer ask in
-        // another conversation may have replaced it meanwhile).
-        setPendingQuestion((q) => (q && q.callId === pending.callId ? null : q))
-        // Reset the in-flight flag unconditionally: if a newer question
-        // already replaced this one in the slot, the .then still fires with
-        // this call's closure. Leaving `submitting` true here is what wedged
-        // every follow-up question into an all-buttons-disabled card.
-        setSubmitting(false)
-      })
-      .catch((e) => {
-        setErr(String(e))
-        setSubmitting(false)
-      })
   }
 
-  // Push-to-talk answer routing: the PTT release dispatches 'yaah-answer-ask'
-  // (window event, because the hotkey fires while the card is unmounted or
-  // the webview unfocused). An exact/fuzzy option match answers directly;
-  // anything else becomes the free-text answer. PTT transcription is slow
-  // relative to a click, so a stale event for an already-answered question
-  // must be dropped, not submitted to whatever ask came next.
+  const { customOpen, setCustomOpen, custom, setCustom, submitting, err, respond } = useCardSubmit(
+    pending.callId,
+    () => setPendingQuestion((q) => (q && q.callId === pending.callId ? null : q)),
+    sendAnswer
+  )
+  const [voiceSeeded, setVoiceSeeded] = useState(false)
+
   useVoiceAnswer('yaah-answer-ask', pending.callId, submitting, (ans) => {
     const labels = pending.options.map((o) => o.label)
     const picked = matchOptionLabel(ans, labels)
     if (picked) {
-      answer(picked)
+      respond(picked)
     } else {
       setCustomOpen(true)
       setCustom(ans)
@@ -369,13 +344,7 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
   })
 
   return (
-    <div className="rounded-lg border border-orange-700/60 bg-zinc-900 p-3 shadow-lg">
-      <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
-        <span className="run-pulse">?</span> agent asks — pick an answer
-      </div>
-      {/* #113: the question text renders in the transcript (see the mount
-          site) so a long question scrolls away instead of pushing these
-          controls off-screen. Only the answer affordances live here. */}
+    <ApprovalCardShell color="orange" icon={<span className="run-pulse">?</span>} title="agent asks — pick an answer" err={err}>
       <div className="max-h-[40vh] space-y-1.5 overflow-y-auto">
         {pending.options.map((o, i) => (
           <AskOptionRow
@@ -383,7 +352,7 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
             label={o.label}
             description={o.description}
             disabled={submitting}
-            onClick={() => answer(o.label)}
+            onClick={() => respond(o.label)}
           />
         ))}
         {!customOpen ? (
@@ -395,68 +364,31 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
             Something else…
           </button>
         ) : (
-          <div className="flex gap-1.5">
-            <input
-              autoFocus
-              className={`flex-1 rounded   bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-orange-500 focus:outline-none ${
-                voiceSeeded ? 'border-orange-500/70' : ''
-              }`}
-              placeholder={voiceSeeded ? 'Voice answer staged — edit or Send' : 'Type your own answer…'}
-              value={custom}
-              onChange={(e) => {
-                setCustom(e.target.value)
-                setVoiceSeeded(false)
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && custom.trim()) {
-                  e.preventDefault()
-                  answer(custom.trim())
-                }
-              }}
-            />
-            <button
-              className="rounded bg-orange-600 px-3 py-1.5 text-xs text-white hover:bg-orange-500 disabled:opacity-50"
-              disabled={submitting || !custom.trim()}
-              onClick={() => answer(custom.trim())}
-            >
-              {submitting ? '…' : 'Send'}
-            </button>
-          </div>
+          <FreeTextAnswer
+            custom={custom}
+            setCustom={setCustom}
+            submitting={submitting}
+            submit={respond}
+            placeholder={voiceSeeded ? 'Voice answer staged — edit or Send' : 'Type your own answer…'}
+            sendColor="orange"
+            inputClassName={voiceSeeded ? 'border-orange-500/70 focus:border-orange-500' : ''}
+            onEdit={() => setVoiceSeeded(false)}
+          />
         )}
       </div>
-      {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
-    </div>
+    </ApprovalCardShell>
   )
 }
-
 /** Live approval card: a tool call blocked by the access-mode gate (ask
  *  mode). Approve executes it, Deny returns an error to the model; typed
  *  text denies with that text as guidance. Plan mode reuses this card with
  *  the plan-exit chip. Voice answers ride the same 'yaah-answer-ask' event
  *  (labels are option rows like any ask_user card). */
 function ApprovalCard({ approval }: { approval: PendingApproval }) {
-  const conversationId = useAgent((s) => s.conversationId)
   const setPendingApproval = useAgent((s) => s.setPendingApproval)
-  const setAccessMode = useAgent((s) => s.setAccessMode)
-  const [customOpen, setCustomOpen] = useState(false)
-  const [custom, setCustom] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-
-  const respond = (text: string) => {
-    if (conversationId === null || submitting) return
-    setSubmitting(true)
-    setErr(null)
-    submitAnswer(conversationId, approval.callId, text)
-      .then(() => {
-        setPendingApproval((a) => (a && a.callId === approval.callId ? null : a))
-        setSubmitting(false)
-      })
-      .catch((e) => {
-        setErr(String(e))
-        setSubmitting(false)
-      })
-  }
+  const { customOpen, setCustomOpen, custom, setCustom, submitting, err, respond } = useCardSubmit(approval.callId, () => {
+    setPendingApproval((a) => (a && a.callId === approval.callId ? null : a))
+  })
 
   // Plan-mode exit lives in the status strip (PlanExitButton): plan mode
   // never holds a pending approval — blocked calls fail immediately and the
@@ -468,13 +400,10 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
     } else if (norm === 'deny' || norm === 'no' || norm === 'deny it' || norm === 'reject' || norm === 'stop') {
       respond('deny')
     } else {
-      // Anything else is guidance: deny, telling the model why.
       respond(ans)
     }
   })
 
-  // One-line arg summary per tool, mono-styled, so the card reads like a
-  // trace chip rather than prose.
   const summary = (() => {
     const a = approval.args ?? {}
     switch (approval.tool) {
@@ -506,22 +435,12 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   })()
 
   const commandLike = approval.tool === 'bash' || approval.tool === 'powershell'
-
-  // Blast-radius tiering (trust transaction): mutating tools get a red-family
-  // Approve so the button itself prices the risk; read-only tools keep the
-  // calm blue reserved for benign human actions.
   const MUTATING_TOOLS = new Set(['bash', 'powershell', 'edit_file', 'write_file', 'git_push', 'delete_file', 'move_file'])
   const mutating = MUTATING_TOOLS.has(approval.tool)
-  // The workspace the command would run in (shell tools run at the workspace
-  // root; file tools carry their own path).cwd shown so the user can judge
-  // relative paths in the command.
   const approvalWorkspace = useAgent((s) => s.workspace)
 
   return (
-    <div className="rounded-lg border border-orange-700/60 bg-zinc-900 p-3 shadow-lg">
-      <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
-        <span className="run-pulse">!</span> approval needed
-      </div>
+    <ApprovalCardShell color="orange" icon={<span className="run-pulse">!</span>} title="approval needed" err={err}>
       <p className="mb-1.5 flex items-center gap-2 font-mono text-xs text-zinc-100">
         <span className="text-orange-300">{approval.tool}</span>
         {summary && <span className="truncate text-zinc-400">{summary}</span>}
@@ -532,9 +451,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
         </p>
       )}
       {commandLike && (
-        // Shell commands render uncapped: the whole command is the thing
-        // being judged, so it must be visible without digging.
-        <pre className="mb-2 overflow-y-auto whitespace-pre-wrap rounded   bg-zinc-950 p-2 font-mono text-[11px] text-zinc-300">
+        <pre className="mb-2 overflow-y-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] text-zinc-300">
           {String(approval.args?.command ?? '')}
         </pre>
       )}
@@ -549,7 +466,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
           {submitting ? '…' : mutating ? 'Approve (runs shell / writes files)' : 'Approve'}
         </button>
         <button
-          className="rounded   px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          className="rounded px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
           disabled={submitting}
           onClick={() => respond('deny')}
         >
@@ -565,31 +482,18 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
           Deny with a note…
         </button>
       ) : (
-        <div className="mt-1.5 flex gap-1.5">
-          <input
-            autoFocus
-            className="flex-1 rounded   bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none"
+        <div className="mt-1.5">
+          <FreeTextAnswer
+            custom={custom}
+            setCustom={setCustom}
+            submitting={submitting}
+            submit={respond}
             placeholder="Why deny? Sent to the model as guidance…"
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && custom.trim()) {
-                e.preventDefault()
-                respond(custom.trim())
-              }
-            }}
+            sendColor="blue"
           />
-          <button
-            className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-50"
-            disabled={submitting || !custom.trim()}
-            onClick={() => respond(custom.trim())}
-          >
-            {submitting ? '…' : 'Send'}
-          </button>
         </div>
       )}
-      {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
-    </div>
+    </ApprovalCardShell>
   )
 }
 
@@ -598,36 +502,19 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
  *  save before resuming) and the SAME turn continues into execution; typed
  *  text is a change request — plan mode stays on and the model revises. */
 function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
-  const conversationId = useAgent((s) => s.conversationId)
   const setPendingPlanApproval = useAgent((s) => s.setPendingPlanApproval)
   const setAccessMode = useAgent((s) => s.setAccessMode)
-  const [customOpen, setCustomOpen] = useState(false)
-  const [custom, setCustom] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
 
-  const respond = (text: string) => {
-    if (conversationId === null || submitting) return
-    setSubmitting(true)
-    setErr(null)
-    submitAnswer(conversationId, pending.callId, text)
-      .then(() => {
-        if (text === 'approve') {
-          // The backend already saved access_mode=full before unblocking the
-          // run; mirror it into the store so the UI follows immediately.
-          setAccessMode('full')
-          window.dispatchEvent(
-            new CustomEvent('yaah-access-mode-changed', { detail: { mode: 'full' } }),
-          )
-        }
-        setPendingPlanApproval((p) => (p && p.callId === pending.callId ? null : p))
-        setSubmitting(false)
-      })
-      .catch((e) => {
-        setErr(String(e))
-        setSubmitting(false)
-      })
-  }
+  const { customOpen, setCustomOpen, custom, setCustom, submitting, err, respond } = useCardSubmit(pending.callId, (answer) => {
+    setPendingPlanApproval((p) => (p && p.callId === pending.callId ? null : p))
+    if (answer !== 'approve') return
+    // The backend already saved access_mode=full before unblocking the run;
+    // mirror it into the store so the UI follows immediately. Approve-only
+    // and success-only: a failed submit must not flip the mode (pre-#667
+    // behavior, restored during review of #667).
+    setAccessMode('full')
+    window.dispatchEvent(new CustomEvent('yaah-access-mode-changed', { detail: { mode: 'full' } }))
+  })
 
   // Push-to-talk routing: PTT release dispatches 'yaah-answer-plan' (its own
   // event — the ask/approval cards answer a different vocabulary). "Approve"
@@ -638,10 +525,7 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
   })
 
   return (
-    <div className="rounded-lg border border-sky-700/60 bg-zinc-900 p-3 shadow-lg">
-      <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-sky-400">
-        <span className="run-pulse">▸</span> plan ready — approve to run
-      </div>
+    <ApprovalCardShell color="sky" icon={<span className="run-pulse">▶</span>} title="plan ready — approve to run" err={err}>
       <div className="mb-2.5 max-h-64 overflow-y-auto text-sm text-zinc-100">
         <AgentMarkdown content={pending.plan} />
       </div>
@@ -655,7 +539,7 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
         </button>
         {!customOpen && (
           <button
-            className="rounded   px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            className="rounded px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
             disabled={submitting}
             onClick={() => setCustomOpen(true)}
           >
@@ -664,34 +548,20 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
         )}
       </div>
       {customOpen && (
-        <div className="mt-1.5 flex gap-1.5">
-          <input
-            autoFocus
-            className="flex-1 rounded   bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none"
+        <div className="mt-1.5">
+          <FreeTextAnswer
+            custom={custom}
+            setCustom={setCustom}
+            submitting={submitting}
+            submit={respond}
             placeholder="What should change? Sent to the model as feedback…"
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && custom.trim()) {
-                e.preventDefault()
-                respond(custom.trim())
-              }
-            }}
+            sendColor="sky"
           />
-          <button
-            className="rounded bg-sky-600 px-3 py-1.5 text-xs text-white hover:bg-sky-500 disabled:opacity-50"
-            disabled={submitting || !custom.trim()}
-            onClick={() => respond(custom.trim())}
-          >
-            {submitting ? '…' : 'Send'}
-          </button>
         </div>
       )}
-      {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
-    </div>
+    </ApprovalCardShell>
   )
 }
-
 /** Answered ask_user call as it appears in the trace/history. */
 function AskUserTrace({ tc }: { tc: ToolCall }) {
   const args = (tc.args ?? {}) as {
