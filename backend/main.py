@@ -2185,6 +2185,20 @@ def _proxy_result(res):
     return res.json()
 
 
+
+async def _proxy_or_503(session, method, path, *, detail, **kw):
+    """Proxy call with unwrap + error-remap to 503 (httpx errors only).
+
+    HTTPException raised by _proxy_result (non-200 host response) is
+    re-raised unchanged; network/transport errors become 503.
+    """
+    try:
+        return _proxy_result(await session.proxy(method, path, **kw))
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
+
 # ---- Markdown export ----
 
 
