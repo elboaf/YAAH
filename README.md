@@ -2,7 +2,7 @@
 
 ![YAAH box art - the AI coding agent for everyone - Halloween edition](docs/assets/box-art-halloween.png)
 
-**YAAH** = **Y**et **A**nother **A**gent Harness.
+**YAAH** = **Y**et **A**nother **A**gent **H**arness.
 
 YAAH is a desktop AI coding agent: a model with real tools on your machine —
 shell, files, git, search — and every tool call shown transparently. See
