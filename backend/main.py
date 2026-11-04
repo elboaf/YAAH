@@ -2531,8 +2531,6 @@ async def api_transcribe(request: Request):
 
     from backend.agent import transcribe
 
-    import asyncio
-
     pcm = await request.body()
     if len(pcm) > MAX_AUDIO_BYTES:
         return JSONResponse({"detail": "recording too large"}, status_code=413)
@@ -2638,8 +2636,6 @@ async def api_tts_test(body: TtsTestBody):
     endpoint never streams audio — it is a lighthouse, not a narration
     path. `engine` may override the saved choice so the button tests what
     is on screen before the user hits Save."""
-    import asyncio
-
     from backend.agent import speak
     from fastapi.responses import JSONResponse
 
@@ -2809,7 +2805,6 @@ async def api_tts_download():
     """Download + unpack the TTS model; streams progress as JSON lines
     ({"stage": "download"|"extract"|"done"|"error", ...}). One download at
     a time — a second concurrent request is refused with 409."""
-    import asyncio
     from backend.agent import speak
     from fastapi.responses import StreamingResponse
 
@@ -2853,8 +2848,6 @@ async def api_tts_synthesize(body: TtsBody):
     """One prose chunk in, one WAV out (24 kHz 16-bit mono). Voice/speed
     default to the stored settings. 409 = model not downloaded yet (the
     UI offers the Settings download); 503 = engine failed to start."""
-    import asyncio
-
     from backend.agent import speak
     from fastapi.responses import JSONResponse, Response
 
@@ -3097,7 +3090,6 @@ class RemoteDeviceReconnect(BaseModel):
 
 
 def _remote_device_profiles() -> list[dict]:
-    from backend.agent.config import load_config
     profiles = load_config().get("remote_devices") or []
     return [dict(profile) for profile in profiles if isinstance(profile, dict)]
 
@@ -3105,7 +3097,6 @@ def _remote_device_profiles() -> list[dict]:
 def _save_remote_device_profiles(profiles: list[dict]) -> None:
     """Save device profiles including passphrases. On Unix, chmod the config
     to owner-only (0600) since it now contains secrets."""
-    from backend.agent.config import save_config, CONFIG_PATH
     import stat
 
     save_config({"remote_devices": profiles})
@@ -3570,8 +3561,6 @@ async def api_remote_connect(body: RemoteConnect):
 @app.get("/api/remote/discover")
 async def api_remote_discover():
     """mDNS sweep for hosts on this LAN (blocking sweep, ~2.5s)."""
-    import asyncio
-
     hosts = await asyncio.to_thread(discovery.browse)
     return {"hosts": hosts}
 
