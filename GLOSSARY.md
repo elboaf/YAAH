@@ -1,32 +1,110 @@
 # YAAH
 
 An agent harness where multiple chats and sub-agents can work in the
-same workspace. The vocabulary below is the direct world (ADR-0017):
-runs execute directly in the workspace's checkout — one tree, no
-isolation machinery.
+same workspace. The vocabulary below spans two worlds: the direct world
+(ADR-0017) — ordinary chats execute directly in the workspace's
+checkout, one tree, no isolation machinery — and the developer world
+(ADR-0022) — worker chats work in their own clone (a desk) and reach
+the checkout only through contribution, review, and supervisor merge.
 
 ## Language
 
 ### Workspace
 
 **Workspace checkout**:
-The workspace's one git checkout, exactly as the human opened it. Every
-run, chat, and sub-agent works directly in it; there is no second tree,
-no per-chat copy, and no tree agents are forbidden to touch. Concurrent
-writers on one checkout can clobber each other's uncommitted edits —
-a risk accepted with eyes open (ADR-0017).
+The workspace's git checkout, exactly as the human opened it. Ordinary
+chats (every chat YAAH has today) work directly in it; worker chats
+never touch it — they work at a desk and contribute through the
+supervisor path (ADR-0022). Concurrent writers on one checkout can
+clobber each other's uncommitted edits — accepted for ordinary chats
+with a soft warning (ADR-0017, ADR-0022).
 _Avoid_: primary worktree, main tree, chat worktree (isolation-era
-terms, dead with ADR-0010)
+terms, dead with ADR-0010); "every chat works in it" (workers don't)
 
 **Branch switch**:
 A plain `git checkout` of the workspace, on the user's request, via the
 `branch_select` tool. Git's own refusals are the guard (uncommitted
 changes that would be clobbered, unknown branch, a branch checked out
 in another worktree); the branch is created first when asked. Nothing
-is stored: no per-chat branch identity, no pin, no origin.
+is stored: no per-chat branch identity, no pin, no origin. For a
+worker chat the same tool operates on its desk, not the checkout.
 _Avoid_: branch selector, branch pin (stored per-chat value, removed
 with ADR-0010); "switches the branch for every chat" (there is one
 checkout and it belongs to no chat)
+
+**Supervisor**:
+Any ordinary chat acting as maintainer of the workspace checkout: it
+reviews contributions, merges them, resolves conflicts, and — when the
+workspace has an origin — pushes branches, opens PRs, and shepherds CI.
+There is no designation, pin, or special role: any chat the user drives
+can supervise, and several can exist.
+_Avoid_: the supervisor (definite article implies one designated
+chat); maintainer chat as a type
+
+**Worker chat**:
+A restricted chat type, spawned by an ordinary chat, first-class in the
+sidebar and steerable by the user or the supervising chat. The harness
+re-roots it at its desk: file tools, shells, and git endpoints resolve
+only inside the desk. The only way work leaves a desk is submit.
+Workers cannot spawn workers; a worker's sub-agents inherit its desk
+and restrictions.
+_Avoid_: developer chat (persona word in prose, not the type name);
+agent chat (not restricted, not desk-bound); sandboxed chat (not an
+OS-level jail — the same trust floor as the rest of the harness)
+
+**Desk**:
+A seat directory outside the repo (`~/.yaah/desks/<workspace>/<n>`)
+holding a clone of the workspace repo whose only remote is the
+workspace repo. One pool per workspace, created on demand, capped
+(default 4; spawn fails loudly at the cap). Desk directories outlive
+their worker chats — the next occupant inherits them.
+_Avoid_: workstation, seat, worktree (it is a full clone); clone dir
+(loses the seat/occupancy meaning); putting desks inside the repo
+(the residue cleanup would meet them)
+
+**Handover**:
+What happens when a supervisor assigns a desk to a worker: fetch from
+the workspace repo and reset tracked files to the workspace's current
+state — a predecessor's uncommitted edits do not survive — while
+untracked files (node_modules, builds) and old branches carry over.
+The new developer inherits a used computer, just not at the same time.
+_Avoid_: reclone (wipes the inheritance); assuming a clean or dirty
+state (handover defines it)
+
+**Contribution**:
+A request-pull-style submission from a worker chat: summary, branch,
+and base commit, placed in the workspace's inbox. The supervising chat
+fetches the branch straight from the desk, reviews, and merges into
+the checkout, owning conflict resolution. Rejection bounces to the
+authoring worker with the feedback; a contribution closes only on
+merge or explicit abandon. A worker holds at most one pending
+contribution, and submit requires a clean desk.
+_Avoid_: PR (a contribution is local; PRs are a supervisor origin
+duty); landing (a dead term in this project); patch (branches
+travel, not patches)
+
+**Inbox**:
+The per-workspace queue of pending contributions. Submitting starts —
+or queues behind — a turn on the supervising chat (supervisor turns
+serialize: a burst drains one merge at a time). The inbox persists if
+a supervising chat dies; any ordinary chat can drain it.
+_Avoid_: global queue (it is per workspace); notification system
+(this is a queue with wake-on-submit, not a general event bus)
+
+**Submit**:
+The only way work leaves a desk: the worker commits on a branch in its
+desk and files a contribution. Blocked on a dirty desk — commit first.
+_Avoid_: push (workers have no origin and no write to the checkout);
+merge request (provider vocabulary)
+
+**Publish-and-reconcile**:
+The supervisor's deliberate act, after a PR lands on origin (possibly
+squashed or reworked by review): confirm the merge, compare content,
+then reset the checkout's master to origin's merged state — origin is
+authoritative when it exists. Guarded: reconciliation never discards
+locally-integrated work that has not landed on origin.
+_Avoid_: automatic sync (the step is deliberate, never silent); pull
+(a merge would pile duplicate-content commits after squash-merges)
 
 **Remote workspace**:
 A workspace whose tree lives on another host — a second YAAH instance
