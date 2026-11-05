@@ -1,5 +1,5 @@
 import { useEscClose } from './useEscClose'
-import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useVoiceAnswer } from "./use-voice-answer"
 import {
   listConversations,
@@ -4112,23 +4112,73 @@ export function ModelOptions({
   or a configured-but-slow local server (llama.cpp) would be told it has no
   provider (#51 regression: the banner keyed off the /models probe instead
   of the config). */
+// #685: module-level "last model-list probe" clock shared by every mounted
+// useModelList() consumer. Hover/focus/open on the rail selects refreshes
+// only when the list is older than MODEL_LIST_TTL_MS — across ALL surfaces,
+// not per component — so a hover right after closing Settings re-probes
+// nothing. Explicit triggers (mount, providers-changed, Settings close)
+// call refresh() directly and bypass the clock.
+const MODEL_LIST_TTL_MS = 60_000
+let modelListProbedAt = 0
+// One request generation shared by EVERY hook instance: the old per-instance
+// latestRefresh ref ordered responses only within one component, so a slow
+// sidebar probe could still broadcast over a newer rail probe through the
+// model-list-changed channel. Only the globally-newest request may apply.
+let modelListProbeGen = 0
+/** True when the shared model-list clock is older than the hover TTL. */
+export function modelListStale(): boolean {
+  return Date.now() - modelListProbedAt >= MODEL_LIST_TTL_MS
+}
+
+/** #51 — hook: the provider-grouped model list shared by every picker.
+
+  activeProvider: the configured active provider from config.json, or ''
+  when none is configured. null = the backend hasn't answered yet (restart,
+  unreachable) — "no provider configured" banners must NOT render on null,
+  or a configured-but-slow local server (llama.cpp) would be told it has no
+  provider (#51 regression: the banner keyed off the /models probe instead
+  of the config). */
 export function useModelList() {
   const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
   const [activeProvider, setActiveProvider] = useState<string | null>(null)
-  // Ignore stale refresh responses: mount/save/close/button can all fire
-  // refresh() concurrently, so an older network response could resolve
-  // last and clobber newer model data. Track the latest request so only
-  // the newest one's result is applied (covers every caller).
-  const latestRefresh = useRef(0)
   const refresh = useCallback(() => {
-    const requestId = ++latestRefresh.current
+    const requestId = ++modelListProbeGen
     listAvailableModels()
       .then((r) => {
-        if (requestId !== latestRefresh.current) return
+        // Reject any but the globally-newest request: an older response
+        // (from any instance) must not clobber a newer list or broadcast it.
+        if (requestId !== modelListProbeGen) return
+        // Review (#685): freshness is stamped only AFTER a successful
+        // response — a failed probe must stay retryable on the next
+        // hover/focus/open, not lock the picker out for 60s (there is no
+        // manual refresh button anymore).
+        modelListProbedAt = Date.now()
         setByProvider(r.providers)
         setActiveProvider(r.active_provider)
+        // #685: a probe landed — broadcast the payload so every OTHER
+        // mounted consumer adopts the fresh list without probing again.
+        // Silent by design: this is the always-refresh-on-hover path.
+        window.dispatchEvent(
+          new CustomEvent('model-list-changed', {
+            detail: { providers: r.providers, active_provider: r.active_provider },
+          }),
+        )
       })
       .catch(() => {})
+  }, [])
+  // Adopt a fresh list probed by a sibling consumer (one shared payload,
+  // no second network call).
+  useEffect(() => {
+    const onProbe = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{ providers: Record<string, ProviderModels>; active_provider: string }>
+      ).detail
+      if (!detail) return
+      setByProvider(detail.providers)
+      setActiveProvider(detail.active_provider)
+    }
+    window.addEventListener('model-list-changed', onProbe)
+    return () => window.removeEventListener('model-list-changed', onProbe)
   }, [])
   useEffect(() => {
     refresh()
@@ -4189,87 +4239,19 @@ export const SUBAGENT_AUTO_LABEL = 'sub-agent: auto'
 export const SUBAGENT_SCOPE_HINT =
   'Model for sub-agents this chat spawns. Auto = the Settings sub-agent scope, or this chat\'s own model when none is set.'
 
-/** Default reasoning/thought level for new chats. Existing conversations keep
- *  their pinned effort, matching the default-model selector's scope. */
-export function DefaultThoughtLevelPicker({ variant = 'standalone' }: { variant?: 'standalone' | 'strip' }) {
-  const effort = useAgent((s) => s.globalEffort)
-  const model = useAgent((s) => s.globalModel)
-  const { byProvider } = useModelList()
-  const supportedEfforts = modelReasoningEfforts(byProvider, model)
-  const refreshGlobals = useAgent((s) => s.refreshGlobals)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+/** #685 lockstep: the composer rail is the only model picker in the app.
+ *  A pick in a normal chat or a fresh draft writes the chat's scope AND the
+ *  global default (active provider + remembered model / default effort in
+ *  config.json) — what new chats start on. Agent chats are the exception:
+ *  their picks write through to the owning agent only. */
+export const DEFAULT_LOCKSTEP_HINT = ' Also sets the default for new chats.'
 
-  const apply = async (value: string) => {
-    if (value === effort || saving) return
-    setSaving(true)
-    setError('')
-    try {
-      await updateConfig({ reasoning_effort: value })
-      await refreshGlobals()
-    } catch (e) {
-      setError(`Could not save thought level: ${errorMessage(e)}`)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const statusClass = variant === 'strip'
-    ? 'm-0 text-[10px] leading-tight text-zinc-500'
-    : 'mt-1 text-[10px] text-zinc-500'
-  const errorClass = variant === 'strip'
-    ? 'm-0 text-[10px] leading-tight text-red-400'
-    : 'mt-1 text-[10px] text-red-400'
-
-  if (variant === 'strip') {
-    // Sidebar transport strip: borderless cell filler; status lines stack
-    // under the select only while present.
-    return (
-      <div className="flex min-w-0 flex-1 flex-col justify-center">
-        <select
-          id="default-thought-level"
-          className="sw-strip-select w-full min-w-0 truncate bg-transparent px-1.5 text-xs text-zinc-300 focus:outline-none disabled:opacity-60"
-          value={effort}
-          onChange={(e) => void apply(e.target.value)}
-          disabled={saving}
-          aria-label="Thought level"
-          aria-describedby={error ? 'default-thought-level-status' : undefined}
-        >
-          <EffortOptions efforts={supportedEfforts} />
-        </select>
-        {saving && <p className={statusClass} role="status">Saving thought level…</p>}
-        {error && <p id="default-thought-level-status" className={errorClass} role="alert">{error}</p>}
-      </div>
-    )
-  }
-  return (
-    <div className="w-24 shrink-0">
-      <select
-        id="default-thought-level"
-        className="w-full rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
-        value={effort}
-        onChange={(e) => void apply(e.target.value)}
-        disabled={saving}
-        aria-label="Thought level"
-        aria-describedby={error ? 'default-thought-level-status' : undefined}
-      >
-        <EffortOptions efforts={supportedEfforts} />
-      </select>
-      {saving && <p className={statusClass} role="status">Saving thought level…</p>}
-      {error && <p id="default-thought-level-status" className={errorClass} role="alert">{error}</p>}
-    </div>
-  )
-}
 
 export function Sidebar() {
   const { newConversation, workspace, setWorkspace, refreshGlobals } = useAgent()
-  const globalModel = useAgent((s) => s.globalModel)
-  // useModelList hook manages the provider-grouped model list — no local
-  // state duplication. Stale-response protection and cross-component
-  // notification now live in the hook.
-  const { byProvider, activeProvider, refresh: refreshModels } = useModelList()
-  const [savingModel, setSavingModel] = useState(false)
-  const [modelError, setModelError] = useState('')
+  // #685: the strip no longer shows pickers; it only needs refresh for the
+  // Settings-close path (a fresh probe after config edits, bypassing TTL).
+  const { refresh: refreshModels } = useModelList()
   const [showSettings, setShowSettings] = useState(false)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [addingDevice, setAddingDevice] = useState(false)
@@ -4290,45 +4272,15 @@ export function Sidebar() {
   }, [])
 
   // Registry and device flows are owned by ConversationList/DeviceGroups;
-  // the sidebar footer only manages local model defaults.
-
-  // #132: globalModel arrives provider-qualified from /api/config; fall
-  // back to composing with the probed active provider for legacy responses.
-  const parsedGlobal = parseModelScope(globalModel)
-  const defaultScopeValue =
-    parsedGlobal.provider
-      ? `${parsedGlobal.provider}::${parsedGlobal.model}`
-      : `${activeProvider ?? ''}::${globalModel}`
+  // the sidebar footer only manages the workspace strip. Model and effort
+  // defaults moved into the composer (#685): the rail's picks ARE the
+  // default now, so the strip has no pickers of its own.
 
   useEffect(() => {
-    // #51: the sidebar picker is now the DEFAULT for new chats (the store's
-    // globalModel drives both this select and fresh drafts' header pickers).
+    // #51: keep globalModel/globalEffort fresh — the rail's lockstep picks
+    // write the default, and fresh drafts seed from it.
     refreshGlobals()
   }, [refreshGlobals])
-
-  // value encoding "provider::model" keeps providers with clashing ids apart
-  const pickModel = (value: string) => {
-    const idx = value.indexOf('::')
-    if (idx < 0) return
-    const provider = value.slice(0, idx)
-    const m = value.slice(idx + 2)
-    // #132: compare against the qualified global (globalModel is qualified
-    // from /api/config now), not the bare id.
-    if (!m || qualifyModelScope(globalModel, activeProvider ?? '') === `${provider}::${m}`) return
-    setSavingModel(true)
-    setModelError('')
-    const keepEffort = modelReasoningEfforts(byProvider, `${provider}::${m}`).includes(
-      useAgent.getState().globalEffort,
-    )
-    setActiveModel(provider, m)
-      .then(() => (keepEffort ? undefined : updateConfig({ reasoning_effort: '' })))
-      .then(refreshGlobals)
-      .then(refreshModels)
-      .catch((e) => {
-        setModelError(`Could not save model: ${errorMessage(e)}`)
-      })
-      .finally(() => setSavingModel(false))
-  }
 
   /** Open a workspace from the list: its most recent conversation, or a
    *  fresh chat when it has none (Q2: the list is the conversation switcher). */
@@ -4373,19 +4325,6 @@ export function Sidebar() {
             </div>
             <div className="sw-strip-divider" />
             <div className="sw-strip-cell">
-              <select
-                id="default-model"
-                className="sw-strip-select min-w-0 flex-1 truncate bg-transparent font-mono text-xs text-zinc-200 focus:outline-none disabled:opacity-60"
-                value={defaultScopeValue}
-                onChange={(e) => pickModel(e.target.value)}
-                disabled={savingModel}
-                aria-label="Default model"
-                aria-describedby={modelError ? 'default-model-status' : undefined}
-                title={defaultScopeValue}
-              >
-                <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
-              </select>
-              <span className="sw-strip-sep" />
               <div className="relative shrink-0">
                 <button
                   className="sw-strip-ico border border-dashed border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
@@ -4429,26 +4368,9 @@ export function Sidebar() {
                   </>
                 )}
               </div>
-              <span className="sw-strip-sep" />
-              <button
-                className="sw-strip-ico focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                aria-label="Refresh models"
-                title="Refresh model lists from all providers"
-                onClick={() => {
-                  refreshModels()
-                  window.dispatchEvent(new CustomEvent('providers-changed'))
-                }}
-                disabled={savingModel}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
-                </svg>
-              </button>
             </div>
             <div className="sw-strip-divider" />
             <div className="sw-strip-cell">
-              <DefaultThoughtLevelPicker variant="strip" />
-              <span className="sw-strip-sep" />
               <button
                 className="sw-strip-ico focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
                 aria-label="Settings"
@@ -4462,27 +4384,6 @@ export function Sidebar() {
               </button>
             </div>
           </div>
-          {savingModel && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving model…</p>}
-          {modelError && <p id="default-model-status" className="mt-1 text-[10px] text-red-400" role="alert">{modelError}</p>}
-          {/* Keyed on the configured active provider, not the /models probe:
-              a llama.cpp/Ollama server whose catalog endpoint fails or is
-              slow is still a configured setup (#51). */}
-          {activeProvider === '' && (
-            <button
-              className="mt-1.5 w-full rounded bg-zinc-800/60 px-2 py-1 text-left text-[10px] leading-relaxed text-zinc-300 hover:border-zinc-500"
-              onClick={() => setShowSettings(true)}
-            >
-              No model provider configured — add one in Settings to start.
-            </button>
-          )}
-          {/* per-provider failure notes (Q10) */}
-          {Object.entries(byProvider)
-            .filter(([, pm]) => pm.error)
-            .map(([name, pm]) => (
-              <p key={name} className="mt-1 text-[10px] text-zinc-400">
-                {name}: {pm.error}
-              </p>
-            ))}
         </div>
       </aside>
       {showSettings && (
@@ -7392,14 +7293,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       scaleSavedRef.current = quantizeUiScale(uiScale)
       scaleDirtyRef.current = false
       // Provider/model changes can affect the defaults inherited by new chats;
-      // refresh the sidebar's model and thought-level controls.
+      // refresh the rail's controls.
       useAgent.getState().refreshGlobals()
       // Issue #109: credentials may have changed — every useModelList()
-      // consumer re-probes /api/models/available, and latched per-chat
-      // connection-error state (stale displays of turns that failed on the
-      // OLD key) is revalidated: the banner drops, the sidebar red pill
-      // clears. The backend re-reads config on every call, so nothing else
-      // is stale.
+      // consumer re-probes /api/models/available (and re-stamps the shared
+      // probe clock, so a following hover won't double-probe), and latched
+      // per-chat connection-error state (stale displays of turns that failed
+      // on the OLD key) is revalidated: the banner drops, the sidebar red
+      // pill clears. The backend re-reads config on every call, so nothing
+      // else is stale.
       window.dispatchEvent(new CustomEvent('providers-changed'))
       // Revalidate latched per-chat connection errors (issue #109): they are
       // stale displays of turns that failed on the OLD credentials. Drop the
@@ -8328,17 +8230,14 @@ function AccessModeControl() {
   return (
     <div ref={ref} className="relative">
       <button
-        className="flex items-center gap-1.5 rounded px-2 py-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200"
+        className="imp-mode-trigger"
         title="Access mode — what the agent may do without asking"
         aria-label="Access mode"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${m.dot}`} />
-        mode: {m.short}
-        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-          <path d="M1.5 3l2.5 2.5L6.5 3" />
-        </svg>
+        <span aria-hidden="true" className="imp-mode-label">{m.short}</span>
       </button>
       {open && (
         <div className="absolute bottom-9 left-0 z-20 w-64 rounded   bg-zinc-900 py-1 shadow-lg">
@@ -8980,6 +8879,9 @@ export function ChatScopePickers() {
   const setDraftScope = useAgent((s) => s.setDraftScope)
   const globalModel = useAgent((s) => s.globalModel)
   const globalEffort = useAgent((s) => s.globalEffort)
+  // #685 lockstep: the default-write for normal chats and drafts. Agent
+  // chats are exempt (their picks write through to the owning agent only).
+  const refreshGlobals = useAgent((s) => s.refreshGlobals)
 
   const { byProvider, activeProvider, refresh } = useModelList()
   // The conversation row's pinned scope, refreshed on chat switch and after
@@ -9044,12 +8946,24 @@ export function ChatScopePickers() {
     const m = value.slice(idx + 2)
     if (!m || (m === shownModel && provider === shownProvider)) return
     // #132: writes are always provider-qualified — a bare id would lose its
-    // routing provider and drift with the sidebar default later.
+    // routing provider and drift with the default later.
     const newModel = `${provider}::${m}`
     const nextEffort = modelReasoningEfforts(byProvider, newModel).includes(effort) ? effort : ''
+    // #685 lockstep: a pick in a draft or normal chat also MOVES THE DEFAULT
+    // (active provider + remembered model in config.json) — the rail is the
+    // sole default writer now that the sidebar picker is gone. Optimistic:
+    // the store updates first so a "New chat" right after the pick inherits
+    // the new default (review round); persistence reconciles on failure.
+    // Only the default's own effort resets when the new model doesn't
+    // advertise it; the chat's pinned effort already carries over via
+    // nextEffort. Agent chats never move the default (Q5 exemption).
     if (conversationId === null) {
       setDraftScope({ model: newModel, effort: nextEffort })
+      moveDefault(provider, m)
       return
+    }
+    if (!isAgentChat) {
+      moveDefault(provider, m)
     }
     setSavingModel(true)
     const write = isAgentChat
@@ -9081,9 +8995,16 @@ export function ChatScopePickers() {
 
   const applyEffort = (e: string) => {
     if (e === effort) return
+    // #685 lockstep: effort picks move the default effort too (Q6 — same
+    // rule as the model), except in agent chats (Q5 exemption). Optimistic
+    // store write first, same reasoning as moveDefault above.
     if (conversationId === null) {
       setDraftScope({ effort: e })
+      moveDefaultEffort(e)
       return
+    }
+    if (!isAgentChat) {
+      moveDefaultEffort(e)
     }
     setSavingEffort(true)
     const write = isAgentChat
@@ -9134,6 +9055,34 @@ export function ChatScopePickers() {
   }
 
   const saving = savingModel || savingEffort || savingSubagent
+
+  /**
+   * #685 lockstep, review round: the new-chat default moves in the client
+   * store IMMEDIATELY — a pick followed by "New chat" must seed the fresh
+   * draft from the new default, not from whatever the last network refresh
+   * left behind. Persistence follows; on failure refreshGlobals reconciles
+   * the store with what actually persisted (per-stage tracking unnecessary:
+   * config.json is the source of truth either way).
+   */
+  const moveDefault = (provider: string, m: string) => {
+    const prevEffort = useAgent.getState().globalEffort
+    const keepDefaultEffort = modelReasoningEfforts(byProvider, m).includes(prevEffort)
+    const nextDefaultEffort = keepDefaultEffort ? prevEffort : ''
+    useAgent.setState({ globalModel: `${provider}::${m}`, globalEffort: nextDefaultEffort })
+    const effortSave = keepDefaultEffort
+      ? Promise.resolve()
+      : updateConfig({ reasoning_effort: '' })
+    Promise.all([setActiveModel(provider, m), effortSave])
+      .then(refreshGlobals)
+      .catch(() => refreshGlobals().catch(() => {}))
+  }
+  /** Same optimistic pattern for the default thought level. */
+  const moveDefaultEffort = (e: string) => {
+    useAgent.setState({ globalEffort: e })
+    updateConfig({ reasoning_effort: e })
+      .then(refreshGlobals)
+      .catch(() => refreshGlobals().catch(() => {}))
+  }
   // "No provider" means the config has none — not that the /models probe
   // returned nothing (a configured llama.cpp/Ollama server whose catalog
   // endpoint errors or is slow is NOT an unconfigured setup). While the
@@ -9142,56 +9091,82 @@ export function ChatScopePickers() {
   const noProvider = activeProvider === ''
   const downNotes = Object.entries(byProvider).filter(([, pm]) => pm.error)
 
+  // #685: always-refresh-on-hover — hovering, focusing, or opening either
+  // rail select re-probes the provider list when it's older than 60s. One
+  // module-level clock is shared across every surface (see useModelList);
+  // explicit refreshes (Settings close, provider saves) bypass the TTL.
+  // mousedown/keydown (the select-open gestures) additionally broadcast
+  // yaah-combobox-open so custom option sheets can sync their option list.
+  /** Hover/focus stale-check: re-probe only past the shared 60s TTL. */
+  const maybeRefreshModelList = () => {
+    if (modelListStale()) refresh()
+  }
+  /** Open gesture on a rail select: stale-check plus the combobox-open
+      broadcast for custom option sheets. */
+  const onPickerOpen = () => {
+    maybeRefreshModelList()
+    window.dispatchEvent(new CustomEvent('yaah-combobox-open'))
+  }
+  /** Keyboard select-open gesture, treated like opening for refresh. */
+  const onPickerKeyDown = (e: ReactKeyboardEvent<HTMLSelectElement>) => {
+    if (!['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(e.key)) return
+    onPickerOpen()
+  }
+
   return (
     <div className="flex flex-col gap-0.5   bg-zinc-900/60 px-4 py-1.5">
       <div className="flex items-center gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-600">model</span>
+        {/* c7914de2 P3 rail, #685 consolidation: the rail is the ONLY model
+            picker — its picks write the chat scope AND the new-chat default
+            (see applyModel/applyEffort). Hover/focus/open refreshes the
+            provider list when stale; the sidebar refresh button is gone. */}
         <select
           className="min-w-0 max-w-[16rem] flex-1 truncate rounded   bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={`${shownProvider}::${shownModel}`}
           onChange={(e) => applyModel(e.target.value)}
+          onMouseEnter={maybeRefreshModelList}
+          onFocus={maybeRefreshModelList}
+          onMouseDown={onPickerOpen}
+          onKeyDown={onPickerKeyDown}
           disabled={locked || saving || noProvider}
           aria-label="Chat model"
           title={
             isAgentChat
               ? "This chat's model (writes through to the owning agent)"
               : conversationId === null
-                ? "This chat's model (pinned at first send)"
-                : 'Model for this chat — other chats are unaffected'
+                ? "This chat's model (pinned at first send)." + DEFAULT_LOCKSTEP_HINT
+                : "This chat's model." + DEFAULT_LOCKSTEP_HINT
           }
         >
           <ModelOptions byProvider={byProvider} value={`${shownProvider}::${shownModel}`} />
         </select>
-        <button
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-          aria-label="Refresh models"
-          title="Refresh model lists from all providers"
-          onClick={() => refresh()}
-          disabled={saving}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
-          </svg>
-        </button>
-        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">effort</span>
+        <span className="imp-dotsep" aria-hidden="true">·</span>
         <select
           className="rounded   bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={effort}
           onChange={(e) => applyEffort(e.target.value)}
+          onMouseEnter={maybeRefreshModelList}
+          onFocus={maybeRefreshModelList}
+          onMouseDown={onPickerOpen}
+          onKeyDown={onPickerKeyDown}
           disabled={locked || saving || !modelSupportsReasoning(byProvider, model)}
           aria-label="Chat reasoning effort"
-          title={`${EFFORT_HINT}${isAgentChat ? ' (writes through to the owning agent)' : ''}`}
+          title={`${EFFORT_HINT}${isAgentChat ? ' (writes through to the owning agent)' : DEFAULT_LOCKSTEP_HINT}`}
         >
           <EffortOptions efforts={modelReasoningEfforts(byProvider, model)} />
         </select>
         {/* #383: where this chat's spawn_agent delegations run. '' =
             sub-agent: auto — the global Settings scope, then this chat's
             own model. Writes are complete "provider::model" or ''. */}
-        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">sub-agent</span>
+        <span className="imp-dotsep" aria-hidden="true">·</span>
         <select
           className="max-w-[14rem] rounded   bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={subagentModel}
           onChange={(e) => applySubagentModel(e.target.value)}
+          onMouseEnter={maybeRefreshModelList}
+          onFocus={maybeRefreshModelList}
+          onMouseDown={onPickerOpen}
+          onKeyDown={onPickerKeyDown}
           disabled={locked || saving || noProvider}
           aria-label="Chat sub-agent model"
           title={
@@ -9202,17 +9177,6 @@ export function ChatScopePickers() {
           <option value="">{SUBAGENT_AUTO_LABEL}</option>
           <ModelOptions byProvider={byProvider} value={subagentModel} />
         </select>
-        {isAgentChat && (
-          <span
-            className="rounded   px-1.5 py-0.5 text-[10px] text-zinc-400"
-            title="This chat belongs to a scheduled agent — changes apply to the agent"
-          >
-            agent
-          </span>
-        )}
-        {(savingModel || savingEffort) && (
-          <span className="text-[10px] text-zinc-500">saving…</span>
-        )}
       </div>
       {/* Provider-state affordances (#51): moved here from the sidebar so
           they sit next to the picker that needs them. */}
@@ -9586,8 +9550,8 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
-      {/* #51/#76: per-chat model + effort pickers — the chat's own scope. */}
-      <ChatScopePickers />
+      {/* #51/#76 scope pickers moved into the composer's bottom rail
+          (session c7914de2) — rendered by Composer now. */}
       <div
         ref={transcriptRef}
         onScroll={onTranscriptScroll}
@@ -9681,14 +9645,22 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           <MessageView key={m.id} msg={m} live={m.id === liveId} />
         ))}
         {pendingQuestion && (
-          <div className="rounded border border-orange-800/60 bg-orange-950/20 px-3 py-2">
-            <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
-              <span className="run-pulse">?</span> agent asks
+          <div className="lg-card">
+            <div className="lg-head">
+              <span aria-hidden="true" className="run-pulse lg-caret">?</span>
+              <span className="lg-title">agent asks</span>
             </div>
             {/* #113: the question renders inside the scrollable transcript
                 so a multi-screen question scrolls away with the chat instead
-                of pushing the pinned answer controls off-screen. */}
-            <p className="whitespace-pre-wrap text-sm text-zinc-100">{pendingQuestion.question}</p>
+                of pushing the pinned answer controls off-screen. Ledger band
+                (2026-11-05): matches AskUserTrace / the remote card's Q-row;
+                the orange pre-ledger chrome is gone. */}
+            <div className="lg-sheet">
+              <div className="lg-row">
+                <span aria-hidden="true" className="lg-key">Q</span>
+                <p className="lg-val lg-val--q">{pendingQuestion.question}</p>
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -11626,9 +11598,13 @@ export function Composer() {
           }}
         />
         {/* Unified toolbar: host + mode on the left, attach/mic/send on the
-            right — one hairline-separated row inside the composer card. */}
-        <div className="flex items-center gap-1   px-1.5 py-1.5">
+            right — one row inside the composer card. The scope pickers
+            (#51/#76) moved here from the top strip (session c7914de2):
+            P3 annotation rail — ghost selects, dot separators, no labels.
+            Mockups: .impeccable/live/mockups-c7914de2-c.html */}
+        <div className="imp-scope-rail">
           <AccessModeControl />
+          <ChatScopePickers />
           <div className="ml-auto flex items-center gap-1">
             <button
               title="Attach files"
@@ -11692,29 +11668,33 @@ export function Composer() {
                 )}
               </button>
             )}
+            {/* c7914de2: the send arrow doubles as the stop square while a
+                turn is live — same position, same job (send() steers mid-turn,
+                so the arrow never changes identity). */}
             {streaming || sendingKey === (useAgent.getState().bufferKey()) ? (
-              <>
-                <button
-                  className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
-                  onClick={() => void send()}
-                  disabled={!input.trim() && attachments.length === 0 && images.length === 0}
-                >
-                  Send
-                </button>
-                <button
-                  className="rounded border border-red-700 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950"
-                  onClick={stop}
-                >
-                  Stop
-                </button>
-              </>
+              <button
+                type="button"
+                className="imp-stop-square"
+                title="Stop streaming"
+                aria-label="Stop streaming"
+                onClick={stop}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
+                  <rect x="2" y="2" width="6" height="6" rx="1" />
+                </svg>
+              </button>
             ) : (
               <button
-                className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
-                onClick={() => void send()}
+                type="button"
+                className="imp-send"
+                title="Send — or press Enter"
+                aria-label="Send"
                 disabled={!input.trim() && attachments.length === 0 && images.length === 0}
+                onClick={() => void send()}
               >
-                Send
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 19V6M5.5 12.5L12 6l6.5 6.5" />
+                </svg>
               </button>
             )}
           </div>
