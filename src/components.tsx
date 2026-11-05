@@ -1689,56 +1689,53 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
   }
 
   return (
-    <div
-      data-agent-card=""
-      className="rounded-lg border border-zinc-700 bg-zinc-800 p-3"
-    >
-      <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-500">
-        agent
-        {/* Stop control on the message currently being read aloud. */}
-        <MessageStopButton msgId={msg.id} />
-      </div>
-      {msg.implementsPlan && <PlanBanner plan={msg.implementsPlan} />}
-      {canInterleave ? (
-        <>
-          {interleaved}
-          {/* #275: the unified segmentation owns the emission text; the say
-              briefing line and the empty-content caret keep body parity. */}
-          {showSayLine ? (
-            <em className="say-line mt-1.5 block text-xs italic text-zinc-500">
-              {msg.say}
-            </em>
-          ) : null}
-          {!msg.content && !(msg.toolCalls ?? []).length && (
-            <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
+        <div data-agent-card="" className="mv-card">
+          <div className="mb-0.5 flex items-center gap-2 select-none font-mono text-[10px] uppercase tracking-widest text-zinc-500 mv-label">
+            agent
+            {/* Stop control on the message currently being read aloud. */}
+            <MessageStopButton msgId={msg.id} />
+          </div>
+          {msg.implementsPlan && <PlanBanner plan={msg.implementsPlan} />}
+          {canInterleave ? (
+            <>
+              {interleaved}
+              {/* #275: the unified segmentation owns the emission text; the say
+                  briefing line and the empty-content caret keep body parity. */}
+              {showSayLine ? (
+                <em className="say-line mt-1.5 block text-xs italic text-zinc-500">
+                  {msg.say}
+                </em>
+              ) : null}
+              {!msg.content && !(msg.toolCalls ?? []).length && (
+                <span className="run-pulse font-mono text-sm text-zinc-500">▊</span>
+              )}
+              {live && (
+                <ToolTicker calls={(msg.toolCalls ?? []).filter((call) => call.name !== 'spawn_agent')} />
+              )}
+              {!live && allCalls.some((call) => call.name !== 'spawn_agent') && (
+                <TraceLine calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
+              )}
+              {live && <ModelCallWaiting />}
+            </>
+          ) : chronological ? (
+            <>
+              {segments}
+              {allCalls.some((call) => call.name !== 'spawn_agent') ? (
+                live
+                  ? <ToolTicker calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
+                  : <TraceLine calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
+              ) : null}
+              {live && <ModelCallWaiting />}
+            </>
+          ) : (
+            <>
+              {ordered.map((call) => (
+                <QuestionAnchor key={call.id} tc={call} after={allCalls.slice(allCalls.indexOf(call) + 1)} />
+              ))}
+              {body}
+            </>
           )}
-          {live && (
-            <ToolTicker calls={(msg.toolCalls ?? []).filter((call) => call.name !== 'spawn_agent')} />
-          )}
-          {!live && allCalls.some((call) => call.name !== 'spawn_agent') && (
-            <TraceLine calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
-          )}
-          {live && <ModelCallWaiting />}
-        </>
-      ) : chronological ? (
-        <>
-          {segments}
-          {allCalls.some((call) => call.name !== 'spawn_agent') ? (
-            live
-              ? <ToolTicker calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
-              : <TraceLine calls={allCalls.filter((call) => call.name !== 'spawn_agent')} />
-          ) : null}
-          {live && <ModelCallWaiting />}
-        </>
-      ) : (
-        <>
-          {ordered.map((call) => (
-            <QuestionAnchor key={call.id} tc={call} after={allCalls.slice(allCalls.indexOf(call) + 1)} />
-          ))}
-          {body}
-        </>
-      )}
-    </div>
+        </div>
   )
 })
 
