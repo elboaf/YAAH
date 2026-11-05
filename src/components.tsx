@@ -3829,7 +3829,7 @@ export function ConversationRow({
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [menuOpen, setMenuOpen])
   return (
-    <div className="group relative flex items-center">
+    <div className="lg-row group relative flex items-center">
       <button
         className={`flex min-w-0 flex-1 items-center rounded px-2 py-1.5 text-left text-xs group-focus-within:bg-zinc-800/60 ${
           active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/60'
@@ -4355,14 +4355,14 @@ export function Sidebar() {
 
   return (
     <>
-      <aside className="flex w-64 min-w-[220px] flex-col   bg-zinc-900 p-2 text-sm border-r border-zinc-700">
+      <aside className="lg-sidebar flex w-64 min-w-[220px] flex-col bg-zinc-900 p-2 text-sm border-r border-zinc-700">
         <ConversationList addingDevice={addingDevice} setAddingDevice={setAddingDevice} />
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}
         <div className="relative mt-auto pt-2">
           {/* No overflow-hidden here: it would clip the add-workspace menu,
               which opens upward out of the strip. Cells keep their own radii. */}
-          <div className="sw-strip rounded-lg border border-zinc-700 bg-zinc-950/70 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.25),0_4px_6px_-4px_rgba(0,0,0,0.2)]">
+          <div className="sw-strip lg-strip-machined rounded-lg border border-zinc-700 bg-zinc-950/70 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.25),0_4px_6px_-4px_rgba(0,0,0,0.2)]">
             <div className="sw-strip-cell">
               <button
                 className="sw-strip-btn w-full min-w-0 rounded bg-blue-600 px-2 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
