@@ -400,12 +400,34 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0;
+  gap: 4px;
   padding: 3px 5px;
   border-radius: 4px;
   background: transparent;
-  border: 0;
+  /* Visible boundary in normal mode; forced-colors maps it to a system
+     line, so the control never dissolves into the background (#685 review). */
+  border: 1px solid #3f3f46;
   cursor: pointer;
 }
 .imp-mode-trigger:hover { background: rgba(39, 39, 42, 0.85); }
+/* Non-color mode cue (review: the dot alone is color-only). Mono
+   micro-label matching the rail's ghost-select voice; the dot stays as
+   the at-a-glance hue for sighted color mode. */
+.imp-mode-label {
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+  color: #a8a8a8;
+}
+/* Forced-colors (Windows high-contrast): box-shadow focus rings vanish,
+   so keyboard focus falls back to a system outline (#685 review). */
+@media (forced-colors: active) {
+  .imp-scope-rail select:focus-visible,
+  .imp-send:focus-visible {
+    outline: 1px solid CanvasText;
+    outline-offset: 1px;
+  }
+}
 .imp-dotsep { color: #3f3f46; font-size: 10px; padding: 0 2px; user-select: none; }

@@ -4120,24 +4120,39 @@ export function ModelOptions({
 // call refresh() directly and bypass the clock.
 const MODEL_LIST_TTL_MS = 60_000
 let modelListProbedAt = 0
+// One request generation shared by EVERY hook instance: the old per-instance
+// latestRefresh ref ordered responses only within one component, so a slow
+// sidebar probe could still broadcast over a newer rail probe through the
+// model-list-changed channel. Only the globally-newest request may apply.
+let modelListProbeGen = 0
+/** True when the shared model-list clock is older than the hover TTL. */
 export function modelListStale(): boolean {
   return Date.now() - modelListProbedAt >= MODEL_LIST_TTL_MS
 }
 
+/** #51 — hook: the provider-grouped model list shared by every picker.
+
+  activeProvider: the configured active provider from config.json, or ''
+  when none is configured. null = the backend hasn't answered yet (restart,
+  unreachable) — "no provider configured" banners must NOT render on null,
+  or a configured-but-slow local server (llama.cpp) would be told it has no
+  provider (#51 regression: the banner keyed off the /models probe instead
+  of the config). */
 export function useModelList() {
   const [byProvider, setByProvider] = useState<Record<string, ProviderModels>>({})
   const [activeProvider, setActiveProvider] = useState<string | null>(null)
-  // Ignore stale refresh responses: mount/save/close/hover can all fire
-  // refresh() concurrently, so an older network response could resolve
-  // last and clobber newer model data. Track the latest request so only
-  // the newest one's result is applied (covers every caller).
-  const latestRefresh = useRef(0)
   const refresh = useCallback(() => {
-    modelListProbedAt = Date.now()
-    const requestId = ++latestRefresh.current
+    const requestId = ++modelListProbeGen
     listAvailableModels()
       .then((r) => {
-        if (requestId !== latestRefresh.current) return
+        // Reject any but the globally-newest request: an older response
+        // (from any instance) must not clobber a newer list or broadcast it.
+        if (requestId !== modelListProbeGen) return
+        // Review (#685): freshness is stamped only AFTER a successful
+        // response — a failed probe must stay retryable on the next
+        // hover/focus/open, not lock the picker out for 60s (there is no
+        // manual refresh button anymore).
+        modelListProbedAt = Date.now()
         setByProvider(r.providers)
         setActiveProvider(r.active_provider)
         // #685: a probe landed — broadcast the payload so every OTHER
@@ -8222,6 +8237,7 @@ function AccessModeControl() {
         onClick={() => setOpen(!open)}
       >
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${m.dot}`} />
+        <span aria-hidden="true" className="imp-mode-label">{m.short}</span>
       </button>
       {open && (
         <div className="absolute bottom-9 left-0 z-20 w-64 rounded   bg-zinc-900 py-1 shadow-lg">
@@ -8935,30 +8951,19 @@ export function ChatScopePickers() {
     const nextEffort = modelReasoningEfforts(byProvider, newModel).includes(effort) ? effort : ''
     // #685 lockstep: a pick in a draft or normal chat also MOVES THE DEFAULT
     // (active provider + remembered model in config.json) — the rail is the
-    // sole default writer now that the sidebar picker is gone. Same
-    // effort-guard as the old strip picker: a default effort the new model
-    // doesn't advertise resets to the provider default. Only the default's
-    // own effort resets; the chat's pinned effort already carries over via
+    // sole default writer now that the sidebar picker is gone. Optimistic:
+    // the store updates first so a "New chat" right after the pick inherits
+    // the new default (review round); persistence reconciles on failure.
+    // Only the default's own effort resets when the new model doesn't
+    // advertise it; the chat's pinned effort already carries over via
     // nextEffort. Agent chats never move the default (Q5 exemption).
     if (conversationId === null) {
       setDraftScope({ model: newModel, effort: nextEffort })
-      const keepDefaultEffort = modelReasoningEfforts(byProvider, newModel).includes(
-        useAgent.getState().globalEffort,
-      )
-      setActiveModel(provider, m)
-        .then(() => (keepDefaultEffort ? undefined : updateConfig({ reasoning_effort: '' })))
-        .then(refreshGlobals)
-        .catch(() => {})
+      moveDefault(provider, m)
       return
     }
     if (!isAgentChat) {
-      const keepDefaultEffort = modelReasoningEfforts(byProvider, newModel).includes(
-        useAgent.getState().globalEffort,
-      )
-      setActiveModel(provider, m)
-        .then(() => (keepDefaultEffort ? undefined : updateConfig({ reasoning_effort: '' })))
-        .then(refreshGlobals)
-        .catch(() => {})
+      moveDefault(provider, m)
     }
     setSavingModel(true)
     const write = isAgentChat
@@ -8991,14 +8996,15 @@ export function ChatScopePickers() {
   const applyEffort = (e: string) => {
     if (e === effort) return
     // #685 lockstep: effort picks move the default effort too (Q6 — same
-    // rule as the model), except in agent chats (Q5 exemption).
+    // rule as the model), except in agent chats (Q5 exemption). Optimistic
+    // store write first, same reasoning as moveDefault above.
     if (conversationId === null) {
       setDraftScope({ effort: e })
-      void updateConfig({ reasoning_effort: e }).then(refreshGlobals).catch(() => {})
+      moveDefaultEffort(e)
       return
     }
     if (!isAgentChat) {
-      void updateConfig({ reasoning_effort: e }).then(refreshGlobals).catch(() => {})
+      moveDefaultEffort(e)
     }
     setSavingEffort(true)
     const write = isAgentChat
@@ -9049,6 +9055,34 @@ export function ChatScopePickers() {
   }
 
   const saving = savingModel || savingEffort || savingSubagent
+
+  /**
+   * #685 lockstep, review round: the new-chat default moves in the client
+   * store IMMEDIATELY — a pick followed by "New chat" must seed the fresh
+   * draft from the new default, not from whatever the last network refresh
+   * left behind. Persistence follows; on failure refreshGlobals reconciles
+   * the store with what actually persisted (per-stage tracking unnecessary:
+   * config.json is the source of truth either way).
+   */
+  const moveDefault = (provider: string, m: string) => {
+    const prevEffort = useAgent.getState().globalEffort
+    const keepDefaultEffort = modelReasoningEfforts(byProvider, m).includes(prevEffort)
+    const nextDefaultEffort = keepDefaultEffort ? prevEffort : ''
+    useAgent.setState({ globalModel: `${provider}::${m}`, globalEffort: nextDefaultEffort })
+    const effortSave = keepDefaultEffort
+      ? Promise.resolve()
+      : updateConfig({ reasoning_effort: '' })
+    Promise.all([setActiveModel(provider, m), effortSave])
+      .then(refreshGlobals)
+      .catch(() => refreshGlobals().catch(() => {}))
+  }
+  /** Same optimistic pattern for the default thought level. */
+  const moveDefaultEffort = (e: string) => {
+    useAgent.setState({ globalEffort: e })
+    updateConfig({ reasoning_effort: e })
+      .then(refreshGlobals)
+      .catch(() => refreshGlobals().catch(() => {}))
+  }
   // "No provider" means the config has none — not that the /models probe
   // returned nothing (a configured llama.cpp/Ollama server whose catalog
   // endpoint errors or is slow is NOT an unconfigured setup). While the
@@ -9063,13 +9097,17 @@ export function ChatScopePickers() {
   // explicit refreshes (Settings close, provider saves) bypass the TTL.
   // mousedown/keydown (the select-open gestures) additionally broadcast
   // yaah-combobox-open so custom option sheets can sync their option list.
+  /** Hover/focus stale-check: re-probe only past the shared 60s TTL. */
   const maybeRefreshModelList = () => {
     if (modelListStale()) refresh()
   }
+  /** Open gesture on a rail select: stale-check plus the combobox-open
+      broadcast for custom option sheets. */
   const onPickerOpen = () => {
     maybeRefreshModelList()
     window.dispatchEvent(new CustomEvent('yaah-combobox-open'))
   }
+  /** Keyboard select-open gesture, treated like opening for refresh. */
   const onPickerKeyDown = (e: ReactKeyboardEvent<HTMLSelectElement>) => {
     if (!['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(e.key)) return
     onPickerOpen()

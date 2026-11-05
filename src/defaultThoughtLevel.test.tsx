@@ -113,6 +113,35 @@ describe('composer rail lockstep (#685): picks move the default', () => {
     await waitFor(() => expect(updateConfig).toHaveBeenCalledWith({ reasoning_effort: 'low' }))
   })
 
+  it('the default moves in the store IMMEDIATELY on pick, before any network settles', async () => {
+    render(<ChatScopePickers />)
+    const picker = await findModelPicker()
+    await waitFor(() => expect(picker).toHaveValue('openrouter::reasoner'))
+
+    fireEvent.change(picker, { target: { value: 'groq::llama-3.3-70b' } })
+
+    // Review round (#685): the optimistic write must already be visible —
+    // a "New chat" clicked now inherits THIS, not the stale globals.
+    expect(useAgent.getState().globalModel).toBe('groq::llama-3.3-70b')
+    // The effort guard applied optimistically too: groq advertises nothing,
+    // so the default effort resets in the same tick.
+    expect(useAgent.getState().globalEffort).toBe('')
+  })
+
+  it('a failed default write reconciles the store with what persisted', async () => {
+    setActiveModel.mockRejectedValueOnce(new Error('boom'))
+    render(<ChatScopePickers />)
+    const picker = await findModelPicker()
+    await waitFor(() => expect(picker).toHaveValue('openrouter::reasoner'))
+
+    fireEvent.change(picker, { target: { value: 'groq::llama-3.3-70b' } })
+    expect(useAgent.getState().globalModel).toBe('groq::llama-3.3-70b')
+
+    // refreshGlobals re-reads the (static) config: the store must land back
+    // on the persisted default instead of lying about the save.
+    await waitFor(() => expect(useAgent.getState().globalModel).toBe('openrouter::reasoner'))
+  })
+
   it('an agent-chat pick writes through to the agent and never moves the default', async () => {
     useAgent.setState({
       agents: [{
@@ -232,5 +261,61 @@ describe('probe clock export', () => {
     vi.setSystemTime(Date.now() + 61_000)
     expect(modelListStale()).toBe(true)
     vi.useRealTimers()
+  })
+
+  it('a FAILED probe does not stamp freshness — the next hover retries', async () => {
+    // Freeze Date.now 120s ahead so the shared clock reads stale no matter
+    // what earlier tests in this file stamped: a probe that stamps would
+    // make the clock FRESH (age 0), a probe that doesn't leaves it stale.
+    const realNow = Date.now
+    const fakeNow = realNow() + 120_000
+    Date.now = () => fakeNow
+    try {
+      listAvailableModels.mockRejectedValueOnce(new Error('provider down'))
+      render(<ChatScopePickers />)
+      const picker = await findModelPicker()
+      // Mount probe failed: freshness must NOT be stamped (review #685 —
+      // there is no manual refresh button to fall back on anymore).
+      expect(modelListStale()).toBe(true)
+
+      // The next hover retries the probe, which now succeeds and stamps.
+      listAvailableModels.mockResolvedValue(byProvider)
+      fireEvent.mouseEnter(picker)
+      await waitFor(() => expect(modelListStale()).toBe(false))
+      expect(listAvailableModels).toHaveBeenCalledTimes(2)
+    } finally {
+      Date.now = realNow
+    }
+  })
+
+  it('a stale older response from any instance cannot broadcast over a newer one', async () => {
+    // Freshness freeze so nothing in this test depends on the shared clock.
+    const realNow = Date.now
+    Date.now = () => realNow() + 500_000
+    try {
+      // Mount probe hangs (the "slow sidebar request" in this scenario).
+      let resolveSlow: (v: unknown) => void = () => {}
+      listAvailableModels.mockImplementationOnce(
+        () => new Promise((resolve) => { resolveSlow = resolve }),
+      )
+      render(<ChatScopePickers />)
+      const picker = await findModelPicker()
+      // The rail's explicit re-probe (newest generation) resolves fast.
+      const fresh = { providers: { openrouter: { models: ['fresh-model'] } }, active_provider: 'openrouter' }
+      listAvailableModels.mockResolvedValueOnce(fresh)
+      window.dispatchEvent(new Event('providers-changed'))
+      await waitFor(() => expect(within(picker).getByRole('option', { name: 'fresh-model' })).toBeInTheDocument())
+
+      // NOW the older mount-generation response resolves late with junk.
+      resolveSlow({ providers: { openrouter: { models: ['stale-model'] } }, active_provider: '' })
+      await new Promise((r) => setTimeout(r, 20))
+      // Cross-instance ordering (review #685): the late response is from a
+      // superseded generation and must not have replaced or rebroadcast.
+      expect(within(picker).getByRole('option', { name: 'fresh-model' })).toBeInTheDocument()
+      expect(within(picker).queryByRole('option', { name: 'stale-model' })).not.toBeInTheDocument()
+      expect(listAvailableModels).toHaveBeenCalledTimes(2)
+    } finally {
+      Date.now = realNow
+    }
   })
 })
