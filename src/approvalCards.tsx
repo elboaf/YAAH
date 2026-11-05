@@ -3,34 +3,38 @@ import { submitAnswer } from './api'
 import { useAgent } from './store'
 
 /**
- * Shared card shell: bordered container with header icon, title, and error display.
+ * Shared card shell: ledger band (design sign-off 2026-11-05, live session
+ * 74694c80 v3) — ruled top/bottom hairlines on a deep well, mono micro-label
+ * header, role hue carried by VALUES inside the band, never by chrome.
+ * `color` keeps naming the role (orange=ask/gate, sky=plan) for callers and
+ * for the accent-specific input/send treatments; the shell itself is hue-free.
  */
-const SHELL_COLORS = {
-  orange: { border: 'border-orange-700/60', text: 'text-orange-400' },
-  sky: { border: 'border-sky-700/60', text: 'text-sky-400' }
-}
-
-export function ApprovalCardShell({ color, icon, title, children, err }: {
+export function ApprovalCardShell({ color, icon, title, sub, children, err }: {
   color: 'orange' | 'sky'
   icon: React.ReactNode
   title: string
+  /** Faint mono suffix after the title (e.g. "#live · pick an answer"). */
+  sub?: string
   children: React.ReactNode
   err: string | null
 }) {
-  const c = SHELL_COLORS[color]
   return (
-    <div className={`rounded-lg border ${c.border} bg-zinc-900 p-3 shadow-lg`}>
-      <div className={`mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest ${c.text}`}>
-        {icon} {title}
+    <div className="lg-card mb-2" role="status">
+      <div className="lg-head">
+        <span aria-hidden="true" className="lg-caret">{icon}</span>
+        <span className="lg-title">{title}</span>
+        {sub && <span className="lg-sub">{sub}</span>}
       </div>
       {children}
-      {err && <p className="mt-2 text-[11px] text-red-400">{err}</p>}
+      {err && <p className="lg-danger">{err}</p>}
     </div>
   )
 }
 
 /**
- * Shared free-text answer input + send button.
+ * Shared free-text answer input + send button: ledger input row (ruled top
+ * hairline, ✎ key, underline input, mono SEND). sendColor picks which role
+ * hue the focus underline + button carry.
  */
 export function FreeTextAnswer({ custom, setCustom, submitting, submit, placeholder, sendColor = 'blue', inputClassName = '', onEdit }: {
   custom: string
@@ -39,16 +43,19 @@ export function FreeTextAnswer({ custom, setCustom, submitting, submit, placehol
   submit: (text: string) => void
   placeholder: string
   sendColor?: string
-  /** Extra classes for the input (e.g. the voiceSeeded highlight ring). */
+  /** Extra classes for the input (e.g. the voiceSeeded underline). */
   inputClassName?: string
   /** Fired when the user edits the input, after setCustom. */
   onEdit?: () => void
 }) {
+  const inputAccent =
+    sendColor === 'sky' ? 'lg-input--sky' : sendColor === 'orange' ? '' : 'lg-input--blue'
   return (
-    <div className="flex gap-1.5">
+    <div className="lg-inputrow">
+      <span aria-hidden="true" className="lg-key lg-key--faint">✎</span>
       <input
         autoFocus
-        className={`flex-1 rounded bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none ${inputClassName}`}
+        className={`lg-input ${inputAccent} ${inputClassName}`}
         placeholder={placeholder}
         value={custom}
         onChange={(e) => {
@@ -63,11 +70,7 @@ export function FreeTextAnswer({ custom, setCustom, submitting, submit, placehol
         }}
       />
       <button
-        className={`rounded px-3 py-1.5 text-xs text-white disabled:opacity-50 ${
-          sendColor === 'orange' ? 'bg-orange-600 hover:bg-orange-500' :
-          sendColor === 'sky' ? 'bg-sky-600 hover:bg-sky-500' :
-          'bg-blue-600 hover:bg-blue-500'
-        }`}
+        className={`lg-send lg-send--${sendColor}`}
         disabled={submitting || !custom.trim()}
         onClick={() => submit(custom.trim())}
       >

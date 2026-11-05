@@ -184,7 +184,9 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
 
 // ---------------------------------------------------------------- tool calls
 
-/** One option row of an ask_user card: label + trade-off description. */
+/** One option row of an ask_user card: ledger keyed row (design sign-off
+ *  2026-11-05) — mono number key + label + trade-off description; chosen
+ *  rows carry the role hue in the key. */
 function AskOptionRow({
   label,
   description,
@@ -200,16 +202,15 @@ function AskOptionRow({
 }) {
   return (
     <button
-      className={`block w-full rounded   px-2.5 py-1.5 text-left text-xs ${
-        chosen
-          ? 'border-orange-500 bg-orange-950/40 text-orange-200'
-          : ' bg-zinc-800/60 text-zinc-200 enabled:hover:border-orange-500/60 enabled:hover:bg-zinc-800'
-      } disabled:cursor-default`}
+      className={`lg-row ${disabled ? '' : 'cursor-pointer'} disabled:cursor-default`}
       disabled={disabled}
       onClick={onClick}
     >
-      <span className="font-medium">{label}</span>
-      {description && <span className="block text-[11px] leading-4 text-zinc-400 line-clamp-2">{description}</span>}
+      <span aria-hidden="true" className={`lg-key ${chosen ? 'lg-key--chosen' : ''}`}>{chosen ? '✓' : '·'}</span>
+      <span className="lg-val">
+        <span className={`lg-opt-label ${chosen ? 'lg-opt-label--chosen' : ''}`}>{label}</span>
+        {description && <span className="lg-opt-desc">{description}</span>}
+      </span>
     </button>
   )
 }
@@ -344,8 +345,12 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
   })
 
   return (
-    <ApprovalCardShell color="orange" icon={<span className="run-pulse">?</span>} title="agent asks — pick an answer" err={err}>
-      <div className="max-h-[40vh] space-y-1.5 overflow-y-auto">
+    <ApprovalCardShell color="orange" icon="▾" title="agent asks" sub="#live · pick an answer" err={err}>
+      <div className="lg-sheet" style={{ maxHeight: '40vh', overflowY: 'auto' }}>
+        <div className="lg-row">
+          <span aria-hidden="true" className="lg-key">Q</span>
+          <p className="lg-val lg-val--q">{pending.question}</p>
+        </div>
         {pending.options.map((o, i) => (
           <AskOptionRow
             key={i}
@@ -355,15 +360,17 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
             onClick={() => respond(o.label)}
           />
         ))}
-        {!customOpen ? (
+        {!customOpen && (
           <button
-            className="block w-full rounded border border-dashed border-zinc-700 px-2.5 py-1.5 text-left text-xs text-zinc-400 hover:border-orange-500/60 hover:text-zinc-200"
+            className="lg-row lg-row--else"
             disabled={submitting}
             onClick={() => setCustomOpen(true)}
           >
-            Something else…
+            <span aria-hidden="true" className="lg-key lg-key--faint">…</span>
+            <span className="lg-val lg-else">Something else…</span>
           </button>
-        ) : (
+        )}
+        {customOpen && (
           <FreeTextAnswer
             custom={custom}
             setCustom={setCustom}
@@ -371,7 +378,7 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
             submit={respond}
             placeholder={voiceSeeded ? 'Voice answer staged — edit or Send' : 'Type your own answer…'}
             sendColor="orange"
-            inputClassName={voiceSeeded ? 'border-orange-500/70 focus:border-orange-500' : ''}
+            inputClassName={voiceSeeded ? 'qa-voice-staged' : ''}
             onEdit={() => setVoiceSeeded(false)}
           />
         )}
@@ -440,33 +447,38 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   const approvalWorkspace = useAgent((s) => s.workspace)
 
   return (
-    <ApprovalCardShell color="orange" icon={<span className="run-pulse">!</span>} title="approval needed" err={err}>
-      <p className="mb-1.5 flex items-center gap-2 font-mono text-xs text-zinc-100">
-        <span className="text-orange-300">{approval.tool}</span>
-        {summary && <span className="truncate text-zinc-400">{summary}</span>}
-      </p>
-      {approvalWorkspace && commandLike && (
-        <p className="mb-1.5 font-mono text-[10px] text-zinc-500">
-          in {approvalWorkspace || 'workspace root'}
-        </p>
-      )}
-      {commandLike && (
-        <pre className="mb-2 overflow-y-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] terminal-text">
-          {String(approval.args?.command ?? '')}
-        </pre>
-      )}
-      <div className="flex gap-1.5">
+    <ApprovalCardShell color="orange" icon="▾" title="approval needed" sub={`#${approval.tool}`} err={err}>
+      <div className="lg-sheet">
+        <div className="lg-row">
+          <span aria-hidden="true" className="lg-key lg-key--faint">tool</span>
+          <p className="lg-val lg-val--tool">
+            {approval.tool}
+            {summary && <span className="lg-val--mono"> · {summary}</span>}
+          </p>
+        </div>
+        {approvalWorkspace && commandLike && (
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key lg-key--faint">cwd</span>
+            <p className="lg-val lg-val--mono">{approvalWorkspace || 'workspace root'}</p>
+          </div>
+        )}
+        {commandLike && (
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key lg-key--faint">$</span>
+            <pre className="lg-pre terminal-text lg-val">{String(approval.args?.command ?? '')}</pre>
+          </div>
+        )}
+      </div>
+      <div className="lg-actions">
         <button
-          className={`rounded px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 ${
-            mutating ? 'bg-red-700 hover:bg-red-600' : 'bg-blue-600 hover:bg-blue-500'
-          }`}
+          className={`lg-btn ${mutating ? 'lg-btn--danger' : 'lg-btn--primary'}`}
           disabled={submitting}
           onClick={() => respond('approve')}
         >
-          {submitting ? '…' : mutating ? 'Approve (runs shell / writes files)' : 'Approve'}
+          {submitting ? '…' : mutating ? '✚ Approve — runs shell / writes files' : '▶ Approve'}
         </button>
         <button
-          className="rounded px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          className="lg-btn lg-btn--ghost"
           disabled={submitting}
           onClick={() => respond('deny')}
         >
@@ -474,24 +486,19 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
         </button>
       </div>
       {!customOpen ? (
-        <button
-          className="mt-1.5 block w-full rounded border border-dashed border-zinc-700 px-2.5 py-1.5 text-left text-xs text-zinc-400 hover:border-orange-500/60 hover:text-zinc-200"
-          disabled={submitting}
-          onClick={() => setCustomOpen(true)}
-        >
-          Deny with a note…
+        <button className="lg-inputrow" style={{ width: '100%' }} disabled={submitting} onClick={() => setCustomOpen(true)}>
+          <span aria-hidden="true" className="lg-key lg-key--faint">…</span>
+          <span className="lg-val lg-else">Deny with a note…</span>
         </button>
       ) : (
-        <div className="mt-1.5">
-          <FreeTextAnswer
-            custom={custom}
-            setCustom={setCustom}
-            submitting={submitting}
-            submit={respond}
-            placeholder="Why deny? Sent to the model as guidance…"
-            sendColor="blue"
-          />
-        </div>
+        <FreeTextAnswer
+          custom={custom}
+          setCustom={setCustom}
+          submitting={submitting}
+          submit={respond}
+          placeholder="Why deny? Sent to the model as guidance…"
+          sendColor="blue"
+        />
       )}
     </ApprovalCardShell>
   )
@@ -525,21 +532,21 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
   })
 
   return (
-    <ApprovalCardShell color="sky" icon={<span className="run-pulse">▶</span>} title="plan ready — approve to run" err={err}>
-      <div className="mb-2.5 max-h-64 overflow-y-auto text-sm text-zinc-100">
+    <ApprovalCardShell color="sky" icon="▾" title="plan ready" sub="#exit_plan · approve to run" err={err}>
+      <div className="lg-plan">
         <AgentMarkdown content={pending.plan} />
       </div>
-      <div className="flex gap-1.5">
+      <div className="lg-actions">
         <button
-          className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          className="lg-btn lg-btn--primary"
           disabled={submitting}
           onClick={() => respond('approve')}
         >
-          {submitting ? '…' : 'Approve & run'}
+          {submitting ? '…' : '▶ Approve & run'}
         </button>
         {!customOpen && (
           <button
-            className="rounded px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            className="lg-btn lg-btn--ghost"
             disabled={submitting}
             onClick={() => setCustomOpen(true)}
           >
@@ -548,16 +555,14 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
         )}
       </div>
       {customOpen && (
-        <div className="mt-1.5">
-          <FreeTextAnswer
-            custom={custom}
-            setCustom={setCustom}
-            submitting={submitting}
-            submit={respond}
-            placeholder="What should change? Sent to the model as feedback…"
-            sendColor="sky"
-          />
-        </div>
+        <FreeTextAnswer
+          custom={custom}
+          setCustom={setCustom}
+          submitting={submitting}
+          submit={respond}
+          placeholder="What should change? Sent to the model as feedback…"
+          sendColor="sky"
+        />
       )}
     </ApprovalCardShell>
   )
@@ -571,28 +576,28 @@ function AskUserTrace({ tc }: { tc: ToolCall }) {
   const result = (tc.result ?? {}) as { answer?: string | null; note?: string }
   const answer = typeof result.answer === 'string' && result.answer ? result.answer : null
   return (
-    <div className="rounded   bg-zinc-900/60 p-2">
-      <p className="mb-1.5 whitespace-pre-wrap font-sans text-xs text-zinc-200">
-        {args.question ?? ''}
-      </p>
-      <div className="space-y-1">
-        {(args.options ?? []).map((o, i) => (
-          <AskOptionRow
-            key={i}
-            label={o.label}
-            description={o.description}
-            chosen={answer !== null && o.label === answer}
-            disabled
-          />
-        ))}
-        {answer !== null && !(args.options ?? []).some((o) => o.label === answer) && (
-          <AskOptionRow label={answer} chosen disabled />
-        )}
+    <div>
+      <div className="lg-row">
+        <span aria-hidden="true" className="lg-key">Q</span>
+        <p className="lg-val lg-val--q">{args.question ?? ''}</p>
       </div>
+      {(args.options ?? []).map((o, i) => (
+        <AskOptionRow
+          key={i}
+          label={o.label}
+          description={o.description}
+          chosen={answer !== null && o.label === answer}
+          disabled
+        />
+      ))}
+      {answer !== null && !(args.options ?? []).some((o) => o.label === answer) && (
+        <AskOptionRow label={answer} chosen disabled />
+      )}
       {answer === null && (
-        <p className="mt-1 font-sans text-[11px] text-zinc-500">
-          {result.note ?? 'not answered'}
-        </p>
+        <div className="lg-row">
+          <span aria-hidden="true" className="lg-key lg-key--faint">…</span>
+          <p className="lg-val lg-val--mono">{result.note ?? 'not answered'}</p>
+        </div>
       )}
     </div>
   )
@@ -1019,15 +1024,21 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
     if (tc.name === 'exit_plan') {
       const result = (tc.result ?? {}) as { decision?: string; feedback?: string; note?: string }
       return (
-        <div className="rounded border border-sky-800/60 bg-zinc-900/60 p-2">
-          <p className="mb-1.5 whitespace-pre-wrap font-sans text-xs text-zinc-200">{String(args.plan ?? '')}</p>
-          <p className="font-mono text-[11px] text-sky-300">
-            {result.decision === 'approved'
-              ? '✓ approved — plan mode off, executing'
-              : result.decision === 'revised'
-                ? `↻ changes requested: ${result.feedback ?? ''}`
-                : (result.note ?? 'no decision')}
-          </p>
+        <div>
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key">Q</span>
+            <p className="lg-val lg-val--q">{String(args.plan ?? '')}</p>
+          </div>
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key">✓</span>
+            <p className={`lg-val lg-val--mono ${result.decision === 'approved' ? 'lg-val--a--sky' : ''}`}>
+              {result.decision === 'approved'
+                ? 'approved — plan mode off, executing'
+                : result.decision === 'revised'
+                  ? `↻ changes requested: ${result.feedback ?? ''}`
+                  : (result.note ?? 'no decision')}
+            </p>
+          </div>
         </div>
       )
     }
@@ -1735,24 +1746,38 @@ function PlanningFold({ msg, body }: { msg: ChatMessage; body: ReactNode }) {
   const [open, setOpen] = useState(false)
   const n = msg.toolCalls?.length ?? 0
   return (
-    <div className="rounded-lg border border-sky-800/50 bg-zinc-800 p-3">
+    <div className="lg-card mb-2">
       <button
-        className="flex w-full items-center gap-2 py-0.5 text-left font-mono text-[10px] uppercase tracking-widest text-sky-400 hover:text-sky-300"
+        className="lg-head"
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="text-sky-600">{open ? '▾' : '▸'}</span>
-        <span>planning</span>
-        {n > 0 && (
-          <span className="tracking-normal text-zinc-600 normal-case">
-            {n} call{n === 1 ? '' : 's'}
-          </span>
-        )}
-        <span className="ml-auto tracking-normal text-zinc-600 normal-case">
-          ✓ approved — {open ? 'hide' : 'show'}
-        </span>
+        {planHeader(open, `${n} call${n === 1 ? '' : 's'} · approved`)}
       </button>
       {open && <div className="mt-0.5">{body}</div>}
     </div>
+  )
+}
+
+/** QuestionAnchor header (ledger): "▾ question #ask · answered … hide/show". */
+function qaHeader(open: boolean) {
+  return (
+    <>
+      <span aria-hidden="true" className="lg-caret">{open ? '▾' : '▸'}</span>
+      <span className="lg-title">question</span>
+      <span className="lg-sub">#ask · answered</span>
+      <span className="ml-auto lg-sub">{open ? 'hide' : 'show'}</span>
+    </>
+  )
+}
+/** exit_plan trace header (ledger): "▾ plan #exit_plan · <status> … hide/show". */
+function planHeader(open: boolean, status: string) {
+  return (
+    <>
+      <span aria-hidden="true" className="lg-caret">{open ? '▾' : '▸'}</span>
+      <span className="lg-title">plan</span>
+      <span className="lg-sub">#exit_plan · {status}</span>
+      <span className="ml-auto lg-sub">{open ? 'hide' : 'show'}</span>
+    </>
   )
 }
 
@@ -1770,28 +1795,19 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
   const answer =
     typeof result.answer === 'string' && result.answer ? result.answer : null
   return (
-    <div className="mb-2 rounded border border-orange-800/60 bg-orange-950/20">
+    <div className="lg-card mb-2">
       <button
-        className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[10px] uppercase tracking-widest text-orange-400"
+        className="lg-head"
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="text-orange-600">{open ? '▼' : '▸'}</span>
-        <span>question · answered</span>
-        {answer && (
-          <span className="truncate tracking-normal normal-case text-zinc-400">
-            {answer}
-          </span>
-        )}
-        <span className="ml-auto shrink-0 tracking-normal text-zinc-600 normal-case">
-          {open ? 'hide' : 'show'}
-        </span>
+        {qaHeader(open)}
       </button>
       {open && (
-        <div className="  border-orange-800/40 px-2.5 py-2">
+        <div className="lg-sheet">
           <AskUserTrace tc={tc} />
           {after.length > 0 && (
-            <p className="mt-1.5 truncate font-mono text-[11px] terminal-text">
-              <span className="mr-1.5 text-zinc-600">→ did next:</span>
+            <p className="lg-next">
+              <span className="lg-sub">{'→ did next:'}</span>{' '}
               <CallNameCounts calls={after} />
             </p>
           )}
@@ -1807,19 +1823,15 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
 function PlanBanner({ plan }: { plan: string }) {
   const [open, setOpen] = useState(true)
   return (
-    <div className="mb-2 rounded border border-sky-800/60 bg-sky-950/30">
-      <button
-        className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[10px] uppercase tracking-widest text-sky-400"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="text-sky-600">{open ? '▾' : '▸'}</span>
-        <span>implementing approved plan</span>
-        <span className="ml-auto tracking-normal text-zinc-600 normal-case">
-          {open ? 'hide plan' : 'show plan'}
-        </span>
+    <div className="lg-card mb-2">
+      <button className="lg-head" onClick={() => setOpen((o) => !o)}>
+        <span aria-hidden="true" className="lg-caret">{open ? '▾' : '▸'}</span>
+        <span className="lg-title">plan</span>
+        <span className="lg-sub">#approved · implementing</span>
+        <span className="ml-auto lg-sub">{open ? 'hide plan' : 'show plan'}</span>
       </button>
       {open && (
-        <div className="max-h-64 overflow-y-auto   border-sky-800/40 px-3 py-2 text-sm text-zinc-100">
+        <div className="max-h-64 overflow-y-auto">
           <AgentMarkdown content={plan} />
         </div>
       )}
@@ -2653,17 +2665,11 @@ export function RemoteTranscriptDialog({
           {!editing && sendNote && <p role="status" className="mb-2 text-xs text-red-400">{sendNote}</p>}
           {renderedMessages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
-          {pendingRemoteQuestion && (
-            <div className="rounded border border-orange-800/60 bg-orange-950/20 px-3 py-2">
-              <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
-                <span className="run-pulse">?</span> agent asks
-              </div>
-              <p className="whitespace-pre-wrap text-sm text-zinc-100">{pendingRemoteQuestion.question}</p>
-            </div>
-          )}
         </div>
       {/* #308 follow-up: the remote ask_user card — answers route to the
-          device turn answer endpoint so the blocked runner resumes. */}
+          device turn answer endpoint so the blocked runner resumes. The
+          transcript itself carries no duplicate annotation: one question
+          surface (ledger redesign, 2026-11-05). */}
       {pendingRemoteQuestion && (
         <div className="border-t border-orange-800/60 px-4 pb-3 pt-3">
           <AskUserCard key={pendingRemoteQuestion.callId} pending={pendingRemoteQuestion} remote={{ hostId, conversationId }} />
