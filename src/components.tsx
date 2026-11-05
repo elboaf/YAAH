@@ -157,7 +157,7 @@ export function hasProviderMarkup(title: string): boolean {
 function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
   const lines: DiffLine[] = diffLines(oldText, newText)
   return (
-    <div className="my-1 overflow-hidden rounded   bg-zinc-950">
+    <div className="my-1 overflow-hidden rounded border border-zinc-700">
       <div className="  bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-500">
         diff
       </div>
@@ -170,7 +170,7 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
                 ? 'bg-emerald-950/60 text-emerald-300'
                 : l.kind === 'del'
                   ? 'bg-red-950/60 text-red-300'
-                  : 'text-zinc-400 terminal-text'
+                  : 'terminal-text'
             }
           >
             <span className="select-none opacity-60">{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}</span>
@@ -663,8 +663,8 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
         done
-            ? 'bg-zinc-950/70 terminal-text'
-            : 'bg-zinc-700/60 terminal-text'
+            ? 'bg-zinc-800/40 terminal-text'
+            : 'bg-zinc-800/70 terminal-text'
       }`}
     >
       <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
@@ -758,7 +758,7 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
     <div
       ref={wrapRef}
       data-agent-telemetry=""
-      className={`overflow-hidden terminal-text rounded bg-zinc-950/50 px-1.5 py-0.5 ${compact ? 'mt-1' : ''}`}
+      className={`overflow-hidden terminal-text rounded bg-zinc-800/50 px-1.5 py-0.5 ${compact ? 'mt-1' : ''}`}
       style={{
         maskImage:
           'linear-gradient(to right, transparent 0%, black 14%, black 100%)',
@@ -1000,7 +1000,7 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
           </div>
           {savedTo && <div className="mt-1 text-zinc-600">saved to {savedTo}</div>}
           {open && (
-            <div className="rounded bg-zinc-950/60 px-2 py-1 terminal-text">
+            <div className="rounded bg-zinc-800/60 px-2 py-1 terminal-text">
               <div className="whitespace-pre-wrap break-all">
                 args: {JSON.stringify(tc.args ?? {}, null, 2)}
               </div>
@@ -1100,7 +1100,7 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
         <span className="shrink-0 text-zinc-600">{open ? '[-]' : '[+]'}</span>
       </button>
       {open && (
-        <div className="rounded bg-zinc-950/60 px-2 py-1 terminal-text">
+        <div className="rounded bg-zinc-800/60 px-2 py-1 terminal-text">
           <div className="whitespace-pre-wrap break-all">
             args: {JSON.stringify(tc.args ?? {}, null, 2)}
           </div>

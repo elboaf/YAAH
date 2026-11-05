@@ -11,7 +11,9 @@ export default {
       // retuned to the chosen surface system. Every bg-zinc-*/text-zinc-*/
       // border-zinc-* utility in src picks the new value up without touching
       // a single className. Mapping, by what each step MEANS in src:
-      //   zinc-950 #09090b → #0d1117  machine blocks / deep wells (prototype .tool)
+      //   zinc-950 #09090b → #1b1b1b  deep input wells (message edit, remote
+      //     transcript, model textarea, transport strip) — ink ghost removed
+      //     the machine well; this step is now an ordinary input floor
       //   zinc-900 #18181b → #1b1b1b  sidebar / header wells (darker than panels)
       //   zinc-800 #27272a → #252525  panels, chips, inputs (prototype .msg bg)
       //   zinc-700 #3f3f46 → #333333  hairlines + strong borders (prototype border)
@@ -21,9 +23,9 @@ export default {
       //   zinc-400 #a1a1aa → #a8a8a8  secondary ink, warmed to neutral gray
       //   zinc-300 #d4d4d8 → #d4d4d4  body ink (prototype body color exactly)
       //   zinc-200 #e4e4e7 → #e6e6e6  bright ink, warmed
-      // 50/100 unchanged. #58ff58 stays reserved for machine voice
-      // (.terminal-text / .crt-glow in index.css) — it is deliberately NOT
-      // in this ladder.
+      // 50/100 unchanged. Phosphor green (#58ff58) retired 2026-11-06 — the
+      // machine voice is ghost ink (#b8b8b8 via .terminal-text); there is no
+      // colored terminal accent and no machine well in the ladder anymore.
       colors: {
         zinc: {
           50: '#fafafa',
@@ -36,7 +38,7 @@ export default {
           700: '#333333',
           800: '#252525',
           900: '#1b1b1b',
-          950: '#0d1117',
+          950: '#1b1b1b',
         },
       },
     },

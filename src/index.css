@@ -4,10 +4,11 @@
 
 /* Modern refresh (issue #643, Terminal-as-Accent — full migration):
    clean dark surface with terminal accents, per DESIGN.md. System fonts
-   for UI, monospace for machine output. Phosphor green (#58ff58) is the
-   terminal accent, reserved for machine voice: tool chips/tape/trace,
-   code blocks, diff context. Surfaces: #1e1e1e base, #252525 panels,
-   #333 hairlines (zinc ladder retuned in tailwind.config.js). */
+   for UI, monospace for machine output. Machine voice is ghost ink
+   (#b8b8b8 via .terminal-text) — mono alone marks the machine; the old
+   phosphor wells are gone, machine output sits directly on panels.
+   Surfaces: #1e1e1e base, #252525 panels, #333 hairlines (zinc ladder
+   retuned in tailwind.config.js). */
 
 /* Interface scale: App.tsx applies inline zoom to #root (inline styles only —
    legacy WebView2 zoom rejects var() in stylesheets). With a full-size box the
@@ -29,7 +30,7 @@ body,
 }
 
 /* Scrollbars are chrome, not content: transparent track so each surface keeps
-   its own floor (console #1e1e1e, code #0d1117, modals), ghost-zinc thumb that
+   its own floor (console #1e1e1e, modals), ghost-zinc thumb that
    brightens through the ink ladder on interaction. The 2px transparent border
    with padding-box clipping floats the thumb at ~6px visual width. */
 ::-webkit-scrollbar {
@@ -121,7 +122,7 @@ body,
   height: 11px;
   margin-left: 2px;
   vertical-align: text-bottom;
-  background: #58ff58;
+  background: #b8b8b8;
   animation: caret-blink 1s steps(1) infinite;
 }
 
@@ -200,14 +201,16 @@ body,
    Do not re-add a reduced-motion fallback that collapses the dots to one:
    that read as "feature missing" (issue #25 follow-up). */
 
-/* Terminal accent color */
+/* Machine voice (ink ghost, 2026-11-06 sign-off): monospace alone marks the
+   machine — ghost-bright ink, no hue, no glow. Human actions stay blue. */
 .terminal-text {
-  color: #58ff58;
+  color: #b8b8b8;
 }
 
-/* Subtle CRT glow for terminal elements */
+/* Former CRT glow — retained as a no-op so legacy class users don't break;
+   do not add new text-shadows (ink ghost carries no glow). */
 .crt-glow {
-  text-shadow: 0 0 4px rgba(88, 255, 88, 0.3);
+  text-shadow: none;
 }
 /* Sidebar transport strip (live session 4f4bd5e9, variant 2 accepted):
    one dense hairline-divided control strip at the sidebar's foot.
@@ -283,5 +286,5 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
 .lg-btn--danger { background: #b91c1c; color: #ffffff; border: 0; }
 .lg-btn--danger:hover { background: #dc2626; }
 .lg-danger { margin: 2px 10px 6px; font-size: 11px; color: #f87171; }
-.lg-next { margin: 6px 0 0; padding: 2px 10px 0; font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; color: #58ff58; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lg-next .lg-sep { color: #3a5a3a; }
+.lg-next { margin: 6px 0 0; padding: 2px 10px 0; font-family: "JetBrains Mono", Consolas, monospace; font-size: 11px; color: #b8b8b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-next .lg-sep { color: #555555; }
