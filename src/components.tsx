@@ -8328,17 +8328,13 @@ function AccessModeControl() {
   return (
     <div ref={ref} className="relative">
       <button
-        className="flex items-center gap-1.5 rounded px-2 py-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200"
+        className="imp-mode-trigger"
         title="Access mode — what the agent may do without asking"
         aria-label="Access mode"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${m.dot}`} />
-        mode: {m.short}
-        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-          <path d="M1.5 3l2.5 2.5L6.5 3" />
-        </svg>
       </button>
       {open && (
         <div className="absolute bottom-9 left-0 z-20 w-64 rounded   bg-zinc-900 py-1 shadow-lg">
@@ -9145,7 +9141,9 @@ export function ChatScopePickers() {
   return (
     <div className="flex flex-col gap-0.5   bg-zinc-900/60 px-4 py-1.5">
       <div className="flex items-center gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-600">model</span>
+        {/* c7914de2 P3 rail: the labels, refresh button, agent badge and
+            saving text moved out — the rail shows three ghost selects only.
+            Model-list refresh lives in Settings; writes fail silent as before. */}
         <select
           className="min-w-0 max-w-[16rem] flex-1 truncate rounded   bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={`${shownProvider}::${shownModel}`}
@@ -9162,18 +9160,7 @@ export function ChatScopePickers() {
         >
           <ModelOptions byProvider={byProvider} value={`${shownProvider}::${shownModel}`} />
         </select>
-        <button
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-          aria-label="Refresh models"
-          title="Refresh model lists from all providers"
-          onClick={() => refresh()}
-          disabled={saving}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
-          </svg>
-        </button>
-        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">effort</span>
+        <span className="imp-dotsep" aria-hidden="true">·</span>
         <select
           className="rounded   bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={effort}
@@ -9187,7 +9174,7 @@ export function ChatScopePickers() {
         {/* #383: where this chat's spawn_agent delegations run. '' =
             sub-agent: auto — the global Settings scope, then this chat's
             own model. Writes are complete "provider::model" or ''. */}
-        <span className="ml-1 text-[10px] uppercase tracking-wider text-zinc-600">sub-agent</span>
+        <span className="imp-dotsep" aria-hidden="true">·</span>
         <select
           className="max-w-[14rem] rounded   bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={subagentModel}
@@ -9202,17 +9189,6 @@ export function ChatScopePickers() {
           <option value="">{SUBAGENT_AUTO_LABEL}</option>
           <ModelOptions byProvider={byProvider} value={subagentModel} />
         </select>
-        {isAgentChat && (
-          <span
-            className="rounded   px-1.5 py-0.5 text-[10px] text-zinc-400"
-            title="This chat belongs to a scheduled agent — changes apply to the agent"
-          >
-            agent
-          </span>
-        )}
-        {(savingModel || savingEffort) && (
-          <span className="text-[10px] text-zinc-500">saving…</span>
-        )}
       </div>
       {/* Provider-state affordances (#51): moved here from the sidebar so
           they sit next to the picker that needs them. */}
@@ -9586,8 +9562,8 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
-      {/* #51/#76: per-chat model + effort pickers — the chat's own scope. */}
-      <ChatScopePickers />
+      {/* #51/#76 scope pickers moved into the composer's bottom rail
+          (session c7914de2) — rendered by Composer now. */}
       <div
         ref={transcriptRef}
         onScroll={onTranscriptScroll}
@@ -11626,9 +11602,13 @@ export function Composer() {
           }}
         />
         {/* Unified toolbar: host + mode on the left, attach/mic/send on the
-            right — one hairline-separated row inside the composer card. */}
-        <div className="flex items-center gap-1   px-1.5 py-1.5">
+            right — one row inside the composer card. The scope pickers
+            (#51/#76) moved here from the top strip (session c7914de2):
+            P3 annotation rail — ghost selects, dot separators, no labels.
+            Mockups: .impeccable/live/mockups-c7914de2-c.html */}
+        <div className="imp-scope-rail">
           <AccessModeControl />
+          <ChatScopePickers />
           <div className="ml-auto flex items-center gap-1">
             <button
               title="Attach files"
@@ -11692,29 +11672,33 @@ export function Composer() {
                 )}
               </button>
             )}
+            {/* c7914de2: the send arrow doubles as the stop square while a
+                turn is live — same position, same job (send() steers mid-turn,
+                so the arrow never changes identity). */}
             {streaming || sendingKey === (useAgent.getState().bufferKey()) ? (
-              <>
-                <button
-                  className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
-                  onClick={() => void send()}
-                  disabled={!input.trim() && attachments.length === 0 && images.length === 0}
-                >
-                  Send
-                </button>
-                <button
-                  className="rounded border border-red-700 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950"
-                  onClick={stop}
-                >
-                  Stop
-                </button>
-              </>
+              <button
+                type="button"
+                className="imp-stop-square"
+                title="Stop streaming"
+                aria-label="Stop streaming"
+                onClick={stop}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
+                  <rect x="2" y="2" width="6" height="6" rx="1" />
+                </svg>
+              </button>
             ) : (
               <button
-                className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
-                onClick={() => void send()}
+                type="button"
+                className="imp-send"
+                title="Send — or press Enter"
+                aria-label="Send"
                 disabled={!input.trim() && attachments.length === 0 && images.length === 0}
+                onClick={() => void send()}
               >
-                Send
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 19V6M5.5 12.5L12 6l6.5 6.5" />
+                </svg>
               </button>
             )}
           </div>
