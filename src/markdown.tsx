@@ -58,7 +58,7 @@ function CopyButton({ text }: { text: string }) {
 export function CodeBlock({ code, lang, startLine = 1 }: { code: string; lang?: string; startLine?: number }) {
   const lines = code.replace(/\n$/, '').split('\n')
   return (
-    <div className="my-1 overflow-hidden rounded border border-zinc-700 bg-zinc-950">
+    <div className="my-1 overflow-hidden rounded border border-zinc-700">
       <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-2 py-1">
         <span className="font-mono text-[10px] text-zinc-500">{lang ?? 'text'}</span>
         <CopyButton text={code} />
@@ -69,7 +69,7 @@ export function CodeBlock({ code, lang, startLine = 1 }: { code: string; lang?: 
             <span className="w-10 shrink-0 select-none pr-2 text-right text-zinc-600">
               {startLine + i}
             </span>
-            <span className="whitespace-pre-wrap break-all text-zinc-300 terminal-text">
+            <span className="whitespace-pre-wrap break-all terminal-text">
               {highlightLine(line).map((t, j) => (
                 <span key={j} className={t.cls}>{t.text}</span>
               ))}

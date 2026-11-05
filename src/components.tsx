@@ -157,7 +157,7 @@ export function hasProviderMarkup(title: string): boolean {
 function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
   const lines: DiffLine[] = diffLines(oldText, newText)
   return (
-    <div className="my-1 overflow-hidden rounded   bg-zinc-950">
+    <div className="my-1 overflow-hidden rounded border border-zinc-700">
       <div className="  bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-500">
         diff
       </div>
@@ -170,7 +170,7 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
                 ? 'bg-emerald-950/60 text-emerald-300'
                 : l.kind === 'del'
                   ? 'bg-red-950/60 text-red-300'
-                  : 'text-zinc-400 terminal-text'
+                  : 'terminal-text'
             }
           >
             <span className="select-none opacity-60">{l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}</span>
@@ -184,7 +184,9 @@ function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
 
 // ---------------------------------------------------------------- tool calls
 
-/** One option row of an ask_user card: label + trade-off description. */
+/** One option row of an ask_user card: ledger keyed row (design sign-off
+ *  2026-11-05) — mono number key + label + trade-off description; chosen
+ *  rows carry the role hue in the key. */
 function AskOptionRow({
   label,
   description,
@@ -200,16 +202,15 @@ function AskOptionRow({
 }) {
   return (
     <button
-      className={`block w-full rounded   px-2.5 py-1.5 text-left text-xs ${
-        chosen
-          ? 'border-orange-500 bg-orange-950/40 text-orange-200'
-          : ' bg-zinc-800/60 text-zinc-200 enabled:hover:border-orange-500/60 enabled:hover:bg-zinc-800'
-      } disabled:cursor-default`}
+      className={`lg-row ${disabled ? '' : 'cursor-pointer'} disabled:cursor-default`}
       disabled={disabled}
       onClick={onClick}
     >
-      <span className="font-medium">{label}</span>
-      {description && <span className="block text-[11px] leading-4 text-zinc-400 line-clamp-2">{description}</span>}
+      <span aria-hidden="true" className={`lg-key ${chosen ? 'lg-key--chosen' : ''}`}>{chosen ? '✓' : '·'}</span>
+      <span className="lg-val">
+        <span className={`lg-opt-label ${chosen ? 'lg-opt-label--chosen' : ''}`}>{label}</span>
+        {description && <span className="lg-opt-desc">{description}</span>}
+      </span>
     </button>
   )
 }
@@ -344,8 +345,18 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
   })
 
   return (
-    <ApprovalCardShell color="orange" icon={<span className="run-pulse">?</span>} title="agent asks — pick an answer" err={err}>
-      <div className="max-h-[40vh] space-y-1.5 overflow-y-auto">
+    <ApprovalCardShell color="orange" icon="▾" title="agent asks" sub="#live · pick an answer" err={err}>
+      <div className="lg-sheet" style={{ maxHeight: '40vh', overflowY: 'auto' }}>
+        {/* Question annotation lives only on the remote card: the local
+            transcript already renders pending.question above the composer
+            (#113), and the remote transcript carries no annotation — one
+            question surface per transcript (ledger redesign, 2026-11-05). */}
+        {remote && (
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key">Q</span>
+            <p className="lg-val lg-val--q">{pending.question}</p>
+          </div>
+        )}
         {pending.options.map((o, i) => (
           <AskOptionRow
             key={i}
@@ -355,15 +366,17 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
             onClick={() => respond(o.label)}
           />
         ))}
-        {!customOpen ? (
+        {!customOpen && (
           <button
-            className="block w-full rounded border border-dashed border-zinc-700 px-2.5 py-1.5 text-left text-xs text-zinc-400 hover:border-orange-500/60 hover:text-zinc-200"
+            className="lg-row lg-row--else"
             disabled={submitting}
             onClick={() => setCustomOpen(true)}
           >
-            Something else…
+            <span aria-hidden="true" className="lg-key lg-key--faint">…</span>
+            <span className="lg-val lg-else">Something else…</span>
           </button>
-        ) : (
+        )}
+        {customOpen && (
           <FreeTextAnswer
             custom={custom}
             setCustom={setCustom}
@@ -371,7 +384,7 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
             submit={respond}
             placeholder={voiceSeeded ? 'Voice answer staged — edit or Send' : 'Type your own answer…'}
             sendColor="orange"
-            inputClassName={voiceSeeded ? 'border-orange-500/70 focus:border-orange-500' : ''}
+            inputClassName={voiceSeeded ? 'qa-voice-staged' : ''}
             onEdit={() => setVoiceSeeded(false)}
           />
         )}
@@ -440,33 +453,38 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
   const approvalWorkspace = useAgent((s) => s.workspace)
 
   return (
-    <ApprovalCardShell color="orange" icon={<span className="run-pulse">!</span>} title="approval needed" err={err}>
-      <p className="mb-1.5 flex items-center gap-2 font-mono text-xs text-zinc-100">
-        <span className="text-orange-300">{approval.tool}</span>
-        {summary && <span className="truncate text-zinc-400">{summary}</span>}
-      </p>
-      {approvalWorkspace && commandLike && (
-        <p className="mb-1.5 font-mono text-[10px] text-zinc-500">
-          in {approvalWorkspace || 'workspace root'}
-        </p>
-      )}
-      {commandLike && (
-        <pre className="mb-2 overflow-y-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 font-mono text-[11px] terminal-text">
-          {String(approval.args?.command ?? '')}
-        </pre>
-      )}
-      <div className="flex gap-1.5">
+    <ApprovalCardShell color="orange" icon="▾" title="approval needed" sub={`#${approval.tool}`} err={err}>
+      <div className="lg-sheet">
+        <div className="lg-row">
+          <span aria-hidden="true" className="lg-key lg-key--faint">tool</span>
+          <p className="lg-val lg-val--tool">
+            {approval.tool}
+            {summary && <span className="lg-val--mono"> · {summary}</span>}
+          </p>
+        </div>
+        {approvalWorkspace && commandLike && (
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key lg-key--faint">cwd</span>
+            <p className="lg-val lg-val--mono">{approvalWorkspace || 'workspace root'}</p>
+          </div>
+        )}
+        {commandLike && (
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key lg-key--faint">$</span>
+            <pre className="lg-pre terminal-text lg-val">{String(approval.args?.command ?? '')}</pre>
+          </div>
+        )}
+      </div>
+      <div className="lg-actions">
         <button
-          className={`rounded px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 ${
-            mutating ? 'bg-red-700 hover:bg-red-600' : 'bg-blue-600 hover:bg-blue-500'
-          }`}
+          className={`lg-btn ${mutating ? 'lg-btn--danger' : 'lg-btn--primary'}`}
           disabled={submitting}
           onClick={() => respond('approve')}
         >
-          {submitting ? '…' : mutating ? 'Approve (runs shell / writes files)' : 'Approve'}
+          {submitting ? '…' : mutating ? '✚ Approve — runs shell / writes files' : '▶ Approve'}
         </button>
         <button
-          className="rounded px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          className="lg-btn lg-btn--ghost"
           disabled={submitting}
           onClick={() => respond('deny')}
         >
@@ -474,24 +492,19 @@ function ApprovalCard({ approval }: { approval: PendingApproval }) {
         </button>
       </div>
       {!customOpen ? (
-        <button
-          className="mt-1.5 block w-full rounded border border-dashed border-zinc-700 px-2.5 py-1.5 text-left text-xs text-zinc-400 hover:border-orange-500/60 hover:text-zinc-200"
-          disabled={submitting}
-          onClick={() => setCustomOpen(true)}
-        >
-          Deny with a note…
+        <button className="lg-inputrow" style={{ width: '100%' }} disabled={submitting} onClick={() => setCustomOpen(true)}>
+          <span aria-hidden="true" className="lg-key lg-key--faint">…</span>
+          <span className="lg-val lg-else">Deny with a note…</span>
         </button>
       ) : (
-        <div className="mt-1.5">
-          <FreeTextAnswer
-            custom={custom}
-            setCustom={setCustom}
-            submitting={submitting}
-            submit={respond}
-            placeholder="Why deny? Sent to the model as guidance…"
-            sendColor="blue"
-          />
-        </div>
+        <FreeTextAnswer
+          custom={custom}
+          setCustom={setCustom}
+          submitting={submitting}
+          submit={respond}
+          placeholder="Why deny? Sent to the model as guidance…"
+          sendColor="blue"
+        />
       )}
     </ApprovalCardShell>
   )
@@ -525,21 +538,21 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
   })
 
   return (
-    <ApprovalCardShell color="sky" icon={<span className="run-pulse">▶</span>} title="plan ready — approve to run" err={err}>
-      <div className="mb-2.5 max-h-64 overflow-y-auto text-sm text-zinc-100">
+    <ApprovalCardShell color="sky" icon="▾" title="plan ready" sub="#exit_plan · approve to run" err={err}>
+      <div className="lg-plan">
         <AgentMarkdown content={pending.plan} />
       </div>
-      <div className="flex gap-1.5">
+      <div className="lg-actions">
         <button
-          className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          className="lg-btn lg-btn--primary"
           disabled={submitting}
           onClick={() => respond('approve')}
         >
-          {submitting ? '…' : 'Approve & run'}
+          {submitting ? '…' : '▶ Approve & run'}
         </button>
         {!customOpen && (
           <button
-            className="rounded px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            className="lg-btn lg-btn--ghost"
             disabled={submitting}
             onClick={() => setCustomOpen(true)}
           >
@@ -548,16 +561,14 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
         )}
       </div>
       {customOpen && (
-        <div className="mt-1.5">
-          <FreeTextAnswer
-            custom={custom}
-            setCustom={setCustom}
-            submitting={submitting}
-            submit={respond}
-            placeholder="What should change? Sent to the model as feedback…"
-            sendColor="sky"
-          />
-        </div>
+        <FreeTextAnswer
+          custom={custom}
+          setCustom={setCustom}
+          submitting={submitting}
+          submit={respond}
+          placeholder="What should change? Sent to the model as feedback…"
+          sendColor="sky"
+        />
       )}
     </ApprovalCardShell>
   )
@@ -571,28 +582,28 @@ function AskUserTrace({ tc }: { tc: ToolCall }) {
   const result = (tc.result ?? {}) as { answer?: string | null; note?: string }
   const answer = typeof result.answer === 'string' && result.answer ? result.answer : null
   return (
-    <div className="rounded   bg-zinc-900/60 p-2">
-      <p className="mb-1.5 whitespace-pre-wrap font-sans text-xs text-zinc-200">
-        {args.question ?? ''}
-      </p>
-      <div className="space-y-1">
-        {(args.options ?? []).map((o, i) => (
-          <AskOptionRow
-            key={i}
-            label={o.label}
-            description={o.description}
-            chosen={answer !== null && o.label === answer}
-            disabled
-          />
-        ))}
-        {answer !== null && !(args.options ?? []).some((o) => o.label === answer) && (
-          <AskOptionRow label={answer} chosen disabled />
-        )}
+    <div>
+      <div className="lg-row">
+        <span aria-hidden="true" className="lg-key">Q</span>
+        <p className="lg-val lg-val--q">{args.question ?? ''}</p>
       </div>
+      {(args.options ?? []).map((o, i) => (
+        <AskOptionRow
+          key={i}
+          label={o.label}
+          description={o.description}
+          chosen={answer !== null && o.label === answer}
+          disabled
+        />
+      ))}
+      {answer !== null && !(args.options ?? []).some((o) => o.label === answer) && (
+        <AskOptionRow label={answer} chosen disabled />
+      )}
       {answer === null && (
-        <p className="mt-1 font-sans text-[11px] text-zinc-500">
-          {result.note ?? 'not answered'}
-        </p>
+        <div className="lg-row">
+          <span aria-hidden="true" className="lg-key lg-key--faint">…</span>
+          <p className="lg-val lg-val--mono">{result.note ?? 'not answered'}</p>
+        </div>
       )}
     </div>
   )
@@ -658,8 +669,8 @@ function ToolChip({ tc }: { tc: TickerToolCall }) {
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] ${
         done
-            ? 'bg-zinc-950/70 terminal-text'
-            : 'bg-zinc-700/60 terminal-text'
+            ? 'bg-zinc-800/40 terminal-text'
+            : 'bg-zinc-800/70 terminal-text'
       }`}
     >
       <span className={toolGlyphColor(tc.name)}>{toolGlyph(tc.name)}</span>
@@ -753,7 +764,7 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
     <div
       ref={wrapRef}
       data-agent-telemetry=""
-      className={`overflow-hidden terminal-text rounded bg-zinc-950/50 px-1.5 py-0.5 ${compact ? 'mt-1' : ''}`}
+      className={`overflow-hidden terminal-text rounded bg-zinc-800/50 px-1.5 py-0.5 ${compact ? 'mt-1' : ''}`}
       style={{
         maskImage:
           'linear-gradient(to right, transparent 0%, black 14%, black 100%)',
@@ -995,7 +1006,7 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
           </div>
           {savedTo && <div className="mt-1 text-zinc-600">saved to {savedTo}</div>}
           {open && (
-            <div className="rounded bg-zinc-950/60 px-2 py-1 terminal-text">
+            <div className="rounded bg-zinc-800/60 px-2 py-1 terminal-text">
               <div className="whitespace-pre-wrap break-all">
                 args: {JSON.stringify(tc.args ?? {}, null, 2)}
               </div>
@@ -1019,15 +1030,21 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
     if (tc.name === 'exit_plan') {
       const result = (tc.result ?? {}) as { decision?: string; feedback?: string; note?: string }
       return (
-        <div className="rounded border border-sky-800/60 bg-zinc-900/60 p-2">
-          <p className="mb-1.5 whitespace-pre-wrap font-sans text-xs text-zinc-200">{String(args.plan ?? '')}</p>
-          <p className="font-mono text-[11px] text-sky-300">
-            {result.decision === 'approved'
-              ? '✓ approved — plan mode off, executing'
-              : result.decision === 'revised'
-                ? `↻ changes requested: ${result.feedback ?? ''}`
-                : (result.note ?? 'no decision')}
-          </p>
+        <div>
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key">Q</span>
+            <p className="lg-val lg-val--q">{String(args.plan ?? '')}</p>
+          </div>
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key">✓</span>
+            <p className={`lg-val lg-val--mono ${result.decision === 'approved' ? 'lg-val--a--sky' : ''}`}>
+              {result.decision === 'approved'
+                ? 'approved — plan mode off, executing'
+                : result.decision === 'revised'
+                  ? `↻ changes requested: ${result.feedback ?? ''}`
+                  : (result.note ?? 'no decision')}
+            </p>
+          </div>
         </div>
       )
     }
@@ -1089,7 +1106,7 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
         <span className="shrink-0 text-zinc-600">{open ? '[-]' : '[+]'}</span>
       </button>
       {open && (
-        <div className="rounded bg-zinc-950/60 px-2 py-1 terminal-text">
+        <div className="rounded bg-zinc-800/60 px-2 py-1 terminal-text">
           <div className="whitespace-pre-wrap break-all">
             args: {JSON.stringify(tc.args ?? {}, null, 2)}
           </div>
@@ -1735,24 +1752,38 @@ function PlanningFold({ msg, body }: { msg: ChatMessage; body: ReactNode }) {
   const [open, setOpen] = useState(false)
   const n = msg.toolCalls?.length ?? 0
   return (
-    <div className="rounded-lg border border-sky-800/50 bg-zinc-800 p-3">
+    <div className="lg-card mb-2">
       <button
-        className="flex w-full items-center gap-2 py-0.5 text-left font-mono text-[10px] uppercase tracking-widest text-sky-400 hover:text-sky-300"
+        className="lg-head"
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="text-sky-600">{open ? '▾' : '▸'}</span>
-        <span>planning</span>
-        {n > 0 && (
-          <span className="tracking-normal text-zinc-600 normal-case">
-            {n} call{n === 1 ? '' : 's'}
-          </span>
-        )}
-        <span className="ml-auto tracking-normal text-zinc-600 normal-case">
-          ✓ approved — {open ? 'hide' : 'show'}
-        </span>
+        {planHeader(open, `${n} call${n === 1 ? '' : 's'} · approved`)}
       </button>
       {open && <div className="mt-0.5">{body}</div>}
     </div>
+  )
+}
+
+/** QuestionAnchor header (ledger): "▾ question #ask · answered … hide/show". */
+function qaHeader(open: boolean) {
+  return (
+    <>
+      <span aria-hidden="true" className="lg-caret">{open ? '▾' : '▸'}</span>
+      <span className="lg-title">question</span>
+      <span className="lg-sub">#ask · answered</span>
+      <span className="ml-auto lg-sub">{open ? 'hide' : 'show'}</span>
+    </>
+  )
+}
+/** exit_plan trace header (ledger): "▾ plan #exit_plan · <status> … hide/show". */
+function planHeader(open: boolean, status: string) {
+  return (
+    <>
+      <span aria-hidden="true" className="lg-caret">{open ? '▾' : '▸'}</span>
+      <span className="lg-title">plan</span>
+      <span className="lg-sub">#exit_plan · {status}</span>
+      <span className="ml-auto lg-sub">{open ? 'hide' : 'show'}</span>
+    </>
   )
 }
 
@@ -1770,28 +1801,19 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
   const answer =
     typeof result.answer === 'string' && result.answer ? result.answer : null
   return (
-    <div className="mb-2 rounded border border-orange-800/60 bg-orange-950/20">
+    <div className="lg-card mb-2">
       <button
-        className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[10px] uppercase tracking-widest text-orange-400"
+        className="lg-head"
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="text-orange-600">{open ? '▼' : '▸'}</span>
-        <span>question · answered</span>
-        {answer && (
-          <span className="truncate tracking-normal normal-case text-zinc-400">
-            {answer}
-          </span>
-        )}
-        <span className="ml-auto shrink-0 tracking-normal text-zinc-600 normal-case">
-          {open ? 'hide' : 'show'}
-        </span>
+        {qaHeader(open)}
       </button>
       {open && (
-        <div className="  border-orange-800/40 px-2.5 py-2">
+        <div className="lg-sheet">
           <AskUserTrace tc={tc} />
           {after.length > 0 && (
-            <p className="mt-1.5 truncate font-mono text-[11px] terminal-text">
-              <span className="mr-1.5 text-zinc-600">→ did next:</span>
+            <p className="lg-next">
+              <span className="lg-sub">{'→ did next:'}</span>{' '}
               <CallNameCounts calls={after} />
             </p>
           )}
@@ -1807,19 +1829,15 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
 function PlanBanner({ plan }: { plan: string }) {
   const [open, setOpen] = useState(true)
   return (
-    <div className="mb-2 rounded border border-sky-800/60 bg-sky-950/30">
-      <button
-        className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[10px] uppercase tracking-widest text-sky-400"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="text-sky-600">{open ? '▾' : '▸'}</span>
-        <span>implementing approved plan</span>
-        <span className="ml-auto tracking-normal text-zinc-600 normal-case">
-          {open ? 'hide plan' : 'show plan'}
-        </span>
+    <div className="lg-card mb-2">
+      <button className="lg-head" onClick={() => setOpen((o) => !o)}>
+        <span aria-hidden="true" className="lg-caret">{open ? '▾' : '▸'}</span>
+        <span className="lg-title">plan</span>
+        <span className="lg-sub">#approved · implementing</span>
+        <span className="ml-auto lg-sub">{open ? 'hide plan' : 'show plan'}</span>
       </button>
       {open && (
-        <div className="max-h-64 overflow-y-auto   border-sky-800/40 px-3 py-2 text-sm text-zinc-100">
+        <div className="max-h-64 overflow-y-auto">
           <AgentMarkdown content={plan} />
         </div>
       )}
@@ -2653,17 +2671,11 @@ export function RemoteTranscriptDialog({
           {!editing && sendNote && <p role="status" className="mb-2 text-xs text-red-400">{sendNote}</p>}
           {renderedMessages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
-          {pendingRemoteQuestion && (
-            <div className="rounded border border-orange-800/60 bg-orange-950/20 px-3 py-2">
-              <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
-                <span className="run-pulse">?</span> agent asks
-              </div>
-              <p className="whitespace-pre-wrap text-sm text-zinc-100">{pendingRemoteQuestion.question}</p>
-            </div>
-          )}
         </div>
       {/* #308 follow-up: the remote ask_user card — answers route to the
-          device turn answer endpoint so the blocked runner resumes. */}
+          device turn answer endpoint so the blocked runner resumes. The
+          transcript itself carries no duplicate annotation: one question
+          surface (ledger redesign, 2026-11-05). */}
       {pendingRemoteQuestion && (
         <div className="border-t border-orange-800/60 px-4 pb-3 pt-3">
           <AskUserCard key={pendingRemoteQuestion.callId} pending={pendingRemoteQuestion} remote={{ hostId, conversationId }} />
@@ -4182,7 +4194,7 @@ export const SUBAGENT_SCOPE_HINT =
 
 /** Default reasoning/thought level for new chats. Existing conversations keep
  *  their pinned effort, matching the default-model selector's scope. */
-export function DefaultThoughtLevelPicker() {
+export function DefaultThoughtLevelPicker({ variant = 'standalone' }: { variant?: 'standalone' | 'strip' }) {
   const effort = useAgent((s) => s.globalEffort)
   const model = useAgent((s) => s.globalModel)
   const { byProvider } = useModelList()
@@ -4205,11 +4217,39 @@ export function DefaultThoughtLevelPicker() {
     }
   }
 
+  const statusClass = variant === 'strip'
+    ? 'm-0 text-[10px] leading-tight text-zinc-500'
+    : 'mt-1 text-[10px] text-zinc-500'
+  const errorClass = variant === 'strip'
+    ? 'm-0 text-[10px] leading-tight text-red-400'
+    : 'mt-1 text-[10px] text-red-400'
+
+  if (variant === 'strip') {
+    // Sidebar transport strip: borderless cell filler; status lines stack
+    // under the select only while present.
+    return (
+      <div className="flex min-w-0 flex-1 flex-col justify-center">
+        <select
+          id="default-thought-level"
+          className="sw-strip-select w-full min-w-0 truncate bg-transparent px-1.5 text-xs text-zinc-300 focus:outline-none disabled:opacity-60"
+          value={effort}
+          onChange={(e) => void apply(e.target.value)}
+          disabled={saving}
+          aria-label="Thought level"
+          aria-describedby={error ? 'default-thought-level-status' : undefined}
+        >
+          <EffortOptions efforts={supportedEfforts} />
+        </select>
+        {saving && <p className={statusClass} role="status">Saving thought level…</p>}
+        {error && <p id="default-thought-level-status" className={errorClass} role="alert">{error}</p>}
+      </div>
+    )
+  }
   return (
     <div className="w-24 shrink-0">
       <select
         id="default-thought-level"
-        className="w-full rounded   bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
+        className="w-full rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
         value={effort}
         onChange={(e) => void apply(e.target.value)}
         disabled={saving}
@@ -4218,8 +4258,8 @@ export function DefaultThoughtLevelPicker() {
       >
         <EffortOptions efforts={supportedEfforts} />
       </select>
-      {saving && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving thought level…</p>}
-      {error && <p id="default-thought-level-status" className="mt-1 text-[10px] text-red-400" role="alert">{error}</p>}
+      {saving && <p className={statusClass} role="status">Saving thought level…</p>}
+      {error && <p id="default-thought-level-status" className={errorClass} role="alert">{error}</p>}
     </div>
   )
 }
@@ -4319,100 +4359,111 @@ export function Sidebar() {
         <ConversationList addingDevice={addingDevice} setAddingDevice={setAddingDevice} />
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}
-        <div className="relative mt-auto   pt-2">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <button
-              className="min-w-0 flex-1 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              onClick={() => {
-                newConversation()
-
-              }}
-            >
-              New chat
-            </button>
-            <div className="relative shrink-0">
+        <div className="relative mt-auto pt-2">
+          {/* No overflow-hidden here: it would clip the add-workspace menu,
+              which opens upward out of the strip. Cells keep their own radii. */}
+          <div className="sw-strip rounded-lg border border-zinc-700 bg-zinc-950/70 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.25),0_4px_6px_-4px_rgba(0,0,0,0.2)]">
+            <div className="sw-strip-cell">
               <button
-                className="flex h-7 w-7 items-center justify-center rounded border border-dashed border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                aria-label="Add workspace"
-                aria-haspopup="menu"
-                aria-expanded={addMenuOpen}
-                title="Add workspace…"
-                onClick={() => setAddMenuOpen(!addMenuOpen)}
+                className="sw-strip-btn w-full min-w-0 rounded bg-blue-600 px-2 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onClick={() => {
+                  newConversation()
+
+                }}
               >
-                <FolderPlusIcon />
+                New chat
               </button>
-              {addMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-30" onClick={() => setAddMenuOpen(false)} />
-                  <div
-                    className="absolute bottom-8 left-0 z-40 w-44 rounded   bg-zinc-900 py-1 shadow-xl"
-                    role="menu"
-                    aria-label="Add workspace"
-                  >
-                    <button
-                      className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-                      role="menuitem"
-                      onClick={() => {
-                        setAddMenuOpen(false)
-                        void browseWorkspace()
-                      }}
-                    >
-                      Local folder…
-                    </button>
-                    <button
-                      className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-                      role="menuitem"
-                      onClick={() => {
-                        setAddMenuOpen(false)
-                        setAddingDevice(true)
-                      }}
-                    >
-                      Remote device…
-                    </button>
-                  </div>
-                </>
-              )}
             </div>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <select
-              id="default-model"
-              className="min-w-0 flex-1 truncate rounded   bg-zinc-800 px-1.5 py-1 font-mono text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
-              value={defaultScopeValue}
-              onChange={(e) => pickModel(e.target.value)}
-              disabled={savingModel}
-              aria-label="Default model"
-              aria-describedby={modelError ? 'default-model-status' : undefined}
-              title={defaultScopeValue}
-            >
-              <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
-            </select>
-            <button
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-              aria-label="Refresh models"
-              title="Refresh model lists from all providers"
-              onClick={() => {
-                refreshModels()
-                window.dispatchEvent(new CustomEvent('providers-changed'))
-              }}
-              disabled={savingModel}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
-              </svg>
-            </button>
-            <DefaultThoughtLevelPicker />
-            <button
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-              aria-label="Settings"
-              title="Settings"
-              onClick={() => setShowSettings(true)}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
+            <div className="sw-strip-divider" />
+            <div className="sw-strip-cell">
+              <select
+                id="default-model"
+                className="sw-strip-select min-w-0 flex-1 truncate bg-transparent font-mono text-xs text-zinc-200 focus:outline-none disabled:opacity-60"
+                value={defaultScopeValue}
+                onChange={(e) => pickModel(e.target.value)}
+                disabled={savingModel}
+                aria-label="Default model"
+                aria-describedby={modelError ? 'default-model-status' : undefined}
+                title={defaultScopeValue}
+              >
+                <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
+              </select>
+              <span className="sw-strip-sep" />
+              <div className="relative shrink-0">
+                <button
+                  className="sw-strip-ico border border-dashed border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                  aria-label="Add workspace"
+                  aria-haspopup="menu"
+                  aria-expanded={addMenuOpen}
+                  title="Add workspace…"
+                  onClick={() => setAddMenuOpen(!addMenuOpen)}
+                >
+                  <FolderPlusIcon />
+                </button>
+                {addMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={() => setAddMenuOpen(false)} />
+                    <div
+                      className="absolute bottom-8 left-0 z-40 w-44 rounded bg-zinc-900 py-1 shadow-xl"
+                      role="menu"
+                      aria-label="Add workspace"
+                    >
+                      <button
+                        className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
+                          void browseWorkspace()
+                        }}
+                      >
+                        Local folder…
+                      </button>
+                      <button
+                        className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
+                          setAddingDevice(true)
+                        }}
+                      >
+                        Remote device…
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+              <span className="sw-strip-sep" />
+              <button
+                className="sw-strip-ico focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                aria-label="Refresh models"
+                title="Refresh model lists from all providers"
+                onClick={() => {
+                  refreshModels()
+                  window.dispatchEvent(new CustomEvent('providers-changed'))
+                }}
+                disabled={savingModel}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
+                </svg>
+              </button>
+            </div>
+            <div className="sw-strip-divider" />
+            <div className="sw-strip-cell">
+              <DefaultThoughtLevelPicker variant="strip" />
+              <span className="sw-strip-sep" />
+              <button
+                className="sw-strip-ico focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                aria-label="Settings"
+                title="Settings"
+                onClick={() => setShowSettings(true)}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </button>
+            </div>
           </div>
           {savingModel && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving model…</p>}
           {modelError && <p id="default-model-status" className="mt-1 text-[10px] text-red-400" role="alert">{modelError}</p>}
@@ -4421,7 +4472,7 @@ export function Sidebar() {
               slow is still a configured setup (#51). */}
           {activeProvider === '' && (
             <button
-              className="mt-1.5 w-full rounded   bg-zinc-800/60 px-2 py-1 text-left text-[10px] leading-relaxed text-zinc-300 hover:border-zinc-500"
+              className="mt-1.5 w-full rounded bg-zinc-800/60 px-2 py-1 text-left text-[10px] leading-relaxed text-zinc-300 hover:border-zinc-500"
               onClick={() => setShowSettings(true)}
             >
               No model provider configured — add one in Settings to start.
@@ -9671,56 +9722,55 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       )}
       <Composer />
       <div className="flex items-center gap-2 px-4 pb-1 pt-0.5 font-mono text-[10px] text-zinc-600">
-        <span
-          className={`inline-block h-1.5 w-1.5 rounded-full ${
-            streaming ? 'run-pulse bg-amber-400' : status === 'error' ? 'bg-red-500' : 'bg-emerald-600'
-          }`}
-        />
-        {streaming ? 'working' : status}
-        {/* Session metadata: exact context fill, then the git cluster. */}
-        <ContextChip info={contextInfo} />
-        <GitChipCluster
-          info={gitInfo}
-          streaming={streaming}
-          conversationId={conversationId}
-          onCommandDone={refreshGitInfo}
-        />
-        {/* Access mode lives in the composer toolbar now. Plan approval is a
-            live card above the composer (exit_plan), not a status-strip chip. */}
-        {/* Read-aloud toggle: one click to mute/unmute the agent's voice.
-            Hidden while the model isn't downloaded — Settings owns that. */}
-        {ttsReady && (
-          <button
-            className={`ml-auto rounded   px-1.5 py-0.5 ${
-              ttsError
-                ? 'border-red-700 text-red-300'
-                : ttsSpeaking
-                  ? 'border-amber-600/70 text-amber-300'
-                  : ttsEnabled
-                    ? ' text-zinc-200 hover:bg-zinc-800'
-                    : ' text-zinc-600 hover:text-zinc-400'
+        <span className="flex items-center gap-2">
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full ${
+              streaming ? 'run-pulse bg-amber-400' : status === 'error' ? 'bg-red-500' : 'bg-emerald-600'
             }`}
-            title={
-              ttsError
-                ? `Read-aloud error: ${ttsError}`
-                : ttsEnabled
-                  ? 'Read-aloud on — click to mute'
-                  : 'Read-aloud off — click to hear responses'
-            }
-            aria-pressed={ttsEnabled}
-            aria-label={ttsEnabled ? 'Mute read-aloud' : 'Unmute read-aloud'}
-            onClick={toggleTts}
-          >
-            {ttsSpeaking ? (
-              <span className="run-pulse inline-block text-[10px] leading-[12px]">●</span>
-            ) : (
-              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-                <path d="M2 5.5h2L7 3v8L4 8.5H2z" />
-                <path d="M9.5 5a3 3 0 0 1 0 4" />
-              </svg>
-            )}
-          </button>
-        )}
+          />
+          {streaming ? 'working' : status}
+          <ContextChip info={contextInfo} />
+        </span>
+        <span className="ml-auto flex items-center gap-2">
+          <GitChipCluster
+            info={gitInfo}
+            streaming={streaming}
+            conversationId={conversationId}
+            onCommandDone={refreshGitInfo}
+          />
+          {ttsReady && (
+            <button
+              className={`rounded   px-1.5 py-0.5 ${
+                ttsError
+                  ? 'border-red-700 text-red-300'
+                  : ttsSpeaking
+                    ? 'border-amber-600/70 text-amber-300'
+                    : ttsEnabled
+                      ? ' text-zinc-200 hover:bg-zinc-800'
+                      : ' text-zinc-600 hover:text-zinc-400'
+              }`}
+              title={
+                ttsError
+                  ? `Read-aloud error: ${ttsError}`
+                  : ttsEnabled
+                    ? 'Read-aloud on — click to mute'
+                    : 'Read-aloud off — click to hear responses'
+              }
+              aria-pressed={ttsEnabled}
+              aria-label={ttsEnabled ? 'Mute read-aloud' : 'Unmute read-aloud'}
+              onClick={toggleTts}
+            >
+              {ttsSpeaking ? (
+                <span className="run-pulse inline-block text-[10px] leading-[12px]">●</span>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                  <path d="M2 5.5h2L7 3v8L4 8.5H2z" />
+                  <path d="M9.5 5a3 3 0 0 1 0 4" />
+                </svg>
+              )}
+            </button>
+          )}
+        </span>
       </div>
     </main>
   )

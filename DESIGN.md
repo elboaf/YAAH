@@ -3,7 +3,6 @@ name: YAAH
 description: Desktop AI coding agent — a mission-control console for watching and steering a working agent.
 colors:
   console-bg: "#1e1e1e"
-  console-deep: "#0d1117"
   surface: "#252525"
   surface-well: "#1b1b1b"
   hairline: "#333333"
@@ -13,7 +12,7 @@ colors:
   ink-secondary: "#a8a8a8"
   ink-muted: "#8a8a8a"
   ink-ghost: "#555555"
-  terminal-green: "#58ff58"
+  machine-ink: "#b8b8b8"
   action-blue: "#2563eb"
   action-blue-hover: "#3b82f6"
   working-amber: "#fbbf24"
@@ -76,8 +75,8 @@ components:
     rounded: "{rounded.sm}"
     padding: "8px 12px"
   tool-chip:
-    backgroundColor: "rgba(13,17,23,0.7)"
-    textColor: "{colors.terminal-green}"
+    backgroundColor: "rgba(37,37,37,0.4)"
+    textColor: "{colors.machine-ink}"
     rounded: "{rounded.sm}"
     padding: "2px 6px"
   skill-chip:
@@ -91,8 +90,8 @@ components:
     rounded: "{rounded.sm}"
     padding: "6px 8px"
   code-block:
-    backgroundColor: "{colors.console-deep}"
-    textColor: "{colors.terminal-green}"
+    backgroundColor: "transparent"
+    textColor: "{colors.machine-ink}"
     rounded: "{rounded.sm}"
   agent-card:
     backgroundColor: "{colors.surface}"
@@ -116,15 +115,15 @@ components:
 
 **Creative North Star: "Mission Control, Terminal as Accent"**
 
-YAAH's interface is a dark instrument panel for supervising a machine at work. Every agent action is a readable signal: tool calls arrive as green mono chips, state is a status light, and the human's own actions are the single strong blue voice in the room. The aesthetic is a terminal that grew awareness — dense, mono-led, unhurried — not a consumer chat app and not a marketing surface.
+YAAH's interface is a dark instrument panel for supervising a machine at work. Every agent action is a readable signal: tool calls arrive as ghost-ink mono chips, state is a status light, and the human's own actions are the single strong blue voice in the room. The aesthetic is a terminal that grew awareness — dense, mono-led, unhurried — not a consumer chat app and not a marketing surface.
 
-The surface world is warm neutral (#1e1e1e console, #252525 panels, #333 hairlines — the "retro accent" direction picked at design review and shipped by issue #643's full migration). Machine output carries the identity: phosphor green (#58ff58) mono on deep well blocks (#0d1117). The green is an accent, not a theme — it marks *where the machine is speaking*, never where a human can act.
+The surface world is warm neutral (#1e1e1e console, #252525 panels, #333 hairlines — the "retro accent" direction picked at design review and shipped by issue #643's full migration). Machine output carries the identity: ghost-bright ink (#b8b8b8) mono sitting directly on panels and wells — the phosphor green (#58ff58) and its cold blue-black machine floor (#0d1117) were retired 2026-11-06 ("Ink Ghost" direction). The machine is marked by monospace alone; ink ghost is not an accent — it adds no hue, never marks a human action, and never decorates non-machine content.
 
-Density is high but never ambiguous: compact rows (6–8px vertical padding), 10–12px secondary text, and hairline borders do the separating, so color is freed to carry meaning only. Machine output is monospace and green; human prose is the only place the sans voice breathes, in neutral ink. Motion exists solely to report state — a chip sliding in, a pulse while a tool runs — never to decorate.
+Density is high but never ambiguous: compact rows (6–8px vertical padding), 10–12px secondary text, and hairline borders do the separating, so color is freed to carry meaning only. Machine output is monospace in ghost ink; human prose is the only place the sans voice breathes, in neutral ink. Motion exists solely to report state — a chip sliding in, a pulse while a tool runs — never to decorate.
 
 **Key Characteristics:**
 - Warm-neutral gray surfaces (#1e1e1e / #252525 / #333); color is information, not decoration
-- Monospace is the voice of the machine — and the machine speaks green (#58ff58)
+- Monospace is the voice of the machine — set in ghost-bright ink (#b8b8b8), no hue
 - Sans in neutral ink is the voice of the human
 - Flat surfaces separated by 1px hairlines, never shadows
 - Shadows reserved for layers that float above the app (modals, menus, live question card)
@@ -132,24 +131,23 @@ Density is high but never ambiguous: compact rows (6–8px vertical padding), 10
 
 ## Colors
 
-A warm-neutral console where phosphor green marks the machine's voice, one blue accent marks human intent, and a small set of state colors report what the machine is doing.
+A warm-neutral console where ghost-bright mono marks the machine's voice, one blue accent marks human intent, and a small set of state colors report what the machine is doing.
 
 ### Primary
 - **Action Blue** (#2563eb): the only color a human action may use — New chat, Send, Save, and focus rings on the composer. Hover lifts to #3b82f6. If blue appears, the user did it or is about to.
 
-### Terminal Accent
-- **Terminal Green** (#58ff58, optional glow rgba(88,255,88,0.3)): the machine's voice — tool chips (running *and* done), the telemetry tape, trace lines, code blocks, diff context lines. Set in JetBrains Mono on deep well surfaces (#0d1117). The `.terminal-text` / `.crt-glow` classes in index.css are its only source. Green is never a button, never a human-action color, and never decorates non-machine content.
+### Machine Voice (replaces the retired Terminal Accent)
+- **Machine Ink** (#b8b8b8, ≈ zinc-300; no glow — the former rgba(88,255,88,0.3) CRT halo is retired with the green): the machine's voice — tool chips (running *and* done), the telemetry tape, trace lines, code blocks, diff context lines. Set in JetBrains Mono directly on the panel or a quiet #252525 tint; the dedicated blue-black machine well (#0d1117) is retired with it. The `.terminal-text` class in index.css is its only source; `.crt-glow` remains as a no-op for legacy callers. Ink is never a button, never a human-action color, and never decorates non-machine content — monospace, not hue, is what marks the machine.
 
 ### State
 - **Working Amber** (#fbbf24): the machine-at-work signal — pulsing status dot, running-tool pulse. Never a button.
 - **Ask Orange** (#f97316, deep #c2410c): the agent-is-asking channel — question card border, option selection, the pulsing `?`. Distinct from amber so "busy" and "waiting on you" never blur.
 
 ### Tool Spectrum
-- **Tool Spectrum** (read #38bdf8 · search #a78bfa · shell #34d399 · web #22d3ee · image #f472b6 · delegate #e879f9 · edit #fbbf24): per-tool glyph identity inside chips and traces. Sanctioned to appear anywhere a tool is named — not elsewhere. Delegate (fuchsia) marks sub-agent delegation (spawn_agent) and its nested transcript blocks. The glyph carries the spectrum; the chip text itself is green.
+- **Tool Spectrum** (read #38bdf8 · search #a78bfa · shell #34d399 · web #22d3ee · image #f472b6 · delegate #e879f9 · edit #fbbf24): per-tool glyph identity inside chips and traces. Sanctioned to appear anywhere a tool is named — not elsewhere. Delegate (fuchsia) marks sub-agent delegation (spawn_agent) and its nested transcript blocks. The glyph carries the spectrum; the chip text itself is ghost ink.
 
 ### Neutral (the surface + ink system)
 - **Console Background** (#1e1e1e): app root (`bg-[#1e1e1e]` on the App shell).
-- **Console Deep** (#0d1117): machine wells — code blocks, diffs, tool chip fills, the telemetry tape. The floor of the system, never pure black.
 - **Surface** (#252525): panels, agent message cards, inputs, chip bases. Implemented as Tailwind zinc-800 (retuned; see below).
 - **Surface Well** (#1b1b1b): the sidebar and header strips — darker than panels so the chat column reads forward.
 - **Hairline** (#333333): the default 1px separator and card border.
@@ -161,14 +159,14 @@ A warm-neutral console where phosphor green marks the machine's voice, one blue 
 - **Ink Ghost** (#555555): timestamps, line numbers, glyphs, disabled hints.
 - **Skill Indigo** (#312e81 at 60% with #c7d2fe text): skill chips only — the one cool violet family reserved for the skills system.
 
-**Implementation note (issue #643):** the zinc ladder in `tailwind.config.js` is deliberately retuned so the *names* keep their roles: zinc-950→#0d1117, zinc-900→#1b1b1b, zinc-800→#252525, zinc-700→#333333, zinc-600→#555555 (faint ink, not borders), zinc-500→#8a8a8a, zinc-400→#a8a8a8, zinc-300→#d4d4d4, zinc-200→#e6e6e6. Use the zinc utility that matches the ROLE above; do not introduce raw hex for surfaces outside the composer/user-bubble tints.
+**Implementation note (issue #643):** the zinc ladder in `tailwind.config.js` is deliberately retuned so the *names* keep their roles: zinc-950→#1b1b1b (deep input wells only — the machine well is retired), zinc-900→#1b1b1b, zinc-800→#252525, zinc-700→#333333, zinc-600→#555555 (faint ink, not borders), zinc-500→#8a8a8a, zinc-400→#a8a8a8, zinc-300→#d4d4d4, zinc-200→#e6e6e6. Use the zinc utility that matches the ROLE above; do not introduce raw hex for surfaces outside the composer/user-bubble tints.
 
 ### Named Rules
-**The Color Is State Rule.** Color never decorates; it reports. Blue = human action, green = machine voice, amber = machine working, orange = agent asking, emerald/red = done/error. Tool glyph colors are the single sanctioned exception, and only where a tool is named.
+**The Color Is State Rule.** Color never decorates; it reports. Blue = human action, ghost ink = machine voice, amber = machine working, orange = agent asking, emerald/red = done/error — with the machine voice carried by monospace, not hue. Tool glyph colors are the single sanctioned exception, and only where a tool is named.
 
 **The One Voice Rule.** Action Blue is the only accent permitted on interactive controls. State colors may appear on indicators, never on buttons.
 
-**The Machine Speaks Green Rule.** Anything the machine produced — tool names, tape, traces, code, diff context — is monospace in #58ff58 on a #0d1117 well. If a surface is green-mono, it is machine output; if it's neutral sans, it's human space.
+**The Machine Speaks Mono-on-Ink Rule.** Anything the machine produced — tool names, tape, traces, code, diff context — is monospace in #b8b8b8 ghost ink, sitting directly on the panel or a quiet #252525 tint; there is no dedicated machine well. If a surface is mono ink, it is machine output; if it's neutral sans, it's human space.
 
 ## Typography
 
@@ -181,7 +179,7 @@ A warm-neutral console where phosphor green marks the machine's voice, one blue 
 - **Title** (600, 14px, 1.625): panel headings ("FILES", "Settings").
 - **Body** (400, 14px, 1.625): user and agent prose. Agent text runs the full chat-column width; user bubbles cap at 85%.
 - **Secondary** (400, 12px, 1.5): option descriptions, settings help, conversation rows.
-- **Mono Body** (400, 11px/16px): tool chips, traces, code, args/results — green on wells.
+- **Mono Body** (400, 11px/16px): tool chips, traces, code, args/results — ghost ink on panels.
 - **Label** (500, 10px, 0.1em tracking, uppercase): section markers — "agent" on message cards, "agent asks — pick an answer", the status line.
 
 ### Named Rules
@@ -199,7 +197,7 @@ A fixed two-pane console: sidebar (256px, min 220px, #1b1b1b with a #333 right h
 
 ## Elevation & Depth
 
-Flat by doctrine: surfaces are separated with 1px hairlines (#333333, or #444444 where a border must read on a filled surface), never shadows. Depth is conveyed tonally (surface #252525 on console #1e1e1e, machine wells #0d1117, sidebar well #1b1b1b) and by two sanctioned devices: the live tool ticker's right-edge gradient fade mask, and floating layers.
+Flat by doctrine: surfaces are separated with 1px hairlines (#333333, or #444444 where a border must read on a filled surface), never shadows. Depth is conveyed tonally (surface #252525 on console #1e1e1e, deep input wells #1b1b1b, sidebar well #1b1b1b) and by two sanctioned devices: the live tool ticker's right-edge gradient fade mask, and floating layers.
 
 ### Shadow Vocabulary
 - **Live question card** (`0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1)`): the ask_user card, because it is an interruption floating above the composer.
@@ -223,15 +221,15 @@ Precise radii on the hairline grid: controls and chips use 4px; message cards, t
 - **Micro text buttons** (10px, #8a8a8a): refresh, export, sys — quiet utilities that brighten to #d4d4d4 on hover.
 
 ### Chips
-- **Tool chip:** 11px mono, 2px 6px, 4px radius; green (#58ff58) text in both states. Done = rgba(13,17,23,0.7) fill; running = rgba(63,63,70,0.6) fill with a pulsing amber dot. Glyph carries the tool's spectrum color.
+- **Tool chip:** 11px mono, 2px 6px, 4px radius; ghost ink (#b8b8b8) text in both states. Done = rgba(37,37,37,0.4) fill; running = rgba(63,63,70,0.6) fill with a pulsing amber dot. Glyph carries the tool's spectrum color.
 - **Attachment chip:** 10px mono on #252525, #d4d4d4 text, × remove.
 - **Skill chip:** rgba(49,46,129,0.6) with #c7d2fe 10px mono text — the indigo family appears nowhere else.
 
 ### Cards / Containers
 - **Agent message card:** #252525, 1px #333 border, 8px radius, 12px padding, uppercase mono "agent" label; emission prose inside in neutral sans ink.
 - **User bubble:** rgba(74,144,217,0.08) fill, 1px rgba(37,99,235,0.45) border, 8px radius; text #e6eef7.
-- **Code block:** #0d1117 body, 1px #333 border, 4px radius; header strip #1b1b1b with 10px mono language tag and copy button, separated by a #252525 hairline. Code text green; line numbers in #555555, gutter right-aligned; syntax colors from codeview.ts ride on top.
-- **Diff rows:** additions rgba(6,78,59,0.6) with #6ee7b7 text, deletions rgba(69,10,10,0.6) with #fca5a5 text, context lines green; `+`/`-` glyphs at 60% opacity.
+- **Code block:** transparent body on a 1px #333 border, 4px radius; header strip #1b1b1b with 10px mono language tag and copy button, separated by a #252525 hairline. Code text ghost ink; line numbers in #555555, gutter right-aligned; syntax colors from codeview.ts ride on top.
+- **Diff rows:** additions rgba(6,78,59,0.6) with #6ee7b7 text, deletions rgba(69,10,10,0.6) with #fca5a5 text, context lines ghost ink; `+`/`-` glyphs at 60% opacity.
 - **Ask card:** #1b1b1b, 1px rgba(194,65,12,0.6) border, 8px radius, 12px padding, live-question shadow; selected option fills rgba(67,20,7,0.4) with #fed7aa text and #f97316 border.
 - **Modals:** #1e1e1e, 1px #444444 border, 8px radius, floating-layer shadow over a black/60 scrim.
 
@@ -246,7 +244,7 @@ Precise radii on the hairline grid: controls and chips use 4px; message cards, t
 - **File tree:** 11px rows, 12px-per-level indent, caret/• glyph in #8a8a8a, hover fill #252525, context menu on right-click.
 
 ### Signature: the Tool Ticker
-The live turn renders recent tool calls as a single horizontal chip row of green mono chips, newest sliding in from the left (0.25s ease-out, 24px travel) and older chips fading right under a gradient mask — the row never grows past the panel. Beneath it, the telemetry tape streams the session's raw tool output as a green mono line. When the turn ends, the ticker collapses into one expandable trace line ("N calls · glyph name ×count", green mono) whose rows expand to per-call detail. This ticker→trace collapse is the system's signature behavior: loud while working, silent when done.
+The live turn renders recent tool calls as a single horizontal chip row of ghost-ink mono chips, newest sliding in from the left (0.25s ease-out, 24px travel) and older chips fading right under a gradient mask — the row never grows past the panel. Beneath it, the telemetry tape streams the session's raw tool output as a ghost-ink mono line. When the turn ends, the ticker collapses into one expandable trace line ("N calls · glyph name ×count", ghost-ink mono) whose rows expand to per-call detail. This ticker→trace collapse is the system's signature behavior: loud while working, silent when done.
 
 ### Status Line
 The app's pulse: a 6px dot (amber pulsing = working, red = error, emerald = idle) beside a 10px mono label, last row of the chat panel.
@@ -255,7 +253,7 @@ The app's pulse: a 6px dot (amber pulsing = working, red = error, emerald = idle
 
 ### Do:
 - **Do** separate in-flow surfaces with 1px hairlines (#333333; #444444 ONLY on borders of inputs/fields filled with #252525, where the border must read against the raised fill). #444444 is never the default separator.
-- **Do** set machine output in JetBrains Mono at 10–11px, green (#58ff58) on #0d1117 wells; labels uppercase with 0.1em tracking.
+- **Do** set machine output in JetBrains Mono at 10–11px, ghost ink (#b8b8b8) directly on the panel or a quiet #252525 tint — there is no machine well; labels uppercase with 0.1em tracking.
 - **Do** keep Action Blue (#2563eb) exclusively on human-initiated controls.
 - **Do** report state with the status colors: amber working, orange asking, emerald done, red error.
 - **Do** keep controls compact: 4px radius on chips/controls, 8px on cards and the composer, 6–8px vertical padding, 10–12px secondary text.
@@ -263,9 +261,9 @@ The app's pulse: a 6px dot (amber pulsing = working, red = error, emerald = idle
 
 ### Don't:
 - **Don't** put shadows on in-flow surfaces — shadows are for modals, menus, and the ask card only.
-- **Don't** use pure black (#000) as a surface; the floor is #0d1117, and only for machine wells.
+- **Don't** use pure black (#000) as a surface; floors are the warm neutral ladder (#1b1b1b darkest) — there is no cold blue-black machine floor anymore.
 - **Don't** introduce new accent hues; the tool spectrum colors appear only where a tool is named, indigo only for skills.
-- **Don't** spend terminal green on anything but machine voice — no green buttons, green links, or green human prose. If a human can click it, it's blue or ghost zinc.
+- **Don't** spend machine ink on anything but machine voice — no ink-voice buttons, links, or human prose, and no colored terminal accent at all: the machine is marked by monospace, not hue. If a human can click it, it's blue or ghost zinc.
 - **Don't** animate for delight — motion is chip-in (0.25s ease-out) and run-pulse (1s ease-in-out) or nothing; no bounce or elastic easing.
 - **Don't** render a button in a state color (amber/orange/emerald/red); state colors are indicators, not actions. Human-initiated buttons are blue or ghost zinc.
 - **Don't** spend amber on anything but progress/working (status dot, ticker, run pulse, slow-turn, Steer). Approval cards are ORANGE (an approval is the agent asking); queued chips, git drift, cached-offline labels, warnings, and capture affordances are neutral zinc ink — only their glyph may carry color when it must read.
