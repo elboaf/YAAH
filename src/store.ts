@@ -218,9 +218,10 @@ interface AgentState {
   setSteer: (key: string, on: boolean) => void
   workspace: string
   /**
-   * #51/#76: the current global defaults, hydrated from /api/config by
-   * refreshGlobals. The sidebar picker sets the model (POST active-model),
-   * Settings sets the effort — both are defaults for NEW chats only;
+   * #51/#76, #685: the current global defaults, hydrated from /api/config
+   * by refreshGlobals. The composer rail's picks write them (a pick in a
+   * fresh draft or normal chat moves the default in lockstep; agent chats
+   * are exempt) — they are defaults for NEW chats and empty scopes only;
    * saved chats never follow them.
    */
   globalModel: string
@@ -768,10 +769,11 @@ export const useAgent = create<AgentState>((set, get) => ({
       // New chat button after setWorkspace) sets s.workspace first, and the
       // first send both files the chat and streams its turn here (#88/#94).
       draftDestination: s.workspace,
-      // #51/#76: the fresh draft inherits the CURRENT sidebar defaults —
-      // the picker values it shows are what the first send will pin into the
-      // new conversation row. The sub-agent scope starts empty ('' =
-      // sub-agent: auto) — there is no sidebar default for it (#383).
+      // #51/#76: the fresh draft inherits the CURRENT global defaults —
+      // the composer rail's values (they ARE the default since #685: any
+      // rail pick in a draft or normal chat moved them here). The sub-agent
+      // scope starts empty ('' = sub-agent: auto) — there is no default
+      // for it (#383).
       draftScope: { model: get().globalModel, effort: get().globalEffort, subagent_model: '' },
     }))
     persistConversationId(null)
