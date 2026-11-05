@@ -2,9 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Modern refresh: clean dark surface with terminal accents.
-   System fonts for UI, monospace for machine output.
-   Phosphor green (#58ff58) as the terminal accent. */
+/* Modern refresh (issue #643, Terminal-as-Accent — full migration):
+   clean dark surface with terminal accents, per DESIGN.md. System fonts
+   for UI, monospace for machine output. Phosphor green (#58ff58) is the
+   terminal accent, reserved for machine voice: tool chips/tape/trace,
+   code blocks, diff context. Surfaces: #1e1e1e base, #252525 panels,
+   #333 hairlines (zinc ladder retuned in tailwind.config.js). */
 
 /* Interface scale: App.tsx applies inline zoom to #root (inline styles only —
    legacy WebView2 zoom rejects var() in stylesheets). With a full-size box the
@@ -26,7 +29,7 @@ body,
 }
 
 /* Scrollbars are chrome, not content: transparent track so each surface keeps
-   its own floor (console #18181b, code #09090b, modals), ghost-zinc thumb that
+   its own floor (console #1e1e1e, code #0d1117, modals), ghost-zinc thumb that
    brightens through the ink ladder on interaction. The 2px transparent border
    with padding-box clipping floats the thumb at ~6px visual width. */
 ::-webkit-scrollbar {

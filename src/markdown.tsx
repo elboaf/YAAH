@@ -69,7 +69,7 @@ export function CodeBlock({ code, lang, startLine = 1 }: { code: string; lang?: 
             <span className="w-10 shrink-0 select-none pr-2 text-right text-zinc-600">
               {startLine + i}
             </span>
-            <span className="whitespace-pre-wrap break-all text-zinc-300">
+            <span className="whitespace-pre-wrap break-all text-zinc-300 terminal-text">
               {highlightLine(line).map((t, j) => (
                 <span key={j} className={t.cls}>{t.text}</span>
               ))}
