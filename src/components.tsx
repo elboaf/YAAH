@@ -4182,7 +4182,7 @@ export const SUBAGENT_SCOPE_HINT =
 
 /** Default reasoning/thought level for new chats. Existing conversations keep
  *  their pinned effort, matching the default-model selector's scope. */
-export function DefaultThoughtLevelPicker() {
+export function DefaultThoughtLevelPicker({ variant = 'standalone' }: { variant?: 'standalone' | 'strip' }) {
   const effort = useAgent((s) => s.globalEffort)
   const model = useAgent((s) => s.globalModel)
   const { byProvider } = useModelList()
@@ -4205,11 +4205,39 @@ export function DefaultThoughtLevelPicker() {
     }
   }
 
+  const statusClass = variant === 'strip'
+    ? 'm-0 text-[10px] leading-tight text-zinc-500'
+    : 'mt-1 text-[10px] text-zinc-500'
+  const errorClass = variant === 'strip'
+    ? 'm-0 text-[10px] leading-tight text-red-400'
+    : 'mt-1 text-[10px] text-red-400'
+
+  if (variant === 'strip') {
+    // Sidebar transport strip: borderless cell filler; status lines stack
+    // under the select only while present.
+    return (
+      <div className="flex min-w-0 flex-1 flex-col justify-center">
+        <select
+          id="default-thought-level"
+          className="sw-strip-select w-full min-w-0 truncate bg-transparent px-1.5 text-xs text-zinc-300 focus:outline-none disabled:opacity-60"
+          value={effort}
+          onChange={(e) => void apply(e.target.value)}
+          disabled={saving}
+          aria-label="Thought level"
+          aria-describedby={error ? 'default-thought-level-status' : undefined}
+        >
+          <EffortOptions efforts={supportedEfforts} />
+        </select>
+        {saving && <p className={statusClass} role="status">Saving thought level…</p>}
+        {error && <p id="default-thought-level-status" className={errorClass} role="alert">{error}</p>}
+      </div>
+    )
+  }
   return (
     <div className="w-24 shrink-0">
       <select
         id="default-thought-level"
-        className="w-full rounded   bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
+        className="w-full rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
         value={effort}
         onChange={(e) => void apply(e.target.value)}
         disabled={saving}
@@ -4218,8 +4246,8 @@ export function DefaultThoughtLevelPicker() {
       >
         <EffortOptions efforts={supportedEfforts} />
       </select>
-      {saving && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving thought level…</p>}
-      {error && <p id="default-thought-level-status" className="mt-1 text-[10px] text-red-400" role="alert">{error}</p>}
+      {saving && <p className={statusClass} role="status">Saving thought level…</p>}
+      {error && <p id="default-thought-level-status" className={errorClass} role="alert">{error}</p>}
     </div>
   )
 }
@@ -4319,77 +4347,80 @@ export function Sidebar() {
         <ConversationList addingDevice={addingDevice} setAddingDevice={setAddingDevice} />
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}
-        <div className="relative mt-auto   pt-2">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <button
-              className="min-w-0 flex-1 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              onClick={() => {
-                newConversation()
+        <div className="relative mt-auto pt-2">
+          <div className="sw-strip overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950/70 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.25),0_4px_6px_-4px_rgba(0,0,0,0.2)]">
+            <div className="sw-strip-cell">
+              <button
+                className="sw-strip-btn w-full min-w-0 rounded bg-blue-600 px-2 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onClick={() => {
+                  newConversation()
 
-              }}
-            >
-              New chat
-            </button>
-            <div className="relative shrink-0">
-              <button
-                className="flex h-7 w-7 items-center justify-center rounded border border-dashed border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                aria-label="Add workspace"
-                aria-haspopup="menu"
-                aria-expanded={addMenuOpen}
-                title="Add workspace…"
-                onClick={() => setAddMenuOpen(!addMenuOpen)}
+                }}
               >
-                <FolderPlusIcon />
+                New chat
               </button>
-              {addMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-30" onClick={() => setAddMenuOpen(false)} />
-                  <div
-                    className="absolute bottom-8 left-0 z-40 w-44 rounded   bg-zinc-900 py-1 shadow-xl"
-                    role="menu"
-                    aria-label="Add workspace"
-                  >
-                    <button
-                      className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-                      role="menuitem"
-                      onClick={() => {
-                        setAddMenuOpen(false)
-                        void browseWorkspace()
-                      }}
-                    >
-                      Local folder…
-                    </button>
-                    <button
-                      className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-                      role="menuitem"
-                      onClick={() => {
-                        setAddMenuOpen(false)
-                        setAddingDevice(true)
-                      }}
-                    >
-                      Remote device…
-                    </button>
-                  </div>
-                </>
-              )}
             </div>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <select
-              id="default-model"
-              className="min-w-0 truncate rounded   bg-zinc-800 px-1.5 py-1 font-mono text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
-              value={defaultScopeValue}
-              onChange={(e) => pickModel(e.target.value)}
-              disabled={savingModel}
-              aria-label="Default model"
-              aria-describedby={modelError ? 'default-model-status' : undefined}
-              title={defaultScopeValue}
-            >
-              <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
-            </select>
-            <div className="flex items-center justify-between">
+            <div className="sw-strip-divider" />
+            <div className="sw-strip-cell">
+              <select
+                id="default-model"
+                className="sw-strip-select min-w-0 flex-1 truncate bg-transparent font-mono text-xs text-zinc-200 focus:outline-none disabled:opacity-60"
+                value={defaultScopeValue}
+                onChange={(e) => pickModel(e.target.value)}
+                disabled={savingModel}
+                aria-label="Default model"
+                aria-describedby={modelError ? 'default-model-status' : undefined}
+                title={defaultScopeValue}
+              >
+                <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
+              </select>
+              <span className="sw-strip-sep" />
+              <div className="relative shrink-0">
+                <button
+                  className="sw-strip-ico border border-dashed border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                  aria-label="Add workspace"
+                  aria-haspopup="menu"
+                  aria-expanded={addMenuOpen}
+                  title="Add workspace…"
+                  onClick={() => setAddMenuOpen(!addMenuOpen)}
+                >
+                  <FolderPlusIcon />
+                </button>
+                {addMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={() => setAddMenuOpen(false)} />
+                    <div
+                      className="absolute bottom-8 left-0 z-40 w-44 rounded bg-zinc-900 py-1 shadow-xl"
+                      role="menu"
+                      aria-label="Add workspace"
+                    >
+                      <button
+                        className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
+                          void browseWorkspace()
+                        }}
+                      >
+                        Local folder…
+                      </button>
+                      <button
+                        className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                        role="menuitem"
+                        onClick={() => {
+                          setAddMenuOpen(false)
+                          setAddingDevice(true)
+                        }}
+                      >
+                        Remote device…
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+              <span className="sw-strip-sep" />
               <button
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                className="sw-strip-ico focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
                 aria-label="Refresh models"
                 title="Refresh model lists from all providers"
                 onClick={() => {
@@ -4402,20 +4433,22 @@ export function Sidebar() {
                   <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
                 </svg>
               </button>
-              <div className="flex items-center gap-0.5">
-                <DefaultThoughtLevelPicker />
-                <button
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                  aria-label="Settings"
-                  title="Settings"
-                  onClick={() => setShowSettings(true)}
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                  </svg>
-                </button>
-              </div>
+            </div>
+            <div className="sw-strip-divider" />
+            <div className="sw-strip-cell">
+              <DefaultThoughtLevelPicker variant="strip" />
+              <span className="sw-strip-sep" />
+              <button
+                className="sw-strip-ico focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                aria-label="Settings"
+                title="Settings"
+                onClick={() => setShowSettings(true)}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </button>
             </div>
           </div>
           {savingModel && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving model…</p>}
@@ -4425,7 +4458,7 @@ export function Sidebar() {
               slow is still a configured setup (#51). */}
           {activeProvider === '' && (
             <button
-              className="mt-1.5 w-full rounded   bg-zinc-800/60 px-2 py-1 text-left text-[10px] leading-relaxed text-zinc-300 hover:border-zinc-500"
+              className="mt-1.5 w-full rounded bg-zinc-800/60 px-2 py-1 text-left text-[10px] leading-relaxed text-zinc-300 hover:border-zinc-500"
               onClick={() => setShowSettings(true)}
             >
               No model provider configured — add one in Settings to start.

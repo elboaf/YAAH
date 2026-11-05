@@ -209,3 +209,15 @@ body,
 .crt-glow {
   text-shadow: 0 0 4px rgba(88, 255, 88, 0.3);
 }
+/* Sidebar transport strip (live session 4f4bd5e9, variant 2 accepted):
+   one dense hairline-divided control strip at the sidebar's foot.
+   Cell 1 New chat | cell 2 model + add-workspace + refresh | cell 3 thought level + settings. */
+.sw-strip { display: flex; flex-direction: column; }
+.sw-strip-cell { display: flex; align-items: center; gap: 5px; padding: 4px 6px; }
+.sw-strip-btn { height: 26px; }
+.sw-strip-ico { display: flex; height: 26px; width: 28px; align-items: center; justify-content: center; border-radius: 4px; color: #8a8a8a; flex-shrink: 0; }
+.sw-strip-ico:hover { color: #d4d4d4; background: #2e2e2e; }
+.sw-strip-divider { height: 1px; background: #333333; flex-shrink: 0; }
+.sw-strip-sep { width: 1px; align-self: stretch; margin: 3px 0; background: #333333; flex-shrink: 0; }
+.sw-strip-select { height: 26px; border-radius: 4px; }
+.sw-strip-select:focus-visible { box-shadow: inset 0 0 0 1px #444444; }
