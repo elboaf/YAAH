@@ -9607,14 +9607,22 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           <MessageView key={m.id} msg={m} live={m.id === liveId} />
         ))}
         {pendingQuestion && (
-          <div className="rounded border border-orange-800/60 bg-orange-950/20 px-3 py-2">
-            <div className="mb-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-orange-400">
-              <span className="run-pulse">?</span> agent asks
+          <div className="lg-card">
+            <div className="lg-head">
+              <span aria-hidden="true" className="run-pulse lg-caret">?</span>
+              <span className="lg-title">agent asks</span>
             </div>
             {/* #113: the question renders inside the scrollable transcript
                 so a multi-screen question scrolls away with the chat instead
-                of pushing the pinned answer controls off-screen. */}
-            <p className="whitespace-pre-wrap text-sm text-zinc-100">{pendingQuestion.question}</p>
+                of pushing the pinned answer controls off-screen. Ledger band
+                (2026-11-05): matches AskUserTrace / the remote card's Q-row;
+                the orange pre-ledger chrome is gone. */}
+            <div className="lg-sheet">
+              <div className="lg-row">
+                <span aria-hidden="true" className="lg-key">Q</span>
+                <p className="lg-val lg-val--q">{pendingQuestion.question}</p>
+              </div>
+            </div>
           </div>
         )}
       </div>
