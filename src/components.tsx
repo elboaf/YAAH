@@ -4310,79 +4310,79 @@ export function Sidebar() {
         {/* Compact defaults: existing chats retain their own selections. */}
         <div className="relative mt-auto pt-2">
           {/* No overflow-hidden here: it would clip the add-workspace menu,
-              which opens upward out of the strip. Cells keep their own radii. */}
-          <div className="sw-strip lg-strip-machined rounded-lg border border-zinc-700 bg-zinc-950/70 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.25),0_4px_6px_-4px_rgba(0,0,0,0.2)]">
-            <div className="sw-strip-cell">
-              <button
-                className="sw-strip-btn w-full min-w-0 rounded bg-blue-600 px-2 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                onClick={() => {
-                  newConversation()
+              which opens upward out of the strip. Rows keep their own radii. */}
+          <div className="sw-strip sw-strip-list">
+            <button
+              className="sw-strip-row sw-strip-primary"
+              onClick={() => {
+                newConversation()
 
-                }}
-              >
-                New chat
-              </button>
-            </div>
-            <div className="sw-strip-divider" />
-            <div className="sw-strip-cell">
-              <div className="relative shrink-0">
-                <button
-                  className="sw-strip-ico border border-dashed border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                  aria-label="Add workspace"
-                  aria-haspopup="menu"
-                  aria-expanded={addMenuOpen}
-                  title="Add workspace…"
-                  onClick={() => setAddMenuOpen(!addMenuOpen)}
-                >
-                  <FolderPlusIcon />
-                </button>
-                {addMenuOpen && (
-                  <>
-                    <div className="fixed inset-0 z-30" onClick={() => setAddMenuOpen(false)} />
-                    <div
-                      className="absolute bottom-8 left-0 z-40 w-44 rounded bg-zinc-900 py-1 shadow-xl"
-                      role="menu"
-                      aria-label="Add workspace"
-                    >
-                      <button
-                        className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-                        role="menuitem"
-                        onClick={() => {
-                          setAddMenuOpen(false)
-                          void browseWorkspace()
-                        }}
-                      >
-                        Local folder…
-                      </button>
-                      <button
-                        className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
-                        role="menuitem"
-                        onClick={() => {
-                          setAddMenuOpen(false)
-                          setAddingDevice(true)
-                        }}
-                      >
-                        Remote device…
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="sw-strip-divider" />
-            <div className="sw-strip-cell">
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M8 3.2v9.6" />
+                <path d="M3.2 8h9.6" />
+              </svg>
+              <span className="sw-strip-label">New chat</span>
+            </button>
+            <div className="sw-strip-sep-h" />
+            <div className="sw-strip-rowwrap">
               <button
-                className="sw-strip-ico focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                aria-label="Settings"
-                title="Settings"
-                onClick={() => setShowSettings(true)}
+                className="sw-strip-row"
+                aria-label="Add workspace"
+                aria-haspopup="menu"
+                aria-expanded={addMenuOpen}
+                title="Add workspace…"
+                onClick={() => setAddMenuOpen(!addMenuOpen)}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                </svg>
+                <FolderPlusIcon />
+                <span className="sw-strip-label">Add workspace</span>
               </button>
+              {addMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setAddMenuOpen(false)} />
+                  <div
+                    className="absolute bottom-8 left-0 z-40 w-44 rounded bg-zinc-900 py-1 shadow-xl"
+                    role="menu"
+                    aria-label="Add workspace"
+                  >
+                    <button
+                      className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                      role="menuitem"
+                      onClick={() => {
+                        setAddMenuOpen(false)
+                        void browseWorkspace()
+                      }}
+                    >
+                      Local folder…
+                    </button>
+                    <button
+                      className="block w-full px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                      role="menuitem"
+                      onClick={() => {
+                        setAddMenuOpen(false)
+                        setAddingDevice(true)
+                      }}
+                    >
+                      Remote device…
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
+            <div className="sw-strip-sep-h" />
+            <button
+              className="sw-strip-row"
+              aria-label="Settings"
+              title="Settings"
+              onClick={() => setShowSettings(true)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+              <span className="sw-strip-label">Settings</span>
+            </button>
           </div>
         </div>
       </aside>

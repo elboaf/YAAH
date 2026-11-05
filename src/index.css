@@ -212,18 +212,25 @@ body,
 .crt-glow {
   text-shadow: none;
 }
-/* Sidebar transport strip (live session 4f4bd5e9, variant 2 accepted):
-   one dense hairline-divided control strip at the sidebar's foot.
-   Cell 1 New chat | cell 2 model + add-workspace + refresh | cell 3 thought level + settings. */
+/* Sidebar transport strip (live session 9ee64100, variant 3 "command list",
+   delivered as static mockup after the live mount glitched; V3 implemented
+   in source 2026-11-05): stacked labeled command rows at the sidebar's foot.
+   Blue edge + brightened mono label mark the primary (New chat); add-workspace
+   and settings sit as ghost rows between hairline separators. The menu still
+   opens upward out of the strip (keep overflow visible on every container). */
 .sw-strip { display: flex; flex-direction: column; }
-.sw-strip-cell { display: flex; align-items: center; gap: 5px; padding: 4px 6px; }
-.sw-strip-btn { height: 26px; }
-.sw-strip-ico { display: flex; height: 26px; width: 28px; align-items: center; justify-content: center; border-radius: 4px; color: #8a8a8a; flex-shrink: 0; }
-.sw-strip-ico:hover { color: #d4d4d4; background: #2e2e2e; }
-.sw-strip-divider { height: 1px; background: #333333; flex-shrink: 0; }
-.sw-strip-sep { width: 1px; align-self: stretch; margin: 3px 0; background: #333333; flex-shrink: 0; }
-.sw-strip-select { height: 26px; border-radius: 4px; }
-.sw-strip-select:focus-visible { box-shadow: inset 0 0 0 1px #444444; }
+.sw-strip-list { border: 1px solid #333333; border-radius: 8px; background: rgba(9, 9, 11, 0.7); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.25), 0 4px 6px -4px rgba(0, 0, 0, 0.2); }
+.sw-strip-row { position: relative; display: flex; width: 100%; align-items: center; gap: 8px; height: 26px; padding: 0 10px; border: none; border-radius: 0; background: transparent; color: #8a8a8a; text-align: left; cursor: pointer; }
+.sw-strip-row:hover { background: #2e2e2e; color: #d4d4d4; }
+.sw-strip-row:focus-visible { outline: none; box-shadow: inset 0 0 0 1px #3b82f6; }
+.sw-strip-row svg { flex-shrink: 0; }
+.sw-strip-primary { color: #b8b8b8; box-shadow: inset 2px 0 0 #2563eb; border-top-left-radius: 7px; border-top-right-radius: 7px; }
+.sw-strip-primary svg { color: #3b82f6; }
+.sw-strip-primary:hover { background: #262626; color: #e6e6e6; }
+.sw-strip-rowwrap:last-of-type button.sw-strip-row { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
+.sw-strip-list > button.sw-strip-row:last-child { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
+.sw-strip-label { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; line-height: 1.2; white-space: nowrap; }
+.sw-strip-sep-h { height: 1px; background: #333333; flex-shrink: 0; }
 
 /* Ledger dialogues (design sign-off 2026-11-05, from live session 74694c80
    variant 3): banded deep-well container + ruled Q/A/key rows for every
@@ -314,9 +321,6 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
 .lg-sidebar .lg-row:hover::after { opacity: 1; }
 .lg-sidebar .lg-row .text-zinc-600 { color: #8a8a8a; font-variant-numeric: tabular-nums; }
 .lg-sidebar .flex-1 { scrollbar-width: thin; scrollbar-color: #333333 transparent; }
-.lg-strip-machined { background: #1b1b1b; border-color: #444444; }
-.lg-strip-machined .sw-strip-divider { background: #333333; }
-.lg-strip-machined .sw-strip-sep { background: #444444; }
 
 /* ---- Composer scope rail (session c7914de2, P3 annotation style) ----
    The per-chat model/effort/sub-agent pickers moved from the top strip
