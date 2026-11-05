@@ -753,7 +753,7 @@ function AgentTelemetry({ tape, compact = false }: { tape: string; compact?: boo
     <div
       ref={wrapRef}
       data-agent-telemetry=""
-      className={`overflow-hidden terminal-text ${compact ? 'mt-1 rounded bg-zinc-950/50 px-1.5 py-0.5' : ''}`}
+      className={`overflow-hidden terminal-text rounded bg-zinc-950/50 px-1.5 py-0.5 ${compact ? 'mt-1' : ''}`}
       style={{
         maskImage:
           'linear-gradient(to right, transparent 0%, black 14%, black 100%)',
@@ -995,8 +995,8 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
           </div>
           {savedTo && <div className="mt-1 text-zinc-600">saved to {savedTo}</div>}
           {open && (
-            <div className="px-2 py-1 text-zinc-400">
-              <div className="whitespace-pre-wrap break-all text-zinc-300">
+            <div className="rounded bg-zinc-950/60 px-2 py-1 terminal-text">
+              <div className="whitespace-pre-wrap break-all">
                 args: {JSON.stringify(tc.args ?? {}, null, 2)}
               </div>
               {tc.result !== undefined && (
@@ -1089,8 +1089,8 @@ export function ToolCallRow({ tc }: { tc: ToolCall }) {
         <span className="shrink-0 text-zinc-600">{open ? '[-]' : '[+]'}</span>
       </button>
       {open && (
-        <div className="  px-2 py-1 text-zinc-400">
-          <div className="whitespace-pre-wrap break-all text-zinc-300">
+        <div className="rounded bg-zinc-950/60 px-2 py-1 terminal-text">
+          <div className="whitespace-pre-wrap break-all">
             args: {JSON.stringify(tc.args ?? {}, null, 2)}
           </div>
           {tc.result !== undefined && <div className="mt-1 max-h-96 overflow-auto">{body}</div>}
