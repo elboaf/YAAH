@@ -130,7 +130,16 @@ def tail_new_lines(path: str, offset: int) -> tuple[list[str], int]:
         if cut < 0:
             return [], offset  # one partial line, no newline yet
         data = data[: cut + 1]
-    return data.decode("utf-8", errors="replace").splitlines(), offset + len(data)
+    # split("\n") — NOT splitlines(): JSON strings may legally contain
+    # U+2028/U+2029/U+0085, and JSON.stringify / json.dumps(
+    # ensure_ascii=False) emit them raw inside strings; splitlines()
+    # would cut such an event in half and both fragments would fail
+    # json.loads (silent drop). data is guaranteed to end with b"\n"
+    # here, so the final split element is the empty remainder. A trailing
+    # \r per line (CRLF journals — cmd redirection writes them too) is
+    # stripped, but a lone \r never separates lines.
+    lines = data.decode("utf-8", errors="replace").split("\n")[:-1]
+    return [ln[:-1] if ln.endswith("\r") else ln for ln in lines], offset + len(data)
 
 
 class WakeFileWatcher:
@@ -148,6 +157,10 @@ class WakeFileWatcher:
         prompt: str = "",
         offset: int | None = None,
     ):
+        """Pin the journal identity (file id + size) and the start offset.
+        `offset=None` starts at the file's current end — boot forgets
+        history (no catch-up), matching the scheduler's skip-missed
+        posture; an explicit offset replays from there (tests)."""
         self.path = path
         self.conversation_id = conversation_id
         self.debounce_seconds = max(DEBOUNCE_MIN, min(DEBOUNCE_MAX, debounce_seconds))
@@ -155,6 +168,15 @@ class WakeFileWatcher:
         # an explicit list is a whitelist override.
         self.types = list(types) if types is not None else None
         self.custom_prompt = prompt.strip()
+        # (dev, inode) identifies the file CONTENT for rotation/replacement
+        # detection: os.stat st_ino (Linux/NTFS file ids) + st_dev catch a
+        # journal deleted-and-recreated or swapped, even at equal-or-larger
+        # size, where byte-size comparison alone sees nothing.
+        try:
+            st = os.stat(path)
+            self._file_id = (st.st_dev, st.st_ino)
+        except OSError:
+            self._file_id = None
         try:
             self._size = os.path.getsize(path)
         except OSError:
@@ -206,18 +228,28 @@ class WakeFileWatcher:
 
     async def poll_once(self) -> None:
         """One look at the file: absorb new lines, fire when the debounce
-        window has passed with pending events. Fires enqueue when the
-        target chat is mid-turn (the queue drains at the next step
-        boundary) — never a second concurrent stream."""
+        window has passed with pending events. Rotation/replacement resets
+        to the new content's start; a missing file forgets its identity.
+        Fires enqueue when the target chat is mid-turn (the queue drains
+        at the next step boundary) — never a second concurrent stream."""
         try:
-            size = os.path.getsize(self.path)
+            st = os.stat(self.path)
         except OSError:
+            # Missing this poll: forget the file identity so a recreated
+            # journal (possibly smaller) is picked up fresh instead of
+            # being seeked past until it outgrows the old offset.
             self._size = 0
+            self._file_id = None
             return
-        if self._size and size < self._size:
-            # Truncated or rotated: start over instead of seeking past EOF.
+        if st.st_size < self._size or self._file_id != (st.st_dev, st.st_ino):
+            # Truncated, rotated, or replaced (even at equal-or-larger
+            # size): start from zero on the new content, and discard the
+            # stale burst — it belongs to the old generation.
             self.offset = 0
-        self._size = size
+            self._pending_count = 0
+            self._last_action_at = None
+        self._size = st.st_size
+        self._file_id = (st.st_dev, st.st_ino)
         lines, self.offset = tail_new_lines(self.path, self.offset)
         for raw_line in lines:
             if self.handle_line(raw_line):
@@ -235,8 +267,10 @@ class WakeFileWatcher:
 
 async def _fire_wake(conversation_id: int, prompt: str) -> str:
     """Start (or queue) one wake turn. Returns 'started' | 'queued' |
-    'gone'. Runs drain in a background task the module holds a strong
-    ref to — a wake run is fire-and-forget, like a scheduler fire."""
+    'gone'. Idle targets get run_agent in a held-ref background task (a
+    wake run is fire-and-forget, like a scheduler fire); a busy target
+    gets the prompt via the queue; an idle->busy claim race is recovered
+    from run_agent's kind=busy refusal by enqueueing."""
     from backend.agent import loop as loop_mod
 
     if loop_mod.agent_is_running(conversation_id):
@@ -257,6 +291,10 @@ async def _fire_wake(conversation_id: int, prompt: str) -> str:
     model, effort, subagent_scope = _resolve_turn_scope(conv)
 
     async def _drain() -> None:
+        """Consume one wake-fired run's stream. The loop persists the
+        transcript itself; the stream has no UI — except the kind=busy
+        refusal, which is the idle->busy race signal and re-routes the
+        prompt into the running turn's queue (see the comment below)."""
         try:
             async for line in loop_mod.run_agent(
                 conversation_id,
@@ -284,6 +322,9 @@ async def _fire_wake(conversation_id: int, prompt: str) -> str:
 
 
 async def _watch_loop() -> None:
+    """The lifespan task: poll the watcher once per tick, forever. Every
+    per-poll failure is contained here (log and continue) — the bridge
+    degrades, the backend never notices it exists."""
     try:
         while True:
             await asyncio.sleep(TICK_SECONDS)

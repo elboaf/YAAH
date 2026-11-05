@@ -104,6 +104,22 @@ def test_tail_survives_multibyte_content(tmp_path):
     assert off == path.stat().st_size  # byte-accurate, not char-accurate
 
 
+def test_tail_does_not_split_on_unicode_line_separators(tmp_path):
+    """U+2028 inside a JSON string is legal and emitted raw by
+    JSON.stringify / json.dumps(ensure_ascii=False); splitlines() would
+    cut the event in half (both fragments fail json.loads — silent
+    drop). A '\n'-only split keeps it whole."""
+    path = tmp_path / "events.jsonl"
+    payload = json.dumps(
+        {"type": "steer", "message": "line\u2028sep\u2029end\u0085"}, ensure_ascii=False
+    )
+    assert "\n" not in payload  # the separators survived json.dumps raw
+    path.write_text(payload + "\n", encoding="utf-8")
+    lines, off = wake.tail_new_lines(str(path), 0)
+    assert lines == [payload]
+    assert off == path.stat().st_size
+
+
 # ------------------------------------------------------------ config block
 
 def test_wake_config_defaults_and_sanitizing():
@@ -217,6 +233,41 @@ async def test_truncation_restarts_from_zero(tmp_path, fire_spy):
     path.write_text(json.dumps({"type": "generate"}) + "\n", encoding="utf-8")
     await w.poll_once()  # journal rotated: the old burst is gone
     assert w._pending_count == 1  # only the new generation's line counts
+
+
+async def test_equal_size_replacement_restarts_from_zero(tmp_path, fire_spy):
+    """Deleted and recreated at the SAME byte size — CodeRabbit's rotation
+    case: size comparison alone can never see it, the file id does. (An
+    in-place same-size overwrite keeps the file id and is indistinguishable
+    from no change at the offset level; real rotation replaces the file.)"""
+    w, path = make_watcher(tmp_path, debounce=60)
+    append(path, {"type": "discard"})  # same length as "timeout"
+    await w.poll_once()
+    assert w._pending_count == 1
+    path.unlink()
+    path.write_text(json.dumps({"type": "timeout"}) + "\n", encoding="utf-8")
+    assert path.stat().st_size == w._size  # precondition: equal size
+    await w.poll_once()  # replacement seen via file id: stale burst dropped
+    assert w._pending_count == 0  # timeout is noise AND the old burst is gone
+    append(path, {"type": "accept"})
+    await w.poll_once()
+    assert w._pending_count == 1  # offset reset: the accept line was read
+
+
+async def test_disappear_then_recreate_smaller_resumes(tmp_path, fire_spy):
+    """Deleted at one poll, recreated smaller at the next: without the
+    identity reset the offset seeks past EOF and the watcher goes silent
+    until the new file outgrows the old offset (CodeRabbit's case)."""
+    w, path = make_watcher(tmp_path, debounce=60)
+    append(path, {"type": "steer"}, {"type": "generate"})
+    await w.poll_once()
+    assert w._pending_count == 2
+    path.unlink()
+    await w.poll_once()  # missing: identity forgotten
+    assert w._file_id is None and w._size == 0
+    path.write_text(json.dumps({"type": "accept"}) + "\n", encoding="utf-8")
+    await w.poll_once()
+    assert w._pending_count == 1  # the new journal's line, fresh from zero
 
 
 async def test_missing_file_is_silently_tolerated(tmp_path, fire_spy):
