@@ -347,10 +347,16 @@ function AskUserCard({ pending, remote }: { pending: PendingQuestion; remote?: {
   return (
     <ApprovalCardShell color="orange" icon="▾" title="agent asks" sub="#live · pick an answer" err={err}>
       <div className="lg-sheet" style={{ maxHeight: '40vh', overflowY: 'auto' }}>
-        <div className="lg-row">
-          <span aria-hidden="true" className="lg-key">Q</span>
-          <p className="lg-val lg-val--q">{pending.question}</p>
-        </div>
+        {/* Question annotation lives only on the remote card: the local
+            transcript already renders pending.question above the composer
+            (#113), and the remote transcript carries no annotation — one
+            question surface per transcript (ledger redesign, 2026-11-05). */}
+        {remote && (
+          <div className="lg-row">
+            <span aria-hidden="true" className="lg-key">Q</span>
+            <p className="lg-val lg-val--q">{pending.question}</p>
+          </div>
+        )}
         {pending.options.map((o, i) => (
           <AskOptionRow
             key={i}
@@ -4354,7 +4360,9 @@ export function Sidebar() {
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}
         <div className="relative mt-auto pt-2">
-          <div className="sw-strip overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950/70 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.25),0_4px_6px_-4px_rgba(0,0,0,0.2)]">
+          {/* No overflow-hidden here: it would clip the add-workspace menu,
+              which opens upward out of the strip. Cells keep their own radii. */}
+          <div className="sw-strip rounded-lg border border-zinc-700 bg-zinc-950/70 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.25),0_4px_6px_-4px_rgba(0,0,0,0.2)]">
             <div className="sw-strip-cell">
               <button
                 className="sw-strip-btn w-full min-w-0 rounded bg-blue-600 px-2 text-xs font-medium text-white hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"

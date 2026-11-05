@@ -232,7 +232,7 @@ body,
    the exit_plan trace block, PlanBanner, PlanningFold. Role hue lives in
    VALUES only (orange=ask, sky=plan); action blue and terminal green keep
    their app-wide roles. */
-.lg-card { border-top: 1px solid #333333; border-bottom: 1px solid #333333; background: rgba(13, 17, 23, 0.425); }
+.lg-card { border-top: 1px solid #333333; border-bottom: 1px solid #333333; background: rgba(27, 27, 27, 0.425); }
 .lg-head { display: flex; width: 100%; align-items: center; gap: 8px; padding: 5px 10px; background: none; border: 0; text-align: left; font-family: "JetBrains Mono", Consolas, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; }
 .lg-caret { color: #8a8a8a; }
 .lg-title { color: #a8a8a8; }
