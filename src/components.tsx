@@ -4374,10 +4374,10 @@ export function Sidebar() {
               )}
             </div>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-col gap-1.5">
             <select
               id="default-model"
-              className="min-w-0 flex-1 truncate rounded   bg-zinc-800 px-1.5 py-1 font-mono text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
+              className="min-w-0 truncate rounded   bg-zinc-800 px-1.5 py-1 font-mono text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-60"
               value={defaultScopeValue}
               onChange={(e) => pickModel(e.target.value)}
               disabled={savingModel}
@@ -4387,32 +4387,36 @@ export function Sidebar() {
             >
               <ModelOptions byProvider={byProvider} value={defaultScopeValue} />
             </select>
-            <button
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-              aria-label="Refresh models"
-              title="Refresh model lists from all providers"
-              onClick={() => {
-                refreshModels()
-                window.dispatchEvent(new CustomEvent('providers-changed'))
-              }}
-              disabled={savingModel}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
-              </svg>
-            </button>
-            <DefaultThoughtLevelPicker />
-            <button
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-              aria-label="Settings"
-              title="Settings"
-              onClick={() => setShowSettings(true)}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
+            <div className="flex items-center justify-between">
+              <button
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                aria-label="Refresh models"
+                title="Refresh model lists from all providers"
+                onClick={() => {
+                  refreshModels()
+                  window.dispatchEvent(new CustomEvent('providers-changed'))
+                }}
+                disabled={savingModel}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a9 9 0 0 1 15.37-6.37M22 12.5a9 9 0 0 1-15.37 6.37" />
+                </svg>
+              </button>
+              <div className="flex items-center gap-0.5">
+                <DefaultThoughtLevelPicker />
+                <button
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                  aria-label="Settings"
+                  title="Settings"
+                  onClick={() => setShowSettings(true)}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
           </div>
           {savingModel && <p className="mt-1 text-[10px] text-zinc-500" role="status">Saving model…</p>}
           {modelError && <p id="default-model-status" className="mt-1 text-[10px] text-red-400" role="alert">{modelError}</p>}
@@ -9671,56 +9675,55 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       )}
       <Composer />
       <div className="flex items-center gap-2 px-4 pb-1 pt-0.5 font-mono text-[10px] text-zinc-600">
-        <span
-          className={`inline-block h-1.5 w-1.5 rounded-full ${
-            streaming ? 'run-pulse bg-amber-400' : status === 'error' ? 'bg-red-500' : 'bg-emerald-600'
-          }`}
-        />
-        {streaming ? 'working' : status}
-        {/* Session metadata: exact context fill, then the git cluster. */}
-        <ContextChip info={contextInfo} />
-        <GitChipCluster
-          info={gitInfo}
-          streaming={streaming}
-          conversationId={conversationId}
-          onCommandDone={refreshGitInfo}
-        />
-        {/* Access mode lives in the composer toolbar now. Plan approval is a
-            live card above the composer (exit_plan), not a status-strip chip. */}
-        {/* Read-aloud toggle: one click to mute/unmute the agent's voice.
-            Hidden while the model isn't downloaded — Settings owns that. */}
-        {ttsReady && (
-          <button
-            className={`ml-auto rounded   px-1.5 py-0.5 ${
-              ttsError
-                ? 'border-red-700 text-red-300'
-                : ttsSpeaking
-                  ? 'border-amber-600/70 text-amber-300'
-                  : ttsEnabled
-                    ? ' text-zinc-200 hover:bg-zinc-800'
-                    : ' text-zinc-600 hover:text-zinc-400'
+        <span className="flex items-center gap-2">
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full ${
+              streaming ? 'run-pulse bg-amber-400' : status === 'error' ? 'bg-red-500' : 'bg-emerald-600'
             }`}
-            title={
-              ttsError
-                ? `Read-aloud error: ${ttsError}`
-                : ttsEnabled
-                  ? 'Read-aloud on — click to mute'
-                  : 'Read-aloud off — click to hear responses'
-            }
-            aria-pressed={ttsEnabled}
-            aria-label={ttsEnabled ? 'Mute read-aloud' : 'Unmute read-aloud'}
-            onClick={toggleTts}
-          >
-            {ttsSpeaking ? (
-              <span className="run-pulse inline-block text-[10px] leading-[12px]">●</span>
-            ) : (
-              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-                <path d="M2 5.5h2L7 3v8L4 8.5H2z" />
-                <path d="M9.5 5a3 3 0 0 1 0 4" />
-              </svg>
-            )}
-          </button>
-        )}
+          />
+          {streaming ? 'working' : status}
+          <ContextChip info={contextInfo} />
+        </span>
+        <span className="ml-auto flex items-center gap-2">
+          <GitChipCluster
+            info={gitInfo}
+            streaming={streaming}
+            conversationId={conversationId}
+            onCommandDone={refreshGitInfo}
+          />
+          {ttsReady && (
+            <button
+              className={`rounded   px-1.5 py-0.5 ${
+                ttsError
+                  ? 'border-red-700 text-red-300'
+                  : ttsSpeaking
+                    ? 'border-amber-600/70 text-amber-300'
+                    : ttsEnabled
+                      ? ' text-zinc-200 hover:bg-zinc-800'
+                      : ' text-zinc-600 hover:text-zinc-400'
+              }`}
+              title={
+                ttsError
+                  ? `Read-aloud error: ${ttsError}`
+                  : ttsEnabled
+                    ? 'Read-aloud on — click to mute'
+                    : 'Read-aloud off — click to hear responses'
+              }
+              aria-pressed={ttsEnabled}
+              aria-label={ttsEnabled ? 'Mute read-aloud' : 'Unmute read-aloud'}
+              onClick={toggleTts}
+            >
+              {ttsSpeaking ? (
+                <span className="run-pulse inline-block text-[10px] leading-[12px]">●</span>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                  <path d="M2 5.5h2L7 3v8L4 8.5H2z" />
+                  <path d="M9.5 5a3 3 0 0 1 0 4" />
+                </svg>
+              )}
+            </button>
+          )}
+        </span>
       </div>
     </main>
   )
