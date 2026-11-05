@@ -134,16 +134,20 @@ _Avoid_: naming it embeddings-only (the name must outlive the feature)
 ### Model scoping
 
 **Model scope**:
-What model (and routing provider) a chat, draft, or agent runs on: a stored value that must be COMPLETE (`provider::model`) or EMPTY (follow the global default). A complete scope is self-describing — the row names the provider that hosts its model, so later changes to the sidebar default cannot re-route it (#132).
-_Avoid_: half-scope; "the model follows the sidebar"
+What model (and routing provider) a chat, draft, or agent runs on: a stored value that must be COMPLETE (`provider::model`) or EMPTY (follow the global default). A complete scope is self-describing — the row names the provider that hosts its model, so later changes to the default cannot re-route it (#132).
+_Avoid_: half-scope; "the model follows the sidebar" (the sidebar has no model picker)
 
 **Bare id**:
 A model id stored or sent WITHOUT its provider (`llama-3.3-70b`, not `groq::llama-3.3-70b`). Storage never writes this shape (qualify at write; boot repair fixes legacy rows); the resolver's bare branch is back-compat only and routes through the ambient active provider.
 _Avoid_: storing bare ids; treating bare as a legal stored scope
 
-**Default model** (sidebar):
-The global default for NEW chats and for scopes that are empty — the active provider plus its remembered model. Changing it must never affect a chat whose scope is complete.
-_Avoid_: "current model" (which chats read as their own scope)
+**Default model**:
+The global default for NEW chats and for scopes that are empty — the active provider plus its remembered model. Its only writer is the composer rail (#685): a pick in a fresh draft or a normal chat sets that chat's scope AND moves the default (lockstep); agent chats are exempt — their picks write through to the owning agent only. Changing it must never affect a chat whose scope is complete.
+_Avoid_: "current model" (which chats read as their own scope); "sidebar default" (the sidebar picker was removed — the composer rail is the sole default writer)
+
+**Default effort**:
+The global default thought level for new chats (config `reasoning_effort`), written by the same lockstep rule as the Default model: an effort pick in a draft or normal chat is also the default effort; agent-chat picks are exempt. Existing chats keep their pinned effort.
+_Avoid_: setting it from the sidebar (the strip picker was removed with #685)
 
 **Sub-agent scope**:
 Where a chat's spawn_agent delegations run: a stored value that must be COMPLETE (`provider::model`) or EMPTY ("sub-agent: auto"). Resolution: the chat's pin > the global sub-agent scope (Settings) > the chat's own model. Same rules as any Model scope — never bare, dead-provider scopes fail the spawn. (#383, ADR-0018)
