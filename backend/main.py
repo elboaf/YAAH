@@ -78,8 +78,17 @@ async def lifespan(app: FastAPI):
     from backend.agent import scheduler
 
     await scheduler.ensure_scheduled()
+    # Wake bridge (issue #688): config-gated tail of an external event
+    # journal (e.g. an impeccable live session) that starts/queues turns
+    # of one conversation. Off by default; start_wake_watcher re-checks
+    # enabled + completeness itself, so this is only a logging gate.
+    from backend.agent import wake as wake_mod
+
+    if wake_mod.start_wake_watcher():
+        log.info("wake bridge active")
     yield
     await mcp_client.manager.shutdown()
+    wake_mod.stop_wake_watcher()
     scheduler.stop_scheduler()
     discovery.stop_advertising()
 
@@ -1055,6 +1064,9 @@ class ConfigUpdate(BaseModel):
     # Image generation block (sd-server): merged like remote/memory so a
     # partial save never wipes sibling keys.
     image_generation: dict | None = None
+    # Wake bridge (issue #688): an external event file starts chat turns.
+    # Partial-merged like the other blocks; None = untouched.
+    wake: dict | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -2247,6 +2259,8 @@ async def api_export_conversation(conversation_id: int):
 
 @app.get("/api/config")
 async def api_get_config():
+    from backend.agent import wake as wake_mod
+
     cfg = load_config()
     # Voice settings; both API keys are masked like provider keys.
     voice_view = {**(cfg.get("voice") or {})}
@@ -2302,6 +2316,9 @@ async def api_get_config():
         # doubles as the configured flag for tool availability.
         "image_generation": cfg.get("image_generation")
         or {"provider": "sdcpp", "api_base": "", "size": "1024x1024"},
+        # Wake bridge (issue #688): the sanitized view — garbage fields
+        # never reach the UI; edits sanitize on the way back in.
+        "wake": wake_mod.read_wake_config(cfg),
     }
 
 
@@ -2395,6 +2412,15 @@ async def api_set_config(body: ConfigUpdate):
         if "enabled" in merged_mem:
             merged_mem["enabled"] = bool(merged_mem["enabled"])
         updates["memory"] = merged_mem
+    # Wake block merges the same way (issue #688): a save that only
+    # touches enabled keeps path/conversation_id/debounce/types/prompt
+    # intact. Values are NOT re-sanitized on the write path —
+    # read_wake_config sanitizes on every read, so garbage stays inert.
+    # (A null wake never reaches here: ConfigUpdate already filtered it.)
+    wk = updates.get("wake")
+    if isinstance(wk, dict):
+        existing = load_config().get("wake") or {}
+        updates["wake"] = {**existing, **wk}
     # Interface scale is clamped to the shipped range (Settings offers a
     # 100–200% slider since #171; anything wilder would break the layout).
     if "ui_scale" in updates:
@@ -2450,6 +2476,15 @@ async def api_set_config(body: ConfigUpdate):
                 merged_s[str(model_id)] = v
         updates["model_steps"] = merged_s
     save_config(updates)
+    # Wake bridge (issue #688): a saved wake block hot-applies — start on
+    # first enable, restart on edits, stop when disabled. An incomplete
+    # block never starts (start_wake_watcher refuses and logs).
+    if "wake" in updates:
+        from backend.agent import wake as wake_mod
+
+        wake_mod.stop_wake_watcher()
+        if wake_mod.read_wake_config().get("enabled"):
+            wake_mod.start_wake_watcher()
     # Hosting toggles need the mDNS advertiser to follow.
     if isinstance(remote, dict):
         from backend.agent import discovery
