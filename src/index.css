@@ -442,7 +442,8 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
    so keyboard focus falls back to a system outline (#685 review). */
 @media (forced-colors: active) {
   .imp-scope-rail select:focus-visible,
-  .imp-send:focus-visible {
+  .imp-send:focus-visible,
+  .imp-mode-trigger:focus-visible {
     outline: 1px solid CanvasText;
     outline-offset: 1px;
   }

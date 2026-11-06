@@ -11492,7 +11492,9 @@ export function Composer() {
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
           placeholder={
             voiceState === 'recording'
-              ? 'Listening — speak your message (stops automatically on silence)'
+              ? pttHeldRef.current
+                ? 'Recording — release the hotkey to transcribe and send'
+                : 'Listening — speak your message (stops automatically on silence)'
               : voiceState === 'transcribing'
                 ? 'Transcribing your message…'
                 : isAgentChat
