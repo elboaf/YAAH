@@ -60,12 +60,34 @@ function streamEvents() {
   })
   s().finishToolCall(KEY, asst, 'q1', { answer: 'Update everything' })
 
-  // post-answer emission + the tool the card's trace must be able to show
+  // Post-answer emission + the tool the card's trace must be able to show
   s().setStatus(KEY, 'thinking')
   s().appendTextDelta(KEY, asst, 'Updating now.')
   s().setStatus(KEY, 'running-tool')
   s().startToolCall(KEY, asst, 'c3', 'bash', { command: POST_ANSWER_CMD })
   s().finishToolCall(KEY, asst, 'c3', { exit_code: 0 })
+  s().setStatus(KEY, 'idle')
+}
+
+// Same shape, but every call AFTER the answer is a spawn_agent: the card's
+// filtered trace list is empty, so the card must render no trace toggle at
+// all (a "0 calls" button that expands to nothing is the CodeRabbit #692
+// regression).
+function streamEventsSpawnOnly() {
+  const s = () => useAgent.getState()
+  s().setStatus(KEY, 'thinking')
+  s().appendUserMessage(KEY, 'delegate the copy update')
+  const asst = s().appendAssistantPlaceholder(KEY)
+  s().appendTextDelta(KEY, asst, 'One decision first.')
+  s().setStatus(KEY, 'running-tool')
+  s().startToolCall(KEY, asst, 'q1', 'ask_user', {
+    question: 'Delegate the whole update?',
+    options: [{ label: 'Delegate it' }],
+  })
+  s().finishToolCall(KEY, asst, 'q1', { answer: 'Delegate it' })
+  s().setStatus(KEY, 'running-tool')
+  s().startToolCall(KEY, asst, 'd1', 'spawn_agent', { prompt: 'update the bundled skill copy' })
+  s().finishToolCall(KEY, asst, 'd1', { summary: 'delegated run finished' })
   s().setStatus(KEY, 'idle')
 }
 
@@ -113,5 +135,15 @@ describe('answered ask card carries a working expandable trace (#anchor-swallow)
       .find((b) => b.textContent?.includes('swallowed'))!
     fireEvent.click(c3Row)
     expect(document.body.textContent).toContain('after reply')
+  })
+
+  it('an ask followed only by spawn_agent renders no card trace toggle (no "0 calls")', () => {
+    streamEventsSpawnOnly()
+    renderAll()
+    // The spawn still exists as its own block in the flow — it is filtered
+    // from the card's trace, not hidden from the transcript.
+    expect(document.body.textContent).toContain('spawn_agent')
+    // The card must not render an empty trace control.
+    expect(screen.queryByText('0 calls')).toBeNull()
   })
 })

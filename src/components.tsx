@@ -1813,10 +1813,14 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
               turn's trace summary (same glyphs, same ×N counts) but had no
               click target — it read as the chip row while never expanding.
               spawn_agent calls stay out: they render as their own block in
-              the flow, matching the turn-level trace's filter. */}
-          {after.length > 0 && (
-            <TraceLine calls={after.filter((call) => call.name !== 'spawn_agent')} />
-          )}
+              the flow, matching the turn-level trace's filter. The guard
+              tests the FILTERED list — an ask followed only by spawns would
+              otherwise render a "0 calls" toggle that expands to nothing
+              (CodeRabbit #692). */}
+          {(() => {
+            const trace = after.filter((call) => call.name !== 'spawn_agent')
+            return trace.length > 0 ? <TraceLine calls={trace} /> : null
+          })()}
         </div>
       )}
     </div>
