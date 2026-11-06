@@ -2339,28 +2339,34 @@ def _normalize_int_map(entries, validator, keep=lambda w: w > 0):
     return result
 
 
+def merge_block(name: str, updates: dict) -> dict:
+    """Merge an incoming block over its stored counterpart, preserving sibling keys.
+
+    For simple `{**existing, **incoming}` merges. Blocks with special logic
+    (masked keys, enabled-only writes, validation) still inline their own.
+    Returns the merged block.
+    """
+    existing = load_config().get(name) or {}
+    incoming = updates[name]
+    updates[name] = {**existing, **incoming}
+    return updates[name]
+
+
 @app.put("/api/config")
 async def api_set_config(body: ConfigUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     voice = updates.get("voice")
     if isinstance(voice, dict):
-        # Voice updates merge over the stored voice block: the GET view masks
-        # the cloud key as "set", so a settings round-trip must never wipe it.
-        existing = load_config().get("voice") or {}
         # Masked keys (#205 added tts_api_key): the GET view shows "set"/"",
         # so an echoed mask must never overwrite the stored key. A fresh
         # non-empty value passes through and replaces it.
         for key in ("cloud_api_key", "tts_api_key"):
             if voice.get(key) in ("set", ""):
                 voice.pop(key, None)
-        updates["voice"] = {**existing, **voice}
-    # Remote block merges the same way: a Settings save that only touches
-    # hosting_enabled must not wipe the passphrase.
+        merge_block("voice", updates)
     remote = updates.get("remote")
     if isinstance(remote, dict):
-        existing = load_config().get("remote") or {}
-        merged = {**existing, **remote}
-        updates["remote"] = merged
+        merged = merge_block("remote", updates)
     # Windows Sandbox block merges the same way (#112): a Settings save that
     # only touches enabled must not reset memory_mb / vgpu / etc. The toggle
     # never disables the Windows feature itself — only the agent's use of it.
@@ -2376,15 +2382,11 @@ async def api_set_config(body: ConfigUpdate):
             }
         else:
             updates.pop("sandbox", None)
-    # Computer-use block merges the same way (#140): a Settings save that only
-    # touches allow_screenshot must not reset panic_hotkey / observe_default.
     cu = updates.get("computer_use")
     if isinstance(cu, dict):
-        existing = load_config().get("computer_use") or {}
-        merged_cu = {**existing, **cu}
+        merged_cu = merge_block("computer_use", updates)
         if "allow_screenshot" in merged_cu:
             merged_cu["allow_screenshot"] = bool(merged_cu["allow_screenshot"])
-        updates["computer_use"] = merged_cu
     # Image-generation block merges the same way: a Settings save that
     # only touches size must not reset api_base. The provider kind is
     # fixed for this build (sdcpp only); the tool schema is derived from
@@ -2413,9 +2415,7 @@ async def api_set_config(body: ConfigUpdate):
             # scan in the background - the save NEVER waits on it, and a
             # failed scan is a notice, not an error.
             _schedule_lora_scan(incoming_base)
-        # Persistent-memory block merges the same way (#169): a Settings save
-    # that only touches enabled keeps any future sibling keys intact.
-    # enabled must be a real boolean (CodeRabbit return trip): bool("false")
+        # enabled must be a real boolean (CodeRabbit return trip): bool("false")
     # is True in Python, so a string "false" must be rejected, not coerced.
     mem = updates.get("memory")
     if isinstance(mem, dict):
@@ -2424,20 +2424,12 @@ async def api_set_config(body: ConfigUpdate):
                 status_code=422,
                 detail={"code": "invalid_memory_enabled", "message": "memory.enabled must be a boolean"},
             )
-        existing = load_config().get("memory") or {}
-        merged_mem = {**existing, **mem}
+        merged_mem = merge_block("memory", updates)
         if "enabled" in merged_mem:
             merged_mem["enabled"] = bool(merged_mem["enabled"])
-        updates["memory"] = merged_mem
-    # Wake block merges the same way (issue #688): a save that only
-    # touches enabled keeps path/conversation_id/debounce/types/prompt
-    # intact. Values are NOT re-sanitized on the write path —
-    # read_wake_config sanitizes on every read, so garbage stays inert.
-    # (A null wake never reaches here: ConfigUpdate already filtered it.)
     wk = updates.get("wake")
     if isinstance(wk, dict):
-        existing = load_config().get("wake") or {}
-        updates["wake"] = {**existing, **wk}
+        merge_block("wake", updates)
     # Interface scale is clamped to the shipped range (Settings offers a
     # 100–200% slider since #171; anything wilder would break the layout).
     if "ui_scale" in updates:
