@@ -1,5 +1,5 @@
 import { useEscClose } from './useEscClose'
-import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
+import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useVoiceAnswer } from "./use-voice-answer"
 import {
   listConversations,
@@ -8242,7 +8242,6 @@ function AccessModeControl() {
         onClick={() => setOpen(!open)}
       >
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${m.dot}`} />
-        <span aria-hidden="true" className="imp-mode-label">{m.short}</span>
       </button>
       {open && (
         <div className="absolute bottom-9 left-0 z-20 w-64 rounded   bg-zinc-900 py-1 shadow-lg">
@@ -8275,6 +8274,13 @@ function AccessModeControl() {
  *  + the sync readout (local/origin hashes, ahead/behind). Hidden entirely
  *  for non-repos.
  *
+ *  Composer-condensation round: pass openUp={false} when the cluster sits
+ *  on the composer card's TOP edge — the dropdown then opens DOWNWARD
+ *  below the chip instead of upward off the app floor. The dirty dot is
+ *  retired: the tooltip already carries the changed/untracked counts, and
+ *  the amber dot read as a second working indicator beside the status
+ *  line.
+ *
  *  #361/#363: one tree, no per-chat branch identity. The checkout goes to
  *  the branch-select endpoint — a plain git checkout of the workspace, no
  *  stored state — and lands in the conversation as a synthetic tool row.
@@ -8284,11 +8290,15 @@ export function GitChipCluster({
   streaming,
   conversationId,
   onCommandDone,
+  openUp = true,
 }: {
   info: GitInfo | null
   streaming: boolean
   conversationId: number | null
   onCommandDone: () => void
+  /** true = the app-floor strip (menu opens upward, default). false = the
+   *  composer's top edge — the menu drops below the chip, right-aligned. */
+  openUp?: boolean
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [branches, setBranches] = useState<string[]>([])
@@ -8422,19 +8432,18 @@ export function GitChipCluster({
         aria-expanded={menuOpen}
         onClick={openMenu}
       >
-        <span
-          className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${info.dirty ? 'bg-amber-400' : 'bg-transparent'}`}
-          title={info.dirty ? `${info.changed} changed file${info.changed === 1 ? '' : 's'} (${info.untracked} untracked)` : undefined}
-        />
         <span className="min-w-0 max-w-[10rem] truncate">{info.branch}</span>
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
           <path d="M1.5 3l2.5 2.5L6.5 3" />
         </svg>
       </button>
 
-      {/* checkout dropdown (opens upward — the strip is the floor) */}
+      {/* checkout dropdown — opens upward off the app floor (default) or
+          downward from the composer's top edge (openUp=false) */}
       {menuOpen && (
-        <div className="absolute bottom-full left-0 z-30 mb-1 w-56 rounded   bg-zinc-900 py-1 shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_8px_10px_-6px_rgba(0,0,0,0.1)]">
+        <div
+          className={`absolute z-30 w-56 rounded   bg-zinc-900 py-1 shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_8px_10px_-6px_rgba(0,0,0,0.1)] ${openUp ? 'bottom-full left-0 mb-1' : 'left-0 top-full mt-1'}`}
+        >
           <div className="px-3 pb-1 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-600">
             branches
           </div>
@@ -8509,93 +8518,40 @@ export function GitChipCluster({
  *    on most families, independent of the hard window. */
 const DUMB_ZONE_TOKENS = 120_000
 
-function contextDialColor(tokens: number, dumbVisible: boolean): string {
-  if (dumbVisible && tokens >= DUMB_ZONE_TOKENS) return '#ef4444' // red-500
-  return '#10b981' // emerald-500
-}
-
-/** Stepped color for the token-count text next to the dial — distinct
- *  bands, no gradient: blue (send-button blue) under 90k, yellow past
- *  100k, orange past 120k (the dumb zone), red past 200k. */
+/** Stepped color for the token-count text — distinct bands, no gradient:
+ *  blue (send-button blue) under 100k, yellow past 100k, orange past 120k
+ *  (the dumb zone), red past 200k. */
 function tokenCountColor(tokens: number): string {
   if (tokens >= 200_000) return 'text-red-500'
   if (tokens >= DUMB_ZONE_TOKENS) return 'text-orange-500'
   if (tokens >= 100_000) return 'text-yellow-500'
   return 'text-blue-600'
 }
-/** Context gauge (status strip): a circular dial whose fill arc is the
- *  exact context size against the model's window, climbing with every
- *  model call during a run. The dial color crosses into the dumb zone
- *  past DUMB_ZONE_TOKENS. Also shows cumulative billed cost when the
- *  provider reports it (#627). Nothing renders until the first turn
- *  completes (the count comes from the API's usage report). */
+
+/** Context readout (composer meta row): the bare token count, color-stepped
+ *  by the bands above, no dial, no units. The circular dial was retired
+ *  (composer-condensation round): the count plus its tooltip carry what the
+ *  dial knew — the 120k dumb-zone guidance and the billed cost. Nothing
+ *  renders until the first turn completes (the count comes from the API's
+ *  usage report). */
 export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null; cost: number | null } | undefined }) {
   if (!info) return null
-  const windowTokens = info.window
-  // The dial ALWAYS scales out of 200k, regardless of the model's context
-  // window — one fixed ruler so the graphic means the same thing for every
-  // model. The window stays in the tooltip and the text readout. Fill
-  // keeps the safe green color until a threshold band is crossed.
-  const scale = 200_000
-  // Fill wraps at 100%: past one lap the arc starts a new lap from 12
-  // o'clock so the dial keeps moving. The hub readout shows the true,
-  // unclamped percentage (see tooltip note on DUMB_ZONE_TOKENS).
-  const rawFrac = info.tokens / scale
-  const frac = rawFrac % 1
-  const dumbFrac = DUMB_ZONE_TOKENS / scale
-  const dumbVisible = dumbFrac < 1
-  const fill = contextDialColor(info.tokens, dumbVisible)
-  // Arc geometry: a 24x24 viewBox dial, ring from 12 o'clock clockwise.
-  const r = 8.5
-  const arcFrac = frac
-  const largeArc = arcFrac > 0.5 ? 1 : 0
-  const endAngle = arcFrac * 2 * Math.PI - Math.PI / 2
-  const endX = 12 + r * Math.cos(endAngle)
-  const endY = 12 + r * Math.sin(endAngle)
-  const arcPath =
-    arcFrac > 0
-      ? `M 12 ${12 - r} A ${r} ${r} 0 ${largeArc} 1 ${endX.toFixed(3)} ${endY.toFixed(3)}`
-      : ''
   // Cost display: authoritative billed amount from OpenRouter. Shows
   // nothing (no fake $0.00) when the provider doesn't report cost.
   const showCost = info.cost !== null && info.cost > 0
   return (
     <span
-      className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-400"
+      className={`font-mono text-[10px] ${tokenCountColor(info.tokens)}`}
       // The "120k" figure below must stay in sync with DUMB_ZONE_TOKENS.
       title={[
-        'This is the recommended max context tracker.',
-        'This is not a rule, but starting a new chat is recommended before the dial reaches 100%',
-        'Over 120k context causes inefficient, inconsistent, and generally poor model behavior, not to mention higher token usage.',
+        'Context size — the recommended max tracker.',
+        'Starting a new chat is recommended before this passes ~120k: past that, model behavior degrades and token usage climbs.',
         showCost ? `Session cost: $${info.cost!.toFixed(4)}` : undefined,
       ].filter(Boolean).join('\n')}
     >
-      <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" className="shrink-0">
-        {/* Track: full ring, dim. */}
-        <circle cx="12" cy="12" r={r} fill="none" stroke="#3f3f46" strokeWidth="2.6" />
-        {/* Fill arc: context vs window, from 12 o'clock clockwise. */}
-        {arcPath && (
-          <path d={arcPath} fill="none" stroke={fill} strokeWidth="2.6" strokeLinecap="round" />
-        )}
-        {/* Threshold ticks on the rim. */}
-        {/* Hub readout: true, unclamped percentage of the fixed dial. */}
-        <text
-          x="12"
-          y="12.8"
-          textAnchor="middle"
-          dominantBaseline="middle"
-          fontSize="7"
-          fontFamily="ui-monospace, monospace"
-          fill={rawFrac > 0.92 ? fill : '#a1a1aa'}
-        >
-          {Math.round(rawFrac * 100)}%
-        </text>
-      </svg>
-      <span className={tokenCountColor(info.tokens)}>
-        {fmtTok(info.tokens)} tok
-      </span>
+      {fmtTok(info.tokens)}
       {showCost && (
-        <span className="text-emerald-400">
+        <span className="ml-1 text-emerald-400">
           (${info.cost!.toFixed(4)})
         </span>
       )}
@@ -9061,6 +9017,50 @@ export function ChatScopePickers() {
 
   const saving = savingModel || savingEffort || savingSubagent
 
+  // Composer-condensation round: each picker's label rides an overlay strip
+  // that scrolls (a slow mono marquee) only when the text overflows its
+  // clipped trigger width. Native selects alone cannot scroll their closed
+  // label, so the select stays for a11y/test contracts and the overlay
+  // (aria-hidden, pointer-events none) mirrors its display value.
+  const modelRef = useRef<HTMLSelectElement>(null)
+  const effortRef = useRef<HTMLSelectElement>(null)
+  const subagentRef = useRef<HTMLSelectElement>(null)
+  const [modelOverflow, setModelOverflow] = useState(false)
+  const [effortOverflow, setEffortOverflow] = useState(false)
+  const [subagentOverflow, setSubagentOverflow] = useState(false)
+  useLayoutEffect(() => {
+    const check = (el: HTMLSelectElement | null, set: (v: boolean) => void) => {
+      const wrap = el?.parentElement
+      if (!el || !wrap) return
+      const over = el.scrollWidth > el.clientWidth + 1
+      set(over)
+      // Exact scroll distance for the marquee: full text width minus the
+      // visible clip, plus padding so the run ends just past the left edge.
+      wrap.style.setProperty(
+        '--imp-marquee-shift',
+        over ? `${-(el.scrollWidth - el.clientWidth + 10)}px` : '0px',
+      )
+    }
+    const checkAll = () => {
+      check(modelRef.current, setModelOverflow)
+      check(effortRef.current, setEffortOverflow)
+      check(subagentRef.current, setSubagentOverflow)
+    }
+    checkAll()
+    // Re-measure when a picker's WIDTH changes without its label changing —
+    // window resize / layout shifts leave the overflow state stale otherwise
+    // (CodeRabbit #698). jsdom has no ResizeObserver; the label-driven
+    // re-checks above cover the tests.
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(checkAll)
+    for (const el of [modelRef.current, effortRef.current, subagentRef.current]) {
+      if (el) ro.observe(el)
+    }
+    return () => ro.disconnect()
+    // Deps are the displayed strings — the initial measurement depends on
+    // the label text and the clip width (disabled stand-down is pure CSS).
+  }, [model, effort, subagentModel])
+
   /**
    * #685 lockstep, review round: the new-chat default moves in the client
    * store IMMEDIATELY — a pick followed by "New chat" must seed the fresh
@@ -9125,7 +9125,10 @@ export function ChatScopePickers() {
             picker — its picks write the chat scope AND the new-chat default
             (see applyModel/applyEffort). Hover/focus/open refreshes the
             provider list when stale; the sidebar refresh button is gone. */}
-        <select
+        <span className="imp-picker imp-picker--grow" data-picker-wrap="model">
+          <select
+          ref={modelRef}
+          data-picker="model"
           className="min-w-0 max-w-[16rem] flex-1 truncate rounded   bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={`${shownProvider}::${shownModel}`}
           onChange={(e) => applyModel(e.target.value)}
@@ -9145,8 +9148,15 @@ export function ChatScopePickers() {
         >
           <ModelOptions byProvider={byProvider} value={`${shownProvider}::${shownModel}`} />
         </select>
+          <span className="imp-marquee-wrap" aria-hidden="true">
+            <span className={`imp-marquee ${modelOverflow ? 'imp-marquee--scroll' : ''}`}>{shownModel}</span>
+          </span>
+        </span>
         <span className="imp-dotsep" aria-hidden="true">·</span>
-        <select
+        <span className="imp-picker" data-picker-wrap="effort">
+          <select
+          ref={effortRef}
+          data-picker="effort"
           className="rounded   bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={effort}
           onChange={(e) => applyEffort(e.target.value)}
@@ -9160,11 +9170,20 @@ export function ChatScopePickers() {
         >
           <EffortOptions efforts={modelReasoningEfforts(byProvider, model)} />
         </select>
+          <span className="imp-marquee-wrap" aria-hidden="true">
+            <span className={`imp-marquee ${effortOverflow ? 'imp-marquee--scroll' : ''}`}>
+              {effort ? effort.charAt(0).toUpperCase() + effort.slice(1) : 'Default'}
+            </span>
+          </span>
+        </span>
         {/* #383: where this chat's spawn_agent delegations run. '' =
             sub-agent: auto — the global Settings scope, then this chat's
             own model. Writes are complete "provider::model" or ''. */}
         <span className="imp-dotsep" aria-hidden="true">·</span>
-        <select
+        <span className="imp-picker" data-picker-wrap="subagent">
+          <select
+          ref={subagentRef}
+          data-picker="subagent"
           className="max-w-[14rem] rounded   bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-200 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
           value={subagentModel}
           onChange={(e) => applySubagentModel(e.target.value)}
@@ -9182,6 +9201,12 @@ export function ChatScopePickers() {
           <option value="">{SUBAGENT_AUTO_LABEL}</option>
           <ModelOptions byProvider={byProvider} value={subagentModel} />
         </select>
+          <span className="imp-marquee-wrap" aria-hidden="true">
+            <span className={`imp-marquee ${subagentOverflow ? 'imp-marquee--scroll' : ''}`}>
+              {subagentModel ? subagentModel.split('::')[1] ?? subagentModel : SUBAGENT_AUTO_LABEL}
+            </span>
+          </span>
+        </span>
       </div>
       {/* Provider-state affordances (#51): moved here from the sidebar so
           they sit next to the picker that needs them. */}
@@ -9694,7 +9719,55 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           <PlanApprovalCard key={pendingPlanApproval.callId} pending={pendingPlanApproval} />
         </div>
       )}
-      <Composer />
+      <Composer
+        rightSlot={
+          <>
+            <ContextChip info={contextInfo} />
+            <GitChipCluster
+              info={gitInfo}
+              streaming={streaming}
+              conversationId={conversationId}
+              onCommandDone={refreshGitInfo}
+              openUp={false}
+            />
+            {ttsReady && (
+              <button
+                className={`rounded   px-1.5 py-0.5 ${
+                  ttsError
+                    ? 'border-red-700 text-red-300'
+                    : ttsSpeaking
+                      ? 'border-amber-600/70 text-amber-300'
+                      : ttsEnabled
+                        ? ' text-zinc-200 hover:bg-zinc-800'
+                        : ' text-zinc-600 hover:text-zinc-400'
+                }`}
+                title={
+                  ttsError
+                    ? `Read-aloud error: ${ttsError}`
+                    : ttsEnabled
+                      ? 'Read-aloud on — click to mute'
+                      : 'Read-aloud off — click to hear responses'
+                }
+                aria-pressed={ttsEnabled}
+                aria-label={ttsEnabled ? 'Mute read-aloud' : 'Unmute read-aloud'}
+                onClick={toggleTts}
+              >
+                {ttsSpeaking ? (
+                  <span className="run-pulse inline-block text-[10px] leading-[12px]">●</span>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                    <path d="M2 5.5h2L7 3v8L4 8.5H2z" />
+                    <path d="M9.5 5a3 3 0 0 1 0 4" />
+                  </svg>
+                )}
+              </button>
+            )}
+          </>
+        }
+      />
+      {/* The app-floor strip keeps ONE job: the machine-state dot (amber
+          working / red error / emerald idle) and its label. Context, git,
+          and read-aloud moved onto the composer card itself. */}
       <div className="flex items-center gap-2 px-4 pb-1 pt-0.5 font-mono text-[10px] text-zinc-600">
         <span className="flex items-center gap-2">
           <span
@@ -9703,47 +9776,6 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
             }`}
           />
           {streaming ? 'working' : status}
-          <ContextChip info={contextInfo} />
-        </span>
-        <span className="ml-auto flex items-center gap-2">
-          <GitChipCluster
-            info={gitInfo}
-            streaming={streaming}
-            conversationId={conversationId}
-            onCommandDone={refreshGitInfo}
-          />
-          {ttsReady && (
-            <button
-              className={`rounded   px-1.5 py-0.5 ${
-                ttsError
-                  ? 'border-red-700 text-red-300'
-                  : ttsSpeaking
-                    ? 'border-amber-600/70 text-amber-300'
-                    : ttsEnabled
-                      ? ' text-zinc-200 hover:bg-zinc-800'
-                      : ' text-zinc-600 hover:text-zinc-400'
-              }`}
-              title={
-                ttsError
-                  ? `Read-aloud error: ${ttsError}`
-                  : ttsEnabled
-                    ? 'Read-aloud on — click to mute'
-                    : 'Read-aloud off — click to hear responses'
-              }
-              aria-pressed={ttsEnabled}
-              aria-label={ttsEnabled ? 'Mute read-aloud' : 'Unmute read-aloud'}
-              onClick={toggleTts}
-            >
-              {ttsSpeaking ? (
-                <span className="run-pulse inline-block text-[10px] leading-[12px]">●</span>
-              ) : (
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-                  <path d="M2 5.5h2L7 3v8L4 8.5H2z" />
-                  <path d="M9.5 5a3 3 0 0 1 0 4" />
-                </svg>
-              )}
-            </button>
-          )}
         </span>
       </div>
     </main>
@@ -9763,8 +9795,16 @@ const MAX_IMAGE_BYTES = 5_000_000
 
 const MAX_TEXT_BYTES = 2_000_000
 
-/** Exported for the say wire-contract test (#226); App composes it here. */
-export function Composer() {
+/** Exported for the say wire-contract test (#226); App composes it here.
+ *  Composer-condensation round: the card owns the session meta — rightSlot
+ *  (context readout, git cluster, read-aloud toggle) renders on the card's
+ *  TOP edge, right-aligned. */
+export function Composer({
+  rightSlot,
+}: {
+  /** Session meta, top edge, right-aligned. */
+  rightSlot?: ReactNode
+} = {}) {
   const {
     conversationId,
     workspace,
@@ -11318,7 +11358,7 @@ export function Composer() {
 
   return (
     <div
-      className="p-3"
+      className="flex justify-center p-3"
       onDragOver={(e) => {
         e.preventDefault()
         setDragOver(true)
@@ -11335,6 +11375,12 @@ export function Composer() {
         }
       }}
     >
+      {/* Composer-condensation round: the card is a fixed-width instrument
+          (max 720px, centered — empty air stays on each side at wide
+          windows) instead of stretching edge to edge. Session meta (context
+          readout, git cluster, read-aloud toggle) crams onto the card's TOP
+          edge via the metaSlot/rightSlot portals from ChatPanel. */}
+      <div className="imp-composer-wrap relative w-full min-w-0 max-w-[720px]">
       {skillMenuOpen && (
         <div className="relative">
           <div className="absolute bottom-1 left-0 z-10 max-h-56 w-80 overflow-y-auto rounded   bg-zinc-900 shadow-lg">
@@ -11381,6 +11427,9 @@ export function Composer() {
           </div>
         </div>
       )}
+      <div className="imp-composer-meta">
+        <span className="imp-composer-meta__right">{rightSlot}</span>
+      </div>
       <div
         data-composer=""
         className={`imp-composer rounded-lg border bg-zinc-800/50 transition-colors ${
@@ -11698,6 +11747,7 @@ export function Composer() {
             <span>drop to attach</span>
           </div>
         )}
+      </div>
       </div>
     </div>
   )

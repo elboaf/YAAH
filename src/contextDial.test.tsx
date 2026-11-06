@@ -2,66 +2,55 @@ import { describe, expect, it } from 'vitest'
 import { render } from '@testing-library/react'
 import { ContextChip } from './components'
 
-function info(tokens: number) {
-  return { tokens, window: 200_000, model: 'test-model', cost: null }
+function info(tokens: number, cost: number | null = null) {
+  return { tokens, window: 200_000, model: 'test-model', cost }
 }
 
-const TOOLTIP_LINES = [
-  'This is the recommended max context tracker.',
-  'This is not a rule, but starting a new chat is recommended before the dial reaches 100%',
-  'Over 120k context causes inefficient, inconsistent, and generally poor model behavior, not to mention higher token usage.',
-]
+// The circular context dial was retired in the composer-condensation round:
+// ContextChip is now the bare token count (no units), color-stepped by
+// threshold bands, with the dumb-zone guidance and billed cost in the
+// tooltip. These tests pin that contract.
 
-function svgOf(container: HTMLElement) {
-  const svg = container.querySelector('svg')
-  if (!svg) throw new Error('dial svg not rendered')
-  return svg
-}
-
-describe('ContextChip context dial (#135)', () => {
-  it('shows the unclamped hub percentage past 100% and wraps the arc (250k -> 125%, 25% into second lap)', () => {
-    const { container } = render(<ContextChip info={info(250_000)} />)
-    const svg = svgOf(container)
-    expect(svg.querySelector('text')!.textContent).toBe('125%')
-    const path = svg.querySelector('path')!.getAttribute('d')!
-    // Wrapped: arc ends at 25% of the circle from 12 o'clock, largeArc = 0.
-    const r = 8.5
-    const endAngle = 0.25 * 2 * Math.PI - Math.PI / 2
-    const endX = (12 + r * Math.cos(endAngle)).toFixed(3)
-    const endY = (12 + r * Math.sin(endAngle)).toFixed(3)
-    expect(path).toBe(`M 12 ${12 - r} A ${r} ${r} 0 0 1 ${endX} ${endY}`)
-    // Wrapped: largeArc = 0 (an unwrapped 125% would be a >half-circle, largeArc = 1).
-    expect(path).toContain(' 0 0 1 ')
+describe('ContextChip condensed counter (composer condensation round)', () => {
+  it('renders the bare token count with no units and no dial svg', () => {
+    const { container } = render(<ContextChip info={info(25_900)} />)
+    expect(container.textContent).toBe('25.9k')
+    expect(container.querySelector('svg')).toBeNull()
+    expect(container.textContent).not.toContain('tok')
+    expect(container.textContent).not.toContain('%')
   })
 
-  it('never clamps the hub readout (500k -> 250%)', () => {
-    const { container } = render(<ContextChip info={info(500_000)} />)
-    expect(svgOf(container).querySelector('text')!.textContent).toBe('250%')
+  it('renders nothing before the first turn completes (no usage yet)', () => {
+    const { container } = render(<ContextChip info={undefined} />)
+    expect(container.textContent).toBe('')
   })
 
-  it('renders identically below 100% (100k -> 100%... uses wrapped frac = raw frac)', () => {
-    const { container } = render(<ContextChip info={info(100_000)} />)
-    const svg = svgOf(container)
-    expect(svg.querySelector('text')!.textContent).toBe('50%')
-    // Below 100%: largeArc = 0, same geometry as before the change.
-    const r = 8.5
-    const endAngle = 0.5 * 2 * Math.PI - Math.PI / 2
-    const endX = (12 + r * Math.cos(endAngle)).toFixed(3)
-    const endY = (12 + r * Math.sin(endAngle)).toFixed(3)
-    expect(svg.querySelector('path')!.getAttribute('d')).toBe(
-      `M 12 ${12 - r} A ${r} ${r} 0 0 1 ${endX} ${endY}`,
-    )
-    // Threshold ticks: none (the compaction trigger tick is gone; the
-    // dumb-zone tick was removed in #387) -> zero lines.
-    const lines = svg.querySelectorAll('line')
-    expect(lines).toHaveLength(0)
+  it('steps the count color by threshold band: blue -> yellow -> orange -> red', () => {
+    const chipClass = (tokens: number) => {
+      const { container } = render(<ContextChip info={info(tokens)} />)
+      const chip = container.querySelector('span')
+      return chip?.className ?? ''
+    }
+    expect(chipClass(25_900)).toContain('text-blue-600')
+    expect(chipClass(100_000)).toContain('text-yellow-500')
+    expect(chipClass(120_000)).toContain('text-orange-500')
+    expect(chipClass(200_000)).toContain('text-red-500')
   })
 
-  it('tooltip is exactly the three copy lines, old numeric lines gone', () => {
-    const { container } = render(<ContextChip info={info(250_000)} />)
+  it('tooltip keeps the dumb-zone guidance with the 120k figure', () => {
+    const { container } = render(<ContextChip info={info(125_000)} />)
     const chip = container.querySelector('span[title]')!
-    expect(chip.getAttribute('title')).toBe(TOOLTIP_LINES.join('\n'))
-    expect(chip.getAttribute('title')).not.toContain('dial scaled to')
-    expect(chip.getAttribute('title')).not.toContain('dumb zone from')
+    expect(chip.getAttribute('title')).toContain('~120k')
+    expect(chip.getAttribute('title')).toContain('Starting a new chat is recommended')
+  })
+
+  it('shows the billed cost in the tooltip and inline only when the provider reports one', () => {
+    const { container } = render(<ContextChip info={info(25_900, 0.0123)} />)
+    expect(container.textContent).toContain('$0.0123')
+    expect(container.querySelector('span[title]')!.getAttribute('title')).toContain('Session cost: $0.0123')
+
+    const { container: noCost } = render(<ContextChip info={info(25_900, null)} />)
+    expect(noCost.textContent).toBe('25.9k')
+    expect(noCost.textContent).not.toContain('$')
   })
 })

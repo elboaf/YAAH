@@ -533,3 +533,85 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
   .imp-v2-hint,
   .imp-composer button[aria-pressed="true"]::after { animation: none; }
 }
+
+/* ---- Composer condensation round (this session) ----
+   The composer becomes a fixed-width instrument (max 720px, centered) that
+   owns the session meta: the context readout, the git cluster, and the
+   read-aloud toggle sit on the card's TOP edge; the app-floor strip keeps
+   only the status dot. The access-mode trigger collapses to its dot alone
+   (the menu is the label). Picker labels scroll (mono marquee) only when
+   they overflow their clipped width. */
+.imp-composer-wrap { min-width: 0; }
+.imp-composer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  /* Wrap instead of overflowing when the card narrows: the git cluster
+     does not shrink, so a single line can exceed the card at narrow
+     windows (CodeRabbit #698). */
+  flex-wrap: wrap;
+  /* 14px: leaves room above the card's rounded top for the hairline-float
+     meta row; mono 10px keeps it instrument-grade. */
+  padding: 0 2px 3px;
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace);
+  font-size: 10px;
+  line-height: 1;
+  min-height: 17px;
+  color: #8a8a8a;
+}
+.imp-composer-meta:empty { display: none; }
+.imp-composer-meta__right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+/* Meta-row controls inherit the rail's ghost-ink treatment: the git
+   cluster's chips sit quiet here and brighten on hover. */
+
+/* Picker-label marquee: the overlay mirrors the select's display value and
+   scrolls only when the real text overflows the clipped trigger width.
+   The select itself stays the accessible, test-pinned control; whenever the
+   select's own label is readable (hover, focus, disabled) the overlay
+   stands down so the two never double-print. */
+.imp-scope-rail { position: relative; }
+.imp-picker { position: relative; display: inline-flex; min-width: 0; flex: 0 1 auto; }
+.imp-picker--grow { flex: 1 1 auto; }
+.imp-marquee-wrap {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  pointer-events: none;
+  overflow: hidden;
+  border-radius: 4px;
+  max-width: 100%;
+}
+.imp-marquee {
+  display: inline-block;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace);
+  font-size: 10px;
+  color: #71717a;
+  padding-left: 6px; /* matches the select's px-1.5 */
+}
+.imp-scope-rail select:not(:hover):not(:focus-visible):not(:disabled) { color: transparent; }
+.imp-picker > select:hover + .imp-marquee-wrap,
+.imp-picker > select:focus-visible + .imp-marquee-wrap,
+.imp-picker > select:disabled + .imp-marquee-wrap { visibility: hidden; }
+.imp-marquee--scroll { animation: imp-marquee-move 9s linear infinite; }
+@keyframes imp-marquee-move {
+  0% { transform: translateX(0); }
+  55% { transform: translateX(var(--imp-marquee-shift, -40px)); }
+  72% { transform: translateX(var(--imp-marquee-shift, -40px)); }
+  100% { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .imp-marquee--scroll { animation: none; }
+  /* Restoring the native label means the overlay must go too, or the two
+     labels print over each other (CodeRabbit #698). */
+  .imp-picker > .imp-marquee-wrap { visibility: hidden; }
+  .imp-scope-rail select:not(:hover):not(:focus-visible):not(:disabled) { color: #71717a; }
+}
