@@ -9041,12 +9041,24 @@ export function ChatScopePickers() {
         over ? `${-(el.scrollWidth - el.clientWidth + 10)}px` : '0px',
       )
     }
-    check(modelRef.current, setModelOverflow)
-    check(effortRef.current, setEffortOverflow)
-    check(subagentRef.current, setSubagentOverflow)
-    // Deps are the displayed strings — the marquee measurement depends on
-    // the label text and the clip width, not on saving/disabled states
-    // (disabled stand-down is pure CSS on the wrapper).
+    const checkAll = () => {
+      check(modelRef.current, setModelOverflow)
+      check(effortRef.current, setEffortOverflow)
+      check(subagentRef.current, setSubagentOverflow)
+    }
+    checkAll()
+    // Re-measure when a picker's WIDTH changes without its label changing —
+    // window resize / layout shifts leave the overflow state stale otherwise
+    // (CodeRabbit #698). jsdom has no ResizeObserver; the label-driven
+    // re-checks above cover the tests.
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(checkAll)
+    for (const el of [modelRef.current, effortRef.current, subagentRef.current]) {
+      if (el) ro.observe(el)
+    }
+    return () => ro.disconnect()
+    // Deps are the displayed strings — the initial measurement depends on
+    // the label text and the clip width (disabled stand-down is pure CSS).
   }, [model, effort, subagentModel])
 
   /**
