@@ -1031,7 +1031,9 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
                     " VALUES (?, ?, datetime('now'))",
                     (resolved, basename(resolved)),
                 )
-                target_id = (await db.execute("SELECT last_insert_rowid()")).fetchone()[0]
+                cur = await db.execute("SELECT last_insert_rowid()")
+                row = await cur.fetchone()
+                target_id = row[0]
                 target = resolved
             else:
                 target = existing["path"]

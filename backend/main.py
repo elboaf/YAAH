@@ -214,7 +214,6 @@ from backend.db.database import (
     delete_workspace,
     get_conversation,
     get_messages,
-    get_workspace_by_path,
     list_conversations,
     list_workspaces,
     move_conversation,
@@ -2322,6 +2321,24 @@ async def api_get_config():
     }
 
 
+def _normalize_int_map(entries, validator, keep=lambda w: w > 0):
+    """Normalize a per-model int map, dropping bad entries.
+
+    validator(entry) should return the validated int, or raise TypeError/
+    ValueError for unparseable entries, or None to skip. keep(w) decides
+    whether to retain a parsed value (default: w > 0).
+    """
+    result = {}
+    for model_id, entry in entries.items():
+        try:
+            w = validator(entry)
+        except (TypeError, ValueError):
+            continue
+        if w is not None and keep(w):
+            result[str(model_id)] = w
+    return result
+
+
 @app.put("/api/config")
 async def api_set_config(body: ConfigUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -2430,30 +2447,19 @@ async def api_set_config(body: ConfigUpdate):
     # persist); when absent the stored map is untouched.
     cwo = updates.get("context_window_overrides")
     if isinstance(cwo, dict):
-        merged: dict[str, int] = {}
-        for model_id, window in cwo.items():
-            if window is None:
-                continue
-            try:
-                w = int(window)
-            except (TypeError, ValueError):
-                continue
-            if w > 0:
-                merged[str(model_id)] = w
-        updates["context_window_overrides"] = merged
+        updates["context_window_overrides"] = _normalize_int_map(
+            cwo,
+            lambda v: None if v is None else int(v),
+        )
     # Per-model context windows: when present this is the authoritative full
     # map (Settings sends everything it shows, so removals persist).
     mc = updates.get("model_context")
     if isinstance(mc, dict):
-        merged_mc: dict[str, dict[str, int]] = {}
-        for model_id, entry in mc.items():
-            try:
-                w = int((entry or {}).get("context_window") or 0)
-            except (TypeError, ValueError):
-                continue
-            if w > 0:
-                merged_mc[str(model_id)] = {"context_window": w}
-        updates["model_context"] = merged_mc
+        raw = _normalize_int_map(
+            mc,
+            lambda e: int((e or {}).get("context_window") or 0),
+        )
+        updates["model_context"] = {k: {"context_window": v} for k, v in raw.items()}
     # Access mode is validated against the shipped set; anything else falls
     # back to "ask" (safe default) rather than 422ing a whole settings save.
     if "access_mode" in updates:
@@ -2466,15 +2472,10 @@ async def api_set_config(body: ConfigUpdate):
     # anything else is dropped rather than persisted raw.
     msteps = updates.get("model_steps")
     if isinstance(msteps, dict):
-        merged_s: dict[str, int] = {}
-        for model_id, steps in msteps.items():
-            try:
-                v = int(steps)
-            except (TypeError, ValueError):
-                continue
-            if v >= 0:
-                merged_s[str(model_id)] = v
-        updates["model_steps"] = merged_s
+        updates["model_steps"] = _normalize_int_map(
+            msteps, int,
+            keep=lambda w: w >= 0,
+        )
     save_config(updates)
     # Wake bridge (issue #688): a saved wake block hot-applies — start on
     # first enable, restart on edits, stop when disabled. An incomplete
