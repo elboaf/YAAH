@@ -2322,7 +2322,6 @@ async def api_get_config():
     }
 
 
-@app.put("/api/config")
 def _normalize_int_map(entries, validator, keep=lambda w: w > 0):
     """Normalize a per-model int map, dropping bad entries.
 
@@ -2355,6 +2354,7 @@ def merge_block(name: str, updates: dict):
     return updates[name]
 
 
+@app.put("/api/config")
 async def api_set_config(body: ConfigUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     voice = updates.get("voice")
