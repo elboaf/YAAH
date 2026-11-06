@@ -80,6 +80,17 @@ def normalize_workspace(workspace: str | None) -> str | None:
         return None
     return ws
 
+
+async def resolve_workspace_row(path: str, db) -> dict | None:
+    """Find an existing workspace row by resolved, case-folded path."""
+    resolved = str(Path(path).resolve())
+    cur = await db.execute("SELECT * FROM workspaces")
+    for row in await cur.fetchall():
+        if row["path"] is not None and str(Path(row["path"]).resolve()).lower() == resolved.lower():
+            return dict(row)
+    return None
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -708,18 +719,17 @@ async def upsert_workspace(path: str) -> dict:
     Dedupe key is the resolved, case-folded path: Windows paths differing
     only in case or trailing slashes are the same folder.
     """
-    resolved = str(Path(path).resolve())
     async with open_db() as db:
-        cur = await db.execute("SELECT * FROM workspaces")
-        for row in await cur.fetchall():
-            if row["path"] is not None and str(Path(row["path"]).resolve()).lower() == resolved.lower():
-                await db.execute(
-                    "UPDATE workspaces SET last_opened_at = datetime('now')"
-                    " WHERE id = ?",
-                    (row["id"],),
-                )
-                await db.commit()
-                return dict(row) | {"last_opened_at": None}
+        existing = await resolve_workspace_row(path, db)
+        if existing is not None:
+            await db.execute(
+                "UPDATE workspaces SET last_opened_at = datetime('now')"
+                " WHERE id = ?",
+                (existing["id"],),
+            )
+            await db.commit()
+            return existing | {"last_opened_at": None}
+        resolved = str(Path(path).resolve())
         await db.execute(
             "INSERT INTO workspaces (path, label, last_opened_at)"
             " VALUES (?, ?, datetime('now'))",
@@ -1014,19 +1024,15 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
             # Resolve/case-fold through the same dedupe the registry uses, so
             # 'C:/Proj' and 'c:\\proj\\' land on one row and one directory.
             resolved = str(Path(target).resolve())
-            cur = await db.execute("SELECT * FROM workspaces")
-            existing = None
-            for row in await cur.fetchall():
-                if row["path"] is not None and str(Path(row["path"]).resolve()).lower() == resolved.lower():
-                    existing = row
-                    break
+            existing = await resolve_workspace_row(target, db)
             if existing is None:
-                cur = await db.execute(
+                await db.execute(
                     "INSERT INTO workspaces (path, label, last_opened_at)"
                     " VALUES (?, ?, datetime('now'))",
                     (resolved, basename(resolved)),
                 )
-                target_id = cur.lastrowid
+                target_id = (await db.execute("SELECT last_insert_rowid()")).fetchone()[0]
+                target = resolved
             else:
                 target = existing["path"]
                 target_id = existing["id"]
@@ -1034,7 +1040,6 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
                     "UPDATE workspaces SET last_opened_at = datetime('now') WHERE id = ?",
                     (target_id,),
                 )
-            target = resolved if target_id is not None and existing is None else target
         await db.execute(
             "UPDATE conversations SET workspace = ?,"
             " updated_at = datetime('now') WHERE id = ?",
