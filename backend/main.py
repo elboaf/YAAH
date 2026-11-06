@@ -295,6 +295,22 @@ class NewWorkspace(BaseModel):
 
 
 @app.get("/api/workspaces")
+async def _fetch_remote_workspaces(host_id: str) -> tuple[list[dict], str]:
+    """Fetch workspaces from a remote host, or return cached rows."""
+    host = remote_mod.get_remote(host_id)
+    if host is not None:
+        try:
+            rows = _proxy_result(await host.proxy("GET", "/api/workspaces/local"))
+            return [
+                {**row, "path": remote_mod.ns_path(host_id, row.get("path")),
+                 "owner_id": host_id, "device_status": "online"}
+                for row in rows
+            ], "online"
+        except (httpx.HTTPError, HTTPException):
+            pass
+    return [], "offline"
+
+
 async def api_list_workspaces():
     """Aggregate local workspaces and each saved device's reachable or cached workspaces."""
     local_rows = [
@@ -304,45 +320,24 @@ async def api_list_workspaces():
     ]
     profiles = _remote_device_profiles()
     if not profiles and remote_mod.get_remote() is not None:
-        host = remote_mod.get_remote()
-        try:
-            rows = _proxy_result(await host.proxy("GET", "/api/workspaces/local"))
-            remote_rows = [
-                {**row, "path": remote_mod.ns_path(host.host_id, row.get("path")),
-                 "owner_id": host.host_id, "device_status": "online"}
-                for row in rows
-            ]
-            return local_rows + remote_rows
-        except (httpx.HTTPError, HTTPException):
-            return local_rows
+        rows, _ = await _fetch_remote_workspaces(remote_mod.get_remote().host_id)
+        return local_rows + rows
 
     result = list(local_rows)
     for profile in profiles:
         host_id = profile["host_id"]
-        host = remote_mod.get_remote(host_id)
-        rows = profile.get("cached_workspaces") or []
-        state = "offline"
-        if host is not None:
-            try:
-                rows = _proxy_result(await host.proxy("GET", "/api/workspaces/local"))
-                rows = [
-                    {**row, "path": remote_mod.ns_path(host_id, row.get("path")),
-                     "owner_id": host_id, "device_status": "online"}
-                    for row in rows
-                ]
-                profile["cached_workspaces"] = rows
+        rows, state = await _fetch_remote_workspaces(host_id)
+        if state == "online":
+            profile["cached_workspaces"] = rows
+            host = remote_mod.get_remote(host_id)
+            if host is not None:
                 profile.update({"name": host.name, "os": host.info.get("os")})
-                state = "online"
-            except (httpx.HTTPError, HTTPException):
-                rows = [
-                    {**row, "owner_id": host_id, "device_status": "error"}
-                    for row in rows
-                ]
-                state = "error"
         else:
+            cached = profile.get("cached_workspaces") or []
             rows = [
-                {**row, "owner_id": host_id, "device_status": "cached"}
-                for row in rows
+                {**row, "owner_id": host_id,
+                 "device_status": "error" if state == "error" else "cached"}
+                for row in cached
             ]
         result.extend(rows)
         profile["status"] = state
