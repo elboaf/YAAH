@@ -214,7 +214,6 @@ from backend.db.database import (
     delete_workspace,
     get_conversation,
     get_messages,
-
     list_conversations,
     list_workspaces,
     move_conversation,
@@ -2338,20 +2337,6 @@ def _normalize_int_map(entries, validator, keep=lambda w: w > 0):
         if w is not None and keep(w):
             result[str(model_id)] = w
     return result
-
-
-def merge_block(name: str, updates: dict):
-    """Merge a block over its stored counterpart, preserving sibling keys.
-
-    For simple `{**existing, **incoming}` merges. Blocks with special logic
-    (masked keys, enabled-only writes, validation) still inline their own.
-    Returns the merged block (or None if the block wasn't in updates).
-    """
-    if name not in updates or not isinstance(updates[name], dict):
-        return None
-    existing = load_config().get(name) or {}
-    updates[name] = {**existing, **updates[name]}
-    return updates[name]
 
 
 @app.put("/api/config")
