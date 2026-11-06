@@ -1599,7 +1599,7 @@ async def search_conversation_history(
     like_pattern = f"%{safe_query}%"
 
     # Search all text fields via SQL LIKE
-    async with get_db() as db:
+    async with open_db() as db:
         cur = await db.execute(
             """
             SELECT id, role, content, tool_calls, tool_call_id, sub_agent_transcript
@@ -1616,7 +1616,7 @@ async def search_conversation_history(
             (conversation_id, like_pattern, like_pattern, like_pattern, like_pattern),
         )
         rows = await cur.fetchall()
-        cur.close()
+        await cur.close()
 
     # Build excerpts in Python for the filtered matches
     needle = query.casefold()
