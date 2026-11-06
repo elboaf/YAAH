@@ -1808,11 +1808,14 @@ function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
       {open && (
         <div className="lg-sheet">
           <AskUserTrace tc={tc} />
+          {/* The calls after the question, as a real expandable trace. The
+              old "→ did next" line was CallNameCounts text that mimicked the
+              turn's trace summary (same glyphs, same ×N counts) but had no
+              click target — it read as the chip row while never expanding.
+              spawn_agent calls stay out: they render as their own block in
+              the flow, matching the turn-level trace's filter. */}
           {after.length > 0 && (
-            <p className="lg-next">
-              <span className="lg-sub">{'→ did next:'}</span>{' '}
-              <CallNameCounts calls={after} />
-            </p>
+            <TraceLine calls={after.filter((call) => call.name !== 'spawn_agent')} />
           )}
         </div>
       )}
