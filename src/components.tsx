@@ -4311,7 +4311,7 @@ export function Sidebar() {
         <div className="relative mt-auto pt-2">
           {/* No overflow-hidden here: it would clip the add-workspace menu,
               which opens upward out of the strip. Rows keep their own radii. */}
-          <div className="sw-strip sw-strip-list">
+          <div className="sw-strip">
             <button
               className="sw-strip-row sw-strip-primary"
               onClick={() => {
@@ -4325,7 +4325,6 @@ export function Sidebar() {
               </svg>
               <span className="sw-strip-label">New chat</span>
             </button>
-            <div className="sw-strip-sep-h" />
             <div className="sw-strip-rowwrap">
               <button
                 className="sw-strip-row"
@@ -4370,7 +4369,6 @@ export function Sidebar() {
                 </>
               )}
             </div>
-            <div className="sw-strip-sep-h" />
             <button
               className="sw-strip-row"
               aria-label="Settings"
