@@ -1133,6 +1133,20 @@ async def add_message(
         return cur.lastrowid
 
 
+async def _refill_remote_messages(db, host_id: str, conversation_id: str, messages: list[dict]) -> None:
+    """Replace all cached messages for a remote conversation."""
+    await db.execute(
+        "DELETE FROM remote_messages WHERE host_id=? AND conversation_id=?",
+        (host_id, conversation_id),
+    )
+    for position, message in enumerate(messages):
+        await db.execute(
+            "INSERT INTO remote_messages(host_id, conversation_id, message_id, position, payload) VALUES (?, ?, ?, ?, ?)",
+            (host_id, conversation_id, str(message.get("id", position)), position,
+             json.dumps(message)),
+        )
+
+
 async def upsert_remote_conversation(host_id: str, conversation: dict, messages: list[dict]) -> None:
     """Replace one cached remote transcript atomically; IDs are host-scoped."""
     cid = str(conversation["id"])
@@ -1159,16 +1173,7 @@ async def upsert_remote_conversation(host_id: str, conversation: dict, messages:
              conversation.get("workspace"), conversation.get("updated_at", ""),
              str(conversation.get("revision", ""))),
         )
-        await db.execute(
-            "DELETE FROM remote_messages WHERE host_id=? AND conversation_id=?",
-            (host_id, cid),
-        )
-        for position, message in enumerate(messages):
-            await db.execute(
-                "INSERT INTO remote_messages(host_id, conversation_id, message_id, position, payload) VALUES (?, ?, ?, ?, ?)",
-                (host_id, cid, str(message.get("id", position)), position,
-                 json.dumps(message)),
-            )
+        await _refill_remote_messages(db, host_id, cid, messages)
         await db.commit()
 
 
@@ -1191,12 +1196,7 @@ async def queue_remote_commit(
             "UPDATE remote_conversations SET title=?, workspace=?, sync_status='pending' WHERE host_id=? AND conversation_id=?",
             (conversation.get("title", "New Task"), conversation.get("workspace"), host_id, cid),
         )
-        await db.execute("DELETE FROM remote_messages WHERE host_id=? AND conversation_id=?", (host_id, cid))
-        for position, message in enumerate(messages):
-            await db.execute(
-                "INSERT INTO remote_messages(host_id, conversation_id, message_id, position, payload) VALUES (?, ?, ?, ?, ?)",
-                (host_id, cid, str(message.get("id", position)), position, json.dumps(message)),
-            )
+        await _refill_remote_messages(db, host_id, cid, messages)
         await db.commit()
         return commit_id
 
