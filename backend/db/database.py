@@ -1521,7 +1521,8 @@ async def get_remote_messages(host_id: str, conversation_id: str) -> list[dict] 
             "SELECT payload FROM remote_messages WHERE host_id=? AND conversation_id=? ORDER BY position",
             (host_id, str(conversation_id)),
         )
-        rows = await cur.fetchall()
+        rows_iter = cur
+        rows = []
         if not rows:
             cur = await db.execute(
                 "SELECT 1 FROM remote_conversations WHERE host_id=? AND conversation_id=?",
@@ -1580,7 +1581,12 @@ async def get_messages(conversation_id: int):
 async def search_conversation_history(
     conversation_id: int, query: str, max_results: int = 10
 ) -> dict:
-    """Case-insensitive plain-text search over all textual transcript fields."""
+    """Case-insensitive plain-text search over all textual transcript fields.
+
+    Matching is pushed into SQLite via LIKE; Python only builds excerpts.
+    SQLite's LIKE is case-insensitive for ASCII. Non-ASCII casefolding
+    differs from Python's casefold() — acceptable per ponytail #270.
+    """
     query = str(query or "").strip()
     if not query:
         return {"error": "query must not be empty"}
@@ -1588,44 +1594,66 @@ async def search_conversation_history(
         max_results = max(1, min(int(max_results or 10), 50))
     except (TypeError, ValueError):
         max_results = 10
-    needle = query.casefold()
-    rows = await get_messages(conversation_id)
 
-    def _excerpt(text: str, pos: int) -> str:
-        """±160 chars around the match, with ellipses at the clipped ends."""
-        start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
-        excerpt = text[start:end]
-        if start:
-            excerpt = "…" + excerpt
-        if end < len(text):
-            excerpt += "…"
-        return excerpt
+    # Escape LIKE wildcards in user input
+    safe_query = query.replace("\\", "\\\\").replace("%", "\%").replace("_", "\_")
+    like_pattern = f"%{safe_query}%"
 
-    candidates = []
-    stopped = False
-    for row in rows:
-        fields = (
-            ("content", row.get("content") or ""),
-            ("tool_calls", json.dumps(row.get("tool_calls"), ensure_ascii=False) if row.get("tool_calls") else ""),
-            ("tool_call_id", row.get("tool_call_id") or ""),
-            ("sub_agent_transcript", json.dumps(row.get("sub_agent_transcript"), ensure_ascii=False) if row.get("sub_agent_transcript") else ""),
+    # Search all text fields via SQL LIKE
+    async with open_db() as db:
+        cur = await db.execute(
+            """
+            SELECT id, role, content, tool_calls, tool_call_id, sub_agent_transcript
+            FROM messages
+            WHERE conversation_id = ?
+            AND (
+                content LIKE ? ESCAPE '\\'
+                OR (tool_calls IS NOT NULL AND json_quote(tool_calls) LIKE ? ESCAPE '\\')
+                OR tool_call_id LIKE ? ESCAPE '\\'
+                OR (sub_agent_transcript IS NOT NULL AND json_quote(sub_agent_transcript) LIKE ? ESCAPE '\\')
+            )
+            ORDER BY id ASC
+            """,
+            (conversation_id, like_pattern, like_pattern, like_pattern, like_pattern),
         )
-        for field, value in fields:
-            text = str(value)
-            pos = text.casefold().find(needle)
-            if pos >= 0:
-                excerpt = _excerpt(text, pos)
-                candidates.append({
-                    "message_id": row["id"],
-                    "role": row["role"],
-                    "field": field,
-                    "excerpt": excerpt,
-                })
-                if len(candidates) > max_results:
-                    stopped = True
-                    break
-        if stopped:
-            break
+        # Iterate incrementally - don't load all matching rows.
+        needle = query.casefold()
+        candidates = []
+        stopped = False
+        while len(candidates) <= max_results:
+            row = await cur.fetchone()
+            if row is None:
+                break
+            fields = (
+                ("content", row["content"] or ""),
+                ("tool_calls", json.dumps(row["tool_calls"], ensure_ascii=False) if row["tool_calls"] else ""),
+                ("tool_call_id", row["tool_call_id"] or ""),
+                ("sub_agent_transcript", json.dumps(row["sub_agent_transcript"], ensure_ascii=False) if row["sub_agent_transcript"] else ""),
+            )
+            for field, value in fields:
+                text = str(value)
+                pos = text.casefold().find(needle)
+                if pos >= 0:
+                    # Build excerpt around match
+                    start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
+                    excerpt = text[start:end]
+                    if start:
+                        excerpt = "�" + excerpt
+                    if end < len(text):
+                        excerpt += "�"
+                    candidates.append({
+                        "message_id": row["id"],
+                        "role": row["role"],
+                        "field": field,
+                        "excerpt": excerpt,
+                    })
+                    if len(candidates) > max_results:
+                        stopped = True
+                        break
+            if stopped:
+                break
+        await cur.close()
+
     return {
         "matches": candidates[:max_results],
         "count": len(candidates[:max_results]),
