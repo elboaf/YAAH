@@ -319,9 +319,11 @@ async def api_list_workspaces():
         if remote_mod.parse_ns(row["path"]) is None
     ]
     profiles = _remote_device_profiles()
-    if not profiles and remote_mod.get_remote() is not None:
-        rows, _ = await _fetch_remote_workspaces(remote_mod.get_remote().host_id)
-        return local_rows + rows
+    if not profiles:
+        remote = remote_mod.get_remote()
+        if remote is not None:
+            profiles = [{"host_id": remote.host_id, "name": remote.name}]
+            _save_remote_device_profiles(profiles)
 
     result = list(local_rows)
     for profile in profiles:
