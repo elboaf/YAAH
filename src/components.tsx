@@ -4311,7 +4311,7 @@ export function Sidebar() {
         <div className="relative mt-auto pt-2">
           {/* No overflow-hidden here: it would clip the add-workspace menu,
               which opens upward out of the strip. Rows keep their own radii. */}
-          <div className="sw-strip sw-strip-list">
+          <div className="sw-strip">
             <button
               className="sw-strip-row sw-strip-primary"
               onClick={() => {
@@ -4325,7 +4325,6 @@ export function Sidebar() {
               </svg>
               <span className="sw-strip-label">New chat</span>
             </button>
-            <div className="sw-strip-sep-h" />
             <div className="sw-strip-rowwrap">
               <button
                 className="sw-strip-row"
@@ -4370,7 +4369,6 @@ export function Sidebar() {
                 </>
               )}
             </div>
-            <div className="sw-strip-sep-h" />
             <button
               className="sw-strip-row"
               aria-label="Settings"
@@ -11322,9 +11320,6 @@ export function Composer() {
       onDrop={(e) => {
         e.preventDefault()
         setDragOver(false)
-        // #48: a drop advertising files with no readable File objects is the
-        // WebView2 silent-failure signature (native OLE handler intercepting
-        // the drag) — surface it, never swallow it.
         const outcome = classifyDrop(e.dataTransfer)
         if (outcome.kind === 'files') {
           addFiles(outcome.files)
@@ -11381,14 +11376,12 @@ export function Composer() {
       )}
       <div
         data-composer=""
-        className={`rounded-lg border bg-zinc-800/50 transition-colors ${
+        className={`imp-composer rounded-lg border bg-zinc-800/50 transition-colors ${
           dragOver
             ? 'border-blue-500 border-dashed'
             : ' border-zinc-700 focus-within:border-blue-500'
         }`}
       >
-        {/* Staged content lives inside the card: everything the message is
-            made of sits in one bordered container. */}
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {images.map((img, i) => (
@@ -11484,11 +11477,6 @@ export function Composer() {
           </div>
         )}
         <div className="relative">
-        {/* Chip overlay for inline skill tokens — pointer-events:none so the
-            textarea receives every click/keystroke (Q12); the translucent
-            indigo paint sits OVER the token text, which stays visible and
-            editable underneath. aria-hidden: decorative, the text IS the
-            content. */}
         {tokenRects.map(({ span, left, top, width, height }) => (
           <div
             key={`${span.start}-${span.name}`}
@@ -11503,9 +11491,15 @@ export function Composer() {
           rows={2}
           style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
           placeholder={
-            isAgentChat
-              ? 'This is an agent chat — messages become standing instructions (they never start a run)'
-              : 'Describe a task... (drop/paste/attach images or text files; type / to load a skill)'
+            voiceState === 'recording'
+              ? pttHeldRef.current
+                ? 'Recording — release the hotkey to transcribe and send'
+                : 'Listening — speak your message (stops automatically on silence)'
+              : voiceState === 'transcribing'
+                ? 'Transcribing your message…'
+                : isAgentChat
+                  ? 'This is an agent chat — messages become standing instructions (they never start a run)'
+                  : 'Describe a task... (drop/paste/attach images or text files; type / to load a skill)'
           }
           aria-label="Message the agent"
           value={input}
@@ -11597,15 +11591,13 @@ export function Composer() {
             e.target.value = ''
           }}
         />
-        {/* Unified toolbar: host + mode on the left, attach/mic/send on the
-            right — one row inside the composer card. The scope pickers
-            (#51/#76) moved here from the top strip (session c7914de2):
-            P3 annotation rail — ghost selects, dot separators, no labels.
-            Mockups: .impeccable/live/mockups-c7914de2-c.html */}
         <div className="imp-scope-rail">
           <AccessModeControl />
           <ChatScopePickers />
           <div className="ml-auto flex items-center gap-1">
+            {!streaming && input.trim().length > 0 && (
+              <span className="imp-v2-hint" aria-hidden="true">↵ enter</span>
+            )}
             <button
               title="Attach files"
               aria-label="Attach files"
@@ -11625,8 +11617,6 @@ export function Composer() {
                 <path d="M7 2v10M2 7h10" />
               </svg>
             </button>
-            {/* Only render once confirmed available: an optimistic show/hide
-                flashed the button before the backend could answer. */}
             {micAvailable === true && (
               <button
                 title={
@@ -11668,9 +11658,6 @@ export function Composer() {
                 )}
               </button>
             )}
-            {/* c7914de2: the send arrow doubles as the stop square while a
-                turn is live — same position, same job (send() steers mid-turn,
-                so the arrow never changes identity). */}
             {streaming || sendingKey === (useAgent.getState().bufferKey()) ? (
               <button
                 type="button"
@@ -11699,6 +11686,11 @@ export function Composer() {
             )}
           </div>
         </div>
+        {dragOver && (
+          <div className="imp-drop-note" aria-hidden="true">
+            <span>drop to attach</span>
+          </div>
+        )}
       </div>
     </div>
   )

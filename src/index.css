@@ -215,22 +215,21 @@ body,
 /* Sidebar transport strip (live session 9ee64100, variant 3 "command list",
    delivered as static mockup after the live mount glitched; V3 implemented
    in source 2026-11-05): stacked labeled command rows at the sidebar's foot.
-   Blue edge + brightened mono label mark the primary (New chat); add-workspace
-   and settings sit as ghost rows between hairline separators. The menu still
-   opens upward out of the strip (keep overflow visible on every container). */
+/* Action strip (design sign-off 2026-11-05, live session 165cb90b variant 1,
+   "bare stack"): three quiet rows straight on the sidebar well - the bordered
+   list box, its floating shadow, the hairline separators and the blue edge
+   bar are retired. Blue stays on the New chat icon alone; hover fills keep
+   the rows findable. The menu still opens upward out of the strip (keep
+   overflow visible on every container). */
 .sw-strip { display: flex; flex-direction: column; }
-.sw-strip-list { border: 1px solid #333333; border-radius: 8px; background: rgba(9, 9, 11, 0.7); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.25), 0 4px 6px -4px rgba(0, 0, 0, 0.2); }
 .sw-strip-row { position: relative; display: flex; width: 100%; align-items: center; gap: 8px; height: 26px; padding: 0 10px; border: none; border-radius: 0; background: transparent; color: #8a8a8a; text-align: left; cursor: pointer; }
 .sw-strip-row:hover { background: #2e2e2e; color: #d4d4d4; }
 .sw-strip-row:focus-visible { outline: none; box-shadow: inset 0 0 0 1px #3b82f6; }
 .sw-strip-row svg { flex-shrink: 0; }
-.sw-strip-primary { color: #b8b8b8; box-shadow: inset 2px 0 0 #2563eb; border-top-left-radius: 7px; border-top-right-radius: 7px; }
+.sw-strip-primary { color: #b8b8b8; }
 .sw-strip-primary svg { color: #3b82f6; }
 .sw-strip-primary:hover { background: #262626; color: #e6e6e6; }
-.sw-strip-rowwrap:last-of-type button.sw-strip-row { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
-.sw-strip-list > button.sw-strip-row:last-child { border-bottom-left-radius: 7px; border-bottom-right-radius: 7px; }
 .sw-strip-label { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; line-height: 1.2; white-space: nowrap; }
-.sw-strip-sep-h { height: 1px; background: #333333; flex-shrink: 0; }
 
 /* Ledger dialogues (design sign-off 2026-11-05, from live session 74694c80
    variant 3): banded deep-well container + ruled Q/A/key rows for every
@@ -320,6 +319,15 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
 }
 .lg-sidebar .lg-row:hover::after { opacity: 1; }
 .lg-sidebar .lg-row .text-zinc-600 { color: #8a8a8a; font-variant-numeric: tabular-nums; }
+/* Conversation list (design sign-off 2026-11-05, live session c353e05a
+   variant 3 "living air"): the hair-pin separators between chat rows are
+   retired in the sidebar; rows breathe (5px, +1px on hover) and row metadata
+   brightens on hover. Non-sidebar .lg-row lists keep their separators. */
+.lg-sidebar .lg-row + .lg-row { border-top: none; }
+.lg-sidebar .lg-row { padding: 5px 0; transition: padding 0.15s ease-out; }
+.lg-sidebar .lg-row:hover { padding: 6px 0; }
+.lg-sidebar .lg-row:hover .text-zinc-600 { color: #d4d4d4; }
+.lg-sidebar .flex-1 > .mb-3 { margin-top: 2px; }
 .lg-sidebar .flex-1 { scrollbar-width: thin; scrollbar-color: #333333 transparent; }
 
 /* ---- Composer scope rail (session c7914de2, P3 annotation style) ----
@@ -405,7 +413,7 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
   align-items: center;
   justify-content: center;
   gap: 4px;
-  padding: 3px 5px;
+  padding: 3px 6px;
   border-radius: 4px;
   background: transparent;
   /* Visible boundary in normal mode; forced-colors maps it to a system
@@ -413,7 +421,12 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
   border: 1px solid #3f3f46;
   cursor: pointer;
 }
-.imp-mode-trigger:hover { background: rgba(39, 39, 42, 0.85); }
+.imp-mode-trigger:hover { background: rgba(46, 46, 46, 0.9); border-color: #52525b; }
+/* Access-mode trigger (design sign-off 2026-11-05, live session 5c0c9cab
+   variant 1 "crisper control"): brighter label, deeper hover with border
+   lift, crisp dot edge, and the focus-visible ring the control lacked. */
+.imp-mode-trigger:focus-visible { outline: none; box-shadow: inset 0 0 0 1px #3b82f6; }
+.imp-mode-trigger > span:first-child { box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); }
 /* Non-color mode cue (review: the dot alone is color-only). Mono
    micro-label matching the rail's ghost-select voice; the dot stays as
    the at-a-glance hue for sighted color mode. */
@@ -423,15 +436,100 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
   letter-spacing: 0.08em;
   text-transform: uppercase;
   line-height: 1;
-  color: #a8a8a8;
+  color: #d4d4d4;
 }
 /* Forced-colors (Windows high-contrast): box-shadow focus rings vanish,
    so keyboard focus falls back to a system outline (#685 review). */
 @media (forced-colors: active) {
   .imp-scope-rail select:focus-visible,
-  .imp-send:focus-visible {
+  .imp-send:focus-visible,
+  .imp-mode-trigger:focus-visible {
     outline: 1px solid CanvasText;
     outline-offset: 1px;
   }
 }
 .imp-dotsep { color: #3f3f46; font-size: 10px; padding: 0 2px; user-select: none; }
+
+/* Composer delight bake (impeccable live session 969b09f9): state-revealed
+   feedback on the composer card. Invisible at rest; each rule lights only in
+   its state - armed (typing), streaming, recording/transcribing, drag-over. */
+.imp-composer { position: relative; }
+
+/* Dictation presence: the card reports the voice channel. */
+.imp-composer:has(button[aria-pressed="true"]) { border-color: rgba(248, 113, 113, 0.55); }
+.imp-composer:has(button[class*="text-amber-300"]) { border-color: rgba(251, 191, 36, 0.45); }
+.imp-composer button[aria-pressed="true"] { position: relative; }
+.imp-composer button[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  animation: imp-dictation-breathe 1.8s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes imp-dictation-breathe { 0%, 100% { opacity: 0.15; } 50% { opacity: 0.9; } }
+
+/* The arming moment: send settles in on the first keystroke; ghost enter hint. */
+.imp-composer .imp-send {
+  transition: transform 0.15s ease-out, background-color 0.15s ease-out, border-color 0.15s ease-out, color 0.15s ease-out;
+}
+.imp-composer .imp-send:not(:disabled) { animation: imp-send-arm 0.24s ease-out; }
+.imp-composer .imp-send:not(:disabled):active { transform: scale(0.94); }
+@keyframes imp-send-arm { 0% { transform: scale(0.9); } 60% { transform: scale(1.05); } 100% { transform: scale(1); } }
+.imp-v2-hint {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #555555;
+  white-space: nowrap;
+  animation: imp-hint-in 0.2s ease-out;
+}
+@keyframes imp-hint-in { from { opacity: 0; transform: translateX(4px); } to { opacity: 1; transform: translateX(0); } }
+
+/* Drop receptor: corner reticles, quiet blue wash, mono caption while dragging. */
+.imp-composer::before,
+.imp-composer::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+  pointer-events: none;
+  z-index: 2;
+}
+.imp-composer::before { left: 4px; top: 4px; border-left: 1px solid #3b82f6; border-top: 1px solid #3b82f6; }
+.imp-composer::after { right: 4px; bottom: 4px; border-right: 1px solid #3b82f6; border-bottom: 1px solid #3b82f6; }
+.imp-composer:has(> .imp-drop-note)::before,
+.imp-composer:has(> .imp-drop-note)::after { opacity: 1; }
+.imp-drop-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 1;
+  background: rgba(37, 99, 235, 0.04);
+}
+.imp-drop-note::before,
+.imp-drop-note::after { content: ""; position: absolute; width: 14px; height: 14px; }
+.imp-drop-note::before { right: 4px; top: 4px; border-right: 1px solid #3b82f6; border-top: 1px solid #3b82f6; }
+.imp-drop-note::after { left: 4px; bottom: 4px; border-left: 1px solid #3b82f6; border-bottom: 1px solid #3b82f6; }
+.imp-drop-note span {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #3b82f6;
+  background: #1b1b1b;
+  border: 1px solid rgba(59, 130, 246, 0.45);
+  border-radius: 4px;
+  padding: 2px 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .imp-composer .imp-send:not(:disabled),
+  .imp-v2-hint,
+  .imp-composer button[aria-pressed="true"]::after { animation: none; }
+}
