@@ -1521,8 +1521,7 @@ async def get_remote_messages(host_id: str, conversation_id: str) -> list[dict] 
             "SELECT payload FROM remote_messages WHERE host_id=? AND conversation_id=? ORDER BY position",
             (host_id, str(conversation_id)),
         )
-        rows_iter = cur
-        rows = []
+        rows = await cur.fetchall()
         if not rows:
             cur = await db.execute(
                 "SELECT 1 FROM remote_conversations WHERE host_id=? AND conversation_id=?",
@@ -1638,9 +1637,9 @@ async def search_conversation_history(
                     start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
                     excerpt = text[start:end]
                     if start:
-                        excerpt = "…" + excerpt
+                        excerpt = "â€¦" + excerpt
                     if end < len(text):
-                        excerpt += "…"
+                        excerpt += "â€¦"
                     candidates.append({
                         "message_id": row["id"],
                         "role": row["role"],
