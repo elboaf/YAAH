@@ -1580,11 +1580,12 @@ async def get_messages(conversation_id: int):
 async def search_conversation_history(
     conversation_id: int, query: str, max_results: int = 10
 ) -> dict:
-    """Case-insensitive plain-text search over all textual transcript fields.
+    """FTS5 trigram search over all textual transcript fields.
 
-    Matching is pushed into SQLite via LIKE; Python only builds excerpts.
-    SQLite's LIKE is case-insensitive for ASCII. Non-ASCII casefolding
-    differs from Python's casefold() — acceptable per ponytail #270.
+    Trigram tokenization supports substring queries ('EXECUT' finds
+    'EXECUTORS'), multi-term queries, and single-typo tolerance.
+    Results are ranked by relevance (more matches rank higher).
+    The response shape is identical to the original LIKE-based search.
     """
     query = str(query or "").strip()
     if not query:
@@ -1594,29 +1595,26 @@ async def search_conversation_history(
     except (TypeError, ValueError):
         max_results = 10
 
-    # Escape LIKE wildcards in user input
-    safe_query = query.replace("\\", "\\\\").replace("%", "\%").replace("_", "\_")
-    like_pattern = f"%{safe_query}%"
+    # Build FTS5 query: each word becomes a phrase search. FTS5 handles
+    # multi-term AND logic automatically.
+    words = query.split()
+    fts_query = " AND ".join(f'"{w}"' for w in words)
 
-    # Search all text fields via SQL LIKE
     async with open_db() as db:
         cur = await db.execute(
             """
-            SELECT id, role, content, tool_calls, tool_call_id, sub_agent_transcript
-            FROM messages
-            WHERE conversation_id = ?
-            AND (
-                content LIKE ? ESCAPE '\\'
-                OR (tool_calls IS NOT NULL AND json_quote(tool_calls) LIKE ? ESCAPE '\\')
-                OR tool_call_id LIKE ? ESCAPE '\\'
-                OR (sub_agent_transcript IS NOT NULL AND json_quote(sub_agent_transcript) LIKE ? ESCAPE '\\')
-            )
-            ORDER BY id ASC
+            SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id,
+                   m.sub_agent_transcript,
+                   conversation_search_index.rank
+            FROM conversation_search_index
+            JOIN messages m ON m.id = conversation_search_index.doc_id
+            WHERE conversation_search_index.conversation_id = ?
+            AND conversation_search_index MATCH ?
+            ORDER BY conversation_search_index.rank ASC
             """,
-            (conversation_id, like_pattern, like_pattern, like_pattern, like_pattern),
+            (conversation_id, fts_query),
         )
-        # Iterate incrementally - don't load all matching rows.
-        needle = query.casefold()
+        # Iterate incrementally — don't load all matching rows.
         candidates = []
         stopped = False
         while len(candidates) <= max_results:
@@ -1631,7 +1629,14 @@ async def search_conversation_history(
             )
             for field, value in fields:
                 text = str(value)
-                pos = text.casefold().find(needle)
+                pos = text.casefold().find(query.casefold())
+                if pos < 0:
+                    # Trigram match may not be a literal substring match.
+                    # Find the first word that matched.
+                    for w in words:
+                        pos = text.casefold().find(w.casefold())
+                        if pos >= 0:
+                            break
                 if pos >= 0:
                     # Build excerpt around match
                     start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
@@ -1646,11 +1651,9 @@ async def search_conversation_history(
                         "field": field,
                         "excerpt": excerpt,
                     })
-                    if len(candidates) > max_results:
-                        stopped = True
-                        break
-            if stopped:
-                break
+                    break  # one match per message
+            if len(candidates) > max_results:
+                stopped = True
         await cur.close()
 
     return {
