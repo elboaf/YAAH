@@ -1688,6 +1688,7 @@ async def search_conversation_history(
         for w in words:
             raw_tris = [w[i:i+3] for i in range(len(w) - 2)]
             escaped_tris = [f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in raw_tris]
+            groups.append("(" + " OR ".join(escaped_tris) + ")")
         fuzzy_query = " AND ".join(groups)
 
     ranked_sql = """
