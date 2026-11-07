@@ -912,23 +912,62 @@ async def test_gate_busy_lock_proceeds_ungated(monkeypatch, tmp_path, clean_env,
 
 
 @pytest.mark.asyncio
-async def test_unloaded_model_degrades_before_slots_probe(monkeypatch, clean_env, router_cfg):
+async def test_unloaded_cold_preset_bootstraps_base(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Issue #699: preset unloaded + EMPTY ledger (first-ever turn, or
+    bins wiped) -> the gate still warms the child and bootstraps the
+    BASE from the same load the turn's real call would trigger anyway.
+    Before the fix this gate returned silently, the turn paid the full
+    ~11.5k-token head prefill, and the flush skipped too - so every
+    subsequent cold start paid it again."""
     router = _Router()
     router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
     chats: list = []
     _fake_chat(monkeypatch, chats)
+
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
+        chats.append({"messages": messages, "max_tokens": max_tokens,
+                      "tools": tools})
+        # The warm load completed: the router now reports the child loaded.
+        router.models = _models_payload()
+        router.slot = _slot_payload(id_task=1)
+        return {"choices": [{"message": {"content": ""}}]}
+
+    monkeypatch.setattr("backend.agent.model_client.chat", chat)
+
     await sc.gate(model="", effort="", conversation_id=42,
                   is_new_conversation=True, system_prompt="S" * 2000,
                   tools=TOOLS)
-    # The hang-avoidance ordering: /v1/models consulted, /slots never hit.
-    # ROUND5: with an EMPTY ledger there is no bin worth a load cycle, so
-    # the gate still degrades silently - no aux prefill against an
-    # unloaded child.
-    assert any("/v1/models" in u for u in router.gets)
-    assert not any("/slots?" in u for u in router.gets)
-    assert chats == []
+
+    # Hang avoidance holds: /v1/models is consulted BEFORE any /slots
+    # probe (the router's /slots hangs on an unloaded preset).
+    first_slots = next(
+        (i for i, u in enumerate(router.gets) if "/slots?" in u), None
+    )
+    assert first_slots is not None
+    assert any("/v1/models" in u for u in router.gets[:first_slots])
+    # Warm-up fired: tool-less, one token (its prefill is discarded by the
+    # bootstrap's own [system] head).
+    warm = [c for c in chats if c["messages"] == [{"role": "user", "content": "."}]]
+    assert len(warm) == 1 and warm[0]["tools"] is None and warm[0]["max_tokens"] == 1
+    # The aux BOOTSTRAP ran with the turn's tools and the system prompt...
+    boot = [c for c in chats if c["messages"][0]["role"] == "system"]
+    assert len(boot) == 1
+    assert boot[0]["messages"][0]["content"] == "S" * 2000
+    assert boot[0]["tools"] == TOOLS and boot[0]["max_tokens"] == 1
+    # ...and the BASE was saved + ledgered.
+    base = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    assert ("http://h:8080/slots/0?action=save", base) in router.posts
+    ledger = json.loads((tmp_path / "led.json").read_text("utf-8"))
+    assert any(b["file"] == base and b["kind"] == "base" for b in ledger["bins"])
+    # The gate recorded ownership, so the turn-end flush checkpoints this
+    # conversation (the costliest turn banks the conv bin too).
+    assert sc._SLOT_STATE
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000, usage=None, tools=TOOLS)
+    assert any(f == "conv-42.bin" for _, f in router.posts)
 
 
 @pytest.mark.asyncio
@@ -975,23 +1014,107 @@ async def test_unloaded_preset_with_seed_warms_and_restores(
 
 
 @pytest.mark.asyncio
-async def test_unloaded_preset_without_matching_bins_stays_silent(
-    monkeypatch, tmp_path, clean_env, router_cfg,
-):
-    """Unloaded + no bins this turn would restore -> degrade as before
-    (no load cycle for a persona that has nothing banked yet)."""
+async def test_unloaded_cold_warmup_fails_degrades(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Issue #699 scope guard: if the child never comes up (re-probe
+    after the warm load still says unloaded), the gate degrades exactly
+    as before - no bootstrap, no BASE, no gate record, so the turn-end
+    flush skips and the turn proceeds uncached."""
     router = _Router()
     router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
     router.install(monkeypatch)
     monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
-    sc._write_ledger("http://h:8080/v1", "x2.m", {"bins": []})
     chats: list = []
     _fake_chat(monkeypatch, chats)
+    probe_calls = {"n": 0}
+
+    async def always_unloaded(api_base, preset):
+        probe_calls["n"] += 1
+        # The child never comes up.
+
+    monkeypatch.setattr(sc, "_probe", always_unloaded)
     await sc.gate(model="", effort="", conversation_id=42,
                   is_new_conversation=True, system_prompt="S" * 2000,
                   tools=TOOLS)
-    assert chats == []
-    assert not any("action=restore" in u for u, _ in router.posts)
+    # One warm attempt fired, then the re-probe gave up - no bootstrap
+    # aux prefill against a child that never loaded.
+    assert probe_calls["n"] == 2
+    assert len(chats) == 1
+    assert not router.posts
+    assert sc._SLOT_STATE == {}
+    assert not (tmp_path / "led.json").exists()
+    # And the flush skips: no gate ownership record was made.
+    await sc.flush(model="", effort="", conversation_id=42,
+                   system_prompt="S" * 2000, usage=None, tools=TOOLS)
+    assert not router.posts
+
+
+@pytest.mark.asyncio
+async def test_unloaded_cold_warmup_cancelled(monkeypatch, tmp_path, clean_env, router_cfg):
+    """Issue #699 + #389 semantics: Stop during the warm load aborts the
+    whole cold-start bootstrap - no save, no ledger, no gate record."""
+    router = _Router()
+    router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
+        await asyncio.Event().wait()  # never completes
+
+    monkeypatch.setattr("backend.agent.model_client.chat", chat)
+    cancel_ev = asyncio.Event()
+    cancel_ev.set()
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  cancel_ev=cancel_ev, tools=TOOLS)
+    assert router.posts == []
+    assert sc._SLOT_STATE == {}
+    assert not (tmp_path / "led.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_second_new_conversation_after_cold_bootstrap_restores(
+    monkeypatch, tmp_path, clean_env, router_cfg,
+):
+    """Issue #699 acceptance 2: after a cold-start bootstrap banked the
+    BASE, a second new conversation on the same persona (still cold -
+    preset unloaded again) warms and RESTORES the BASE instead of
+    re-prefilling the head."""
+    router = _Router()
+    router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
+    router.install(monkeypatch)
+    monkeypatch.setattr(sc, "_ledger_path", lambda a, m: tmp_path / "led.json")
+    chats: list = []
+    _fake_chat(monkeypatch, chats)
+
+    async def chat(messages, tools=None, stream=False, model="", effort="",
+                   max_tokens=None):
+        chats.append({"messages": messages, "max_tokens": max_tokens,
+                      "tools": tools})
+        router.models = _models_payload()
+        router.slot = _slot_payload(id_task=1)
+        return {"choices": [{"message": {"content": ""}}]}
+
+    monkeypatch.setattr("backend.agent.model_client.chat", chat)
+
+    # First turn: cold bootstrap banks the BASE.
+    await sc.gate(model="", effort="", conversation_id=42,
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
+    base = sc.base_bin_name("http://h:8080/v1", "x2.m", "S" * 2000, TOOLS)
+    assert ("http://h:8080/slots/0?action=save", base) in router.posts
+
+    # Second turn: preset unloaded again, but the BASE now exists.
+    router.models = {"data": [{"id": "x2.m", "status": {"value": "unloaded"}}]}
+    router.posts.clear()
+    chats.clear()
+    await sc.gate(model="", effort="", conversation_id=77,
+                  is_new_conversation=True, system_prompt="S" * 2000,
+                  tools=TOOLS)
+    warm = [c for c in chats if c["messages"] == [{"role": "user", "content": "."}]]
+    assert len(warm) == 1  # exactly one tool-less warm load
+    assert not any(c["messages"][0]["role"] == "system" for c in chats)
+    assert ("http://h:8080/slots/0?action=restore", base) in router.posts
 
 
 @pytest.mark.asyncio
