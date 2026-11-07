@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
     if os.environ.get("YAAH_NO_HOSTING") != "1" and (
         load_config().get("remote") or {}
     ).get("hosting_enabled", True):
-        discovery.start_advertising(API_PORT)
+        discovery.start_advertising(_effective_api_port())
     # MCP tool servers (config "mcpServers"): spawn each registered server
     # and merge its tools into the model's toolbox. Failures are per-server
     # and non-fatal — a broken server shows as 'failed' in Settings.
@@ -107,6 +107,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _effective_api_port() -> int:
+    """The port THIS process serves: the headless server records its bind
+    in YAAH_API_PORT before starting uvicorn (service context and
+    `serve --port`); the desktop app and dev runs bind API_PORT. The
+    mDNS beacon advertises the port LAN clients must dial, so it must
+    follow the process's real bind, not a constant."""
+    try:
+        return int(os.environ.get("YAAH_API_PORT") or API_PORT)
+    except ValueError:
+        return API_PORT
 
 
 def _is_loopback_client(client_host: str) -> bool:
@@ -2483,7 +2495,7 @@ async def api_set_config(body: ConfigUpdate):
         from backend.agent import discovery
 
         if merged.get("hosting_enabled"):
-            discovery.start_advertising(API_PORT)
+            discovery.start_advertising(_effective_api_port())
         else:
             discovery.stop_advertising()
     return {"ok": True}

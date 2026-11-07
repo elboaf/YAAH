@@ -20,19 +20,26 @@ passphrase only. Install it on machines you control.
 
 ## Windows
 
-1. Download `yaah-server-setup.exe` and run it **from an elevated
-   prompt** — installing a service requires elevation. Double-clicking
-   also works; it detects it isn't a service start and launches the same
-   wizard. Admin account: a plain UAC yes/no. Standard account: the popup
-   asks for an administrator's password.
-2. Answer two prompts:
+1. Download `yaah-server-setup.exe` and double-click it (or run it from
+   a prompt — same thing). A UAC prompt appears (admin account: yes/no;
+   standard account: enter an administrator's password), then the
+   **setup window** opens. Installing a service needs that elevation.
+2. Fill the form and click **Install**:
    - the **passphrase** desktop clients must present,
    - a **display name** (what the client's host switcher shows; defaults
-     to the hostname).
-3. The wizard copies itself to `%LOCALAPPDATA%\YAAH\`, registers the
+     to the hostname),
+   - the **port** (default 8765 — what direct-IP entries assume) and
+     **host bind** (default `0.0.0.0` = LAN hosting).
+   An existing install is detected and pre-filled (upgrade, not reinstall).
+3. The installer copies itself to `%LOCALAPPDATA%\YAAH\`, registers the
    `YaahServer` service (automatic startup, running as **LocalSystem** —
    no account password involved), records the installing user's profile
-   in the service's `Parameters` registry key, and starts it.
+   in the service's `Parameters` registry key, adds the Windows Firewall
+   rules, and starts the service. A confirmation dialog closes it out.
+4. The server now appears in **Programs & Features** ("YAAH Headless
+   Server", right-click — Uninstall) and the Start Menu gains a
+   **YAAH Server** folder: *Uninstall*, *Open Server Status* (running
+   state, port, version, last start) and *Server Logs*.
 
 Run setup from the account whose workspace you want the server to serve:
 the passphrase is stored in that account's `~/.yaah/config.json` and the
@@ -54,10 +61,16 @@ explicitly (elevated):
 
     netsh advfirewall firewall add rule name="YAAH Server" dir=in action=allow program="C:\Users\<you>\AppData\Local\YAAH\yaah-server-setup.exe" enable=yes
 
-Manage the service (elevated):
+Manage the server:
+
+    yaah-server-setup status      # status window (or: Start Menu > Open Server Status)
+    yaah-server-setup logs        # open the logs folder in Explorer
+    yaah-server-setup uninstall   # GUI uninstaller (same as Programs & Features)
+
+Manage the service from a script (elevated prompt; the verbs the GUI wraps):
 
     yaah-server-setup start | stop | restart
-    yaah-server-setup remove      # uninstall the service
+    yaah-server-setup remove      # stop, deregister, drop ARP + Start Menu
     yaah-server-setup serve       # foreground console run (debugging)
 
 Verify: `curl http://127.0.0.1:8765/api/remote/info` — `workspace_root`
@@ -78,6 +91,21 @@ Two events in the System log look scary but aren't failures:
   Application log naming the port). Stop the desktop app (or don't install
   the service on a desktop-use box); the SCM restart policy retries every
   5 s, so the service picks the port up once it frees.
+
+## Uninstalling (Windows)
+
+Programs & Features — right-click "YAAH Headless Server" — Uninstall (or
+Start Menu — YAAH Server — Uninstall YAAH Server). The uninstaller asks,
+one by one, whether to remove the service (+ firewall rules + Start Menu
+folder), the YAAH data folder (`~/.yaah` — shared with the desktop app on
+this box, so it is opt-in and stays by default), and the program file;
+it shows the exact summary before anything is deleted, then reports what
+was removed. Unattended equivalent: `yaah-server-setup remove` from an
+elevated prompt — in the windowed build the service host has no console,
+so this prints nothing and `HandleCommandLine` may return before the
+ SCM finishes the stop; wait for the SCM yourself (poll `sc query
+YaahServer` until it leaves RUNNING) before reusing the port or
+reinstalling (CodeRabbit #466 round 2).
 
 ## Linux (deb)
 
@@ -122,6 +150,8 @@ passphrase" means a plain mismatch.
 
 `scripts/build_server.sh` builds the PyInstaller exe(s); on Windows it
 produces the single self-contained `yaah-server-setup.exe` (service host +
-wizard + management verbs + `serve`), on Linux the plain `yaah-server`
-binary that `scripts/build_server_deb.sh` wraps into the deb. The release
-workflow builds and attaches all four artifacts on tag push.
+GUI installer/uninstaller + status window + management verbs + `serve`,
+built `--windowed` so no console flashes), on Linux the plain
+`yaah-server` binary that `scripts/build_server_deb.sh` wraps into the
+deb. The release workflow builds and attaches all four artifacts on tag
+push.
