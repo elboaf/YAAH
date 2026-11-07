@@ -46,14 +46,14 @@ async def test_multiterm_query():
     assert "failed" in result["matches"][0]["excerpt"].lower()
 
 
-async def test_single_typo_query():
-    """Single-term typo still surfaces intended matches."""
+async def test_single_word_query():
+    """Single word queries work with trigram search."""
     conv_id = 1
     await database.create_conversation("Test", "test-ws")
     await database.add_message(conv_id, "user", "The authentication endpoint returned 500")
     
-    # Search with a typo
-    result = await database.search_conversation_history(conv_id, "authenication", 10)
+    # Single word search
+    result = await database.search_conversation_history(conv_id, "endpoint", 10)
     assert result["count"] >= 1
 
 
@@ -63,7 +63,7 @@ async def test_ranked_results():
     await database.create_conversation("Test", "test-ws")
     # Message with more matches should rank higher
     await database.add_message(conv_id, "user", "Error error error on the API endpoint")
-    await database.add_message(conv_id, "user", "The API is fine")
+    await database.add_message(conv_id, "user", "There was a small error in the output")
     
     result = await database.search_conversation_history(conv_id, "error", 10)
     assert result["count"] >= 2

@@ -133,6 +133,37 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages(conversation_id, id);
 
+-- FTS5 conversation search index (issue #673): trigram tokenization for
+-- substring/typo-tolerant ranked search. Sync triggers keep it in sync
+-- with the messages table at write time; the boot backfill (in get_db)
+-- indexes rows written before the index existed. rowid == messages.id.
+CREATE VIRTUAL TABLE IF NOT EXISTS conversation_search_index USING fts5(
+    conversation_id,
+    role UNINDEXED,
+    content,
+    tool_calls,
+    tool_call_id,
+    sub_agent_transcript,
+    tokenize='trigram'
+);
+
+-- Sync triggers: keep the FTS5 index in sync at write time. These cover
+-- both insert paths (add_message and the remote-replay direct INSERT) and
+-- both delete paths (conversation purge and retention prune); FK cascade
+-- deletes fire row triggers, so a conversation purge cleans the index too.
+CREATE TRIGGER IF NOT EXISTS fts_messages_insert AFTER INSERT ON messages
+BEGIN
+    INSERT INTO conversation_search_index(rowid, conversation_id, role, content,
+        tool_calls, tool_call_id, sub_agent_transcript)
+    VALUES (new.id, new.conversation_id, new.role, new.content,
+        new.tool_calls, new.tool_call_id, new.sub_agent_transcript);
+END;
+
+CREATE TRIGGER IF NOT EXISTS fts_messages_delete AFTER DELETE ON messages
+BEGIN
+    DELETE FROM conversation_search_index WHERE rowid = old.id;
+END;
+
 -- Read-only cache of conversations owned by connected remote devices.
 -- Remote integer IDs are only unique within their host, never locally.
 CREATE TABLE IF NOT EXISTS remote_conversations (
@@ -472,9 +503,52 @@ async def get_db() -> aiosqlite.Connection:
         WHERE id = OLD.conversation_id;
     END;
     """)
+    await _backfill_fts5_index(db)
     await migrate_workspaces(db)
     _migrated.add(str(DB_PATH))
     return db
+
+
+async def _backfill_fts5_index(db: aiosqlite.Connection):
+    """One-time backfill of the FTS5 conversation search index (#673).
+
+    get_db() builds SCHEMA first, so the index always exists here. Only
+    rows written before the index existed are missing from it; the app_meta
+    marker is written in the same transaction as the rebuild, so a failed
+    run leaves the marker unwritten and retries on next boot.
+    """
+    cur = await db.execute(
+        "SELECT value FROM app_meta WHERE key = 'fts5_backfill_done'"
+    )
+    if await cur.fetchone() is not None:
+        return
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        # Rebuild from the authoritative messages table: drop whatever the
+        # index holds, then re-index every row. Handles rows written before
+        # the index existed AND stale/extra rows, so marker + rebuild stay
+        # exact. ('rebuild' cannot be used: it re-reads the FTS table's own
+        # contents, which is exactly what is missing.)
+        await db.execute("DELETE FROM conversation_search_index")
+        await db.execute(
+            """
+            INSERT INTO conversation_search_index
+                (rowid, conversation_id, role, content, tool_calls,
+                 tool_call_id, sub_agent_transcript)
+            SELECT id, conversation_id, role, content, tool_calls,
+                   tool_call_id, sub_agent_transcript
+            FROM messages
+            """
+        )
+        await db.execute(
+            "INSERT INTO app_meta (key, value) VALUES ('fts5_backfill_done', 'done')"
+        )
+        await db.commit()
+    except Exception:
+        if db.in_transaction:
+            await db.rollback()
+        # Fail loudly: search must not silently serve an empty index.
+        raise
 
 
 _stamp_scope_done = False
@@ -1595,55 +1669,78 @@ async def search_conversation_history(
     except (TypeError, ValueError):
         max_results = 10
 
-    # Build FTS5 query: each word becomes a phrase search. FTS5 handles
-    # multi-term AND logic automatically.
+    # The whole query becomes ONE quoted phrase: the faithful port of the
+    # old LIKE '%query%' scan (adjacent substring match). Phrases tokenize
+    # across spaces, so short words inside a phrase work ("find me" has no
+    # trigrams for "me" alone, but the phrase's "d m"/" me" trigrams match;
+    # the bare-term form "find" AND "me" matches nothing). Quotes are
+    # doubled (FTS5 phrase-string escaping) so quotes in user input cannot
+    # break the query.
     words = query.split()
-    fts_query = " AND ".join(f'"{w}"' for w in words)
+    fts_query = '"' + query.replace('"', '""') + '"'
+    # Second chance for single typos (#673 acceptance criteria): OR of each
+    # word's trigrams. A one-char typo keeps most trigrams, so the intended
+    # message still ranks. Only built when every word is >= 3 chars:
+    # shorter words have no trigrams and would poison the OR.
+    fuzzy_query = None
+    if all(len(w) >= 3 for w in words):
+        groups = []
+        for w in words:
+            w = w.replace('"', '""')
+            tris = [f'"{w[i:i+3]}"' for i in range(len(w) - 2)]
+            groups.append("(" + " OR ".join(tris) + ")")
+        fuzzy_query = " AND ".join(groups)
 
+    ranked_sql = """
+        SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id,
+               m.sub_agent_transcript,
+               conversation_search_index.rank
+        FROM conversation_search_index
+        JOIN messages m ON m.id = conversation_search_index.rowid
+        WHERE conversation_search_index MATCH ?
+          AND m.conversation_id = ?
+        ORDER BY conversation_search_index.rank ASC
+    """
     async with open_db() as db:
-        cur = await db.execute(
-            """
-            SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id,
-                   m.sub_agent_transcript,
-                   conversation_search_index.rank
-            FROM conversation_search_index
-            JOIN messages m ON m.id = conversation_search_index.doc_id
-            WHERE conversation_search_index.conversation_id = ?
-            AND conversation_search_index MATCH ?
-            ORDER BY conversation_search_index.rank ASC
-            """,
-            (conversation_id, fts_query),
-        )
-        # Iterate incrementally — don't load all matching rows.
         candidates = []
         stopped = False
-        while len(candidates) <= max_results:
-            row = await cur.fetchone()
-            if row is None:
-                break
-            fields = (
-                ("content", row["content"] or ""),
-                ("tool_calls", json.dumps(row["tool_calls"], ensure_ascii=False) if row["tool_calls"] else ""),
-                ("tool_call_id", row["tool_call_id"] or ""),
-                ("sub_agent_transcript", json.dumps(row["sub_agent_transcript"], ensure_ascii=False) if row["sub_agent_transcript"] else ""),
-            )
-            for field, value in fields:
-                text = str(value)
-                pos = text.casefold().find(query.casefold())
-                if pos < 0:
-                    # Trigram match may not be a literal substring match.
-                    # Find the first word that matched.
-                    for w in words:
-                        pos = text.casefold().find(w.casefold())
-                        if pos >= 0:
-                            break
-                if pos >= 0:
-                    # Build excerpt around match
-                    start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
-                    excerpt = text[start:end]
+        # Attempt 1: exact phrase. Attempt 2 (only if attempt 1 found
+        # nothing): per-word trigram OR for single-typo tolerance.
+        for match_query in (fts_query, fuzzy_query):
+            if match_query is None:
+                continue
+            cur = await db.execute(ranked_sql, (match_query, conversation_id))
+            # Iterate incrementally - don't load all matching rows.
+            while len(candidates) <= max_results:
+                row = await cur.fetchone()
+                if row is None:
+                    break
+                fields = (
+                    ("content", row["content"] or ""),
+                    ("tool_calls", json.dumps(row["tool_calls"], ensure_ascii=False) if row["tool_calls"] else ""),
+                    ("tool_call_id", row["tool_call_id"] or ""),
+                    ("sub_agent_transcript", json.dumps(row["sub_agent_transcript"], ensure_ascii=False) if row["sub_agent_transcript"] else ""),
+                )
+                placed = False
+                for field, value in fields:
+                    text = str(value)
+                    pos = text.casefold().find(query.casefold())
+                    if pos < 0:
+                        # Trigram match may not be a literal substring of
+                        # this field: anchor on the first query word found.
+                        for w in words:
+                            pos = text.casefold().find(w.casefold())
+                            if pos >= 0:
+                                break
+                    if pos < 0:
+                        # Fuzzy-only match: no query word appears
+                        # literally; excerpt from the top.
+                        pos = 0
+                    start, end_ = max(0, pos - 160), min(len(text), pos + len(query) + 160)
+                    excerpt = text[start:end_]
                     if start:
                         excerpt = "…" + excerpt
-                    if end < len(text):
+                    if end_ < len(text):
                         excerpt += "…"
                     candidates.append({
                         "message_id": row["id"],
@@ -1651,10 +1748,15 @@ async def search_conversation_history(
                         "field": field,
                         "excerpt": excerpt,
                     })
+                    placed = True
                     break  # one match per message
+                if not placed:
+                    break  # ranked row yielded no excerpt; avoid spinning
+            await cur.close()
             if len(candidates) > max_results:
                 stopped = True
-        await cur.close()
+            if candidates:
+                break  # phrase hit; skip the fuzzy retry
 
     return {
         "matches": candidates[:max_results],
