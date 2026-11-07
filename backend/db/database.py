@@ -1638,9 +1638,9 @@ async def search_conversation_history(
                     start, end = max(0, pos - 160), min(len(text), pos + len(query) + 160)
                     excerpt = text[start:end]
                     if start:
-                        excerpt = "…" + excerpt
+                        excerpt = "â€¦" + excerpt
                     if end < len(text):
-                        excerpt += "…"
+                        excerpt += "â€¦"
                     candidates.append({
                         "message_id": row["id"],
                         "role": row["role"],
