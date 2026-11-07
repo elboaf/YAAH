@@ -551,3 +551,38 @@ def test_exit_plan_schema_only_injected_in_plan_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(loop, "load_config", cfgmod.load_config)
     names = {s["function"]["name"] for s in get_schemas()}
     assert "exit_plan" not in names
+
+
+# ---------------------------------------------------------------- mDNS port truth (issue #466)
+
+def test_effective_api_port_follows_env_marker(monkeypatch):
+    """The headless server exports YAAH_API_PORT before binding; the
+    mDNS beacon must advertise that port (LAN clients dial what this
+    process actually binds), and garbage in the env falls back to
+    API_PORT rather than crashing the lifespan."""
+    import backend.main as mainmod
+
+    monkeypatch.setattr(mainmod, "API_PORT", 8765)
+    monkeypatch.setenv("YAAH_API_PORT", "9001")
+    assert mainmod._effective_api_port() == 9001
+    monkeypatch.setenv("YAAH_API_PORT", "not-a-port")
+    assert mainmod._effective_api_port() == 8765
+    monkeypatch.delenv("YAAH_API_PORT")
+    assert mainmod._effective_api_port() == 8765
+
+
+def test_advertising_callsites_use_effective_port(monkeypatch):
+    """Both beacon starts (lifespan + the hosting toggle in api_set_config)
+    must go through _effective_api_port - a hardcoded API_PORT would
+    advertise 8765 while the service listens on the configured port."""
+    import inspect
+
+    import backend.main as mainmod
+
+    lifespan_src = inspect.getsource(mainmod.lifespan)
+    assert "_effective_api_port()" in lifespan_src
+    assert "start_advertising(API_PORT)" not in lifespan_src
+
+    toggle_src = inspect.getsource(mainmod.api_set_config)
+    assert "_effective_api_port()" in toggle_src
+    assert "start_advertising(API_PORT)" not in toggle_src

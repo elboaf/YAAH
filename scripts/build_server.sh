@@ -36,7 +36,14 @@ if [ -n "$EXE" ]; then
   # Windows: the single exe hosts the service (pywin32) AND the setup
   # wizard (`yaah-server-setup setup` / double-click).
   pip install pywin32
-  pyinstaller --noconfirm --clean --onefile --console \
+  # --windowed (issue #466): the installer/uninstaller are GUI windows
+  # (Tkinter); the SCM service context has no console anyway. Tkinter's
+  # tcl/tk data files are collected automatically. NOTE: in a windowed
+  # build stdout/stderr are None, so the service verbs (install/remove/
+  # start/stop/restart) print nothing and scripted callers get no
+  # output - script against the CONSOLE build if you need messages
+  # (CodeRabbit #466 round 2).
+  pyinstaller --noconfirm --clean --onefile --windowed \
     --name yaah-server-setup \
     --add-binary "backend/gh/bin/gh.exe;gh/bin" \
     --add-data "backend/gh/LICENSE;gh" \
@@ -49,6 +56,7 @@ if [ -n "$EXE" ]; then
     --hidden-import mcp --hidden-import mcp.client.stdio \
     --hidden-import mcp.client.session --hidden-import mcp.types \
     --hidden-import yaml \
+    --hidden-import server_gui \
     --hidden-import win32timezone --hidden-import win32serviceutil \
     --hidden-import win32service --hidden-import win32event \
     --hidden-import servicemanager \
