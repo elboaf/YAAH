@@ -11,6 +11,13 @@ Two cache points per (router, model, system prompt) "persona":
    conversation on that persona restores the BASE at the gate instead of
    re-prefilling the system prompt.
 
+   Issue #699: the bootstrap also runs when the preset is UNLOADED and
+   the persona has no bins (first turn ever, or bins wiped). The gate
+   warms the child first - the turn's real call autoloads it either way -
+   and banks the BASE from that same load, instead of skipping and
+   letting the costliest turn of the session prefill the whole head with
+   nothing banked.
+
    ROUND-6 CORRECTION: the aux prefill MUST carry the same tool schemas
    the turn's real calls will. Chat templates render the tools block at
    the HEAD of the prompt, so a tools-less bank shares ~no prefix with
@@ -477,40 +484,56 @@ async def _gate_inner(
         return
     async with lock:
         probed = await _probe(api_base, preset)
+        base_name = base_bin_name(api_base, preset, system_prompt, tools)
         if probed is None:
             # A router restart / idle-unload leaves the preset unloaded
             # while the bins stay on disk. Degrading here made every
             # first turn after a restart pay load + FULL prefill with the
             # cache sitting unused (live-diagnosed 2026-10-25). When the
-            # router is merely between loads and this turn would restore
-            # a bin, warm the child with a tiny aux prefill (llama-swap
-            # spawns on demand) and proceed into the normal decision.
+            # router is merely between loads, warm the child with a tiny
+            # aux prefill (llama-swap spawns on demand) and proceed into
+            # the normal decision.
             if not (await _preset_not_loaded(api_base, preset)):
                 return
             ledger = read_ledger(api_base, preset)
-            base_name = base_bin_name(api_base, preset, system_prompt, tools)
             warm_bin = _warm_candidate(
                 ledger, conversation_id, is_new_conversation, base_name
             )
             if warm_bin is None:
-                return
-            log.info(
-                "slotcache: %s not loaded, warming to restore %s",
-                preset, warm_bin,
-            )
+                # Issue #699: no bin worth restoring (first-ever turn on
+                # the persona, or bins wiped). Skipping here made the
+                # turn's OWN call pay the full head prefill (~11.5k
+                # tokens / ~90 s live) while banking nothing - and the
+                # flush then skipped for lack of a gate record, so the
+                # NEXT cold start paid it all again. The autoload fires
+                # on the turn's real call either way, so warm the child
+                # now and let the bootstrap branch below bank the BASE
+                # from that same load.
+                log.info(
+                    "slotcache: %s not loaded, no bins to restore; "
+                    "warming to bootstrap the BASE",
+                    preset,
+                )
+            else:
+                log.info(
+                    "slotcache: %s not loaded, warming to restore %s",
+                    preset, warm_bin,
+                )
             try:
                 from backend.agent.loop import _race_model_call
 
                 call = asyncio.create_task(
                     model_client.chat(
                         # Minimal warm prompt: the goal is the LOAD, not a
-                        # cacheable prefix (the restore below replaces the
-                        # slot anyway). Deliberately TOOL-LESS: whatever
-                        # this call prefills is discarded by the restore
-                        # (round-6b live verify 2026-10-26 - with tools
+                        # cacheable prefix. Deliberately TOOL-LESS:
+                        # whatever this call prefills is discarded - by
+                        # the restore below when a bin was restored
+                        # (round-6b live verify 2026-10-26: with tools
                         # riding along the "warm-up" prefilled 5,204
                         # tokens / ~44 s before restoring a bin it then
-                        # matched in 15 tokens). Only the AUX BOOTSTRAP
+                        # matched in 15 tokens), or by the aux bootstrap
+                        # prefill's own [system] head (erase-then-restore
+                        # semantics, ROUND6). Only the AUX BOOTSTRAP
                         # below needs the turn's tools: what IT prefills
                         # gets saved.
                         messages=[{"role": "user", "content": "."}],
@@ -534,7 +557,6 @@ async def _gate_inner(
         models_entry, slot = probed
         boot = boot_fingerprint(models_entry)
         ledger = read_ledger(api_base, preset)
-        base_name = base_bin_name(api_base, preset, system_prompt, tools)
         decision = decide(
             slot,
             _SLOT_STATE.get(key),
