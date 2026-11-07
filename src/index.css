@@ -1,8 +1,15 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
-/* Modern refresh (issue #643, Terminal-as-Accent — full migration):
+/* Tailwind v4 entry (#707): the v3 `@tailwind` directives are silently
+   ignored by the v4 engine - the build stayed green while the theme layer
+   (zinc palette, spacing, fonts) vanished from the shipped app (rc.80/rc.81
+   carried the theme-less CSS). `@import "tailwindcss"` is the v4 entry;
+   `@config` keeps loading tailwind.config.js, which owns the retuned
+   Terminal-as-Accent zinc ladder. Any future redesign that moves the
+   config into CSS `@theme` must retire the `@config` line with it.
+
+   Modern refresh (issue #643, Terminal-as-Accent — full migration):
    clean dark surface with terminal accents, per DESIGN.md. System fonts
    for UI, monospace for machine output. Machine voice is ghost ink
    (#b8b8b8 via .terminal-text) — mono alone marks the machine; the old
