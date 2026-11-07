@@ -865,15 +865,27 @@ TOOLS_SCHEMA += [
         "function": {
             "name": "search_conversation_history",
             "description": (
-                "Search all persisted text in this conversation, including "
-                "messages, tool activity, and sub-agent transcripts. Provide a "
-                "case-insensitive plain-text query; results contain short excerpts."
+                "Search persisted text across conversations. Default searches "
+                "this conversation only. Use workspace_reach='workspace' to "
+                "search all conversations in the current workspace plus any "
+                "configured related workspaces. Use workspace_reach='related' "
+                "to search only related workspaces. Results identify their "
+                "source conversation."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Plain-text query to find in conversation history"},
                     "max_results": {"type": "integer", "description": "Maximum matches (default 10, max 50)"},
+                    "workspace_reach": {
+                        "type": "string",
+                        "enum": ["workspace", "related"],
+                        "description": (
+                            "Expand search to the current workspace ('workspace') "
+                            "or related workspaces only ('related'). Omit or leave "
+                            "empty to search this conversation only."
+                        )
+                    },
                 },
                 "required": ["query"],
             },
@@ -1414,12 +1426,42 @@ async def move_file(workspace: str, src: str, dst: str) -> dict:
 async def search_conversation_history(
     workspace: str, conversation_id: int | None = None,
     query: str = "", max_results: int = 10,
+    workspace_reach: str = None,
 ) -> dict:
     """Search the active conversation's complete persisted text transcript."""
     if conversation_id is None:
         return {"error": "conversation history is unavailable in this context"}
     from backend.db.database import search_conversation_history as search
+    from backend.db.database import search_conversations_in_workspace
+    from backend.db.database import get_related_workspaces
 
+    if workspace_reach == "workspace":
+        results = await search_conversations_in_workspace(workspace, query, max_results)
+        # Also search related workspaces and merge results
+        related = await get_related_workspaces(workspace)
+        for rel_ws in related:
+            rel_results = await search_conversations_in_workspace(rel_ws, query, max_results)
+            if rel_results["matches"]:
+                # Deduplicate by message_id and merge
+                existing_ids = {m["message_id"] for m in results["matches"]}
+                for match in rel_results["matches"]:
+                    if match["message_id"] not in existing_ids:
+                        results["matches"].append(match)
+                        existing_ids.add(match["message_id"])
+                        results["count"] += 1
+        # Re-rank by count (truncate)
+        results["matches"] = results["matches"][:max_results]
+        results["count"] = len(results["matches"])
+        return results
+    elif workspace_reach == "related":
+        related = await get_related_workspaces(workspace)
+        for rel_ws in related:
+            results = await search_conversations_in_workspace(rel_ws, query, max_results)
+            if results["matches"]:
+                return results
+        return {"matches": [], "count": 0, "truncated": False}
+
+    # Default: single conversation search
     return await search(conversation_id, query, max_results)
 
 

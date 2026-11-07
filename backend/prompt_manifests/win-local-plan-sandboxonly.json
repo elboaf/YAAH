@@ -157,8 +157,8 @@
     },
     {
       "name": "search_conversation_history",
-      "bytes": 538,
-      "sha256": "3fa37c36f55806e77ae5bed6457a47c21bfda358f3e7026d890289eb2cd04758"
+      "bytes": 908,
+      "sha256": "47e3f94c8f9497277a8d1aba6d59c4ef77c35c64f383c73f773ec752320ef0cf"
     },
     {
       "name": "spawn_agent",
