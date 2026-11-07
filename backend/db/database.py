@@ -1521,8 +1521,7 @@ async def get_remote_messages(host_id: str, conversation_id: str) -> list[dict] 
             "SELECT payload FROM remote_messages WHERE host_id=? AND conversation_id=? ORDER BY position",
             (host_id, str(conversation_id)),
         )
-        rows_iter = cur
-        rows = []
+        rows = await cur.fetchall()
         if not rows:
             cur = await db.execute(
                 "SELECT 1 FROM remote_conversations WHERE host_id=? AND conversation_id=?",
