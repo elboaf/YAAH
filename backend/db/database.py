@@ -19,7 +19,7 @@ def _default_data_dir() -> Path:
 
     Dev runs keep everything in the repo's backend/data/. The packaged app
     runs from a PyInstaller --onefile bundle, where __file__ points into a
-    throwaway temp extraction that is deleted on exit — writing there meant
+    throwaway temp extraction that is deleted on exit â€” writing there meant
     every launch started from an empty database (user history loss,
     2026-09-11). Frozen builds persist under ~/.yaah instead.
     """
@@ -30,7 +30,7 @@ def _default_data_dir() -> Path:
     return Path(__file__).parent.parent / "data"
 
 
-# YAAH_DB_PATH lets the test suite redirect this to a throwaway file —
+# YAAH_DB_PATH lets the test suite redirect this to a throwaway file â€”
 # the default path is the user's real database.
 DB_PATH = Path(
     os.environ.get("YAAH_DB_PATH")
@@ -38,13 +38,13 @@ DB_PATH = Path(
 )
 
 # migrate_workspaces seeds config.json's last_workspace into the registry once
-# per process (module global), not on every get_db() call — see the comment in
+# per process (module global), not on every get_db() call â€” see the comment in
 # migrate_workspaces.
 _last_workspace_seeded = False
 
 # get_db() runs the schema/migration pass once per (process, database file).
 # Keyed by path, not a bare bool: tests repoint YAAH_DB_PATH at fresh files
-# between cases and each must get a full migrate. #374 — without this, every
+# between cases and each must get a full migrate. #374 â€” without this, every
 # API call's migrate UPDATE contended for the write lock under the UI's
 # polling (1000+ 'database is locked' errors per session).
 _migrated: set[str] = set()
@@ -301,7 +301,7 @@ async def get_db() -> aiosqlite.Connection:
     await db.execute("PRAGMA foreign_keys = ON")
     if str(DB_PATH) in _migrated:
         # Schema + migrations already applied this process (see #374): skip
-        # the write pass below entirely — it is per-request write-lock
+        # the write pass below entirely â€” it is per-request write-lock
         # contention for a result that cannot change.
         return db
     # Idempotent: ensures schema exists even for direct calls outside app lifespan
@@ -321,12 +321,12 @@ async def get_db() -> aiosqlite.Connection:
         # persisted so reloads and Markdown export can render what was said.
         await db.execute("ALTER TABLE messages ADD COLUMN say TEXT")
     if "say_is_fallback" not in cols:
-        # #230: attribution — 1 when the `say` line is the heuristic
+        # #230: attribution â€” 1 when the `say` line is the heuristic
         # fallback, 0 when it is a model <say> briefing; NULL pre-#230 rows.
         await db.execute("ALTER TABLE messages ADD COLUMN say_is_fallback INTEGER")
     if "meta" not in cols:
         # #198: JSON object tagging structured rows so the UI can render
-        # them differently — a scheduled fire's user row carries
+        # them differently â€” a scheduled fire's user row carries
         # {"agent_prompt": true} (collapse-to-chip in agent chats).
         await db.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
     if "duration_ms" not in cols:
@@ -360,7 +360,7 @@ async def get_db() -> aiosqlite.Connection:
         )
     if "model" not in conv_cols or "effort" not in conv_cols:
         # #51/#76: per-chat model + reasoning effort, mirroring the agents
-        # columns. NOT NULL DEFAULT '' = follow the global default — the
+        # columns. NOT NULL DEFAULT '' = follow the global default â€” the
         # pre-per-chat behavior for existing rows.
         if "model" not in conv_cols:
             await db.execute(
@@ -372,7 +372,7 @@ async def get_db() -> aiosqlite.Connection:
             )
         await _stamp_conversation_scopes(db)
     if "subagent_model" not in conv_cols:
-        # #383: the chat's pinned sub-agent scope — complete
+        # #383: the chat's pinned sub-agent scope â€” complete
         # "provider::model" or '' (sub-agent: auto: global setting
         # falls through, then the parent's own model). Top-level guard:
         # an upgraded database already has model/effort, so riding their
@@ -416,7 +416,7 @@ async def get_db() -> aiosqlite.Connection:
         # Persisted load_skill tail: the byte-exact "# Loaded skill" tail
         # message a static-mode conversation accumulated through the
         # load_skill tool. It replays at messages[1] on every later turn so
-        # the strict prompt prefix (head + tail) keeps matching — a
+        # the strict prompt prefix (head + tail) keeps matching â€” a
         # this-turn-only tail vanished on the next turn and shifted the
         # whole history down a slot, re-prefilling everything after the
         # head (observed 90+% -> ~20% cache hits on llama.cpp). Written
@@ -428,11 +428,11 @@ async def get_db() -> aiosqlite.Connection:
         # The workspace the tail was accumulated under (NULL = never
         # accumulated). A loaded block embeds the skill folder path of the
         # workspace it was loaded under, so the tail must not replay after
-        # a conversation moves — same scoping rule as the frozen head. Its
+        # a conversation moves â€” same scoping rule as the frozen head. Its
         # OWN column, not the head's: the head refreezes (and rewrites its
         # ws) on the first turn after a move, which would retroactively
         # bless a stale tail's bytes if the tail shared the column.
-        # Pre-upgrade tails keep ws NULL and stop replaying — a one-time
+        # Pre-upgrade tails keep ws NULL and stop replaying â€” a one-time
         # cache loss; the next load_skill re-accumulates.
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN persisted_skill_tail_ws TEXT"
@@ -455,7 +455,7 @@ async def get_db() -> aiosqlite.Connection:
         # the conversation becomes the on-screen one.
         await db.execute("ALTER TABLE agents ADD COLUMN say_mode TEXT NOT NULL DEFAULT 'arrival'")
     if "subagent_model" not in agent_cols:
-        # #383: the agent's pinned sub-agent scope — complete
+        # #383: the agent's pinned sub-agent scope â€” complete
         # "provider::model" or '' (sub-agent: auto). Written through the
         # model-effort endpoint from the pinned chat's sub-agent picker,
         # same contract as model/effort.
@@ -467,7 +467,7 @@ async def get_db() -> aiosqlite.Connection:
     ws_cols = {r[1] for r in await cur.fetchall()}
     if "position" not in ws_cols:
         # #42: manual sidebar order, stamped only by explicit user drags.
-        # NULL = never manually ordered — the activity sort applies. No
+        # NULL = never manually ordered â€” the activity sort applies. No
         # backfill: a legacy `position = id` backfill made old workspaces
         # read as arbitrarily hand-ordered.
         await db.execute("ALTER TABLE workspaces ADD COLUMN position INTEGER")
@@ -561,11 +561,11 @@ async def _stamp_conversation_scopes(db: aiosqlite.Connection):
     Runs only on the upgrade that ADDS the columns: from then on every row
     carries its own explicit value, and `''` in the wild means the chat's
     owner set Default deliberately (never "inherit whatever the global is
-    right now"). Agent-pinned chats are skipped — their selectors write
+    right now"). Agent-pinned chats are skipped â€” their selectors write
     through to the owning agent, so the agent's model/effort IS the chat's.
     Idempotent via the module flag (get_db runs on every API call).
 
-    #132: the stamp writes the global in PROVIDER-QUALIFIED form — a bare
+    #132: the stamp writes the global in PROVIDER-QUALIFIED form â€” a bare
     id would lose the routing provider and the chat would silently follow
     the active_provider of the day (the "model not found" re-route bug)."""
     global _stamp_scope_done
@@ -598,7 +598,7 @@ async def repair_bare_model_scopes() -> dict:
     """#132 one-time repair: qualify every conversations row still storing a
     BARE model id (no provider). Bare rows were stamped bare by the #51/#76
     upgrade stamp (and by first-sends that fell back to the bare global), so
-    their routing provider is lost — turns drifted to whichever provider the
+    their routing provider is lost â€” turns drifted to whichever provider the
     sidebar default pointed at later ("model not found").
 
     Resolution per bare id: match against every configured provider's
@@ -613,7 +613,7 @@ async def repair_bare_model_scopes() -> dict:
 
     Unlike the other one-time migrations, this does NOT live in get_db's
     migration chain: it needs live provider catalogs (HTTP), and get_db runs
-    on every API call — probing /models per request would be unacceptable.
+    on every API call â€” probing /models per request would be unacceptable.
     Hosted by lifespan instead (once per boot, before the scheduler starts);
     tests invoke it directly and reset the flag themselves."""
     global _repair_scope_done
@@ -628,7 +628,7 @@ async def repair_bare_model_scopes() -> dict:
     active = cfg.get("active_provider") or ""
     try:
         catalogs = (await list_all_models(cfg.get("providers") or {}))["providers"]
-    except Exception as e:  # noqa: BLE001 — repair is best-effort, never fatal
+    except Exception as e:  # noqa: BLE001 â€” repair is best-effort, never fatal
         # Providers unreachable: leave every row for the next boot to retry.
         _repair_scope_done = False
         return {"repaired": 0, "error": str(e)}
@@ -646,7 +646,7 @@ async def repair_bare_model_scopes() -> dict:
         # #383: subagent_model columns follow the same complete-or-empty
         # rule, so bare values there repair through the identical catalog
         # resolution (a scope's bare branch routes at the AMBIENT provider,
-        # silently defeating the pin — qualify it like model itself).
+        # silently defeating the pin â€” qualify it like model itself).
         for table, cols in (
             ("conversations", ("model", "subagent_model")),
             ("agents", ("model", "subagent_model")),
@@ -716,7 +716,7 @@ async def migrate_workspaces(db: aiosqlite.Connection):
     # registry too, so the restored selection always exists in the dropdown.
     # This seed is ONCE PER PROCESS: migrate_workspaces runs on every get_db
     # (i.e. every API call), and re-seeding per call resurrects a deleted
-    # workspace whenever config.json still names it — the mechanism behind
+    # workspace whenever config.json still names it â€” the mechanism behind
     # issue #11. The durable case (restart) is covered by delete_workspace
     # clearing last_workspace when its path is removed.
     global _last_workspace_seeded
@@ -764,7 +764,7 @@ async def reorder_workspaces(ordered_ids: list[int]) -> None:
     """Stamp the user's manual sidebar order (#42).
 
     Only the listed ids get positions (list index = position). Unlisted
-    rows stay NULL — 'never manually ordered' — and NULL must never be
+    rows stay NULL â€” 'never manually ordered' â€” and NULL must never be
     backfilled, or rows the user never dragged read as hand-placed.
     """
     async with open_db() as db:
@@ -888,11 +888,11 @@ async def create_conversation(
     Blank strings are legal writes (the chat's deliberate Default); None
     stamps the current global default (drafts already carry explicit picks,
     so None is the "unspecified" path for API callers).
-    subagent_model (#383): the chat's pinned sub-agent scope — '' (auto) is
+    subagent_model (#383): the chat's pinned sub-agent scope â€” '' (auto) is
     the normal write; an explicit value qualifies complete-or-empty like
     model does.
     #132: an explicit-but-BARE model id is qualified with the active
-    provider at write time — the row must be self-describing, or a later
+    provider at write time â€” the row must be self-describing, or a later
     sidebar default change silently re-routes the chat ("model not found")."""
     if model is None or effort is None:
         from backend.agent.config import load_config
@@ -985,9 +985,9 @@ async def assert_no_active_remote_edit_lease(db, conversation_id: int) -> None:
 async def update_conversation(conversation_id: int, *, touch_updated_at: bool = True, **fields):
     """Update allowed conversation fields (title, workspace,
     system_prompt_override, model, effort, subagent_model). #132: a bare
-    model write is qualified with the active provider — '' stays ''
+    model write is qualified with the active provider â€” '' stays ''
     (deliberate Default). #382: a ''/'.' workspace write is the Default
-    pseudo-workspace and lands as NULL — a stored '' would drop the chat
+    pseudo-workspace and lands as NULL â€” a stored '' would drop the chat
     from the sidebar's NULL-matched Default group.
 
     touch_updated_at: whether to bump updated_at (default True). Pass
@@ -1021,7 +1021,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
             updates["model"], load_config().get("active_provider") or ""
         )
     if updates.get("subagent_model"):
-        # #383: same complete-or-empty rule for the sub-agent scope — a
+        # #383: same complete-or-empty rule for the sub-agent scope â€” a
         # bare id would route at today's active provider forever after.
         from backend.agent.config import load_config, qualify_model_scope
 
@@ -1048,7 +1048,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
 
 
 async def touch_updated_at(conversation_id: int) -> None:
-    """Bump the conversation's updated_at timestamp — used at run
+    """Bump the conversation's updated_at timestamp â€” used at run
     completion so the sidebar re-sorts once per run, not per message.
 
     Uses strftime with %f for microsecond resolution to avoid two fast
@@ -1068,18 +1068,18 @@ async def move_conversation(conversation_id: int, target: str | None) -> dict | 
 
     The conversation row's `workspace` column is the single source of truth
     for where the chat LIVES; the turn endpoint derives each turn's working
-    directory from it, so updating this row IS the move — the sidebar group
+    directory from it, so updating this row IS the move â€” the sidebar group
     and the cwd can never drift apart.
 
     target: the destination workspace path, or None for the Default
     pseudo-workspace (no root directory). Returns
-    {"workspace": target-or-None, "target_id": registry id or None} —
+    {"workspace": target-or-None, "target_id": registry id or None} â€”
     target_id is None when the destination is Default, which has no
     directory to register. None (chat unknown) means the caller returns 404.
 
     Renaming-on-move is deliberately out of scope here: if the target path
     doesn't exist on disk it is still registered (the sidebar already shows
-    a ⚠ for dead workspaces), so the move is never silently lost.
+    a âš  for dead workspaces), so the move is never silently lost.
     """
     # ''/'.' mean Default and must land as NULL, not '' (#382): the sidebar
     # groups under Default by matching the registry's NULL path.
@@ -1130,7 +1130,7 @@ async def set_conversation_usage(
 ):
     """Record the context size (usage.prompt_tokens) of the latest model call
     in this conversation, plus the model id that produced it. Deliberately
-    does NOT touch updated_at — a context readout must not re-sort the list."""
+    does NOT touch updated_at â€” a context readout must not re-sort the list."""
     async with open_db() as db:
         await db.execute(
             "UPDATE conversations SET context_tokens = ?, context_model = ? WHERE id = ?",
@@ -1144,7 +1144,7 @@ async def add_conversation_cost(
 ):
     """Accumulate billed cost and output tokens for this conversation.
 
-    cost may be None (provider didn't report it) — in that case only
+    cost may be None (provider didn't report it) â€” in that case only
     completion tokens are tracked. Uses atomic column increment so
     concurrent model calls within a turn don't race.
     """
@@ -1196,7 +1196,7 @@ async def add_message(
                 json.dumps(attachments) if attachments else None,
                 json.dumps(sub_agent_transcript) if sub_agent_transcript else None,
                 say,
-                # #230: attribution flag — True when the persisted `say` line
+                # #230: attribution flag â€” True when the persisted `say` line
                 # is the heuristic fallback rather than a model <say> briefing.
                 1 if say_is_fallback else (0 if say_is_fallback is not None else None),
                 json.dumps(meta) if meta else None,
@@ -1686,9 +1686,8 @@ async def search_conversation_history(
     if all(len(w) >= 3 for w in words):
         groups = []
         for w in words:
-            w = w.replace('"', '""')
-            tris = [f'"{w[i:i+3]}"' for i in range(len(w) - 2)]
-            groups.append("(" + " OR ".join(tris) + ")")
+            raw_tris = [w[i:i+3] for i in range(len(w) - 2)]
+            escaped_tris = [f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in raw_tris]
         fuzzy_query = " AND ".join(groups)
 
     ranked_sql = """
@@ -1707,7 +1706,7 @@ async def search_conversation_history(
         # Attempt 1: exact phrase. Attempt 2 (only if attempt 1 found
         # nothing): per-word trigram OR for single-typo tolerance.
         for match_query in (fts_query, fuzzy_query):
-            if match_query is None:
+            if match_query is None or match_query == '""':
                 continue
             cur = await db.execute(ranked_sql, (match_query, conversation_id))
             # Iterate incrementally - don't load all matching rows.
@@ -1721,21 +1720,30 @@ async def search_conversation_history(
                     ("tool_call_id", row["tool_call_id"] or ""),
                     ("sub_agent_transcript", json.dumps(row["sub_agent_transcript"], ensure_ascii=False) if row["sub_agent_transcript"] else ""),
                 )
-                placed = False
+                # Find the best field to excerpt from: prefer literal match,
+                # then word match, then first non-empty (fuzzy-only matches).
+                literal_target = None
+                word_target = None
+                first_nonempty = None
                 for field, value in fields:
                     text = str(value)
+                    if not text:
+                        continue
+                    if first_nonempty is None:
+                        first_nonempty = (field, text, 0)
                     pos = text.casefold().find(query.casefold())
-                    if pos < 0:
-                        # Trigram match may not be a literal substring of
-                        # this field: anchor on the first query word found.
-                        for w in words:
-                            pos = text.casefold().find(w.casefold())
-                            if pos >= 0:
-                                break
-                    if pos < 0:
-                        # Fuzzy-only match: no query word appears
-                        # literally; excerpt from the top.
-                        pos = 0
+                    if pos >= 0:
+                        literal_target = (field, text, pos)
+                        break
+                    for w in words:
+                        wpos = text.casefold().find(w.casefold())
+                        if wpos >= 0:
+                            if word_target is None:
+                                word_target = (field, text, wpos)
+                            break
+                target = literal_target or word_target or first_nonempty
+                if target is not None:
+                    field, text, pos = target
                     start, end_ = max(0, pos - 160), min(len(text), pos + len(query) + 160)
                     excerpt = text[start:end_]
                     if start:
@@ -1749,7 +1757,6 @@ async def search_conversation_history(
                         "excerpt": excerpt,
                     })
                     placed = True
-                    break  # one match per message
                 if not placed:
                     break  # ranked row yielded no excerpt; avoid spinning
             await cur.close()
