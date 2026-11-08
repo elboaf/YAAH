@@ -1431,6 +1431,8 @@ async def search_conversation_history(
     """Search the active conversation's complete persisted text transcript."""
     if conversation_id is None:
         return {"error": "conversation history is unavailable in this context"}
+    if not str(query or "").strip():
+        return {"error": "query must not be empty"}
     from backend.db.database import search_conversation_history as search
     from backend.db.database import search_conversations_in_workspace
     from backend.db.database import get_related_workspaces

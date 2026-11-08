@@ -503,11 +503,12 @@ async def get_db() -> aiosqlite.Connection:
         WHERE id = OLD.conversation_id;
     END;
     """)
-    # Mark migration as complete before backfill so get_db() calls from search return quickly
-    _migrated.add(str(DB_PATH))
     # Run one-time FTS5 backfill (no-op if already done)
     await _backfill_fts5_index(db)
     await migrate_workspaces(db)
+    # Mark migration complete after both finish so a failure leaves the
+    # path eligible for retry.
+    _migrated.add(str(DB_PATH))
     return db
 
 
@@ -1673,9 +1674,9 @@ def _make_excerpt(row, query, words):
     """Build an excerpt dict from a search result row."""
     fields = (
         ("content", row["content"] or ""),
-        ("tool_calls", json.dumps(row["tool_calls"], ensure_ascii=False) if row["tool_calls"] else ""),
+        ("tool_calls", row["tool_calls"] or ""),
         ("tool_call_id", row["tool_call_id"] or ""),
-        ("sub_agent_transcript", json.dumps(row["sub_agent_transcript"], ensure_ascii=False) if row["sub_agent_transcript"] else ""),
+        ("sub_agent_transcript", row["sub_agent_transcript"] or ""),
     )
     literal_target = None
     word_target = None
@@ -1804,12 +1805,21 @@ async def search_conversations_in_workspace(
     except (TypeError, ValueError):
         max_results = 10
 
+    # Normalize workspace path so callers pass '' or '.' (matches Default
+    # workspace, stored as NULL)
+    normalized = normalize_workspace(workspace)
+
     # Build conversation ID list for this workspace
     async with open_db() as db:
-        cur = await db.execute(
-            "SELECT id FROM conversations WHERE workspace = ?",
-            (workspace,)
-        )
+        if normalized is None:
+            cur = await db.execute(
+                "SELECT id FROM conversations WHERE workspace IS NULL"
+            )
+        else:
+            cur = await db.execute(
+                "SELECT id FROM conversations WHERE workspace = ?",
+                (normalized,)
+            )
         conv_ids = [row["id"] for row in await cur.fetchall()]
 
     if not conv_ids:
