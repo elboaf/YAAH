@@ -1898,7 +1898,13 @@ async def search_all_workspaces(query: str, max_results: int = 10) -> dict:
         for sq in search_queries:
             if stopped or candidates:
                 break
-            cur = await db.execute(ranked_sql, (sq,))
+            # Restrict to transcript content fields; conversation_id is
+            # indexed but we don't want numeric queries matching IDs
+            # instead of actual message content.
+            cur = await db.execute(
+                ranked_sql,
+                (f"{{content tool_calls tool_call_id sub_agent_transcript}} : ({sq})",),
+            )
             while len(candidates) <= max_results:
                 row = await cur.fetchone()
                 if row is None:
@@ -1928,7 +1934,7 @@ async def search_all_workspaces(query: str, max_results: int = 10) -> dict:
 def _classify_result_kind(match: dict) -> str:
     """Classify a search result by the kind of content it matched."""
     field = match.get("field", "")
-    if field == "sub_agent_transcript" or match.get("role") == "system":
+    if field == "sub_agent_transcript":
         return "sub-agent"
     if field in ("tool_calls", "tool_call_id") or match.get("role") == "tool":
         return "tool"
