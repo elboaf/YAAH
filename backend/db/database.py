@@ -503,8 +503,11 @@ async def get_db() -> aiosqlite.Connection:
         WHERE id = OLD.conversation_id;
     END;
     """)
+    # Run one-time FTS5 backfill (no-op if already done)
     await _backfill_fts5_index(db)
     await migrate_workspaces(db)
+    # Mark migration complete after both finish so a failure leaves the
+    # path eligible for retry.
     _migrated.add(str(DB_PATH))
     return db
 
@@ -1651,6 +1654,72 @@ async def get_messages(conversation_id: int):
         return rows
 
 
+def _build_fts_query(query: str):
+    """Build the FTS5 query string and fuzzy fallback for a user query."""
+    query = str(query or "").strip()
+    words = query.split()
+    fts_query = '"' + query.replace('"', '""') + '"'
+    fuzzy_query = None
+    if all(len(w) >= 3 for w in words):
+        groups = []
+        for w in words:
+            raw_tris = [w[i:i+3] for i in range(len(w) - 2)]
+            escaped_tris = [f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in raw_tris]
+            groups.append("(" + " OR ".join(escaped_tris) + ")")
+        fuzzy_query = " AND ".join(groups)
+    return query, words, fts_query, fuzzy_query
+
+
+def _make_excerpt(row, query, words):
+    """Build an excerpt dict from a search result row."""
+    fields = (
+        ("content", row["content"] or ""),
+        ("tool_calls", row["tool_calls"] or ""),
+        ("tool_call_id", row["tool_call_id"] or ""),
+        ("sub_agent_transcript", row["sub_agent_transcript"] or ""),
+    )
+    literal_target = None
+    word_target = None
+    first_nonempty = None
+    for field, value in fields:
+        text = str(value)
+        if not text:
+            continue
+        if first_nonempty is None:
+            first_nonempty = (field, text, 0)
+        pos = text.casefold().find(query.casefold())
+        if pos >= 0:
+            literal_target = (field, text, pos)
+            break
+        for w in words:
+            wpos = text.casefold().find(w.casefold())
+            if wpos >= 0:
+                if word_target is None:
+                    word_target = (field, text, wpos)
+                break
+    target = literal_target or word_target or first_nonempty
+    if target is None:
+        return None
+    field, text, pos = target
+    start, end_ = max(0, pos - 160), min(len(text), pos + len(query) + 160)
+    excerpt = text[start:end_]
+    if start:
+        excerpt = "…" + excerpt
+    if end_ < len(text):
+        excerpt += "…"
+    result = {
+        "message_id": row["id"],
+        "role": row["role"],
+        "field": field,
+        "excerpt": excerpt,
+    }
+    if "conversation_id" in row.keys():
+        result["conversation_id"] = row["conversation_id"]
+    if "title" in row.keys():
+        result["conversation_title"] = row["title"]
+    return result
+
+
 async def search_conversation_history(
     conversation_id: int, query: str, max_results: int = 10
 ) -> dict:
@@ -1661,7 +1730,7 @@ async def search_conversation_history(
     Results are ranked by relevance (more matches rank higher).
     The response shape is identical to the original LIKE-based search.
     """
-    query = str(query or "").strip()
+    query, words, fts_query, fuzzy_query = _build_fts_query(query)
     if not query:
         return {"error": "query must not be empty"}
     try:
@@ -1669,108 +1738,162 @@ async def search_conversation_history(
     except (TypeError, ValueError):
         max_results = 10
 
-    # The whole query becomes ONE quoted phrase: the faithful port of the
-    # old LIKE '%query%' scan (adjacent substring match). Phrases tokenize
-    # across spaces, so short words inside a phrase work ("find me" has no
-    # trigrams for "me" alone, but the phrase's "d m"/" me" trigrams match;
-    # the bare-term form "find" AND "me" matches nothing). Quotes are
-    # doubled (FTS5 phrase-string escaping) so quotes in user input cannot
-    # break the query.
-    words = query.split()
-    fts_query = '"' + query.replace('"', '""') + '"'
-    # Second chance for single typos (#673 acceptance criteria): OR of each
-    # word's trigrams. A one-char typo keeps most trigrams, so the intended
-    # message still ranks. Only built when every word is >= 3 chars:
-    # shorter words have no trigrams and would poison the OR.
-    fuzzy_query = None
-    if all(len(w) >= 3 for w in words):
-        groups = []
-        for w in words:
-            raw_tris = [w[i:i+3] for i in range(len(w) - 2)]
-            escaped_tris = [f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in raw_tris]
-            groups.append("(" + " OR ".join(escaped_tris) + ")")
-        fuzzy_query = " AND ".join(groups)
-
-    ranked_sql = """
-        SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id,
-               m.sub_agent_transcript,
-               conversation_search_index.rank
-        FROM conversation_search_index
-        JOIN messages m ON m.id = conversation_search_index.rowid
-        WHERE conversation_search_index MATCH ?
-          AND m.conversation_id = ?
-        ORDER BY conversation_search_index.rank ASC
-    """
+    ranked_sql = (
+        "SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, "
+        "m.sub_agent_transcript, conversation_search_index.rank "
+        "FROM conversation_search_index "
+        "JOIN messages m ON m.id = conversation_search_index.rowid "
+        "WHERE conversation_search_index MATCH ? "
+        "AND m.conversation_id = ? "
+        "ORDER BY conversation_search_index.rank ASC"
+    )
     async with open_db() as db:
         candidates = []
         stopped = False
-        # Attempt 1: exact phrase. Attempt 2 (only if attempt 1 found
-        # nothing): per-word trigram OR for single-typo tolerance.
         for match_query in (fts_query, fuzzy_query):
             if match_query is None or match_query == '""':
                 continue
             cur = await db.execute(ranked_sql, (match_query, conversation_id))
-            # Iterate incrementally - don't load all matching rows.
             while len(candidates) <= max_results:
                 row = await cur.fetchone()
                 if row is None:
                     break
-                fields = (
-                    ("content", row["content"] or ""),
-                    ("tool_calls", json.dumps(row["tool_calls"], ensure_ascii=False) if row["tool_calls"] else ""),
-                    ("tool_call_id", row["tool_call_id"] or ""),
-                    ("sub_agent_transcript", json.dumps(row["sub_agent_transcript"], ensure_ascii=False) if row["sub_agent_transcript"] else ""),
-                )
-                # Find the best field to excerpt from: prefer literal match,
-                # then word match, then first non-empty (fuzzy-only matches).
-                literal_target = None
-                word_target = None
-                first_nonempty = None
-                for field, value in fields:
-                    text = str(value)
-                    if not text:
-                        continue
-                    if first_nonempty is None:
-                        first_nonempty = (field, text, 0)
-                    pos = text.casefold().find(query.casefold())
-                    if pos >= 0:
-                        literal_target = (field, text, pos)
-                        break
-                    for w in words:
-                        wpos = text.casefold().find(w.casefold())
-                        if wpos >= 0:
-                            if word_target is None:
-                                word_target = (field, text, wpos)
-                            break
-                target = literal_target or word_target or first_nonempty
-                if target is not None:
-                    field, text, pos = target
-                    start, end_ = max(0, pos - 160), min(len(text), pos + len(query) + 160)
-                    excerpt = text[start:end_]
-                    if start:
-                        excerpt = "…" + excerpt
-                    if end_ < len(text):
-                        excerpt += "…"
-                    candidates.append({
-                        "message_id": row["id"],
-                        "role": row["role"],
-                        "field": field,
-                        "excerpt": excerpt,
-                    })
+                excerpt = _make_excerpt(row, query, words)
+                if excerpt is not None:
+                    candidates.append(excerpt)
                     placed = True
+                else:
+                    placed = False
                 if not placed:
-                    break  # ranked row yielded no excerpt; avoid spinning
+                    break
             await cur.close()
             if len(candidates) > max_results:
                 stopped = True
             if candidates:
-                break  # phrase hit; skip the fuzzy retry
+                break
+
+    # Strip conversation metadata for backward-compat single-chat results
+    matches = []
+    for m in candidates[:max_results]:
+        matches.append({
+            "message_id": m["message_id"],
+            "role": m["role"],
+            "field": m["field"],
+            "excerpt": m["excerpt"],
+        })
+    return {
+        "matches": matches,
+        "count": len(matches),
+        "truncated": stopped,
+    }
+
+
+async def search_conversations_in_workspace(
+    workspace: str, query: str, max_results: int = 10
+) -> dict:
+    """FTS5 search across all conversations in a workspace.
+
+    Results include the conversation title and ID so callers can
+    identify the source conversation. Supports the same query forms
+    as search_conversation_history.
+    """
+    query, words, fts_query, fuzzy_query = _build_fts_query(query)
+    if not query:
+        return {"error": "query must not be empty"}
+    try:
+        max_results = max(1, min(int(max_results or 10), 50))
+    except (TypeError, ValueError):
+        max_results = 10
+
+    # Normalize workspace path so callers pass '' or '.' (matches Default
+    # workspace, stored as NULL)
+    normalized = normalize_workspace(workspace)
+
+    # Filter by workspace through a join on conversations: no per-id
+    # placeholder list (SQLite caps bound variables; large workspaces
+    # would exceed it), and the conversation ids need not be fetched.
+    ws_filter = "c.workspace IS NULL" if normalized is None else "c.workspace = ?"
+    ranked_sql = f"""
+        SELECT m.id, m.conversation_id, c.title, m.role, m.content,
+               m.tool_calls, m.tool_call_id, m.sub_agent_transcript,
+               conversation_search_index.rank
+        FROM conversation_search_index
+        JOIN messages m ON m.id = conversation_search_index.rowid
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE conversation_search_index MATCH ?
+          AND {ws_filter}
+        ORDER BY conversation_search_index.rank ASC
+    """
+    search_queries = []
+    if fts_query and fts_query != '""':
+        search_queries.append(fts_query)
+    if fuzzy_query:
+        search_queries.append(fuzzy_query)
+
+    candidates = []
+    stopped = False
+    async with open_db() as db:
+        for sq in search_queries:
+            if stopped or candidates:
+                break
+            bind = (sq,) if normalized is None else (sq, normalized)
+            cur = await db.execute(ranked_sql, bind)
+            while len(candidates) <= max_results:
+                row = await cur.fetchone()
+                if row is None:
+                    break
+                excerpt = _make_excerpt(row, query, words)
+                if excerpt is not None:
+                    candidates.append(excerpt)
+                else:
+                    break
+            await cur.close()
+            if len(candidates) > max_results:
+                stopped = True
 
     return {
         "matches": candidates[:max_results],
         "count": len(candidates[:max_results]),
         "truncated": stopped,
     }
+
+
+# Related workspaces configuration (per-workspace, stored in app_meta).
+# Keys use the normalized workspace form so a configured relation always
+# matches the workspace string conversations are stored under.
+def _related_ws_key(workspace: str) -> str:
+    return f"related_workspaces:{normalize_workspace(workspace) or ''}"
+
+
+async def get_related_workspaces(workspace: str) -> list[str]:
+    """Get the list of related workspace paths for a workspace."""
+    async with open_db() as db:
+        cur = await db.execute(
+            "SELECT value FROM app_meta WHERE key = ?",
+            (_related_ws_key(workspace),)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return []
+        try:
+            value = json.loads(row["value"])
+        except (json.JSONDecodeError, TypeError):
+            return []
+        # Only a list of strings is meaningful; anything else (corrupted
+        # or hand-edited row) degrades to "no related workspaces".
+        if not isinstance(value, list):
+            return []
+        return [v for v in value if isinstance(v, str)]
+
+
+async def set_related_workspaces(workspace: str, related: list[str]) -> None:
+    """Set the list of related workspace paths for a workspace."""
+    async with open_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+            (_related_ws_key(workspace), json.dumps(related))
+        )
+        await db.commit()
 
 # ---- Scheduled agents (issue #41) ----
 
