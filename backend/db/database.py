@@ -1858,6 +1858,89 @@ async def search_conversations_in_workspace(
     }
 
 
+async def search_all_workspaces(query: str, max_results: int = 10) -> dict:
+    """FTS5 search across all conversations in all workspaces.
+
+    The human's search reach is genuinely global — unlike the agent
+    workspace-scoped tool, this searches every conversation the human
+    has ever had. Results are classified by kind (chat / tool /
+    sub-agent) via the matched field and role columns.
+    """
+    query, words, fts_query, fuzzy_query = _build_fts_query(query)
+    if not query:
+        return {"error": "query must not be empty"}
+    try:
+        max_results = max(1, min(int(max_results or 10), 50))
+    except (TypeError, ValueError):
+        max_results = 10
+
+    # No workspace filter — all conversations. Join on conversations
+    # for title, but do not filter by workspace.
+    ranked_sql = """
+        SELECT m.id, m.conversation_id, c.title, m.role, m.content,
+               m.tool_calls, m.tool_call_id, m.sub_agent_transcript,
+               conversation_search_index.rank
+        FROM conversation_search_index
+        JOIN messages m ON m.id = conversation_search_index.rowid
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE conversation_search_index MATCH ?
+        ORDER BY conversation_search_index.rank ASC
+    """
+    search_queries = []
+    if fts_query and fts_query != '""':
+        search_queries.append(fts_query)
+    if fuzzy_query:
+        search_queries.append(fuzzy_query)
+
+    candidates = []
+    stopped = False
+    async with open_db() as db:
+        for sq in search_queries:
+            if stopped or candidates:
+                break
+            # Restrict to transcript content fields; conversation_id is
+            # indexed but we don't want numeric queries matching IDs
+            # instead of actual message content.
+            cur = await db.execute(
+                ranked_sql,
+                (f"{{content tool_calls tool_call_id sub_agent_transcript}} : ({sq})",),
+            )
+            while len(candidates) <= max_results:
+                row = await cur.fetchone()
+                if row is None:
+                    break
+                excerpt = _make_excerpt(row, query, words)
+                if excerpt is not None:
+                    candidates.append(excerpt)
+                else:
+                    break
+            await cur.close()
+            if len(candidates) > max_results:
+                stopped = True
+
+    # Classify each result by kind: chat, tool, or sub-agent
+    matches = []
+    for m in candidates[:max_results]:
+        kind = _classify_result_kind(m)
+        matches.append({**m, "kind": kind})
+
+    return {
+        "matches": matches,
+        "count": len(matches),
+        "truncated": stopped,
+    }
+
+
+def _classify_result_kind(match: dict) -> str:
+    """Classify a search result by the kind of content it matched."""
+    field = match.get("field", "")
+    if field == "sub_agent_transcript":
+        return "sub-agent"
+    if field in ("tool_calls", "tool_call_id") or match.get("role") == "tool":
+        return "tool"
+    return "chat"
+
+
 # Related workspaces configuration (per-workspace, stored in app_meta).
 # Keys use the normalized workspace form so a configured relation always
 # matches the workspace string conversations are stored under.
