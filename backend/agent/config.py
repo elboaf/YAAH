@@ -160,6 +160,16 @@ DEFAULTS = {
     # Settings map and takes precedence over the flat form.
     "context_window_overrides": {},
     "model_context": {},
+    # Embeddings config block (Phase 2a, issue #677): model-agnostic
+    # embeddings client, separate from chat providers. YAAH sends chunks
+    # to this endpoint and stores the resulting vectors. The user
+    # configures the endpoint, key, and model name. Blank = unconfigured
+    # = keyword search only (degraded mode).
+    "embeddings": {
+        "api_base": "",
+        "api_key": "",
+        "model": "",
+    },
     # Access mode gating tool execution (PLAN-access-modes.md): "ask" =
     # prompt before mutating/shell tools, "plan" = block them entirely,
     # "full" = run everything without confirmation. Read at gate time so a

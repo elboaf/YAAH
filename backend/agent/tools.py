@@ -1436,52 +1436,77 @@ async def search_conversation_history(
     from backend.db.database import search_conversation_history as search
     from backend.db.database import search_conversations_in_workspace
     from backend.db.database import get_related_workspaces
+    from backend.agent.search_semantic import search_with_semantic
 
     if workspace_reach == "workspace":
-        results = await search_conversations_in_workspace(workspace, query, max_results)
-        if "error" in results:
-            return results
-        # Merge related-workspace matches into one ranked pool, primary
-        # workspace first (each helper returns rank-ordered matches).
-        related = await get_related_workspaces(workspace)
-        for rel_ws in related:
-            rel_results = await search_conversations_in_workspace(rel_ws, query, max_results)
-            if "error" in rel_results:
-                continue  # a broken related workspace must not kill the search
-            existing_ids = {m["message_id"] for m in results["matches"]}
-            for match in rel_results["matches"]:
-                if match["message_id"] not in existing_ids:
-                    results["matches"].append(match)
-                    existing_ids.add(match["message_id"])
-        merged = results["matches"][:max_results]
-        return {
-            "matches": merged,
-            "count": len(merged),
-            "truncated": results["truncated"] or len(results["matches"]) > max_results,
-        }
-    elif workspace_reach == "related":
-        related = await get_related_workspaces(workspace)
-        matches = []
-        truncated = False
-        for rel_ws in related:
-            results = await search_conversations_in_workspace(rel_ws, query, max_results)
+        async def ws_keyword_fn(q: str, n: int) -> dict:
+            results = await search_conversations_in_workspace(workspace, q, n)
             if "error" in results:
-                continue
-            existing_ids = {m["message_id"] for m in matches}
-            for match in results["matches"]:
-                if match["message_id"] not in existing_ids:
-                    matches.append(match)
-                    existing_ids.add(match["message_id"])
-            truncated = truncated or results["truncated"]
-        merged = matches[:max_results]
-        return {
-            "matches": merged,
-            "count": len(merged),
-            "truncated": truncated or len(matches) > max_results,
-        }
+                return results
+            # Merge related-workspace matches into one ranked pool, primary
+            # workspace first (each helper returns rank-ordered matches).
+            related = await get_related_workspaces(workspace)
+            for rel_ws in related:
+                rel_results = await search_conversations_in_workspace(rel_ws, q, n)
+                if "error" in rel_results:
+                    continue  # a broken related workspace must not kill the search
+                existing_ids = {m["message_id"] for m in results["matches"]}
+                for match in rel_results["matches"]:
+                    if match["message_id"] not in existing_ids:
+                        results["matches"].append(match)
+                        existing_ids.add(match["message_id"])
+            merged = results["matches"][:n]
+            return {
+                "matches": merged,
+                "count": len(merged),
+                "truncated": results["truncated"] or len(results["matches"]) > n,
+            }
 
-    # Default: single conversation search
-    return await search(conversation_id, query, max_results)
+        return await search_with_semantic(
+            ws_keyword_fn, query, max_results,
+            workspace_reach="workspace", workspace=workspace,
+        )
+    elif workspace_reach == "related":
+        async def rel_keyword_fn(q: str, n: int) -> dict:
+            related = await get_related_workspaces(workspace)
+            matches = []
+            truncated = False
+            for rel_ws in related:
+                results = await search_conversations_in_workspace(rel_ws, q, n)
+                if "error" in results:
+                    continue
+                existing_ids = {m["message_id"] for m in matches}
+                for match in results["matches"]:
+                    if match["message_id"] not in existing_ids:
+                        matches.append(match)
+                        existing_ids.add(match["message_id"])
+                truncated = truncated or results["truncated"]
+            merged = matches[:n]
+            return {
+                "matches": merged,
+                "count": len(merged),
+                "truncated": truncated or len(matches) > n,
+            }
+
+        return await search_with_semantic(
+            rel_keyword_fn, query, max_results,
+            workspace_reach="related", workspace=workspace,
+        )
+
+    # Default: single conversation search, with the semantic layer (#677)
+    # layered over it. search_with_semantic runs keyword_fn FIRST and adds
+    # the semantic ranking on top -- so an unreachable embeddings endpoint
+    # degrades to exactly the keyword results below, flagged in
+    # semantic_state/semantic_unavailable instead of failing the tool.
+    from backend.agent.search_semantic import search_with_semantic
+
+    async def keyword_fn(q: str, n: int) -> dict:
+        return await search(conversation_id, q, n)
+
+    return await search_with_semantic(
+        keyword_fn, query, max_results,
+        workspace_reach=None, workspace=None,
+    )
 
 
 async def search_files(

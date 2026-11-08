@@ -164,6 +164,22 @@ BEGIN
     DELETE FROM conversation_search_index WHERE rowid = old.id;
 END;
 
+-- Vector search index (issue #677, Phase 2a): stores embedding vectors for
+-- message chunks. Built incrementally via the index builder; not synced
+-- at write time (rebuild is user-triggered). chunk_index distinguishes
+-- multiple chunks from the same message.
+CREATE TABLE IF NOT EXISTS vector_index (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    conversation_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    chunk_text TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    UNIQUE(message_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_vector_conversation ON vector_index(conversation_id);
+
 -- Read-only cache of conversations owned by connected remote devices.
 -- Remote integer IDs are only unique within their host, never locally.
 CREATE TABLE IF NOT EXISTS remote_conversations (

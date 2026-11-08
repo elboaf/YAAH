@@ -21,6 +21,12 @@ from backend.db.database import get_db
 
 log = logging.getLogger("yaah.main")
 
+# Embeddings index rebuild state (#677): one rebuild at a time; progress
+# for the Settings display. Rebuilds are user-triggered ONLY (never at
+# boot); the globals live here because the endpoint owns the lifecycle.
+_embeddings_rebuild_running = False
+_embeddings_rebuild_progress: dict = {}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -956,10 +962,127 @@ async def api_search(query: str = "", max_results: int = 10):
     Searches across all conversations in all workspaces. Results are
     classified by kind (chat / tool / sub-agent) and carry conversation
     identity so the UI can open the source conversation.
+
+    #677: semantic search layers over the keyword ranking when the
+    embeddings endpoint is configured, an index exists, and query-time
+    embedding succeeds -- any failure degrades to the keyword results
+    with semantic_state/semantic_unavailable explaining why.
     """
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="query must not be empty")
-    return await search_all_workspaces(query, max_results)
+    from backend.agent.search_semantic import search_with_semantic
+
+    async def keyword_fn(q: str, n: int) -> dict:
+        return await search_all_workspaces(q, n)
+
+    return await search_with_semantic(keyword_fn, query.strip(), max_results)
+
+
+@app.get("/api/embeddings/status")
+async def api_embeddings_status():
+    """Embeddings state for Settings (#677).
+
+    configured/available report the endpoint block and reachability;
+    index carries the stored build metadata (model, dimensions, last
+    build time); readiness is the degradation ladder state. A probe is
+    NOT fired here implicitly on every poll -- the UI calls POST
+    /api/embeddings/probe for a live reachability check -- because the
+    probe costs a real embedding round-trip.
+    """
+    from backend.agent import embeddings, vectorestore
+
+    emb_cfg = embeddings._embeddings_config()
+    configured = bool(emb_cfg["api_base"]) and bool(emb_cfg["model"])
+    meta = await vectorestore.get_index_metadata()
+    return {
+        "configured": configured,
+        "api_base": emb_cfg["api_base"],
+        "api_key": "set" if emb_cfg["api_key"] else "",
+        "model": emb_cfg["model"],
+        "index": {
+            "model": meta.get("model"),
+            "dimensions": meta.get("dimensions"),
+            "last_build": meta.get("last_build"),
+            "vectors": await vectorestore.get_vector_count(),
+        },
+        "readiness": vectorestore.semantic_readiness(
+            emb_cfg["model"], meta
+        ),
+        "available": None,  # unknown until probed; see /api/embeddings/probe
+    }
+
+
+@app.post("/api/embeddings/probe")
+async def api_embeddings_probe():
+    """Live reachability probe for the configured endpoint (#677).
+
+    Sends a one-word embed to the configured endpoint and reports what
+    came back (dimensions, model) or why it failed. Never raises.
+    """
+    from backend.agent import embeddings
+
+    return await embeddings.check_embeddings_available()
+
+
+@app.post("/api/embeddings/rebuild")
+async def api_embeddings_rebuild():
+    """User-triggered index rebuild (#677).
+
+    One-click from Settings. Runs synchronously and returns the build
+    summary; never fires at boot or on config save. An in-flight build
+    rejects a second trigger (409) so two builds cannot interleave their
+    clears and stores.
+    """
+    from backend.agent import indexbuilder
+
+    global _embeddings_rebuild_running
+    if _embeddings_rebuild_running:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "rebuild_in_progress",
+                    "message": "an index rebuild is already running"},
+        )
+    _embeddings_rebuild_running = True
+    try:
+        def _track(phase: str, pct: int, msg: str):
+            _embeddings_rebuild_progress.clear()
+            _embeddings_rebuild_progress.update({
+                "running": True, "phase": phase, "percent": pct, "message": msg,
+            })
+            log.info("embeddings rebuild: %s %d%% %s", phase, pct, msg)
+
+        result = await indexbuilder.build_index(progress_callback=_track)
+        _embeddings_rebuild_progress.clear()
+        _embeddings_rebuild_progress.update({
+            "running": False, "phase": "done", "percent": 100,
+            "message": (
+                f"{'ok' if result.get('ok') else 'error'}: "
+                f"{result.get('vectors_stored', 0)} vectors stored"
+            ),
+            "result": result,
+        })
+        return result
+    finally:
+        _embeddings_rebuild_running = False
+
+
+@app.get("/api/embeddings/rebuild/progress")
+async def api_embeddings_rebuild_progress():
+    """Last-known rebuild progress for the Settings progress display.
+
+    The rebuild itself runs in one request; while it runs this reports
+    the live phase/percent, after it finishes the final summary lingers
+    until the next build starts.
+    """
+    return dict(_embeddings_rebuild_progress)
+
+
+@app.post("/api/embeddings/rebuild/progress/reset")
+async def api_embeddings_rebuild_progress_reset():
+    """Clear the lingering progress summary (UI dismiss)."""
+    global _embeddings_rebuild_progress
+    _embeddings_rebuild_progress = {}
+    return {"ok": True}
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
@@ -1092,6 +1215,10 @@ class ConfigUpdate(BaseModel):
     # Wake bridge (issue #688): an external event file starts chat turns.
     # Partial-merged like the other blocks; None = untouched.
     wake: dict | None = None
+    # Embeddings endpoint block (#677): separate from chat providers.
+    # Merged like the other blocks; the api_key echoes "set"/"" the way
+    # the voice keys do (a mask never overwrites the stored key).
+    embeddings: dict | None = None
 
 
 @app.post("/api/agent/{conversation_id}")
@@ -2344,6 +2471,11 @@ async def api_get_config():
         # Wake bridge (issue #688): the sanitized view — garbage fields
         # never reach the UI; edits sanitize on the way back in.
         "wake": wake_mod.read_wake_config(cfg),
+        # Embeddings endpoint block (#677), key masked like voice keys.
+        "embeddings": {
+            **(cfg.get("embeddings") or {}),
+            "api_key": "set" if (cfg.get("embeddings") or {}).get("api_key") else "",
+        },
     }
 
 
@@ -2456,6 +2588,34 @@ async def api_set_config(body: ConfigUpdate):
     wk = updates.get("wake")
     if isinstance(wk, dict):
         merge_block("wake", updates)
+    # Embeddings block (#677): masked-key merge. The GET view shows
+    # api_key as "set"/""; an echoed mask must never overwrite the stored
+    # key, a fresh value replaces it, and a blank does not clear.
+    # api_base/model are three-state like image_generation.api_base:
+    # absent = untouched, non-blank = the user's value, blank = clear.
+    # Blank MUST win over the merge or the configured flag lies: the
+    # contract is blank = unconfigured = keyword search only.
+    emb = updates.get("embeddings")
+    if isinstance(emb, dict):
+        existing_emb = load_config().get("embeddings") or {}
+        incoming_base = (
+            str(emb["api_base"]).strip() if "api_base" in emb else None
+        )
+        incoming_model = str(emb["model"]).strip() if "model" in emb else None
+        merged_emb = {
+            **existing_emb,
+            **{k: v for k, v in emb.items() if v not in (None, "")},
+        }
+        if incoming_base is not None:
+            merged_emb["api_base"] = incoming_base
+        if incoming_model is not None:
+            merged_emb["model"] = incoming_model
+        if emb.get("api_key") in ("set", ""):
+            # Echoed mask: the stored key survives untouched (a fresh
+            # non-empty value already rode the non-blank filter above;
+            # a blank key never clears -- same rule as the voice keys).
+            merged_emb["api_key"] = existing_emb.get("api_key") or ""
+        updates["embeddings"] = merged_emb
     # Interface scale is clamped to the shipped range (Settings offers a
     # 100–200% slider since #171; anything wilder would break the layout).
     if "ui_scale" in updates:
