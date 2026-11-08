@@ -1809,24 +1809,10 @@ async def search_conversations_in_workspace(
     # workspace, stored as NULL)
     normalized = normalize_workspace(workspace)
 
-    # Build conversation ID list for this workspace
-    async with open_db() as db:
-        if normalized is None:
-            cur = await db.execute(
-                "SELECT id FROM conversations WHERE workspace IS NULL"
-            )
-        else:
-            cur = await db.execute(
-                "SELECT id FROM conversations WHERE workspace = ?",
-                (normalized,)
-            )
-        conv_ids = [row["id"] for row in await cur.fetchall()]
-
-    if not conv_ids:
-        return {"matches": [], "count": 0, "truncated": False}
-
-    # Search with IN clause
-    placeholders = ",".join("?" for _ in conv_ids)
+    # Filter by workspace through a join on conversations: no per-id
+    # placeholder list (SQLite caps bound variables; large workspaces
+    # would exceed it), and the conversation ids need not be fetched.
+    ws_filter = "c.workspace IS NULL" if normalized is None else "c.workspace = ?"
     ranked_sql = f"""
         SELECT m.id, m.conversation_id, c.title, m.role, m.content,
                m.tool_calls, m.tool_call_id, m.sub_agent_transcript,
@@ -1835,12 +1821,9 @@ async def search_conversations_in_workspace(
         JOIN messages m ON m.id = conversation_search_index.rowid
         JOIN conversations c ON c.id = m.conversation_id
         WHERE conversation_search_index MATCH ?
-          AND m.conversation_id IN ({placeholders})
+          AND {ws_filter}
         ORDER BY conversation_search_index.rank ASC
     """
-    params = [fts_query] + conv_ids
-    if fuzzy_query:
-        params.append(fuzzy_query)
     search_queries = []
     if fts_query and fts_query != '""':
         search_queries.append(fts_query)
@@ -1853,7 +1836,8 @@ async def search_conversations_in_workspace(
         for sq in search_queries:
             if stopped or candidates:
                 break
-            cur = await db.execute(ranked_sql, [sq] + conv_ids)
+            bind = (sq,) if normalized is None else (sq, normalized)
+            cur = await db.execute(ranked_sql, bind)
             while len(candidates) <= max_results:
                 row = await cur.fetchone()
                 if row is None:
@@ -1874,21 +1858,32 @@ async def search_conversations_in_workspace(
     }
 
 
-# Related workspaces configuration (per-workspace, stored in app_meta)
+# Related workspaces configuration (per-workspace, stored in app_meta).
+# Keys use the normalized workspace form so a configured relation always
+# matches the workspace string conversations are stored under.
+def _related_ws_key(workspace: str) -> str:
+    return f"related_workspaces:{normalize_workspace(workspace) or ''}"
+
+
 async def get_related_workspaces(workspace: str) -> list[str]:
     """Get the list of related workspace paths for a workspace."""
     async with open_db() as db:
         cur = await db.execute(
             "SELECT value FROM app_meta WHERE key = ?",
-            (f"related_workspaces:{workspace}",)
+            (_related_ws_key(workspace),)
         )
         row = await cur.fetchone()
         if row is None:
             return []
         try:
-            return json.loads(row["value"])
+            value = json.loads(row["value"])
         except (json.JSONDecodeError, TypeError):
             return []
+        # Only a list of strings is meaningful; anything else (corrupted
+        # or hand-edited row) degrades to "no related workspaces".
+        if not isinstance(value, list):
+            return []
+        return [v for v in value if isinstance(v, str)]
 
 
 async def set_related_workspaces(workspace: str, related: list[str]) -> None:
@@ -1896,7 +1891,7 @@ async def set_related_workspaces(workspace: str, related: list[str]) -> None:
     async with open_db() as db:
         await db.execute(
             "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
-            (f"related_workspaces:{workspace}", json.dumps(related))
+            (_related_ws_key(workspace), json.dumps(related))
         )
         await db.commit()
 

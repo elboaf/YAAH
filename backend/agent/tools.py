@@ -1439,29 +1439,46 @@ async def search_conversation_history(
 
     if workspace_reach == "workspace":
         results = await search_conversations_in_workspace(workspace, query, max_results)
-        # Also search related workspaces and merge results
+        if "error" in results:
+            return results
+        # Merge related-workspace matches into one ranked pool, primary
+        # workspace first (each helper returns rank-ordered matches).
         related = await get_related_workspaces(workspace)
         for rel_ws in related:
             rel_results = await search_conversations_in_workspace(rel_ws, query, max_results)
-            if rel_results["matches"]:
-                # Deduplicate by message_id and merge
-                existing_ids = {m["message_id"] for m in results["matches"]}
-                for match in rel_results["matches"]:
-                    if match["message_id"] not in existing_ids:
-                        results["matches"].append(match)
-                        existing_ids.add(match["message_id"])
-                        results["count"] += 1
-        # Re-rank by count (truncate)
-        results["matches"] = results["matches"][:max_results]
-        results["count"] = len(results["matches"])
-        return results
+            if "error" in rel_results:
+                continue  # a broken related workspace must not kill the search
+            existing_ids = {m["message_id"] for m in results["matches"]}
+            for match in rel_results["matches"]:
+                if match["message_id"] not in existing_ids:
+                    results["matches"].append(match)
+                    existing_ids.add(match["message_id"])
+        merged = results["matches"][:max_results]
+        return {
+            "matches": merged,
+            "count": len(merged),
+            "truncated": results["truncated"] or len(results["matches"]) > max_results,
+        }
     elif workspace_reach == "related":
         related = await get_related_workspaces(workspace)
+        matches = []
+        truncated = False
         for rel_ws in related:
             results = await search_conversations_in_workspace(rel_ws, query, max_results)
-            if results["matches"]:
-                return results
-        return {"matches": [], "count": 0, "truncated": False}
+            if "error" in results:
+                continue
+            existing_ids = {m["message_id"] for m in matches}
+            for match in results["matches"]:
+                if match["message_id"] not in existing_ids:
+                    matches.append(match)
+                    existing_ids.add(match["message_id"])
+            truncated = truncated or results["truncated"]
+        merged = matches[:max_results]
+        return {
+            "matches": merged,
+            "count": len(merged),
+            "truncated": truncated or len(matches) > max_results,
+        }
 
     # Default: single conversation search
     return await search(conversation_id, query, max_results)

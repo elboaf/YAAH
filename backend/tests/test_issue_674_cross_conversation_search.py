@@ -7,8 +7,8 @@ Tests the expanded search scope through the tool executor seam:
 - Sub-agent pinning to own conversation
 """
 import pytest
-import json
 import os
+from backend.db import database
 from backend.agent.tools import execute_tool
 from backend.db.database import (
     create_conversation, add_message,
@@ -18,12 +18,14 @@ from backend.db.database import (
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
-    """Use a throwaway database for each test."""
+    """Each test gets its own database file.
+
+    DB_PATH is read at call time from the module global, so the fixture
+    must rebind it (the env var alone is only read at import time).
+    """
     db_file = tmp_path / "test_674.db"
-    monkeypatch.setenv("YAAH_DB_PATH", str(db_file))
-    # Clear migration cache so the new db gets migrated
-    from backend.db.database import _migrated
-    _migrated.clear()
+    monkeypatch.setattr(database, "DB_PATH", db_file)
+    monkeypatch.setattr(database, "_migrated", set())
     yield db_file
 
 
