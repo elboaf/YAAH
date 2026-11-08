@@ -337,16 +337,29 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
 .lg-sidebar .flex-1 > .mb-3 { margin-top: 2px; }
 /* Hover-revealed thumb: the 8px scrollbar and its stable gutter stay in
    place (issue #133), so revealing the thumb reflows nothing — only its ink
-   changes: transparent while the pointer is elsewhere, hairline once the
-   sidebar is entered. Keyboard focus reveals it the same way so arrow-key
-   scrolling keeps its affordance. */
-.lg-sidebar .flex-1 {
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-  transition: scrollbar-color 0.15s ease-out;
+   changes: transparent while the pointer is outside the sidebar, hairline
+   once the sidebar is entered. Keyboard focus reveals it the same way so
+   arrow-key scrolling keeps its affordance.
+
+   The standard-property path and the ::-webkit-scrollbar path are mutually
+   exclusive on purpose (CodeRabbit, PR #713): any non-auto scrollbar-color
+   or scrollbar-width on the element makes Chromium 121+ ignore the whole
+   ::-webkit-scrollbar family, which would silently drop the thumb's
+   hover/active ladder. So the standard path is gated to engines WITHOUT
+   webkit-scrollbar styling (Firefox), and the webkit path carries no
+   standard properties, keeping Chromium on it. Recent Firefox ships
+   partial ::-webkit-scrollbar support and answers this @supports selector()
+   gate TRUE, which is why the standard path needs a mirror gate rather
+   than relying on the webkit block being skipped there. */
+@supports not selector(::-webkit-scrollbar) {
+  .lg-sidebar .flex-1 {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color 0.15s ease-out;
+  }
+  .lg-sidebar:hover .flex-1,
+  .lg-sidebar:focus-within .flex-1 { scrollbar-color: #333333 transparent; }
 }
-.lg-sidebar:hover .flex-1,
-.lg-sidebar:focus-within .flex-1 { scrollbar-color: #333333 transparent; }
 .lg-sidebar .flex-1::-webkit-scrollbar-thumb {
   background-color: transparent;
   transition: background-color 0.15s ease-out;
