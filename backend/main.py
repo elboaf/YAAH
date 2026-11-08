@@ -232,6 +232,7 @@ from backend.db.database import (
     touch_workspace,
     update_conversation,
     delete_conversation,
+    search_all_workspaces,
     upsert_workspace,
     upsert_remote_conversation,
     list_remote_conversations,
@@ -946,6 +947,19 @@ async def api_delete_conversation(conversation_id: int):
 @app.get("/api/conversations/{conversation_id}/messages")
 async def api_get_messages(conversation_id: int):
     return await get_messages(conversation_id)
+
+
+@app.get("/api/search")
+async def api_search(query: str = "", max_results: int = 10):
+    """HTTP search endpoint for the UI.
+
+    Searches across all conversations in all workspaces. Results are
+    classified by kind (chat / tool / sub-agent) and carry conversation
+    identity so the UI can open the source conversation.
+    """
+    if not query or not query.strip():
+        raise HTTPException(status_code=400, detail="query must not be empty")
+    return await search_all_workspaces(query, max_results)
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
