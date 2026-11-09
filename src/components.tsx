@@ -4319,9 +4319,15 @@ export function Sidebar() {
 
   // #676: open a conversation from a search result (existing flow: switch to
   // the conversation, load its history, remember the workspace).
+  // The search result doesn't carry workspace info — resolve it from the
+  // conversation row and switch workspaces if needed (search is global).
   const openSearchResult = (convId: number) => {
-    setConversationId(convId)
-    getMessages(convId)
+    getConversation(convId)
+      .then((conv) => {
+        setConversationId(convId)
+        if (conv.workspace && conv.workspace !== workspace) setWorkspace(conv.workspace)
+        return getMessages(convId)
+      })
       .then((rows) => loadHistory(convId, rows))
       .catch((e) =>
         setNotice({
