@@ -102,6 +102,13 @@ import {
   type SandboxStatus,
   probeImageProvider,
   getLoraCatalog,
+  getEmbeddingsStatus,
+  probeEmbeddings,
+  rebuildEmbeddings,
+  getEmbeddingsRebuildProgress,
+  dismissEmbeddingsRebuildProgress,
+  type EmbeddingsStatus,
+  type RebuildProgress,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
@@ -6435,6 +6442,238 @@ function SettingsCard({
   )
 }
 
+/** Settings card: the embeddings endpoint (issue #677). Separate from the
+ *  chat providers: the endpoint, key, and model that conversation chunks
+ *  travel to for semantic search. Blank endpoint = unconfigured = keyword
+ *  search only. Test probes reachability (a real one-word embed); Rebuild
+ *  is the one-click, USER-triggered index build with live progress --
+ *  rebuilds never fire at boot or on save. The status row reads
+ *  /api/embeddings/status (no implicit probe: that costs a round-trip). */
+export function EmbeddingsSettingsCard({
+  draft,
+  onChange,
+}: {
+  draft: { api_base: string; api_key: string; model: string; key_saved: boolean }
+  onChange: (next: { api_base: string; api_key: string; model: string; key_saved: boolean }) => void
+}) {
+  const [status, setStatus] = useState<EmbeddingsStatus | null>(null)
+  const [probeState, setProbeState] = useState<'idle' | 'busy'>('idle')
+  const [probeResult, setProbeResult] = useState<string | null>(null)
+  const [probeOk, setProbeOk] = useState(false)
+  const [rebuildState, setRebuildState] = useState<'idle' | 'busy'>('idle')
+  const [rebuildError, setRebuildError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<RebuildProgress | null>(null)
+
+  useEffect(() => {
+    let dead = false
+    getEmbeddingsStatus()
+      .then((s) => {
+        if (!dead) setStatus(s)
+      })
+      .catch(() => {
+        /* status unavailable (old backend): the draft still works */
+      })
+    // Pick up a rebuild started elsewhere (or before this mount): show a
+    // live build or the lingering final summary.
+    getEmbeddingsRebuildProgress()
+      .then((p) => {
+        if (!dead && (p.running || p.phase === 'done')) setProgress(p)
+      })
+      .catch(() => {})
+    return () => {
+      dead = true
+    }
+  }, [])
+
+  // While a rebuild runs (ours or one started elsewhere), poll progress
+  // once a second until it reports done; then refresh the index stats.
+  const rebuildRunning = progress?.running === true
+  useEffect(() => {
+    if (!rebuildRunning) return
+    const iv = window.setInterval(async () => {
+      try {
+        const p = await getEmbeddingsRebuildProgress()
+        if (p.running) {
+          setProgress(p)
+        } else {
+          setProgress({ ...p, running: false })
+          window.clearInterval(iv)
+          getEmbeddingsStatus()
+            .then((s) => setStatus(s))
+            .catch(() => {})
+        }
+      } catch {
+        /* transient poll failure: keep the last known progress */
+      }
+    }, 1000)
+    return () => window.clearInterval(iv)
+  }, [rebuildRunning])
+
+  const draftComplete =
+    draft.api_base.trim() !== '' && draft.model.trim() !== ''
+  // Test/Rebuild hit the SAVED config (the endpoints read config server-
+  // side), not the draft. Enable them only when the draft is complete AND
+  // matches what the backend has: probing or rebuilding a half-edited
+  // form would either report "not configured" (nothing saved yet) or
+  // clear the vectors and rebuild with the OLD model. A typed key also
+  // counts as unsaved (its draft state never reached config.json); a
+  // key-less config is a legitimate final state, not "unsaved".
+  const keyIsUnsaved = draft.api_key.trim() !== ''
+  const savedMatchesDraft =
+    !status ||
+    (status.api_base === draft.api_base.trim() &&
+      status.model === draft.model.trim() &&
+      !keyIsUnsaved)
+  const configured = draftComplete && savedMatchesDraft
+  const saveFirst = draftComplete && !savedMatchesDraft
+
+  const test = async () => {
+    setProbeState('busy')
+    setProbeResult(null)
+    try {
+      const r = await probeEmbeddings()
+      setProbeOk(!!r.available)
+      setProbeResult(
+        r.available
+          ? `ok - endpoint reachable (${r.dimensions} dims, model ${r.model})`
+          : (r.error ?? 'unreachable'),
+      )
+    } catch (e) {
+      setProbeOk(false)
+      setProbeResult((e as Error).message)
+    }
+    setProbeState('idle')
+  }
+
+  const rebuild = async () => {
+    setRebuildState('busy')
+    setRebuildError(null)
+    setProgress({ running: true, phase: 'starting', percent: 0, message: 'Starting index build' })
+    try {
+      const r = await rebuildEmbeddings()
+      setProgress({
+        running: false,
+        phase: 'done',
+        percent: 100,
+        message: r.ok
+          ? `Index built: ${r.vectors_stored ?? 0} vectors (${r.model}, ${r.dimensions} dims)`
+          : `Build finished with errors: ${r.error ?? 'unknown error'}`,
+        result: r,
+      })
+      getEmbeddingsStatus()
+        .then((s) => setStatus(s))
+        .catch(() => {})
+    } catch (e) {
+      setProgress(null)
+      setRebuildError((e as Error).message)
+    }
+    setRebuildState('idle')
+  }
+
+  const dismissProgress = () => {
+    setProgress(null)
+    void dismissEmbeddingsRebuildProgress().catch(() => {})
+  }
+
+  return (
+    <SettingsCard title="Conversation embeddings" className="col-span-4">
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <input
+            className={`${settingsInputCls} flex-1`}
+            value={draft.api_base}
+            placeholder="http://127.0.0.1:8099/v1 (OpenAI-compatible /embeddings)"
+            aria-label="Embeddings endpoint"
+            onChange={(e) => onChange({ ...draft, api_base: e.target.value })}
+          />
+          <button
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            disabled={probeState === 'busy' || !configured}
+            onClick={test}
+          >
+            {probeState === 'busy' ? '…' : 'Test'}
+          </button>
+          <button
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            disabled={rebuildState === 'busy' || !configured}
+            onClick={rebuild}
+          >
+            {rebuildState === 'busy' ? 'Rebuilding…' : 'Rebuild index'}
+          </button>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            className={`${settingsInputCls} flex-1`}
+            value={draft.model}
+            placeholder="embedding model (e.g. bge-m3)"
+            aria-label="Embeddings model"
+            onChange={(e) => onChange({ ...draft, model: e.target.value })}
+          />
+          <input
+            type="password"
+            className={`${settingsInputCls} w-40 shrink-0`}
+            value={draft.api_key}
+            placeholder={draft.key_saved ? 'key saved' : 'api key (optional)'}
+            aria-label="Embeddings API key"
+            onChange={(e) => onChange({ ...draft, api_key: e.target.value })}
+          />
+        </div>
+        {saveFirst && (
+          <p className="font-mono text-[10px] text-amber-400" role="status">
+            Save first to test or rebuild with these settings.
+          </p>
+        )}
+        {status && (
+          <p className="font-mono text-[10px] text-zinc-500">
+            index: {status.index.vectors} vectors
+            {status.index.model
+              ? ` · built with ${status.index.model} (${status.index.dimensions} dims)`
+              : ' · never built'}
+            {status.readiness === 'mismatch' &&
+              ' — configured model differs from the index; rebuild to switch'}
+          </p>
+        )}
+        {probeResult && (
+          <p className={`font-mono text-[10px] ${probeOk ? 'text-emerald-400' : 'text-red-400'}`}>
+            {probeResult}
+          </p>
+        )}
+        {progress && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between font-mono text-[10px] text-zinc-400">
+              <span>{progress.message}</span>
+              {!progress.running && (
+                <button
+                  type="button"
+                  className="text-zinc-500 hover:text-zinc-300"
+                  aria-label="Dismiss rebuild status"
+                  onClick={dismissProgress}
+                >
+                  dismiss
+                </button>
+              )}
+            </div>
+            <div className="h-1 w-full overflow-hidden rounded bg-zinc-800">
+              <div
+                className="h-full bg-blue-500 transition-all"
+                style={{ width: `${progress.percent}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {rebuildError && (
+          <p className="font-mono text-[10px] text-red-400">{rebuildError}</p>
+        )}
+        <p className="font-mono text-[10px] text-zinc-600">
+          {draftComplete
+            ? 'Semantic search layers over keyword results; transcript chunks are sent only to this endpoint.'
+            : 'Blank = semantic search off (keyword search only); nothing is sent anywhere.'}
+        </p>
+      </div>
+    </SettingsCard>
+  )
+}
+
 /** Shared field chrome: raised fill, hairline border, blue focus border.
  *  Width is set per-use (w-full / flex-1 / fixed). */
 const settingsInputCls =
@@ -6813,6 +7052,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     provider: 'sdcpp',
     api_base: '',
   })
+  // Embeddings endpoint draft (#677): separate from chat providers. The
+  // key draft is write-only (GET arrives masked), mirroring the voice keys.
+  const [embeddingsDraft, setEmbeddingsDraft] = useState<{
+    api_base: string
+    api_key: string
+    model: string
+    key_saved: boolean
+  }>({ api_base: '', api_key: '', model: '', key_saved: false })
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // The one provider whose fields are open; collapsed rows show a summary.
@@ -6965,6 +7212,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           setProviders(next)
           setSubagentProvider(c.subagent_provider ?? '')
           setImageGen(c.image_generation ?? { provider: 'sdcpp', api_base: '' })
+          setEmbeddingsDraft({
+            api_base: c.embeddings?.api_base ?? '',
+            api_key: '',
+            model: c.embeddings?.model ?? '',
+            key_saved: c.embeddings?.api_key === 'set',
+          })
           // One authoritative map (#588 fault A follow-up): saved per-model
           // steps land in the one structure the editor edits and Save ships.
           setCompMap(
@@ -7276,6 +7529,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           provider: 'sdcpp',
           api_base: imageGen.api_base.trim(),
         },
+        embeddings: {
+          api_base: embeddingsDraft.api_base.trim(),
+          model: embeddingsDraft.model.trim(),
+          // Typed key replaces; empty/kept field is dropped server-side so
+          // the saved key survives (the voice-key masking dance).
+          ...(embeddingsDraft.api_key ? { api_key: embeddingsDraft.api_key } : {}),
+        },
       })
       // #451 (review): a saved voice change must reach the frontend speech
       // mirror immediately - the Settings and ChatPanel status probes run
@@ -7417,6 +7677,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             {/* providers: collapsed rows; fields behind one open row */}
             {activeTab === 'connect' && (
               <>
+              <EmbeddingsSettingsCard draft={embeddingsDraft} onChange={setEmbeddingsDraft} />
               <ImageGenSettingsCard imageGen={imageGen} onChange={setImageGen} />
               <SettingsCard title="Providers" className="col-span-4">
               {providerOrder.length === 0 && (

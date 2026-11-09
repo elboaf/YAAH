@@ -164,6 +164,22 @@ BEGIN
     DELETE FROM conversation_search_index WHERE rowid = old.id;
 END;
 
+-- Vector search index (issue #677, Phase 2a): stores embedding vectors for
+-- message chunks. Built incrementally via the index builder; not synced
+-- at write time (rebuild is user-triggered). chunk_index distinguishes
+-- multiple chunks from the same message.
+CREATE TABLE IF NOT EXISTS vector_index (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    chunk_text TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    UNIQUE(message_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_vector_conversation ON vector_index(conversation_id);
+
 -- Read-only cache of conversations owned by connected remote devices.
 -- Remote integer IDs are only unique within their host, never locally.
 CREATE TABLE IF NOT EXISTS remote_conversations (
@@ -505,11 +521,66 @@ async def get_db() -> aiosqlite.Connection:
     """)
     # Run one-time FTS5 backfill (no-op if already done)
     await _backfill_fts5_index(db)
+    await _migrate_vector_index_foreign_keys(db)
     await migrate_workspaces(db)
     # Mark migration complete after both finish so a failure leaves the
     # path eligible for retry.
     _migrated.add(str(DB_PATH))
     return db
+
+
+async def _migrate_vector_index_foreign_keys(db: aiosqlite.Connection):
+    """Rebuild vector_index with cascading FKs (issue #677 review round).
+
+    A build made before the FKs existed leaves vector rows behind when a
+    conversation (or message) is deleted -- semantic search would then
+    return excerpts of deleted transcript text until the next full
+    rebuild. Fresh databases get the FKs from SCHEMA; this one-time
+    migration retrofits existing ones. Guarded by an app_meta marker so
+    it runs once per database, not per boot.
+    """
+    cur = await db.execute(
+        "SELECT value FROM app_meta WHERE key = 'vector_index_fk_migrated'"
+    )
+    if await cur.fetchone() is not None:
+        return
+    cur = await db.execute("PRAGMA foreign_key_list(vector_index)")
+    if await cur.fetchone() is not None:
+        # Already has FKs (fresh DB or a previous process migrated it):
+        # stamp the marker and skip the rebuild.
+        await db.execute(
+            "INSERT OR REPLACE INTO app_meta (key, value) "
+            "VALUES ('vector_index_fk_migrated', 'done')"
+        )
+        await db.commit()
+        return
+    # Dropping the vectors is safe: the index is a derived cache and any
+    # build recorded alongside it is stale the moment rows vanish -- the
+    # next user-triggered rebuild repopulates both.
+    await db.execute("DROP INDEX IF EXISTS idx_vector_conversation")
+    await db.execute("DROP TABLE vector_index")
+    await db.executescript("""
+CREATE TABLE IF NOT EXISTS vector_index (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    chunk_text TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    UNIQUE(message_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_vector_conversation ON vector_index(conversation_id);
+""")
+    # The vectors are gone: any stored build metadata is now a lie
+    # (readiness would read "ready" over an empty index). Clear it in the
+    # same transaction as the migration marker.
+    await db.execute("DELETE FROM app_meta WHERE key = 'search_index_metadata'")
+    await db.execute(
+        "INSERT OR REPLACE INTO app_meta (key, value) "
+        "VALUES ('vector_index_fk_migrated', 'done')"
+    )
+    await db.commit()
 
 
 async def _backfill_fts5_index(db: aiosqlite.Connection):

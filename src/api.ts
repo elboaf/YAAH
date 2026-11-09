@@ -333,6 +333,10 @@ export interface AgentConfig {
   /** Image generation (sd-server): own Settings block; api_base doubles
    *  as the configured flag for the generate_image tool. */
   image_generation?: { provider: string; api_base: string; size: string }
+  /** Embeddings endpoint block (#677), separate from chat providers;
+   *  api_key arrives masked ("set" | ""). Blank endpoint = semantic
+   *  search off (keyword search only). */
+  embeddings?: { api_base: string; api_key: string; model: string }
   /** Per-model step budgets (issue #111; model id -> steps, 0 = unlimited). */
   model_steps?: Record<string, number>
   /** Voice dictation; cloud_api_key arrives masked ("set" | ""). */
@@ -421,6 +425,69 @@ export const probeImageProvider = (apiBase: string) =>
     body: JSON.stringify({ api_base: apiBase }),
   })
 
+// ---- Embeddings (issue #677): status, probe, rebuild + progress ----
+
+export type EmbeddingsStatus = {
+  configured: boolean
+  api_base: string
+  api_key: string
+  model: string
+  index: {
+    model: string | null
+    dimensions: number | null
+    /** ISO 8601 timestamp of the last index build (vectorestore writes
+     *  datetime.now(timezone.utc).isoformat()). */
+    last_build: string | null
+    vectors: number
+  }
+  readiness: 'not_configured' | 'no_index' | 'mismatch' | 'ready'
+  available: boolean | null
+}
+
+export type EmbeddingsProbe = {
+  configured: boolean
+  available: boolean
+  error?: string
+  dimensions?: number
+  model?: string
+}
+
+export type RebuildProgress = {
+  running: boolean
+  phase: string
+  percent: number
+  message: string
+  result?: {
+    ok?: boolean
+    vectors_stored?: number
+    model?: string
+    dimensions?: number | null
+    error?: string
+  }
+}
+
+export const getEmbeddingsStatus = () => api<EmbeddingsStatus>('/api/embeddings/status')
+
+export const probeEmbeddings = () =>
+  api<EmbeddingsProbe>('/api/embeddings/probe', { method: 'POST' })
+
+export const rebuildEmbeddings = () =>
+  api<{
+    ok: boolean
+    vectors_stored?: number
+    chunks_embedded?: number
+    total_chunks?: number
+    model?: string
+    dimensions?: number | null
+    error?: string
+  }>('/api/embeddings/rebuild', { method: 'POST' })
+
+export const getEmbeddingsRebuildProgress = () =>
+  api<RebuildProgress>('/api/embeddings/rebuild/progress')
+
+export const dismissEmbeddingsRebuildProgress = () =>
+  api<{ ok: boolean }>('/api/embeddings/rebuild/progress/reset', { method: 'POST' })
+
 /** Remember the workspace for the next app launch (stored in config.json). */
 export const updateLastWorkspace = (workspace: string) =>
   api<{ ok: boolean }>('/api/config/last-workspace', {
@@ -441,6 +508,10 @@ export const updateConfig = (
     /** Image generation block (sd-server): merged server-side, so a
      *  partial save never wipes sibling keys. */
     image_generation?: { provider?: string; api_base?: string; size?: string }
+    /** Embeddings endpoint block (#677): merged server-side with the
+     *  voice-key masking dance (an echoed "set" never overwrites the
+     *  stored key). api_base IS the configured flag: "" unconfigures. */
+    embeddings?: { api_base?: string; api_key?: string; model?: string }
     context_window_overrides: Record<string, number | null>
     /** Per-model context windows: the authoritative map when present. */
     model_context?: Record<string, { context_window: number | null }>
