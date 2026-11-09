@@ -572,6 +572,10 @@ CREATE TABLE IF NOT EXISTS vector_index (
 );
 CREATE INDEX IF NOT EXISTS idx_vector_conversation ON vector_index(conversation_id);
 """)
+    # The vectors are gone: any stored build metadata is now a lie
+    # (readiness would read "ready" over an empty index). Clear it in the
+    # same transaction as the migration marker.
+    await db.execute("DELETE FROM app_meta WHERE key = 'search_index_metadata'")
     await db.execute(
         "INSERT OR REPLACE INTO app_meta (key, value) "
         "VALUES ('vector_index_fk_migrated', 'done')"

@@ -435,7 +435,9 @@ export type EmbeddingsStatus = {
   index: {
     model: string | null
     dimensions: number | null
-    last_build: number | null
+    /** ISO 8601 timestamp of the last index build (vectorestore writes
+     *  datetime.now(timezone.utc).isoformat()). */
+    last_build: string | null
     vectors: number
   }
   readiness: 'not_configured' | 'no_index' | 'mismatch' | 'ready'

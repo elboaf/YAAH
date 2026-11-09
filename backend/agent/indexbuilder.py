@@ -125,6 +125,7 @@ async def build_index(progress_callback=None) -> dict:
     embedded = 0
     dimensions = None
     last_error = None
+    consecutive_failures = 0
     for batch_start in range(0, total_chunks, EMBEDDING_BATCH_SIZE):
         batch_end = min(batch_start + EMBEDDING_BATCH_SIZE, total_chunks)
         batch = chunks[batch_start:batch_end]
@@ -151,10 +152,22 @@ async def build_index(progress_callback=None) -> dict:
             if total_chunks > 0:
                 pct = 20 + int(80 * embedded / total_chunks)
                 safe_report("embedding", pct, f"Embedded {embedded}/{total_chunks} chunks")
+            consecutive_failures = 0
 
         except EmbeddingsError as e:
             last_error = str(e)
+            consecutive_failures += 1
             log.warning("Batch embedding failed: %s", e)
+            # A dead endpoint fails every remaining batch; stop after a
+            # few consecutive failures instead of grinding through the
+            # whole corpus. A success resets the count, so a flaky
+            # endpoint keeps going and a dead one bails fast.
+            if consecutive_failures >= 3:
+                safe_report(
+                    "error", 20,
+                    f"stopping: {consecutive_failures} consecutive embedding batches failed",
+                )
+                break
 
     # Record index metadata (model + dimensions) — use the CONFIGURED model name,
     # not the response echo, as the identity for mismatch detection.

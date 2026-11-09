@@ -453,3 +453,34 @@ async def test_tool_scopes_semantic_hits_to_conversation():
         embeddings._transport = None
     ids = {m["message_id"] for m in result["matches"]}
     assert 3 not in ids, f"tool leaked a foreign conversation hit: {ids}"
+
+
+async def test_workspace_scope_includes_related_workspaces():
+    """workspace reach = the workspace PLUS its related workspaces -- the
+    same coverage the keyword search walks (review round 2)."""
+    await _seed()  # conversation 1, workspace "ws"
+    await database.create_conversation("Related ws chat", "ws-related")
+    await database.add_message(
+        2, "user",
+        "Packaging topics live in a related workspace conversation.",
+    )
+    await database.set_related_workspaces("ws", ["ws-related"])
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 2, "message_id": 3, "role": "user",
+        "chunk_text": "Packaging topics live in a related workspace conversation.",
+        "chunk_index": 0, "embedding": [0.25] * 4,
+    }])
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(
+            _kw_fn, "packaging", 10,
+            workspace_reach="workspace", workspace="ws",
+        )
+    finally:
+        embeddings._transport = None
+    ids = {m["message_id"] for m in result["matches"]}
+    assert 3 in ids, f"related-workspace hit missing from workspace scope: {ids}"
+    assert result["semantic_matches"] >= 1

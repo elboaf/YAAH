@@ -266,3 +266,68 @@ async def test_short_and_tool_messages_skipped():
         embeddings._transport = None
     # Only the one adequate user message embedded.
     assert result["total_chunks"] == 1
+
+
+async def test_dead_endpoint_stops_after_consecutive_failures(monkeypatch):
+    """A dead endpoint must not grind through the whole corpus: the build
+    stops after three consecutive failed batches (one success resets)."""
+    from backend.agent import embeddings as emb_mod
+    from backend.agent.embeddings import EmbeddingsError
+
+    calls = {"n": 0}
+
+    async def dead(texts):
+        calls["n"] += 1
+        raise EmbeddingsError("embeddings endpoint unreachable")
+
+    # indexbuilder binds embed_texts at import time; patch at the source
+    # module so the build loop's `await embed_texts(...)` resolves to the
+    # dead fake (the same module object `from ... import` read from).
+    monkeypatch.setattr(emb_mod, "embed_texts", dead)
+    monkeypatch.setattr(indexbuilder, "embed_texts", dead)
+    # The build must also be configured, else it fails before any batch.
+    config_mod.save_config({"embeddings": {
+        "api_base": "http://x", "api_key": "", "model": "m",
+    }})
+    # Small batches so the corpus spans several: 10 chunks / 2 per batch
+    # = 5 embed_texts calls; a broken build grinds all 5, the guard
+    # stops at 3.
+    monkeypatch.setattr(indexbuilder, "EMBEDDING_BATCH_SIZE", 2)
+    # ~4300 chars each -> 3 chunks per message -> 15 chunks total.
+    msgs = [
+        {"message_id": i, "conversation_id": 1, "role": "user",
+         "text": f"chunk text number {i}. " * 200}
+        for i in range(1, 6)
+    ]
+
+    # build_index reads the DB, so the message reader is faked to feed
+    # the loop's guard indirectly via a tiny monkeypatched reader.
+    import backend.db.database as dbmod
+
+    class _FakeDb:
+        def __init__(self):
+            pass
+
+        async def execute(self, *a, **k):
+            class C:
+                async def fetchall(self):
+                    return [
+                        {"id": m["message_id"], "conversation_id": 1,
+                         "role": "user", "content": m["text"]}
+                        for m in msgs
+                    ]
+            return C()
+
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def fake_open_db():
+        yield _FakeDb()
+
+    monkeypatch.setattr(indexbuilder, "open_db", fake_open_db)
+    # clear/record/store ride the real vectorestore on the isolated DB.
+    await database.create_conversation("Build test", "ws")
+
+    result = await indexbuilder.build_index()
+    assert result["ok"] is False
+    assert calls["n"] == 3, f"expected stop after 3 batches, called {calls['n']}"

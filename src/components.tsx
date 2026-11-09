@@ -6515,11 +6515,15 @@ export function EmbeddingsSettingsCard({
   // side), not the draft. Enable them only when the draft is complete AND
   // matches what the backend has: probing or rebuilding a half-edited
   // form would either report "not configured" (nothing saved yet) or
-  // clear the vectors and rebuild with the OLD model.
+  // clear the vectors and rebuild with the OLD model. A typed key also
+  // counts as unsaved (its draft state never reached config.json); a
+  // key-less config is a legitimate final state, not "unsaved".
+  const keyIsUnsaved = draft.api_key.trim() !== ''
   const savedMatchesDraft =
     !status ||
     (status.api_base === draft.api_base.trim() &&
-      status.model === draft.model.trim())
+      status.model === draft.model.trim() &&
+      !keyIsUnsaved)
   const configured = draftComplete && savedMatchesDraft
   const saveFirst = draftComplete && !savedMatchesDraft
 

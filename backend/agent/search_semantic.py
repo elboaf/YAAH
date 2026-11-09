@@ -106,7 +106,9 @@ async def search_with_semantic(
     # Scope: an explicit conversation scope wins; workspace reach narrows
     # next; neither means all conversations (the HTTP search is global by
     # design). The keyword half and the semantic half of a response must
-    # cover the SAME conversations.
+    # cover the SAME conversations. "workspace" reach = the workspace PLUS
+    # its related workspaces -- the same coverage the keyword search
+    # walks (its own hits merge per-workspace there).
     if conversation_ids:
         if not conversation_ids:
             result["semantic_state"] = "unavailable"
@@ -114,8 +116,12 @@ async def search_with_semantic(
             return result
     elif workspace_reach in ("workspace", "related"):
         from backend.db.database import get_related_workspaces
-        scopes = [workspace] if workspace_reach == "workspace" else []
-        if workspace_reach == "related":
+        scopes = []
+        if workspace_reach == "workspace":
+            # The workspace PLUS its related workspaces. "" normalizes to
+            # the Default workspace (NULL rows) inside the store helper.
+            scopes = [workspace or "", *(await get_related_workspaces(workspace or ""))]
+        else:  # "related"
             scopes = await get_related_workspaces(workspace or "")
         conversation_ids = await vectorestore.conversation_ids_in_workspaces(scopes)
         if not conversation_ids:

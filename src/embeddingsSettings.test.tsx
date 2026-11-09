@@ -46,7 +46,7 @@ const statusReady = {
   api_base: 'http://127.0.0.1:8099/v1',
   api_key: 'set',
   model: 'bge-m3',
-  index: { model: 'bge-m3', dimensions: 1024, last_build: 1, vectors: 42 },
+  index: { model: 'bge-m3', dimensions: 1024, last_build: '2026-11-09T00:00:00+00:00', vectors: 42 },
   readiness: 'ready' as const,
   available: null,
 }

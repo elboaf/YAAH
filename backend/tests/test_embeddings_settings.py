@@ -331,3 +331,53 @@ def test_default_workspace_scoped_search_finds_null_workspace_rows(client, monke
     result = asyncio.new_event_loop().run_until_complete(scoped())
     assert result["semantic_state"] == "ready"
     assert result["semantic_matches"] >= 1
+
+
+def test_fk_migration_clears_stale_build_metadata(tmp_path, monkeypatch):
+    """The one-time FK migration drops the vectors AND the build metadata:
+    readiness reads no_index afterwards, never fake-ready."""
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "mig.db")
+    monkeypatch.setattr(database, "_migrated", set())
+    import asyncio
+    from backend.agent import vectorestore
+
+    async def scenario():
+        # First process: build a "ready" index (old JSON-vector schema is
+        # the pre-migration shape only if the FKs are absent, so simulate
+        # by building, then dropping the marker + FKs to force a rebuild).
+        await database.create_conversation("M", "ws")
+        await database.add_message(1, "user", "some transcript content here")
+        await vectorestore.store_chunk_embeddings([{
+            "conversation_id": 1, "message_id": 1, "role": "user",
+            "chunk_text": "some transcript content here",
+            "chunk_index": 0, "embedding": [0.1, 0.2, 0.3],
+        }])
+        await vectorestore.record_index_build("bge-m3", 3)
+        assert vectorestore.semantic_readiness(
+            "bge-m3", await vectorestore.get_index_metadata()) == "ready"
+        # Simulate a pre-FK database: no FKs on the table, no marker.
+        async with database.open_db() as db:
+            await db.execute("DROP TABLE vector_index")
+            await db.execute("""
+                CREATE TABLE vector_index (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    conversation_id INTEGER NOT NULL,
+                    role TEXT NOT NULL, chunk_text TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL, embedding BLOB NOT NULL,
+                    UNIQUE(message_id, chunk_index)
+                )
+            """)
+            await db.execute("DELETE FROM app_meta WHERE key = 'vector_index_fk_migrated'")
+            await db.commit()
+        # Second "process": the migration stamp is per-DB; force re-run.
+        monkeypatch.setattr(database, "_migrated", set())
+        async with database.open_db() as db:
+            pass
+        meta = await vectorestore.get_index_metadata()
+        assert meta == {}
+        assert vectorestore.semantic_readiness("bge-m3", meta) == "no_index"
+        assert await vectorestore.get_vector_count() == 0
+
+    asyncio.new_event_loop().run_until_complete(scenario())
