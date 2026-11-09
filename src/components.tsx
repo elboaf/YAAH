@@ -112,7 +112,7 @@ import {
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
-import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
+import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -3227,6 +3227,10 @@ export function ConversationList({
   const refresh = useCallback(() => {
     listConversations().then((rows) => {
       setConvs(rows)
+      // Feed the send-target workspace cache (#460): a conversation drain
+      // resolves the conversation's OWN workspace from these rows instead of
+      // the active workspace at drain time.
+      for (const r of rows) convWorkspaceCache.set(String(r.id), r.workspace ?? '')
       useAgent.setState({ titleByConv: {} })
     }).catch(() => setConvs([]))
     listWorkspaces().then(setWorkspaces).catch(() => setWorkspaces([]))

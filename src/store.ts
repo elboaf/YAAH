@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { getConfig, listAgents, type ScheduledAgent, type StoredMessage } from './api'
+import { getConversation, getConfig, listAgents, type ScheduledAgent, type StoredMessage } from './api'
 import { normalizeAskOptions } from './askOptions'
 
 let toastSeq = 0
@@ -1326,6 +1326,12 @@ export const useAgent = create<AgentState>((set, get) => ({
  * destination (the destination card's Change… / + add-workspace pick), then
  * the active workspace. 0376bee dropped the pin read for click-sends, so a
  * chat filed under whichever workspace was selected before the pick.
+ *
+ * A numeric conversation id with an empty target workspace (the end-of-run
+ * queue drain, #460) has a home already: resolve it from the conversation
+ * row via the api module so the drained turn streams against the
+ * conversation's own workspace — never the active one, which may be a
+ * different folder (or empty, mid-switch) by the time the drain fires.
  */
 export function resolveSendTarget(
   target: { workspace: string } | undefined,
@@ -1333,9 +1339,26 @@ export function resolveSendTarget(
   draftDestination: string | null,
   workspace: string,
 ): string {
-  if (target) return target.workspace
+  if (target) {
+    if (!target.workspace && conversationId !== null) {
+      const id = conversationId
+      // Synchronous cache; the row fetch is only a backstop for a
+      // conversation not yet in memory. A miss resolves async — the turn
+      // body carries it, the next drain picks up the cached row.
+      void getConversation(id).then((row) => {
+        convWorkspaceCache.set(String(id), row.workspace ?? '')
+      }).catch(() => {})
+      return convWorkspaceCache.get(String(id)) ?? workspace
+    }
+    return target.workspace
+  }
   return (conversationId === null ? draftDestination : null) ?? workspace
 }
+
+/** Conversation id -> workspace, fed by getConversation backfills above and
+ *  by the sidebar's conversation loads, so a #460 drain resolves the
+ *  conversation's own workspace synchronously in the common case. */
+export const convWorkspaceCache = new Map<string, string>()
 
 /**
  * The on-screen conversation's run status — the replacement for the old
