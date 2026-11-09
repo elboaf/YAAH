@@ -60,10 +60,6 @@ export function SidebarSearch({
   const toolMatches = matches.filter((m) => m.kind === 'tool')
   const subagentMatches = matches.filter((m) => m.kind === 'sub-agent')
 
-  if (!query.trim()) {
-    return null
-  }
-
   return (
     <div className="lg-search border-b border-zinc-700/50 bg-zinc-900/50 px-1.5 py-1">
       {/* Search input */}
@@ -89,7 +85,6 @@ export function SidebarSearch({
           placeholder="Search conversations…"
           aria-label="Search conversations"
           className="flex-1 bg-transparent text-xs text-zinc-200 outline-none placeholder:text-zinc-600"
-          autoFocus
         />
         {loading && (
           <span className="run-dots shrink-0 text-blue-400">
@@ -99,7 +94,8 @@ export function SidebarSearch({
       </div>
 
       {/* Results */}
-      <div className="mt-1.5 max-h-72 overflow-y-auto">
+      {query.trim() && (
+        <div className="mt-1.5 max-h-72 overflow-y-auto">
         {error && (
           <p className="px-2 py-1.5 text-xs text-red-400 bg-red-950/30 rounded">
             {error}
@@ -197,6 +193,7 @@ export function SidebarSearch({
           </div>
         )}
       </div>
+      )}
     </div>
   )
 }
