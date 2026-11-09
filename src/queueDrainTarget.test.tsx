@@ -126,4 +126,19 @@ describe('end-of-run queue drain targets the conversation that ran (#460)', () =
     // turn must use the conversation's own workspace.
     expect(streamCalls[1].workspace).toBe('C:/w/a')
   })
+
+  it('a cache MISS awaits the conversation row before draining (never the active workspace)', async () => {
+    // CodeRabbit nitpick: the miss path (getConversation fetch) ran in no
+    // test. Empty the cache; resolveSendTargetAsync must await the row and
+    // resolve the conversation's OWN workspace — not fall back to the
+    // active workspace while the fetch is in flight.
+    convWorkspaceCache.clear()
+    render(<ChatPanel />)
+    const textarea = await screen.findByLabelText('Message the agent')
+    fireEvent.change(textarea, { target: { value: 'first' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(streamCalls.length).toBe(2))
+    expect(streamCalls[1].cid).toBe(7)
+    expect(streamCalls[1].workspace).toBe('C:/w/a')
+  })
 })

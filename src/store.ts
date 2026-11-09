@@ -1327,11 +1327,8 @@ export const useAgent = create<AgentState>((set, get) => ({
  * the active workspace. 0376bee dropped the pin read for click-sends, so a
  * chat filed under whichever workspace was selected before the pick.
  *
- * A numeric conversation id with an empty target workspace (the end-of-run
- * queue drain, #460) has a home already: resolve it from the conversation
- * row via the api module so the drained turn streams against the
- * conversation's own workspace — never the active one, which may be a
- * different folder (or empty, mid-switch) by the time the drain fires.
+ * The async sibling resolveSendTargetAsync covers hand-off sends (#460):
+ * an empty target workspace resolves the conversation's OWN row.
  */
 export function resolveSendTarget(
   target: { workspace: string } | undefined,
@@ -1339,25 +1336,47 @@ export function resolveSendTarget(
   draftDestination: string | null,
   workspace: string,
 ): string {
-  if (target) {
-    if (!target.workspace && conversationId !== null) {
-      const id = conversationId
-      // Synchronous cache; the row fetch is only a backstop for a
-      // conversation not yet in memory. A miss resolves async — the turn
-      // body carries it, the next drain picks up the cached row.
-      void getConversation(id).then((row) => {
-        convWorkspaceCache.set(String(id), row.workspace ?? '')
-      }).catch(() => {})
-      return convWorkspaceCache.get(String(id)) ?? workspace
-    }
-    return target.workspace
-  }
+  if (target) return target.workspace
   return (conversationId === null ? draftDestination : null) ?? workspace
 }
 
-/** Conversation id -> workspace, fed by getConversation backfills above and
- *  by the sidebar's conversation loads, so a #460 drain resolves the
- *  conversation's own workspace synchronously in the common case. */
+/**
+ * Async workspace resolution for hand-off sends (#460): a target with an
+ * empty workspace means the conversation's OWN row is authoritative. A
+ * cache hit resolves immediately; a miss fetches the row and awaits it —
+ * a drained turn must never stream against the active workspace on a
+ * guess (CodeRabbit major on #721: the fire-and-forget backfill never
+ * reached the in-flight turn). Callers are already async.
+ */
+export async function resolveSendTargetAsync(
+  target: { conversationId?: number | null; workspace: string } | undefined,
+  conversationId: number | null,
+  draftDestination: string | null,
+  workspace: string,
+): Promise<string> {
+  if (target && !target.workspace && conversationId !== null) {
+    const key = String(conversationId)
+    const cached = convWorkspaceCache.get(key)
+    if (cached !== undefined) return cached
+    try {
+      const row = await getConversation(conversationId)
+      const ws = row.workspace ?? ''
+      convWorkspaceCache.set(key, ws)
+      return ws
+    } catch {
+      // Row unreachable (conversation deleted mid-drain?): the active
+      // workspace is the last resort — the backend re-resolves from its
+      // own row for the turn anyway.
+      return workspace
+    }
+  }
+  return resolveSendTarget(target, conversationId, draftDestination, workspace)
+}
+
+/** Conversation id -> workspace, fed by the sidebar's conversation loads,
+ *  the move dialog's onDone, and resolveSendTargetAsync misses, so a #460
+ *  drain resolves the conversation's own workspace without a fetch in the
+ *  common case. */
 export const convWorkspaceCache = new Map<string, string>()
 
 /**
