@@ -1359,14 +1359,22 @@ export async function resolveSendTargetAsync(
     const cached = convWorkspaceCache.get(key)
     if (cached !== undefined) return cached
     try {
-      const row = await getConversation(conversationId)
+      // Bounded lookup (CodeRabbit major on a1d0199): a stalled request
+      // must never park the drain — queued sends and echo clearing hang
+      // behind this await. On timeout the active workspace carries the
+      // call; the agent endpoint re-resolves the authoritative workspace
+      // from its own conversation row for the turn regardless.
+      const row = await Promise.race([
+        getConversation(conversationId),
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(() => reject(new Error('conversation row lookup timed out')), 4000)
+          ;(timer as unknown as { unref?: () => void }).unref?.()
+        }),
+      ])
       const ws = row.workspace ?? ''
       convWorkspaceCache.set(key, ws)
       return ws
     } catch {
-      // Row unreachable (conversation deleted mid-drain?): the active
-      // workspace is the last resort — the backend re-resolves from its
-      // own row for the turn anyway.
       return workspace
     }
   }

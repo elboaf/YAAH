@@ -66,6 +66,7 @@ vi.mock('./api', async (importOriginal) => {
   }
 })
 
+import { getConversation } from './api'
 import { ChatPanel } from './components'
 import { convWorkspaceCache, useAgent } from './store'
 
@@ -74,6 +75,7 @@ beforeEach(() => {
   createConversationCalls = 0
   convWorkspaceCache.clear()
   convWorkspaceCache.set('7', 'C:/w/a')
+  vi.mocked(getConversation).mockReset()
   useAgent.setState({
     conversationId: null,
     messagesByConv: { draft: [] },
@@ -140,5 +142,24 @@ describe('end-of-run queue drain targets the conversation that ran (#460)', () =
     await waitFor(() => expect(streamCalls.length).toBe(2))
     expect(streamCalls[1].cid).toBe(7)
     expect(streamCalls[1].workspace).toBe('C:/w/a')
+  })
+
+  it('a STALLED row lookup times out — the drain proceeds, it never hangs', async () => {
+    // CodeRabbit major on a1d0199: a cache miss awaited getConversation
+    // unbounded — a stalled request would park queued sends and echo
+    // clearing forever. The lookup is capped (4s); the drained turn then
+    // carries the active-workspace fallback and the backend re-resolves
+    // the authoritative workspace from its own conversation row anyway.
+    convWorkspaceCache.clear()
+    // Stall EVERY lookup: an earlier scope fetch consumes a once-mock, so
+    // the drain's own call must be the stalled one regardless of ordering.
+    vi.mocked(getConversation).mockImplementation(() => new Promise(() => {}))
+    render(<ChatPanel />)
+    const textarea = await screen.findByLabelText('Message the agent')
+    fireEvent.change(textarea, { target: { value: 'first' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(streamCalls.length).toBe(2), { timeout: 8000 })
+    expect(streamCalls[1].cid).toBe(7)
+    expect(streamCalls[1].workspace).toBe('')
   })
 })
