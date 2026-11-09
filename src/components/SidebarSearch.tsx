@@ -53,8 +53,9 @@ export function SidebarSearch({
         setMatches([])
         setSearched(true)
       } finally {
-        if (myId !== searchId.current) return
-        setLoading(false)
+        if (myId === searchId.current) {
+          setLoading(false)
+        }
       }
     }, 300)
 
