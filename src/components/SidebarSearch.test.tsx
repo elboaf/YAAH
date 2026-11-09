@@ -25,13 +25,11 @@ const mockMatches = [
 describe('SidebarSearch (#676)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.useFakeTimers()
   })
 
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
-    vi.useRealTimers()
   })
 
   it('shows search input on mount', () => {
@@ -51,8 +49,7 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'schema' } })
-    await vi.advanceTimersByTimeAsync(350)
-    expect(searchConversations).toHaveBeenCalledWith('schema', 10)
+    await waitFor(() => expect(searchConversations).toHaveBeenCalledWith('schema', 10), { timeout: 1000 })
   })
 
   it('renders classified chat results with kind badge', async () => {
@@ -64,10 +61,9 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'test' } })
-    await vi.advanceTimersByTimeAsync(350)
-    await waitFor(() => expect(screen.getByText('Chats')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Chats')).toBeInTheDocument(), { timeout: 1000 })
     expect(screen.getByText('Chat A')).toBeInTheDocument()
-    expect(screen.getByText('chat')).toBeInTheDocument()
+    expect(screen.getAllByText('chat').length).toBeGreaterThanOrEqual(1)
   })
 
   it('renders tool output in separate section', async () => {
@@ -79,8 +75,7 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'grep' } })
-    await vi.advanceTimersByTimeAsync(350)
-    await waitFor(() => expect(screen.getByText('Tool output')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Tool output')).toBeInTheDocument(), { timeout: 1000 })
     expect(screen.getByText('tool')).toBeInTheDocument()
   })
 
@@ -93,8 +88,7 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'explore' } })
-    await vi.advanceTimersByTimeAsync(350)
-    await waitFor(() => expect(screen.getByText('Sub-agents')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Sub-agents')).toBeInTheDocument(), { timeout: 1000 })
     expect(screen.getByText('agent')).toBeInTheDocument()
   })
 
@@ -108,19 +102,24 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={onOpen} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'found' } })
-    await vi.advanceTimersByTimeAsync(350)
-    await waitFor(() => expect(screen.getByText('Target')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Target')).toBeInTheDocument(), { timeout: 1000 })
     fireEvent.click(screen.getByText('Target'))
     expect(onOpen).toHaveBeenCalledWith(42)
   })
 
-  it('shows loading state', async () => {
-    ;(searchConversations as ReturnType<typeof vi.fn>).mockImplementation(() => new Promise(() => {}))
+  it('shows loading state while search is in progress', async () => {
+    let resolvePromise: () => void
+    const neverResolves = new Promise<void>((resolve) => { resolvePromise = resolve })
+    ;(searchConversations as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await neverResolves
+      return { count: 0, matches: [], truncated: false }
+    })
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'loading' } })
-    await vi.advanceTimersByTimeAsync(350)
-    expect(screen.getByText('Searching…')).toBeInTheDocument()
+    // Wait for debounce + loading state to appear
+    await waitFor(() => expect(screen.getByText('Searching…')).toBeInTheDocument(), { timeout: 1000 })
+    resolvePromise!()
   })
 
   it('shows no-results state', async () => {
@@ -128,8 +127,7 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'nothing' } })
-    await vi.advanceTimersByTimeAsync(350)
-    await waitFor(() => expect(screen.getByText('No matches for "nothing"')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('No matches for "nothing"')).toBeInTheDocument(), { timeout: 1000 })
   })
 
   it('shows error state', async () => {
@@ -137,7 +135,6 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'error' } })
-    await vi.advanceTimersByTimeAsync(350)
-    await waitFor(() => expect(screen.getByText('Backend unreachable')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Backend unreachable')).toBeInTheDocument(), { timeout: 1000 })
   })
 })

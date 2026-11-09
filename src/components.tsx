@@ -112,7 +112,7 @@ import {
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
-import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
+import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -3227,6 +3227,10 @@ export function ConversationList({
   const refresh = useCallback(() => {
     listConversations().then((rows) => {
       setConvs(rows)
+      // Feed the send-target workspace cache (#460): a conversation drain
+      // resolves the conversation's OWN workspace from these rows instead of
+      // the active workspace at drain time.
+      for (const r of rows) convWorkspaceCache.set(String(r.id), r.workspace ?? '')
       useAgent.setState({ titleByConv: {} })
     }).catch(() => setConvs([]))
     listWorkspaces().then(setWorkspaces).catch(() => setWorkspaces([]))
@@ -4324,8 +4328,8 @@ export function Sidebar() {
   const openSearchResult = (convId: number) => {
     getConversation(convId)
       .then((conv) => {
+        setWorkspace(conv.workspace ?? '')
         setConversationId(convId)
-        if (conv.workspace && conv.workspace !== workspace) setWorkspace(conv.workspace)
         return getMessages(convId)
       })
       .then((rows) => loadHistory(convId, rows))
@@ -11216,7 +11220,11 @@ export function Composer({
     // Its target is captured at release, not read from this render after
     // asynchronous transcription.
     const isPtt = pttText !== undefined
-    const target = isPtt ? opts?.target : undefined
+    // An explicit target pins the destination: PTT captures its own at
+    // release, and the end-of-run queue drain (#460) pins the conversation
+    // that ran. Without one, the composer's render-time selection decides —
+    // the historical behavior for click/Enter sends.
+    const target = opts?.target
     const targetConversationId = target ? target.conversationId : conversationId
     // Draft destination (#94/#134): the pinned destination wins over the
     // stale active workspace — the destination card's Change… picker and the
@@ -11224,7 +11232,7 @@ export function Composer({
     // click-sends, filing the chat under the previously-selected workspace.
     const targetWorkspace = resolveSendTarget(
       target,
-      conversationId,
+      targetConversationId,
       useAgent.getState().draftDestination,
       workspace,
     )
@@ -11623,8 +11631,19 @@ export function Composer({
   const drainQueueOnEnd = async (
     key: string,
     items: Array<{ id: number; text: string; skills?: string[]; images?: string[] }>,
-    sendQueued: (text?: string, opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[] }) => Promise<void>,
+    sendQueued: (text?: string, opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[]; target?: { conversationId: number | null; workspace: string } }) => Promise<void>,
   ) => {
+    // The drain's destination is the conversation THAT RAN, never the
+    // composer's render-time selection (#460): `sendQueued` is the `send`
+    // captured by the finished turn's render — if the user has since moved
+    // to a fresh draft, that closure still resolves `conversationId ===
+    // null` and `send` takes the `createConversation` branch, filing a
+    // brand-new chat. Pin the numeric id whenever the key is one; a draft
+    // drain (still "draft") stays unpinned.
+    const drainId = Number(key)
+    const drainedTarget = Number.isInteger(drainId) && drainId > 0
+      ? { conversationId: drainId as number, workspace: '' }
+      : undefined
     for (const it of items) {
       const echoes = useAgent.getState().queueEchoByConv[key] ?? []
       const echo = echoes.find((e) => e.id === it.id)
@@ -11632,7 +11651,12 @@ export function Composer({
         markQueuedAsNormal(key, echo.tempId)
         dropQueuedEcho(key, echo.tempId)
       }
-      await sendQueued(it.text, { queueHandoff: true, images: it.images ?? [], skills: it.skills ?? [] })
+      await sendQueued(it.text, {
+        queueHandoff: true,
+        images: it.images ?? [],
+        skills: it.skills ?? [],
+        target: drainedTarget,
+      })
     }
     // Any echo without a matching backend item is stale: the backend's
     // drained list is authoritative after the run-end handoff.

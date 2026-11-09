@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { searchConversations, type SearchMatch } from '../api'
 
 /**
@@ -21,9 +21,12 @@ export function SidebarSearch({
   const [searched, setSearched] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const searchId = useRef(0)
 
-  const doSearch = useCallback(async (q: string) => {
-    const trimmed = q.trim()
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+
+    const trimmed = query.trim()
     if (!trimmed) {
       setMatches([])
       setSearched(false)
@@ -32,28 +35,33 @@ export function SidebarSearch({
       return
     }
 
+    searchId.current++
+    const myId = searchId.current
     setLoading(true)
     setError(null)
-    try {
-      const result = await searchConversations(trimmed, 10)
-      setMatches(result.matches)
-      setSearched(true)
-    } catch (e) {
-      setError(String((e as Error).message ?? e))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
 
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current)
-    debounceRef.current = setTimeout(() => {
-      doSearch(query)
+    debounceRef.current = setTimeout(async () => {
+      if (myId !== searchId.current) return
+      try {
+        const result = await searchConversations(trimmed, 10)
+        if (myId !== searchId.current) return
+        setMatches(result.matches)
+        setSearched(true)
+      } catch (e) {
+        if (myId !== searchId.current) return
+        setError(String((e as Error).message ?? e))
+        setMatches([])
+        setSearched(true)
+      } finally {
+        if (myId !== searchId.current) return
+        setLoading(false)
+      }
     }, 300)
+
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [query, doSearch])
+  }, [query])
 
   // Split results by kind for distinct sections
   const chatMatches = matches.filter((m) => m.kind === 'chat')
