@@ -127,9 +127,11 @@ _Avoid_: treating keyword and semantic search as competing replacements
 
 **Local model server**:
 A locally managed model-serving process run by YAAH, serving models
-named in a pluggable manifest. The embedding model is its first tenant,
-not its definition.
-_Avoid_: naming it embeddings-only (the name must outlive the feature)
+named in a pluggable manifest. Single-tenant: one loaded model per
+process; a second model means a second process. The sd-server (image
+gen) is tenant #0; the embedding model is the first model tenant.
+_Avoid_: naming it embeddings-only (the name must outlive the feature);
+multi-model claims (a second tenant needs a proxy router, per ADR-0022)
 
 ### Model scoping
 

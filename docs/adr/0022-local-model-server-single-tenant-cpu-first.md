@@ -1,6 +1,6 @@
 # ADR 0022: The local model server is single-tenant, CPU-first with optional GPU offload, and the manifest names files over the wire
 
-Status: Proposed — awaiting owner approval; T6 (#678) implements it.
+Status: Accepted — owner-settled in the #678 triage session (2026-11-09); T6 (#678) implements it.
 
 Companion to ADR-0021. ADR-0021 decided YAAH bundles and manages a **local
 model server** (glossary term) and that the server, the model manifest, and
@@ -79,13 +79,7 @@ functional.
 
 This **refines ADR-0021** ("the default embeddings endpoint is the bundled
 local server") in one respect: local is the default *once the user turns the
-server on*, and the out-of-box state is server OFF. Explicit OFF as
-out-of-box honors ADR-0021's local-consent principle — the default
-embeddings endpoint becomes the bundled server exactly when the user enables
-it, so it is still local-default in spirit (never a hosted API) while
-byte-cost and background processes stay user-consented. The alternative, if
-the owner prefers ADR-0021 read literally, is server ON with the model
-downloading on first enable.
+server on*, and the out-of-box state is server OFF.
 
 ### Companion decision: sd-server is declared tenant #0
 
