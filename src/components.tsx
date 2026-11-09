@@ -137,6 +137,7 @@ import { createPortal } from 'react-dom'
 import { transcriptSelection, googleSearchUrl } from './selectionSearch'
 import { openExternal } from './openExternal'
 import { ApprovalCardShell, FreeTextAnswer, useCardSubmit } from "./approvalCards"
+import { SidebarSearch } from './components/SidebarSearch'
 // Tauri invoke rejections are plain strings, not Errors — `(e as Error).message`
 // would print "undefined" and hide the real (permission) cause.
 function errorMessage(e: unknown): string {
@@ -4262,7 +4263,7 @@ export const DEFAULT_LOCKSTEP_HINT = ' Also sets the default for new chats.'
 
 
 export function Sidebar() {
-  const { newConversation, workspace, setWorkspace, refreshGlobals } = useAgent()
+  const { newConversation, workspace, setWorkspace, refreshGlobals, setConversationId, loadHistory } = useAgent()
   // #685: the strip no longer shows pickers; it only needs refresh for the
   // Settings-close path (a fresh probe after config edits, bypassing TTL).
   const { refresh: refreshModels } = useModelList()
@@ -4316,9 +4317,24 @@ export function Sidebar() {
     }
   }
 
+  // #676: open a conversation from a search result (existing flow: switch to
+  // the conversation, load its history, remember the workspace).
+  const openSearchResult = (convId: number) => {
+    setConversationId(convId)
+    getMessages(convId)
+      .then((rows) => loadHistory(convId, rows))
+      .catch((e) =>
+        setNotice({
+          title: 'Failed to open conversation',
+          message: String((e as { message?: string }).message ?? e),
+        }),
+      )
+  }
+
   return (
     <>
       <aside className="lg-sidebar flex w-64 min-w-[220px] flex-col bg-zinc-900 p-2 text-sm border-r border-zinc-700">
+        <SidebarSearch onOpenConversation={openSearchResult} />
         <ConversationList addingDevice={addingDevice} setAddingDevice={setAddingDevice} />
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}

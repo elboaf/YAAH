@@ -1046,6 +1046,25 @@ export const transcribeStatus = () => api<TranscribeStatus>('/api/transcribe/sta
  *  `language` is the whisper-detected source language (null when the engine
  *  doesn't report one) — the PTT answer router uses it to reject answers
  *  dictated in a language the option labels aren't written in. */
+/** Search across all conversations in all workspaces (#676).
+ *  Returns classified results grouped by conversation. */
+export async function searchConversations(
+  query: string,
+  max_results: number = 10,
+): Promise<{ count: number; matches: SearchMatch[]; truncated: boolean }> {
+  return api(`/api/search?query=${encodeURIComponent(query)}&max_results=${max_results}`)
+}
+
+export interface SearchMatch {
+  kind: 'chat' | 'tool' | 'sub-agent'
+  conversation_id: number
+  conversation_title: string
+  message_id: number
+  excerpt: string
+  score: number
+  workspace?: string
+}
+
 export async function transcribeAudio(wav: Blob): Promise<{ text: string; language: string | null }> {
   let res: Response
   try {
