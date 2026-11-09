@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { getConfig, listAgents, type ScheduledAgent, type StoredMessage } from './api'
+import { getConversation, getConfig, listAgents, type ScheduledAgent, type StoredMessage } from './api'
 import { normalizeAskOptions } from './askOptions'
 
 let toastSeq = 0
@@ -1326,6 +1326,9 @@ export const useAgent = create<AgentState>((set, get) => ({
  * destination (the destination card's Change… / + add-workspace pick), then
  * the active workspace. 0376bee dropped the pin read for click-sends, so a
  * chat filed under whichever workspace was selected before the pick.
+ *
+ * The async sibling resolveSendTargetAsync covers hand-off sends (#460):
+ * an empty target workspace resolves the conversation's OWN row.
  */
 export function resolveSendTarget(
   target: { workspace: string } | undefined,
@@ -1336,6 +1339,53 @@ export function resolveSendTarget(
   if (target) return target.workspace
   return (conversationId === null ? draftDestination : null) ?? workspace
 }
+
+/**
+ * Async workspace resolution for hand-off sends (#460): a target with an
+ * empty workspace means the conversation's OWN row is authoritative. A
+ * cache hit resolves immediately; a miss fetches the row and awaits it —
+ * a drained turn must never stream against the active workspace on a
+ * guess (CodeRabbit major on #721: the fire-and-forget backfill never
+ * reached the in-flight turn). Callers are already async.
+ */
+export async function resolveSendTargetAsync(
+  target: { conversationId?: number | null; workspace: string } | undefined,
+  conversationId: number | null,
+  draftDestination: string | null,
+  workspace: string,
+): Promise<string> {
+  if (target && !target.workspace && conversationId !== null) {
+    const key = String(conversationId)
+    const cached = convWorkspaceCache.get(key)
+    if (cached !== undefined) return cached
+    try {
+      // Bounded lookup (CodeRabbit major on a1d0199): a stalled request
+      // must never park the drain — queued sends and echo clearing hang
+      // behind this await. On timeout the active workspace carries the
+      // call; the agent endpoint re-resolves the authoritative workspace
+      // from its own conversation row for the turn regardless.
+      const row = await Promise.race([
+        getConversation(conversationId),
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(() => reject(new Error('conversation row lookup timed out')), 4000)
+          ;(timer as unknown as { unref?: () => void }).unref?.()
+        }),
+      ])
+      const ws = row.workspace ?? ''
+      convWorkspaceCache.set(key, ws)
+      return ws
+    } catch {
+      return workspace
+    }
+  }
+  return resolveSendTarget(target, conversationId, draftDestination, workspace)
+}
+
+/** Conversation id -> workspace, fed by the sidebar's conversation loads,
+ *  the move dialog's onDone, and resolveSendTargetAsync misses, so a #460
+ *  drain resolves the conversation's own workspace without a fetch in the
+ *  common case. */
+export const convWorkspaceCache = new Map<string, string>()
 
 /**
  * The on-screen conversation's run status — the replacement for the old

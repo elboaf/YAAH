@@ -112,7 +112,7 @@ import {
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
-import { buildMessages, lastAssistantId, resolveSendTarget, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
+import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -3227,6 +3227,10 @@ export function ConversationList({
   const refresh = useCallback(() => {
     listConversations().then((rows) => {
       setConvs(rows)
+      // Feed the send-target workspace cache (#460): a conversation drain
+      // resolves the conversation's OWN workspace from these rows instead of
+      // the active workspace at drain time.
+      for (const r of rows) convWorkspaceCache.set(String(r.id), r.workspace ?? '')
       useAgent.setState({ titleByConv: {} })
     }).catch(() => setConvs([]))
     listWorkspaces().then(setWorkspaces).catch(() => setWorkspaces([]))
@@ -3674,6 +3678,10 @@ export function ConversationList({
           onDone={(target) => {
             const movedId = moveTarget?.id
             setMoveTarget(null)
+            // #460 (CodeRabbit): update the drain-workspace cache directly.
+            // refresh()'s listConversations resolves later; a drain firing
+            // in that window must see the NEW workspace, not the pre-move one.
+            if (movedId !== undefined) convWorkspaceCache.set(String(movedId), target ?? '')
             // The core invariant, both ways: the open conversation's
             // workspace IS the active workspace. If the moved chat is the
             // one on screen, the panel adopts the destination so the very
@@ -11571,6 +11579,14 @@ export function Composer({
         setSteerFlag(targetKey, false)
         // Prevent the done handler from wiping echoes until all items are sent.
         pendingQueueAutosendRef.current[targetKey] = result.queued
+        // Resolve the conversation's own workspace once (#460): same
+        // contract as the end-of-run drain — never the active workspace.
+        const steerWs = await resolveSendTargetAsync(
+          { conversationId: targetConversationId, workspace: '' },
+          targetConversationId,
+          null,
+          workspace,
+        )
         // Drain the queue by sending items as fresh turns.
         for (const item of result.queued) {
           // Reconcile the queued echo before sending the fresh turn.
@@ -11586,7 +11602,7 @@ export function Composer({
           // restore it so the item isn't lost (it remains queued for the next
           // manual send).
           try {
-            await send(item.text, { queueHandoff: true, throwOnError: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: "" } })
+            await send(item.text, { queueHandoff: true, throwOnError: true, images: item.images ?? [], skills: item.skills ?? [], target: { conversationId: targetConversationId, workspace: steerWs } })
           } catch (e) {
             if (promoted && echo) {
               // Re-add the echo so the item survives.
@@ -11637,9 +11653,19 @@ export function Composer({
     // brand-new chat. Pin the numeric id whenever the key is one; a draft
     // drain (still "draft") stays unpinned.
     const drainId = Number(key)
-    const drainedTarget = Number.isInteger(drainId) && drainId > 0
-      ? { conversationId: drainId as number, workspace: '' }
-      : undefined
+    let drainedTarget: { conversationId: number; workspace: string } | undefined
+    if (Number.isInteger(drainId) && drainId > 0) {
+      // Resolve the conversation's own workspace ONCE per drain; a cache
+      // miss awaits the row fetch (#460, CodeRabbit major) — the drained
+      // turns must never stream against the active workspace on a guess.
+      const ws = await resolveSendTargetAsync(
+        { conversationId: drainId, workspace: '' },
+        drainId,
+        null,
+        workspace,
+      )
+      drainedTarget = { conversationId: drainId, workspace: ws }
+    }
     for (const it of items) {
       const echoes = useAgent.getState().queueEchoByConv[key] ?? []
       const echo = echoes.find((e) => e.id === it.id)
