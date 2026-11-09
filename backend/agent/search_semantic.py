@@ -22,6 +22,7 @@ async def search_with_semantic(
     max_results: int,
     workspace_reach: str | None = None,
     workspace: str | None = None,
+    conversation_ids: list[int] | None = None,
 ) -> dict:
     """Run keyword search with semantic boost/degradation.
 
@@ -31,11 +32,21 @@ async def search_with_semantic(
     similarity score and the FTS keyword matches merge in below them --
     union, keyword order preserved for hits the index missed).
 
+    Scope: an explicit conversation_ids list wins (the single-
+    conversation tool path passes [conversation_id]); workspace reach
+    narrows next; None (and no workspace reach) means all conversations
+    -- the HTTP search is global by design.
+
     The response always carries the keyword contract shape plus:
       semantic_state - "ready" | "unavailable" | "off" | "not_configured"
       semantic_unavailable - human string, present iff state != ready
                              (and state != not_configured, where semantic
                              is simply not a feature).
+
+    Semantic hits are enriched to the classified shape (kind +
+    conversation identity) the T3 endpoint contract promises, and the
+    merged list is re-classified per hit so every match the caller sees
+    carries the same fields regardless of which half produced it.
     """
     import asyncio
     # keyword_fn may be sync or async; handle both.
@@ -46,6 +57,8 @@ async def search_with_semantic(
         if asyncio.iscoroutine(result) or asyncio.isawaitable(result):
             result = await result
     if not isinstance(result, dict) or "matches" not in result:
+        # Malformed keyword result: pass it through unchanged rather than
+        # pretending semantic_state applies to a shape we do not own.
         return result
 
     emb_cfg = embeddings._embeddings_config()
@@ -90,10 +103,16 @@ async def search_with_semantic(
         )
         return result
 
-    # Scope: workspace reach narrows the scan; conversation scope (None)
-    # means all conversations (the HTTP search is global by design).
-    conversation_ids = None
-    if workspace_reach in ("workspace", "related"):
+    # Scope: an explicit conversation scope wins; workspace reach narrows
+    # next; neither means all conversations (the HTTP search is global by
+    # design). The keyword half and the semantic half of a response must
+    # cover the SAME conversations.
+    if conversation_ids:
+        if not conversation_ids:
+            result["semantic_state"] = "unavailable"
+            result["semantic_unavailable"] = "no indexed conversations in scope"
+            return result
+    elif workspace_reach in ("workspace", "related"):
         from backend.db.database import get_related_workspaces
         scopes = [workspace] if workspace_reach == "workspace" else []
         if workspace_reach == "related":
@@ -123,12 +142,21 @@ async def search_with_semantic(
         return result
 
     # Merge: semantic hits first (they carry similarity), then keyword
-    # matches the index missed, deduped by message_id.
+    # matches the index missed, deduped by message_id. Every hit is
+    # classified (kind: chat/tool/sub-agent) so a merged list has ONE
+    # contract shape regardless of which half produced each match.
+    from backend.db.database import _classify_result_kind
+
     keyword_matches = result.get("matches") or []
-    seen = {hit["message_id"] for hit in semantic_hits}
-    merged = list(semantic_hits)
+    seen = set()
+    merged = []
+    for hit in semantic_hits:
+        hit.setdefault("kind", _classify_result_kind(hit))
+        seen.add(hit["message_id"])
+        merged.append(hit)
     for m in keyword_matches:
         if m.get("message_id") not in seen:
+            m.setdefault("kind", _classify_result_kind(m))
             merged.append(m)
             seen.add(m.get("message_id"))
 

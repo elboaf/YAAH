@@ -1062,6 +1062,16 @@ async def api_embeddings_rebuild():
             "result": result,
         })
         return result
+    except Exception as e:
+        # A crashed build must not leave "running: True" behind: the
+        # Settings card would poll a finished build forever and hide the
+        # Dismiss button. Report the failure and let the UI dismiss it.
+        _embeddings_rebuild_progress.clear()
+        _embeddings_rebuild_progress.update({
+            "running": False, "phase": "done", "percent": 100,
+            "message": f"error: rebuild failed: {e}",
+        })
+        raise
     finally:
         _embeddings_rebuild_running = False
 

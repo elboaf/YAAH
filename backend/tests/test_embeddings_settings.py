@@ -247,3 +247,87 @@ def test_rebuild_progress_lingers_then_resets(client, monkeypatch):
     r = client.post("/api/embeddings/rebuild/progress/reset")
     assert r.status_code == 200
     assert client.get("/api/embeddings/rebuild/progress").json() == {}
+
+
+def test_rebuild_crash_marks_progress_finished(client, monkeypatch):
+    """A build that RAISES must still flip progress to finished: the
+    Settings card polls 'running' states forever otherwise (and hides
+    the Dismiss button while doing it)."""
+    client.put("/api/config", json={
+        "embeddings": {"api_base": "http://e:1", "model": "bge-m3"},
+    })
+    import backend.main as mainmod
+    from backend.agent import indexbuilder
+
+    async def broken(progress_callback=None):
+        raise RuntimeError("db gone mid-build")
+
+    monkeypatch.setattr(indexbuilder, "build_index", broken)
+    with pytest.raises(Exception):
+        client.post("/api/embeddings/rebuild")
+    prog = client.get("/api/embeddings/rebuild/progress").json()
+    assert prog["running"] is False
+    assert "rebuild failed" in prog["message"]
+    assert mainmod._embeddings_rebuild_running is False
+
+
+def test_failed_rebuild_leaves_no_stale_ready_metadata(client, monkeypatch):
+    """Rebuild clears vectors AND metadata: a build that stores nothing
+    reports no_index honestly instead of fake-ready."""
+    client.put("/api/config", json={
+        "embeddings": {"api_base": "http://e:1", "model": "bge-m3"},
+    })
+    conv = client.post("/api/conversations", json={"title": "T", "workspace": "ws"}).json()
+    client.post(f"/api/conversations/{conv['id']}/messages", json={
+        "role": "user",
+        "content": "The packaging stage failed during the deploy pipeline run.",
+    })
+    # First build succeeds -> ready.
+    _install_ok(monkeypatch, dim=4)
+    assert client.post("/api/embeddings/rebuild").json()["ok"] is True
+    status = client.get("/api/embeddings/status").json()
+    assert status["readiness"] == "ready"
+
+    # Rebuild with a now-dead endpoint: vectors were cleared, nothing stored.
+    def dead(request):
+        raise httpx.ConnectError("down", request=request)
+
+    monkeypatch.setattr(embeddings, "_transport", _CapturingTransport(dead))
+    assert client.post("/api/embeddings/rebuild").json()["ok"] is False
+    status = client.get("/api/embeddings/status").json()
+    assert status["readiness"] == "no_index"
+    assert status["index"]["vectors"] == 0
+
+
+
+def test_default_workspace_scoped_search_finds_null_workspace_rows(client, monkeypatch):
+    """Workspace-scoped semantic search must include Default-workspace
+    conversations (workspace NULL at rest), not return an empty scope."""
+    client.put("/api/config", json={
+        "embeddings": {"api_base": "http://e:1", "model": "bge-m3"},
+    })
+    r = client.post("/api/conversations", json={"title": "T", "workspace": ""})
+    assert r.status_code == 200
+    conv_id = r.json()["id"]
+    client.post(f"/api/conversations/{conv_id}/messages", json={
+        "role": "user",
+        "content": "The packaging stage failed during the deploy pipeline run.",
+    })
+    _install_ok(monkeypatch, dim=4)
+    assert client.post("/api/embeddings/rebuild").json()["ok"] is True
+
+    import asyncio
+    from backend.agent.search_semantic import search_with_semantic
+    from backend.db import database as dbmod
+
+    async def scoped():
+        async def keyword_fn(q, n):
+            return await dbmod.search_all_workspaces(q, n)
+        return await search_with_semantic(
+            keyword_fn, "packaging", 10,
+            workspace_reach="workspace", workspace="",
+        )
+
+    result = asyncio.new_event_loop().run_until_complete(scoped())
+    assert result["semantic_state"] == "ready"
+    assert result["semantic_matches"] >= 1

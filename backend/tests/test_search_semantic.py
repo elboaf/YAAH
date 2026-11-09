@@ -326,3 +326,130 @@ def _kw_fn(query, max_results):
     async def run(q, n):
         return await database.search_conversation_history(1, q, n)
     return run(query, max_results)
+
+
+async def test_conversation_scope_contains_semantic_hits():
+    """The single-conversation tool path passes [conversation_id]:
+    semantic hits from OTHER conversations must not leak in ahead of
+    the conversation's own keyword results."""
+    await _seed()  # conversation 1
+    await database.create_conversation("Other conversation", "ws")
+    await database.add_message(
+        2, "user",
+        "Packaging topics live here too, in a different conversation.",
+    )
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([
+        {
+            "conversation_id": 1, "message_id": 1, "role": "user",
+            "chunk_text": "The packaging stage failed during the deploy pipeline run.",
+            "chunk_index": 0, "embedding": [0.25] * 4,
+        },
+        {
+            "conversation_id": 2, "message_id": 3, "role": "user",
+            "chunk_text": "Packaging topics live here too.",
+            "chunk_index": 0, "embedding": [0.25] * 4,  # identical vector: ties
+        },
+    ])
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(
+            _kw_fn, "packaging", 10, conversation_ids=[1])
+    finally:
+        embeddings._transport = None
+    # Semantic hits carry conversation_id; the conversation-1 keyword
+    # matches do not (single-conversation shape). Assert containment:
+    # every hit WITH a conversation_id belongs to conversation 1, and no
+    # message id from conversation 2 appears anywhere.
+    for m in result["matches"]:
+        if "conversation_id" in m:
+            assert m["conversation_id"] == 1, f"foreign hit leaked in: {m}"
+    ids = {m["message_id"] for m in result["matches"]}
+    assert 3 not in ids, f"conversation-2 message leaked in: {ids}"
+
+
+async def test_merged_hits_carry_classified_shape():
+    """Merged results have ONE contract shape: every match carries kind,
+    and the T3 identity fields when the endpoint caller needs them."""
+    await _seed()
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 1, "message_id": 1, "role": "user",
+        "chunk_text": "The packaging stage failed during the deploy pipeline run.",
+        "chunk_index": 0, "embedding": [0.25] * 4,
+    }])
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(_kw_fn, "packaging", 10)
+    finally:
+        embeddings._transport = None
+    assert result["semantic_state"] == "ready"
+    # Semantic hits carry the classified identity fields; single-
+    # conversation keyword matches keep their minimal T2 shape.
+    for m in result["matches"]:
+        assert m["kind"] in ("chat", "tool", "sub-agent")
+    for m in result["matches"]:
+        if m.get("semantic") or "similarity" in m:
+            assert "conversation_id" in m
+
+
+async def test_global_search_keeps_none_scope():
+    """No scope args = global (the HTTP search): other conversations'
+    semantic hits DO surface, ranked first."""
+    await _seed()  # conversation 1
+    await database.create_conversation("Other conversation", "ws")
+    await database.add_message(
+        2, "user",
+        "Packaging topics live here too, in a different conversation.",
+    )
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 2, "message_id": 3, "role": "user",
+        "chunk_text": "Packaging topics live here too.",
+        "chunk_index": 0, "embedding": [0.25] * 4,
+    }])
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(_kw_fn, "packaging", 10)
+    finally:
+        embeddings._transport = None
+    # The other conversation's semantic hit surfaced globally: it appears
+    # with conversation identity (or at least its message id is present).
+    ids = {m["message_id"] for m in result["matches"]}
+    assert 3 in ids, f"global scope lost the foreign semantic hit: {ids}"
+    assert result["semantic_matches"] >= 1
+
+
+async def test_tool_scopes_semantic_hits_to_conversation():
+    """Regression (review round): the REAL tool path -- tools.
+    search_conversation_history -- must scope its semantic half to the
+    conversation. Without the pass-through, hits from other conversations
+    leak in ahead of the conversation's own keyword results."""
+    from backend.agent.tools import search_conversation_history
+    await _seed()  # conversation 1
+    await database.create_conversation("Other conversation", "ws")
+    await database.add_message(
+        2, "user",
+        "Packaging topics live here too, in a different conversation.",
+    )
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 2, "message_id": 3, "role": "user",
+        "chunk_text": "Packaging topics live here too.",
+        "chunk_index": 0, "embedding": [0.25] * 4,
+    }])
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_conversation_history(1, "packaging", 10)
+    finally:
+        embeddings._transport = None
+    ids = {m["message_id"] for m in result["matches"]}
+    assert 3 not in ids, f"tool leaked a foreign conversation hit: {ids}"

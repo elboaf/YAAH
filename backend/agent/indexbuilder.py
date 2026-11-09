@@ -73,9 +73,13 @@ async def build_index(progress_callback=None) -> dict:
 
     safe_report("starting", 0, "Starting index build")
 
-    # Clear existing index
+    # Clear existing index -- and the build metadata with it. The metadata
+    # must never outlive the vectors it describes: a failed rebuild would
+    # otherwise leave "ready" pointing at an empty index.
     safe_report("clearing", 5, "Clearing existing index")
     await clear_vector_index()
+    from backend.agent.vectorestore import clear_index_metadata
+    await clear_index_metadata()
 
     # Read all messages
     safe_report("reading", 10, "Reading conversation data")

@@ -6509,7 +6509,19 @@ export function EmbeddingsSettingsCard({
     return () => window.clearInterval(iv)
   }, [rebuildRunning])
 
-  const configured = draft.api_base.trim() !== '' && draft.model.trim() !== ''
+  const draftComplete =
+    draft.api_base.trim() !== '' && draft.model.trim() !== ''
+  // Test/Rebuild hit the SAVED config (the endpoints read config server-
+  // side), not the draft. Enable them only when the draft is complete AND
+  // matches what the backend has: probing or rebuilding a half-edited
+  // form would either report "not configured" (nothing saved yet) or
+  // clear the vectors and rebuild with the OLD model.
+  const savedMatchesDraft =
+    !status ||
+    (status.api_base === draft.api_base.trim() &&
+      status.model === draft.model.trim())
+  const configured = draftComplete && savedMatchesDraft
+  const saveFirst = draftComplete && !savedMatchesDraft
 
   const test = async () => {
     setProbeState('busy')
@@ -6602,6 +6614,11 @@ export function EmbeddingsSettingsCard({
             onChange={(e) => onChange({ ...draft, api_key: e.target.value })}
           />
         </div>
+        {saveFirst && (
+          <p className="font-mono text-[10px] text-amber-400" role="status">
+            Save first to test or rebuild with these settings.
+          </p>
+        )}
         {status && (
           <p className="font-mono text-[10px] text-zinc-500">
             index: {status.index.vectors} vectors
@@ -6644,7 +6661,7 @@ export function EmbeddingsSettingsCard({
           <p className="font-mono text-[10px] text-red-400">{rebuildError}</p>
         )}
         <p className="font-mono text-[10px] text-zinc-600">
-          {configured
+          {draftComplete
             ? 'Semantic search layers over keyword results; transcript chunks are sent only to this endpoint.'
             : 'Blank = semantic search off (keyword search only); nothing is sent anywhere.'}
         </p>

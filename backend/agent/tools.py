@@ -1506,6 +1506,7 @@ async def search_conversation_history(
     return await search_with_semantic(
         keyword_fn, query, max_results,
         workspace_reach=None, workspace=None,
+        conversation_ids=[conversation_id],
     )
 
 

@@ -200,3 +200,33 @@ describe('Embeddings settings card (#677)', () => {
     expect(screen.queryByText(/vectors/)).toBeNull()
   })
 })
+
+describe('Embeddings settings card: draft vs saved gating', () => {
+  it('disables Test/Rebuild while the draft differs from the saved config', async () => {
+    // Draft points at a different model than the saved one: the endpoints
+    // read the SAVED config, so acting on the unsaved draft would rebuild
+    // with the old model (after clearing the vectors).
+    render(
+      <EmbeddingsSettingsCard
+        draft={draft({ model: 'bge-new' })}
+        onChange={() => {}}
+      />,
+    )
+    await waitFor(() => expect(screen.getByRole('status')).toBeTruthy())
+    expect(screen.getByText(/Save first/)).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Test' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(
+      (screen.getByRole('button', { name: 'Rebuild index' }) as HTMLButtonElement).disabled,
+    ).toBe(true)
+  })
+
+  it('keeps Test/Rebuild enabled when the draft matches the saved config', async () => {
+    render(<EmbeddingsSettingsCard draft={draft()} onChange={() => {}} />)
+    await waitFor(() => expect(screen.getByText(/42 vectors/)).toBeTruthy())
+    expect(screen.queryByText(/Save first/)).toBeNull()
+    expect((screen.getByRole('button', { name: 'Test' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(
+      (screen.getByRole('button', { name: 'Rebuild index' }) as HTMLButtonElement).disabled,
+    ).toBe(false)
+  })
+})

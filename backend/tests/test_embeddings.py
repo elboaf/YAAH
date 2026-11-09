@@ -218,3 +218,19 @@ async def test_transcript_text_goes_only_to_configured_endpoint(monkeypatch):
     await embeddings.embed_texts(["private transcript words"])
     assert len(transport.requests) == 1
     assert str(transport.requests[0].url) == "http://embed-host:1234/v1/embeddings"
+
+
+async def test_short_response_rejected(monkeypatch):
+    """Fewer vectors than inputs is an error, not a silent truncation:
+    the batch zip would drop chunks and report ok anyway."""
+    config_mod.save_config({"embeddings": {
+        "api_base": "http://x", "api_key": "", "model": "m",
+    }})
+    transport = _CapturingTransport(
+        lambda request: httpx.Response(
+            200, content=_embedding_response([[0.1] * 4], model="m")
+        )
+    )
+    monkeypatch.setattr(embeddings, "_transport", transport)
+    with pytest.raises(EmbeddingsError, match="1 vectors for 2 inputs"):
+        await embeddings.embed_texts(["a", "b"])

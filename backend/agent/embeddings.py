@@ -98,8 +98,8 @@ async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int, str]:
 
     try:
         data = r.json()
-    except json.JSONDecodeError:
-        raise EmbeddingsError("embeddings endpoint returned non-JSON response")
+    except json.JSONDecodeError as e:
+        raise EmbeddingsError("embeddings endpoint returned non-JSON response") from e
 
     # OpenAI-compatible response:
     # {"data": [{"embedding": [...]}, ...], "model": "name", "usage": {...}}
@@ -120,6 +120,13 @@ async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int, str]:
 
     if dimensions is None:
         raise EmbeddingsError("no embeddings returned")
+    if len(embeddings) != len(texts):
+        # A short response would silently drop chunks in the batch zip;
+        # the build must know, not guess.
+        raise EmbeddingsError(
+            f"embeddings endpoint returned {len(embeddings)} vectors "
+            f"for {len(texts)} inputs"
+        )
 
     # The configured name is the identity stored with the index; the
     # response echo is advisory only.
