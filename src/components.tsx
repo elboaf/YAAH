@@ -137,6 +137,7 @@ import { createPortal } from 'react-dom'
 import { transcriptSelection, googleSearchUrl } from './selectionSearch'
 import { openExternal } from './openExternal'
 import { ApprovalCardShell, FreeTextAnswer, useCardSubmit } from "./approvalCards"
+import { SidebarSearch } from './components/SidebarSearch'
 // Tauri invoke rejections are plain strings, not Errors — `(e as Error).message`
 // would print "undefined" and hide the real (permission) cause.
 function errorMessage(e: unknown): string {
@@ -4262,7 +4263,7 @@ export const DEFAULT_LOCKSTEP_HINT = ' Also sets the default for new chats.'
 
 
 export function Sidebar() {
-  const { newConversation, workspace, setWorkspace, refreshGlobals } = useAgent()
+  const { newConversation, workspace, setWorkspace, refreshGlobals, setConversationId, loadHistory } = useAgent()
   // #685: the strip no longer shows pickers; it only needs refresh for the
   // Settings-close path (a fresh probe after config edits, bypassing TTL).
   const { refresh: refreshModels } = useModelList()
@@ -4316,9 +4317,30 @@ export function Sidebar() {
     }
   }
 
+  // #676: open a conversation from a search result (existing flow: switch to
+  // the conversation, load its history, remember the workspace).
+  // The search result doesn't carry workspace info — resolve it from the
+  // conversation row and switch workspaces if needed (search is global).
+  const openSearchResult = (convId: number) => {
+    getConversation(convId)
+      .then((conv) => {
+        setWorkspace(conv.workspace ?? '')
+        setConversationId(convId)
+        return getMessages(convId)
+      })
+      .then((rows) => loadHistory(convId, rows))
+      .catch((e) =>
+        setNotice({
+          title: 'Failed to open conversation',
+          message: String((e as { message?: string }).message ?? e),
+        }),
+      )
+  }
+
   return (
     <>
       <aside className="lg-sidebar flex w-64 min-w-[220px] flex-col bg-zinc-900 p-2 text-sm border-r border-zinc-700">
+        <SidebarSearch onOpenConversation={openSearchResult} />
         <ConversationList addingDevice={addingDevice} setAddingDevice={setAddingDevice} />
         <UpdateChip />
         {/* Compact defaults: existing chats retain their own selections. */}
@@ -11194,7 +11216,11 @@ export function Composer({
     // Its target is captured at release, not read from this render after
     // asynchronous transcription.
     const isPtt = pttText !== undefined
-    const target = isPtt ? opts?.target : undefined
+    // An explicit target pins the destination: PTT captures its own at
+    // release, and the end-of-run queue drain (#460) pins the conversation
+    // that ran. Without one, the composer's render-time selection decides —
+    // the historical behavior for click/Enter sends.
+    const target = opts?.target
     const targetConversationId = target ? target.conversationId : conversationId
     // Draft destination (#94/#134): the pinned destination wins over the
     // stale active workspace — the destination card's Change… picker and the
@@ -11202,7 +11228,7 @@ export function Composer({
     // click-sends, filing the chat under the previously-selected workspace.
     const targetWorkspace = resolveSendTarget(
       target,
-      conversationId,
+      targetConversationId,
       useAgent.getState().draftDestination,
       workspace,
     )
@@ -11601,8 +11627,19 @@ export function Composer({
   const drainQueueOnEnd = async (
     key: string,
     items: Array<{ id: number; text: string; skills?: string[]; images?: string[] }>,
-    sendQueued: (text?: string, opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[] }) => Promise<void>,
+    sendQueued: (text?: string, opts?: { queueHandoff?: boolean; images?: string[]; skills?: string[]; target?: { conversationId: number | null; workspace: string } }) => Promise<void>,
   ) => {
+    // The drain's destination is the conversation THAT RAN, never the
+    // composer's render-time selection (#460): `sendQueued` is the `send`
+    // captured by the finished turn's render — if the user has since moved
+    // to a fresh draft, that closure still resolves `conversationId ===
+    // null` and `send` takes the `createConversation` branch, filing a
+    // brand-new chat. Pin the numeric id whenever the key is one; a draft
+    // drain (still "draft") stays unpinned.
+    const drainId = Number(key)
+    const drainedTarget = Number.isInteger(drainId) && drainId > 0
+      ? { conversationId: drainId as number, workspace: '' }
+      : undefined
     for (const it of items) {
       const echoes = useAgent.getState().queueEchoByConv[key] ?? []
       const echo = echoes.find((e) => e.id === it.id)
@@ -11610,7 +11647,12 @@ export function Composer({
         markQueuedAsNormal(key, echo.tempId)
         dropQueuedEcho(key, echo.tempId)
       }
-      await sendQueued(it.text, { queueHandoff: true, images: it.images ?? [], skills: it.skills ?? [] })
+      await sendQueued(it.text, {
+        queueHandoff: true,
+        images: it.images ?? [],
+        skills: it.skills ?? [],
+        target: drainedTarget,
+      })
     }
     // Any echo without a matching backend item is stale: the backend's
     // drained list is authoritative after the run-end handoff.
