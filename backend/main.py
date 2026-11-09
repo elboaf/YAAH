@@ -1095,6 +1095,116 @@ async def api_embeddings_rebuild_progress_reset():
     return {"ok": True}
 
 
+# ---- Local model server management (Phase 2b, issue #678) ----
+
+from backend.agent import modelserver
+
+# In-memory state for the running server
+_server_manager = None
+_server_download_progress = {}
+
+
+@app.get("/api/server/status")
+async def api_server_status():
+    """Status of the local model server."""
+    global _server_manager
+    binary, model_id = modelserver.get_server_config()
+    configured = bool(binary)
+
+    if _server_manager and _server_manager.is_running():
+        return {
+            "configured": configured,
+            "running": True,
+            "port": _server_manager.port,
+            "model": model_id,
+            "endpoint": _server_manager.get_embeddings_endpoint(),
+            "healthy": await modelserver.health_check(_server_manager.port),
+        }
+    return {
+        "configured": configured,
+        "running": False,
+        "port": None,
+        "model": model_id,
+        "endpoint": None,
+        "healthy": False,
+    }
+
+
+@app.get("/api/server/models")
+async def api_server_models():
+    """List available models from the manifest."""
+    return {"models": modelserver.list_models()}
+
+
+@app.post("/api/server/start")
+async def api_server_start(body: dict = None):
+    """Start the local model server."""
+    global _server_manager
+    body = body or {}
+    model_id = body.get("model") or None
+
+    if _server_manager and _server_manager.is_running():
+        return {"ok": True, "port": _server_manager.port}
+
+    binary, configured_model = modelserver.get_server_config()
+    if not binary:
+        return {"ok": False, "error": "server not configured"}
+
+    target_model = model_id or configured_model
+    if not target_model:
+        target_model = modelserver.default_model("embedding")["id"]
+
+    entry = modelserver.find_model(target_model)
+    if not entry:
+        return {"ok": False, "error": f"unknown model: {target_model}"}
+
+    # Download if needed
+    if not modelserver.is_model_downloaded(entry):
+        try:
+            await asyncio.to_thread(modelserver.download_model, entry)
+        except Exception as e:
+            return {"ok": False, "error": f"download failed: {e}"}
+
+    _server_manager = modelserver.ServerManager()
+    try:
+        port = await _server_manager.start(target_model)
+        return {"ok": True, "port": port}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/server/stop")
+async def api_server_stop():
+    """Stop the local model server."""
+    global _server_manager
+    if _server_manager:
+        await _server_manager.stop()
+        _server_manager = None
+    return {"ok": True}
+
+
+@app.post("/api/server/download")
+async def api_server_download(body: dict = None):
+    """Download a model without starting the server."""
+    body = body or {}
+    model_id = body.get("model")
+    if not model_id:
+        model_id = modelserver.default_model("embedding")["id"]
+
+    entry = modelserver.find_model(model_id)
+    if not entry:
+        return {"ok": False, "error": f"unknown model: {model_id}"}
+
+    if modelserver.is_model_downloaded(entry):
+        return {"ok": True, "message": "already downloaded"}
+
+    try:
+        await asyncio.to_thread(modelserver.download_model, entry)
+        return {"ok": True, "message": "downloaded"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/conversations/{conversation_id}/messages")
 async def api_add_message(conversation_id: int, body: NewMessage):
     try:

@@ -23,6 +23,7 @@ import logging
 import httpx
 
 from backend.agent.config import load_config
+from backend.agent import modelserver
 
 log = logging.getLogger("yaah.embeddings")
 
@@ -60,7 +61,12 @@ async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int, str]:
     degrade to keyword-only search.
     """
     emb_cfg = _embeddings_config()
-    api_base = emb_cfg["api_base"]
+    # Local server takes precedence when it's running and healthy
+    local_endpoint = modelserver.get_effective_embeddings_endpoint()
+    if local_endpoint:
+        api_base = local_endpoint
+    else:
+        api_base = emb_cfg["api_base"]
     api_key = emb_cfg["api_key"]
     model = emb_cfg["model"]
 
