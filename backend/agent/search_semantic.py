@@ -19,7 +19,7 @@ import asyncio
 import inspect
 import logging
 
-from backend.agent import embeddings, vectorestore
+from backend.agent import embeddings, reranker, vectorestore
 from backend.agent.vectorestore import semantic_readiness
 
 log = logging.getLogger("yaah.search_semantic")
@@ -58,6 +58,7 @@ async def search_with_semantic(
     workspace_reach: str | None = None,
     workspace: str | None = None,
     conversation_ids: list[int] | None = None,
+    rerank: bool = True,
 ) -> dict:
     """Run hybrid search with RRF fusion of keyword and semantic legs.
 
@@ -72,11 +73,16 @@ async def search_with_semantic(
     carries semantic_state "off". This state was promised by the contract
     but no code path produced it before Phase 3.
 
+    rerank: if True, rerank the top fused results with a cross-encoder
+    reranker if one is available (ADR-0023 §9). Fail-open: on reranker
+    unavailability or error, the RRF-fused order is preserved.
+
     The response always carries the keyword contract shape plus:
       semantic_state - "ready" | "unavailable" | "off" | "not_configured"
       semantic_unavailable - human string, present iff state == "unavailable"
       semantic_matches - count of fused hits with a semantic contribution
       truncated - true if the fused candidate list exceeded max_results
+      reranker_state - "applied" | "unavailable" | "not_configured" | "off"
     Each hit gains an optional sources: ["keyword", "semantic"] array
     indicating which legs contributed.
     """
@@ -160,7 +166,13 @@ async def search_with_semantic(
         return kw_result
 
     # Fuse the two legs
-    return _fuse(kw_matches, sem_result["hits"], kw_result, max_results)
+    fused = _fuse(kw_matches, sem_result["hits"], kw_result, max_results)
+
+    # Rerank with cross-encoder if available (ADR-0023 §9)
+    if rerank and fused["semantic_state"] == "ready":
+        fused = await _rerank_fused(query, fused, max_results)
+
+    return fused
 
 
 async def _run_semantic_leg(
@@ -340,5 +352,44 @@ def _fuse(
     result["truncated"] = truncated
     result["semantic_state"] = "ready"
     result["semantic_matches"] = semantic_match_count
+
+    return result
+
+
+async def _rerank_fused(
+    query: str,
+    result: dict,
+    max_results: int,
+) -> dict:
+    """Apply cross-encoder reranking to the top fused results (ADR-0023 §9).
+
+    Reranks the top RERANK_DEPTH candidates. If the reranker is unavailable
+    or fails, preserves the RRF-fused order (fail-open).
+    """
+    try:
+        available = await reranker.is_reranker_available()
+    except Exception:
+        available = False
+
+    if not available:
+        result["reranker_state"] = "unavailable"
+        return result
+
+    # Only rerank if we have enough candidates
+    matches = result["matches"]
+    if len(matches) < 3:
+        result["reranker_state"] = "applied"
+        return result
+
+    # Rerank top candidates
+    reranked = await reranker.rerank(query, matches)
+
+    if len(reranked) == len(matches):
+        result["matches"] = reranked[:max_results]
+        result["count"] = len(result["matches"])
+        result["reranker_state"] = "applied"
+    else:
+        # Reranker returned different count; preserve original
+        result["reranker_state"] = "unavailable"
 
     return result

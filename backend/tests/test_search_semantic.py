@@ -90,9 +90,17 @@ def _kw(query, max_results):
     return run(query, max_results)
 
 
-async def test_ready_semantic_ranking_added():
+async def test_ready_semantic_ranking_added(monkeypatch):
+    """Semantic leg runs, endpoint receives the configured model id."""
     await _seed()
     _configure()
+
+    # Force the test to use the configured endpoint, not a live server.
+    monkeypatch.setattr(
+        "backend.agent.modelserver.get_effective_embeddings_endpoint",
+        lambda: None,
+    )
+
     await vectorestore.record_index_build("bge-m3", 4)
     await vectorestore.store_chunk_embeddings([{
         "conversation_id": 1, "message_id": 1, "role": "user",
