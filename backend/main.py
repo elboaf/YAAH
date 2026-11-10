@@ -93,6 +93,14 @@ async def lifespan(app: FastAPI):
     if wake_mod.start_wake_watcher():
         log.info("wake bridge active")
     yield
+    # The managed local model server is OUR child process: a clean app
+    # shutdown must not orphan it (it would hold its port until killed).
+    try:
+        from backend.agent import modelserver as _modelserver
+
+        await _modelserver.get_manager().stop()
+    except Exception:  # noqa: BLE001 - shutdown is best-effort
+        pass
     await mcp_client.manager.shutdown()
     wake_mod.stop_wake_watcher()
     scheduler.stop_scheduler()
@@ -1093,6 +1101,117 @@ async def api_embeddings_rebuild_progress_reset():
     global _embeddings_rebuild_progress
     _embeddings_rebuild_progress = {}
     return {"ok": True}
+
+
+# ---- Local model server management (Phase 2b, issue #678) ----
+
+from backend.agent import modelserver
+
+_server_download_progress = {}
+
+
+@app.get("/api/server/status")
+async def api_server_status():
+    """Status of the local model server."""
+    binary, model_id = modelserver.get_server_config()
+    configured = bool(binary)
+    manager = modelserver.get_manager()
+
+    if manager.is_running() and manager.port:
+        return {
+            "configured": configured,
+            "running": True,
+            "port": manager.port,
+            "model": model_id,
+            "endpoint": manager.get_embeddings_endpoint(),
+            "healthy": await modelserver.health_check(manager.port),
+        }
+    return {
+        "configured": configured,
+        "running": False,
+        "port": None,
+        "model": model_id,
+        "endpoint": None,
+        "healthy": False,
+    }
+
+
+@app.get("/api/server/models")
+async def api_server_models():
+    """List available models from the manifest."""
+    return {"models": modelserver.list_models()}
+
+
+@app.post("/api/server/start")
+async def api_server_start(body: dict = None):
+    """Start the local model server."""
+    body = body or {}
+    model_id = body.get("model") or None
+
+    binary, configured_model = modelserver.get_server_config()
+    if not binary:
+        return {"ok": False, "error": "server not configured"}
+
+    manager = modelserver.get_manager()
+    # Serialize concurrent start requests: the port pick + spawn must be
+    # one-at-a-time or two callers race two children onto one port.
+    async with modelserver.get_start_lock():
+        if manager.is_running():
+            return {"ok": True, "port": manager.port}
+
+        target_model = model_id or configured_model
+        if not target_model:
+            target_model = modelserver.default_model("embedding")["id"]
+
+        entry = modelserver.find_model(target_model)
+        if not entry:
+            return {"ok": False, "error": f"unknown model: {target_model}"}
+
+        # Download if needed
+        if not modelserver.is_model_downloaded(entry):
+            try:
+                await asyncio.to_thread(modelserver.download_model, entry)
+            except Exception as e:
+                return {"ok": False, "error": f"download failed: {e}"}
+
+        try:
+            port = await manager.start(target_model)
+            return {"ok": True, "port": port}
+        except Exception as e:
+            # start() cleans up its own child; drop the manager state
+            # too so status doesn't report a half-dead server.
+            await manager.stop()
+            return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/server/stop")
+async def api_server_stop():
+    """Stop the local model server."""
+    manager = modelserver.get_manager()
+    await manager.stop()
+    return {"ok": True}
+
+
+@app.post("/api/server/download")
+async def api_server_download(body: dict = None):
+    """Download a model without starting the server."""
+    body = body or {}
+    model_id = body.get("model")
+    if not model_id:
+        model_id = modelserver.default_model("embedding")["id"]
+
+    entry = modelserver.find_model(model_id)
+    if not entry:
+        return {"ok": False, "error": f"unknown model: {model_id}"}
+
+    if modelserver.is_model_downloaded(entry):
+        return {"ok": True, "message": "already downloaded"}
+
+    try:
+        await asyncio.to_thread(modelserver.download_model, entry)
+        return {"ok": True, "message": "downloaded"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/conversations/{conversation_id}/messages")

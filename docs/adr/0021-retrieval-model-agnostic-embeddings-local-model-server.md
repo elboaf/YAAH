@@ -1,7 +1,12 @@
 # ADR 0021: Retrieval is model-agnostic over an OpenAI-compatible embeddings endpoint, with a bundled local model server as the default host
 
 Date: 2026-10-30
-Status: Accepted
+Status: Accepted. Amended by ADR-0022 (2026-11-09): the out-of-box state of
+the local server is OFF — "the default embeddings endpoint is the bundled
+local server" applies once the user enables the server; nothing downloads
+and no process starts without that explicit consent. ADR-0022 also settles
+the T6 gate decisions this ADR left open (tenancy, resource policy, manifest
+shape).
 Driven by: conversation-search/RAG planning session (Oct 2026); Phase 2a/2b of
 the retrieval roadmap. The owner's learning goal is a stated requirement: YAAH
 exists partly to teach its owner modern AI implementations, and RAG was chosen

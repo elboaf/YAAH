@@ -23,6 +23,7 @@ import logging
 import httpx
 
 from backend.agent.config import load_config
+from backend.agent import modelserver
 
 log = logging.getLogger("yaah.embeddings")
 
@@ -48,6 +49,24 @@ def _embeddings_config() -> dict:
     }
 
 
+def _resolved_connection() -> dict:
+    """The connection embed_texts should use (ADR-0022): the bundled
+    local server wins when enabled AND healthy -- its /v1 base URL and
+    the manifest model id fill the block, no key (localhost). Otherwise
+    the manually configured endpoint, key and model stand."""
+    local_endpoint = modelserver.get_effective_embeddings_endpoint()
+    if local_endpoint:
+        _, model_id = modelserver.get_server_config()
+        if not model_id:
+            model_id = modelserver.default_model("embedding")["id"]
+        return {
+            "api_base": local_endpoint,
+            "api_key": "",
+            "model": model_id,
+        }
+    return _embeddings_config()
+
+
 async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int, str]:
     """Embed a list of texts using the configured embeddings endpoint.
 
@@ -59,7 +78,7 @@ async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int, str]:
     Raises EmbeddingsError on any failure. Callers should catch it and
     degrade to keyword-only search.
     """
-    emb_cfg = _embeddings_config()
+    emb_cfg = _resolved_connection()
     api_base = emb_cfg["api_base"]
     api_key = emb_cfg["api_key"]
     model = emb_cfg["model"]
@@ -149,12 +168,12 @@ async def check_embeddings_available() -> dict:
     """Probe the configured endpoint; never raises.
 
     Returns {configured: bool, available: bool, error?, dimensions?,
-    model?}. `configured` reports the config block state; available=False
+    model?}. `configured` reports the resolved connection state; available=False
     with configured=True means configured but unreachable/misbehaving --
     the degraded-mode signal.
     """
-    emb_cfg = _embeddings_config()
-    configured = bool(emb_cfg["api_base"]) and bool(emb_cfg["model"])
+    conn = _resolved_connection()
+    configured = bool(conn["api_base"]) and bool(conn["model"])
     if not configured:
         return {"configured": False, "available": False, "error": "not configured"}
 

@@ -160,6 +160,15 @@ DEFAULTS = {
     # Settings map and takes precedence over the flat form.
     "context_window_overrides": {},
     "model_context": {},
+    # Local model server (Phase 2b, issue #678): YAAH manages a llama-server
+    # process for local inference. Out-of-box: server OFF (empty binary/model).
+    # When enabled: binary="llama", model="qwen3-embedding-0.6b" (or other
+    # manifest id). The server selects its own port; YAAH manages lifecycle.
+    # Single-tenant: one loaded model per server process.
+    "server": {
+        "binary": "",
+        "model": "",
+    },
     # Embeddings config block (Phase 2a, issue #677): model-agnostic
     # embeddings client, separate from chat providers. YAAH sends chunks
     # to this endpoint and stores the resulting vectors. The user
