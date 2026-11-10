@@ -19,8 +19,6 @@ from backend.agent.search_semantic import (
 )
 from backend.db import database
 
-pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
@@ -117,6 +115,7 @@ def test_fusion_depth_constant():
 # Fusion ordering
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_fusion_ranks_cross_leg_agreement_high():
     """A message ranked high in BOTH legs should fuse to the top."""
     await _seed_messages()
@@ -144,56 +143,58 @@ async def test_fusion_ranks_cross_leg_agreement_high():
     assert result["matches"][0]["sources"] == ["keyword", "semantic"]
 
 
+@pytest.mark.asyncio
 async def test_fusion_tie_break_keyword_rank():
     """When fused scores are equal, keyword rank breaks the tie."""
-    # Create scenario: two messages with identical fused scores
-    # One at keyword rank 1 / semantic rank 2
-    # One at keyword rank 2 / semantic rank 1
-    # Same fused score; keyword rank 1 should win
+    # Create two messages with identical keyword match (same rank) and
+    # identical semantic match (same rank), so fused scores are exactly equal.
+    # The keyword rank tiebreaker should then apply (both have same kw rank),
+    # falling through to message_id ascending as final tiebreaker.
 
     await database.create_conversation("Tie break test", "ws")
+    # Same exact text for both so FTS ranks them equally
     await database.add_message(
-        1, "user", "First keyword match phrase"
+        1, "user", "Identical search term content"
     )
     await database.add_message(
-        1, "user", "Second keyword match phrase"
+        1, "user", "Identical search term content"
     )
 
-    # Both have keyword matches, swap semantic ranks
     _configure()
     await vectorestore.record_index_build("bge-m3", 4)
 
-    # Message 1: high keyword rank, low semantic rank
+    # Both have identical semantic vectors → tied semantic rank
     await vectorestore.store_chunk_embeddings([
         {
             "conversation_id": 1, "message_id": 1, "role": "user",
-            "chunk_text": "First keyword match phrase",
+            "chunk_text": "Identical search term content",
             "chunk_index": 0,
-            "embedding": [-0.1, 0.1, -0.1, 0.1],  # lower similarity
+            "embedding": [0.25, 0.25, 0.25, 0.25],
         },
         {
             "conversation_id": 1, "message_id": 2, "role": "user",
-            "chunk_text": "Second keyword match phrase",
+            "chunk_text": "Identical search term content",
             "chunk_index": 0,
-            "embedding": [0.25, 0.25, 0.25, 0.25],  # higher similarity
+            "embedding": [0.25, 0.25, 0.25, 0.25],
         },
     ])
 
     transport = _respond()
     embeddings._transport = transport
     try:
-        # "keyword match" matches both in keyword leg
-        result = await search_with_semantic(_kw_fn, "keyword match", 10)
+        result = await search_with_semantic(_kw_fn, "search term content", 10)
     finally:
         embeddings._transport = None
 
-    if result["semantic_state"] == "ready" and len(result["matches"]) >= 2:
-        # Check that keyword rank breaks tie when scores are close
-        # The exact tie depends on RRF math; verify ordering is deterministic
-        ids = [m["message_id"] for m in result["matches"]]
-        assert len(ids) == len(set(ids))  # no duplicates
+    assert result["semantic_state"] == "ready"
+    ids = [m["message_id"] for m in result["matches"]]
+    # Both tied on fused score and keyword rank → message_id ascending wins
+    if 1 in ids and 2 in ids:
+        assert ids.index(1) < ids.index(2)
+    assert len(ids) == len(set(ids))  # no duplicates
 
 
+@pytest.mark.asyncio
 async def test_fusion_deterministic_ordering():
     """Same inputs → same output order every run."""
     await _seed_messages()
@@ -222,6 +223,7 @@ async def test_fusion_deterministic_ordering():
 # Chunk aggregation / dedupe
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_aggregation_best_chunk_per_message():
     """Multiple chunks per message → best chunk wins for that message."""
     await database.create_conversation("Multi-chunk test", "ws")
@@ -258,15 +260,17 @@ async def test_aggregation_best_chunk_per_message():
     finally:
         embeddings._transport = None
 
-    # Message 1 should appear only once
+    # Message 1 should appear exactly once (present and deduped)
     ids = [m["message_id"] for m in result["matches"]]
-    assert ids.count(1) <= 1
+    assert 1 in ids
+    assert ids.count(1) == 1
 
 
 # ============================================================
 # kw: opt-out
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_kw_prefix_opt_out_keyword_only():
     """kw: prefix forces keyword-only, emits semantic_state 'off'."""
     await _seed_messages()
@@ -290,6 +294,7 @@ async def test_kw_prefix_opt_out_keyword_only():
         assert m.get("sources") is None or m.get("sources") == ["keyword"]
 
 
+@pytest.mark.asyncio
 async def test_kw_prefix_stripped_before_search():
     """The kw: prefix is removed from the query before searching."""
     await _seed_messages()
@@ -305,6 +310,7 @@ async def test_kw_prefix_stripped_before_search():
 # Redefined count semantics
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_semantic_matches_counts_fused_hits_with_semantic():
     """semantic_matches = number of fused hits with semantic contribution."""
     await _seed_messages()
@@ -323,15 +329,16 @@ async def test_semantic_matches_counts_fused_hits_with_semantic():
     finally:
         embeddings._transport = None
 
-    if result["semantic_state"] == "ready":
-        # Count hits with semantic in their sources
-        actual_semantic = sum(
-            1 for m in result["matches"]
-            if "semantic" in m.get("sources", [])
-        )
-        assert result["semantic_matches"] == actual_semantic
+    assert result["semantic_state"] == "ready"
+    # Count hits with semantic in their sources
+    actual_semantic = sum(
+        1 for m in result["matches"]
+        if "semantic" in m.get("sources", [])
+    )
+    assert result["semantic_matches"] == actual_semantic
 
 
+@pytest.mark.asyncio
 async def test_truncated_reflects_fused_candidates():
     """truncated = true when fused candidates exceed max_results."""
     await _seed_messages()
@@ -360,19 +367,18 @@ async def test_truncated_reflects_fused_candidates():
     finally:
         embeddings._transport = None
 
-    if result["semantic_state"] == "ready":
-        # With 6+ candidates and max_results=2, should be truncated
-        # (unless all 6 are in the same conversation for the local test)
-        assert result["count"] <= 2
-        if result["count"] == 2:
-            # We had more candidates, so truncated should be true
-            assert result["truncated"] is True
+    assert result["semantic_state"] == "ready"
+    # With 6+ candidates and max_results=2, should be truncated
+    assert result["count"] <= 2
+    if result["count"] == 2:
+        assert result["truncated"] is True
 
 
 # ============================================================
 # Sources array
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_sources_array_indicates_contributing_legs():
     """Each hit has sources array indicating which legs contributed."""
     await _seed_messages()
@@ -391,19 +397,19 @@ async def test_sources_array_indicates_contributing_legs():
     finally:
         embeddings._transport = None
 
-    if result["semantic_state"] == "ready":
-        for m in result["matches"]:
-            assert "sources" in m
-            assert isinstance(m["sources"], list)
-            # Valid values
-            for src in m["sources"]:
-                assert src in ("keyword", "semantic")
+    assert result["semantic_state"] == "ready"
+    for m in result["matches"]:
+        assert "sources" in m
+        assert isinstance(m["sources"], list)
+        for src in m["sources"]:
+            assert src in ("keyword", "semantic")
 
 
 # ============================================================
 # Degrade pass-through
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_degrade_not_configured():
     """Not configured → keyword-only, state not_configured."""
     await _seed_messages()
@@ -414,6 +420,7 @@ async def test_degrade_not_configured():
     assert result["count"] >= 1
 
 
+@pytest.mark.asyncio
 async def test_degrade_no_index():
     """Configured but no index → state no_index."""
     await _seed_messages()
@@ -426,6 +433,7 @@ async def test_degrade_no_index():
     assert result["count"] >= 1
 
 
+@pytest.mark.asyncio
 async def test_degrade_model_mismatch():
     """Model mismatch → state unavailable, advises rebuild."""
     await _seed_messages()
@@ -439,6 +447,7 @@ async def test_degrade_model_mismatch():
     assert result["count"] >= 1
 
 
+@pytest.mark.asyncio
 async def test_degrade_endpoint_unreachable():
     """Embeddings endpoint down → keyword results, state unavailable."""
     await _seed_messages()
@@ -459,6 +468,7 @@ async def test_degrade_endpoint_unreachable():
     assert result["count"] >= 1
 
 
+@pytest.mark.asyncio
 async def test_degrade_dimension_drift():
     """Dimension drift → state unavailable, advises rebuild."""
     await _seed_messages()
@@ -480,6 +490,7 @@ async def test_degrade_dimension_drift():
 # Assembled scope fusion
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_global_search_fuses_across_workspaces():
     """Global search fuses keyword and semantic across all workspaces."""
     await _seed_messages()
@@ -498,17 +509,18 @@ async def test_global_search_fuses_across_workspaces():
     finally:
         embeddings._transport = None
 
-    if result["semantic_state"] == "ready":
-        # Semantic hit from conversation 3 should be included
-        ids = {m["message_id"] for m in result["matches"]}
-        # At minimum, keyword matches should be present
-        assert result["count"] >= 1
+    assert result["semantic_state"] == "ready"
+    # Semantic hit from conversation 3 should be included
+    ids = {m["message_id"] for m in result["matches"]}
+    assert 5 in ids
+    assert result["count"] >= 1
 
 
 # ============================================================
 # Endpoint shape
 # ============================================================
 
+@pytest.mark.asyncio
 async def test_api_search_returns_fusion_shape():
     """GET /api/search returns the RRF fusion response shape."""
     await _seed_messages()

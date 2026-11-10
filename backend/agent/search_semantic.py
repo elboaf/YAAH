@@ -82,6 +82,12 @@ async def search_with_semantic(
     """
     query = query.strip()
 
+    # Validate/normalize max_results (matching old behavior and vectorestore bounds)
+    try:
+        max_results = max(1, min(int(max_results or 10), 50))
+    except (TypeError, ValueError):
+        max_results = 10
+
     async def _invoke_keyword_fn(q, n):
         """Handle all keyword_fn calling conventions."""
         if inspect.iscoroutinefunction(keyword_fn):
@@ -106,31 +112,40 @@ async def search_with_semantic(
         query, workspace_reach, workspace, conversation_ids
     )
 
-    try:
-        kw_result, sem_result = await asyncio.gather(
-            kw_task, semantic_task, return_exceptions=False
-        )
-    except Exception as e:
-        log.warning("hybrid search failed unexpectedly", exc_info=True)
-        # Fallback to keyword-only
-        kw_result = await _invoke_keyword_fn(query, max_results)
-        if isinstance(kw_result, dict) and "matches" in kw_result:
-            kw_result["semantic_state"] = "unavailable"
-            kw_result["semantic_unavailable"] = f"hybrid search error: {e}"
-        return kw_result
+    # Handle each leg separately so a semantic failure preserves keyword results
+    kw_result, sem_result = await asyncio.gather(
+        kw_task, semantic_task, return_exceptions=True
+    )
+
+    if isinstance(kw_result, Exception):
+        log.warning("keyword leg failed", exc_info=kw_result)
+        # No fallback: keyword_fn itself is broken
+        raise kw_result
 
     if not isinstance(kw_result, dict) or "matches" not in kw_result:
         return kw_result
 
     kw_matches = kw_result["matches"]
-    kw_result["matches"] = kw_matches[:max_results]
-    kw_result["count"] = len(kw_result["matches"])
+
+    if isinstance(sem_result, Exception):
+        # Semantic leg crashed; preserve keyword results with unavailable state
+        log.warning("semantic leg failed", exc_info=sem_result)
+        kw_result["semantic_state"] = "unavailable"
+        kw_result["semantic_unavailable"] = f"semantic search error: {sem_result}"
+        kw_result["semantic_matches"] = 0
+        kw_result["truncated"] = len(kw_matches) > max_results or kw_result.get("truncated", False)
+        kw_result["matches"] = kw_matches[:max_results]
+        kw_result["count"] = len(kw_result["matches"])
+        return kw_result
 
     if sem_result["state"] != "ready":
         kw_result["semantic_state"] = sem_result["state"]
         if sem_result.get("unavailable"):
             kw_result["semantic_unavailable"] = sem_result["unavailable"]
         kw_result["semantic_matches"] = 0
+        kw_result["truncated"] = len(kw_matches) > max_results or kw_result.get("truncated", False)
+        kw_result["matches"] = kw_matches[:max_results]
+        kw_result["count"] = len(kw_result["matches"])
         return kw_result
 
     # Fuse the two legs
