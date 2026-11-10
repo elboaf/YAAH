@@ -249,7 +249,7 @@ class TestModelDownload:
         from backend.agent import modelserver as ms
 
         entry = dict(modelserver.find_model("qwen3-embedding-0.6b"))
-        entry["sha256"] = ""  # fake bytes won't match the real checksum
+        assert entry["sha256"]  # the real checksum stays enforced here
         model_dir = tmp_path / entry["id"]
         model_dir.mkdir()
         monkeypatch.setattr(ms, "MODELS_DIR", tmp_path)
@@ -268,6 +268,29 @@ class TestModelDownload:
             ms.download_model(entry)
         part = model_dir / (entry["files"][0] + ".part")
         assert part.exists()  # anchor survives for the next attempt
+        assert part.read_bytes() == b"HEAD"  # untouched, resumable
+
+    def test_checksum_mismatch_drops_completed_download(self, tmp_path, monkeypatch):
+        """A COMPLETED download that fails verification is deleted: those
+        bytes are corrupt and must not become the next resume anchor."""
+        from backend.agent import modelserver as ms
+
+        entry = dict(modelserver.find_model("qwen3-embedding-0.6b"))
+        assert entry["sha256"]  # real checksum, mismatch guaranteed
+        model_dir = tmp_path / entry["id"]
+        model_dir.mkdir()
+        monkeypatch.setattr(ms, "MODELS_DIR", tmp_path)
+
+        def handler(request):
+            return httpx.Response(200, content=b"corrupt-full-file")
+
+        monkeypatch.setattr(
+            ms.httpx, "Client", lambda **kw: _FakeClient(handler)
+        )
+        with pytest.raises(ValueError, match="Checksum mismatch"):
+            ms.download_model(entry)
+        part = model_dir / (entry["files"][0] + ".part")
+        assert not part.exists()  # corrupt anchor removed
 
 
 class TestServerLifecycle:

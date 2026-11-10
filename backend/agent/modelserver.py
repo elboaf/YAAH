@@ -206,6 +206,10 @@ def download_model(entry: dict[str, Any], progress_cb: Optional[Callable] = None
                         sha.update(chunk)
                 computed = sha.hexdigest()
                 if computed != entry["sha256"]:
+                    # Complete but corrupt: the bytes themselves are bad,
+                    # so the anchor must not survive to poison the next
+                    # resume.
+                    os.remove(tmp_path)
                     raise ValueError(f"Checksum mismatch for {filename}: "
                                      f"expected {entry['sha256']}, got {computed}")
 
@@ -215,18 +219,11 @@ def download_model(entry: dict[str, Any], progress_cb: Optional[Callable] = None
             log.info("  Downloaded %s (%d bytes)", filename, target.stat().st_size)
         except Exception:
             # KEEP the part file on failure: it is the next attempt's
-            # resume anchor. Only a checksum mismatch means the bytes
-            # themselves are bad - drop them so we never resume corrupt.
-            if entry.get("sha256") and os.path.exists(tmp_path):
-                try:
-                    sha = hashlib.sha256()
-                    with open(tmp_path, "rb") as f:
-                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                            sha.update(chunk)
-                    if sha.hexdigest() != entry["sha256"]:
-                        os.remove(tmp_path)
-                except OSError:
-                    pass
+            # resume anchor. (The checksum branch above removes it
+            # itself when a COMPLETED download is corrupt - the only
+            # case where resuming would be wrong.) A truncated file can
+            # never match the full-file digest, so re-hashing here
+            # would delete every partial download.
             raise
 
     log.info("Model %s downloaded successfully (%d files, %d bytes total)",
