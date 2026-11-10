@@ -260,7 +260,7 @@ async def _capture_evaluate(queries, top, out=print):
         out(f"QUERY: {q}")
 
 
-def test_main_runs_end_to_end_on_redirected_store(tmp_path, monkeypatch, capsys):
+def test_main_passes_parsed_queries_to_evaluate(tmp_path, monkeypatch, capsys):
     asyncio.run(_seed())
     qf = tmp_path / "queries.txt"
     qf.write_text("packaging\ncache bug\n", encoding="utf-8")
@@ -291,7 +291,121 @@ def test_main_embed_overrides_write_no_real_config(tmp_path, monkeypatch, capsys
     assert real_config.read_text(encoding="utf-8") == '{"access_mode": "full"}'
 
 
-# ------------------------------------------------------------ rebuild path
+# ------------------------------------------------- override + guard rails
+
+
+def test_main_embed_model_only_merges_over_configured_block(
+    tmp_path, monkeypatch, capsys
+):
+    asyncio.run(_seed())
+    qf = tmp_path / "queries.txt"
+    qf.write_text("packaging\n", encoding="utf-8")
+    config_mod.save_config({"embeddings": {
+        "api_base": "http://cfg-endpoint", "api_key": "k", "model": "other-model",
+    }})
+    # Deterministic transport: the merged endpoint is "unreachable", so
+    # production degrades. If the override had blanked the omitted fields
+    # instead of merging (the pre-review bug), the state would be
+    # not_configured instead.
+    embeddings._transport = httpx.MockTransport(
+        lambda request: httpx.Response(500, content=b"boom")
+    )
+    rc = search_eval.main([str(qf), "--embed-model", "bge-m3"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "state=unavailable" in out
+    assert "state=not_configured" not in out
+    # the real config file was never modified (CONFIG_PATH points at the
+    # deleted throwaway after main(); read the real file directly)
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert stored["embeddings"] == {
+        "api_base": "http://cfg-endpoint", "api_key": "k", "model": "other-model",
+    }
+
+
+def test_main_does_not_send_key_to_a_different_endpoint(tmp_path, monkeypatch, capsys):
+    asyncio.run(_seed(vectors="pos"))  # index ready, so the embed call fires
+    qf = tmp_path / "queries.txt"
+    qf.write_text("packaging\n", encoding="utf-8")
+    config_mod.save_config({"embeddings": {
+        "api_base": "http://cfg-endpoint", "api_key": "secret", "model": "m",
+    }})
+    seen: list[dict] = []
+
+    def handler(request):
+        seen.append(dict(request.headers))
+        return httpx.Response(500, content=b"no")
+
+    embeddings._transport = httpx.MockTransport(handler)
+    # model matches the seeded index (so readiness is ready and the embed
+    # fires); the endpoint differs, so the configured key must NOT ride along
+    rc = search_eval.main(
+        [str(qf), "--embed-api-base", "http://other", "--embed-model", "bge-m3"]
+    )
+    assert rc == 0
+    assert seen  # the (failing) embed call went out
+    assert (seen[0].get("authorization") or "") != "Bearer secret"
+
+
+def test_main_rebuild_refused_when_endpoint_not_usable(tmp_path, monkeypatch, capsys):
+    asyncio.run(_seed())
+    qf = tmp_path / "queries.txt"
+    qf.write_text("packaging\n", encoding="utf-8")
+    config_mod.save_config({"embeddings": {
+        "api_base": "http://dead", "api_key": "", "model": "bge-m3",
+    }})
+    embeddings._transport = httpx.MockTransport(
+        lambda request: httpx.Response(500, content=b"boom")
+    )
+    rc = search_eval.main([str(qf), "--rebuild"])
+    assert rc == 2
+    assert "rebuild refused" in capsys.readouterr().err
+    # the index was never cleared
+    assert asyncio.run(vectorestore.get_vector_count()) == 0
+
+
+def test_main_rejects_mismatched_db_in_process(tmp_path, monkeypatch, capsys):
+    asyncio.run(_seed())
+    qf = tmp_path / "queries.txt"
+    qf.write_text("packaging\n", encoding="utf-8")
+    other = tmp_path / "elsewhere.db"
+    rc = search_eval.main([str(qf), "--db", str(other)])
+    assert rc == 2
+    assert "cannot be honored" in capsys.readouterr().err
+
+
+def test_main_accepts_db_matching_the_process_binding(tmp_path, monkeypatch, capsys):
+    asyncio.run(_seed())
+    qf = tmp_path / "queries.txt"
+    qf.write_text("packaging\n", encoding="utf-8")
+    rc = search_eval.main([str(qf), "--db", str(database.DB_PATH)])
+    assert rc == 0
+    assert "QUERY: packaging" in capsys.readouterr().out
+
+
+def test_main_cleans_up_the_throwaway_config(tmp_path, monkeypatch, capsys):
+    asyncio.run(_seed())
+    qf = tmp_path / "queries.txt"
+    qf.write_text("packaging\n", encoding="utf-8")
+    real_config = tmp_path / "config.json"
+    real_config.write_text('{"access_mode": "full"}', encoding="utf-8")
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", real_config)
+    seen_paths: list[Path] = []
+
+    async def _probe(queries, top, out=print):
+        from backend.agent import config as cm
+
+        seen_paths.append(Path(cm.CONFIG_PATH))
+
+    monkeypatch.setattr(search_eval, "evaluate", _probe)
+    rc = search_eval.main(
+        [str(qf), "--embed-api-base", "http://x", "--embed-model", "bge-m3"]
+    )
+    assert rc == 0
+    throwaway = seen_paths[0]
+    assert throwaway != real_config  # the run used the throwaway
+    assert not throwaway.exists()  # ...and it was deleted afterwards
+    assert real_config.exists()  # the real config was never touched
 
 
 async def test_rebuild_goes_through_real_builder(capsys):

@@ -208,26 +208,39 @@ async def _conversation_titles(conversation_ids: list[int]) -> dict:
         return {r["id"]: r["title"] for r in await cur.fetchall()}
 
 
-def _override_config(config_mod, args) -> None:
-    """Point CONFIG_PATH at a throwaway config when --embed-* overrides are
-    given; otherwise honor --config. Module-attribute redirect only: no real
-    config file is ever modified."""
-    if args.embed_api_base or args.embed_model:
-        cfg = config_mod.load_config()
-        cfg["embeddings"] = {
-            "api_base": args.embed_api_base or "",
-            "api_key": args.embed_key or "",
-            "model": args.embed_model or "",
-        }
-        cfg["server"] = {"binary": "", "model": ""}
-        tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".json", delete=False, encoding="utf-8"
-        )
-        json.dump(cfg, tmp)
-        tmp.close()
-        config_mod.CONFIG_PATH = Path(tmp.name)
-    elif args.config:
-        config_mod.CONFIG_PATH = Path(args.config)
+def _override_config(config_mod, args) -> bool:
+    """Apply --embed-* / --config without touching any real config file.
+
+    --embed-* merges over the configured embeddings block (omitted
+    fields keep their configured values) inside a throwaway config; the
+    local model server is invisible cross-process, so the manual block
+    is the connection. The API key is preserved only while the endpoint
+    stays the same -- a different endpoint never silently inherits the
+    configured key. Returns True when a throwaway config was created
+    (the caller owns deleting it)."""
+    if not (args.embed_api_base or args.embed_model):
+        if args.config:
+            config_mod.CONFIG_PATH = Path(args.config)
+        return False
+    cfg = config_mod.load_config()
+    emb = dict(cfg.get("embeddings") or {})
+    if args.embed_api_base and args.embed_api_base != emb.get("api_base"):
+        emb["api_key"] = args.embed_key or ""
+    elif args.embed_key:
+        emb["api_key"] = args.embed_key
+    if args.embed_api_base:
+        emb["api_base"] = args.embed_api_base
+    if args.embed_model:
+        emb["model"] = args.embed_model
+    cfg["embeddings"] = emb
+    cfg["server"] = {"binary": "", "model": ""}
+    tmp = tempfile.NamedTemporaryFile(
+        "w", suffix=".json", delete=False, encoding="utf-8"
+    )
+    json.dump(cfg, tmp)
+    tmp.close()
+    config_mod.CONFIG_PATH = Path(tmp.name)
+    return True
 
 
 def main(argv=None) -> int:
@@ -241,24 +254,59 @@ def main(argv=None) -> int:
         print("no queries in file (blank lines and # comments are skipped)", file=sys.stderr)
         return 2
 
-    # YAAH_DB_PATH is read at import time; must be set before backend imports.
+    # --db must be a real alternative store. YAAH_DB_PATH is read at
+    # import time: if this process has already imported the store module,
+    # --db is only honorable when it names the same file -- refuse rather
+    # than silently evaluate/rebuild the wrong store. In a fresh process
+    # the env var is set before the first backend import, which binds it.
     if args.db:
+        if "backend.db.database" in sys.modules:
+            import backend.db.database as database
+
+            if Path(args.db).resolve() != Path(database.DB_PATH).resolve():
+                print(
+                    f"--db {args.db} cannot be honored: this process already has "
+                    f"the store bound at {database.DB_PATH} (YAAH_DB_PATH is read "
+                    "at import time). Run the script as its own process.",
+                    file=sys.stderr,
+                )
+                return 2
         os.environ["YAAH_DB_PATH"] = args.db
 
     from backend.agent import config as config_mod
 
-    _override_config(config_mod, args)
-
+    throwaway_path: Path | None = None
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except AttributeError:
-        pass
+        if _override_config(config_mod, args):
+            throwaway_path = Path(config_mod.CONFIG_PATH)
 
-    if args.rebuild:
-        print("# rebuilding vector index (user-triggered, same path as Settings)...")
-        print(f"# {asyncio.run(_maybe_rebuild())}")
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except AttributeError:
+            pass
 
-    asyncio.run(evaluate(queries, args.top))
+        if args.rebuild:
+            # A rebuild clears the vector index before re-embedding.
+            # Refuse to start one against an endpoint that cannot embed
+            # right now -- that combination would wipe a good index.
+            from backend.agent import embeddings
+
+            probe = asyncio.run(embeddings.check_embeddings_available())
+            if not (probe.get("configured") and probe.get("available")):
+                print(
+                    "rebuild refused: embeddings endpoint not usable "
+                    f"({probe.get('error') or 'not configured'}) -- refusing "
+                    "to clear the index before a proven-good embed",
+                    file=sys.stderr,
+                )
+                return 2
+            print("# rebuilding vector index (user-triggered, same path as Settings)...")
+            print(f"# {asyncio.run(_maybe_rebuild())}")
+
+        asyncio.run(evaluate(queries, args.top))
+    finally:
+        if throwaway_path is not None:
+            throwaway_path.unlink(missing_ok=True)
     return 0
 
 
