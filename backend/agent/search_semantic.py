@@ -117,9 +117,11 @@ async def search_with_semantic(
         kw_task, semantic_task, return_exceptions=True
     )
 
-    if isinstance(kw_result, Exception):
+    if isinstance(kw_result, BaseException):
+        # Includes CancelledError (BaseException, not Exception): a
+        # cancelled keyword leg must not be treated as a result value.
+        # No fallback: keyword_fn itself is broken.
         log.warning("keyword leg failed", exc_info=kw_result)
-        # No fallback: keyword_fn itself is broken
         raise kw_result
 
     if not isinstance(kw_result, dict) or "matches" not in kw_result:
@@ -127,13 +129,22 @@ async def search_with_semantic(
 
     kw_matches = kw_result["matches"]
 
-    if isinstance(sem_result, Exception):
-        # Semantic leg crashed; preserve keyword results with unavailable state
+    def _degraded_truncated() -> bool:
+        """Fused-truth truncation for keyword-only/degraded responses.
+
+        The keyword leg ran at FUSION_DEPTH, so its own truncated flag is
+        relative to that depth; the caller's cut is max_results.
+        """
+        return len(kw_matches) > max_results or bool(kw_result.get("truncated", False))
+
+    if isinstance(sem_result, BaseException):
+        # Semantic leg crashed (incl. cancellation); preserve keyword
+        # results with unavailable state
         log.warning("semantic leg failed", exc_info=sem_result)
         kw_result["semantic_state"] = "unavailable"
         kw_result["semantic_unavailable"] = f"semantic search error: {sem_result}"
         kw_result["semantic_matches"] = 0
-        kw_result["truncated"] = len(kw_matches) > max_results or kw_result.get("truncated", False)
+        kw_result["truncated"] = _degraded_truncated()
         kw_result["matches"] = kw_matches[:max_results]
         kw_result["count"] = len(kw_result["matches"])
         return kw_result
@@ -143,7 +154,7 @@ async def search_with_semantic(
         if sem_result.get("unavailable"):
             kw_result["semantic_unavailable"] = sem_result["unavailable"]
         kw_result["semantic_matches"] = 0
-        kw_result["truncated"] = len(kw_matches) > max_results or kw_result.get("truncated", False)
+        kw_result["truncated"] = _degraded_truncated()
         kw_result["matches"] = kw_matches[:max_results]
         kw_result["count"] = len(kw_result["matches"])
         return kw_result
@@ -256,10 +267,10 @@ def _fuse(
     kw_by_msg = _aggregate_leg(kw_matches, "message_id")
     sem_by_msg = _aggregate_leg(sem_hits, "message_id")
 
-    # Compute fused scores
+    # Compute fused scores. Ranks are per-message positions in each
+    # deduplicated leg dict (insertion order = the leg's ranking).
     fused = {}
-    for mid, hit in kw_by_msg.items():
-        rank = list(kw_by_msg.keys()).index(mid) + 1
+    for rank, (mid, hit) in enumerate(kw_by_msg.items(), start=1):
         score = rrf_score(rank)
         fused[mid] = {
             "score": score,
@@ -269,8 +280,7 @@ def _fuse(
             "sources": ["keyword"],
         }
 
-    for mid, hit in sem_by_msg.items():
-        rank = list(sem_by_msg.keys()).index(mid) + 1
+    for rank, (mid, hit) in enumerate(sem_by_msg.items(), start=1):
         if mid in fused:
             fused[mid]["score"] += rrf_score(rank)
             fused[mid]["sem_hit"] = hit

@@ -145,14 +145,10 @@ async def test_fusion_ranks_cross_leg_agreement_high():
 
 @pytest.mark.asyncio
 async def test_fusion_tie_break_keyword_rank():
-    """When fused scores are equal, keyword rank breaks the tie."""
-    # Create two messages with identical keyword match (same rank) and
-    # identical semantic match (same rank), so fused scores are exactly equal.
-    # The keyword rank tiebreaker should then apply (both have same kw rank),
-    # falling through to message_id ascending as final tiebreaker.
-
+    """Exact-tie ordering: equal fused score + equal keyword rank falls
+    through to message_id ascending."""
     await database.create_conversation("Tie break test", "ws")
-    # Same exact text for both so FTS ranks them equally
+    # Same exact text for both so FTS ranks them equally (kw ranks equal)
     await database.add_message(
         1, "user", "Identical search term content"
     )
@@ -163,7 +159,8 @@ async def test_fusion_tie_break_keyword_rank():
     _configure()
     await vectorestore.record_index_build("bge-m3", 4)
 
-    # Both have identical semantic vectors → tied semantic rank
+    # Identical semantic vectors → identical similarity → tied semantic
+    # contribution, so both messages fuse to the SAME score.
     await vectorestore.store_chunk_embeddings([
         {
             "conversation_id": 1, "message_id": 1, "role": "user",
@@ -188,9 +185,9 @@ async def test_fusion_tie_break_keyword_rank():
 
     assert result["semantic_state"] == "ready"
     ids = [m["message_id"] for m in result["matches"]]
-    # Both tied on fused score and keyword rank → message_id ascending wins
-    if 1 in ids and 2 in ids:
-        assert ids.index(1) < ids.index(2)
+    # Unconditional: both must be present, first two exactly [1, 2]
+    assert len(ids) >= 2, f"expected both tied messages, got {ids}"
+    assert ids[:2] == [1, 2]
     assert len(ids) == len(set(ids))  # no duplicates
 
 
@@ -330,7 +327,9 @@ async def test_semantic_matches_counts_fused_hits_with_semantic():
         embeddings._transport = None
 
     assert result["semantic_state"] == "ready"
-    # Count hits with semantic in their sources
+    # semantic_matches must reflect at least one real semantic contribution
+    assert result["semantic_matches"] >= 1
+    # ...and equal the number of hits carrying a semantic source
     actual_semantic = sum(
         1 for m in result["matches"]
         if "semantic" in m.get("sources", [])
@@ -368,10 +367,10 @@ async def test_truncated_reflects_fused_candidates():
         embeddings._transport = None
 
     assert result["semantic_state"] == "ready"
-    # With 6+ candidates and max_results=2, should be truncated
-    assert result["count"] <= 2
-    if result["count"] == 2:
-        assert result["truncated"] is True
+    # Unconditional: 5 indexed messages + keyword hits at max_results=2
+    # means candidates exceed the cut.
+    assert result["count"] == 2
+    assert result["truncated"] is True
 
 
 # ============================================================
