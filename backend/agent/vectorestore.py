@@ -260,7 +260,7 @@ async def semantic_search(
     built by different models: degrade, never fake a result.
     """
     try:
-        max_results = max(1, min(int(max_results or 10), 50))
+        max_results = max(1, min(int(max_results or 10), 100))
     except (TypeError, ValueError):
         max_results = 10
 

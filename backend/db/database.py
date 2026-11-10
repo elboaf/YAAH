@@ -1805,7 +1805,7 @@ async def search_conversation_history(
     if not query:
         return {"error": "query must not be empty"}
     try:
-        max_results = max(1, min(int(max_results or 10), 50))
+        max_results = max(1, min(int(max_results or 10), 100))
     except (TypeError, ValueError):
         max_results = 10
 
@@ -1872,7 +1872,7 @@ async def search_conversations_in_workspace(
     if not query:
         return {"error": "query must not be empty"}
     try:
-        max_results = max(1, min(int(max_results or 10), 50))
+        max_results = max(1, min(int(max_results or 10), 100))
     except (TypeError, ValueError):
         max_results = 10
 
@@ -1941,7 +1941,7 @@ async def search_all_workspaces(query: str, max_results: int = 10) -> dict:
     if not query:
         return {"error": "query must not be empty"}
     try:
-        max_results = max(1, min(int(max_results or 10), 50))
+        max_results = max(1, min(int(max_results or 10), 100))
     except (TypeError, ValueError):
         max_results = 10
 
