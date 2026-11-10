@@ -43,11 +43,14 @@ MODELS: list[dict[str, Any]] = [
         "id": "qwen3-embedding-0.6b",
         "name": "Qwen3-Embedding-0.6B (GGUF)",
         "hf_repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
-        "files": ["qwen3_embedding_0.6b_q8_0.gguf"],
-        "revision": "main",
-        # sha256 computed from the actual downloaded file; empty means
-        # computed on first download and pinned in a follow-up release.
-        "sha256": "",
+        # Filename is case-sensitive on HF (a wrong case 404s).
+        "files": ["Qwen3-Embedding-0.6B-Q8_0.gguf"],
+        # Pinned upstream commit; a new upstream version arrives via a
+        # YAAH release, never by moving this pin (ADR-0022).
+        "revision": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
+        # sha256 of the GGUF payload (the HF LFS oid at the pinned
+        # revision) - download_model refuses a mismatched file.
+        "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
         "license": "Apache-2.0",
         "tasks": ["embedding"],
         "dimensions": 1024,
@@ -128,10 +131,16 @@ def _model_download_url(entry: dict[str, Any], filename: str) -> str:
 
 
 def download_model(entry: dict[str, Any], progress_cb: Optional[Callable] = None) -> Path:
-    """Download a model from the manifest entry. Returns the path to the downloaded file.
+    """Download a model from the manifest entry. Returns the path to the
+    downloaded file.
 
-    Uses atomic download (temp file + rename) and checksum verification if available.
-    Runs on a thread via asyncio.to_thread to avoid blocking the event loop.
+    Resumable: partial bytes accumulate in a deterministic
+    `<filename>.part` next to the target and the next attempt continues
+    with an HTTP Range request, so a dropped 600MB fetch does not start
+    over. The finished file is checksum-verified (manifest sha256) and
+    atomically renamed into place, so a truncated or corrupted download
+    can never sit at the real path. Runs on a thread via
+    asyncio.to_thread to avoid blocking the event loop.
     """
     model_id = entry["id"]
     log.info("Downloading model %s from %s", model_id, entry["hf_repo"])
@@ -148,25 +157,42 @@ def download_model(entry: dict[str, Any], progress_cb: Optional[Callable] = None
         log.info("  Downloading %s -> %s", filename, target)
 
         url = _model_download_url(entry, filename)
+        # Deterministic part file: the resume anchor across attempts.
+        tmp_path = str(target) + ".part"
 
-        # Download to temp file, then atomic rename
-        tmp_path = tempfile.mktemp(suffix=".part", dir=str(model_dir))
+        resume_from = 0
+        if os.path.exists(tmp_path):
+            resume_from = os.path.getsize(tmp_path)
+            log.info("  resuming %s from byte %d", filename, resume_from)
+
         try:
-            with httpx.Client(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
-                with client.stream("GET", url) as r:
-                    r.raise_for_status()
+            headers = {"Range": f"bytes={resume_from}-"} if resume_from else {}
+            with httpx.Client(
+                timeout=DOWNLOAD_TIMEOUT, follow_redirects=True
+            ) as client:
+                with client.stream("GET", url, headers=headers) as r:
+                    # A server that ignores Range replies 200 with the
+                    # whole file: restart from zero rather than append.
+                    if resume_from and r.status_code != 206:
+                        resume_from = 0
+                        r.raise_for_status()
+                    else:
+                        r.raise_for_status()
                     content_length = r.headers.get("Content-Length")
                     tracker = DownloadTracker()
                     if content_length:
-                        tracker.total_size = int(content_length)
+                        tracker.total_size = resume_from + int(content_length)
 
-                    with open(tmp_path, "wb") as f:
+                    mode = "ab" if resume_from else "wb"
+                    with open(tmp_path, mode) as f:
                         chunk_num = 0
                         for chunk in r.iter_bytes(chunk_size=1024 * 1024):
                             if not chunk:
                                 break
                             f.write(chunk)
-                            tracker.bytes_downloaded += len(chunk)
+                            tracker.bytes_downloaded = (
+                                resume_from + f.tell()
+                            )
                             total_bytes += len(chunk)
                             chunk_num += 1
                             if progress_cb and chunk_num % 10 == 0:
@@ -176,7 +202,7 @@ def download_model(entry: dict[str, Any], progress_cb: Optional[Callable] = None
             if entry.get("sha256"):
                 sha = hashlib.sha256()
                 with open(tmp_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(8192), b""):
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
                         sha.update(chunk)
                 computed = sha.hexdigest()
                 if computed != entry["sha256"]:
@@ -188,11 +214,19 @@ def download_model(entry: dict[str, Any], progress_cb: Optional[Callable] = None
             downloaded_files.append(target)
             log.info("  Downloaded %s (%d bytes)", filename, target.stat().st_size)
         except Exception:
-            # Clean up temp file on failure
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+            # KEEP the part file on failure: it is the next attempt's
+            # resume anchor. Only a checksum mismatch means the bytes
+            # themselves are bad - drop them so we never resume corrupt.
+            if entry.get("sha256") and os.path.exists(tmp_path):
+                try:
+                    sha = hashlib.sha256()
+                    with open(tmp_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                            sha.update(chunk)
+                    if sha.hexdigest() != entry["sha256"]:
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
             raise
 
     log.info("Model %s downloaded successfully (%d files, %d bytes total)",
@@ -354,12 +388,13 @@ class ServerManager:
         # Select port
         self.port = select_free_port()
 
-        # Build command
+        # Build command. NOTE: llama-server's port flag is --port; the
+        # bare -p is the PROMPT flag and would wedge startup.
         model_path = MODELS_DIR / model_id / entry["files"][0]
         cmd = [
             binary,
             "-m", str(model_path),
-            "-p", str(self.port),
+            "--port", str(self.port),
             "--host", "127.0.0.1",
             *entry.get("flags", []),
         ]
@@ -372,10 +407,12 @@ class ServerManager:
         log.info("Starting llama-server on port %d: %s", self.port, " ".join(cmd))
 
         try:
+            # Output goes to the OS sink, not PIPE: nothing drains the
+            # pipes, and a chatty server would fill them and block.
             self.process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except Exception as e:
@@ -384,11 +421,21 @@ class ServerManager:
         # Wait for health check to pass
         for i in range(60):
             await asyncio.sleep(HEALTH_CHECK_INTERVAL / 10)
+            # Bail out early if the child already died (bad binary, bad
+            # flag, port conflict) instead of waiting the full window.
+            if self.process.poll() is not None:
+                self.process = None
+                raise RuntimeError(
+                    f"llama-server exited during startup (port {self.port})"
+                )
             if await health_check(self.port):
                 log.info("Server healthy on port %d after %d attempts",
                          self.port, i + 1)
                 return self.port
 
+        # Startup failed: kill the child we spawned so it doesn't leak
+        # as a running-but-unhealthy process holding a stale port.
+        await self.stop()
         raise RuntimeError(f"Server failed to become healthy on port {self.port}")
 
     async def stop(self) -> None:
@@ -403,6 +450,7 @@ class ServerManager:
         except (asyncio.TimeoutError, subprocess.TimeoutExpired):
             log.warning("Server did not terminate gracefully, killing")
             self.process.kill()
+            await asyncio.to_thread(self.process.wait)
         finally:
             self.process = None
             self._stop_event.set()
@@ -413,10 +461,24 @@ class ServerManager:
             log.warning("Server unhealthy, restarting")
             self.restart_count += 1
             if self.restart_count > MAX_RESTARTS:
+                # The circuit-breaker: park the manager stopped so a
+                # later explicit start resets the counter instead of
+                # the next call tripping the same limit instantly.
+                await self.stop()
+                self.restart_count = 0
                 raise RuntimeError("Server failed to restart after multiple attempts")
             await self.stop()
             if self.model_entry:
-                await self.start(self.model_entry["id"])
+                try:
+                    await self.start(self.model_entry["id"])
+                except Exception:
+                    await self.stop()
+                    raise
+            else:
+                await self.stop()
+                raise RuntimeError("no model entry to restart")
+            # A healthy restart resets the breaker.
+            self.restart_count = 0
 
     def get_embeddings_endpoint(self) -> Optional[str]:
         """Get the embeddings endpoint URL when server is running."""
@@ -429,11 +491,37 @@ class ServerManager:
 # Configuration integration
 # ---------------------------------------------------------------------
 
+# The one live manager for this process. The embeddings client resolves
+# its endpoint against THIS instance, not a fresh one - a new
+# ServerManager() has no process and would always report stopped.
+_manager: Optional[ServerManager] = None
+_start_lock: Optional[asyncio.Lock] = None
+
+
+def get_manager() -> ServerManager:
+    """Return the process-wide ServerManager, creating it on first use."""
+    global _manager, _start_lock
+    if _manager is None:
+        _manager = ServerManager()
+        _start_lock = asyncio.Lock()
+    return _manager
+
+
+def get_start_lock() -> asyncio.Lock:
+    """Lock serializing server starts (must exist after get_manager)."""
+    global _start_lock
+    get_manager()
+    return _start_lock
+
+
 def set_server_config(binary: str, model_id: str) -> None:
-    """Set the server configuration (binary name and model id)."""
-    cfg = config_mod.load_config()
-    cfg["server"] = {"binary": binary, "model": model_id}
-    config_mod.save_config(cfg)
+    """Set the server configuration (binary name and model id).
+
+    Sends a partial update so save_config merges just the server key -
+    persisting the whole load_config() view would bake env overrides
+    and defaults into the user's config file.
+    """
+    config_mod.save_config({"server": {"binary": binary, "model": model_id}})
 
 
 def get_server_config() -> tuple[str, str]:
@@ -444,25 +532,14 @@ def get_server_config() -> tuple[str, str]:
 
 
 def get_effective_embeddings_endpoint() -> Optional[str]:
-    """Get the embeddings endpoint: local server if running, else config.
-
-    This is called by the embeddings client to determine where to send requests.
-    """
-    # Check if local server is running
-    binary, model_id = get_server_config()
-    if binary:
-        manager = ServerManager()
-        endpoint = manager.get_embeddings_endpoint()
-        if endpoint:
-            return endpoint
-
-    # Fall back to manually configured endpoint
-    cfg = config_mod.load_config()
-    emb = cfg.get("embeddings", {})
-    api_base = (emb.get("api_base") or "").strip()
-    if api_base:
-        return api_base
-
+    """The bundled local server's /v1 base URL while it is running and
+    serving, else None. ONLY the local server - the fallback to the
+    manually configured embeddings endpoint lives in the caller
+    (embeddings._resolved_connection); folding it in here would make
+    every configured remote endpoint look 'local' and strip its key."""
+    manager = get_manager()
+    if manager.is_running() and manager.port:
+        return manager.get_embeddings_endpoint()
     return None
 
 

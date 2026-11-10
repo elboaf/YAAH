@@ -69,7 +69,7 @@ freshness for byte-identical local models.
 
 User-visible model selection: the Settings surface lists manifest models,
 users choose from that list. Config stores `server.binary` (`llama` /
-`sd` / empty) and `server.model` (manifest id, e.g. `qwen3-emb-0.6b`). An
+`sd` / empty) and `server.model` (manifest id, e.g. `qwen3-embedding-0.6b`). An
 entry's task hints must cover `embedding` to be selectable as the default
 embedding model — task-correctness is manifest-checked, not trusted to the
 user. An empty `server.model` falls back to the manifest's default embedding

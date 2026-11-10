@@ -93,6 +93,14 @@ async def lifespan(app: FastAPI):
     if wake_mod.start_wake_watcher():
         log.info("wake bridge active")
     yield
+    # The managed local model server is OUR child process: a clean app
+    # shutdown must not orphan it (it would hold its port until killed).
+    try:
+        from backend.agent import modelserver as _modelserver
+
+        await _modelserver.get_manager().stop()
+    except Exception:  # noqa: BLE001 - shutdown is best-effort
+        pass
     await mcp_client.manager.shutdown()
     wake_mod.stop_wake_watcher()
     scheduler.stop_scheduler()
@@ -1099,26 +1107,24 @@ async def api_embeddings_rebuild_progress_reset():
 
 from backend.agent import modelserver
 
-# In-memory state for the running server
-_server_manager = None
 _server_download_progress = {}
 
 
 @app.get("/api/server/status")
 async def api_server_status():
     """Status of the local model server."""
-    global _server_manager
     binary, model_id = modelserver.get_server_config()
     configured = bool(binary)
+    manager = modelserver.get_manager()
 
-    if _server_manager and _server_manager.is_running():
+    if manager.is_running() and manager.port:
         return {
             "configured": configured,
             "running": True,
-            "port": _server_manager.port,
+            "port": manager.port,
             "model": model_id,
-            "endpoint": _server_manager.get_embeddings_endpoint(),
-            "healthy": await modelserver.health_check(_server_manager.port),
+            "endpoint": manager.get_embeddings_endpoint(),
+            "healthy": await modelserver.health_check(manager.port),
         }
     return {
         "configured": configured,
@@ -1139,47 +1145,50 @@ async def api_server_models():
 @app.post("/api/server/start")
 async def api_server_start(body: dict = None):
     """Start the local model server."""
-    global _server_manager
     body = body or {}
     model_id = body.get("model") or None
-
-    if _server_manager and _server_manager.is_running():
-        return {"ok": True, "port": _server_manager.port}
 
     binary, configured_model = modelserver.get_server_config()
     if not binary:
         return {"ok": False, "error": "server not configured"}
 
-    target_model = model_id or configured_model
-    if not target_model:
-        target_model = modelserver.default_model("embedding")["id"]
+    manager = modelserver.get_manager()
+    # Serialize concurrent start requests: the port pick + spawn must be
+    # one-at-a-time or two callers race two children onto one port.
+    async with modelserver.get_start_lock():
+        if manager.is_running():
+            return {"ok": True, "port": manager.port}
 
-    entry = modelserver.find_model(target_model)
-    if not entry:
-        return {"ok": False, "error": f"unknown model: {target_model}"}
+        target_model = model_id or configured_model
+        if not target_model:
+            target_model = modelserver.default_model("embedding")["id"]
 
-    # Download if needed
-    if not modelserver.is_model_downloaded(entry):
+        entry = modelserver.find_model(target_model)
+        if not entry:
+            return {"ok": False, "error": f"unknown model: {target_model}"}
+
+        # Download if needed
+        if not modelserver.is_model_downloaded(entry):
+            try:
+                await asyncio.to_thread(modelserver.download_model, entry)
+            except Exception as e:
+                return {"ok": False, "error": f"download failed: {e}"}
+
         try:
-            await asyncio.to_thread(modelserver.download_model, entry)
+            port = await manager.start(target_model)
+            return {"ok": True, "port": port}
         except Exception as e:
-            return {"ok": False, "error": f"download failed: {e}"}
-
-    _server_manager = modelserver.ServerManager()
-    try:
-        port = await _server_manager.start(target_model)
-        return {"ok": True, "port": port}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+            # start() cleans up its own child; drop the manager state
+            # too so status doesn't report a half-dead server.
+            await manager.stop()
+            return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/server/stop")
 async def api_server_stop():
     """Stop the local model server."""
-    global _server_manager
-    if _server_manager:
-        await _server_manager.stop()
-        _server_manager = None
+    manager = modelserver.get_manager()
+    await manager.stop()
     return {"ok": True}
 
 
