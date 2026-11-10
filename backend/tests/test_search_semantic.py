@@ -448,7 +448,9 @@ async def test_tool_scopes_semantic_hits_to_conversation():
     transport = _respond()
     embeddings._transport = transport
     try:
-        result = await search_conversation_history(1, "packaging", 10)
+        result = await search_conversation_history(
+            workspace="ws", conversation_id=1, query="packaging", max_results=10
+        )
     finally:
         embeddings._transport = None
     ids = {m["message_id"] for m in result["matches"]}
