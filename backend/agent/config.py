@@ -168,6 +168,10 @@ DEFAULTS = {
     "server": {
         "binary": "",
         "model": "",
+        # GPU offload toggle (ADR-0022): opt-in, re-probed at each start.
+        # False = CPU (default). When the user flips it on, start() probes
+        # VRAM and offloads only when there is headroom.
+        "gpu_offload": False,
     },
     # Embeddings config block (Phase 2a, issue #677): model-agnostic
     # embeddings client, separate from chat providers. YAAH sends chunks

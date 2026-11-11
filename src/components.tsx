@@ -113,6 +113,7 @@ import {
   getModelServerModels,
   startModelServer,
   stopModelServer,
+  setServerGpuOffload,
   downloadModelServer,
   type ModelServerStatus,
   type ModelServerModel,
@@ -6752,6 +6753,7 @@ export function ModelServerSettingsCard() {
   const [status, setStatus] = useState<ModelServerStatus | null>(null)
   const [models, setModels] = useState<ModelServerModel[]>([])
   const [selectedModel, setSelectedModel] = useState('')
+  const [gpuOffload, setGpuOffload] = useState(false)
   const [startState, setStartState] = useState<'idle' | 'busy'>('idle')
   const [stopState, setStopState] = useState<'idle' | 'busy'>('idle')
   const [downloadState, setDownloadState] = useState<'idle' | 'busy'>('idle')
@@ -6762,6 +6764,9 @@ export function ModelServerSettingsCard() {
     try {
       const s = await getModelServerStatus()
       setStatus(s)
+      if (typeof s.gpu_offload === 'boolean') {
+        setGpuOffload(s.gpu_offload)
+      }
     } catch {
       /* status endpoint unavailable: keep last known state */
     }
@@ -6820,6 +6825,38 @@ export function ModelServerSettingsCard() {
       setMessageOk(false)
     }
     setStopState('idle')
+  }
+
+  const toggleGpu = async (enabled: boolean) => {
+    // Only persist when the user actually flips it — the initial status
+    // load must not rewrite a saved preference.
+    if (enabled === gpuOffload) {
+      setGpuOffload(enabled)
+      return
+    }
+    setMessage(null)
+    try {
+      const r = await setServerGpuOffload(enabled)
+      if (r.ok) {
+        setGpuOffload(true)
+        // A running server must restart to apply the new flag.
+        if (status?.running) {
+          setMessage('Restarting the server with GPU acceleration…')
+          setMessageOk(true)
+          stop()
+          refresh()
+        } else {
+          setMessage('GPU acceleration set. It applies on next start.')
+          setMessageOk(true)
+        }
+      } else {
+        setMessage(r.error ?? 'Failed to set GPU acceleration')
+        setMessageOk(false)
+      }
+    } catch (e) {
+      setMessage((e as Error).message)
+      setMessageOk(false)
+    }
   }
 
   const download = async () => {
@@ -6907,6 +6944,34 @@ export function ModelServerSettingsCard() {
             {message}
           </p>
         )}
+        <div className="flex items-center justify-between">
+          <span className="font-mono text-[10px] text-zinc-400">
+            GPU acceleration
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={gpuOffload}
+            aria-label="GPU acceleration"
+            title={status?.running
+              ? 'Turning on GPU acceleration restarts the running server'
+              : 'Applies on next start'}
+            onClick={() => toggleGpu(!gpuOffload)}
+            className={[
+              'relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors duration-150 ease-in-out focus:outline-none',
+              gpuOffload
+                ? 'bg-blue-600'
+                : 'bg-zinc-700',
+            ].join(' ')}
+          >
+            <span
+              className={[
+                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-150 ease-in-out',
+                gpuOffload ? 'translate-x-4' : 'translate-x-1',
+              ].join(' ')}
+            />
+          </button>
+        </div>
         <p className="font-mono text-[10px] text-zinc-600">
           Bundled llama.cpp server for embeddings. Out-of-the-box state is OFF; nothing downloads or starts until you click Start.
         </p>

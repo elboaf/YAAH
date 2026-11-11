@@ -478,39 +478,76 @@ def _probe_vram_headroom() -> Optional[dict]:
 
     Returns None if no GPU or unable to probe.
     Returns {total_vram, free_vram, has_headroom} dict otherwise.
+
+    Tries nvidia-smi first (most accurate), then falls back to the Windows
+    CIM provider. Either way, `has_headroom` is True only when free VRAM
+    comfortably exceeds the model's footprint.
     """
     if os.name != "nt":
         return None
 
+    def _parse_int(tok: str) -> Optional[int]:
+        for line in tok.split("\n"):
+            if "=" in line:
+                try:
+                    return int(line.split("=")[1].strip())
+                except (ValueError, IndexError):
+                    return None
+        return None
+
+    # Primary: nvidia-smi (accurate per-GPU VRAM). Best-effort; absent on
+    # AMD or systems without it, so we fall through rather than failing.
+    try:
+        import shutil
+        if shutil.which("nvidia-smi"):
+            import subprocess
+            res = subprocess.run(
+                ["nvidia-smi", "--query-gpu=total_memory,free_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                parts = [p for p in res.stdout.strip().split(",") if p.strip()]
+                if len(parts) >= 2:
+                    total = int(parts[0].strip()) * 1024 * 1024
+                    free = int(parts[1].strip()) * 1024 * 1024
+                    # Require at least ~2 GB free before offloading: a
+                    # chat provider can grab VRAM mid-run, and ADR-0022
+                    # says degrade, don't contend.
+                    return {
+                        "total_vram": total,
+                        "free_vram": free,
+                        "has_headroom": free >= 2 * 1024 * 1024 * 1024,
+                    }
+    except Exception:
+        pass
+
+    # Fallback: Windows CIM (AdapterRAM, FreeVRAM). Best-effort parsing.
     try:
         import subprocess
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_VideoController | Select-Object "
-             "AdapterRAM,FreeVRAM"],
-            capture_output=True,
-            text=True,
-            timeout=10,
+             "Get-CimInstance Win32_VideoController | "
+             "Select-Object AdapterRAM,FreeVRAM"],
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
             return None
-
-        # Parse the output - this is best-effort and varies by GPU driver
-        lines = result.stdout.strip().split("\n")
-        for line in lines:
-            if "AdapterRAM" in line or "FreeVRAM" in line:
-                # This is a simplified parser; real implementation would be more robust
-                pass
-
-        # Fall back to a conservative estimate
-        # TODO: Use nvidia-smi or AMD equivalents for more accurate detection
-        return {
-            "total_vram": 8 * 1024 * 1024 * 1024,  # Assume 8GB
-            "free_vram": 4 * 1024 * 1024 * 1024,   # Assume 4GB free
-            "has_headroom": True,
-        }
+        total = _parse_int(result.stdout)
+        free = _parse_int(result.stdout)
+        if total and free is not None:
+            # FreeVRAM from CIM can be negative when the driver reports
+            # over-subscription; clamp to 0 so we don't falsely report headroom.
+            free = max(0, free)
+            return {
+                "total_vram": total,
+                "free_vram": free,
+                "has_headroom": free >= 2 * 1024 * 1024 * 1024,
+            }
     except Exception:
-        return None
+        pass
+
+    return None
 
 
 def should_use_gpu_offload() -> bool:
@@ -543,8 +580,14 @@ class ServerManager:
     def is_running(self) -> bool:
         return self.state == "running"
 
-    async def start(self, model_id: str, gpu_offload: bool = False) -> int:
-        """Start the server with the specified model. Returns the port."""
+    async def start(self, model_id: str, gpu_offload: Optional[bool] = None) -> int:
+        """Start the server with the specified model. Returns the port.
+
+        gpu_offload: True/False forces the flag; None reads the persisted
+        preference from config (ADR-0022: opt-in, re-evaluated here by the
+        VRAM probe). None is the default so restarts and the REST handler
+        honor the user's saved toggle.
+        """
         entry = find_model(model_id)
         if not entry:
             raise ValueError(f"Unknown model: {model_id}")
@@ -564,6 +607,11 @@ class ServerManager:
         # Select port
         self.port = select_free_port()
 
+        # Resolve the offload decision: an explicit arg wins, otherwise the
+        # persisted user preference (default off, per ADR-0022).
+        if gpu_offload is None:
+            gpu_offload = get_server_gpu_offload("embedding")
+
         # Build command. NOTE: llama-server's port flag is --port; the
         # bare -p is the PROMPT flag and would wedge startup.
         model_path = MODELS_DIR / model_id / entry["files"][0]
@@ -580,7 +628,8 @@ class ServerManager:
         else:
             cmd.extend(["-ngl", "0"])  # CPU only
 
-        log.info("Starting llama-server on port %d: %s", self.port, " ".join(cmd))
+        log.info("Starting llama-server on port %d (GPU offload=%s): %s",
+                 self.port, bool(gpu_offload), " ".join(cmd))
 
         try:
             # Output goes to the OS sink, not PIPE: nothing drains the
@@ -755,6 +804,27 @@ def get_server_config(task: str = "embedding") -> tuple[str, str]:
     server = cfg.get("server", {})
     model_key = "model" if task == "embedding" else f"{task}_model"
     return (server.get("binary", ""), server.get(model_key, ""))
+
+
+def get_server_gpu_offload(task: str = "embedding") -> bool:
+    """Whether GPU offload is enabled for this task's server (default False).
+
+    Per ADR-0022 the toggle is a user-visible, opt-in setting stored in the
+    server config block; it is re-evaluated at every start by probing VRAM.
+    """
+    cfg = config_mod.load_config()
+    server = cfg.get("server", {})
+    key = "gpu_offload" if task == "embedding" else f"{task}_gpu_offload"
+    return bool(server.get(key, False))
+
+
+def set_server_gpu_offload(value: bool, task: str = "embedding") -> None:
+    """Persist the GPU-offload preference for a task's server."""
+    cfg = config_mod.load_config()
+    server = dict(cfg.get("server", {}))
+    key = "gpu_offload" if task == "embedding" else f"{task}_gpu_offload"
+    server[key] = bool(value)
+    config_mod.save_config({"server": server})
 
 
 def get_effective_embeddings_endpoint() -> Optional[str]:

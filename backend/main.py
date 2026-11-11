@@ -1137,6 +1137,7 @@ async def api_server_status():
     fetch); the Start endpoint installs on demand either way.
     """
     binary, model_id = modelserver.get_server_config()
+    gpu_offload = modelserver.get_server_gpu_offload()
     configured = bool(binary) or modelserver._find_server_binary() is not None
     manager = modelserver.get_manager()
 
@@ -1149,6 +1150,7 @@ async def api_server_status():
             "model": model_id,
             "endpoint": manager.get_embeddings_endpoint(),
             "healthy": await modelserver.health_check(manager.port),
+            "gpu_offload": gpu_offload,
         }
     return {
         "configured": configured,
@@ -1158,6 +1160,7 @@ async def api_server_status():
         "model": model_id,
         "endpoint": None,
         "healthy": False,
+        "gpu_offload": gpu_offload,
     }
 
 
@@ -1228,6 +1231,22 @@ async def api_server_stop():
     manager = modelserver.get_manager()
     await manager.stop()
     return {"ok": True}
+
+
+@app.post("/api/server/gpu-offload")
+async def api_server_gpu_offload(body: dict = None):
+    """Persist the user's GPU-offload preference (ADR-0022).
+
+    The toggle is opt-in: True = offload model layers to the GPU when VRAM
+    has headroom at start; False = CPU only. start() re-probes VRAM on every
+    launch, so this only records the preference, not a one-time decision.
+    """
+    body = body or {}
+    value = body.get("gpu_offload", False)
+    if not isinstance(value, bool):
+        return {"ok": False, "error": "gpu_offload must be a boolean"}
+    modelserver.set_server_gpu_offload(value)
+    return {"ok": True, "gpu_offload": value}
 
 
 @app.post("/api/server/download")
