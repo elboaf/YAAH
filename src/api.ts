@@ -470,6 +470,7 @@ export type RebuildProgress = {
 export interface ModelServerStatus {
   configured: boolean
   running: boolean
+  binary_ready: boolean
   port: number | null
   model: string
   endpoint: string | null
