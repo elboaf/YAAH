@@ -1144,13 +1144,19 @@ async def api_server_models():
 
 @app.post("/api/server/start")
 async def api_server_start(body: dict = None):
-    """Start the local model server."""
+    """Start the local model server. Auto-configures if binary is found."""
     body = body or {}
     model_id = body.get("model") or None
 
     binary, configured_model = modelserver.get_server_config()
     if not binary:
-        return {"ok": False, "error": "server not configured"}
+        # Auto-detect and configure if the binary exists on the system
+        found = modelserver._find_server_binary()
+        if found:
+            binary = found
+            modelserver.set_server_config(binary, "")
+        else:
+            return {"ok": False, "error": "server not configured (llama-server binary not found)"}
 
     manager = modelserver.get_manager()
     # Serialize concurrent start requests: the port pick + spawn must be
