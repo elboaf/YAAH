@@ -6481,11 +6481,14 @@ function SettingsCard({
 
 /** Settings card: the embeddings endpoint (issue #677). Separate from the
  *  chat providers: the endpoint, key, and model that conversation chunks
- *  travel to for semantic search. Blank endpoint = unconfigured = keyword
- *  search only. Test probes reachability (a real one-word embed); Rebuild
- *  is the one-click, USER-triggered index build with live progress --
- *  rebuilds never fire at boot or on save. The status row reads
- *  /api/embeddings/status (no implicit probe: that costs a round-trip). */
+ *  travel to for semantic search. The RUNNING BUILT-IN SERVER is the
+ *  default endpoint (ADR-0021/0022) -- when it's up, this block is an
+ *  override and Test/Rebuild arm without typing anything (#732 follow-up);
+ *  with it off, a blank endpoint = keyword search only. Test probes
+ *  reachability (a real one-word embed); Rebuild is the one-click,
+ *  USER-triggered index build with live progress -- rebuilds never fire
+ *  at boot or on save. The status row reads /api/embeddings/status (no
+ *  implicit probe: that costs a round-trip). */
 export function EmbeddingsSettingsCard({
   draft,
   onChange,
@@ -6503,13 +6506,16 @@ export function EmbeddingsSettingsCard({
 
   useEffect(() => {
     let dead = false
-    getEmbeddingsStatus()
-      .then((s) => {
-        if (!dead) setStatus(s)
-      })
-      .catch(() => {
-        /* status unavailable (old backend): the draft still works */
-      })
+    const refreshStatus = () => {
+      getEmbeddingsStatus()
+        .then((s) => {
+          if (!dead) setStatus(s)
+        })
+        .catch(() => {
+          /* status unavailable (old backend): the draft still works */
+        })
+    }
+    refreshStatus()
     // Pick up a rebuild started elsewhere (or before this mount): show a
     // live build or the lingering final summary.
     getEmbeddingsRebuildProgress()
@@ -6517,8 +6523,13 @@ export function EmbeddingsSettingsCard({
         if (!dead && (p.running || p.phase === 'done')) setProgress(p)
       })
       .catch(() => {})
+    // The model-server card's Start/Stop changes the EFFECTIVE endpoint
+    // (the built-in server wins while running): re-read status on its
+    // transitions, not just on mount.
+    window.addEventListener('yaah:model-server-changed', refreshStatus)
     return () => {
       dead = true
+      window.removeEventListener('yaah:model-server-changed', refreshStatus)
     }
   }, [])
 
@@ -6546,8 +6557,13 @@ export function EmbeddingsSettingsCard({
     return () => window.clearInterval(iv)
   }, [rebuildRunning])
 
+  // The running built-in server IS the effective endpoint (ADR-0021:
+  // local is the default once the user turns it on) -- the manual block
+  // below is an override, not a prerequisite.
+  const effectiveLocal = status?.effective?.source === 'local'
   const draftComplete =
-    draft.api_base.trim() !== '' && draft.model.trim() !== ''
+    effectiveLocal ||
+    (draft.api_base.trim() !== '' && draft.model.trim() !== '')
   // Test/Rebuild hit the SAVED config (the endpoints read config server-
   // side), not the draft. Enable them only when the draft is complete AND
   // matches what the backend has: probing or rebuilding a half-edited
@@ -6555,9 +6571,13 @@ export function EmbeddingsSettingsCard({
   // clear the vectors and rebuild with the OLD model. A typed key also
   // counts as unsaved (its draft state never reached config.json); a
   // key-less config is a legitimate final state, not "unsaved".
+  // EXCEPTION: the running built-in server is the effective endpoint by
+  // itself (ADR-0021/0022 resolution) -- nothing needs to be typed or
+  // saved, so Test/Rebuild arm on it regardless of the draft fields.
   const keyIsUnsaved = draft.api_key.trim() !== ''
   const savedMatchesDraft =
     !status ||
+    effectiveLocal ||
     (status.api_base === draft.api_base.trim() &&
       status.model === draft.model.trim() &&
       !keyIsUnsaved)
@@ -6660,7 +6680,7 @@ export function EmbeddingsSettingsCard({
             Save first to test or rebuild with these settings.
           </p>
         )}
-        {status && (
+        {status && !effectiveLocal && (
           <p className="font-mono text-[10px] text-zinc-500">
             index: {status.index.vectors} vectors
             {status.index.model
@@ -6668,6 +6688,17 @@ export function EmbeddingsSettingsCard({
               : ' · never built'}
             {status.readiness === 'mismatch' &&
               ' — configured model differs from the index; rebuild to switch'}
+          </p>
+        )}
+        {status && effectiveLocal && (
+          <p className="font-mono text-[10px] text-zinc-500">
+            using built-in server ({status.effective.model}) — index:{' '}
+            {status.index.vectors} vectors
+            {status.index.model
+              ? ` · built with ${status.index.model}`
+              : ' · never built'}
+            {status.readiness === 'mismatch' &&
+              ' — rebuild to build with the built-in model'}
           </p>
         )}
         {probeResult && (
@@ -6702,9 +6733,11 @@ export function EmbeddingsSettingsCard({
           <p className="font-mono text-[10px] text-red-400">{rebuildError}</p>
         )}
         <p className="font-mono text-[10px] text-zinc-600">
-          {draftComplete
-            ? 'Semantic search layers over keyword results; transcript chunks are sent only to this endpoint.'
-            : 'Blank = semantic search off (keyword search only); nothing is sent anywhere.'}
+          {effectiveLocal
+            ? 'The built-in server is serving embeddings (it wins over anything typed here). Fill this block only to point at a different endpoint.'
+            : draftComplete
+              ? 'Semantic search layers over keyword results; transcript chunks are sent only to this endpoint.'
+              : 'Blank = semantic search off (keyword search only); nothing is sent anywhere.'}
         </p>
       </div>
     </SettingsCard>
@@ -6759,6 +6792,7 @@ export function ModelServerSettingsCard() {
         setMessage(`Server started on port ${r.port}`)
         setMessageOk(true)
         refresh()
+        window.dispatchEvent(new Event('yaah:model-server-changed'))
       } else {
         setMessage(r.error ?? 'Start failed')
         setMessageOk(false)
@@ -6779,6 +6813,7 @@ export function ModelServerSettingsCard() {
         setMessage('Server stopped')
         setMessageOk(true)
         refresh()
+        window.dispatchEvent(new Event('yaah:model-server-changed'))
       }
     } catch (e) {
       setMessage((e as Error).message)

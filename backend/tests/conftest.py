@@ -98,6 +98,20 @@ async def _join_extraction_tasks():
     _loop._extract_tasks.clear()
     _extract._reset_state()
 
+
+@pytest.fixture(autouse=True)
+def _reset_modelserver_tenants():
+    """The model-server tenant registry is module-global state, and the
+    embeddings resolver consults it at call time: a test that fakes a
+    'running' server (monkeypatching a tenant's is_running/port) leaks a
+    fake endpoint into every later test in the same process - including
+    cross-file under xdist (the #734 search-eval CI red). Sweep it after
+    every test like the other session-wide global restores."""
+    yield
+    from backend.agent import modelserver as _ms
+
+    _ms.reset_tenants()
+
 # The suite's loop tests exercise tool MECHANICS (bash, file writes) with no
 # user present to answer approval prompts; under the product default ("ask")
 # the access-mode gate would block them forever. Run the suite with the gate

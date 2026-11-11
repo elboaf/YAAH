@@ -1002,11 +1002,29 @@ async def api_embeddings_status():
     emb_cfg = embeddings._embeddings_config()
     configured = bool(emb_cfg["api_base"]) and bool(emb_cfg["model"])
     meta = await vectorestore.get_index_metadata()
+    # What the runtime will ACTUALLY use (ADR-0021: the bundled local
+    # server is the default endpoint once running; ADR-0022 resolution
+    # order: local > manual). The manual block above stays reported for
+    # editing, but readiness follows the resolved model -- the one the
+    # embeds (and hence a rebuild) would really send.
+    local_endpoint = modelserver.get_effective_embeddings_endpoint()
+    resolved = embeddings._resolved_connection()
+    resolved_configured = bool(resolved["api_base"]) and bool(
+        resolved["model"]
+    )
     return {
         "configured": configured,
         "api_base": emb_cfg["api_base"],
         "api_key": "set" if emb_cfg["api_key"] else "",
         "model": emb_cfg["model"],
+        "effective": {
+            "source": "local" if local_endpoint else (
+                "manual" if resolved_configured else "none"
+            ),
+            "api_base": resolved["api_base"],
+            "model": resolved["model"],
+            "configured": resolved_configured,
+        },
         "index": {
             "model": meta.get("model"),
             "dimensions": meta.get("dimensions"),
@@ -1014,7 +1032,7 @@ async def api_embeddings_status():
             "vectors": await vectorestore.get_vector_count(),
         },
         "readiness": vectorestore.semantic_readiness(
-            emb_cfg["model"], meta
+            resolved["model"], meta
         ),
         "available": None,  # unknown until probed; see /api/embeddings/probe
     }

@@ -695,6 +695,18 @@ def get_tenant_lock(task: str) -> asyncio.Lock:
     return _tenant_locks[task]
 
 
+def reset_tenants() -> None:
+    """Drop every tenant manager and lock (test isolation: the registry
+    is module-global state, and a test that fakes a 'running' server on
+    a tenant must not leak that into another test in the same process -
+    the embeddings resolver consults this registry at call time)."""
+    global _tenants, _tenant_locks, _manager, _start_lock
+    _tenants = {}
+    _tenant_locks = {}
+    _manager = None
+    _start_lock = None
+
+
 # Backward compatibility: the "embedding" task is the primary tenant.
 _manager: Optional[ServerManager] = None
 _start_lock: Optional[asyncio.Lock] = None
