@@ -466,6 +466,35 @@ export type RebuildProgress = {
   }
 }
 
+// Local model server (issue #730)
+export interface ModelServerStatus {
+  configured: boolean
+  running: boolean
+  port: number | null
+  model: string
+  endpoint: string | null
+  healthy: boolean
+}
+export interface ModelServerModel {
+  id: string
+  name: string
+  tasks: string[]
+}
+export const getModelServerStatus = () => api<ModelServerStatus>('/api/server/status')
+export const getModelServerModels = () => api<{ models: ModelServerModel[] }>('/api/server/models')
+export const startModelServer = (model?: string) =>
+  api<{ ok: boolean; port?: number; error?: string }>('/api/server/start', {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  })
+export const stopModelServer = () =>
+  api<{ ok: boolean }>('/api/server/stop', { method: 'POST' })
+export const downloadModelServer = (model?: string) =>
+  api<{ ok: boolean; message?: string; error?: string }>('/api/server/download', {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  })
+
 export const getEmbeddingsStatus = () => api<EmbeddingsStatus>('/api/embeddings/status')
 
 export const probeEmbeddings = () =>

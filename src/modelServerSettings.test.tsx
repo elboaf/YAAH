@@ -1,0 +1,160 @@
+// Local model server settings card (issue #730): status row, start/stop,
+// download action, model picker. API layer is mocked at the module boundary.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+
+const {
+  getModelServerStatus,
+  getModelServerModels,
+  startModelServer,
+  stopModelServer,
+  downloadModelServer,
+} = vi.hoisted(() => ({
+  getModelServerStatus: vi.fn(),
+  getModelServerModels: vi.fn(),
+  startModelServer: vi.fn(),
+  stopModelServer: vi.fn(),
+  downloadModelServer: vi.fn(),
+}))
+
+vi.mock('./api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./api')>()
+  return {
+    ...actual,
+    getModelServerStatus,
+    getModelServerModels,
+    startModelServer,
+    stopModelServer,
+    downloadModelServer,
+  }
+})
+
+import { ModelServerSettingsCard } from './components'
+
+const models = [
+  { id: 'qwen3-embedding-0.6b', name: 'Qwen3-Embedding-0.6B (GGUF)', tasks: ['embedding'] },
+  { id: 'qwen3-reranker-0.6b', name: 'Qwen3-Reranker-0.6B (GGUF)', tasks: ['reranking'] },
+]
+
+beforeEach(() => {
+  getModelServerStatus.mockReset()
+  getModelServerModels.mockReset()
+  startModelServer.mockReset()
+  stopModelServer.mockReset()
+  downloadModelServer.mockReset()
+  getModelServerStatus.mockResolvedValue({
+    configured: true,
+    running: false,
+    port: null,
+    model: 'qwen3-embedding-0.6b',
+    endpoint: null,
+    healthy: false,
+  })
+  getModelServerModels.mockResolvedValue({ models })
+})
+
+afterEach(() => cleanup())
+
+describe('Model server settings card (#730)', () => {
+  it('renders the OFF status and model picker', async () => {
+    render(<ModelServerSettingsCard />)
+    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'Start' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy()
+    expect(
+      (screen.getByRole('button', { name: 'Stop' }) as HTMLButtonElement).disabled,
+    ).toBe(true)
+  })
+
+  it('shows running status with port when server is up', async () => {
+    getModelServerStatus.mockResolvedValue({
+      configured: true,
+      running: true,
+      port: 8081,
+      model: 'qwen3-embedding-0.6b',
+      endpoint: 'http://127.0.0.1:8081/v1',
+      healthy: true,
+    })
+    render(<ModelServerSettingsCard />)
+    await waitFor(() => expect(screen.getByText(/running on port 8081/)).toBeTruthy())
+    expect(
+      (screen.getByRole('button', { name: 'Start' }) as HTMLButtonElement).disabled,
+    ).toBe(true)
+    expect(
+      (screen.getByRole('button', { name: 'Stop' }) as HTMLButtonElement).disabled,
+    ).toBe(false)
+  })
+
+  it('starts the server and refreshes status', async () => {
+    startModelServer.mockResolvedValue({ ok: true, port: 8082 })
+    let statusCall = 0
+    getModelServerStatus.mockImplementation(() => {
+      statusCall++
+      if (statusCall === 1) {
+        return Promise.resolve({
+          configured: true, running: false, port: null,
+          model: 'qwen3-embedding-0.6b', endpoint: null, healthy: false,
+        })
+      }
+      return Promise.resolve({
+        configured: true, running: true, port: 8082,
+        model: 'qwen3-embedding-0.6b', endpoint: 'http://127.0.0.1:8082/v1', healthy: true,
+      })
+    })
+    render(<ModelServerSettingsCard />)
+    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }))
+    await waitFor(() => expect(screen.getByText(/Server started on port 8082/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/running on port 8082/)).toBeTruthy())
+    expect(startModelServer).toHaveBeenCalledWith('qwen3-embedding-0.6b')
+  })
+
+  it('surfaces a start error', async () => {
+    startModelServer.mockResolvedValue({ ok: false, error: 'download failed: timeout' })
+    render(<ModelServerSettingsCard />)
+    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }))
+    await waitFor(() => expect(screen.getByText(/download failed: timeout/)).toBeTruthy())
+  })
+
+  it('stops the server and refreshes status', async () => {
+    stopModelServer.mockResolvedValue({ ok: true })
+    let statusCall = 0
+    getModelServerStatus.mockImplementation(() => {
+      statusCall++
+      if (statusCall === 1) {
+        return Promise.resolve({
+          configured: true, running: true, port: 8083,
+          model: 'qwen3-embedding-0.6b', endpoint: 'http://127.0.0.1:8083/v1', healthy: true,
+        })
+      }
+      return Promise.resolve({
+        configured: true, running: false, port: null,
+        model: 'qwen3-embedding-0.6b', endpoint: null, healthy: false,
+      })
+    })
+    render(<ModelServerSettingsCard />)
+    await waitFor(() => expect(screen.getByText(/running on port 8083/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    await waitFor(() => expect(screen.getByText(/Server stopped/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    expect(stopModelServer).toHaveBeenCalledTimes(1)
+  })
+
+  it('downloads a model without starting', async () => {
+    downloadModelServer.mockResolvedValue({ ok: true, message: 'downloaded' })
+    render(<ModelServerSettingsCard />)
+    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(screen.getByText(/downloaded/)).toBeTruthy())
+    expect(downloadModelServer).toHaveBeenCalledWith('qwen3-embedding-0.6b')
+  })
+
+  it('preselects the default embedding model', async () => {
+    render(<ModelServerSettingsCard />)
+    await waitFor(() => expect(screen.getByLabelText('Model server model')).toBeTruthy())
+    const select = screen.getByLabelText('Model server model') as HTMLSelectElement
+    expect(select.value).toBe('qwen3-embedding-0.6b')
+  })
+})

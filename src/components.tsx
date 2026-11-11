@@ -109,6 +109,13 @@ import {
   dismissEmbeddingsRebuildProgress,
   type EmbeddingsStatus,
   type RebuildProgress,
+  getModelServerStatus,
+  getModelServerModels,
+  startModelServer,
+  stopModelServer,
+  downloadModelServer,
+  type ModelServerStatus,
+  type ModelServerModel,
 } from './api'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
@@ -6704,6 +6711,175 @@ export function EmbeddingsSettingsCard({
   )
 }
 
+/** Local model server card (issue #730): status row, start/stop/download
+ *  actions, model picker. The server is OFF out of the box (ADR-0022);
+ *  this card makes the OFF state visible but never changes it implicitly.
+ *  Status refreshes on tab mount and after each action (no polling). */
+export function ModelServerSettingsCard() {
+  const [status, setStatus] = useState<ModelServerStatus | null>(null)
+  const [models, setModels] = useState<ModelServerModel[]>([])
+  const [selectedModel, setSelectedModel] = useState('')
+  const [startState, setStartState] = useState<'idle' | 'busy'>('idle')
+  const [stopState, setStopState] = useState<'idle' | 'busy'>('idle')
+  const [downloadState, setDownloadState] = useState<'idle' | 'busy'>('idle')
+  const [message, setMessage] = useState<string | null>(null)
+  const [messageOk, setMessageOk] = useState(false)
+
+  const refresh = async () => {
+    try {
+      const s = await getModelServerStatus()
+      setStatus(s)
+    } catch {
+      /* status endpoint unavailable: keep last known state */
+    }
+  }
+
+  useEffect(() => {
+    let dead = false
+    refresh()
+    getModelServerModels()
+      .then((m) => {
+        if (!dead) {
+          setModels(m.models)
+          // Preselect the default embedding model
+          const defaultModel = m.models.find((x) => x.id === 'qwen3-embedding-0.6b')
+          if (defaultModel) setSelectedModel(defaultModel.id)
+        }
+      })
+      .catch(() => {})
+    return () => { dead = true }
+  }, [])
+
+  const start = async () => {
+    setStartState('busy')
+    setMessage(null)
+    try {
+      const r = await startModelServer(selectedModel)
+      if (r.ok) {
+        setMessage(`Server started on port ${r.port}`)
+        setMessageOk(true)
+        refresh()
+      } else {
+        setMessage(r.error ?? 'Start failed')
+        setMessageOk(false)
+      }
+    } catch (e) {
+      setMessage((e as Error).message)
+      setMessageOk(false)
+    }
+    setStartState('idle')
+  }
+
+  const stop = async () => {
+    setStopState('busy')
+    setMessage(null)
+    try {
+      const r = await stopModelServer()
+      if (r.ok) {
+        setMessage('Server stopped')
+        setMessageOk(true)
+        refresh()
+      }
+    } catch (e) {
+      setMessage((e as Error).message)
+      setMessageOk(false)
+    }
+    setStopState('idle')
+  }
+
+  const download = async () => {
+    setDownloadState('busy')
+    setMessage(null)
+    try {
+      const r = await downloadModelServer(selectedModel)
+      if (r.ok) {
+        setMessage(r.message ?? 'Download complete')
+        setMessageOk(true)
+      } else {
+        setMessage(r.error ?? 'Download failed')
+        setMessageOk(false)
+      }
+    } catch (e) {
+      setMessage((e as Error).message)
+      setMessageOk(false)
+    }
+    setDownloadState('idle')
+  }
+
+  // Status line text
+  let statusText = 'off'
+  let statusColor = 'text-zinc-500'
+  if (status?.running) {
+    statusText = `running on port ${status.port}`
+    statusColor = status.healthy ? 'text-emerald-400' : 'text-amber-400'
+    if (status.endpoint) {
+      statusText += ` (${status.endpoint})`
+    }
+  } else if (!status?.configured) {
+    statusText = 'not configured (no binary)'
+    statusColor = 'text-red-400'
+  }
+
+  return (
+    <SettingsCard title="Local model server" className="col-span-4">
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <span className={`font-mono text-[10px] ${statusColor}`} role="status">
+            {statusText}
+          </span>
+          {status?.model && status.model !== selectedModel && (
+            <span className="font-mono text-[10px] text-zinc-600">
+              (loaded: {status.model})
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <select
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none"
+            value={selectedModel}
+            aria-label="Model server model"
+            onChange={(e) => setSelectedModel(e.target.value)}
+            disabled={status?.running === true}
+          >
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>{m.name}</option>
+            ))}
+          </select>
+          <button
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            disabled={startState === 'busy' || status?.running === true}
+            onClick={start}
+          >
+            {startState === 'busy' ? 'Starting\u2026' : 'Start'}
+          </button>
+          <button
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            disabled={stopState === 'busy' || status?.running !== true}
+            onClick={stop}
+          >
+            {stopState === 'busy' ? 'Stopping\u2026' : 'Stop'}
+          </button>
+          <button
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            disabled={downloadState === 'busy'}
+            onClick={download}
+          >
+            {downloadState === 'busy' ? 'Downloading\u2026' : 'Download'}
+          </button>
+        </div>
+        {message && (
+          <p className={`font-mono text-[10px] ${messageOk ? 'text-emerald-400' : 'text-red-400'}`}>
+            {message}
+          </p>
+        )}
+        <p className="font-mono text-[10px] text-zinc-600">
+          Bundled llama.cpp server for embeddings. Out-of-the-box state is OFF; nothing downloads or starts until you click Start.
+        </p>
+      </div>
+    </SettingsCard>
+  )
+}
+
 /** Shared field chrome: raised fill, hairline border, blue focus border.
  *  Width is set per-use (w-full / flex-1 / fixed). */
 const settingsInputCls =
@@ -7707,6 +7883,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             {/* providers: collapsed rows; fields behind one open row */}
             {activeTab === 'connect' && (
               <>
+              <ModelServerSettingsCard />
               <EmbeddingsSettingsCard draft={embeddingsDraft} onChange={setEmbeddingsDraft} />
               <ImageGenSettingsCard imageGen={imageGen} onChange={setImageGen} />
               <SettingsCard title="Providers" className="col-span-4">
