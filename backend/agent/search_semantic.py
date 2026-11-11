@@ -19,7 +19,7 @@ import asyncio
 import inspect
 import logging
 
-from backend.agent import embeddings, reranker, vectorestore
+from backend.agent import embeddings, reranker, vectorestore, modelserver
 from backend.agent.vectorestore import semantic_readiness
 
 log = logging.getLogger("yaah.search_semantic")
@@ -378,6 +378,11 @@ async def _rerank_fused(
         result["reranker_state"] = "unavailable"
         return result
 
+    matches = result["matches"]
+    if not matches:
+        result["reranker_state"] = "applied"
+        return result
+
     # Wrap in try/except to preserve fail-open contract
     try:
         reranked = await reranker.rerank(query, matches)
@@ -385,15 +390,6 @@ async def _rerank_fused(
         log.warning("rerank failed; keeping RRF order", exc_info=True)
         result["reranker_state"] = "unavailable"
         return result
-
-    # Only rerank if we have enough candidates
-    matches = result["matches"]
-    if len(matches) < 3:
-        result["reranker_state"] = "applied"
-        return result
-
-    # Rerank top candidates
-    reranked = await reranker.rerank(query, matches)
 
     if len(reranked) == len(matches):
         result["matches"] = reranked[:max_results]

@@ -59,14 +59,16 @@ MODELS: list[dict[str, Any]] = [
     {
         "id": "qwen3-reranker-0.6b",
         "name": "Qwen3-Reranker-0.6B (GGUF)",
-        "hf_repo": "Qwen/Qwen3-Reranker-0.6B-GGUF",
+        "hf_repo": "mradermacher/Qwen3-Reranker-0.6B-GGUF",
         # Qwen3-Reranker-0.6B cross-encoder for post-retrieval reranking.
         # Runs on a separate llama-server process with --reranking --pooling rank
         # (mutually exclusive with --embeddings per ADR-0023 §9).
-        "files": ["qwen3-reranker-0.6b-q8_0.gguf"],
-        "revision": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
-        # sha256 populated when the model file is first downloaded and verified.
-        "sha256": "",
+        "files": ["Qwen3-Reranker-0.6B.Q8_0.gguf"],
+        # Pinned upstream commit; a new upstream version arrives via a
+        # YAAH release, never by moving this pin (ADR-0022).
+        "revision": "6727da811d2cc45b078b744bffaaab122a0691da",
+        # sha256 of the GGUF payload (the HF LFS oid at the pinned revision).
+        "sha256": "c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7",
         "license": "Apache-2.0",
         "tasks": ["reranking"],
         "dimensions": 0,

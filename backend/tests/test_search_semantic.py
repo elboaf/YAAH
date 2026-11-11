@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from backend.agent import config as config_mod
-from backend.agent import embeddings, vectorestore
+from backend.agent import embeddings, vectorestore, modelserver
 from backend.agent.search_semantic import search_with_semantic
 from backend.db import database
 
@@ -494,3 +494,88 @@ async def test_workspace_scope_includes_related_workspaces():
     ids = {m["message_id"] for m in result["matches"]}
     assert 3 in ids, f"related-workspace hit missing from workspace scope: {ids}"
     assert result["semantic_matches"] >= 1
+
+
+# ------------------------------------------------------------ reranking (T7c)
+
+
+async def test_reranker_state_unavailable_when_no_endpoint(monkeypatch):
+    """No reranker endpoint → reranker_state 'unavailable', RRF order kept."""
+    await _seed()
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 1, "message_id": 1, "role": "user",
+        "chunk_text": "packaging content", "chunk_index": 0,
+        "embedding": [0.25] * 4,
+    }])
+    monkeypatch.setattr(modelserver, "get_effective_reranker_endpoint", lambda: None)
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(_kw_fn, "packaging", 10)
+    finally:
+        embeddings._transport = None
+    assert result["reranker_state"] == "unavailable"
+    assert result["semantic_state"] == "ready"
+
+
+async def test_reranker_state_applied(monkeypatch):
+    """Reranker endpoint up + scores returned → reranker_state 'applied'."""
+    await _seed()
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 1, "message_id": 1, "role": "user",
+        "chunk_text": "packaging content alpha", "chunk_index": 0,
+        "embedding": [0.25] * 4,
+    }])
+    # Fake the reranker endpoint resolution AND the rerank call
+    monkeypatch.setattr(modelserver, "get_effective_reranker_endpoint",
+                        lambda: "http://localhost:9999/v1")
+    from backend.agent import reranker as reranker_mod
+    monkeypatch.setattr(reranker_mod, "rerank",
+                        _fake_rerank_reverses)
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(_kw_fn, "packaging", 10)
+    finally:
+        embeddings._transport = None
+    assert result["reranker_state"] == "applied"
+
+
+async def _fake_rerank_reverses(query, documents, endpoint=None):
+    """Fake reranker that reverses order and attaches scores."""
+    out = list(reversed(documents))
+    for i, d in enumerate(out):
+        d["rerank_score"] = 1.0 - i * 0.1
+    return out
+
+
+async def test_reranker_fail_open_on_error(monkeypatch):
+    """Reranker raising → RRF order kept, reranker_state 'unavailable'."""
+    await _seed()
+    _configure()
+    await vectorestore.record_index_build("bge-m3", 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 1, "message_id": 1, "role": "user",
+        "chunk_text": "packaging content", "chunk_index": 0,
+        "embedding": [0.25] * 4,
+    }])
+    monkeypatch.setattr(modelserver, "get_effective_reranker_endpoint",
+                        lambda: "http://localhost:9999/v1")
+    from backend.agent import reranker as reranker_mod
+
+    async def _boom(query, documents, endpoint=None):
+        raise RuntimeError("reranker exploded")
+    monkeypatch.setattr(reranker_mod, "rerank", _boom)
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(_kw_fn, "packaging", 10)
+    finally:
+        embeddings._transport = None
+    assert result["reranker_state"] == "unavailable"
+    assert result["semantic_state"] == "ready"
+    assert result["count"] >= 1

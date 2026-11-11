@@ -9,6 +9,7 @@ import httpx
 from unittest.mock import patch, AsyncMock
 
 from backend.agent import reranker
+from backend.agent import modelserver
 
 
 @pytest.mark.anyio
@@ -55,17 +56,35 @@ async def test_rerank_calls_endpoint():
     assert result[2]["rerank_score"] == 0.70
 
 
+class _RaisingClient:
+    """Fake AsyncClient that raises RequestError on any HTTP call."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, *args, **kwargs):
+        raise httpx.RequestError("timeout")
+
+    async def get(self, *args, **kwargs):
+        raise httpx.RequestError("connection refused")
+
+
 @pytest.mark.anyio
-async def test_rerank_endpoint_error_fails_open():
+async def test_rerank_endpoint_error_fails_open(monkeypatch):
     """Endpoint error → fail-open with original order."""
     docs = [
         {"message_id": 1, "snippet": "first doc"},
         {"message_id": 2, "snippet": "second doc"},
     ]
 
-    with patch.object(httpx.AsyncClient, "post", side_effect=httpx.RequestError("timeout")):
-        with patch("httpx.AsyncClient", return_value=AsyncMock()):
-            result = await reranker.rerank("test query", docs, endpoint="http://localhost:9999/v1")
+    monkeypatch.setattr(httpx, "AsyncClient", _RaisingClient)
+    result = await reranker.rerank("test query", docs, endpoint="http://localhost:9999/v1")
 
     assert [d["message_id"] for d in result] == [1, 2]
 
@@ -98,14 +117,12 @@ async def test_reranker_is_available_when_server_running():
 
 
 @pytest.mark.anyio
-async def test_reranker_not_available_when_server_down():
+async def test_reranker_not_available_when_server_down(monkeypatch):
     """is_reranker_available returns False when endpoint is down."""
-    with patch.object(httpx.AsyncClient, "get", side_effect=httpx.RequestError("connection refused")):
-        with patch("httpx.AsyncClient", return_value=AsyncMock()):
-            from backend.agent import modelserver
-            with patch.object(modelserver, "get_effective_reranker_endpoint", return_value="http://localhost:9999/v1"):
-                available = await reranker.is_reranker_available()
-                assert available is False
+    monkeypatch.setattr(httpx, "AsyncClient", _RaisingClient)
+    with patch.object(modelserver, "get_effective_reranker_endpoint", return_value="http://localhost:9999/v1"):
+        available = await reranker.is_reranker_available()
+        assert available is False
 
 
 def test_model_manifest_has_reranker():
