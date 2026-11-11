@@ -483,6 +483,7 @@ export interface ModelServerStatus {
   model: string
   endpoint: string | null
   healthy: boolean
+  gpu_offload: boolean
 }
 export interface ModelServerModel {
   id: string
@@ -498,6 +499,11 @@ export const startModelServer = (model?: string) =>
   })
 export const stopModelServer = () =>
   api<{ ok: boolean }>('/api/server/stop', { method: 'POST' })
+export const setServerGpuOffload = (gpu_offload: boolean) =>
+  api<{ ok: boolean; gpu_offload?: boolean; error?: string }>('/api/server/gpu-offload', {
+    method: 'POST',
+    body: JSON.stringify({ gpu_offload }),
+  })
 export const downloadModelServer = (model?: string) =>
   api<{ ok: boolean; message?: string; error?: string }>('/api/server/download', {
     method: 'POST',

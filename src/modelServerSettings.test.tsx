@@ -8,12 +8,14 @@ const {
   getModelServerModels,
   startModelServer,
   stopModelServer,
+  setServerGpuOffload,
   downloadModelServer,
 } = vi.hoisted(() => ({
   getModelServerStatus: vi.fn(),
   getModelServerModels: vi.fn(),
   startModelServer: vi.fn(),
   stopModelServer: vi.fn(),
+  setServerGpuOffload: vi.fn(),
   downloadModelServer: vi.fn(),
 }))
 
@@ -25,6 +27,7 @@ vi.mock('./api', async (importOriginal) => {
     getModelServerModels,
     startModelServer,
     stopModelServer,
+    setServerGpuOffload,
     downloadModelServer,
   }
 })
@@ -41,6 +44,7 @@ beforeEach(() => {
   getModelServerModels.mockReset()
   startModelServer.mockReset()
   stopModelServer.mockReset()
+  setServerGpuOffload.mockReset()
   downloadModelServer.mockReset()
   getModelServerStatus.mockResolvedValue({
     configured: true,
@@ -49,6 +53,7 @@ beforeEach(() => {
     model: 'qwen3-embedding-0.6b',
     endpoint: null,
     healthy: false,
+    gpu_offload: false,
   })
   getModelServerModels.mockResolvedValue({ models })
 })
@@ -157,5 +162,111 @@ describe('Model server settings card (#730)', () => {
     await waitFor(() => expect(screen.getByLabelText('Model server model')).toBeTruthy())
     const select = screen.getByLabelText('Model server model') as HTMLSelectElement
     expect(select.value).toBe('qwen3-embedding-0.6b')
+  })
+
+  it('reads the saved gpu_offload preference from status', async () => {
+    getModelServerStatus.mockResolvedValue({
+      configured: true, running: false, port: null,
+      model: 'qwen3-embedding-0.6b', endpoint: null, healthy: false,
+      gpu_offload: true,
+    })
+    render(<ModelServerSettingsCard />)
+    await waitFor(
+      () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'true'),
+    )
+  })
+
+  it('persists the toggle when flipped off while stopped', async () => {
+    getModelServerStatus.mockResolvedValue({
+      configured: true, running: false, port: null,
+      model: 'qwen3-embedding-0.6b', endpoint: null, healthy: false,
+      gpu_offload: true,
+    })
+    setServerGpuOffload.mockResolvedValue({ ok: true, gpu_offload: false })
+    render(<ModelServerSettingsCard />)
+    await waitFor(
+      () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'true'),
+    )
+    fireEvent.click(screen.getByRole('switch', { name: 'GPU acceleration' }))
+    await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalledWith(false))
+  })
+
+  it('restarts the running server when GPU acceleration is toggled on', async () => {
+    startModelServer.mockResolvedValue({ ok: true, port: 8084 })
+    stopModelServer.mockResolvedValue({ ok: true })
+    setServerGpuOffload.mockResolvedValue({ ok: true, gpu_offload: true })
+    let statusCall = 0
+    getModelServerStatus.mockImplementation(() => {
+      statusCall++
+      if (statusCall === 1) {
+        return Promise.resolve({
+          configured: true, running: true, port: 8083,
+          model: 'qwen3-embedding-0.6b',
+          endpoint: 'http://127.0.0.1:8083/v1', healthy: true,
+          gpu_offload: false,
+        })
+      }
+      return Promise.resolve({
+        configured: true, running: false, port: null,
+        model: 'qwen3-embedding-0.6b', endpoint: null, healthy: false,
+        gpu_offload: true,
+      })
+    })
+    render(<ModelServerSettingsCard />)
+    await waitFor(
+      () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'false'),
+    )
+    fireEvent.click(screen.getByRole('switch', { name: 'GPU acceleration' }))
+    await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalledWith(true))
+    await waitFor(() => expect(stopModelServer).toHaveBeenCalledTimes(1))
+    // A running server must restart (stop + start), not just stop, to apply
+    // the new flag.
+    await waitFor(() => expect(startModelServer).toHaveBeenCalledTimes(1))
+    await waitFor(
+      () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'true'),
+    )
+  })
+
+  it('disables the Stop button while a GPU toggle save is pending', async () => {
+    // Running on the first status call, stopped thereafter.
+    let statusCall = 0
+    getModelServerStatus.mockImplementation(() => {
+      statusCall++
+      return statusCall === 1
+        ? Promise.resolve({
+            configured: true,
+            running: true,
+            port: 8083,
+            model: 'qwen3-embedding-0.6b',
+            endpoint: 'http://127.0.0.1:8083/v1',
+            healthy: true,
+            gpu_offload: false,
+          })
+        : Promise.resolve({
+            configured: true,
+            running: false,
+            port: null,
+            model: 'qwen3-embedding-0.6b',
+            endpoint: null,
+            healthy: false,
+            gpu_offload: true,
+          })
+    })
+    // Never resolve the save, so toggleBusy stays true after the click.
+    const pending = new Promise<{ ok: boolean; gpu_offload: boolean }>(() => undefined)
+    setServerGpuOffload.mockReturnValue(pending)
+    render(<ModelServerSettingsCard />)
+    await waitFor(
+      () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'false'),
+    )
+    fireEvent.click(screen.getByRole('switch', { name: 'GPU acceleration' }))
+    // The toggle save is in flight, so toggleBusy is true and the Stop
+    // button must be disabled to prevent a double-stop during the
+    // restart cascade.
+    await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalled())
+    expect(screen.getByRole('button', { name: 'Stop' })).toHaveAttribute('disabled')
+    // Clicking the (disabled) Stop must not fire a second stop.
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    expect(stopModelServer).not.toHaveBeenCalled()
   })
 })
