@@ -56,10 +56,31 @@ MODELS: list[dict[str, Any]] = [
         "dimensions": 1024,
         "flags": ["--embeddings"],
     },
+    {
+        "id": "qwen3-reranker-0.6b",
+        "name": "Qwen3-Reranker-0.6B (GGUF)",
+        "hf_repo": "mradermacher/Qwen3-Reranker-0.6B-GGUF",
+        # Qwen3-Reranker-0.6B cross-encoder for post-retrieval reranking.
+        # Runs on a separate llama-server process with --reranking --pooling rank
+        # (mutually exclusive with --embeddings per ADR-0023 §9).
+        "files": ["Qwen3-Reranker-0.6B.Q8_0.gguf"],
+        # Pinned upstream commit; a new upstream version arrives via a
+        # YAAH release, never by moving this pin (ADR-0022).
+        "revision": "6727da811d2cc45b078b744bffaaab122a0691da",
+        # sha256 of the GGUF payload (the HF LFS oid at the pinned revision).
+        "sha256": "c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7",
+        "license": "Apache-2.0",
+        "tasks": ["reranking"],
+        "dimensions": 0,
+        "flags": ["--reranking", "--pooling", "rank"],
+    },
 ]
 
 # Default model ids per task
-DEFAULT_MODEL: dict[str, str] = {"embedding": "qwen3-embedding-0.6b"}
+DEFAULT_MODEL: dict[str, str] = {
+    "embedding": "qwen3-embedding-0.6b",
+    "reranking": "qwen3-reranker-0.6b",
+}
 
 
 def find_model(model_id: str) -> Optional[dict[str, Any]]:
@@ -488,19 +509,45 @@ class ServerManager:
 # Configuration integration
 # ---------------------------------------------------------------------
 
-# The one live manager for this process. The embeddings client resolves
-# its endpoint against THIS instance, not a fresh one - a new
-# ServerManager() has no process and would always report stopped.
+# Multi-tenant registry: one ServerManager per task, each with its own
+# process and port (ADR-0022 one-model-per-process rule).
+_tenants: dict[str, ServerManager] = {}
+_tenant_locks: dict[str, asyncio.Lock] = {}
+
+
+def get_tenant(task: str) -> ServerManager:
+    """Return the ServerManager for a task, creating it on first use.
+
+    Each task (embedding, reranking, etc.) gets its own server process
+    on its own port. This is the multi-tenant extension of the original
+    single-tenant design, required by the mutually exclusive server
+    flags (--embeddings vs --reranking).
+    """
+    global _tenants, _tenant_locks
+    if task not in _tenants:
+        _tenants[task] = ServerManager()
+        _tenant_locks[task] = asyncio.Lock()
+    return _tenants[task]
+
+
+def get_tenant_lock(task: str) -> asyncio.Lock:
+    """Lock serializing server starts for a task (must exist after get_tenant)."""
+    global _tenants, _tenant_locks
+    get_tenant(task)
+    return _tenant_locks[task]
+
+
+# Backward compatibility: the "embedding" task is the primary tenant.
 _manager: Optional[ServerManager] = None
 _start_lock: Optional[asyncio.Lock] = None
 
 
 def get_manager() -> ServerManager:
-    """Return the process-wide ServerManager, creating it on first use."""
+    """Return the process-wide ServerManager for embeddings (backward compat)."""
     global _manager, _start_lock
     if _manager is None:
-        _manager = ServerManager()
-        _start_lock = asyncio.Lock()
+        _manager = get_tenant("embedding")
+        _start_lock = get_tenant_lock("embedding")
     return _manager
 
 
@@ -511,21 +558,33 @@ def get_start_lock() -> asyncio.Lock:
     return _start_lock
 
 
-def set_server_config(binary: str, model_id: str) -> None:
+def set_server_config(binary: str, model_id: str, task: str = "embedding") -> None:
     """Set the server configuration (binary name and model id).
 
     Sends a partial update so save_config merges just the server key -
     persisting the whole load_config() view would bake env overrides
     and defaults into the user's config file.
+
+    task: which tenant to configure (default: "embedding").
     """
-    config_mod.save_config({"server": {"binary": binary, "model": model_id}})
+    model_key = "model" if task == "embedding" else f"{task}_model"
+    config_mod.save_config({
+        "server": {
+            "binary": binary,
+            model_key: model_id,
+        }
+    })
 
 
-def get_server_config() -> tuple[str, str]:
-    """Get the server configuration. Returns (binary, model_id)."""
+def get_server_config(task: str = "embedding") -> tuple[str, str]:
+    """Get the server configuration. Returns (binary, model_id).
+
+    task: which tenant to query (default: "embedding").
+    """
     cfg = config_mod.load_config()
     server = cfg.get("server", {})
-    return (server.get("binary", ""), server.get("model", ""))
+    model_key = "model" if task == "embedding" else f"{task}_model"
+    return (server.get("binary", ""), server.get(model_key, ""))
 
 
 def get_effective_embeddings_endpoint() -> Optional[str]:
@@ -537,6 +596,15 @@ def get_effective_embeddings_endpoint() -> Optional[str]:
     manager = get_manager()
     if manager.is_running() and manager.port:
         return manager.get_embeddings_endpoint()
+    return None
+
+
+def get_effective_reranker_endpoint() -> Optional[str]:
+    """The reranker server's /v1 base URL while it is running and
+    serving, else None."""
+    manager = get_tenant("reranking")
+    if manager.is_running() and manager.port:
+        return f"http://localhost:{manager.port}/v1"
     return None
 
 
