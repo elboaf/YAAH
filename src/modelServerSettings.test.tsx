@@ -226,4 +226,47 @@ describe('Model server settings card (#730)', () => {
       () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'true'),
     )
   })
+
+  it('disables the Stop button while a GPU toggle save is pending', async () => {
+    // Running on the first status call, stopped thereafter.
+    let statusCall = 0
+    getModelServerStatus.mockImplementation(() => {
+      statusCall++
+      return statusCall === 1
+        ? Promise.resolve({
+            configured: true,
+            running: true,
+            port: 8083,
+            model: 'qwen3-embedding-0.6b',
+            endpoint: 'http://127.0.0.1:8083/v1',
+            healthy: true,
+            gpu_offload: false,
+          })
+        : Promise.resolve({
+            configured: true,
+            running: false,
+            port: null,
+            model: 'qwen3-embedding-0.6b',
+            endpoint: null,
+            healthy: false,
+            gpu_offload: true,
+          })
+    })
+    // Never resolve the save, so toggleBusy stays true after the click.
+    const pending = new Promise<{ ok: boolean; gpu_offload: boolean }>(() => undefined)
+    setServerGpuOffload.mockReturnValue(pending)
+    render(<ModelServerSettingsCard />)
+    await waitFor(
+      () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'false'),
+    )
+    fireEvent.click(screen.getByRole('switch', { name: 'GPU acceleration' }))
+    // The toggle save is in flight, so toggleBusy is true and the Stop
+    // button must be disabled to prevent a double-stop during the
+    // restart cascade.
+    await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalled())
+    expect(screen.getByRole('button', { name: 'Stop' })).toHaveAttribute('disabled')
+    // Clicking the (disabled) Stop must not fire a second stop.
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    expect(stopModelServer).not.toHaveBeenCalled()
+  })
 })

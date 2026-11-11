@@ -6751,6 +6751,7 @@ export function EmbeddingsSettingsCard({
  *  Status refreshes on tab mount and after each action (no polling). */
 export function ModelServerSettingsCard() {
   const [status, setStatus] = useState<ModelServerStatus | null>(null)
+  const [statusFailed, setStatusFailed] = useState(false)
   const [models, setModels] = useState<ModelServerModel[]>([])
   const [selectedModel, setSelectedModel] = useState('')
   const [gpuOffload, setGpuOffload] = useState(false)
@@ -6761,15 +6762,21 @@ export function ModelServerSettingsCard() {
   const [messageOk, setMessageOk] = useState(false)
   const [toggleBusy, setToggleBusy] = useState(false)
 
+  // refresh(): pull status once per lifecycle action and await it so a
+  // stop()'s refresh can never arrive after start()'s and overwrite the
+  // running status with stopped (the card must reflect the latest op).
   const refresh = async () => {
     try {
       const s = await getModelServerStatus()
       setStatus(s)
+      setStatusFailed(false)
       if (typeof s.gpu_offload === 'boolean') {
         setGpuOffload(s.gpu_offload)
       }
     } catch {
-      /* status endpoint unavailable: keep last known state */
+      // Status endpoint unavailable: record it so the card can offer a
+      // retry, and keep the last known state instead of losing it.
+      setStatusFailed(true)
     }
   }
 
@@ -6789,11 +6796,11 @@ export function ModelServerSettingsCard() {
     return () => { dead = true }
   }, [])
 
-  const start = async () => {
+  const start = async (model?: string) => {
     setStartState('busy')
     setMessage(null)
     try {
-      const r = await startModelServer(selectedModel)
+      const r = await startModelServer(model ?? selectedModel)
       if (r.ok) {
         setMessage(`Server started on port ${r.port}`)
         setMessageOk(true)
@@ -6810,7 +6817,7 @@ export function ModelServerSettingsCard() {
     setStartState('idle')
   }
 
-  const stop = async () => {
+  const stop = async (): Promise<boolean> => {
     setStopState('busy')
     setMessage(null)
     try {
@@ -6818,14 +6825,20 @@ export function ModelServerSettingsCard() {
       if (r.ok) {
         setMessage('Server stopped')
         setMessageOk(true)
-        refresh()
+        await refresh()
         window.dispatchEvent(new Event('yaah:model-server-changed'))
+        return true
       }
+      setMessage('Stop failed')
+      setMessageOk(false)
+      return false
     } catch (e) {
       setMessage((e as Error).message)
       setMessageOk(false)
+      return false
+    } finally {
+      setStopState('idle')
     }
-    setStopState('idle')
   }
 
   const toggleGpu = async (enabled: boolean) => {
@@ -6846,14 +6859,18 @@ export function ModelServerSettingsCard() {
         // Reflect the saved value, not a hard-coded true.
         setGpuOffload(enabled)
         // A running server must restart to apply the new flag: stop, then
-        // start the same model. When stopped, the flag applies on next
-        // manual start.
+        // start the same model. Capture the running model before stopping
+        // — after remount selectedModel resets to the default, but the
+        // running server was started with a specific model.
+        const runningModel = status?.model ?? selectedModel
         if (status?.running) {
           setMessage('Restarting the server with GPU acceleration…')
           setMessageOk(true)
           window.dispatchEvent(new Event('yaah:model-server-changed'))
-          await stop()
-          await start()
+          // Don't start unless the stop actually succeeded; a failed stop
+          // leaves the server running with its old flag, and starting now
+          // would double-launch.
+          if (await stop()) await start(runningModel)
         } else {
           setMessage('GPU acceleration set. It applies on next start.')
           setMessageOk(true)
@@ -6915,6 +6932,17 @@ export function ModelServerSettingsCard() {
               (loaded: {status.model})
             </span>
           )}
+          {statusFailed && (
+            <button
+              type="button"
+              aria-label="Reload server status"
+              title="Reload server status"
+              onClick={refresh}
+              className="rounded bg-zinc-800 px-2 py-1 font-mono text-[10px] text-zinc-400 hover:bg-zinc-700"
+            >
+              Reload
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-1.5">
           <select
@@ -6930,14 +6958,14 @@ export function ModelServerSettingsCard() {
           </select>
           <button
             className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
-            disabled={startState === 'busy' || status?.running === true}
-            onClick={start}
+            disabled={startState === 'busy' || status?.running === true || toggleBusy}
+            onClick={() => start()}
           >
             {startState === 'busy' ? 'Starting\u2026' : 'Start'}
           </button>
           <button
             className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
-            disabled={stopState === 'busy' || status?.running !== true}
+            disabled={stopState === 'busy' || status?.running !== true || toggleBusy}
             onClick={stop}
           >
             {stopState === 'busy' ? 'Stopping\u2026' : 'Stop'}
@@ -6968,7 +6996,13 @@ export function ModelServerSettingsCard() {
               ? 'Turning on GPU acceleration restarts the running server'
               : 'Applies on next start'}
             onClick={() => toggleGpu(!gpuOffload)}
-            disabled={toggleBusy}
+            disabled={
+              toggleBusy ||
+              !status ||
+              statusFailed ||
+              startState === 'busy' ||
+              stopState === 'busy'
+            }
             className={[
               'relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors duration-150 ease-in-out focus:outline-none',
               gpuOffload
