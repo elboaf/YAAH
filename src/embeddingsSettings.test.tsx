@@ -46,8 +46,20 @@ const statusReady = {
   api_base: 'http://127.0.0.1:8099/v1',
   api_key: 'set',
   model: 'bge-m3',
+  effective: { source: 'manual' as const, api_base: 'http://127.0.0.1:8099/v1', model: 'bge-m3', configured: true },
   index: { model: 'bge-m3', dimensions: 1024, last_build: '2026-11-09T00:00:00+00:00', vectors: 42 },
   readiness: 'ready' as const,
+  available: null,
+}
+
+const statusLocalServer = {
+  configured: false,
+  api_base: '',
+  api_key: '',
+  model: '',
+  effective: { source: 'local' as const, api_base: 'http://localhost:60995/v1', model: 'qwen3-embedding-0.6b', configured: true },
+  index: { model: null, dimensions: null, last_build: null, vectors: 0 },
+  readiness: 'no_index' as const,
   available: null,
 }
 
@@ -100,6 +112,39 @@ describe('Embeddings settings card (#677)', () => {
       (screen.getByRole('button', { name: 'Rebuild index' }) as HTMLButtonElement).disabled,
     ).toBe(true)
     expect(screen.getByText(/semantic search off/)).toBeTruthy()
+  })
+
+  it('arms Test and Rebuild on the running built-in server alone (#732)', async () => {
+    // Nothing typed, nothing saved: the running server is the endpoint.
+    getEmbeddingsStatus.mockResolvedValue(statusLocalServer)
+    render(
+      <EmbeddingsSettingsCard
+        draft={draft({ api_base: '', model: '' })}
+        onChange={() => {}}
+      />,
+    )
+    await waitFor(() =>
+      expect(
+        (screen.getByRole('button', { name: 'Rebuild index' }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    )
+    expect((screen.getByRole('button', { name: 'Test' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByText(/using built-in server/)).toBeTruthy()
+    expect(screen.getByText(/it wins over anything typed here/)).toBeTruthy()
+  })
+
+  it('built-in server status names the effective model and never says off', async () => {
+    getEmbeddingsStatus.mockResolvedValue(statusLocalServer)
+    render(
+      <EmbeddingsSettingsCard
+        draft={draft({ api_base: '', model: '' })}
+        onChange={() => {}}
+      />,
+    )
+    await waitFor(() =>
+      expect(screen.getByText(/using built-in server \(qwen3-embedding-0\.6b\)/)).toBeTruthy(),
+    )
+    expect(screen.queryByText(/semantic search off/)).toBeNull()
   })
 
   it('probes the endpoint and reports what came back', async () => {

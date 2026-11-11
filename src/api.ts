@@ -432,6 +432,14 @@ export type EmbeddingsStatus = {
   api_base: string
   api_key: string
   model: string
+  /** What the runtime actually uses (ADR-0021/0022): the running
+   *  built-in server wins over the manually typed block. */
+  effective: {
+    source: 'local' | 'manual' | 'none'
+    api_base: string
+    model: string
+    configured: boolean
+  }
   index: {
     model: string | null
     dimensions: number | null

@@ -129,6 +129,26 @@ def test_status_reports_unconfigured_block(client):
     assert data["api_key"] == ""
     assert data["index"]["vectors"] == 0
     assert data["available"] is None  # never probed implicitly
+    assert data["effective"]["source"] == "none"
+
+
+def test_status_reports_local_server_as_effective(client, monkeypatch):
+    """A running built-in server is the effective endpoint even with a
+    blank manual block (#732 follow-up): the UI arms Test/Rebuild on
+    this instead of demanding the server's coordinates be typed in."""
+    from backend.agent import modelserver
+
+    monkeypatch.setattr(
+        modelserver, "get_effective_embeddings_endpoint",
+        lambda: "http://localhost:60995/v1",
+    )
+    data = client.get("/api/embeddings/status").json()
+    assert data["configured"] is False  # manual block still blank
+    assert data["effective"]["source"] == "local"
+    assert data["effective"]["api_base"] == "http://localhost:60995/v1"
+    assert data["effective"]["model"] == modelserver.default_model("embedding")["id"]
+    assert data["effective"]["configured"] is True
+    assert data["readiness"] == "no_index"  # armed, just not built yet
 
 
 def test_status_reports_ready_index(client):
