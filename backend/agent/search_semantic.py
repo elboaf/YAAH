@@ -186,13 +186,17 @@ async def _run_semantic_leg(
     conversation_ids: list[int] | None,
 ) -> dict:
     """Run the semantic leg and return {"state", "hits"?, "unavailable"?}."""
-    emb_cfg = embeddings._embeddings_config()
-    configured = bool(emb_cfg["api_base"]) and bool(emb_cfg["model"])
+    # The same connection embed_texts will actually use (ADR-0022
+    # resolution: the running built-in server wins). Gating on the raw
+    # manual block instead made the built-in server useless for search
+    # whenever the manual block stayed blank (#734).
+    conn = embeddings._resolved_connection()
+    configured = bool(conn["api_base"]) and bool(conn["model"])
     if not configured:
         return {"state": "not_configured"}
 
     meta = await vectorestore.get_index_metadata()
-    readiness = semantic_readiness(emb_cfg["model"], meta)
+    readiness = semantic_readiness(conn["model"], meta)
     if readiness == "not_configured":
         return {"state": "not_configured"}
     if readiness == "no_index":
@@ -202,7 +206,7 @@ async def _run_semantic_leg(
             "state": "unavailable",
             "unavailable": (
                 f"index built with model '{meta.get('model')}' but "
-                f"'{emb_cfg['model']}' is configured now -- rebuild the index"
+                f"'{conn['model']}' is configured now -- rebuild the index"
             ),
         }
 

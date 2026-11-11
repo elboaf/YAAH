@@ -147,6 +147,30 @@ describe('Embeddings settings card (#677)', () => {
     expect(screen.queryByText(/semantic search off/)).toBeNull()
   })
 
+  it('re-reads effective status when the model server starts or stops (#734)', async () => {
+    // Mounted while the server is off: keyword-only messaging.
+    const serverOff = {
+      ...statusLocalServer,
+      effective: { ...statusLocalServer.effective, source: 'none' as const, configured: false },
+    }
+    getEmbeddingsStatus.mockResolvedValue(serverOff)
+    render(
+      <EmbeddingsSettingsCard
+        draft={draft({ api_base: '', model: '' })}
+        onChange={() => {}}
+      />,
+    )
+    await waitFor(() => expect(screen.getByText(/semantic search off/)).toBeTruthy())
+    // The server card's Start fires the change event; the embeddings
+    // card must re-read status without a remount.
+    getEmbeddingsStatus.mockResolvedValue(statusLocalServer)
+    window.dispatchEvent(new Event('yaah:model-server-changed'))
+    await waitFor(() =>
+      expect(screen.getByText(/using built-in server/)).toBeTruthy(),
+    )
+    expect(screen.queryByText(/semantic search off/)).toBeNull()
+  })
+
   it('probes the endpoint and reports what came back', async () => {
     probeEmbeddings.mockResolvedValue({ configured: true, available: true, dimensions: 1024, model: 'bge-m3' })
     render(<EmbeddingsSettingsCard draft={draft()} onChange={() => {}} />)

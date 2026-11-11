@@ -69,13 +69,49 @@ async def _seed(conversation_id=1):
 
 # ------------------------------------------------------------ degradation
 
-async def test_not_configured_keyword_only():
+async def test_not_configured_keyword_only(monkeypatch):
     await _seed()
+    # Pin the resolver: no built-in server running on this box.
+    monkeypatch.setattr(
+        "backend.agent.modelserver.get_effective_embeddings_endpoint",
+        lambda: None,
+    )
     result = await search_with_semantic(
         lambda q, n: _kw(q, n), "packaging failed", 10)
     assert result["semantic_state"] == "not_configured"
     assert result["count"] >= 1
     assert "semantic_unavailable" not in result
+
+
+async def test_running_local_server_satisfies_gate_with_blank_block(monkeypatch):
+    """The built-in server running IS configuration (#734): with a blank
+    manual block, the gate must pass on the resolved connection, not
+    demand the server's coordinates be typed in."""
+    await _seed()
+    # No manual block at all; the built-in server is up.
+    monkeypatch.setattr(
+        "backend.agent.modelserver.get_effective_embeddings_endpoint",
+        lambda: "http://localhost:9999/v1",
+    )
+
+    model_id = modelserver.default_model("embedding")["id"]
+    await vectorestore.record_index_build(model_id, 4)
+    await vectorestore.store_chunk_embeddings([{
+        "conversation_id": 1, "message_id": 1, "role": "user",
+        "chunk_text": "The packaging stage failed during the deploy pipeline run.",
+        "chunk_index": 0,
+        "embedding": [0.25, 0.25, 0.25, 0.25],
+    }])
+    transport = _respond()
+    embeddings._transport = transport
+    try:
+        result = await search_with_semantic(_kw_fn, "packaging", 10)
+    finally:
+        embeddings._transport = None
+    assert result["semantic_state"] == "ready"
+    assert result["semantic_matches"] >= 1
+    body = json.loads(transport.requests[0].content.decode("utf-8"))
+    assert body["model"] == model_id  # manifest model, resolved not typed
 
 
 def _kw(query, max_results):

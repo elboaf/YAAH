@@ -6506,13 +6506,16 @@ export function EmbeddingsSettingsCard({
 
   useEffect(() => {
     let dead = false
-    getEmbeddingsStatus()
-      .then((s) => {
-        if (!dead) setStatus(s)
-      })
-      .catch(() => {
-        /* status unavailable (old backend): the draft still works */
-      })
+    const refreshStatus = () => {
+      getEmbeddingsStatus()
+        .then((s) => {
+          if (!dead) setStatus(s)
+        })
+        .catch(() => {
+          /* status unavailable (old backend): the draft still works */
+        })
+    }
+    refreshStatus()
     // Pick up a rebuild started elsewhere (or before this mount): show a
     // live build or the lingering final summary.
     getEmbeddingsRebuildProgress()
@@ -6520,8 +6523,13 @@ export function EmbeddingsSettingsCard({
         if (!dead && (p.running || p.phase === 'done')) setProgress(p)
       })
       .catch(() => {})
+    // The model-server card's Start/Stop changes the EFFECTIVE endpoint
+    // (the built-in server wins while running): re-read status on its
+    // transitions, not just on mount.
+    window.addEventListener('yaah:model-server-changed', refreshStatus)
     return () => {
       dead = true
+      window.removeEventListener('yaah:model-server-changed', refreshStatus)
     }
   }, [])
 
@@ -6784,6 +6792,7 @@ export function ModelServerSettingsCard() {
         setMessage(`Server started on port ${r.port}`)
         setMessageOk(true)
         refresh()
+        window.dispatchEvent(new Event('yaah:model-server-changed'))
       } else {
         setMessage(r.error ?? 'Start failed')
         setMessageOk(false)
@@ -6804,6 +6813,7 @@ export function ModelServerSettingsCard() {
         setMessage('Server stopped')
         setMessageOk(true)
         refresh()
+        window.dispatchEvent(new Event('yaah:model-server-changed'))
       }
     } catch (e) {
       setMessage((e as Error).message)
