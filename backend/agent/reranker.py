@@ -74,9 +74,14 @@ async def rerank(
         if idx is not None:
             score_by_index[idx] = score
 
+    # Validate: require scores for all documents
+    if set(score_by_index) != set(range(len(documents))):
+        log.warning("reranker returned incomplete scores; keeping original ranking")
+        return documents
+
     # Apply scores and re-sort
     for i, doc in enumerate(documents):
-        doc["rerank_score"] = score_by_index.get(i, 0.0)
+        doc["rerank_score"] = score_by_index[i]
 
     return sorted(documents, key=lambda d: d.get("rerank_score", 0.0), reverse=True)
 

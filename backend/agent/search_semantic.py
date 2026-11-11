@@ -170,7 +170,11 @@ async def search_with_semantic(
 
     # Rerank with cross-encoder if available (ADR-0023 §9)
     if rerank and fused["semantic_state"] == "ready":
-        fused = await _rerank_fused(query, fused, max_results)
+        try:
+            fused = await _rerank_fused(query, fused, max_results)
+        except Exception:
+            log.warning("rerank failed; keeping RRF order", exc_info=True)
+            fused["reranker_state"] = "unavailable"
 
     return fused
 
@@ -366,12 +370,19 @@ async def _rerank_fused(
     Reranks the top RERANK_DEPTH candidates. If the reranker is unavailable
     or fails, preserves the RRF-fused order (fail-open).
     """
-    try:
-        available = await reranker.is_reranker_available()
-    except Exception:
-        available = False
+    # Cheap local check: is the reranker endpoint configured and running?
+    # No network probe - rerank() itself fails open.
+    available = modelserver.get_effective_reranker_endpoint() is not None
 
     if not available:
+        result["reranker_state"] = "unavailable"
+        return result
+
+    # Wrap in try/except to preserve fail-open contract
+    try:
+        reranked = await reranker.rerank(query, matches)
+    except Exception:
+        log.warning("rerank failed; keeping RRF order", exc_info=True)
         result["reranker_state"] = "unavailable"
         return result
 
@@ -390,6 +401,7 @@ async def _rerank_fused(
         result["reranker_state"] = "applied"
     else:
         # Reranker returned different count; preserve original
+        log.warning("reranker returned %d results for %d documents", len(reranked), len(matches))
         result["reranker_state"] = "unavailable"
 
     return result

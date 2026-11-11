@@ -59,12 +59,12 @@ MODELS: list[dict[str, Any]] = [
     {
         "id": "qwen3-reranker-0.6b",
         "name": "Qwen3-Reranker-0.6B (GGUF)",
-        "hf_repo": "QuantFactory/Qwen3-Reranker-0.6B-GGUF",
+        "hf_repo": "Qwen/Qwen3-Reranker-0.6B-GGUF",
         # Qwen3-Reranker-0.6B cross-encoder for post-retrieval reranking.
         # Runs on a separate llama-server process with --reranking --pooling rank
         # (mutually exclusive with --embeddings per ADR-0023 §9).
         "files": ["qwen3-reranker-0.6b-q8_0.gguf"],
-        "revision": "main",
+        "revision": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
         # sha256 populated when the model file is first downloaded and verified.
         "sha256": "",
         "license": "Apache-2.0",
