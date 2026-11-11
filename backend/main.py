@@ -1112,15 +1112,21 @@ _server_download_progress = {}
 
 @app.get("/api/server/status")
 async def api_server_status():
-    """Status of the local model server."""
+    """Status of the local model server.
+
+    `binary_ready` is false only when nothing usable is on the system
+    AND the pinned auto-install would have to run (~25 MB one-time
+    fetch); the Start endpoint installs on demand either way.
+    """
     binary, model_id = modelserver.get_server_config()
-    configured = bool(binary)
+    configured = bool(binary) or modelserver._find_server_binary() is not None
     manager = modelserver.get_manager()
 
     if manager.is_running() and manager.port:
         return {
-            "configured": configured,
+            "configured": True,
             "running": True,
+            "binary_ready": True,
             "port": manager.port,
             "model": model_id,
             "endpoint": manager.get_embeddings_endpoint(),
@@ -1129,6 +1135,7 @@ async def api_server_status():
     return {
         "configured": configured,
         "running": False,
+        "binary_ready": modelserver._find_server_binary() is not None,
         "port": None,
         "model": model_id,
         "endpoint": None,
@@ -1144,19 +1151,25 @@ async def api_server_models():
 
 @app.post("/api/server/start")
 async def api_server_start(body: dict = None):
-    """Start the local model server. Auto-configures if binary is found."""
+    """Start the local model server.
+
+    Installs the pinned llama-server on demand when nothing is on the
+    system (ADR-0021/0022: the whole server is download-on-demand),
+    downloads the model if needed, then spawns the child.
+    """
     body = body or {}
     model_id = body.get("model") or None
 
     binary, configured_model = modelserver.get_server_config()
     if not binary:
-        # Auto-detect and configure if the binary exists on the system
-        found = modelserver._find_server_binary()
-        if found:
-            binary = found
-            modelserver.set_server_config(binary, "")
-        else:
-            return {"ok": False, "error": "server not configured (llama-server binary not found)"}
+        # Install-or-detect, then persist what was found so the next
+        # status reports configured. A failed install surfaces its
+        # error instead of dead-ending with "binary not found".
+        try:
+            binary = modelserver.ensure_server_binary()
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+        modelserver.set_server_config(binary, "")
 
     manager = modelserver.get_manager()
     # Serialize concurrent start requests: the port pick + spawn must be

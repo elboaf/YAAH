@@ -293,6 +293,160 @@ class TestModelDownload:
         assert not part.exists()  # corrupt anchor removed
 
 
+class TestServerBinaryDownload:
+    """The llama-server binary itself installs on demand (pinned release,
+    checksummed), so Start never dead-ends with 'binary not found'."""
+
+    def _zip_bytes(self, files: dict) -> bytes:
+        import io
+        import zipfile as zf
+
+        buf = io.BytesIO()
+        with zf.ZipFile(buf, "w") as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+        return buf.getvalue()
+
+    def test_binary_pin_is_complete(self):
+        """The pin carries every field download needs; checksum is enforced."""
+        pin = modelserver.SERVER_BINARY_PIN
+        assert pin["tag"] and pin["asset"]
+        assert pin["url"].startswith("https://github.com/ggml-org/llama.cpp/")
+        assert pin["asset"] in pin["url"]
+        assert len(pin["sha256"]) == 64
+        assert pin["member"] == "llama-server.exe"
+
+    def test_download_stages_binary_and_dlls(self, tmp_path, monkeypatch):
+        """A good archive stages the exe + DLLs (by basename, flat layout),
+        drops nothing else, and leaves no zip or .part behind."""
+        from backend.agent import modelserver as ms
+
+        bin_dir = tmp_path / "bin"
+        monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
+        monkeypatch.setattr(ms, "SERVER_BINARY_PATH", bin_dir / "llama-server.exe")
+
+        archive = self._zip_bytes({
+            "llama-b12284-bin-win-cpu-x64/llama-server.exe": b"MZ-fake-exe",
+            "llama-b12284-bin-win-cpu-x64/ggml.dll": b"DLL-bytes",
+            "llama-b12284-bin-win-cpu-x64/README.txt": b"not staged",
+        })
+
+        pin = dict(ms.SERVER_BINARY_PIN)
+        import hashlib
+        pin["sha256"] = hashlib.sha256(archive).hexdigest()
+        monkeypatch.setattr(ms, "SERVER_BINARY_PIN", pin)
+
+        def handler(request):
+            return httpx.Response(200, content=archive)
+
+        monkeypatch.setattr(
+            ms.httpx, "Client", lambda **kw: _FakeClient(handler)
+        )
+        got = ms.download_server_binary()
+        assert got == str(bin_dir / "llama-server.exe")
+        assert (bin_dir / "llama-server.exe").read_bytes() == b"MZ-fake-exe"
+        assert (bin_dir / "ggml.dll").read_bytes() == b"DLL-bytes"
+        assert not (bin_dir / "README.txt").exists()
+        assert not (bin_dir / (pin["asset"] + ".part")).exists()
+        assert not (bin_dir / pin["asset"]).exists()
+
+    def test_download_checksum_mismatch_stages_nothing(self, tmp_path, monkeypatch):
+        """Corrupt archive bytes: nothing is staged and the anchor is gone."""
+        from backend.agent import modelserver as ms
+
+        bin_dir = tmp_path / "bin"
+        monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
+
+        archive = self._zip_bytes({
+            "llama-b12284-bin-win-cpu-x64/llama-server.exe": b"MZ-fake-exe",
+        })
+        pin = dict(ms.SERVER_BINARY_PIN)
+        pin["sha256"] = "0" * 64  # will not match
+        monkeypatch.setattr(ms, "SERVER_BINARY_PIN", pin)
+
+        def handler(request):
+            return httpx.Response(200, content=archive)
+
+        monkeypatch.setattr(
+            ms.httpx, "Client", lambda **kw: _FakeClient(handler)
+        )
+        with pytest.raises(ValueError, match="Checksum mismatch"):
+            ms.download_server_binary()
+        assert not (bin_dir / "llama-server.exe").exists()
+        assert not (bin_dir / (pin["asset"] + ".part")).exists()
+
+    def test_find_prefers_staged_over_path(self, tmp_path, monkeypatch):
+        """A previously installed binary wins over a PATH lookup."""
+        from backend.agent import modelserver as ms
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        staged = bin_dir / "llama-server.exe"
+        staged.write_bytes(b"MZ")
+        monkeypatch.setattr(ms, "SERVER_BINARY_PATH", staged)
+        monkeypatch.setattr(ms.shutil, "which", lambda name: "C:/path/llama-server.exe")
+        assert ms._find_server_binary() == str(staged)
+
+    def test_ensure_uses_found_binary_without_download(self, tmp_path, monkeypatch):
+        """A binary already on the system short-circuits the download."""
+        from backend.agent import modelserver as ms
+
+        monkeypatch.setattr(ms, "_find_server_binary", lambda: "C:/found/llama-server.exe")
+
+        def boom(progress_cb=None):
+            raise AssertionError("download must not run when binary exists")
+
+        monkeypatch.setattr(ms, "download_server_binary", boom)
+        assert ms.ensure_server_binary() == "C:/found/llama-server.exe"
+
+    def test_ensure_downloads_when_missing(self, monkeypatch):
+        """Nothing on the system: the pinned download runs."""
+        from backend.agent import modelserver as ms
+
+        monkeypatch.setattr(ms, "_find_server_binary", lambda: None)
+        monkeypatch.setattr(
+            ms, "download_server_binary", lambda progress_cb=None: "C:/staged/llama-server.exe"
+        )
+        assert ms.ensure_server_binary() == "C:/staged/llama-server.exe"
+
+    def test_ensure_wraps_download_failure(self, monkeypatch):
+        """A failed install raises RuntimeError with the cause, so the
+        Start endpoint surfaces a real error instead of dead-ending."""
+        from backend.agent import modelserver as ms
+
+        monkeypatch.setattr(ms, "_find_server_binary", lambda: None)
+
+        def fail(progress_cb=None):
+            raise httpx.ConnectError("no network")
+
+        monkeypatch.setattr(ms, "download_server_binary", fail)
+        with pytest.raises(RuntimeError, match="auto-install failed"):
+            ms.ensure_server_binary()
+
+    def test_start_installs_binary_on_demand(self, tmp_path, monkeypatch):
+        """ServerManager.start goes through ensure_server_binary (which
+        downloads when nothing is installed), not the bare finder."""
+        from backend.agent import modelserver as ms
+
+        calls = []
+        monkeypatch.setattr(
+            ms, "ensure_server_binary",
+            lambda: calls.append("ensure") or "C:/staged/llama-server.exe",
+        )
+        entry = modelserver.find_model("qwen3-embedding-0.6b")
+        monkeypatch.setattr(
+            ms, "MODELS_DIR", tmp_path / entry["id"]
+        )  # not downloaded; start must fail on the model AFTER the binary step
+        (tmp_path / entry["id"]).mkdir()
+
+        manager = ms.ServerManager()
+        monkeypatch.setattr(ms, "HEALTH_CHECK_INTERVAL", 0.01)
+        with patch.object(ms.subprocess, "Popen", side_effect=OSError("no spawn in test")):
+            with pytest.raises(Exception):
+                asyncio.run(manager.start("qwen3-embedding-0.6b"))
+        assert calls == ["ensure"]  # the binary step ran before any spawn
+
+
 class TestServerLifecycle:
     """Tests for server start/stop/health management."""
 

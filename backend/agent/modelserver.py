@@ -22,6 +22,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -300,7 +301,16 @@ async def health_check(port: int) -> bool:
 
 
 def _find_server_binary() -> Optional[str]:
-    """Find the llama-server binary on the system."""
+    """Find the llama-server binary on the system.
+
+    The staged location (~/.yaah/bin) is checked first: that is where
+    ensure_server_binary() puts a downloaded llama.cpp release, so a
+    previous install wins over a PATH lookup. A user's own binary on
+    PATH is still preferred over re-downloading when nothing is staged.
+    """
+    staged = SERVER_BINARY_PATH
+    if staged.exists():
+        return str(staged)
     # Check PATH first
     binary = shutil.which("llama-server")
     if binary:
@@ -314,6 +324,125 @@ def _find_server_binary() -> Optional[str]:
             if os.path.exists(location):
                 return location
     return None
+
+
+# ---------------------------------------------------------------------
+# Server binary download-on-demand (the server binary, not a model -
+# ADR-0021/0022 package the whole local server by download, out-of-box OFF)
+# ---------------------------------------------------------------------
+
+# Pinned upstream llama.cpp release. A new build arrives via a YAAH
+# release moving this pin (ADR-0022 version-pinning rule), never live.
+SERVER_BINARY_PIN = {
+    # CPU build for Windows x64: CPU-first is the resource policy
+    # (ADR-0022); a GPU build would pull CUDA runtime DLLs (~400 MB)
+    # and contende for VRAM with chat providers.
+    "tag": "b12284",
+    "asset": "llama-b12284-bin-win-cpu-x64.zip",
+    "url": (
+        "https://github.com/ggml-org/llama.cpp/releases/download/"
+        "b12284/llama-b12284-bin-win-cpu-x64.zip"
+    ),
+    "sha256": "6b3d2c7034b0c0bac65aa0524ddf01ba9c2b622ce7e32675976df642627defa9",
+    "member": "llama-server.exe",
+}
+
+# Where the staged binary lives (find order: staged, PATH, known dirs).
+BIN_DIR = Path.home() / ".yaah" / "bin"
+SERVER_BINARY_PATH = BIN_DIR / SERVER_BINARY_PIN["member"]
+
+
+def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
+    """Download and stage the pinned llama-server binary.
+
+    Fetches the pinned llama.cpp release zip, verifies its sha256,
+    extracts llama-server.exe and every DLL next to it (the loader
+    needs ggml/cudart-style DLLs in the binary's directory), and
+    returns the binary's path. The zip itself is not kept.
+
+    The archive is flat (one top-level dir with both exe and DLLs), so
+    each member is extracted by its basename into BIN_DIR.
+    """
+    pin = SERVER_BINARY_PIN
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    zip_path = BIN_DIR / (pin["asset"] + ".part")
+
+    log.info("Downloading llama-server from %s", pin["url"])
+    with httpx.Client(
+        timeout=DOWNLOAD_TIMEOUT, follow_redirects=True
+    ) as client:
+        with client.stream("GET", pin["url"]) as r:
+            r.raise_for_status()
+            tracker = DownloadTracker()
+            if r.headers.get("Content-Length"):
+                tracker.total_size = int(r.headers["Content-Length"])
+            with open(zip_path, "wb") as f:
+                chunk_num = 0
+                for chunk in r.iter_bytes(chunk_size=1024 * 1024):
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    tracker.bytes_downloaded = f.tell()
+                    chunk_num += 1
+                    if progress_cb and chunk_num % 10 == 0:
+                        progress_cb(tracker)
+
+    # Whole-zip checksum before anything is staged: bad bytes never
+    # reach the bin dir.
+    sha = hashlib.sha256()
+    with open(zip_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            sha.update(chunk)
+    computed = sha.hexdigest()
+    if computed != pin["sha256"]:
+        zip_path.unlink(missing_ok=True)
+        raise ValueError(
+            f"Checksum mismatch for {pin['asset']}: "
+            f"expected {pin['sha256']}, got {computed}"
+        )
+
+    # Extract the server exe and the DLLs it loads, by basename: the
+    # archive is flat, and BIN_DIR is the staged install dir.
+    extracted = []
+    with zipfile.ZipFile(zip_path) as z:
+        members = [n for n in z.namelist() if not n.endswith("/")]
+        target_names = {pin["member"]} | {
+            n for n in (m.rsplit("/", 1)[-1] for m in members)
+            if n.endswith(".dll")
+        }
+        for info in z.infolist():
+            base = info.filename.rsplit("/", 1)[-1]
+            if base in target_names:
+                out = BIN_DIR / base
+                with z.open(info) as src, open(out, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                extracted.append(base)
+
+    zip_path.unlink(missing_ok=True)
+
+    binary = BIN_DIR / pin["member"]
+    if not binary.exists():
+        raise RuntimeError(
+            f"staged archive had no {pin['member']} "
+            f"(extracted: {sorted(extracted)})"
+        )
+    log.info("Staged llama-server at %s (%d files)", binary, len(extracted))
+    return str(binary)
+
+
+def ensure_server_binary() -> str:
+    """Return a usable llama-server path, installing the pinned build
+    if nothing is found on the system. Raises RuntimeError when the
+    download fails so the caller can surface it."""
+    found = _find_server_binary()
+    if found:
+        return found
+    try:
+        return download_server_binary()
+    except Exception as e:
+        raise RuntimeError(
+            f"llama-server not found and auto-install failed: {e}"
+        ) from e
 
 
 def _probe_vram_headroom() -> Optional[dict]:
@@ -394,14 +523,14 @@ class ServerManager:
 
         self.model_entry = entry
 
+        # Binary first: it is the small, fast failure (25 MB pinned
+        # fetch) and installing it before pulling a 600 MB model means
+        # a broken install never wastes the big download.
+        binary = ensure_server_binary()
+
         # Ensure model is downloaded
         if not is_model_downloaded(entry):
             raise RuntimeError(f"Model {model_id} not downloaded")
-
-        # Find server binary
-        binary = _find_server_binary()
-        if not binary:
-            raise RuntimeError("llama-server binary not found")
 
         # Select port
         self.port = select_free_port()
