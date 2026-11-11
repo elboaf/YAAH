@@ -58,7 +58,7 @@ afterEach(() => cleanup())
 describe('Model server settings card (#730)', () => {
   it('renders the OFF status and model picker', async () => {
     render(<ModelServerSettingsCard />)
-    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
     expect(screen.getByRole('button', { name: 'Start' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy()
@@ -77,7 +77,7 @@ describe('Model server settings card (#730)', () => {
       healthy: true,
     })
     render(<ModelServerSettingsCard />)
-    await waitFor(() => expect(screen.getByText(/running on port 8081/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('running on port 8081'))
     expect(
       (screen.getByRole('button', { name: 'Start' }) as HTMLButtonElement).disabled,
     ).toBe(true)
@@ -103,17 +103,17 @@ describe('Model server settings card (#730)', () => {
       })
     })
     render(<ModelServerSettingsCard />)
-    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
     fireEvent.click(screen.getByRole('button', { name: 'Start' }))
     await waitFor(() => expect(screen.getByText(/Server started on port 8082/)).toBeTruthy())
-    await waitFor(() => expect(screen.getByText(/running on port 8082/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('running on port 8082'))
     expect(startModelServer).toHaveBeenCalledWith('qwen3-embedding-0.6b')
   })
 
   it('surfaces a start error', async () => {
     startModelServer.mockResolvedValue({ ok: false, error: 'download failed: timeout' })
     render(<ModelServerSettingsCard />)
-    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
     fireEvent.click(screen.getByRole('button', { name: 'Start' }))
     await waitFor(() => expect(screen.getByText(/download failed: timeout/)).toBeTruthy())
   })
@@ -135,20 +135,21 @@ describe('Model server settings card (#730)', () => {
       })
     })
     render(<ModelServerSettingsCard />)
-    await waitFor(() => expect(screen.getByText(/running on port 8083/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('running on port 8083'))
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
     await waitFor(() => expect(screen.getByText(/Server stopped/)).toBeTruthy())
-    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
     expect(stopModelServer).toHaveBeenCalledTimes(1)
   })
 
   it('downloads a model without starting', async () => {
     downloadModelServer.mockResolvedValue({ ok: true, message: 'downloaded' })
     render(<ModelServerSettingsCard />)
-    await waitFor(() => expect(screen.getByText(/off/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(screen.getByText(/downloaded/)).toBeTruthy())
     expect(downloadModelServer).toHaveBeenCalledWith('qwen3-embedding-0.6b')
+    expect(startModelServer).not.toHaveBeenCalled()
   })
 
   it('preselects the default embedding model', async () => {
