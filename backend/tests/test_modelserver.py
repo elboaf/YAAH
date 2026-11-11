@@ -349,6 +349,55 @@ class TestServerBinaryDownload:
         assert not (bin_dir / "README.txt").exists()
         assert not (bin_dir / (pin["asset"] + ".part")).exists()
         assert not (bin_dir / pin["asset"]).exists()
+        assert not list(bin_dir.glob("yaah-llama-*"))  # staging cleaned
+
+    def test_failed_publish_never_leaves_broken_install(self, tmp_path, monkeypatch):
+        """Extraction dying mid-publish must not expose an exe with
+        missing DLLs: the exe publishes last, so a crashed install is
+        invisible to _find_server_binary and the next start reinstalls."""
+        import shutil
+
+        from backend.agent import modelserver as ms
+
+        bin_dir = tmp_path / "bin"
+        monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
+        monkeypatch.setattr(ms, "SERVER_BINARY_PATH", bin_dir / "llama-server.exe")
+
+        archive = self._zip_bytes({
+            "llama-b12284-bin-win-cpu-x64/llama-server.exe": b"MZ-fake-exe",
+            "llama-b12284-bin-win-cpu-x64/ggml.dll": b"DLL-bytes",
+        })
+        pin = dict(ms.SERVER_BINARY_PIN)
+        import hashlib
+        pin["sha256"] = hashlib.sha256(archive).hexdigest()
+        monkeypatch.setattr(ms, "SERVER_BINARY_PIN", pin)
+
+        def handler(request):
+            return httpx.Response(200, content=archive)
+
+        monkeypatch.setattr(
+            ms.httpx, "Client", lambda **kw: _FakeClient(handler)
+        )
+
+        real_move = shutil.move
+
+        def fail_dll_move(src, dst):
+            if str(dst).endswith("ggml.dll"):
+                raise OSError("disk full mid-publish")
+            return real_move(src, dst)
+
+        monkeypatch.setattr(ms.shutil, "move", fail_dll_move)
+        with pytest.raises(OSError):
+            ms.download_server_binary()
+        assert not (bin_dir / "llama-server.exe").exists()
+        # Isolate the finder to bin_dir: no PATH, no machine-wide
+        # installs (env-var indirection covers the hardcoded dirs).
+        monkeypatch.setattr(ms.shutil, "which", lambda name: None)
+        empty = str(tmp_path / "env-empty")
+        monkeypatch.setenv("LOCALAPPDATA", empty)
+        monkeypatch.setenv("USERPROFILE", empty)
+        assert ms._find_server_binary() is None
+        assert not list(bin_dir.glob("yaah-llama-*"))  # staging cleaned
 
     def test_download_checksum_mismatch_stages_nothing(self, tmp_path, monkeypatch):
         """Corrupt archive bytes: nothing is staged and the anchor is gone."""

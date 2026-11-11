@@ -21,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -401,48 +402,75 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
             f"expected {pin['sha256']}, got {computed}"
         )
 
-    # Extract the server exe and the DLLs it loads, by basename: the
-    # archive is flat, and BIN_DIR is the staged install dir.
+    # Extract into a private staging dir and publish only a complete
+    # install: _find_server_binary accepts the exe on existence alone,
+    # so a half-extracted install must never become visible. The exe is
+    # moved into BIN_DIR last (its DLLs already beside it), which makes
+    # the exe's arrival the completion marker - a crashed extract can
+    # at worst leave stray DLLs, never a broken-looking install.
+    staging = Path(tempfile.mkdtemp(prefix="yaah-llama-", dir=str(BIN_DIR)))
     extracted = []
-    with zipfile.ZipFile(zip_path) as z:
-        members = [n for n in z.namelist() if not n.endswith("/")]
-        target_names = {pin["member"]} | {
-            n for n in (m.rsplit("/", 1)[-1] for m in members)
-            if n.endswith(".dll")
-        }
-        for info in z.infolist():
-            base = info.filename.rsplit("/", 1)[-1]
-            if base in target_names:
-                out = BIN_DIR / base
-                with z.open(info) as src, open(out, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            members = [n for n in z.namelist() if not n.endswith("/")]
+            target_names = {pin["member"]} | {
+                n for n in (m.rsplit("/", 1)[-1] for m in members)
+                if n.endswith(".dll")
+            }
+            staged_files = []
+            for info in z.infolist():
+                base = info.filename.rsplit("/", 1)[-1]
+                if base in target_names:
+                    out = staging / base
+                    with z.open(info) as src, open(out, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    staged_files.append((out, base))
+
+            exe = staging / pin["member"]
+            if not exe.exists():
+                raise RuntimeError(
+                    f"staged archive had no {pin['member']} "
+                    f"(found: {sorted(b for _, b in staged_files)})"
+                )
+
+            for out, base in staged_files:
+                if base == pin["member"]:
+                    continue
+                shutil.move(str(out), str(BIN_DIR / base))
                 extracted.append(base)
+            shutil.move(str(exe), str(BIN_DIR / pin["member"]))
+            extracted.append(pin["member"])
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
     zip_path.unlink(missing_ok=True)
 
     binary = BIN_DIR / pin["member"]
-    if not binary.exists():
-        raise RuntimeError(
-            f"staged archive had no {pin['member']} "
-            f"(extracted: {sorted(extracted)})"
-        )
     log.info("Staged llama-server at %s (%d files)", binary, len(extracted))
     return str(binary)
+
+
+# One install at a time: concurrent starts must not race two downloads
+# into the same archive/staging dir. The lock is thread-level because
+# the download runs in a worker thread (asyncio.to_thread).
+_SERVER_BINARY_LOCK = threading.Lock()
 
 
 def ensure_server_binary() -> str:
     """Return a usable llama-server path, installing the pinned build
     if nothing is found on the system. Raises RuntimeError when the
-    download fails so the caller can surface it."""
-    found = _find_server_binary()
-    if found:
-        return found
-    try:
-        return download_server_binary()
-    except Exception as e:
-        raise RuntimeError(
-            f"llama-server not found and auto-install failed: {e}"
-        ) from e
+    download fails so the caller can surface it. Safe to call from
+    async code via asyncio.to_thread (the download blocks its thread)."""
+    with _SERVER_BINARY_LOCK:
+        found = _find_server_binary()
+        if found:
+            return found
+        try:
+            return download_server_binary()
+        except Exception as e:
+            raise RuntimeError(
+                f"llama-server not found and auto-install failed: {e}"
+            ) from e
 
 
 def _probe_vram_headroom() -> Optional[dict]:
@@ -525,8 +553,9 @@ class ServerManager:
 
         # Binary first: it is the small, fast failure (25 MB pinned
         # fetch) and installing it before pulling a 600 MB model means
-        # a broken install never wastes the big download.
-        binary = ensure_server_binary()
+        # a broken install never wastes the big download. Off the event
+        # loop: the download is synchronous HTTP + hashing + extract.
+        binary = await asyncio.to_thread(ensure_server_binary)
 
         # Ensure model is downloaded
         if not is_model_downloaded(entry):

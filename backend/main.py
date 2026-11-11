@@ -1160,16 +1160,17 @@ async def api_server_start(body: dict = None):
     body = body or {}
     model_id = body.get("model") or None
 
-    binary, configured_model = modelserver.get_server_config()
-    if not binary:
-        # Install-or-detect, then persist what was found so the next
-        # status reports configured. A failed install surfaces its
-        # error instead of dead-ending with "binary not found".
-        try:
-            binary = modelserver.ensure_server_binary()
-        except RuntimeError as e:
-            return {"ok": False, "error": str(e)}
-        modelserver.set_server_config(binary, "")
+    binary_saved, configured_model = modelserver.get_server_config()
+    # Always ensure the binary BEFORE the model download (which can be
+    # a 600 MB pull): a saved path can point at a deleted exe, and the
+    # cheap install must fail before the big fetch. Off the event loop.
+    try:
+        binary = await asyncio.to_thread(modelserver.ensure_server_binary)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    if binary_saved != binary:
+        # First run (nothing saved) or a healed stale/moved path.
+        modelserver.set_server_config(binary, configured_model)
 
     manager = modelserver.get_manager()
     # Serialize concurrent start requests: the port pick + spawn must be
