@@ -495,14 +495,15 @@ def _probe_vram_headroom() -> Optional[dict]:
                     return None
         return None
 
-    # Primary: nvidia-smi (accurate per-GPU VRAM). Best-effort; absent on
-    # AMD or systems without it, so we fall through rather than failing.
+    # NVIDIA GPU: nvidia-smi is the only source of accurate free VRAM.
+    # Fields are the documented memory.total/memory.free (MB -> bytes).
+    # Best-effort; absent on AMD or systems without it, so we fall through.
     try:
         import shutil
         if shutil.which("nvidia-smi"):
             import subprocess
             res = subprocess.run(
-                ["nvidia-smi", "--query-gpu=total_memory,free_memory",
+                ["nvidia-smi", "--query-gpu=memory.total,memory.free",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=10,
             )
@@ -522,31 +523,11 @@ def _probe_vram_headroom() -> Optional[dict]:
     except Exception:
         pass
 
-    # Fallback: Windows CIM (AdapterRAM, FreeVRAM). Best-effort parsing.
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_VideoController | "
-             "Select-Object AdapterRAM,FreeVRAM"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        total = _parse_int(result.stdout)
-        free = _parse_int(result.stdout)
-        if total and free is not None:
-            # FreeVRAM from CIM can be negative when the driver reports
-            # over-subscription; clamp to 0 so we don't falsely report headroom.
-            free = max(0, free)
-            return {
-                "total_vram": total,
-                "free_vram": free,
-                "has_headroom": free >= 2 * 1024 * 1024 * 1024,
-            }
-    except Exception:
-        pass
-
+    # No reliable free-VRAM source (nvidia-smi absent, no NVIDIA GPU):
+    # return None so the caller falls back to CPU. A previous Windows CIM
+    # fallback is intentionally gone - Win32_VideoController exposes no
+    # free-VRAM field and the old parser could not distinguish total from
+    # free, so it never measured what the threshold required.
     return None
 
 
@@ -608,9 +589,17 @@ class ServerManager:
         self.port = select_free_port()
 
         # Resolve the offload decision: an explicit arg wins, otherwise the
-        # persisted user preference (default off, per ADR-0022).
+        # persisted user preference (default off, per ADR-0022). When the
+        # preference is on, re-probe VRAM before committing to offload -
+        # degrade to CPU if headroom has since disappeared so we never
+        # request 99 GPU layers from a GPU that is under VRAM pressure.
         if gpu_offload is None:
             gpu_offload = get_server_gpu_offload("embedding")
+        if gpu_offload:
+            probe = await asyncio.to_thread(_probe_vram_headroom)
+            if not probe or not probe["has_headroom"]:
+                log.info("GPU offload requested but no VRAM headroom; CPU")
+                gpu_offload = False
 
         # Build command. NOTE: llama-server's port flag is --port; the
         # bare -p is the PROMPT flag and would wedge startup.

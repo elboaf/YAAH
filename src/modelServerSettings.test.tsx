@@ -192,6 +192,7 @@ describe('Model server settings card (#730)', () => {
   })
 
   it('restarts the running server when GPU acceleration is toggled on', async () => {
+    startModelServer.mockResolvedValue({ ok: true, port: 8084 })
     stopModelServer.mockResolvedValue({ ok: true })
     setServerGpuOffload.mockResolvedValue({ ok: true, gpu_offload: true })
     let statusCall = 0
@@ -218,6 +219,9 @@ describe('Model server settings card (#730)', () => {
     fireEvent.click(screen.getByRole('switch', { name: 'GPU acceleration' }))
     await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalledWith(true))
     await waitFor(() => expect(stopModelServer).toHaveBeenCalledTimes(1))
+    // A running server must restart (stop + start), not just stop, to apply
+    // the new flag.
+    await waitFor(() => expect(startModelServer).toHaveBeenCalledTimes(1))
     await waitFor(
       () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'true'),
     )

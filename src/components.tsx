@@ -6759,6 +6759,7 @@ export function ModelServerSettingsCard() {
   const [downloadState, setDownloadState] = useState<'idle' | 'busy'>('idle')
   const [message, setMessage] = useState<string | null>(null)
   const [messageOk, setMessageOk] = useState(false)
+  const [toggleBusy, setToggleBusy] = useState(false)
 
   const refresh = async () => {
     try {
@@ -6834,17 +6835,25 @@ export function ModelServerSettingsCard() {
       setGpuOffload(enabled)
       return
     }
+    // Re-entry guard: hold the toggle through the request so a double-click
+    // can't fire two save calls (or, when restarting, two stops).
+    if (toggleBusy) return
+    setToggleBusy(true)
     setMessage(null)
     try {
       const r = await setServerGpuOffload(enabled)
       if (r.ok) {
-        setGpuOffload(true)
-        // A running server must restart to apply the new flag.
+        // Reflect the saved value, not a hard-coded true.
+        setGpuOffload(enabled)
+        // A running server must restart to apply the new flag: stop, then
+        // start the same model. When stopped, the flag applies on next
+        // manual start.
         if (status?.running) {
           setMessage('Restarting the server with GPU acceleration…')
           setMessageOk(true)
-          stop()
-          refresh()
+          window.dispatchEvent(new Event('yaah:model-server-changed'))
+          await stop()
+          await start()
         } else {
           setMessage('GPU acceleration set. It applies on next start.')
           setMessageOk(true)
@@ -6856,6 +6865,8 @@ export function ModelServerSettingsCard() {
     } catch (e) {
       setMessage((e as Error).message)
       setMessageOk(false)
+    } finally {
+      setToggleBusy(false)
     }
   }
 
@@ -6957,6 +6968,7 @@ export function ModelServerSettingsCard() {
               ? 'Turning on GPU acceleration restarts the running server'
               : 'Applies on next start'}
             onClick={() => toggleGpu(!gpuOffload)}
+            disabled={toggleBusy}
             className={[
               'relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors duration-150 ease-in-out focus:outline-none',
               gpuOffload
