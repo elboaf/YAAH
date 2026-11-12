@@ -8,6 +8,8 @@ network downloads.
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -667,6 +669,86 @@ class TestResolvedConnection:
         assert entry["files"] == ["Qwen3-Embedding-0.6B-Q8_0.gguf"]
         assert entry["revision"] != "main"  # pinned commit, not a moving ref
         assert len(entry["sha256"]) == 64   # checksum enforced on download
+
+
+class TestGpuSelection:
+    """Tests for the multi-GPU selection feature: enumerate, index probe,
+    and the persisted selection. nvidia-smi is stubbed so the tests run
+    on a CPU-only host and assert the parser, not the hardware."""
+
+    def test_enumerate_gpus_parses_multi_gpu(self, monkeypatch):
+        """A two-GPU nvidia-smi output (index,name,total,free rows) yields one
+        entry per GPU with byte-sized VRAM. The CSV header row has 4 columns
+        too, so it must be skipped by the int() parse, not the column count."""
+        out = "index,name,memory.total [MiB],memory.free [MiB]\n0,NVIDIA GeForce RTX 4070 SUPER,12282,10770\n1,NVIDIA GeForce GT 1030,2048,1704\n"
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+        )
+        gpus = modelserver.enumerate_gpus()
+        assert [g["index"] for g in gpus] == [0, 1]
+        assert gpus[0]["name"] == "NVIDIA GeForce RTX 4070 SUPER"
+        assert gpus[0]["total_vram"] == 12282 * 1024 * 1024
+        assert gpus[1]["free_vram"] == 1704 * 1024 * 1024
+
+    def test_enumerate_gpus_empty_when_no_nvidia(self, monkeypatch):
+        """No nvidia-smi on PATH means the selector has nothing to show."""
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr(os, "name", "nt")
+        assert modelserver.enumerate_gpus() == []
+
+    def test_probe_without_index_first_gpu(self, monkeypatch):
+        """The default (no index) probe parses the total,free row."""
+        out = "12282, 10770\n2048, 1704\n"
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+        )
+        probe = modelserver._probe_vram_headroom()
+        assert probe["has_headroom"] is True
+        assert probe["free_vram"] == 10770 * 1024 * 1024
+
+    def test_probe_with_index_matches_row(self, monkeypatch):
+        """A GPU-index probe reads that GPU's row, not the first row."""
+        out = "index, memory.total [MiB], memory.free [MiB]\n0, 12282, 10770\n1, 2048, 1704\n"
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+
+        def fake_run(cmd, *a, **k):
+            # The caller must pass index first when a specific GPU is asked.
+            assert "--query-gpu=index,memory.total,memory.free" in cmd[1]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        probe = modelserver._probe_vram_headroom(1)
+        assert probe["free_vram"] == 1704 * 1024 * 1024
+        assert probe["total_vram"] == 2048 * 1024 * 1024
+
+    def test_probe_no_headroom_when_vram_low(self, monkeypatch):
+        """VRAM under the ~2 GB threshold reports no headroom."""
+        # index,total,free where GPU 0 has ~1 GB free.
+        out = "index, memory.total [MiB], memory.free [MiB]\n0, 4096, 900\n"
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+        )
+        probe = modelserver._probe_vram_headroom(0)
+        assert probe["has_headroom"] is False
+
+    def test_gpu_index_config_roundtrip(self):
+        """The selected GPU index persists and reads back."""
+        modelserver.set_server_gpu_index(1)
+        assert modelserver.get_server_gpu_index() == 1
+        # A different task reads its own key.
+        modelserver.set_server_gpu_index(2, task="reranking")
+        assert modelserver.get_server_gpu_index("reranking") == 2
+        assert modelserver.get_server_gpu_index() == 1
+        # None clears the selection.
+        modelserver.set_server_gpu_index(None)
+        assert modelserver.get_server_gpu_index() is None
 
 
 if __name__ == "__main__":

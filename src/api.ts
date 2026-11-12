@@ -475,6 +475,12 @@ export type RebuildProgress = {
 }
 
 // Local model server (issue #730)
+export interface ModelServerGpu {
+  index: number
+  name: string
+  total_vram: number
+  free_vram: number
+}
 export interface ModelServerStatus {
   configured: boolean
   running: boolean
@@ -484,6 +490,8 @@ export interface ModelServerStatus {
   endpoint: string | null
   healthy: boolean
   gpu_offload: boolean
+  gpu_index: number | null
+  gpus: ModelServerGpu[]
 }
 export interface ModelServerModel {
   id: string
@@ -503,6 +511,11 @@ export const setServerGpuOffload = (gpu_offload: boolean) =>
   api<{ ok: boolean; gpu_offload?: boolean; error?: string }>('/api/server/gpu-offload', {
     method: 'POST',
     body: JSON.stringify({ gpu_offload }),
+  })
+export const setServerGpuIndex = (gpu_index: number | null) =>
+  api<{ ok: boolean; gpu_index?: number | null; error?: string }>('/api/server/gpu-index', {
+    method: 'POST',
+    body: JSON.stringify({ gpu_index }),
   })
 export const downloadModelServer = (model?: string) =>
   api<{ ok: boolean; message?: string; error?: string }>('/api/server/download', {

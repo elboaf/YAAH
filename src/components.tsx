@@ -114,6 +114,7 @@ import {
   startModelServer,
   stopModelServer,
   setServerGpuOffload,
+  setServerGpuIndex,
   downloadModelServer,
   type ModelServerStatus,
   type ModelServerModel,
@@ -6755,6 +6756,7 @@ export function ModelServerSettingsCard() {
   const [models, setModels] = useState<ModelServerModel[]>([])
   const [selectedModel, setSelectedModel] = useState('')
   const [gpuOffload, setGpuOffload] = useState(false)
+  const [gpuIndex, setGpuIndex] = useState<number | null>(null)
   const [startState, setStartState] = useState<'idle' | 'busy'>('idle')
   const [stopState, setStopState] = useState<'idle' | 'busy'>('idle')
   const [downloadState, setDownloadState] = useState<'idle' | 'busy'>('idle')
@@ -6773,6 +6775,9 @@ export function ModelServerSettingsCard() {
       if (typeof s.gpu_offload === 'boolean') {
         setGpuOffload(s.gpu_offload)
       }
+      // Reflect the saved GPU selection and the live list of GPUs so the
+      // selector can show/enable itself only when there is more than one.
+      setGpuIndex(typeof s.gpu_index === 'number' ? s.gpu_index : null)
     } catch {
       // Status endpoint unavailable: record it so the card can offer a
       // retry, and keep the last known state instead of losing it.
@@ -6884,6 +6889,35 @@ export function ModelServerSettingsCard() {
       setMessageOk(false)
     } finally {
       setToggleBusy(false)
+    }
+  }
+
+  // The selector only renders for 2+ GPUs, but a change still needs to
+  // persist and, if the server is running, restart it with the new card.
+  const handleGpuChange = async (index: number) => {
+    setGpuIndex(index)
+    setMessage(null)
+    const runningModel = status?.model ?? selectedModel
+    const restart = status?.running
+    try {
+      const r = await setServerGpuIndex(index)
+      if (r.ok) {
+        if (restart) {
+          setMessage('Restarting the server with the selected GPU…')
+          setMessageOk(true)
+          window.dispatchEvent(new Event('yaah:model-server-changed'))
+          if (await stop()) await start(runningModel)
+        } else {
+          setMessage('GPU selected. It applies on next start.')
+          setMessageOk(true)
+        }
+      } else {
+        setMessage(r.error ?? 'Failed to set GPU')
+        setMessageOk(false)
+      }
+    } catch (e) {
+      setMessage((e as Error).message)
+      setMessageOk(false)
     }
   }
 
@@ -7018,6 +7052,26 @@ export function ModelServerSettingsCard() {
             />
           </button>
         </div>
+        {status?.gpus && status.gpus.length > 1 ? (
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-[10px] text-zinc-400" title={status.gpus.map((g) => `${g.name} (${Math.round(g.total_vram / 1024 / 1024)} MB)`).join('; ')}>
+              GPU
+            </span>
+            <select
+              className="rounded bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none"
+              value={gpuIndex ?? 0}
+              aria-label="GPU for embeddings server"
+              onChange={(e) => handleGpuChange(Number(e.target.value))}
+              disabled={toggleBusy || !status || statusFailed || startState === 'busy' || stopState === 'busy'}
+            >
+              {status.gpus.map((g) => (
+                <option key={g.index} value={g.index}>
+                  {g.name} ({Math.round(g.total_vram / 1024 / 1024)} MB)
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
         <p className="font-mono text-[10px] text-zinc-600">
           Bundled llama.cpp server for embeddings. Out-of-the-box state is OFF; nothing downloads or starts until you click Start.
         </p>
