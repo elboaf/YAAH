@@ -346,11 +346,30 @@ SERVER_BINARY_PIN = {
     ),
     "sha256": "6b3d2c7034b0c0bac65aa0524ddf01ba9c2b622ce7e32675976df642627defa9",
     "member": "llama-server.exe",
+    "staged_name": "llama-server.exe",
+}
+
+# CUDA build for the same release. Staged to a distinct path so the CPU
+# and CUDA builds never share BIN_DIR/llama-server.exe and its DLLs (a
+# user can switch the selector on and off without a half-staged install).
+# Opt-in only: offloading is off by default (ADR-0022), so this build is
+# only ever downloaded when the user turns GPU offload on.
+CUDA_SERVER_BINARY_PIN = {
+    "tag": "b12284",
+    "asset": "llama-b12284-bin-win-cuda-12.4-x64.zip",
+    "url": (
+        "https://github.com/ggml-org/llama.cpp/releases/download/"
+        "b12284/llama-b12284-bin-win-cuda-12.4-x64.zip"
+    ),
+    "sha256": "2bf31552cee22652f76a108461a1074548ba84e73294dad1061493875255673f",
+    "member": "llama-server.exe",
+    "staged_name": "llama-server-cuda.exe",
 }
 
 # Where the staged binary lives (find order: staged, PATH, known dirs).
 BIN_DIR = Path.home() / ".yaah" / "bin"
 SERVER_BINARY_PATH = BIN_DIR / SERVER_BINARY_PIN["member"]
+CUDA_SERVER_BINARY_PATH = BIN_DIR / "llama-server-cuda.exe"
 
 
 def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
@@ -364,11 +383,33 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
     The archive is flat (one top-level dir with both exe and DLLs), so
     each member is extracted by its basename into BIN_DIR.
     """
-    pin = SERVER_BINARY_PIN
+    return _download_and_stage(SERVER_BINARY_PIN, "CPU", progress_cb)
+
+
+def download_cuda_server_binary(progress_cb: Optional[Callable] = None) -> str:
+    """Download and stage the CUDA build of the pinned llama-server.
+
+    Same contract as download_server_binary, but for the CUDA asset. The
+    staged file is named llama-server-cuda.exe so it never shares the
+    CPU binary's path or DLLs (a user can toggle the selector on and off
+    without a half-staged install).
+    """
+    return _download_and_stage(CUDA_SERVER_BINARY_PIN, "CUDA", progress_cb)
+
+
+def _download_and_stage(
+    pin: dict, kind: str, progress_cb: Optional[Callable] = None,
+) -> str:
+    """Download the zip at `pin["url"]`, verify its sha256, extract the
+    exe + DLLs and publish them into BIN_DIR under `pin["staged_name"]`.
+
+    The archive is flat (one top-level dir with both exe and DLLs), so
+    each member is extracted by its basename. Returns the staged exe path.
+    """
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = BIN_DIR / (pin["asset"] + ".part")
 
-    log.info("Downloading llama-server from %s", pin["url"])
+    log.info("Downloading llama-server (%s) from %s", kind, pin["url"])
     with httpx.Client(
         timeout=DOWNLOAD_TIMEOUT, follow_redirects=True
     ) as client:
@@ -413,7 +454,7 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
     try:
         with zipfile.ZipFile(zip_path) as z:
             members = [n for n in z.namelist() if not n.endswith("/")]
-            target_names = {pin["member"]} | {
+            target_names = {pin["staged_name"]} | {
                 n for n in (m.rsplit("/", 1)[-1] for m in members)
                 if n.endswith(".dll")
             }
@@ -426,26 +467,26 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
                         shutil.copyfileobj(src, dst)
                     staged_files.append((out, base))
 
-            exe = staging / pin["member"]
+            exe = staging / pin["staged_name"]
             if not exe.exists():
                 raise RuntimeError(
-                    f"staged archive had no {pin['member']} "
+                    f"staged archive had no {pin['staged_name']} "
                     f"(found: {sorted(b for _, b in staged_files)})"
                 )
 
             for out, base in staged_files:
-                if base == pin["member"]:
+                if base == pin["staged_name"]:
                     continue
                 shutil.move(str(out), str(BIN_DIR / base))
                 extracted.append(base)
-            shutil.move(str(exe), str(BIN_DIR / pin["member"]))
-            extracted.append(pin["member"])
+            shutil.move(str(exe), str(BIN_DIR / pin["staged_name"]))
+            extracted.append(pin["staged_name"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
     zip_path.unlink(missing_ok=True)
 
-    binary = BIN_DIR / pin["member"]
+    binary = BIN_DIR / pin["staged_name"]
     log.info("Staged llama-server at %s (%d files)", binary, len(extracted))
     return str(binary)
 
@@ -456,12 +497,52 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
 _SERVER_BINARY_LOCK = threading.Lock()
 
 
-def ensure_server_binary() -> str:
+def find_cuda_server_binary() -> Optional[str]:
+    """Return the CUDA build if it is already staged, else None.
+
+    Staged as llama-server-cuda.exe, so this never returns the CPU
+    binary. The CUDA build is opt-in, so it is usually absent until a
+    user turns GPU offload on and this binary is downloaded.
+    """
+    staged = CUDA_SERVER_BINARY_PATH
+    if staged.exists():
+        return str(staged)
+    binary = shutil.which("llama-server-cuda")
+    if binary:
+        return binary
+    if os.name == "nt":
+        for location in [
+            os.path.expandvars("%LOCALAPPDATA%\\Programs\\llama.cpp\\llama-server-cuda.exe"),
+            os.path.expandvars("%USERPROFILE%\\Downloads\\llama.cpp\\build\\bin\\llama-server-cuda.exe"),
+        ]:
+            if os.path.exists(location):
+                return location
+    return None
+
+
+def ensure_server_binary(gpu_offload: bool = False) -> str:
     """Return a usable llama-server path, installing the pinned build
     if nothing is found on the system. Raises RuntimeError when the
     download fails so the caller can surface it. Safe to call from
-    async code via asyncio.to_thread (the download blocks its thread)."""
+    async code via asyncio.to_thread (the download blocks its thread).
+
+    gpu_offload: when True, stage and return the CUDA build (a CPU binary
+    cannot offload layers). When False, stage and return the CPU build,
+    the default per ADR-0022.
+    """
     with _SERVER_BINARY_LOCK:
+        if gpu_offload:
+            found = find_cuda_server_binary()
+            if found:
+                return found
+            try:
+                return download_cuda_server_binary()
+            except Exception as e:
+                raise RuntimeError(
+                    f"GPU offload requested but the CUDA llama-server build "
+                    f"could not be installed: {e}. Enable offload with a CUDA "
+                    f"build available, or use CPU mode."
+                ) from e
         found = _find_server_binary()
         if found:
             return found
@@ -659,22 +740,9 @@ class ServerManager:
 
         self.model_entry = entry
 
-        # Binary first: it is the small, fast failure (25 MB pinned
-        # fetch) and installing it before pulling a 600 MB model means
-        # a broken install never wastes the big download. Off the event
-        # loop: the download is synchronous HTTP + hashing + extract.
-        binary = await asyncio.to_thread(ensure_server_binary)
-
-        # Ensure model is downloaded
-        if not is_model_downloaded(entry):
-            raise RuntimeError(f"Model {model_id} not downloaded")
-
-        # Select port
-        self.port = select_free_port()
-
         # Resolve which GPU to probe/offload: an explicit arg wins, else
         # the saved selection in config, else None (probe the first GPU).
-        # Only meaningful when offloading; CPU mode ignores it.
+        # These read config only, so resolve before fetching the binary.
         if gpu_index is None:
             gpu_index = get_server_gpu_index(task or self.task)
         # Resolve the offload decision: an explicit arg wins, otherwise the
@@ -682,6 +750,7 @@ class ServerManager:
         # The task selects the right pref: the embedding tenant reads
         # gpu_offload, the reranking tenant reads reranking_gpu_offload.
         tenant = task or self.task
+        explicit_offload = gpu_offload is not None
         if gpu_offload is None:
             gpu_offload = get_server_gpu_offload(tenant)
         # When the preference is on, probe VRAM before committing to offload
@@ -689,12 +758,36 @@ class ServerManager:
         # layers from a GPU under pressure (ADR-0022). The probe blocks, so
         # a user could toggle the switch off mid-probe; re-read the saved
         # preference after the probe so a saved disable still wins. Probe
-        # with the selected GPU's index so the right card is measured.
+        # with the selected GPU's index so the right card is measured. An
+        # explicit gpu_offload=True forces offload: only probe for headroom,
+        # do not let the saved preference (which may be off) override it.
         if gpu_offload:
             probe = await asyncio.to_thread(_probe_vram_headroom, gpu_index)
-            gpu_offload = bool(probe) and probe["has_headroom"] and get_server_gpu_offload(tenant)
+            # An explicit gpu_offload=True forces offload; a saved preference
+            # can still be re-read mid-probe, so only the saved pref is
+            # re-checked after the probe.
+            gpu_offload = bool(probe) and (explicit_offload or get_server_gpu_offload(tenant))
         if not gpu_offload:
             log.info("GPU offload disabled; CPU")
+
+        # Binary first: it is the small, fast failure (25 MB pinned fetch)
+        # and installing it before pulling a 600 MB model means a broken
+        # install never wastes the big download. Off the event loop: the
+        # download is synchronous HTTP + hashing + extract. Which build to
+        # stage is known now that the offload decision is made. When
+        # offloading, stage the CUDA build: a CPU binary cannot offload
+        # layers, so a successful start on the CPU build would silently run
+        # on CPU despite the user asking for GPU. If that build is
+        # unavailable the RuntimeError surfaces to the UI rather than a
+        # wrong-looking success.
+        binary = await asyncio.to_thread(ensure_server_binary, gpu_offload)
+
+        # Ensure model is downloaded
+        if not is_model_downloaded(entry):
+            raise RuntimeError(f"Model {model_id} not downloaded")
+
+        # Select port
+        self.port = select_free_port()
 
         # Build command. NOTE: llama-server's port flag is --port; the
         # bare -p is the PROMPT flag and would wedge startup.
@@ -710,8 +803,10 @@ class ServerManager:
         if gpu_offload:
             cmd.extend(["-ngl", "99"])  # All layers to GPU
             # Pin the offload to the selected GPU so a multi-GPU host does
-            # not silently default to the first card. --main-gpu picks the
-            # device for split-mode = none (the default).
+            # not silently default to the first card. --split-mode none puts
+            # every layer on one device; only then does --main-gpu select
+            # which one (under layer split, --main-gpu does not confine it).
+            cmd.extend(["--split-mode", "none"])
             if gpu_index is not None:
                 cmd.extend(["--main-gpu", str(gpu_index)])
         else:

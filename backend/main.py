@@ -1139,7 +1139,9 @@ async def api_server_status():
     binary, model_id = modelserver.get_server_config()
     gpu_offload = modelserver.get_server_gpu_offload()
     saved_index = modelserver.get_server_gpu_index()
-    gpus = modelserver.enumerate_gpus()
+    # enumerate_gpus() runs a blocking subprocess; keep it off the event
+    # loop so a stalled nvidia-smi cannot stall this status handler.
+    gpus = await asyncio.to_thread(modelserver.enumerate_gpus)
     configured = bool(binary) or modelserver._find_server_binary() is not None
     manager = modelserver.get_manager()
 

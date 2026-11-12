@@ -482,7 +482,7 @@ class TestServerBinaryDownload:
         calls = []
         monkeypatch.setattr(
             ms, "ensure_server_binary",
-            lambda: calls.append("ensure") or "C:/staged/llama-server.exe",
+            lambda gpu_offload=False, calls=calls: calls.append("ensure") or "C:/staged/llama-server.exe",
         )
         entry = modelserver.find_model("qwen3-embedding-0.6b")
         monkeypatch.setattr(
@@ -758,6 +758,148 @@ class TestGpuSelection:
         # None clears the selection.
         modelserver.set_server_gpu_index(None)
         assert modelserver.get_server_gpu_index() is None
+
+    def test_start_offload_command_splits_mode_and_pins_gpu(self, monkeypatch, tmp_path):
+        """A GPU-offload start assembles --split-mode none plus a pinned
+        --main-gpu so a multi-GPU host offloads to the chosen card."""
+        entry = modelserver.find_model("qwen3-embedding-0.6b")
+        assert entry is not None
+        monkeypatch.setattr(modelserver, "MODELS_DIR",
+                            tmp_path / entry["id"])
+        (tmp_path / entry["id"]).mkdir()
+        monkeypatch.setattr(modelserver, "is_model_downloaded",
+                            lambda entry: True)
+        # Probe reports headroom so the offload path is taken.
+        monkeypatch.setattr(modelserver, "_probe_vram_headroom",
+                            lambda gpu_index=None: {
+                                "has_headroom": True, "free_vram": 0})
+        monkeypatch.setattr(modelserver, "ensure_server_binary",
+                            lambda gpu_offload=False: "/bin/llama-server.exe")
+
+        captured = {}
+
+        def fake_popen(cmd, **kw):
+            captured["cmd"] = cmd
+            p = MagicMock()
+            p.poll.return_value = None  # never "exited"
+            return p
+
+        manager = modelserver.ServerManager()
+        monkeypatch.setattr(modelserver, "HEALTH_CHECK_INTERVAL", 0.01)
+        monkeypatch.setattr(modelserver, "health_check",
+                            lambda port: asyncio.sleep(0.01, result=True))
+        with patch.object(modelserver.subprocess, "Popen",
+                          side_effect=fake_popen):
+            asyncio.run(manager.start(
+                "qwen3-embedding-0.6b", gpu_offload=True, gpu_index=1))
+        cmd = captured["cmd"]
+        assert cmd.count("-ngl") == 1 and "99" in cmd
+        # split-mode none must precede --main-gpu, which carries the index.
+        assert cmd[cmd.index("--split-mode") + 1] == "none"
+        assert cmd[cmd.index("--main-gpu") + 1] == "1"
+
+    def test_explicit_gpu_offload_override_forces_offload(self, monkeypatch, tmp_path):
+        """An explicit gpu_offload=True forces offload even when the saved
+        preference is off, so a probe-found headroom does not revert it."""
+        entry = modelserver.find_model("qwen3-embedding-0.6b")
+        assert entry is not None
+        monkeypatch.setattr(modelserver, "MODELS_DIR",
+                            tmp_path / entry["id"])
+        (tmp_path / entry["id"]).mkdir()
+        monkeypatch.setattr(modelserver, "is_model_downloaded",
+                            lambda entry: True)
+        monkeypatch.setattr(modelserver, "get_server_gpu_offload",
+                            lambda tenant: False)  # saved pref is OFF
+        monkeypatch.setattr(modelserver, "_probe_vram_headroom",
+                            lambda gpu_index=None: {
+                                "has_headroom": True, "free_vram": 0})
+        monkeypatch.setattr(modelserver, "ensure_server_binary",
+                            lambda gpu_offload=False: "/bin/llama-server.exe")
+
+        captured = {}
+
+        def fake_popen(cmd, **kw):
+            captured["cmd"] = cmd
+            p = MagicMock()
+            p.poll.return_value = None
+            return p
+
+        manager = modelserver.ServerManager()
+        monkeypatch.setattr(modelserver, "HEALTH_CHECK_INTERVAL", 0.01)
+        monkeypatch.setattr(modelserver, "health_check",
+                            lambda port: asyncio.sleep(0.01, result=True))
+        with patch.object(modelserver.subprocess, "Popen",
+                          side_effect=fake_popen):
+            asyncio.run(manager.start(
+                "qwen3-embedding-0.6b", gpu_offload=True, gpu_index=1))
+        # Explicit True wins: split-mode none + pinned --main-gpu are present,
+        # proving the saved-off preference did not force CPU mode.
+        cmd = captured["cmd"]
+        assert "--split-mode" in cmd and "99" in cmd
+        assert cmd[cmd.index("--main-gpu") + 1] == "1"
+
+class TestCudaBinarySelection:
+    """The CUDA build is opt-in: only staged when offload is requested.
+
+    The default pinned binary is CPU-only (ADR-0022). When offload is on,
+    ensure_server_binary must stage and return the CUDA build under a
+    distinct path so it never shares the CPU binary or its DLLs.
+    """
+
+    def _zip_bytes(self, members):
+        import io, zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for name, data in members.items():
+                z.writestr(name, data)
+        return buf.getvalue()
+
+    def test_offload_true_stages_cuda_build(self, tmp_path, monkeypatch):
+        """ensure_server_binary(True) downloads the CUDA build to
+        llama-server-cuda.exe, not the CPU path."""
+        from backend.agent import modelserver as ms
+        import hashlib
+
+        bin_dir = tmp_path / "bin"
+        monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PATH", bin_dir / "llama-server-cuda.exe")
+
+        archive = self._zip_bytes({
+            "llama-server-cuda.exe": b"cuda-exe",
+            "ggml-cuda.dll": b"cuddl",
+        })
+        pin = dict(ms.CUDA_SERVER_BINARY_PIN)
+        pin["sha256"] = hashlib.sha256(archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PIN", pin)
+
+        def handler(request):
+            return httpx.Response(200, content=archive)
+
+        monkeypatch.setattr(ms.httpx, "Client", lambda **kw: _FakeClient(handler))
+        monkeypatch.setattr(ms.shutil, "which", lambda name: None)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "empty"))
+
+        got = ms.ensure_server_binary(True)
+        assert got == str(bin_dir / "llama-server-cuda.exe")
+        assert (bin_dir / "llama-server-cuda.exe").read_bytes() == b"cuda-exe"
+        # The CPU binary path must be untouched.
+        assert not (bin_dir / "llama-server.exe").exists()
+
+    def test_offload_true_stages_cpu_when_unavailable_raises(self, tmp_path, monkeypatch):
+        """When offload is requested but the CUDA build cannot be staged,
+        raise rather than falling back to a CPU binary (which would make a
+        successful start run on CPU despite the user asking for GPU)."""
+        from backend.agent import modelserver as ms
+
+        monkeypatch.setattr(ms, "find_cuda_server_binary", lambda: None)
+
+        def boom(progress_cb=None):
+            raise httpx.ConnectError("no network")
+
+        monkeypatch.setattr(ms, "download_cuda_server_binary", boom)
+        with pytest.raises(RuntimeError, match="CUDA llama-server build"):
+            ms.ensure_server_binary(True)
 
 
 if __name__ == "__main__":

@@ -6914,10 +6914,16 @@ export function ModelServerSettingsCard() {
       } else {
         setMessage(r.error ?? 'Failed to set GPU')
         setMessageOk(false)
+        // Reconcile the selector with the persisted value so it does not
+        // retain an unsaved index that disagrees with config.
+        setGpuIndex(typeof status?.gpu_index === 'number' ? status.gpu_index : null)
       }
     } catch (e) {
       setMessage((e as Error).message)
       setMessageOk(false)
+      // Same reconciliation if the save threw: keep the selector in sync
+      // with the persisted selection.
+      setGpuIndex(typeof status?.gpu_index === 'number' ? status.gpu_index : null)
     }
   }
 
