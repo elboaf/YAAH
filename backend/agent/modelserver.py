@@ -595,11 +595,11 @@ def download_cuda_server_binary(progress_cb: Optional[Callable] = None) -> str:
     CPU binary's path or DLLs (a user can toggle the selector on and off
     without a half-staged install).
     """
-    binary = _download_and_stage(CUDA_SERVER_BINARY_PIN, "CUDA", progress_cb)
-    # The staged CUDA exe needs its runtime beside it; stage the runtime
-    # on the same failure path so a missing runtime never leaves a
-    # half-install that starts and crashes on load.
+    # Stage the runtime before publishing the exe so a runtime-staging
+    # failure never leaves a half-install: the CUDA exe is not published
+    # until its runtime is ready, and a later call retries setup.
     _download_cuda_runtime(progress_cb)
+    binary = _download_and_stage(CUDA_SERVER_BINARY_PIN, "CUDA", progress_cb)
     return binary
 
 

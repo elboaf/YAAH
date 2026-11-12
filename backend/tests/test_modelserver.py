@@ -922,6 +922,53 @@ class TestCudaBinarySelection:
         with pytest.raises(RuntimeError, match="CUDA llama-server build"):
             ms.ensure_server_binary(True)
 
+    def test_offload_true_runtime_failure_leaves_no_exe(self, tmp_path, monkeypatch):
+        """When the CUDA runtime staging fails, the CUDA exe is not
+        published so a later call retries setup (no half-install)."""
+        from backend.agent import modelserver as ms
+        import hashlib
+
+        bin_dir = tmp_path / "bin"
+        monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PATH", bin_dir / "llama-server-cuda.exe")
+
+        exe_archive = self._zip_bytes({
+            "llama-b12284-bin-win-cuda-12.4-x64/llama-server.exe": b"cuda-exe",
+            "llama-b12284-bin-win-cuda-12.4-x64/ggml-cuda.dll": b"cuddl",
+        })
+        runtime_archive = self._zip_bytes({
+            "cublas64_12.dll": b"cublas",
+            "cublasLt64_12.dll": b"cublaslt",
+            "cudart64_12.dll": b"cudart",
+        })
+        exe_pin = dict(ms.CUDA_SERVER_BINARY_PIN)
+        exe_pin["sha256"] = hashlib.sha256(exe_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PIN", exe_pin)
+        runtime_pin = dict(ms.CUDA_RUNTIME_PIN)
+        runtime_pin["sha256"] = hashlib.sha256(runtime_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_RUNTIME_PIN", runtime_pin)
+
+        archives = {exe_pin["asset"]: exe_archive, runtime_pin["asset"]: runtime_archive}
+
+        def handler(request):
+            return httpx.Response(200, content=archives[request.url.path.rsplit("/", 1)[-1]])
+
+        monkeypatch.setattr(ms.httpx, "Client", lambda **kw: _FakeClient(handler))
+        monkeypatch.setattr(ms.shutil, "which", lambda name: None)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "empty"))
+
+        def runtime_boom(progress_cb=None):
+            raise RuntimeError("runtime staging failed")
+
+        # _download_cuda_runtime fails before the exe is published.
+        monkeypatch.setattr(ms, "_download_cuda_runtime", runtime_boom)
+
+        with pytest.raises(RuntimeError, match="runtime staging failed"):
+            ms.download_cuda_server_binary()
+        # The CUDA exe must not be published on the failed path.
+        assert not (bin_dir / "llama-server-cuda.exe").exists()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
