@@ -8,6 +8,8 @@ network downloads.
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -480,7 +482,7 @@ class TestServerBinaryDownload:
         calls = []
         monkeypatch.setattr(
             ms, "ensure_server_binary",
-            lambda: calls.append("ensure") or "C:/staged/llama-server.exe",
+            lambda gpu_offload=False, calls=calls: calls.append("ensure") or "C:/staged/llama-server.exe",
         )
         entry = modelserver.find_model("qwen3-embedding-0.6b")
         monkeypatch.setattr(
@@ -667,6 +669,305 @@ class TestResolvedConnection:
         assert entry["files"] == ["Qwen3-Embedding-0.6B-Q8_0.gguf"]
         assert entry["revision"] != "main"  # pinned commit, not a moving ref
         assert len(entry["sha256"]) == 64   # checksum enforced on download
+
+
+class TestGpuSelection:
+    """Tests for the multi-GPU selection feature: enumerate, index probe,
+    and the persisted selection. nvidia-smi is stubbed so the tests run
+    on a CPU-only host and assert the parser, not the hardware."""
+
+    def test_enumerate_gpus_parses_multi_gpu(self, monkeypatch):
+        """A two-GPU nvidia-smi output (index,name,total,free rows) yields one
+        entry per GPU with byte-sized VRAM. The CSV header row has 4 columns
+        too, so it must be skipped by the int() parse, not the column count."""
+        out = "index,name,memory.total [MiB],memory.free [MiB]\n0,NVIDIA GeForce RTX 4070 SUPER,12282,10770\n1,NVIDIA GeForce GT 1030,2048,1704\n"
+        monkeypatch.setattr(os, "name", "nt")
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+        )
+        gpus = modelserver.enumerate_gpus()
+        assert [g["index"] for g in gpus] == [0, 1]
+        assert gpus[0]["name"] == "NVIDIA GeForce RTX 4070 SUPER"
+        assert gpus[0]["total_vram"] == 12282 * 1024 * 1024
+        assert gpus[1]["free_vram"] == 1704 * 1024 * 1024
+
+    def test_enumerate_gpus_empty_when_no_nvidia(self, monkeypatch):
+        """No nvidia-smi on PATH means the selector has nothing to show."""
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr(os, "name", "nt")
+        assert modelserver.enumerate_gpus() == []
+
+    def test_probe_without_index_first_gpu(self, monkeypatch):
+        """The default (no index) probe parses the total,free row."""
+        # Stub os.name first: the probe gates on os.name == "nt", and the
+        # tests mock nvidia-smi so they must reach that block on any host
+        # (CI runs Linux, where os.name is "posix" by default).
+        monkeypatch.setattr(os, "name", "nt")
+        out = "12282, 10770\n2048, 1704\n"
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+        )
+        probe = modelserver._probe_vram_headroom()
+        assert probe["has_headroom"] is True
+        assert probe["free_vram"] == 10770 * 1024 * 1024
+
+    def test_probe_with_index_matches_row(self, monkeypatch):
+        """A GPU-index probe reads that GPU's row, not the first row."""
+        monkeypatch.setattr(os, "name", "nt")
+        out = "index, memory.total [MiB], memory.free [MiB]\n0, 12282, 10770\n1, 2048, 1704\n"
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+
+        def fake_run(cmd, *a, **k):
+            # The caller must pass index first when a specific GPU is asked.
+            assert "--query-gpu=index,memory.total,memory.free" in cmd[1]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        probe = modelserver._probe_vram_headroom(1)
+        assert probe["free_vram"] == 1704 * 1024 * 1024
+        assert probe["total_vram"] == 2048 * 1024 * 1024
+
+    def test_probe_no_headroom_when_vram_low(self, monkeypatch):
+        """VRAM under the ~2 GB threshold reports no headroom."""
+        # Stub os.name first (same reason as the other probe tests): the
+        # probe gates on os.name == "nt" so the mocked nvidia-smi is reached
+        # on Linux CI too.
+        monkeypatch.setattr(os, "name", "nt")
+        # index,total,free where GPU 0 has ~1 GB free.
+        out = "index, memory.total [MiB], memory.free [MiB]\n0, 4096, 900\n"
+        monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+        )
+        probe = modelserver._probe_vram_headroom(0)
+        assert probe["has_headroom"] is False
+
+    def test_gpu_index_config_roundtrip(self):
+        """The selected GPU index persists and reads back."""
+        modelserver.set_server_gpu_index(1)
+        assert modelserver.get_server_gpu_index() == 1
+        # A different task reads its own key.
+        modelserver.set_server_gpu_index(2, task="reranking")
+        assert modelserver.get_server_gpu_index("reranking") == 2
+        assert modelserver.get_server_gpu_index() == 1
+        # None clears the selection.
+        modelserver.set_server_gpu_index(None)
+        assert modelserver.get_server_gpu_index() is None
+
+    def test_start_offload_command_splits_mode_and_pins_gpu(self, monkeypatch, tmp_path):
+        """A GPU-offload start assembles --split-mode none plus a pinned
+        --main-gpu so a multi-GPU host offloads to the chosen card."""
+        entry = modelserver.find_model("qwen3-embedding-0.6b")
+        assert entry is not None
+        monkeypatch.setattr(modelserver, "MODELS_DIR",
+                            tmp_path / entry["id"])
+        (tmp_path / entry["id"]).mkdir()
+        monkeypatch.setattr(modelserver, "is_model_downloaded",
+                            lambda entry: True)
+        # Probe reports headroom so the offload path is taken.
+        monkeypatch.setattr(modelserver, "_probe_vram_headroom",
+                            lambda gpu_index=None: {
+                                "has_headroom": True, "free_vram": 0})
+        monkeypatch.setattr(modelserver, "ensure_server_binary",
+                            lambda gpu_offload=False: "/bin/llama-server.exe")
+
+        captured = {}
+
+        def fake_popen(cmd, **kw):
+            captured["cmd"] = cmd
+            p = MagicMock()
+            p.poll.return_value = None  # never "exited"
+            return p
+
+        manager = modelserver.ServerManager()
+        monkeypatch.setattr(modelserver, "HEALTH_CHECK_INTERVAL", 0.01)
+        monkeypatch.setattr(modelserver, "health_check",
+                            lambda port: asyncio.sleep(0.01, result=True))
+        with patch.object(modelserver.subprocess, "Popen",
+                          side_effect=fake_popen):
+            asyncio.run(manager.start(
+                "qwen3-embedding-0.6b", gpu_offload=True, gpu_index=1))
+        cmd = captured["cmd"]
+        assert cmd.count("-ngl") == 1 and "99" in cmd
+        # split-mode none must precede --main-gpu, which carries the index.
+        assert cmd[cmd.index("--split-mode") + 1] == "none"
+        assert cmd[cmd.index("--main-gpu") + 1] == "1"
+
+    def test_explicit_gpu_offload_override_forces_offload(self, monkeypatch, tmp_path):
+        """An explicit gpu_offload=True forces offload even when the saved
+        preference is off, so a probe-found headroom does not revert it."""
+        entry = modelserver.find_model("qwen3-embedding-0.6b")
+        assert entry is not None
+        monkeypatch.setattr(modelserver, "MODELS_DIR",
+                            tmp_path / entry["id"])
+        (tmp_path / entry["id"]).mkdir()
+        monkeypatch.setattr(modelserver, "is_model_downloaded",
+                            lambda entry: True)
+        monkeypatch.setattr(modelserver, "get_server_gpu_offload",
+                            lambda tenant: False)  # saved pref is OFF
+        monkeypatch.setattr(modelserver, "_probe_vram_headroom",
+                            lambda gpu_index=None: {
+                                "has_headroom": True, "free_vram": 0})
+        monkeypatch.setattr(modelserver, "ensure_server_binary",
+                            lambda gpu_offload=False: "/bin/llama-server.exe")
+
+        captured = {}
+
+        def fake_popen(cmd, **kw):
+            captured["cmd"] = cmd
+            p = MagicMock()
+            p.poll.return_value = None
+            return p
+
+        manager = modelserver.ServerManager()
+        monkeypatch.setattr(modelserver, "HEALTH_CHECK_INTERVAL", 0.01)
+        monkeypatch.setattr(modelserver, "health_check",
+                            lambda port: asyncio.sleep(0.01, result=True))
+        with patch.object(modelserver.subprocess, "Popen",
+                          side_effect=fake_popen):
+            asyncio.run(manager.start(
+                "qwen3-embedding-0.6b", gpu_offload=True, gpu_index=1))
+        # Explicit True wins: split-mode none + pinned --main-gpu are present,
+        # proving the saved-off preference did not force CPU mode.
+        cmd = captured["cmd"]
+        assert "--split-mode" in cmd and "99" in cmd
+        assert cmd[cmd.index("--main-gpu") + 1] == "1"
+
+class TestCudaBinarySelection:
+    """The CUDA build is opt-in: only staged when offload is requested.
+
+    The default pinned binary is CPU-only (ADR-0022). When offload is on,
+    ensure_server_binary must stage and return the CUDA build under a
+    distinct path so it never shares the CPU binary or its DLLs.
+    """
+
+    def _zip_bytes(self, members):
+        import io, zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for name, data in members.items():
+                z.writestr(name, data)
+        return buf.getvalue()
+
+    def test_offload_true_stages_cuda_build(self, tmp_path, monkeypatch):
+        """ensure_server_binary(True) downloads the CUDA build and its
+        runtime to llama-server-cuda.exe, not the CPU path.
+
+        The archive ships the exe under its real member name
+        (llama-server.exe), which the staging step renames to the
+        published llama-server-cuda.exe; the separate runtime asset's
+        three DLLs are staged beside it.
+        """
+        from backend.agent import modelserver as ms
+        import hashlib
+
+        bin_dir = tmp_path / "bin"
+        monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PATH", bin_dir / "llama-server-cuda.exe")
+
+        # Archive member name is the real name ("llama-server.exe"),
+        # distinct from the published staged_name ("llama-server-cuda.exe").
+        exe_archive = self._zip_bytes({
+            "llama-b12284-bin-win-cuda-12.4-x64/llama-server.exe": b"cuda-exe",
+            "llama-b12284-bin-win-cuda-12.4-x64/ggml-cuda.dll": b"cuddl",
+        })
+        runtime_archive = self._zip_bytes({
+            "cublas64_12.dll": b"cublas",
+            "cublasLt64_12.dll": b"cublaslt",
+            "cudart64_12.dll": b"cudart",
+        })
+        exe_pin = dict(ms.CUDA_SERVER_BINARY_PIN)
+        exe_pin["sha256"] = hashlib.sha256(exe_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PIN", exe_pin)
+        runtime_pin = dict(ms.CUDA_RUNTIME_PIN)
+        runtime_pin["sha256"] = hashlib.sha256(runtime_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_RUNTIME_PIN", runtime_pin)
+
+        archives = {exe_pin["asset"]: exe_archive, runtime_pin["asset"]: runtime_archive}
+
+        def handler(request):
+            return httpx.Response(200, content=archives[request.url.path.rsplit("/", 1)[-1]])
+
+        monkeypatch.setattr(ms.httpx, "Client", lambda **kw: _FakeClient(handler))
+        monkeypatch.setattr(ms.shutil, "which", lambda name: None)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "empty"))
+
+        got = ms.ensure_server_binary(True)
+        assert got == str(bin_dir / "llama-server-cuda.exe")
+        assert (bin_dir / "llama-server-cuda.exe").read_bytes() == b"cuda-exe"
+        # The CUDA build's runtime DLLs are staged beside it.
+        assert (bin_dir / "cudart64_12.dll").read_bytes() == b"cudart"
+        assert (bin_dir / "cublas64_12.dll").read_bytes() == b"cublas"
+        # The CPU binary path must be untouched.
+        assert not (bin_dir / "llama-server.exe").exists()
+
+    def test_offload_true_stages_cpu_when_unavailable_raises(self, tmp_path, monkeypatch):
+        """When offload is requested but the CUDA build cannot be staged,
+        raise rather than falling back to a CPU binary (which would make a
+        successful start run on CPU despite the user asking for GPU)."""
+        from backend.agent import modelserver as ms
+
+        monkeypatch.setattr(ms, "find_cuda_server_binary", lambda: None)
+
+        def boom(progress_cb=None):
+            raise httpx.ConnectError("no network")
+
+        monkeypatch.setattr(ms, "download_cuda_server_binary", boom)
+        with pytest.raises(RuntimeError, match="CUDA llama-server build"):
+            ms.ensure_server_binary(True)
+
+    def test_offload_true_runtime_failure_leaves_no_exe(self, tmp_path, monkeypatch):
+        """When the CUDA runtime staging fails, the CUDA exe is not
+        published so a later call retries setup (no half-install)."""
+        from backend.agent import modelserver as ms
+        import hashlib
+
+        bin_dir = tmp_path / "bin"
+        monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PATH", bin_dir / "llama-server-cuda.exe")
+
+        exe_archive = self._zip_bytes({
+            "llama-b12284-bin-win-cuda-12.4-x64/llama-server.exe": b"cuda-exe",
+            "llama-b12284-bin-win-cuda-12.4-x64/ggml-cuda.dll": b"cuddl",
+        })
+        runtime_archive = self._zip_bytes({
+            "cublas64_12.dll": b"cublas",
+            "cublasLt64_12.dll": b"cublaslt",
+            "cudart64_12.dll": b"cudart",
+        })
+        exe_pin = dict(ms.CUDA_SERVER_BINARY_PIN)
+        exe_pin["sha256"] = hashlib.sha256(exe_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PIN", exe_pin)
+        runtime_pin = dict(ms.CUDA_RUNTIME_PIN)
+        runtime_pin["sha256"] = hashlib.sha256(runtime_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_RUNTIME_PIN", runtime_pin)
+
+        archives = {exe_pin["asset"]: exe_archive, runtime_pin["asset"]: runtime_archive}
+
+        def handler(request):
+            return httpx.Response(200, content=archives[request.url.path.rsplit("/", 1)[-1]])
+
+        monkeypatch.setattr(ms.httpx, "Client", lambda **kw: _FakeClient(handler))
+        monkeypatch.setattr(ms.shutil, "which", lambda name: None)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "empty"))
+
+        def runtime_boom(progress_cb=None):
+            raise RuntimeError("runtime staging failed")
+
+        # _download_cuda_runtime fails before the exe is published.
+        monkeypatch.setattr(ms, "_download_cuda_runtime", runtime_boom)
+
+        with pytest.raises(RuntimeError, match="runtime staging failed"):
+            ms.download_cuda_server_binary()
+        # The CUDA exe must not be published on the failed path.
+        assert not (bin_dir / "llama-server-cuda.exe").exists()
 
 
 if __name__ == "__main__":

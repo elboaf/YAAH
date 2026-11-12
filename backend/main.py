@@ -1138,21 +1138,14 @@ async def api_server_status():
     """
     binary, model_id = modelserver.get_server_config()
     gpu_offload = modelserver.get_server_gpu_offload()
+    saved_index = modelserver.get_server_gpu_index()
+    # enumerate_gpus() runs a blocking subprocess; keep it off the event
+    # loop so a stalled nvidia-smi cannot stall this status handler.
+    gpus = await asyncio.to_thread(modelserver.enumerate_gpus)
     configured = bool(binary) or modelserver._find_server_binary() is not None
     manager = modelserver.get_manager()
 
-    if manager.is_running() and manager.port:
-        return {
-            "configured": True,
-            "running": True,
-            "binary_ready": True,
-            "port": manager.port,
-            "model": model_id,
-            "endpoint": manager.get_embeddings_endpoint(),
-            "healthy": await modelserver.health_check(manager.port),
-            "gpu_offload": gpu_offload,
-        }
-    return {
+    status = {
         "configured": configured,
         "running": False,
         "binary_ready": modelserver._find_server_binary() is not None,
@@ -1161,7 +1154,23 @@ async def api_server_status():
         "endpoint": None,
         "healthy": False,
         "gpu_offload": gpu_offload,
+        "gpu_index": saved_index,
+        "gpus": gpus,
     }
+    if manager.is_running() and manager.port:
+        status.update({
+            "configured": True,
+            "running": True,
+            "binary_ready": True,
+            "port": manager.port,
+            "model": model_id,
+            "endpoint": manager.get_embeddings_endpoint(),
+            "healthy": await modelserver.health_check(manager.port),
+            "gpu_offload": gpu_offload,
+            "gpu_index": saved_index,
+            "gpus": gpus,
+        })
+    return status
 
 
 @app.get("/api/server/models")
@@ -1247,6 +1256,24 @@ async def api_server_gpu_offload(body: dict = None):
         return {"ok": False, "error": "gpu_offload must be a boolean"}
     modelserver.set_server_gpu_offload(value)
     return {"ok": True, "gpu_offload": value}
+
+
+@app.post("/api/server/gpu-index")
+async def api_server_gpu_index(body: dict = None):
+    """Persist the user's selected GPU index for a task's server.
+
+    value is an int (nvidia-smi GPU index) or null to clear the
+    selection. A running server must restart to apply the new index.
+    """
+    body = body or {}
+    value = body.get("gpu_index")
+    if value is not None:
+        try:
+            value = int(value)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "gpu_index must be an integer"}
+    modelserver.set_server_gpu_index(value)
+    return {"ok": True, "gpu_index": value}
 
 
 @app.post("/api/server/download")

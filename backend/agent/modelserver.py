@@ -346,11 +346,53 @@ SERVER_BINARY_PIN = {
     ),
     "sha256": "6b3d2c7034b0c0bac65aa0524ddf01ba9c2b622ce7e32675976df642627defa9",
     "member": "llama-server.exe",
+    "staged_name": "llama-server.exe",
+    # The staging step requires this archive to contain its exe.
+    "requires_exe": True,
+}
+
+# CUDA build for the same release. Staged to a distinct path so the CPU
+# and CUDA builds never share BIN_DIR/llama-server.exe and its DLLs (a
+# user can switch the selector on and off without a half-staged install).
+# Opt-in only: offloading is off by default (ADR-0022), so this build is
+# only ever downloaded when the user turns GPU offload on.
+CUDA_SERVER_BINARY_PIN = {
+    "tag": "b12284",
+    "asset": "llama-b12284-bin-win-cuda-12.4-x64.zip",
+    "url": (
+        "https://github.com/ggml-org/llama.cpp/releases/download/"
+        "b12284/llama-b12284-bin-win-cuda-12.4-x64.zip"
+    ),
+    "sha256": "2bf31552cee22652f76a108461a1074548ba84e73294dad1061493875255673f",
+    "member": "llama-server.exe",
+    "staged_name": "llama-server-cuda.exe",
+    # The staging step requires this archive to contain its exe.
+    "requires_exe": True,
 }
 
 # Where the staged binary lives (find order: staged, PATH, known dirs).
 BIN_DIR = Path.home() / ".yaah" / "bin"
 SERVER_BINARY_PATH = BIN_DIR / SERVER_BINARY_PIN["member"]
+CUDA_SERVER_BINARY_PATH = BIN_DIR / "llama-server-cuda.exe"
+
+# CUDA 12.4 runtime DLLs for the pinned CUDA build. The llama.cpp CUDA
+# binary zip ships WITHOUT its runtime (only the exe + ggml-cuda DLLs);
+# the CUDA 12.4 runtime is a separate release asset. Those three DLLs
+# (cudart, cublas, cublasLt) must live beside llama-server-cuda.exe or
+# it will fail to load. Pinned and integrity-checked independently so
+# the CPU build's BIN_DIR is never touched and a bad runtime checksum
+# never reaches the bin dir.
+CUDA_RUNTIME_PIN = {
+    "tag": "b12284",
+    "asset": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+    "url": (
+        "https://github.com/ggml-org/llama.cpp/releases/download/"
+        "b12284/cudart-llama-bin-win-cuda-12.4-x64.zip"
+    ),
+    "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+    "member": "llama-server.exe",
+    "staged_name": "llama-server-cuda.exe",
+}
 
 
 def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
@@ -364,11 +406,35 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
     The archive is flat (one top-level dir with both exe and DLLs), so
     each member is extracted by its basename into BIN_DIR.
     """
-    pin = SERVER_BINARY_PIN
+    return _download_and_stage(SERVER_BINARY_PIN, "CPU", progress_cb)
+
+
+def download_cuda_server_binary(progress_cb: Optional[Callable] = None) -> str:
+    """Download and stage the CUDA build of the pinned llama-server.
+
+    Same contract as download_server_binary, but for the CUDA asset. The
+    staged file is named llama-server-cuda.exe so it never shares the
+    CPU binary's path or DLLs (a user can toggle the selector on and off
+    without a half-staged install).
+    """
+    return _download_and_stage(CUDA_SERVER_BINARY_PIN, "CUDA", progress_cb)
+
+
+def _fetch_and_verify_zip(
+    pin: dict, progress_cb: Optional[Callable] = None,
+) -> Path:
+    """Download the zip at `pin["url"]` to BIN_DIR and verify its sha256.
+
+    Returns the path to the fully downloaded (but still zipped) asset at
+    `BIN_DIR/<asset>` (the ".part" resume file is promoted to the final
+    name once complete). The whole-zip checksum is checked before the
+    caller does anything with the bytes, so a bad download never reaches
+    the bin dir. Raises ValueError on checksum mismatch.
+    """
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = BIN_DIR / (pin["asset"] + ".part")
 
-    log.info("Downloading llama-server from %s", pin["url"])
+    log.info("Downloading %s from %s", pin["asset"], pin["url"])
     with httpx.Client(
         timeout=DOWNLOAD_TIMEOUT, follow_redirects=True
     ) as client:
@@ -402,17 +468,45 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
             f"expected {pin['sha256']}, got {computed}"
         )
 
+    promoted = BIN_DIR / pin["asset"]
+    if promoted != zip_path:
+        zip_path.replace(promoted)
+    return promoted
+
+
+def _stage_zip_into_bin_dir(
+    zip_path: Path, pin: dict,
+) -> list:
+    """Extract the flat zip at `zip_path` and publish only a complete
+    install into BIN_DIR.
+
+    The archive is flat (one top-level dir), so each member is matched
+    by its basename. When the archive contains the executable (the
+    llama-server builds, shipped under their real member name such as
+    "llama-server.exe"), it is staged by that name and only renamed to
+    `pin["staged_name"]` once it lands in BIN_DIR; the runtime archive
+    has no exe and is staged under its real member names (cudart64_12.dll
+    etc.) directly. Every staged member by basename is copied into
+    BIN_DIR. Returns the list of staged member basenames. The zip file
+    itself is not kept.
+
+    Publish order makes the exe's arrival the completion marker: the
+    DLLs move into BIN_DIR first, then the exe. Because _find_server_binary
+    accepts the exe on existence alone, a crashed extract can at worst
+    leave stray DLLs, never a broken-looking install.
+    """
     # Extract into a private staging dir and publish only a complete
-    # install: _find_server_binary accepts the exe on existence alone,
-    # so a half-extracted install must never become visible. The exe is
-    # moved into BIN_DIR last (its DLLs already beside it), which makes
-    # the exe's arrival the completion marker - a crashed extract can
-    # at worst leave stray DLLs, never a broken-looking install.
+    # install.
     staging = Path(tempfile.mkdtemp(prefix="yaah-llama-", dir=str(BIN_DIR)))
     extracted = []
     try:
         with zipfile.ZipFile(zip_path) as z:
             members = [n for n in z.namelist() if not n.endswith("/")]
+            # Match the archive's own member name for the exe (the archive
+            # ships it under its real name, e.g. "llama-server.exe"), not the
+            # published name it is renamed to on staging. Collect every DLL
+            # by basename too so the CUDA build's bundled runtime DLLs
+            # (cudart/cublas/cusolver/cufft) are staged beside it.
             target_names = {pin["member"]} | {
                 n for n in (m.rsplit("/", 1)[-1] for m in members)
                 if n.endswith(".dll")
@@ -424,30 +518,89 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
                     out = staging / base
                     with z.open(info) as src, open(out, "wb") as dst:
                         shutil.copyfileobj(src, dst)
-                    staged_files.append((out, base))
+                    # Keep the archive's real member name until publish so the
+                    # exe is found by pin["member"] but not yet confused with
+                    # the published name (e.g. llama-server.exe vs
+                    # llama-server-cuda.exe).
+                    staged_files.append((out, base, base))
 
             exe = staging / pin["member"]
-            if not exe.exists():
+            has_exe = exe.exists()
+            if not has_exe and pin.get("requires_exe", False):
                 raise RuntimeError(
                     f"staged archive had no {pin['member']} "
-                    f"(found: {sorted(b for _, b in staged_files)})"
+                    f"(found: {sorted(b for _, _, b in staged_files)})"
                 )
 
-            for out, base in staged_files:
+            for out, _, base in staged_files:
                 if base == pin["member"]:
-                    continue
+                    continue  # published last, below
                 shutil.move(str(out), str(BIN_DIR / base))
                 extracted.append(base)
-            shutil.move(str(exe), str(BIN_DIR / pin["member"]))
-            extracted.append(pin["member"])
+            if has_exe:
+                # Rename to the published name only now, in BIN_DIR.
+                shutil.move(str(exe), str(BIN_DIR / pin["staged_name"]))
+                extracted.append(pin["staged_name"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+    return extracted
+
+
+def _download_and_stage(
+    pin: dict, kind: str, progress_cb: Optional[Callable] = None,
+) -> str:
+    """Download the zip at `pin["url"]`, verify its sha256, extract the
+    exe + DLLs and publish them into BIN_DIR under `pin["staged_name"]`.
+
+    The archive is flat (one top-level dir with both exe and DLLs), so
+    each member is extracted by its basename. Returns the staged exe path.
+    """
+    zip_path = _fetch_and_verify_zip(pin, progress_cb)
+    extracted = _stage_zip_into_bin_dir(zip_path, pin)
     zip_path.unlink(missing_ok=True)
 
-    binary = BIN_DIR / pin["member"]
+    binary = BIN_DIR / pin["staged_name"]
     log.info("Staged llama-server at %s (%d files)", binary, len(extracted))
     return str(binary)
+
+
+def _download_cuda_runtime(progress_cb: Optional[Callable] = None) -> str:
+    """Download the pinned CUDA 12.4 runtime DLLs and stage them beside
+    the CUDA build in BIN_DIR.
+
+    The CUDA binary zip ships without its runtime (cudart/cublas/cublasLt),
+    which must live next to llama-server-cuda.exe or the exe will not load.
+    Same integrity and publish contract as the binary staging: the runtime
+    zip is integrity-checked before anything is staged, only the runtime's
+    three DLLs are copied into BIN_DIR, and the zip is not kept. The CPU
+    build is never touched.
+    """
+    zip_path = _fetch_and_verify_zip(CUDA_RUNTIME_PIN, progress_cb)
+    extracted = _stage_zip_into_bin_dir(zip_path, CUDA_RUNTIME_PIN)
+    zip_path.unlink(missing_ok=True)
+
+    log.info(
+        "Staged CUDA runtime %s (%d DLLs)",
+        sorted(extracted), len(extracted),
+    )
+    return str(zip_path.parent)
+
+
+def download_cuda_server_binary(progress_cb: Optional[Callable] = None) -> str:
+    """Download and stage the CUDA build of the pinned llama-server.
+
+    Same contract as download_server_binary, but for the CUDA asset. The
+    staged file is named llama-server-cuda.exe so it never shares the
+    CPU binary's path or DLLs (a user can toggle the selector on and off
+    without a half-staged install).
+    """
+    # Stage the runtime before publishing the exe so a runtime-staging
+    # failure never leaves a half-install: the CUDA exe is not published
+    # until its runtime is ready, and a later call retries setup.
+    _download_cuda_runtime(progress_cb)
+    binary = _download_and_stage(CUDA_SERVER_BINARY_PIN, "CUDA", progress_cb)
+    return binary
 
 
 # One install at a time: concurrent starts must not race two downloads
@@ -456,12 +609,52 @@ def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
 _SERVER_BINARY_LOCK = threading.Lock()
 
 
-def ensure_server_binary() -> str:
+def find_cuda_server_binary() -> Optional[str]:
+    """Return the CUDA build if it is already staged, else None.
+
+    Staged as llama-server-cuda.exe, so this never returns the CPU
+    binary. The CUDA build is opt-in, so it is usually absent until a
+    user turns GPU offload on and this binary is downloaded.
+    """
+    staged = CUDA_SERVER_BINARY_PATH
+    if staged.exists():
+        return str(staged)
+    binary = shutil.which("llama-server-cuda")
+    if binary:
+        return binary
+    if os.name == "nt":
+        for location in [
+            os.path.expandvars("%LOCALAPPDATA%\\Programs\\llama.cpp\\llama-server-cuda.exe"),
+            os.path.expandvars("%USERPROFILE%\\Downloads\\llama.cpp\\build\\bin\\llama-server-cuda.exe"),
+        ]:
+            if os.path.exists(location):
+                return location
+    return None
+
+
+def ensure_server_binary(gpu_offload: bool = False) -> str:
     """Return a usable llama-server path, installing the pinned build
     if nothing is found on the system. Raises RuntimeError when the
     download fails so the caller can surface it. Safe to call from
-    async code via asyncio.to_thread (the download blocks its thread)."""
+    async code via asyncio.to_thread (the download blocks its thread).
+
+    gpu_offload: when True, stage and return the CUDA build (a CPU binary
+    cannot offload layers). When False, stage and return the CPU build,
+    the default per ADR-0022.
+    """
     with _SERVER_BINARY_LOCK:
+        if gpu_offload:
+            found = find_cuda_server_binary()
+            if found:
+                return found
+            try:
+                return download_cuda_server_binary()
+            except Exception as e:
+                raise RuntimeError(
+                    f"GPU offload requested but the CUDA llama-server build "
+                    f"could not be installed: {e}. Enable offload with a CUDA "
+                    f"build available, or use CPU mode."
+                ) from e
         found = _find_server_binary()
         if found:
             return found
@@ -473,7 +666,49 @@ def ensure_server_binary() -> str:
             ) from e
 
 
-def _probe_vram_headroom() -> Optional[dict]:
+def _parse_gpu_mem(res: subprocess.CompletedProcess, gpu_index: Optional[int] = None, has_index_column: bool = False) -> Optional[dict]:
+    """Parse nvidia-smi free-VRAM output into a headroom dict.
+
+    One row per GPU. Splitting the whole output on "," would straddle
+    rows on a multi-GPU host (e.g. "12282, 10773\n2048, 1695" -> a field
+    of "10773\n2048") and raise ValueError, so parse per-row.
+
+    Fields come back in query order. With ``has_index_column`` the row is
+    ``index, total, free`` (parts[0]=index, parts[1]=total, parts[2]=free);
+    without it the row is just ``total, free`` (parts[0]=total,
+    parts[1]=free). When gpu_index is set and the query has an index
+    column, match that GPU's row; otherwise use the first.
+    """
+    needed = 3 if has_index_column else 2
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        if len(parts) < needed:
+            continue
+        try:
+            if has_index_column:
+                if gpu_index is not None and int(parts[0]) != gpu_index:
+                    continue
+                total = int(parts[1]) * 1024 * 1024
+                free = int(parts[2]) * 1024 * 1024
+            else:
+                total = int(parts[0]) * 1024 * 1024
+                free = int(parts[1]) * 1024 * 1024
+        except (ValueError, IndexError):
+            continue
+        # Require at least ~2 GB free before offloading: a chat provider
+        # can grab VRAM mid-run, and ADR-0022 says degrade, don't contend.
+        return {
+            "total_vram": total,
+            "free_vram": free,
+            "has_headroom": free >= 2 * 1024 * 1024 * 1024,
+        }
+    return None
+
+
+def _probe_vram_headroom(gpu_index: Optional[int] = None) -> Optional[dict]:
     """Probe for GPU VRAM headroom.
 
     Returns None if no GPU or unable to probe.
@@ -481,45 +716,32 @@ def _probe_vram_headroom() -> Optional[dict]:
 
     Tries nvidia-smi first (most accurate), then falls back to the Windows
     CIM provider. Either way, `has_headroom` is True only when free VRAM
-    comfortably exceeds the model's footprint.
+    comfortably exceeds the model's footprint. With gpu_index set, probe
+    that specific GPU instead of the first.
     """
     if os.name != "nt":
-        return None
-
-    def _parse_int(tok: str) -> Optional[int]:
-        for line in tok.split("\n"):
-            if "=" in line:
-                try:
-                    return int(line.split("=")[1].strip())
-                except (ValueError, IndexError):
-                    return None
         return None
 
     # NVIDIA GPU: nvidia-smi is the only source of accurate free VRAM.
     # Fields are the documented memory.total/memory.free (MB -> bytes).
     # Best-effort; absent on AMD or systems without it, so we fall through.
     try:
-        import shutil
         if shutil.which("nvidia-smi"):
-            import subprocess
+            # index first so _parse_gpu_mem can match parts[0] against the
+            # requested GPU; total/free follow in query order.
+            if gpu_index is not None:
+                fields = ["index", "memory.total", "memory.free"]
+            else:
+                fields = ["memory.total", "memory.free"]
             res = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.total,memory.free",
-                 "--format=csv,noheader,nounits"],
+                ["nvidia-smi", f"--query-gpu={','.join(fields)}",
+                 "--format=csv,nounits"],
                 capture_output=True, text=True, timeout=10,
             )
-            if res.returncode == 0 and res.stdout.strip():
-                parts = [p for p in res.stdout.strip().split(",") if p.strip()]
-                if len(parts) >= 2:
-                    total = int(parts[0].strip()) * 1024 * 1024
-                    free = int(parts[1].strip()) * 1024 * 1024
-                    # Require at least ~2 GB free before offloading: a
-                    # chat provider can grab VRAM mid-run, and ADR-0022
-                    # says degrade, don't contend.
-                    return {
-                        "total_vram": total,
-                        "free_vram": free,
-                        "has_headroom": free >= 2 * 1024 * 1024 * 1024,
-                    }
+            if res.returncode == 0:
+                parsed = _parse_gpu_mem(res, gpu_index, gpu_index is not None)
+                if parsed:
+                    return parsed
     except Exception:
         pass
 
@@ -529,6 +751,50 @@ def _probe_vram_headroom() -> Optional[dict]:
     # free-VRAM field and the old parser could not distinguish total from
     # free, so it never measured what the threshold required.
     return None
+
+
+def enumerate_gpus() -> list[dict[str, Any]]:
+    """List available GPUs with index, name and VRAM totals.
+
+    Runs nvidia-smi once and parses one row per GPU. Returns [] when
+    nvidia-smi is absent (no NVIDIA GPU / driver) so callers can decide
+    whether to show a selector. Each entry:
+    {index, name, total_vram, free_vram} with byte sizes.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        if not shutil.which("nvidia-smi"):
+            return []
+        res = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free",
+             "--format=csv,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        gpus = []
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 4:
+                    continue
+                try:
+                    idx = int(parts[0])
+                    total = int(parts[2]) * 1024 * 1024
+                    free = int(parts[3]) * 1024 * 1024
+                except (ValueError, IndexError):
+                    continue
+                gpus.append({
+                    "index": idx,
+                    "name": parts[1],
+                    "total_vram": total,
+                    "free_vram": free,
+                })
+        return gpus
+    except Exception:
+        return []
 
 
 def should_use_gpu_offload() -> bool:
@@ -542,7 +808,8 @@ def should_use_gpu_offload() -> bool:
 class ServerManager:
     """Manages the lifecycle of a local model server process."""
 
-    def __init__(self):
+    def __init__(self, task: str = "embedding"):
+        self.task = task
         self.process: Optional[subprocess.Popen] = None
         self.port: Optional[int] = None
         self.model_entry: Optional[dict[str, Any]] = None
@@ -561,13 +828,23 @@ class ServerManager:
     def is_running(self) -> bool:
         return self.state == "running"
 
-    async def start(self, model_id: str, gpu_offload: Optional[bool] = None) -> int:
+    async def start(
+        self,
+        model_id: str,
+        gpu_offload: Optional[bool] = None,
+        task: Optional[str] = None,
+        gpu_index: Optional[int] = None,
+    ) -> int:
         """Start the server with the specified model. Returns the port.
 
         gpu_offload: True/False forces the flag; None reads the persisted
         preference from config (ADR-0022: opt-in, re-evaluated here by the
         VRAM probe). None is the default so restarts and the REST handler
-        honor the user's saved toggle.
+        honor the user's saved toggle. task: which tenant this manager
+        serves; None means the manager's own task. gpu_index: which GPU to
+        probe / offload to; None uses the default (first GPU, or the
+        saved selection). The GPU is probed with that index so a
+        multi-GPU host offloads to the chosen card, not blindly to GPU 0.
         """
         entry = find_model(model_id)
         if not entry:
@@ -575,11 +852,56 @@ class ServerManager:
 
         self.model_entry = entry
 
-        # Binary first: it is the small, fast failure (25 MB pinned
-        # fetch) and installing it before pulling a 600 MB model means
-        # a broken install never wastes the big download. Off the event
-        # loop: the download is synchronous HTTP + hashing + extract.
-        binary = await asyncio.to_thread(ensure_server_binary)
+        # Resolve which GPU to probe/offload: an explicit arg wins, else
+        # the saved selection in config, else None (probe the first GPU).
+        # These read config only, so resolve before fetching the binary.
+        if gpu_index is None:
+            gpu_index = get_server_gpu_index(task or self.task)
+        # Resolve the offload decision: an explicit arg wins, otherwise the
+        # tenant's persisted user preference (default off, per ADR-0022).
+        # The task selects the right pref: the embedding tenant reads
+        # gpu_offload, the reranking tenant reads reranking_gpu_offload.
+        tenant = task or self.task
+        explicit_offload = gpu_offload is not None
+        if gpu_offload is None:
+            gpu_offload = get_server_gpu_offload(tenant)
+        # When the preference is on, probe VRAM before committing to offload
+        # and degrade to CPU if headroom is gone - never request 99 GPU
+        # layers from a GPU under pressure (ADR-0022). The probe blocks, so
+        # a user could toggle the switch off mid-probe; re-read the saved
+        # preference after the probe so a saved disable still wins. Probe
+        # with the selected GPU's index so the right card is measured. An
+        # explicit gpu_offload=True forces offload: only probe for headroom,
+        # do not let the saved preference (which may be off) override it.
+        if gpu_offload:
+            probe = await asyncio.to_thread(_probe_vram_headroom, gpu_index)
+            # An explicit gpu_offload=True forces offload only when the
+            # probe reports headroom; a saved preference can still be
+            # re-read mid-probe, so only the saved pref is re-checked
+            # after the probe. The probe's has_headroom gate is the
+            # authority, not merely a non-empty probe result: a probe
+            # with has_headroom=False means VRAM is under pressure, so
+            # this must stay CPU, never offload (ADR-0022 degrade).
+            if probe is None:
+                gpu_offload = False
+            else:
+                gpu_offload = probe["has_headroom"] and (
+                    explicit_offload or get_server_gpu_offload(tenant)
+                )
+        if not gpu_offload:
+            log.info("GPU offload disabled; CPU")
+
+        # Binary first: it is the small, fast failure (25 MB pinned fetch)
+        # and installing it before pulling a 600 MB model means a broken
+        # install never wastes the big download. Off the event loop: the
+        # download is synchronous HTTP + hashing + extract. Which build to
+        # stage is known now that the offload decision is made. When
+        # offloading, stage the CUDA build: a CPU binary cannot offload
+        # layers, so a successful start on the CPU build would silently run
+        # on CPU despite the user asking for GPU. If that build is
+        # unavailable the RuntimeError surfaces to the UI rather than a
+        # wrong-looking success.
+        binary = await asyncio.to_thread(ensure_server_binary, gpu_offload)
 
         # Ensure model is downloaded
         if not is_model_downloaded(entry):
@@ -587,19 +909,6 @@ class ServerManager:
 
         # Select port
         self.port = select_free_port()
-
-        # Resolve the offload decision: an explicit arg wins, otherwise the
-        # persisted user preference (default off, per ADR-0022). When the
-        # preference is on, re-probe VRAM before committing to offload -
-        # degrade to CPU if headroom has since disappeared so we never
-        # request 99 GPU layers from a GPU that is under VRAM pressure.
-        if gpu_offload is None:
-            gpu_offload = get_server_gpu_offload("embedding")
-        if gpu_offload:
-            probe = await asyncio.to_thread(_probe_vram_headroom)
-            if not probe or not probe["has_headroom"]:
-                log.info("GPU offload requested but no VRAM headroom; CPU")
-                gpu_offload = False
 
         # Build command. NOTE: llama-server's port flag is --port; the
         # bare -p is the PROMPT flag and would wedge startup.
@@ -614,6 +923,13 @@ class ServerManager:
 
         if gpu_offload:
             cmd.extend(["-ngl", "99"])  # All layers to GPU
+            # Pin the offload to the selected GPU so a multi-GPU host does
+            # not silently default to the first card. --split-mode none puts
+            # every layer on one device; only then does --main-gpu select
+            # which one (under layer split, --main-gpu does not confine it).
+            cmd.extend(["--split-mode", "none"])
+            if gpu_index is not None:
+                cmd.extend(["--main-gpu", str(gpu_index)])
         else:
             cmd.extend(["-ngl", "0"])  # CPU only
 
@@ -721,7 +1037,7 @@ def get_tenant(task: str) -> ServerManager:
     """
     global _tenants, _tenant_locks
     if task not in _tenants:
-        _tenants[task] = ServerManager()
+        _tenants[task] = ServerManager(task)
         _tenant_locks[task] = asyncio.Lock()
     return _tenants[task]
 
@@ -813,6 +1129,42 @@ def set_server_gpu_offload(value: bool, task: str = "embedding") -> None:
     server = dict(cfg.get("server", {}))
     key = "gpu_offload" if task == "embedding" else f"{task}_gpu_offload"
     server[key] = bool(value)
+    config_mod.save_config({"server": server})
+
+
+def get_server_gpu_index(task: str = "embedding") -> Optional[int]:
+    """The user-selected GPU index for this task's server (default None).
+
+    None means "let the probe decide" (the first GPU). The selector only
+    shows when multiple GPUs are detected; when absent, offload targets
+    the first GPU.
+    """
+    cfg = config_mod.load_config()
+    server = cfg.get("server", {})
+    key = "gpu_index" if task == "embedding" else f"{task}_gpu_index"
+    raw = server.get(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def set_server_gpu_index(value: Optional[int], task: str = "embedding") -> None:
+    """Persist the selected GPU index for a task's server (default None).
+
+    Sends a partial update so save_config merges only the server key -
+    persisting the whole load_config() view would bake env overrides and
+    defaults into the user's config file. None clears the selection.
+    """
+    cfg = config_mod.load_config()
+    server = dict(cfg.get("server", {}))
+    key = "gpu_index" if task == "embedding" else f"{task}_gpu_index"
+    if value is None:
+        server.pop(key, None)
+    else:
+        server[key] = int(value)
     config_mod.save_config({"server": server})
 
 
