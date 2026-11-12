@@ -701,6 +701,10 @@ class TestGpuSelection:
 
     def test_probe_without_index_first_gpu(self, monkeypatch):
         """The default (no index) probe parses the total,free row."""
+        # Stub os.name first: the probe gates on os.name == "nt", and the
+        # tests mock nvidia-smi so they must reach that block on any host
+        # (CI runs Linux, where os.name is "posix" by default).
+        monkeypatch.setattr(os, "name", "nt")
         out = "12282, 10770\n2048, 1704\n"
         monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
         monkeypatch.setattr(
@@ -713,6 +717,7 @@ class TestGpuSelection:
 
     def test_probe_with_index_matches_row(self, monkeypatch):
         """A GPU-index probe reads that GPU's row, not the first row."""
+        monkeypatch.setattr(os, "name", "nt")
         out = "index, memory.total [MiB], memory.free [MiB]\n0, 12282, 10770\n1, 2048, 1704\n"
         monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
 
@@ -728,6 +733,10 @@ class TestGpuSelection:
 
     def test_probe_no_headroom_when_vram_low(self, monkeypatch):
         """VRAM under the ~2 GB threshold reports no headroom."""
+        # Stub os.name first (same reason as the other probe tests): the
+        # probe gates on os.name == "nt" so the mocked nvidia-smi is reached
+        # on Linux CI too.
+        monkeypatch.setattr(os, "name", "nt")
         # index,total,free where GPU 0 has ~1 GB free.
         out = "index, memory.total [MiB], memory.free [MiB]\n0, 4096, 900\n"
         monkeypatch.setattr(shutil, "which", lambda name: "nvidia-smi")
