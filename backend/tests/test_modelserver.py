@@ -855,8 +855,14 @@ class TestCudaBinarySelection:
         return buf.getvalue()
 
     def test_offload_true_stages_cuda_build(self, tmp_path, monkeypatch):
-        """ensure_server_binary(True) downloads the CUDA build to
-        llama-server-cuda.exe, not the CPU path."""
+        """ensure_server_binary(True) downloads the CUDA build and its
+        runtime to llama-server-cuda.exe, not the CPU path.
+
+        The archive ships the exe under its real member name
+        (llama-server.exe), which the staging step renames to the
+        published llama-server-cuda.exe; the separate runtime asset's
+        three DLLs are staged beside it.
+        """
         from backend.agent import modelserver as ms
         import hashlib
 
@@ -864,16 +870,28 @@ class TestCudaBinarySelection:
         monkeypatch.setattr(ms, "BIN_DIR", bin_dir)
         monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PATH", bin_dir / "llama-server-cuda.exe")
 
-        archive = self._zip_bytes({
-            "llama-server-cuda.exe": b"cuda-exe",
-            "ggml-cuda.dll": b"cuddl",
+        # Archive member name is the real name ("llama-server.exe"),
+        # distinct from the published staged_name ("llama-server-cuda.exe").
+        exe_archive = self._zip_bytes({
+            "llama-b12284-bin-win-cuda-12.4-x64/llama-server.exe": b"cuda-exe",
+            "llama-b12284-bin-win-cuda-12.4-x64/ggml-cuda.dll": b"cuddl",
         })
-        pin = dict(ms.CUDA_SERVER_BINARY_PIN)
-        pin["sha256"] = hashlib.sha256(archive).hexdigest()
-        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PIN", pin)
+        runtime_archive = self._zip_bytes({
+            "cublas64_12.dll": b"cublas",
+            "cublasLt64_12.dll": b"cublaslt",
+            "cudart64_12.dll": b"cudart",
+        })
+        exe_pin = dict(ms.CUDA_SERVER_BINARY_PIN)
+        exe_pin["sha256"] = hashlib.sha256(exe_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_SERVER_BINARY_PIN", exe_pin)
+        runtime_pin = dict(ms.CUDA_RUNTIME_PIN)
+        runtime_pin["sha256"] = hashlib.sha256(runtime_archive).hexdigest()
+        monkeypatch.setattr(ms, "CUDA_RUNTIME_PIN", runtime_pin)
+
+        archives = {exe_pin["asset"]: exe_archive, runtime_pin["asset"]: runtime_archive}
 
         def handler(request):
-            return httpx.Response(200, content=archive)
+            return httpx.Response(200, content=archives[request.url.path.rsplit("/", 1)[-1]])
 
         monkeypatch.setattr(ms.httpx, "Client", lambda **kw: _FakeClient(handler))
         monkeypatch.setattr(ms.shutil, "which", lambda name: None)
@@ -883,6 +901,9 @@ class TestCudaBinarySelection:
         got = ms.ensure_server_binary(True)
         assert got == str(bin_dir / "llama-server-cuda.exe")
         assert (bin_dir / "llama-server-cuda.exe").read_bytes() == b"cuda-exe"
+        # The CUDA build's runtime DLLs are staged beside it.
+        assert (bin_dir / "cudart64_12.dll").read_bytes() == b"cudart"
+        assert (bin_dir / "cublas64_12.dll").read_bytes() == b"cublas"
         # The CPU binary path must be untouched.
         assert not (bin_dir / "llama-server.exe").exists()
 

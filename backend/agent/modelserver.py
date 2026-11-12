@@ -347,6 +347,8 @@ SERVER_BINARY_PIN = {
     "sha256": "6b3d2c7034b0c0bac65aa0524ddf01ba9c2b622ce7e32675976df642627defa9",
     "member": "llama-server.exe",
     "staged_name": "llama-server.exe",
+    # The staging step requires this archive to contain its exe.
+    "requires_exe": True,
 }
 
 # CUDA build for the same release. Staged to a distinct path so the CPU
@@ -364,12 +366,33 @@ CUDA_SERVER_BINARY_PIN = {
     "sha256": "2bf31552cee22652f76a108461a1074548ba84e73294dad1061493875255673f",
     "member": "llama-server.exe",
     "staged_name": "llama-server-cuda.exe",
+    # The staging step requires this archive to contain its exe.
+    "requires_exe": True,
 }
 
 # Where the staged binary lives (find order: staged, PATH, known dirs).
 BIN_DIR = Path.home() / ".yaah" / "bin"
 SERVER_BINARY_PATH = BIN_DIR / SERVER_BINARY_PIN["member"]
 CUDA_SERVER_BINARY_PATH = BIN_DIR / "llama-server-cuda.exe"
+
+# CUDA 12.4 runtime DLLs for the pinned CUDA build. The llama.cpp CUDA
+# binary zip ships WITHOUT its runtime (only the exe + ggml-cuda DLLs);
+# the CUDA 12.4 runtime is a separate release asset. Those three DLLs
+# (cudart, cublas, cublasLt) must live beside llama-server-cuda.exe or
+# it will fail to load. Pinned and integrity-checked independently so
+# the CPU build's BIN_DIR is never touched and a bad runtime checksum
+# never reaches the bin dir.
+CUDA_RUNTIME_PIN = {
+    "tag": "b12284",
+    "asset": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+    "url": (
+        "https://github.com/ggml-org/llama.cpp/releases/download/"
+        "b12284/cudart-llama-bin-win-cuda-12.4-x64.zip"
+    ),
+    "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+    "member": "llama-server.exe",
+    "staged_name": "llama-server-cuda.exe",
+}
 
 
 def download_server_binary(progress_cb: Optional[Callable] = None) -> str:
@@ -397,19 +420,21 @@ def download_cuda_server_binary(progress_cb: Optional[Callable] = None) -> str:
     return _download_and_stage(CUDA_SERVER_BINARY_PIN, "CUDA", progress_cb)
 
 
-def _download_and_stage(
-    pin: dict, kind: str, progress_cb: Optional[Callable] = None,
-) -> str:
-    """Download the zip at `pin["url"]`, verify its sha256, extract the
-    exe + DLLs and publish them into BIN_DIR under `pin["staged_name"]`.
+def _fetch_and_verify_zip(
+    pin: dict, progress_cb: Optional[Callable] = None,
+) -> Path:
+    """Download the zip at `pin["url"]` to BIN_DIR and verify its sha256.
 
-    The archive is flat (one top-level dir with both exe and DLLs), so
-    each member is extracted by its basename. Returns the staged exe path.
+    Returns the path to the fully downloaded (but still zipped) asset at
+    `BIN_DIR/<asset>` (the ".part" resume file is promoted to the final
+    name once complete). The whole-zip checksum is checked before the
+    caller does anything with the bytes, so a bad download never reaches
+    the bin dir. Raises ValueError on checksum mismatch.
     """
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = BIN_DIR / (pin["asset"] + ".part")
 
-    log.info("Downloading llama-server (%s) from %s", kind, pin["url"])
+    log.info("Downloading %s from %s", pin["asset"], pin["url"])
     with httpx.Client(
         timeout=DOWNLOAD_TIMEOUT, follow_redirects=True
     ) as client:
@@ -443,18 +468,46 @@ def _download_and_stage(
             f"expected {pin['sha256']}, got {computed}"
         )
 
+    promoted = BIN_DIR / pin["asset"]
+    if promoted != zip_path:
+        zip_path.replace(promoted)
+    return promoted
+
+
+def _stage_zip_into_bin_dir(
+    zip_path: Path, pin: dict,
+) -> list:
+    """Extract the flat zip at `zip_path` and publish only a complete
+    install into BIN_DIR.
+
+    The archive is flat (one top-level dir), so each member is matched
+    by its basename. When the archive contains the executable (the
+    llama-server builds, shipped under their real member name such as
+    "llama-server.exe"), it is staged by that name and only renamed to
+    `pin["staged_name"]` once it lands in BIN_DIR; the runtime archive
+    has no exe and is staged under its real member names (cudart64_12.dll
+    etc.) directly. Every staged member by basename is copied into
+    BIN_DIR. Returns the list of staged member basenames. The zip file
+    itself is not kept.
+
+    Publish order makes the exe's arrival the completion marker: the
+    DLLs move into BIN_DIR first, then the exe. Because _find_server_binary
+    accepts the exe on existence alone, a crashed extract can at worst
+    leave stray DLLs, never a broken-looking install.
+    """
     # Extract into a private staging dir and publish only a complete
-    # install: _find_server_binary accepts the exe on existence alone,
-    # so a half-extracted install must never become visible. The exe is
-    # moved into BIN_DIR last (its DLLs already beside it), which makes
-    # the exe's arrival the completion marker - a crashed extract can
-    # at worst leave stray DLLs, never a broken-looking install.
+    # install.
     staging = Path(tempfile.mkdtemp(prefix="yaah-llama-", dir=str(BIN_DIR)))
     extracted = []
     try:
         with zipfile.ZipFile(zip_path) as z:
             members = [n for n in z.namelist() if not n.endswith("/")]
-            target_names = {pin["staged_name"]} | {
+            # Match the archive's own member name for the exe (the archive
+            # ships it under its real name, e.g. "llama-server.exe"), not the
+            # published name it is renamed to on staging. Collect every DLL
+            # by basename too so the CUDA build's bundled runtime DLLs
+            # (cudart/cublas/cusolver/cufft) are staged beside it.
+            target_names = {pin["member"]} | {
                 n for n in (m.rsplit("/", 1)[-1] for m in members)
                 if n.endswith(".dll")
             }
@@ -465,30 +518,89 @@ def _download_and_stage(
                     out = staging / base
                     with z.open(info) as src, open(out, "wb") as dst:
                         shutil.copyfileobj(src, dst)
-                    staged_files.append((out, base))
+                    # Keep the archive's real member name until publish so the
+                    # exe is found by pin["member"] but not yet confused with
+                    # the published name (e.g. llama-server.exe vs
+                    # llama-server-cuda.exe).
+                    staged_files.append((out, base, base))
 
-            exe = staging / pin["staged_name"]
-            if not exe.exists():
+            exe = staging / pin["member"]
+            has_exe = exe.exists()
+            if not has_exe and pin.get("requires_exe", False):
                 raise RuntimeError(
-                    f"staged archive had no {pin['staged_name']} "
-                    f"(found: {sorted(b for _, b in staged_files)})"
+                    f"staged archive had no {pin['member']} "
+                    f"(found: {sorted(b for _, _, b in staged_files)})"
                 )
 
-            for out, base in staged_files:
-                if base == pin["staged_name"]:
-                    continue
+            for out, _, base in staged_files:
+                if base == pin["member"]:
+                    continue  # published last, below
                 shutil.move(str(out), str(BIN_DIR / base))
                 extracted.append(base)
-            shutil.move(str(exe), str(BIN_DIR / pin["staged_name"]))
-            extracted.append(pin["staged_name"])
+            if has_exe:
+                # Rename to the published name only now, in BIN_DIR.
+                shutil.move(str(exe), str(BIN_DIR / pin["staged_name"]))
+                extracted.append(pin["staged_name"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+    return extracted
+
+
+def _download_and_stage(
+    pin: dict, kind: str, progress_cb: Optional[Callable] = None,
+) -> str:
+    """Download the zip at `pin["url"]`, verify its sha256, extract the
+    exe + DLLs and publish them into BIN_DIR under `pin["staged_name"]`.
+
+    The archive is flat (one top-level dir with both exe and DLLs), so
+    each member is extracted by its basename. Returns the staged exe path.
+    """
+    zip_path = _fetch_and_verify_zip(pin, progress_cb)
+    extracted = _stage_zip_into_bin_dir(zip_path, pin)
     zip_path.unlink(missing_ok=True)
 
     binary = BIN_DIR / pin["staged_name"]
     log.info("Staged llama-server at %s (%d files)", binary, len(extracted))
     return str(binary)
+
+
+def _download_cuda_runtime(progress_cb: Optional[Callable] = None) -> str:
+    """Download the pinned CUDA 12.4 runtime DLLs and stage them beside
+    the CUDA build in BIN_DIR.
+
+    The CUDA binary zip ships without its runtime (cudart/cublas/cublasLt),
+    which must live next to llama-server-cuda.exe or the exe will not load.
+    Same integrity and publish contract as the binary staging: the runtime
+    zip is integrity-checked before anything is staged, only the runtime's
+    three DLLs are copied into BIN_DIR, and the zip is not kept. The CPU
+    build is never touched.
+    """
+    zip_path = _fetch_and_verify_zip(CUDA_RUNTIME_PIN, progress_cb)
+    extracted = _stage_zip_into_bin_dir(zip_path, CUDA_RUNTIME_PIN)
+    zip_path.unlink(missing_ok=True)
+
+    log.info(
+        "Staged CUDA runtime %s (%d DLLs)",
+        sorted(extracted), len(extracted),
+    )
+    return str(zip_path.parent)
+
+
+def download_cuda_server_binary(progress_cb: Optional[Callable] = None) -> str:
+    """Download and stage the CUDA build of the pinned llama-server.
+
+    Same contract as download_server_binary, but for the CUDA asset. The
+    staged file is named llama-server-cuda.exe so it never shares the
+    CPU binary's path or DLLs (a user can toggle the selector on and off
+    without a half-staged install).
+    """
+    binary = _download_and_stage(CUDA_SERVER_BINARY_PIN, "CUDA", progress_cb)
+    # The staged CUDA exe needs its runtime beside it; stage the runtime
+    # on the same failure path so a missing runtime never leaves a
+    # half-install that starts and crashes on load.
+    _download_cuda_runtime(progress_cb)
+    return binary
 
 
 # One install at a time: concurrent starts must not race two downloads
@@ -763,10 +875,19 @@ class ServerManager:
         # do not let the saved preference (which may be off) override it.
         if gpu_offload:
             probe = await asyncio.to_thread(_probe_vram_headroom, gpu_index)
-            # An explicit gpu_offload=True forces offload; a saved preference
-            # can still be re-read mid-probe, so only the saved pref is
-            # re-checked after the probe.
-            gpu_offload = bool(probe) and (explicit_offload or get_server_gpu_offload(tenant))
+            # An explicit gpu_offload=True forces offload only when the
+            # probe reports headroom; a saved preference can still be
+            # re-read mid-probe, so only the saved pref is re-checked
+            # after the probe. The probe's has_headroom gate is the
+            # authority, not merely a non-empty probe result: a probe
+            # with has_headroom=False means VRAM is under pressure, so
+            # this must stay CPU, never offload (ADR-0022 degrade).
+            if probe is None:
+                gpu_offload = False
+            else:
+                gpu_offload = probe["has_headroom"] and (
+                    explicit_offload or get_server_gpu_offload(tenant)
+                )
         if not gpu_offload:
             log.info("GPU offload disabled; CPU")
 
