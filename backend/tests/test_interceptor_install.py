@@ -251,6 +251,8 @@ def test_is_junction_distinguishes_from_real_dir(tmp_path):
 def test_real_junctions_created_on_install(monkeypatch, manifest, tmp_path, fake_install):
     """A real install creates three junctions under the skills dir pointing
     at the installed packs, and writes the done-marker."""
+    if os.sys.platform != "win32":
+        pytest.skip("junctions require Windows")
     skills = tmp_path / "skills"
     skills.mkdir()
     monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
@@ -286,6 +288,8 @@ def test_real_junctions_created_on_install(monkeypatch, manifest, tmp_path, fake
 def test_remove_links_deletes_junctions_only(monkeypatch, manifest, tmp_path, fake_install):
     """remove_links() deletes only the junctions YAAH created; a pre-existing
     real directory at a slot is left untouched (the acceptance criterion)."""
+    if os.sys.platform != "win32":
+        pytest.skip("junctions require Windows")
     skills = tmp_path / "skills"
     skills.mkdir()
     monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
