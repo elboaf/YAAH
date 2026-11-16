@@ -78,10 +78,12 @@ async def build_index(progress_callback=None) -> dict:
     from backend.agent.embeddings import _resolved_connection
     conn = _resolved_connection()
     configured_model = conn["model"]
-    if not configured_model:
-        # Nothing resolves right now. embed_texts would reject the first
-        # batch anyway; refuse here too so metadata never records an
-        # unusable label.
+    if not conn.get("api_base") or not configured_model:
+        # Nothing usable resolves right now. embed_texts would reject the
+        # first batch anyway; refuse here too so metadata never records an
+        # unusable label. A manual config with model set but api_base empty
+        # would clear the index and then fail on every embed (losing the
+        # previous index), so both fields are required before clearing.
         safe_report("error", 0, "no embeddings endpoint resolves -- build refused")
         return {
             "ok": False,
@@ -92,8 +94,8 @@ async def build_index(progress_callback=None) -> dict:
             "model": "",
             "dimensions": None,
             "last_build": time.time(),
-            "error": "no embeddings endpoint resolves: start the bundled "
-            "model server or configure an embeddings endpoint",
+            "error": "no embeddings endpoint resolves: set both embeddings "
+            "api_base and model, or start the bundled model server",
         }
 
     # Clear existing index -- and the build metadata with it. The metadata
@@ -155,7 +157,7 @@ async def build_index(progress_callback=None) -> dict:
 
         texts = [c["text"] for c in batch]
         try:
-            embeddings, dims, _ = await embed_texts(texts)
+            embeddings, dims, _ = await embed_texts(texts, conn)
             if dimensions is None:
                 dimensions = dims
 

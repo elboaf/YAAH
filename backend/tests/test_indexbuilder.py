@@ -122,7 +122,7 @@ async def test_build_indexes_messages_and_records_metadata():
 
     original = emb_mod.embed_texts
 
-    async def routed(texts):
+    async def routed(texts, conn=None):
         return await original(texts)
 
     # Swap _transport at the embeddings module level.
@@ -276,7 +276,7 @@ async def test_dead_endpoint_stops_after_consecutive_failures(monkeypatch):
 
     calls = {"n": 0}
 
-    async def dead(texts):
+    async def dead(texts, conn=None):
         calls["n"] += 1
         raise EmbeddingsError("embeddings endpoint unreachable")
 
@@ -391,6 +391,36 @@ async def test_refused_build_keeps_existing_index(monkeypatch):
     monkeypatch.setattr(
         emb_mod, "_resolved_connection",
         lambda: {"api_base": "", "api_key": "", "model": ""},
+    )
+    result = await ib.build_index()
+    assert result["ok"] is False
+    assert "resolves" in result["error"]
+    meta = await vectorestore.get_index_metadata()
+    assert meta["model"] == "m"
+    assert await vectorestore.get_vector_count() == first["vectors_stored"]
+
+async def test_refused_build_keeps_existing_index_when_api_base_blank(monkeypatch):
+    """A manual config with the model set but api_base empty must refuse
+    BEFORE clearing, so the healthy previous index survives (CodeRabbit
+    finding #1)."""
+    import backend.agent.embeddings as emb_mod
+    import backend.agent.indexbuilder as ib
+
+    _configure(model="m", api_base="http://x")
+    await _seed_messages(
+        "first substantial message text long enough to chunk properly",
+        "second substantial message text long enough to chunk properly",
+    )
+    embeddings._transport = _fake_endpoint([])
+    try:
+        first = await ib.build_index()
+    finally:
+        embeddings._transport = None
+    assert first["ok"] is True
+
+    monkeypatch.setattr(
+        emb_mod, "_resolved_connection",
+        lambda: {"api_base": "", "api_key": "", "model": "m"},
     )
     result = await ib.build_index()
     assert result["ok"] is False
