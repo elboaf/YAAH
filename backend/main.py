@@ -52,6 +52,16 @@ async def lifespan(app: FastAPI):
     _residue = await run_legacy_residue_cleanup()
     if not _residue.get("skipped"):
         log.info("legacy residue cleanup: %s", _residue)
+    # #748 one-time repair: index builds made through the bundled server
+    # with a blank manual model field recorded an empty label, which
+    # readiness treats as no_index -- healthy vectors, degraded search.
+    # Re-labels in place; never re-embeds. Runs AFTER the db is ready and
+    # BEFORE the scheduler so agent searches see the repaired label.
+    from backend.agent.index_repair import repair_index_label
+
+    _label = await repair_index_label()
+    if not _label.get("skipped"):
+        log.info("index-label repair: %s", _label)
     # Skills are scanned once at startup; the UI can force a rescan via
     # POST /api/skills/refresh. The directory is created on first run so
     # there is an obvious place to drop skills.

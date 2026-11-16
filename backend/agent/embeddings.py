@@ -67,7 +67,7 @@ def _resolved_connection() -> dict:
     return _embeddings_config()
 
 
-async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int, str]:
+async def embed_texts(texts: list[str], conn=None) -> tuple[list[list[float]], int, str]:
     """Embed a list of texts using the configured embeddings endpoint.
 
     Returns (embeddings, dimensions, model_name). embeddings[i] is the
@@ -78,7 +78,7 @@ async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int, str]:
     Raises EmbeddingsError on any failure. Callers should catch it and
     degrade to keyword-only search.
     """
-    emb_cfg = _resolved_connection()
+    emb_cfg = conn if conn is not None else _resolved_connection()
     api_base = emb_cfg["api_base"]
     api_key = emb_cfg["api_key"]
     model = emb_cfg["model"]
