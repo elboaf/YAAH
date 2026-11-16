@@ -196,6 +196,11 @@ def installed_version() -> str | None:
     if cli is None:
         return None
     result = _run_cli(["--version"])
+    # Fail closed: a nonzero return code means the version command did not
+    # succeed, so return None even if stdout happens to look like a version
+    # string. Installation detection stays independent of this check.
+    if result.returncode != 0:
+        return None
     version = _parse_version(result.stdout)
     return version
 
@@ -213,10 +218,16 @@ def skill_links_state() -> dict[str, str]:
     }
 
 
-def skill_links_summary() -> str:
-    """Compact '3/3' summary (linked slots over total slots)."""
-    states = skill_links_state().values()
-    linked = sum(1 for s in states if s == "linked")
+def skill_links_summary(states: dict[str, str] | None = None) -> str:
+    """Compact 'x/total' summary (linked slots over total slots).
+
+    Reads the live link states when no mapping is passed, but accepts one so
+    callers (status()) derive the summary from the exact same scan they
+    returned in a single read -- keeping the two consistent.
+    """
+    if states is None:
+        states = skill_links_state()
+    linked = sum(1 for s in states.values() if s == "linked")
     return f"{linked}/{len(states)}"
 
 
@@ -235,8 +246,15 @@ def extension_state() -> str:
         data = json.loads(result.stdout)
     except (ValueError, TypeError):
         return "extension missing"
+    # Fail closed: data must be a dict whose problems and blocked arrays are
+    # both present and empty. Missing fields, null, []-shaped or non-list
+    # values read as "extension missing", never evidence of readiness.
+    if not isinstance(data, dict):
+        return "extension missing"
     problems = data.get("problems")
     blocked = data.get("blocked")
+    if not isinstance(problems, list) or not isinstance(blocked, list):
+        return "extension missing"
     if problems or blocked:
         return "extension missing"
     return "ready"
@@ -273,11 +291,12 @@ def status() -> dict:
       cli                the resolved CLI path, or None
     """
     version = installed_version()
+    link_states = skill_links_state()
     return {
         "installed": installed_state(),
         "version": version,
-        "skill_links": skill_links_state(),
-        "skill_links_summary": skill_links_summary(),
+        "skill_links": link_states,
+        "skill_links_summary": skill_links_summary(link_states),
         "extension": extension_state(),
         "cli": _find_interceptor_cli(),
     }

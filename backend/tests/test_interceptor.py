@@ -96,6 +96,40 @@ def test_missing_cli_version_returns_none_without_raising(monkeypatch, fake_skil
     assert interceptor.installed_state() == "not installed"
 
 
+def test_version_nonzero_rc_returns_none(monkeypatch, fake_skills_root):
+    """A version command that fails (nonzero rc) but prints version-like
+    stdout returns None -- the failure is honored, not misread as a version.
+
+    This is the CodeRabbit hardening: installed_version checks returncode
+    before parsing stdout."""
+    _install_cli(monkeypatch, exists=True)
+    def fake_run_failing(cmd, *a, **k):
+        if "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 2,
+                stdout="interceptor 9.9.9 (e14ad6a-dirty, 2026-10-31)", stderr="boom")
+        return subprocess.CompletedProcess(cmd, 0,
+            stdout='{"problems": [], "blocked": []}', stderr="")
+    monkeypatch.setattr(interceptor.subprocess, "run", fake_run_failing)
+    assert interceptor.installed_version() is None
+    # Installation detection stays independent: still reported installed.
+    assert interceptor.installed_state() == "installed"
+
+
+def test_version_nonzero_rc_in_status(monkeypatch, fake_skills_root):
+    """status() reports version None when --version fails with nonzero rc."""
+    _install_cli(monkeypatch, exists=True)
+    def fake_run_failing(cmd, *a, **k):
+        if "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 1,
+                stdout="interceptor 9.9.9", stderr="boom")
+        return subprocess.CompletedProcess(cmd, 0,
+            stdout='{"problems": [], "blocked": []}', stderr="")
+    monkeypatch.setattr(interceptor.subprocess, "run", fake_run_failing)
+    status = interceptor.status()
+    assert status["version"] is None
+    assert status["installed"] == "installed"
+
+
 # --- extension state -----------------------------------------------------
 
 
@@ -139,6 +173,38 @@ def test_extension_missing_on_failing_command(monkeypatch, fake_skills_root):
 def test_extension_missing_on_empty_stdout(monkeypatch, fake_skills_root):
     _ext(monkeypatch, diagnose_output="", diagnose_rc=0)
     assert interceptor.extension_state() == "extension missing"
+
+
+def test_extension_missing_on_null_object(monkeypatch, fake_skills_root):
+    """A code-0 diagnosis of JSON null parses fine but has no fields; the
+    AttributeError that would escape is prevented and it reads 'extension
+    missing'. CodeRabbit finding (line 238)."""
+    _ext(monkeypatch, diagnose_output="null")
+    assert interceptor.extension_state() == "extension missing"
+
+
+def test_extension_missing_on_json_array(monkeypatch, fake_skills_root):
+    """A code-0 diagnosis of JSON [] parses to a list; data.get() would raise
+    AttributeError, which is prevented and reads 'extension missing'.
+    CodeRabbit finding (line 238)."""
+    _ext(monkeypatch, diagnose_output="[]")
+    assert interceptor.extension_state() == "extension missing"
+
+
+def test_extension_missing_when_fields_not_lists(monkeypatch, fake_skills_root):
+    """A diagnosis with problems as a non-list value (e.g. null/empty object)
+    is NOT treated as evidence of readiness; it reads 'extension missing'.
+    CodeRabbit finding (line 240)."""
+    _ext(monkeypatch, diagnose_output='{"problems": null, "blocked": null}')
+    assert interceptor.extension_state() == "extension missing"
+    _ext(monkeypatch, diagnose_output='{"other": "value"}')
+    assert interceptor.extension_state() == "extension missing"
+
+
+def test_extension_ready_requires_empty_lists(monkeypatch, fake_skills_root):
+    """Both fields present and empty lists => ready; any non-list => missing."""
+    _ext(monkeypatch, diagnose_output='{"problems": [], "blocked": []}')
+    assert interceptor.extension_state() == "ready"
 
 
 # --- skill links ---------------------------------------------------------
