@@ -1622,8 +1622,11 @@ export interface AgentEvent {
   kind?: string
   /** Exact context size (usage.prompt_tokens) of the turn's final model call. */
   usage_tokens?: number
-  /** Turn's accumulated billed cost so far (#627). */
+  /** Turn's accumulated billed cost so far (#627). Old frontends only. */
   turn_cost?: number
+  /** Session cumulative billed cost (#1245) — the DB total at this tick,
+   *  matching what the context endpoint reports. Preferred over turn_cost. */
+  cost_spent?: number
   /** Net workspace changes made during this run. */
   files?: Array<{ path: string; added: number; deleted: number; binary?: boolean }>
   added?: number

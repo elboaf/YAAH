@@ -11875,6 +11875,16 @@ export function Composer({
       }
     } else if (ev.type === 'sub_agent_done') {
       finishSubAgent(bufKey, curId, ev.call_id ?? '', ev.status ?? 'completed', ev.turns ?? 0, ev.note, ev.duration_ms)
+      // #1245: the sub's billed spend rides sub_agent_done — raise the
+      // session total without waiting for the next parent usage tick
+      // (sub-agent model calls never pass the parent loop's persist).
+      if (ev.cost_spent != null) {
+        const subDoneConvId = Number(bufKey)
+        const knownDone = useAgent.getState().contextByConv[String(subDoneConvId)]
+        if (Number.isInteger(subDoneConvId) && subDoneConvId > 0 && knownDone?.cost != null) {
+          setContext(subDoneConvId, knownDone.tokens, knownDone.window, knownDone.model, knownDone.cost + ev.cost_spent, knownDone.completionTokens)
+        }
+      }
       appendSubAgentTelemetry(
         bufKey,
         curId,
@@ -11907,6 +11917,18 @@ export function Composer({
       textDeltas.flush()
       setStatus(bufKey, 'idle')
       setSteerFlag(bufKey, false)
+      // #1245: the last usage tick is one model call behind the final DB
+      // total — completion tokens land with the reply, the cost row writes
+      // after it. Re-read the endpoint so the chip ends the turn at the
+      // authoritative session total.
+      const doneConvId = Number(bufKey)
+      if (Number.isInteger(doneConvId) && doneConvId > 0) {
+        getContext(doneConvId)
+          .then((c) => {
+            setContext(doneConvId, c.context_tokens ?? 0, c.context_window, c.context_model, c.cost_spent ?? null, c.completion_tokens_total)
+          })
+          .catch(() => {})
+      }
       // A completed turn must leave no block pulsing: settle anything the
       // stream ended without a sub_agent_done for (defensive; the backend
       // always emits done events in the normal path).
@@ -11950,20 +11972,23 @@ export function Composer({
       // Exact context size of the latest model call — now emitted per call
       // (live ticks during the run), not just at turn end. Numeric
       // conversation ids only — the draft buffer has no row yet; the
-      // open-time fetch covers it. turn_cost carries the session's
-      // accumulated billed cost so far (#627).
+      // open-time fetch covers it. cost_spent is the session cumulative
+      // (#1245): the DB total at this tick, equal to turn start's stored
+      // total plus the run's live spend — replacing the per-turn
+      // turn_cost, which reset every turn and shrank the chip.
       const convId = Number(bufKey)
       if (Number.isInteger(convId) && convId > 0) {
+        const cost = ev.cost_spent ?? ev.turn_cost ?? null
         // Window re-resolution is sticky: once resolved, reuse the known
         // value instead of re-fetching per tick.
         const known = useAgent.getState().contextByConv[String(convId)]
         if (known?.window) {
-          setContext(convId, ev.usage_tokens ?? 0, known.window, ev.model ?? known.model ?? null, ev.turn_cost ?? null)
+          setContext(convId, ev.usage_tokens ?? 0, known.window, ev.model ?? known.model ?? null, cost)
         } else {
-          setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null, ev.turn_cost ?? null)
+          setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null, cost)
           getContext(convId)
             .then((c) => {
-              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model, ev.turn_cost ?? c.cost_spent ?? null)
+              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model, ev.cost_spent ?? c.cost_spent ?? null)
             })
             .catch(() => {})
         }

@@ -540,6 +540,9 @@ async def run_sub_agent(
     tools = _resolve_tools(defn, workspace=run_workspace)
     loaded_skills: list[str] = []
     transcript: list[dict] = []
+    # #1245: the sub's own billed spend — OpenRouter reports per-call
+    # usage.cost; other providers leave it None (stays None throughout).
+    sub_cost: float | None = None
 
     def _record(role: str, content, **extra):
         entry = {"role": role, "content": content, **extra}
@@ -550,6 +553,7 @@ async def run_sub_agent(
 
     async def _consume_stream(stream) -> None:
         # Consume one model stream into the per-turn acc/state closures.
+        nonlocal sub_cost
         async for ev in stream:
             if cancel_ev.is_set():
                 return
@@ -565,6 +569,11 @@ async def run_sub_agent(
                 state["tool_calls"] = ev["tool_calls"]
             elif ev["type"] == "finish":
                 state["finish"] = ev.get("reason")
+            elif ev["type"] == "usage":
+                # #1245: sum the sub's per-call billed cost.
+                call_cost = (ev.get("usage") or {}).get("cost")
+                if call_cost is not None:
+                    sub_cost = (sub_cost or 0.0) + float(call_cost)
 
     async def _exec_tool_calls(tool_calls, *, interruptible: bool) -> bool:
         """Execute a turn's tool calls, appending tool results to messages.
@@ -887,6 +896,10 @@ async def run_sub_agent(
         "output": final_text or (f"error: {error}" if error else ""),
         **({"error": error} if error else {}),
         **({"note": grace_note} if grace_note else {}),
+        # #1245: the sub's own billed spend (OpenRouter per-call usage.cost
+        # summed over the sub's model calls; None = provider without cost
+        # reporting). The sub's calls never pass the parent loop's persist.
+        **({"cost_spent": sub_cost} if sub_cost is not None else {}),
         "transcript": transcript,
     }
     return result
@@ -1011,6 +1024,14 @@ async def spawn_batch(
                         "agent_type": defn.name,
                         "status": result["status"],
                         "turns": result["turns"],
+                        # #1245: the sub's billed spend, so the chip can
+                        # raise the session total mid-run (sub-agent calls
+                        # never went through the parent loop's persist).
+                        **(
+                            {"cost_spent": result["cost_spent"]}
+                            if result.get("cost_spent") is not None
+                            else {}
+                        ),
                         "duration_ms": int(
                             (time.monotonic() - _sub_t0) * 1000
                         ),
