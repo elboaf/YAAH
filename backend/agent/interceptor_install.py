@@ -145,9 +145,27 @@ def _run_installer(exe: Path, log: Path) -> subprocess.CompletedProcess:
 import ctypes
 from ctypes import wintypes
 
-_get_file_attributes = ctypes.CDLL("kernel32").GetFileAttributesW
-_get_file_attributes.argtypes = [wintypes.PWCHAR]
-_get_file_attributes.restype = wintypes.DWORD
+# kernel32 is a Windows-only library; importing it on Linux/macOS (e.g. the
+# CI runners) would raise at module import and break the whole test
+# collection. Load it lazily inside _is_junction so the import stays clean
+# on every platform, and only the reparse-point check fails closed (as a
+# non-junction) off-Windows.
+_load_kernel32 = None
+
+
+def _get_kernel32():
+    """The kernel32 GetFileAttributesW proc, loaded lazily.
+
+    Returns None on non-Windows platforms (no kernel32), so callers treat
+    a path as not-a-junction rather than crashing at import.
+    """
+    global _load_kernel32
+    if _load_kernel32 is None:
+        try:
+            _load_kernel32 = ctypes.CDLL("kernel32").GetFileAttributesW
+        except OSError:
+            _load_kernel32 = False
+    return _load_kernel32 or False
 
 # FILE_ATTRIBUTE_REPARSE_POINT. A junction carries this flag on the entry
 # itself; a plain directory does not -- the only reliable way to tell the
@@ -165,8 +183,13 @@ def _is_junction(path: Path) -> bool:
     """
     if not path.exists():
         return False
+    get_attrs = _get_kernel32()
+    if not get_attrs:
+        # No kernel32 (non-Windows): a junction is a Windows object, so
+        # treat everything as not-a-junction rather than crash.
+        return False
     try:
-        attr = _get_file_attributes(str(path))
+        attr = get_attrs(str(path))
     except OSError:
         return False
     return attr != 0xFFFFFFFF and bool(attr & _JUNCTION_ATTRIBUTE)
