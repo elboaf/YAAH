@@ -59,9 +59,6 @@ async def build_index(progress_callback=None) -> dict:
     progress_callback is called with (phase, progress_pct, message).
     Returns a summary of the build.
     """
-    from backend.agent.embeddings import _embeddings_config
-    emb_cfg = _embeddings_config()
-    configured_model = emb_cfg["model"]
 
     def safe_report(phase, pct, msg):
         if progress_callback:
@@ -72,6 +69,32 @@ async def build_index(progress_callback=None) -> dict:
                 log.warning("progress callback failed", exc_info=True)
 
     safe_report("starting", 0, "Starting index build")
+
+    # Label identity must match what query time resolves (#734, #748):
+    # the running bundled server wins, else the manual block. Reading the
+    # manual block only made every bundled-server build record an empty
+    # model name when the manual field was blank -- and semantic_readiness
+    # treats an empty label as no_index, permanently degrading search.
+    from backend.agent.embeddings import _resolved_connection
+    conn = _resolved_connection()
+    configured_model = conn["model"]
+    if not configured_model:
+        # Nothing resolves right now. embed_texts would reject the first
+        # batch anyway; refuse here too so metadata never records an
+        # unusable label.
+        safe_report("error", 0, "no embeddings endpoint resolves -- build refused")
+        return {
+            "ok": False,
+            "vectors_stored": 0,
+            "chunks_processed": 0,
+            "chunks_embedded": 0,
+            "total_chunks": 0,
+            "model": "",
+            "dimensions": None,
+            "last_build": time.time(),
+            "error": "no embeddings endpoint resolves: start the bundled "
+            "model server or configure an embeddings endpoint",
+        }
 
     # Clear existing index -- and the build metadata with it. The metadata
     # must never outlive the vectors it describes: a failed rebuild would
@@ -169,9 +192,10 @@ async def build_index(progress_callback=None) -> dict:
                 )
                 break
 
-    # Record index metadata (model + dimensions) — use the CONFIGURED model name,
-    # not the response echo, as the identity for mismatch detection.
-    if dimensions:
+    # Record index metadata (model + dimensions). configured_model now
+    # comes from the resolved connection (above), so the label matches
+    # what query time checks against -- the #748 bug cannot recur.
+    if dimensions and configured_model:
         await record_index_build(configured_model, dimensions)
 
     vector_count = await get_vector_count()
