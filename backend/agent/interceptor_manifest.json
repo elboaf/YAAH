@@ -1,0 +1,8 @@
+{
+  "name": "Interceptor",
+  "version": "2.1.6",
+  "url": "https://github.com/elboaf/Interceptor/releases/download/v2.1.6/Interceptor-Browser-2.1.6-windows-x64.exe",
+  "sha256": "5d468cc09af5634936d1b4835a644250243e4e6af80d6199a55673d528cfadc1",
+  "license": "Elastic License 2.0 — free redistribution with terms passed along",
+  "notes": "Browser-only Inno Setup build for Windows x64 (per-user, silent-capable). This is the asset YAAH downloads and SHA-256 verifies at setup time. A new build arrives via a deliberate one-line pin bump, never live."
+}
