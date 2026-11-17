@@ -642,6 +642,10 @@ export interface InterceptorStatus {
   } | null
 }
 
+/** The install route's nested status: interceptor.status() verbatim —
+ *  WITHOUT `pinned` (only the GET route attaches the manifest). */
+export type InterceptorInstallStatus = Omit<InterceptorStatus, 'pinned'>
+
 /** Install flow result (t2): the manager's outcome keys plus the
  *  post-install status under `status` — one shape the UI renders
  *  directly. did_install distinguishes a first install from the
@@ -652,7 +656,7 @@ export interface InterceptorInstallResult {
   junctions: Record<string, string>
   marker: boolean
   note?: string
-  status: InterceptorStatus
+  status: InterceptorInstallStatus
 }
 
 /** Links DELETE result: what was removed and what was left in place, so

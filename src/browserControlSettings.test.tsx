@@ -5,7 +5,7 @@
 // layer is mocked at the module boundary; platform is stubbed at the
 // same seam (navigator.userAgent) the app itself reads.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 const {
   getInterceptorStatus,
@@ -62,6 +62,20 @@ const ready = {
   ...installedNoExtension,
   extension: 'ready',
 }
+
+// The install POST's nested status carries NO `pinned` (only the GET
+// route attaches the manifest) -- these are the payloads as the backend
+// actually answers them.
+const { pinned: _dropReady, ...readyNoPinned } = ready
+const { pinned: _dropInstalled, ...installedNoExtNoPinned } = installedNoExtension
+
+const installOk = (statusNoPinned: typeof readyNoPinned) => ({
+  installed: true,
+  did_install: true,
+  junctions: {},
+  marker: true,
+  status: statusNoPinned,
+})
 
 const windowsAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 const linuxAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -150,14 +164,16 @@ describe('Browser control settings card (#635)', () => {
     // In-flight: disabled and relabelled; a second click cannot fire.
     expect(screen.getByRole('button', { name: 'Installing…' })).toBeTruthy()
     expect((screen.getByRole('button', { name: 'Installing…' }) as HTMLButtonElement).disabled).toBe(true)
-    // Success answers with the post-install status: the chip refreshes
-    // to the new state without a second round-trip.
-    resolveInstall({ ...ready, status: ready, did_install: true, junctions: {}, marker: true })
+    // Success answers with the post-install status (no `pinned` in it):
+    // the chip refreshes to the new state, and the pinned hint survives
+    // from the GET rather than vanishing.
+    resolveInstall(installOk(readyNoPinned))
     await waitFor(() =>
       expect(
         screen.getByRole('status', { name: 'Browser control status: ready' }),
       ).toBeTruthy(),
     )
+    expect(screen.getByText(/pins Interceptor 2\.1\.6/)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Installing…' })).toBeNull()
     expect((screen.getByRole('button', { name: 'Install' }) as HTMLButtonElement).disabled).toBe(false)
     expect(installInterceptor).toHaveBeenCalledTimes(1)
@@ -181,13 +197,7 @@ describe('Browser control settings card (#635)', () => {
       screen.getByRole('status', { name: 'Browser control status: not installed' }),
     ).toBeTruthy()
     // A second click fires again (retry).
-    installInterceptor.mockResolvedValue({
-      ...ready,
-      status: ready,
-      did_install: true,
-      junctions: {},
-      marker: true,
-    })
+    installInterceptor.mockResolvedValue(installOk(readyNoPinned))
     fireEvent.click(screen.getByRole('button', { name: 'Install' }))
     await waitFor(() =>
       expect(screen.getByRole('status', { name: 'Browser control status: ready' })).toBeTruthy(),
@@ -197,11 +207,8 @@ describe('Browser control settings card (#635)', () => {
   it('reports the idempotent re-click through the flow\'s note', async () => {
     getInterceptorStatus.mockResolvedValue(ready)
     installInterceptor.mockResolvedValue({
-      ...ready,
-      status: ready,
+      ...installOk(installedNoExtNoPinned),
       did_install: false,
-      junctions: {},
-      marker: true,
       note: 'already installed; junctions verified/repaired, nothing re-run',
     })
     render(<BrowserControlSettingsCard />)
@@ -217,5 +224,49 @@ describe('Browser control settings card (#635)', () => {
     render(<BrowserControlSettingsCard />)
     fireEvent.click(await screen.findByRole('button', { name: 'Install' }))
     await waitFor(() => expect(screen.getByText(/gateway timeout/)).toBeTruthy())
+  })
+
+  it('a mount GET that resolves after install began cannot overwrite the installed state', async () => {
+    // The mount GET is still pending when the user clicks Install.
+    let resolveGet!: (v: unknown) => void
+    getInterceptorStatus.mockReturnValue(
+      new Promise((resolve) => {
+        resolveGet = resolve
+      }),
+    )
+    installInterceptor.mockResolvedValue(installOk(readyNoPinned))
+    render(<BrowserControlSettingsCard />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Install' }))
+    await waitFor(() =>
+      expect(screen.getByRole('status', { name: 'Browser control status: ready' })).toBeTruthy(),
+    )
+    // The stale "not installed" answer lands afterwards: dropped. The
+    // act() flush guarantees the stale .then has RUN before we assert,
+    // so the pass is not merely the assertion winning a race.
+    await act(async () => {
+      resolveGet(notInstalled)
+    })
+    expect(screen.getByRole('status', { name: 'Browser control status: ready' })).toBeTruthy()
+    expect(screen.queryByText(/status unavailable/)).toBeNull()
+  })
+
+  it('a mount GET that fails after install began cannot flag status unavailable', async () => {
+    let rejectGet!: (e: unknown) => void
+    getInterceptorStatus.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectGet = reject
+      }),
+    )
+    installInterceptor.mockResolvedValue(installOk(readyNoPinned))
+    render(<BrowserControlSettingsCard />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Install' }))
+    await waitFor(() =>
+      expect(screen.getByRole('status', { name: 'Browser control status: ready' })).toBeTruthy(),
+    )
+    await act(async () => {
+      rejectGet(new Error('Backend is unreachable'))
+    })
+    expect(screen.getByRole('status', { name: 'Browser control status: ready' })).toBeTruthy()
+    expect(screen.queryByText(/status unavailable/)).toBeNull()
   })
 })

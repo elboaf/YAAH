@@ -6798,14 +6798,23 @@ export function BrowserControlSettingsCard() {
   const [installState, setInstallState] = useState<'idle' | 'busy'>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
   const [installNote, setInstallNote] = useState<string | null>(null)
+  // Status-request generation: bumped whenever the install flow is
+  // started, and captured by each status fetch. An answer from an older
+  // generation (the mount GET still in flight when the user already
+  // installed, or its error) is dropped instead of overwriting the
+  // freshly installed state.
+  const installGenerationRef = useRef(0)
 
   const refresh = useCallback(() => {
+    const generation = installGenerationRef.current
     getInterceptorStatus()
       .then((s) => {
+        if (generation !== installGenerationRef.current) return
         setStatus(s)
         setStatusFailed(false)
       })
       .catch(() => {
+        if (generation !== installGenerationRef.current) return
         /* status unavailable (backend down): say so instead of showing a
            wrong state; the Install button stays available to retry */
         setStatusFailed(true)
@@ -6817,15 +6826,21 @@ export function BrowserControlSettingsCard() {
   }, [refresh])
 
   const install = async () => {
+    // Bump the generation BEFORE the request: a status GET still in
+    // flight from the mount (or its error) must not land over the
+    // install outcome once it resolves mid-install.
+    installGenerationRef.current += 1
     setInstallState('busy')
     setInstallError(null)
     setInstallNote(null)
+    setStatusFailed(false)
     try {
       const result: InterceptorInstallResult = await installInterceptor()
       // The route answers with the post-install status: refresh the chip
-      // from it directly (no second round-trip).
-      setStatus(result.status)
-      setStatusFailed(false)
+      // from it directly (no second round-trip). The nested status has
+      // no `pinned` (only the GET attaches the manifest) -- keep the
+      // manifest already shown.
+      setStatus({ ...result.status, pinned: status?.pinned ?? null })
       if (!result.did_install && result.note) setInstallNote(result.note)
     } catch (e) {
       // Failure keeps the actionable message and re-arms the button.
