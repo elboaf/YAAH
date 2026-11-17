@@ -51,6 +51,31 @@ def _prepend_to_path(env: dict, directory: str) -> None:
         env[path_key] = directory + (separator + existing if existing else "")
 
 
+def _front_load_path(env: dict, directory: str) -> None:
+    """Make ``directory`` the FIRST PATH entry, exactly once (in-place).
+
+    Unlike _prepend_to_path (which only adds when absent), an existing
+    entry further down the PATH is removed and re-prepended: a directory
+    that also provides the same command name (an older install) earlier
+    in the PATH would otherwise win resolution for spawned shells
+    (CodeRabbit finding on #754). When the directory is already first the
+    rebuilt PATH is byte-identical, so repeated spawns stay stable.
+    """
+    path_key = _find_path_key(env)
+    existing = env.get(path_key, "")
+    separator = ";" if os.name == "nt" else os.pathsep
+    kept = (
+        [
+            entry
+            for entry in existing.split(separator)
+            if entry.casefold() != directory.casefold()
+        ]
+        if existing
+        else []
+    )
+    env[path_key] = separator.join([directory, *kept]) if kept else directory
+
+
 def command_env(env: dict | None = None) -> dict:
     """Copy an environment and prepend the bundled CLI directory to PATH."""
     result = dict(os.environ if env is None else env)

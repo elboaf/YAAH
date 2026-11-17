@@ -203,12 +203,39 @@ def test_repeated_spawns_do_not_grow_path(monkeypatch, state_root):
     monkeypatch.setattr(ghenv, "interceptor_prepend_dir", lambda: str(state_root))
     inherited = dict(envs[0])
     sim = ghenv.command_env(inherited)
-    ghenv._prepend_to_path(sim, str(state_root))
+    ghenv._front_load_path(sim, str(state_root))
     assert sum(
         1
         for entry in _path_entries(sim)
         if entry.casefold() == str(state_root).casefold()
     ) == 1
+
+
+def test_install_dir_already_on_path_moves_to_front(monkeypatch, state_root):
+    """An install dir already on PATH but BEHIND a competing CLI directory
+    must be moved to the front, appearing once: first match wins command
+    resolution, so a stale entry further down would let an older
+    interceptor win (CodeRabbit finding on #754)."""
+    _write_marker()
+    _install_cli(state_root)
+
+    older = state_root.parent / "Interceptor-old"
+    older.mkdir()
+    older_entries = [str(older), str(state_root), "elsewhere"]
+    separator = ";" if os.name == "nt" else os.pathsep
+    inherited = {"PATH": separator.join(older_entries)}
+
+    monkeypatch.setattr(ghenv, "interceptor_prepend_dir", lambda: str(state_root))
+    env = ghenv.command_env(inherited)
+    ghenv._front_load_path(env, str(state_root))
+
+    entries = _path_entries(env)
+    assert entries[0] == str(state_root), entries
+    assert sum(
+        1 for e in entries if e.casefold() == str(state_root).casefold()
+    ) == 1
+    # The competing dir survives, just demoted.
+    assert str(older) in entries
 
 
 # --- AC5: a real probe process asserts the augmented environment -----------

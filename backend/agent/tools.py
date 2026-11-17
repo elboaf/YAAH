@@ -34,9 +34,12 @@ def _tool_env() -> dict:
     env = command_env()
     prepend_dir = interceptor_prepend_dir()
     if prepend_dir:
-        from backend.agent.ghenv import _prepend_to_path
+        from backend.agent.ghenv import _front_load_path
 
-        _prepend_to_path(env, prepend_dir)
+        # Front-load, not dedupe-prepend: an existing entry further down
+        # PATH (an older Interceptor install) would otherwise win command
+        # resolution for spawned shells.
+        _front_load_path(env, prepend_dir)
     return env
 
 # Shared subprocess spawn conventions live in gitproc.py.
