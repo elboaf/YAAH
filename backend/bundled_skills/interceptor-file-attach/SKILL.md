@@ -46,6 +46,12 @@ for ((i=0;i<N;i++)); do
 done
 ```
 Verify the final reported length equals your base64 length before proceeding.
+If it is one or two over, PowerShell's `Set-Content` appended a trailing CRLF
+to payload.b64 (Git Bash's command substitution usually strips it; other bash
+environments keep the CR). Rebuild the payload with
+`[Convert]::ToBase64String(...) | Set-Content -NoNewline payload.b64`, or
+strip the trailing CR/LF in bash, before chunking — a literal CR inside the
+assembled JavaScript string breaks the attach.
 
 ### 4. Assemble + attach via DataTransfer
 ```

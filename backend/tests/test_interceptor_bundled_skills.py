@@ -11,11 +11,12 @@ from backend.agent import skills as skill_registry
 
 # The validated draft this ticket bakes (byte-identity is the point of the
 # "verbatim" acceptance criterion; the session-authored file never lands in
-# the repo, so the hash pins the exact baked content instead). #637's
-# CodeRabbit round allowed one deviation: the recipe's EXE line now resolves
-# the install dir from the current user's LOCALAPPDATA instead of the
-# hard-coded Administrator profile.
-FILE_ATTACH_SHA256 = "ba2e8ad09346fa7179d2781a9bf26cd5f232bba4684f929c1cec970f7cae09e4"
+# the repo, so the hash pins the exact baked content instead). Deviations
+# from the raw draft, each from a CodeRabbit round on #637: the recipe's
+# EXE line resolves the install dir from the current user's LOCALAPPDATA
+# (not the hard-coded Administrator profile), and the payload step carries
+# the Set-Content trailing-CRLF guidance.
+FILE_ATTACH_SHA256 = "3055422c830aa6b8890615621967f584df5601fbd3557bf6b725f87589092f0f"
 
 
 def _bundled():
