@@ -59,3 +59,18 @@ def command_env(env: dict | None = None) -> dict:
         return result
     _prepend_to_path(result, str(gh_bin))
     return result
+
+
+def interceptor_prepend_dir() -> str | None:
+    """The Interceptor install dir tool spawns should carry on PATH, or None.
+
+    The t4-path (#634) seam: one call into the manager, so the spawn sites
+    never touch Interceptor directly. Gated on the manager's install state;
+    None (Interceptor absent) means callers change nothing. Kept in ghenv
+    rather than tools.py so tests can patch the seam at the same module the
+    PATH plumbing under test lives in.
+    """
+    from backend.agent import interceptor
+
+    return interceptor.path_prepend_dir()
+

@@ -186,6 +186,52 @@ def installed_state() -> str:
     return "installed" if _find_interceptor_cli() is not None else "not installed"
 
 
+def _install_done() -> bool:
+    """True when the install flow's done-marker is present.
+
+    Reads the marker contract t2-install owns
+    (interceptor_install._marker_done) through a late import so this module
+    never imports the install flow at load time. Any error -- including a
+    platform-only import failing on a CI runner -- reads as "not done":
+    this helper gates a PATH convenience, never a status fact, so it fails
+    closed.
+    """
+    try:
+        from backend.agent import interceptor_install
+
+        return bool(interceptor_install._marker_done())
+    except Exception:  # noqa: BLE001 -- fail closed, see docstring
+        return False
+
+
+def path_prepend_dir() -> str | None:
+    """The directory tool-process spawns should prepend to PATH, or None.
+
+    This is ticket t4-path (#634)'s key: right after YAAH installs
+    Interceptor, agent tool shells can already run `interceptor` without
+    restarting YAAH -- every process the backend launches carries the
+    install dir at the front of its PATH, keyed off the install state.
+
+    Gated on the done-marker (a full, successful install -- a partial one
+    must not advertise a command it did not lay down) *and* the documented
+    install dir actually holding a CLI (the marker survives an external
+    uninstall; a PATH entry pointing at nothing must not be advertised).
+
+    The dir is returned even when it does not expand (a non-Windows dev
+    machine, where %LOCALAPPDATA% stays literal): it is additive to PATH
+    and resolves to nothing there, which is harmless.
+
+    None when Interceptor is absent -- the caller's environment must stay
+    byte-identical to the pre-feature one (zero effect when absent).
+    """
+    if not _install_done():
+        return None
+    for candidate_dir in _INSTALL_DIR_CANDIDATES:
+        if (Path(candidate_dir) / "interceptor.exe").is_file():
+            return candidate_dir
+    return None
+
+
 def installed_version() -> str | None:
     """The CLI's dotted version, or None when not installed.
 

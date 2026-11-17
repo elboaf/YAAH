@@ -21,10 +21,23 @@ from backend.agent.shell import resolve_git_bash
 
 
 def _tool_env() -> dict:
-    """Environment inherited by agent shell tools, including bundled gh."""
-    from backend.agent.ghenv import command_env
+    """Environment inherited by agent shell tools, including bundled gh.
 
-    return command_env()
+    Also carries the Interceptor install dir on PATH after a successful
+    in-app install (t4-path, #634): the manager's install state decides,
+    and when Interceptor is absent the returned environment is exactly
+    what command_env alone produced -- byte-identical to the pre-feature
+    behavior, zero effect.
+    """
+    from backend.agent.ghenv import command_env, interceptor_prepend_dir
+
+    env = command_env()
+    prepend_dir = interceptor_prepend_dir()
+    if prepend_dir:
+        from backend.agent.ghenv import _prepend_to_path
+
+        _prepend_to_path(env, prepend_dir)
+    return env
 
 # Shared subprocess spawn conventions live in gitproc.py.
 from backend.agent.gitproc import NO_WINDOW as _NO_WINDOW, NEW_SESSION as _NEW_SESSION
