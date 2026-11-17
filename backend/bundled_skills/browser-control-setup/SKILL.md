@@ -33,7 +33,7 @@ whole picture:
 | `version` | dotted CLI version, or null |
 | `skill_links_summary` | `x/3` — junctions into `~/.yaah/skills` (router/browser/research) |
 | `extension` | `ready` / `extension missing` |
-| `extension_path` | the folder Chrome must load (present when installed) |
+| `extension_path` | the folder Chrome must load — or null: present for YAAH's own installs, but a CLI found outside the standard install dirs (external install) reports `installed` with `extension_path: null` |
 | `pinned` | the pinned-installer manifest: exact asset URL, SHA-256, license |
 
 Decision table:
@@ -105,13 +105,24 @@ Rules:
 The extension is an unpacked, manifest-keyed folder — its ID derives from the
 manifest key, so nobody may copy or rewrite it; Chrome must load that exact
 folder. The Settings panel shows these same steps with the real path and a
-copy button; in chat, coach like this (the `extension_path` from status is the
-folder — read it out or paste it, don't guess):
+copy button; in chat, coach like this. Take the folder from `extension_path`
+in the status response — never guess or construct one.
+
+**If `extension_path` is null** (status still reads `installed` — the classic
+case is a CLI installed outside the standard dirs, which the manager finds
+but whose extension folder it cannot point at): verify before coaching.
+Check the likely folders yourself —
+`%LOCALAPPDATA%\Programs\Interceptor\extension\manifest.json` first, then ask
+the user where they installed Interceptor and look for an `extension`
+subfolder holding `manifest.json` there. A folder without a loadable
+`manifest.json` is not the extension. If no folder with a `manifest.json`
+turns up, say plainly that the extension path could not be found and stop —
+do not hand the user a guessed folder. Once a real folder is confirmed, coach:
 
 1. Open `chrome://extensions` and enable **Developer mode** (top-right).
 2. Click **Load unpacked**.
-3. Pick the folder from `extension_path`
-   (default `%LOCALAPPDATA%\Programs\Interceptor\extension`).
+3. Pick that folder (the default YAAH install lays it at
+   `%LOCALAPPDATA%\Programs\Interceptor\extension`).
 
 Detection is the CLI's own diagnosis, not an assumption: after the user says
 done, re-read status and confirm `extension` reads `ready` before declaring
