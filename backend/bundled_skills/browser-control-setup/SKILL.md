@@ -40,8 +40,15 @@ Decision table:
 
 - `installed` = `not installed` → the Install button (or POST install, step 2)
   does the whole flow. Nothing exists yet — do not run `interceptor` commands.
-- `installed` + `extension` = `extension missing` → the only remaining step is
-  the user's extension load (step 3). Do not reinstall.
+- `installed` + `extension` = `extension missing` → run the diagnosis yourself
+  (`interceptor diagnose extension --json`) before coaching anything. The
+  status string is fail-closed: a blocked profile, a diagnosis failure, or
+  invalid output all read `extension missing`, and the extension may already
+  be loaded. Use the parsed JSON — `problems`/`blocked` name the real gap
+  (which profile, what permission); an empty diagnosis failure means report
+  the diagnosis failure, not coach a reload. Only a diagnosis that really
+  names the extension as absent gets the user's extension load (step 3).
+  Do not reinstall.
 - `installed` + `extension` = `ready` → done. Verify health (step 4) only if
   asked.
 - `skill_links_summary` under `3/3` after a successful install → the junctions
@@ -74,6 +81,11 @@ Rules:
 - **Safe to re-run.** Hash mismatch or 404 fails cleanly with no side effects;
   a rerun repairs or completes a partial state. Network required; there is no
   offline path.
+- **Refresh the skill index afterwards.** YAAH scans skills once at startup;
+  the install endpoint does not refresh that cache, so a fresh install's
+  junctioned packs read as unknown skills until you call
+  `POST http://127.0.0.1:8765/api/skills/refresh`. Do that after every
+  install or repair before loading a junctioned pack.
 - **Judge the POST's returned status, not the exit path** (see gotcha 5). Do
   not parse installer logs.
 - **Never run the installer yourself** by downloading the exe or running
@@ -110,10 +122,17 @@ plainly instead of retrying them.
 
 ## 4. Health verification ("is browser control healthy?")
 
-Answer by command, never by session memory:
+Answer by command, never by session memory. `3/3` alone is not proof: the
+summary counts any real directory sitting in a link slot, and a pre-existing
+user directory there is preserved, not replaced — it may hold no Interceptor
+skills at all.
 
-- Backend status (section 1) — the one-glance answer: installed + `3/3` links
-  + `ready` extension = healthy.
+- Backend status (section 1) — the one-glance answer: `installed` + `3/3`
+  links + `ready` extension is *healthy-looking*; confirm the packs are the
+  real ones by refreshing the index (`POST /api/skills/refresh`) and seeing
+  `interceptor`, `interceptor-browser`, `interceptor-research` resolvable
+  through the load_skill tool (or reading `~/.yaah/skills/interceptor/
+  SKILL.md`).
 - `interceptor status` — daemon mode, transport, link summary.
 - `interceptor diagnose extension --json` — `{"problems": [], "blocked": []}`
   is the readiness contract (gaps name the exact gap: which profile is blocked,
