@@ -615,6 +615,61 @@ export interface SandboxStatus {
 }
 export const getSandboxStatus = () => api<SandboxStatus>('/api/sandbox/status')
 
+// ---- Interceptor browser control (issue #635, spec #630) ----
+
+/** One skill slot's link state, from the manager's status contract (t1). */
+export type InterceptorLinkState = 'linked' | 'not linked'
+
+/** The manager's status contract (backend/agent/interceptor.py status()),
+ *  plus `pinned`: the committed installer manifest the API route attaches.
+ *  Shapes the three chip states via installed + extension:
+ *  not installed / installed-extension missing / ready. */
+export interface InterceptorStatus {
+  installed: 'installed' | 'not installed'
+  version: string | null
+  skill_links: Record<string, InterceptorLinkState>
+  /** 'x/total' over the three skill slots. */
+  skill_links_summary: string
+  extension: 'ready' | 'extension missing'
+  cli: string | null
+  pinned: {
+    name?: string
+    version?: string
+    url?: string
+    sha256?: string
+    license?: string
+    notes?: string
+  } | null
+}
+
+/** Install flow result (t2): the manager's outcome keys plus the
+ *  post-install status under `status` — one shape the UI renders
+ *  directly. did_install distinguishes a first install from the
+ *  idempotent re-click (safe to press twice). */
+export interface InterceptorInstallResult {
+  installed: boolean
+  did_install: boolean
+  junctions: Record<string, string>
+  marker: boolean
+  note?: string
+  status: InterceptorStatus
+}
+
+/** Links DELETE result: what was removed and what was left in place, so
+ *  the UI can surface exactly why a slot survived. */
+export interface InterceptorLinksResult {
+  removed: string[]
+  skipped: Record<string, string>
+}
+
+export const getInterceptorStatus = () => api<InterceptorStatus>('/api/interceptor/status')
+
+export const installInterceptor = () =>
+  api<InterceptorInstallResult>('/api/interceptor/install', { method: 'POST' })
+
+export const deleteInterceptorLinks = () =>
+  api<InterceptorLinksResult>('/api/interceptor/links', { method: 'DELETE' })
+
 /** Per-provider model listing, with the error when a provider is unreachable. */export interface ProviderModelInfo {
   id: string
   reasoning_efforts: string[]
