@@ -6782,7 +6782,14 @@ function interceptorInstallErrorMessage(e: unknown): string {
  *  run it silently, junction the skill packs. Disabled while in-flight;
  *  on success the chip refreshes from the returned post-install status;
  *  on failure the actionable error is shown and the button re-arms
- *  (retry is a safe idempotent re-click). Hidden on Linux builds: the
+ *  (retry is a safe idempotent re-click). After a successful install the
+ *  guided panel (t6-guided-panel, #636) opens by itself: numbered Chrome
+ *  steps, the real unpacked-extension folder with a one-click copy, and
+ *  a live poll of the status endpoint that runs only while the panel is
+ *  visible and stops once the extension is actually detected (the CLI's
+ *  own diagnosis -- never a timeout or an assumption). Ignoring or
+ *  closing the panel is a valid partial-setup state; reopening works.
+ *  Hidden on Linux builds: the
  *  Linux build omits the section entirely (null render). */
 export function BrowserControlSettingsCard() {
   // Windows-only capability (the silent Inno Setup installer and the
@@ -6798,6 +6805,18 @@ export function BrowserControlSettingsCard() {
   const [installState, setInstallState] = useState<'idle' | 'busy'>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
   const [installNote, setInstallNote] = useState<string | null>(null)
+  // Guided panel (t6-guided-panel, #636): open shows the numbered Chrome
+  // steps + the real extension folder + a live status poll. It opens by
+  // itself right after a successful install (that is the moment the user
+  // faces the one manual step) and stays dismissible -- ignoring it is a
+  // valid partial-setup state, and reopening works.
+  const [panelOpen, setPanelOpen] = useState(false)
+  // The poll's one-shot flip: once the panel has been open (its effect
+  // ran) and the status lands ready, the green confirmation line shows.
+  // A mount that is already ready never shows it (the panel never ran),
+  // and a manual dismissal before detection shows nothing (not ready).
+  const panelWasOpenRef = useRef(false)
+  const [pathCopied, setPathCopied] = useState(false)
   // Status-request generation: bumped whenever the install flow is
   // started, and captured by each status fetch. An answer from an older
   // generation (the mount GET still in flight when the user already
@@ -6805,9 +6824,12 @@ export function BrowserControlSettingsCard() {
   // freshly installed state.
   const installGenerationRef = useRef(0)
 
-  const refresh = useCallback(() => {
+  // Returns the in-flight promise so the panel's poll effect can chain a
+  // retry (a failed GET must not kill the poll -- the panel stays honest
+  // with "live check unavailable" and tries again on the next tick).
+  const refresh = useCallback((): Promise<void> => {
     const generation = installGenerationRef.current
-    getInterceptorStatus()
+    const promise = getInterceptorStatus()
       .then((s) => {
         if (generation !== installGenerationRef.current) return
         setStatus(s)
@@ -6819,11 +6841,32 @@ export function BrowserControlSettingsCard() {
            wrong state; the Install button stays available to retry */
         setStatusFailed(true)
       })
+    return promise
   }, [])
 
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // The guided panel's live poll: runs ONLY while the panel is visible,
+  // through the same generation-fenced status GET the card already
+  // speaks. One poll fires the moment the panel opens (an extension may
+  // have been loaded while an install ran), then every 3s -- and the
+  // interval is dropped for good once a poll lands ready (actual
+  // extension detection -- the bare throw on a failed GET -- is the only
+  // thing that can turn the panel green; a timeout or an assumption
+  // cannot). A failed GET (backend restarting) retries on the next tick,
+  // so the poll self-heals instead of dying silently.
+  useEffect(() => {
+    if (!panelOpen) return
+    panelWasOpenRef.current = true
+    if (status?.extension === 'ready') return
+    refresh().catch(() => {}) // failed GET retries on the next tick
+    const timer = window.setInterval(() => {
+      refresh().catch(() => {})
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [panelOpen, status?.extension, refresh])
 
   const install = async () => {
     // Bump the generation BEFORE the request: a status GET still in
@@ -6842,6 +6885,13 @@ export function BrowserControlSettingsCard() {
       // manifest already shown.
       setStatus({ ...result.status, pinned: status?.pinned ?? null })
       if (!result.did_install && result.note) setInstallNote(result.note)
+      // Right after a successful install the one remaining step is the
+      // user's (loading the unpacked extension): open the guided panel
+      // for them. The stale mount GET is already generation-fenced at
+      // this point, so nothing older can reopen it. An install whose
+      // post-install state already reads ready (extension loaded while
+      // YAAH was closed) leaves the panel alone.
+      if (result.status.extension !== 'ready') setPanelOpen(true)
     } catch (e) {
       // Failure keeps the actionable message and re-arms the button.
       setInstallError(interceptorInstallErrorMessage(e))
@@ -6909,11 +6959,78 @@ export function BrowserControlSettingsCard() {
             {installNote}
           </p>
         )}
-        {installed && !ready && (
-          <p className="font-mono text-[10px] text-amber-400" role="status">
-            next step is yours: load the unpacked extension in Chrome — the agent can coach you
-            through it
-          </p>
+        {installed && (!ready || panelWasOpenRef.current) && (
+          <div className="pt-1">
+            {ready ? (
+              /* Detected: the chip above flipped green and the panel's
+                 remaining job is a plain confirmation -- the steps and
+                 the poll are over. A mount that was ready from the start
+                 never shows any of this (panelWasOpenRef stays false). */
+              <p className="font-mono text-[10px] text-emerald-400" role="status">
+                done: browser control is ready
+              </p>
+            ) : (
+              <>
+                <button
+                  className="rounded px-1.5 py-0.5 font-mono text-[10px] text-amber-400 hover:bg-zinc-800"
+                  aria-expanded={panelOpen}
+                  onClick={() => setPanelOpen((v) => !v)}
+                >
+                  {panelOpen ? 'hide setup steps ▴' : 'show setup steps ▾'}
+                </button>
+                {panelOpen && (
+                  <div className="mt-1.5 space-y-1.5 rounded border border-zinc-800 p-2" data-testid="guided-panel">
+                    <p className="font-mono text-[10px] text-zinc-400">
+                      Load the unpacked extension in Chrome:
+                    </p>
+                    <ol className="list-inside list-decimal space-y-0.5 font-mono text-[10px] text-zinc-400">
+                      <li>
+                        open <span className="text-zinc-300">chrome://extensions</span>, enable{' '}
+                        <span className="text-zinc-300">Developer mode</span>
+                      </li>
+                      <li>
+                        click <span className="text-zinc-300">Load unpacked</span>
+                      </li>
+                      <li>pick the folder below</li>
+                    </ol>
+                    {status?.extension_path ? (
+                      <div className="flex items-center gap-1.5">
+                        <code
+                          className="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-500"
+                          title={status.extension_path}
+                        >
+                          {status.extension_path}
+                        </code>
+                        <button
+                          className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+                          onClick={() => {
+                            navigator.clipboard
+                              ?.writeText(status.extension_path!)
+                              .then(() => {
+                                setPathCopied(true)
+                                window.setTimeout(() => setPathCopied(false), 1200)
+                              })
+                              .catch(() => {})
+                          }}
+                        >
+                          {pathCopied ? 'copied!' : 'copy path'}
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="font-mono text-[10px] text-zinc-600">
+                        extension folder not found — Interceptor may not be installed
+                      </p>
+                    )}
+                    <p className="font-mono text-[10px] text-zinc-500" role="note">
+                      {statusFailed
+                        ? 'live check unavailable — the backend may be restarting'
+                        : 'watching for the extension — this flips green the moment Chrome loads it'}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         )}
         {installError && (
           <p className="font-mono text-[10px] text-red-400" role="alert">

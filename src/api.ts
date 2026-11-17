@@ -631,6 +631,10 @@ export interface InterceptorStatus {
   /** 'x/total' over the three skill slots. */
   skill_links_summary: string
   extension: 'ready' | 'extension missing'
+  /** The unpacked-extension folder Chrome must load (t6-guided-panel),
+   *  attached by the status routes -- null/absent when there is no
+   *  folder to point at (never a wrong path). */
+  extension_path?: string | null
   cli: string | null
   pinned: {
     name?: string
@@ -643,7 +647,9 @@ export interface InterceptorStatus {
 }
 
 /** The install route's nested status: interceptor.status() verbatim —
- *  WITHOUT `pinned` (only the GET route attaches the manifest). */
+ *  WITHOUT `pinned` (only the GET route attaches the manifest), but WITH
+ *  `extension_path`: the guided panel needs the real folder right after
+ *  install, not at the next mount. */
 export type InterceptorInstallStatus = Omit<InterceptorStatus, 'pinned'>
 
 /** Install flow result (t2): the manager's outcome keys plus the

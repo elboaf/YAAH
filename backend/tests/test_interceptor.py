@@ -316,3 +316,45 @@ def test_status_when_not_installed(monkeypatch, fake_skills_root):
     assert status["version"] is None
     assert status["extension"] == "extension missing"
     assert status["skill_links_summary"] == "0/3"
+
+
+# --- extension dir (t6-guided-panel, #636) --------------------------------
+
+
+def test_extension_dir_reports_install_layout(monkeypatch, tmp_path):
+    """The unpacked-extension folder is reported when the documented
+    install dir holds one with a loadable manifest."""
+    monkeypatch.setattr(interceptor, "_INSTALL_DIR_CANDIDATES", (str(tmp_path),))
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "manifest.json").write_text("{}", encoding="utf-8")
+    ext = interceptor.extension_dir()
+    assert ext == str(tmp_path / "extension")
+
+
+def test_extension_dir_none_when_no_extension(monkeypatch, tmp_path):
+    """No install dir (or an empty one): None -- the panel shows no path
+    rather than a wrong one."""
+    monkeypatch.setattr(interceptor, "_INSTALL_DIR_CANDIDATES", (str(tmp_path),))
+    assert interceptor.extension_dir() is None
+
+
+def test_extension_dir_none_when_manifest_missing(monkeypatch, tmp_path):
+    """A folder named extension without a loadable manifest is not
+    reported: the probe checks the manifest, not just the directory."""
+    monkeypatch.setattr(interceptor, "_INSTALL_DIR_CANDIDATES", (str(tmp_path),))
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "background.js").write_text("//", encoding="utf-8")
+    assert interceptor.extension_dir() is None
+
+
+def test_extension_dir_never_spawns_a_subprocess(monkeypatch, tmp_path):
+    """Pure filesystem probe: no CLI lookup, no diagnose run -- same
+    constraint path_prepend_dir() is held to."""
+    monkeypatch.setattr(interceptor, "_INSTALL_DIR_CANDIDATES", (str(tmp_path),))
+
+    def _boom(cmd, *a, **k):
+        raise AssertionError("extension_dir must not spawn a subprocess")
+
+    monkeypatch.setattr(interceptor.subprocess, "run", _boom)
+    monkeypatch.setenv(interceptor.INTERCEPTOR_CLI_ENV, str(tmp_path / "nowhere"))
+    assert interceptor.extension_dir() is None

@@ -159,6 +159,35 @@ def test_status_includes_pinned_manifest_info(client, monkeypatch):
     assert body["pinned"] == manifest
 
 
+def test_status_includes_extension_path(client, monkeypatch):
+    """The GET attaches `extension_path` (t6-guided-panel) the same way it
+    attaches `pinned`: the manager seam is faked, so this asserts only the
+    wiring -- the route's answer carries the probe's folder verbatim."""
+    ext_dir = "C:\\fake\\Programs\\Interceptor\\extension"
+
+    def _extension_dir():
+        return ext_dir
+
+    monkeypatch.setattr(interceptor, "extension_dir", _extension_dir)
+    _fake_status(monkeypatch)
+    body = client.get("/api/interceptor/status").json()
+    assert body["extension_path"] == ext_dir
+
+
+def test_status_extension_path_absent_reads_null(client, monkeypatch):
+    """No extension folder to point at: the key is present and null --
+    never a wrong path (the panel shows no path rather than one Chrome
+    would refuse)."""
+
+    def _none():
+        return None
+
+    monkeypatch.setattr(interceptor, "extension_dir", _none)
+    _fake_status(monkeypatch)
+    body = client.get("/api/interceptor/status").json()
+    assert body["extension_path"] is None
+
+
 def test_status_get_has_no_install_side_effect(client, monkeypatch):
     _fake_status(monkeypatch)
     install_calls = _fake_install(monkeypatch, {"installed": True})
@@ -192,6 +221,29 @@ def test_install_runs_flow_and_returns_post_install_status(client, monkeypatch):
     # ...plus the post-install status under `status`.
     assert body["status"]["installed"] == "installed"
     assert status_calls["status"] == 1
+
+
+def test_install_nested_status_carries_extension_path(client, monkeypatch):
+    """The install POST's nested status includes `extension_path`
+    (t6-guided-panel): the guided panel must have the real folder
+    immediately after install, not at the next mount GET."""
+
+    def _extension_dir():
+        return "C:\\fake\\Programs\\Interceptor\\extension"
+
+    monkeypatch.setattr(interceptor, "extension_dir", _extension_dir)
+    _fake_install(
+        monkeypatch,
+        {
+            "installed": True,
+            "did_install": True,
+            "junctions": {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS},
+            "marker": True,
+        },
+    )
+    _fake_status(monkeypatch)
+    body = client.post("/api/interceptor/install").json()
+    assert body["status"]["extension_path"] == "C:\\fake\\Programs\\Interceptor\\extension"
 
 
 def test_install_rerun_reports_did_install_false(client, monkeypatch):
