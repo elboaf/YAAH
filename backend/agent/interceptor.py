@@ -80,9 +80,10 @@ def _skills_dir() -> Path:
 # Candidate install locations for the Interceptor binary. The browser-only
 # Inno Setup installer (per-user, documented) drops interceptor.exe here;
 # a user's own binary on PATH is the fallback. Documented, not guessed.
+# (No other candidates: %LOCALAPPDATA%\Cua\cua-driver belongs to a different
+# product -- Hermes Agent's Cua driver -- and must never read as Interceptor.)
 _INSTALL_DIR_CANDIDATES: tuple[str, ...] = (
     os.path.expandvars(r"%LOCALAPPDATA%\Programs\Interceptor"),
-    os.path.expandvars(r"%LOCALAPPDATA%\Cua\cua-driver"),
 )
 
 # The pinned installer manifest this manager reads as its source of truth

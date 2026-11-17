@@ -11,8 +11,8 @@ no test writes into the real ~/.yaah. The real-junction tests are gated on
 Windows (junctions are a Windows-only object); on non-Windows hosts they are
 skipped with a reason.
 """
-import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -207,27 +207,58 @@ def test_successful_install_skips_run_when_already_installed(
 # --- idempotency --------------------------------------------------------
 
 
-def test_idempotent_rerun_reports_nothing_rerun(
+def test_idempotent_rerun_repairs_missing_junction(
     monkeypatch, manifest, fake_install
 ):
-    """A prior successful install (marker + CLI present) is reported, not
-    repeated: the download, installer run, and junctions are all skipped."""
+    """A prior successful install (marker + CLI present) re-runs nothing --
+    no download, no installer -- but the repair-only junction pass still
+    runs: a slot deleted or re-pointed since the last install is repaired,
+    never silently left dangling (the ticket's repairs/reports criterion)."""
     _install_cli(monkeypatch, exists=True)
     (fake_install / "interceptor_install_done.txt").write_text("done", encoding="utf-8")
 
-    def _boom(_url):
+    def _boom_download(_url):
         raise AssertionError("download must not run on idempotent re-run")
 
-    def _boom_junctions():
-        raise AssertionError("junctions must not run on idempotent re-run")
+    def _boom_installer(exe, log):
+        raise AssertionError("installer must not run on idempotent re-run")
 
-    monkeypatch.setattr(inst, "_download_asset", _boom)
-    monkeypatch.setattr(inst, "_run_installer", _boom)
-    monkeypatch.setattr(inst, "_create_junctions", _boom_junctions)
+    monkeypatch.setattr(inst, "_download_asset", _boom_download)
+    monkeypatch.setattr(inst, "_run_installer", _boom_installer)
+
+    calls = {"junctions": 0}
+
+    def _fake_repair():
+        calls["junctions"] += 1
+        return {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS}
+
+    monkeypatch.setattr(inst, "_create_junctions", _fake_repair)
 
     res = inst.install()
     assert res["did_install"] is False
-    assert res["note"] == "already installed; nothing re-run"
+    assert res["marker"] is True
+    assert calls["junctions"] == 1, "repair pass must run on idempotent re-run"
+    assert "repaired" in res["note"]
+
+
+def test_idempotent_rerun_reports_when_packs_root_missing(
+    monkeypatch, manifest, fake_install
+):
+    """Marker + CLI present but the packs root is gone (CLI resolves via
+    PATH, install dir wiped): the re-click reports instead of failing."""
+    _install_cli(monkeypatch, exists=True)
+    (fake_install / "interceptor_install_done.txt").write_text("done", encoding="utf-8")
+
+    def _no_root():
+        raise RuntimeError("interceptor skills root not found; nothing to junction to")
+
+    monkeypatch.setattr(inst, "_create_junctions", _no_root)
+
+    res = inst.install()
+    assert res["installed"] is True
+    assert res["did_install"] is False
+    assert res["marker"] is True
+    assert "nothing re-run" in res["note"]
 
 
 # --- real junctions (Windows only) --------------------------------------
@@ -236,7 +267,7 @@ def test_idempotent_rerun_reports_nothing_rerun(
 def test_is_junction_distinguishes_from_real_dir(tmp_path):
     """The reparse-point discriminator separates a junction from a plain
     directory (the Windows-only fact that os.path cannot)."""
-    if os.sys.platform != "win32":
+    if sys.platform != "win32":
         pytest.skip("junctions are Windows-only")
 
     packs = tmp_path / "packs"
@@ -257,7 +288,7 @@ def test_is_junction_distinguishes_from_real_dir(tmp_path):
 def test_real_junctions_created_on_install(monkeypatch, manifest, tmp_path, fake_install):
     """A real install creates three junctions under the skills dir pointing
     at the installed packs, and writes the done-marker."""
-    if os.sys.platform != "win32":
+    if sys.platform != "win32":
         pytest.skip("junctions require Windows")
     skills = tmp_path / "skills"
     skills.mkdir()
@@ -291,10 +322,13 @@ def test_real_junctions_created_on_install(monkeypatch, manifest, tmp_path, fake
 # --- remove_links ---------------------------------------------------------
 
 
-def test_remove_links_deletes_junctions_only(monkeypatch, manifest, tmp_path, fake_install):
-    """remove_links() deletes only the junctions YAAH created; a pre-existing
-    real directory at a slot is left untouched (the acceptance criterion)."""
-    if os.sys.platform != "win32":
+def test_remove_links_deletes_only_owned_junctions(
+    monkeypatch, manifest, tmp_path, fake_install
+):
+    """remove_links() deletes only junctions the ownership record vouches
+    for: a real directory at a slot and a link with no ownership record are
+    left untouched (the acceptance criterion)."""
+    if sys.platform != "win32":
         pytest.skip("junctions require Windows")
     skills = tmp_path / "skills"
     skills.mkdir()
@@ -305,8 +339,9 @@ def test_remove_links_deletes_junctions_only(monkeypatch, manifest, tmp_path, fa
     real_target = packs / "keep_me"
     real_target.mkdir()
 
-    # router -> a real junction (YAAH-created); browser -> a real directory
-    # (the user's own; must survive); research -> absent (nothing to do).
+    # router -> a real junction, recorded as YAAH's (must be removed);
+    # browser -> a real directory (the user's own; must survive);
+    # research -> a foreign junction with NO ownership record (must survive).
     router = skills / "router"
     subprocess.run(
         ["powershell", "-NoProfile", "-Command",
@@ -315,16 +350,78 @@ def test_remove_links_deletes_junctions_only(monkeypatch, manifest, tmp_path, fa
     )
     browser = skills / "browser"
     browser.mkdir()
+    foreign = skills / "research"
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         f'New-Item -ItemType Junction -Path {str(foreign)!r} -Target {str(packs)!r}'],
+        check=True, timeout=30,
+    )
+    inst._record_junction_ownership({"router": str(real_target.resolve())})
 
-    removed = inst.remove_links()
+    result = inst.remove_links()
 
-    assert str(router) in removed, "junction was not removed"
-    assert not router.exists(), "junction still exists"
+    assert result["removed"] == [str(router)], "owned junction was not removed"
+    assert not router.exists(), "owned junction still exists"
     assert real_target.is_dir(), "junction target (a real dir) was removed"
     assert browser.is_dir(), "real directory slot was removed"
+    assert foreign.is_dir(), "foreign (unrecorded) junction was removed"
+    assert result["skipped"]["browser"] == "not a link (real directory or absent)"
+    assert result["skipped"]["research"] == "no ownership record for this slot"
 
 
-def test_ownership_manifest_round_trip_windows_path():
+def test_remove_links_leaves_repointed_junction(
+    monkeypatch, manifest, tmp_path, fake_install
+):
+    """A recorded slot whose junction has been re-pointed elsewhere is left
+    alone: the ownership record vouches for the recorded target only."""
+    if sys.platform != "win32":
+        pytest.skip("junctions require Windows")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+
+    packs = tmp_path / "packs"
+    packs.mkdir()
+    recorded = packs / "recorded"
+    recorded.mkdir()
+    elsewhere = packs / "elsewhere"
+    elsewhere.mkdir()
+
+    router = skills / "router"
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         f'New-Item -ItemType Junction -Path {str(router)!r} -Target {str(elsewhere)!r}'],
+        check=True, timeout=30,
+    )
+    inst._record_junction_ownership({"router": str(recorded.resolve())})
+
+    result = inst.remove_links()
+
+    assert result["removed"] == [], "re-pointed junction was removed"
+    assert router.is_dir(), "re-pointed junction did not survive"
+    assert result["skipped"]["router"] == "link exists but points elsewhere than recorded"
+
+
+def test_remove_links_without_record_removes_nothing(
+    monkeypatch, manifest, tmp_path, fake_install
+):
+    """No ownership manifest -> nothing is removed (foreign-junction guard):
+    without the record YAAH cannot prove a link is its own."""
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+    (skills / "router").mkdir()  # entry type irrelevant: no record -> no removal
+
+    result = inst.remove_links()
+
+    assert result["removed"] == []
+    assert (skills / "router").is_dir()
+    # Every slot is skipped with a reason; none was removed on type alone.
+    assert set(result["skipped"]) == set(interceptor.LINK_SLOTS)
+    assert all(result["skipped"].values())
+
+
+def test_ownership_manifest_round_trip_windows_path(monkeypatch, fake_install):
     """json.dumps escapes Windows backslashes so _read_junction_ownership()
     restores the exact target the round trip wrote (the json finding)."""
     win_target = r"C:\Program Files\Interceptor\packs"
