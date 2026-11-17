@@ -60,7 +60,12 @@ of someone else's payload?
    externally) simply drops out of YAAH's skill index.
 
 4. **Leave-on-uninstall.** YAAH's uninstaller removes its three junctions and
-   nothing else. Interceptor stays an independently working app.
+   nothing else. Interceptor stays an independently working app. (As of
+   #637, the junction cleanup is decided but not yet wired: the uninstaller
+   has no hook into `remove_links()`, so junctions currently remain after
+   an uninstall and can dangle if Interceptor is later removed — harmless,
+   since the skills loader hides dangling entries. Wiring it in is tracked
+   for the uninstaller side.)
 
 Consequences: fresh installs fail cleanly when the pinned release is yanked
 (hash mismatch or 404) and the fix is the one-line manifest bump; the feature

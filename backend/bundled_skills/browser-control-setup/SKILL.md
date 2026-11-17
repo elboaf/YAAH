@@ -97,12 +97,14 @@ Rules:
 - **Never run the installer yourself** by downloading the exe or running
   `unins000.exe`'s siblings by hand — the backend's manager is the only
   installer surface; it pins, verifies, and records.
-- **Uninstalling YAAH removes only YAAH's junctions.** Interceptor itself is
-  left alone — an independently working app the user may keep. (The cleanup
-  surface today is `DELETE /api/interceptor/links`; the YAAH uninstaller does
-  not wire it in yet, so junctions can dangle after an uninstall until it
-  does. A dangling junction is harmless — the skills loader simply hides it —
-  and re-running the install flow relinks.)
+- **Uninstalling YAAH leaves Interceptor alone — junction removal is
+  intended, not yet wired.** The decision (ADR-0024): YAAH's uninstaller
+  removes its three junctions and nothing else; Interceptor stays an
+  independently working app. Current behavior: the uninstaller does not call
+  the cleanup surface yet (`DELETE /api/interceptor/links`), so junctions
+  currently **remain after uninstall** and dangle if Interceptor is later
+  removed. Dangling is harmless — the skills loader hides them — and the
+  install flow relinks on rerun.
 
 ## 3. Coaching the extension load (the one manual step)
 
