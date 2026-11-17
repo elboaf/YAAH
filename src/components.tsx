@@ -118,7 +118,13 @@ import {
   downloadModelServer,
   type ModelServerStatus,
   type ModelServerModel,
+  getInterceptorStatus,
+  installInterceptor,
+  deleteInterceptorLinks,
+  type InterceptorStatus,
+  type InterceptorInstallResult,
 } from './api'
+import { isWindowsPlatform } from './update'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
 import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
@@ -6746,6 +6752,179 @@ export function EmbeddingsSettingsCard({
   )
 }
 
+/** Pull the backend's actionable message out of a failed install call.
+ *  The api() layer throws `"<status>: <raw body>"`; the install route's
+ *  expected failures carry {detail: {code, message}} (hash mismatch,
+ *  download failure, installer failure, slot conflict) whose message is
+ *  the actionable text — prefer it, fall back to the thrown text. */
+function interceptorInstallErrorMessage(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  const m = /\d+: (.+)$/s.exec(raw)
+  if (m) {
+    try {
+      const detail = (JSON.parse(m[1]) as { detail?: { code?: string; message?: string } | string })
+        ?.detail
+      if (typeof detail === 'string') return detail
+      if (detail?.message) return `${detail.code ?? 'install failed'}: ${detail.message}`
+    } catch {
+      /* not the JSON error shape: show the raw text below */
+    }
+  }
+  return raw
+}
+
+/** Browser control card (issue #635, spec #630): the Windows-only surface
+ *  for the baked Interceptor capability. A status chip speaks the
+ *  manager's three-state vocabulary — "not installed" / "installed,
+ *  extension missing" (the remaining step is the user's: load the
+ *  unpacked extension in Chrome) / "ready" — and the Install button runs
+ *  the whole setup: download the pinned installer, verify its SHA-256,
+ *  run it silently, junction the skill packs. Disabled while in-flight;
+ *  on success the chip refreshes from the returned post-install status;
+ *  on failure the actionable error is shown and the button re-arms
+ *  (retry is a safe idempotent re-click). Hidden on Linux builds: the
+ *  Linux build omits the section entirely (null render). */
+export function BrowserControlSettingsCard() {
+  // Windows-only capability (the silent Inno Setup installer and the
+  // skill junctions are Windows facts): on other platforms the whole
+  // section does not exist — not even its status fetch. The guard sits
+  // BEFORE the hooks so a Linux mount never registers them (an effect
+  // after a null render would still run and poll); the platform cannot
+  // change mid-mount, so the hook set is stable per lifetime.
+  if (!isWindowsPlatform()) return null
+
+  const [status, setStatus] = useState<InterceptorStatus | null>(null)
+  const [statusFailed, setStatusFailed] = useState(false)
+  const [installState, setInstallState] = useState<'idle' | 'busy'>('idle')
+  const [installError, setInstallError] = useState<string | null>(null)
+  const [installNote, setInstallNote] = useState<string | null>(null)
+  // Status-request generation: bumped whenever the install flow is
+  // started, and captured by each status fetch. An answer from an older
+  // generation (the mount GET still in flight when the user already
+  // installed, or its error) is dropped instead of overwriting the
+  // freshly installed state.
+  const installGenerationRef = useRef(0)
+
+  const refresh = useCallback(() => {
+    const generation = installGenerationRef.current
+    getInterceptorStatus()
+      .then((s) => {
+        if (generation !== installGenerationRef.current) return
+        setStatus(s)
+        setStatusFailed(false)
+      })
+      .catch(() => {
+        if (generation !== installGenerationRef.current) return
+        /* status unavailable (backend down): say so instead of showing a
+           wrong state; the Install button stays available to retry */
+        setStatusFailed(true)
+      })
+  }, [])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  const install = async () => {
+    // Bump the generation BEFORE the request: a status GET still in
+    // flight from the mount (or its error) must not land over the
+    // install outcome once it resolves mid-install.
+    installGenerationRef.current += 1
+    setInstallState('busy')
+    setInstallError(null)
+    setInstallNote(null)
+    setStatusFailed(false)
+    try {
+      const result: InterceptorInstallResult = await installInterceptor()
+      // The route answers with the post-install status: refresh the chip
+      // from it directly (no second round-trip). The nested status has
+      // no `pinned` (only the GET attaches the manifest) -- keep the
+      // manifest already shown.
+      setStatus({ ...result.status, pinned: status?.pinned ?? null })
+      if (!result.did_install && result.note) setInstallNote(result.note)
+    } catch (e) {
+      // Failure keeps the actionable message and re-arms the button.
+      setInstallError(interceptorInstallErrorMessage(e))
+      // The mount GET was fenced at click time, so without a refill the
+      // chip would stay empty (reading as "not installed") for the whole
+      // mount -- including on an already-installed machine. Fetch fresh
+      // status for THIS generation; a newer install click bumps the
+      // generation again, so a late answer here can never bury a newer
+      // outcome.
+      refresh()
+    }
+    setInstallState('idle')
+  }
+
+  // The three-state chip vocabulary, from the manager's contract. An
+  // unrecognised combination reads as "not installed" (fail open toward
+  // the one state where pressing Install is always correct).
+  const installed = status?.installed === 'installed'
+  const ready = installed && status?.extension === 'ready'
+  const chip = ready
+    ? { label: 'ready', cls: 'text-emerald-400', dot: 'bg-emerald-500' }
+    : installed
+      ? { label: 'installed — extension missing', cls: 'text-amber-400', dot: 'bg-amber-500' }
+      : { label: 'not installed', cls: 'text-zinc-500', dot: 'bg-zinc-600' }
+
+  return (
+    <SettingsCard title="Browser control" className="col-span-4">
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <span
+            className={`inline-flex items-center gap-1.5 font-mono text-[10px] ${chip.cls}`}
+            role="status"
+            aria-label={`Browser control status: ${chip.label}`}
+          >
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${chip.dot}`} />
+            {chip.label}
+          </span>
+          {status?.version && (
+            <span className="font-mono text-[10px] text-zinc-600">Interceptor {status.version}</span>
+          )}
+          {installed && (
+            <span className="font-mono text-[10px] text-zinc-500">
+              skills linked {status?.skill_links_summary}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            disabled={installState === 'busy'}
+            onClick={install}
+          >
+            {installState === 'busy' ? 'Installing…' : 'Install'}
+          </button>
+          <span className="font-mono text-[10px] text-zinc-600">
+            {statusFailed
+              ? 'status unavailable — the backend may be restarting'
+              : status?.pinned
+                ? `pins Interceptor ${status.pinned.version} — downloaded at install time, SHA-256 verified before it runs`
+                : 'downloads the pinned Interceptor browser-only build and links its skills'}
+          </span>
+        </div>
+        {installNote && (
+          <p className="font-mono text-[10px] text-zinc-500" role="note">
+            {installNote}
+          </p>
+        )}
+        {installed && !ready && (
+          <p className="font-mono text-[10px] text-amber-400" role="status">
+            next step is yours: load the unpacked extension in Chrome — the agent can coach you
+            through it
+          </p>
+        )}
+        {installError && (
+          <p className="font-mono text-[10px] text-red-400" role="alert">
+            {installError}
+          </p>
+        )}
+      </div>
+    </SettingsCard>
+  )
+}
+
 /** Local model server card (issue #730): status row, start/stop/download
  *  actions, model picker. The server is OFF out of the box (ADR-0022);
  *  this card makes the OFF state visible but never changes it implicitly.
@@ -8784,6 +8963,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               <SettingsCard title="MCP tool servers" className="col-span-4">
               <McpSection />
             </SettingsCard>
+            {/* Windows-only (#635): the Linux build omits the section. */}
+            <BrowserControlSettingsCard />
               </>
             )}
           </div>
