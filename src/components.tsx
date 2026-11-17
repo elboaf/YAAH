@@ -6824,19 +6824,32 @@ export function BrowserControlSettingsCard() {
   // freshly installed state.
   const installGenerationRef = useRef(0)
 
+  // Two fences guard every status answer. installGenerationRef is bumped
+  // by the install flow, so an answer from before an install can never
+  // land over the installed state. fetchSeqRef is a per-refresh
+  // monotonic counter: overlapping refreshes (the 3s poll can start a
+  // request before the previous one finished) answer out of order on a
+  // slow backend, and only the newest-started request may write state --
+  // a slow "ready" landing after a fresh "extension missing" must not
+  // resurrect the old status and stop the poll on stale evidence.
+  const fetchSeqRef = useRef(0)
+
   // Returns the in-flight promise so the panel's poll effect can chain a
   // retry (a failed GET must not kill the poll -- the panel stays honest
   // with "live check unavailable" and tries again on the next tick).
   const refresh = useCallback((): Promise<void> => {
     const generation = installGenerationRef.current
+    const seq = ++fetchSeqRef.current
     const promise = getInterceptorStatus()
       .then((s) => {
         if (generation !== installGenerationRef.current) return
+        if (seq !== fetchSeqRef.current) return // superseded by a newer GET
         setStatus(s)
         setStatusFailed(false)
       })
       .catch(() => {
         if (generation !== installGenerationRef.current) return
+        if (seq !== fetchSeqRef.current) return // superseded by a newer GET
         /* status unavailable (backend down): say so instead of showing a
            wrong state; the Install button stays available to retry */
         setStatusFailed(true)
@@ -6844,13 +6857,24 @@ export function BrowserControlSettingsCard() {
     return promise
   }, [])
 
+  // The three-state chip vocabulary, from the manager's contract. An
+  // unrecognised combination reads as "not installed" (fail open toward
+  // the one state where pressing Install is always correct). Derived
+  // BEFORE the poll effect: the panel's active condition speaks this
+  // vocabulary (stop when the install disappears, pause when ready).
+  const installed = status?.installed === 'installed'
+  const ready = installed && status?.extension === 'ready'
+
   useEffect(() => {
     refresh()
   }, [refresh])
 
-  // The guided panel's live poll: runs ONLY while the panel is visible,
-  // through the same generation-fenced status GET the card already
-  // speaks. One poll fires the moment the panel opens (an extension may
+  // The guided panel's live poll: runs ONLY while the panel is visible
+  // AND the section still speaks the installed vocabulary -- if
+  // Interceptor is uninstalled externally while the panel is open, the
+  // render hides the panel (and the poll must stop with it, or an
+  // invisible interval would keep hitting the status endpoint every
+  // 3s). One poll fires the moment the panel opens (an extension may
   // have been loaded while an install ran), then every 3s -- and the
   // interval is dropped for good once a poll lands ready (actual
   // extension detection -- the bare throw on a failed GET -- is the only
@@ -6858,15 +6882,20 @@ export function BrowserControlSettingsCard() {
   // cannot). A failed GET (backend restarting) retries on the next tick,
   // so the poll self-heals instead of dying silently.
   useEffect(() => {
-    if (!panelOpen) return
+    if (!panelOpen || !installed || ready) return
     panelWasOpenRef.current = true
-    if (status?.extension === 'ready') return
     refresh().catch(() => {}) // failed GET retries on the next tick
     const timer = window.setInterval(() => {
       refresh().catch(() => {})
     }, 3000)
     return () => window.clearInterval(timer)
-  }, [panelOpen, status?.extension, refresh])
+  }, [panelOpen, installed, ready, refresh])
+
+  const chip = ready
+    ? { label: 'ready', cls: 'text-emerald-400', dot: 'bg-emerald-500' }
+    : installed
+      ? { label: 'installed — extension missing', cls: 'text-amber-400', dot: 'bg-amber-500' }
+      : { label: 'not installed', cls: 'text-zinc-500', dot: 'bg-zinc-600' }
 
   const install = async () => {
     // Bump the generation BEFORE the request: a status GET still in
@@ -6905,17 +6934,6 @@ export function BrowserControlSettingsCard() {
     }
     setInstallState('idle')
   }
-
-  // The three-state chip vocabulary, from the manager's contract. An
-  // unrecognised combination reads as "not installed" (fail open toward
-  // the one state where pressing Install is always correct).
-  const installed = status?.installed === 'installed'
-  const ready = installed && status?.extension === 'ready'
-  const chip = ready
-    ? { label: 'ready', cls: 'text-emerald-400', dot: 'bg-emerald-500' }
-    : installed
-      ? { label: 'installed — extension missing', cls: 'text-amber-400', dot: 'bg-amber-500' }
-      : { label: 'not installed', cls: 'text-zinc-500', dot: 'bg-zinc-600' }
 
   return (
     <SettingsCard title="Browser control" className="col-span-4">

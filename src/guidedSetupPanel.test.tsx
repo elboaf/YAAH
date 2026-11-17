@@ -292,14 +292,58 @@ describe('guided extension setup panel (#636)', () => {
     expect(getInterceptorStatus).toHaveBeenCalledTimes(1)
   })
 
-  it('a mount that lands ready without the panel ever opening shows no done line', async () => {
-    // Route: the extension was already loaded at mount. Nobody was
-    // guided (the panel never ran), so there is nothing to confirm --
-    // the chip alone speaks the ready state.
-    getInterceptorStatus.mockResolvedValue(ready)
+  it('an external uninstall while the panel is open stops the poll and hides the panel', async () => {
+    // CodeRabbit round 1: the render guard hides the panel when the
+    // status flips to "not installed" -- the interval must stop with it,
+    // or an invisible panel would keep hitting the endpoint every 3s.
+    getInterceptorStatus
+      .mockResolvedValueOnce(installedNoExtension) // mount GET
+      .mockResolvedValueOnce(installedNoExtension) // poll at panel open
+      .mockResolvedValue(notInstalled) // poll t+3s: uninstalled externally
     render(<BrowserControlSettingsCard />)
     await flush()
+    fireEvent.click(stepsButton())
+    await flush()
+    await flush(3000) // this poll reports the uninstall
+    expect(chip('not installed')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /setup steps/ })).toBeNull()
+    expect(screen.queryByTestId('guided-panel')).toBeNull()
+    const callsAfterUninstall = getInterceptorStatus.mock.calls.length
+    await flush(7000)
+    expect(getInterceptorStatus.mock.calls.length).toBe(callsAfterUninstall)
+  })
+
+  it('an out-of-order poll answer cannot bury a newer detection (seq fence)', async () => {
+    // CodeRabbit round 1: overlapping poll GETs can answer out of order
+    // on a slow backend. A slow "ready" landing after a fresh "extension
+    // missing" must not resurrect the old status (and restart polling):
+    // only the newest-started request may write state.
+    const pending: Array<(v: unknown) => void> = []
+    getInterceptorStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          pending.push(resolve)
+        }),
+    )
+    render(<BrowserControlSettingsCard />)
+    await flush()
+    pending.shift()!(installedNoExtension) // mount GET: installed, missing
+    await flush()
+    fireEvent.click(stepsButton()) // panel open: poll A starts
+    await flush()
+    await flush(3000) // poll B starts; both in flight
+    expect(pending.length).toBe(2)
+    const resolveA = pending.shift()!
+    const resolveB = pending.shift()!
+    resolveB(ready) // the newer request answers ready first
+    await flush()
     expect(chip('ready')).toBeTruthy()
-    expect(screen.queryByText(/done: browser control is ready/)).toBeNull()
+    resolveA(installedNoExtension) // the older request lands last
+    await flush()
+    // Superseded: the ready state stands and the poll stays stopped.
+    expect(chip('ready')).toBeTruthy()
+    const callsAtDetection = getInterceptorStatus.mock.calls.length
+    await flush(7000)
+    expect(getInterceptorStatus.mock.calls.length).toBe(callsAtDetection)
   })
 })
