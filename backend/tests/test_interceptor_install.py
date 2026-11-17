@@ -11,6 +11,7 @@ no test writes into the real ~/.yaah. The real-junction tests are gated on
 Windows (junctions are a Windows-only object); on non-Windows hosts they are
 skipped with a reason.
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -437,10 +438,9 @@ def _can_create_dir_symlink(tmp_path) -> bool:
     often denies it without admin/dev-mode, so tests skip, not fail)."""
     try:
         probe = tmp_path / "_probe_link"
-        os_symlink = __import__("os").symlink
         probe_dir = tmp_path / "_probe_dir"
         probe_dir.mkdir()
-        os_symlink(str(probe_dir), str(probe), target_is_directory=True)
+        os.symlink(str(probe_dir), str(probe), target_is_directory=True)
         probe.unlink()
         return True
     except (OSError, NotImplementedError, PermissionError):
@@ -448,8 +448,7 @@ def _can_create_dir_symlink(tmp_path) -> bool:
 
 
 def _make_symlink(link: Path, target: Path) -> None:
-    os_symlink = __import__("os").symlink
-    os_symlink(str(target), str(link), target_is_directory=True)
+    os.symlink(str(target), str(link), target_is_directory=True)
 
 
 def test_symlink_slot_gets_repaired(monkeypatch, manifest, tmp_path, fake_install):
