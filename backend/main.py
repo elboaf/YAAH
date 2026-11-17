@@ -1709,6 +1709,122 @@ async def api_refresh_skills():
     return {"skills": skills_registry.refresh()}
 
 
+# ---- Interceptor manager (browser control) — spec #630, tickets t1/t2/t3 ----
+
+from backend.agent import interceptor as _interceptor
+from backend.agent import interceptor_install as _interceptor_install
+
+# A refused install maps to an HTTP status by its message prefix, the one
+# seam interceptor_install keeps stable (its own unit tests match these).
+# Orders: (substring, code, http_status, actionable text).
+_INTERCEPTOR_ERROR_MAP: tuple[tuple[str, str, int, str], ...] = (
+    # A mismatched download is refused BEFORE anything runs: the pinned
+    # asset changed underneath us (or the fetch was corrupted) and the fix
+    # is a manifest bump upstream of this code -- never a retry loop.
+    (
+        "hash mismatch",
+        "hash_mismatch",
+        502,
+        "the downloaded installer did not match the pinned SHA-256; nothing "
+        "was run or installed. If the pinned release changed upstream, the "
+        "manifest needs a reviewable bump; otherwise retry later.",
+    ),
+    # curl --fail exited nonzero: the pinned asset was unreachable (404 on
+    # a yanked release, offline machine, proxy refusal).
+    (
+        "download failed",
+        "download_failed",
+        503,
+        "the pinned installer could not be downloaded. Check the network, "
+        "or the release may have been yanked upstream (then a manifest "
+        "bump is the fix).",
+    ),
+    # A pre-existing real directory (or any foreign entry) occupies a skill
+    # slot: YAAH never replaces it, and the current state stands.
+    (
+        "conflict at skill slot",
+        "slot_conflict",
+        409,
+        "a skill link slot is occupied by an entry YAAH did not create "
+        "(a real directory is never replaced). Remove or rename it if you "
+        "want YAAH to link that slot.",
+    ),
+    # The Inno Setup run finished but reported failure; its log is kept
+    # for inspection by the flow that raised.
+    (
+        "installer exited",
+        "installer_failed",
+        500,
+        "the Interceptor installer ran and reported failure. Its setup log "
+        "is kept at ~/.yaah/_installer_tmp/installer.log for inspection.",
+    ),
+)
+
+
+def _interceptor_http_error(exc: RuntimeError) -> HTTPException:
+    """Classify an install-flow RuntimeError into a typed HTTPException.
+
+    Unknown messages still get a 500 with the flow's own text (which is
+    human-readable) rather than a bare traceback.
+    """
+    message = str(exc)
+    for needle, code, http_status, actionable in _INTERCEPTOR_ERROR_MAP:
+        if needle in message:
+            return HTTPException(
+                status_code=http_status,
+                detail={
+                    "code": code,
+                    "message": f"{actionable} ({message})",
+                },
+            )
+    return HTTPException(
+        status_code=500,
+        detail={"code": "install_failed", "message": message},
+    )
+
+
+@app.get("/api/interceptor/status")
+async def api_interceptor_status():
+    """The manager's status contract, verbatim (spec #630 ticket t3-api).
+
+    Plus ``pinned``: the committed manifest (version, URL, SHA-256,
+    license) so the UI can show what an install *would* pin to and the
+    agent can answer "what is pinned" without reading the file. Thin
+    wrapper: no reshaping, no business logic -- the rest is the exact
+    vocabulary interceptor.status() defined (t1).
+    """
+    status = await asyncio.to_thread(_interceptor.status)
+    status["pinned"] = _interceptor.read_pinned_manifest()
+    return status
+
+
+@app.post("/api/interceptor/install")
+async def api_interceptor_install():
+    """Run the manager's install flow and answer with a clear outcome.
+
+    Returns the flow's result plus the post-install status (one shape the
+    UI renders directly). Expected failures never surface as a raw 500:
+    a refused hash, a failed download, and a failed installer run each
+    map to their own code and HTTP status.
+    """
+    try:
+        result = await asyncio.to_thread(_interceptor_install.install)
+    except RuntimeError as exc:
+        raise _interceptor_http_error(exc) from exc
+    status = await asyncio.to_thread(_interceptor.status)
+    return {**result, "status": status}
+
+
+@app.delete("/api/interceptor/links")
+async def api_interceptor_links_delete():
+    """Remove the skill junctions YAAH created -- nothing else.
+
+    Ownership is decided entirely by the manager's recorded manifest; the
+    response reports exactly what was removed and what was left in place.
+    """
+    return await asyncio.to_thread(_interceptor_install.remove_links)
+
+
 # ---- MCP tool servers ----
 
 from backend.agent import mcp_client as _mcp
