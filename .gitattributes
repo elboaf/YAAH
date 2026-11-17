@@ -3,3 +3,8 @@
 # Pin them to raw LF so core.autocrlf can never smudge a checkout
 # into a false drift failure on the Windows canonical host.
 backend/prompt_manifests/*.json -text
+# The validated interceptor-file-attach skill is byte-compared by
+# test_interceptor_bundled_skills.py (verbatim acceptance, #637).
+# Pin it so every platform checks out the exact CRLF bytes of the
+# session-validated draft, whatever core.autocrlf says.
+backend/bundled_skills/interceptor-file-attach/SKILL.md -text

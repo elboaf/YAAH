@@ -64,5 +64,17 @@
     "verdict": "A",
     "title": "11 markdown engineering skills; pr + retro bundled at v1.3.1 (#315)",
     "notes": "pr and retro vendored verbatim from tag v1.3.1 into bundled_skills/. Their 'Call the Skill tool with X' wording maps to YAAH's load_skill tool; retro's step-1 cross-reference (writing-for-agents) resolves in YAAH, pr has none. pr frontmatter also carries a metadata.credits block beyond YAAH's three honored fields - harmless (ignored by the parser), kept verbatim. Neither skill touches git topology. Remaining upstream skills (incl. implement-spec) not bundled: see #316."
+  },
+  {
+    "repo": "elboaf/Interceptor (in-repo draft)",
+    "verdict": "A",
+    "title": "1 skill: interceptor-file-attach (CLI playbook, authored + live-validated in-session)",
+    "notes": "Authored and validated end-to-end by the session that proved the Interceptor browser-only build (attach + send a 234 KB image through Google Chat); baked verbatim into bundled_skills/ by #637. Content is prompt-only (no scripts); teaches the chunked base64 ferry through eval --main + DataTransfer because the CLI has no upload verb. Carries the PowerShell 5.1 argv-mangling trap and the judge-by-parsed-output rule. Junctioned siblings (interceptor, interceptor-browser, interceptor-research) arrive separately, post-install, from the app - never bundled."
+  },
+  {
+    "repo": "elboaf/YAAH (authored in-repo)",
+    "verdict": "A",
+    "title": "1 skill: browser-control-setup (setup/verify/repair playbook for the Interceptor flow)",
+    "notes": "YAAH-authored for #637 against the shipped manager surface (status/install/links API, done-marker PATH augmentation, diagnose extension JSON contract). Model-invocable on purpose - the agent must be able to drive and coach setup, so no disable-model-invocation flag. Teaches status-first, install via the API only (never a hand-run installer), the coached Chrome extension load, health by command, and the five verified Windows gotchas (absolute path in fresh shells, --format png, PS 5.1 argv mangling, --any-tab authorization, exit codes unreliable)."
   }
 ]
