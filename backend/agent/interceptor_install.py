@@ -37,8 +37,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ctypes
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -139,12 +139,6 @@ def _run_installer(exe: Path, log: Path) -> subprocess.CompletedProcess:
 
 
 # --- junctions -----------------------------------------------------------
-
-# Bound once at import. GetFileAttributesW returns 0xFFFFFFFF
-# (INVALID_FILE_ATTRIBUTES) when the path does not exist; callers guard
-# with path.exists() before relying on the value.
-import ctypes
-from ctypes import wintypes
 
 # kernel32 is a Windows-only library; importing it on Linux/macOS (e.g. the
 # CI runners) would raise at module import and break the whole test
@@ -282,9 +276,12 @@ def install() -> dict:
       5. create the three skill junctions (idempotent, repair-only),
       6. write the done-marker (only on full success).
 
-    Idempotency: if the done-marker and the CLI are both present, install
-    is a no-op that reports current junction state and re-runs nothing --
-    the marker is not rewritten and the junctions are not repaired.
+    Idempotency: if the done-marker and the CLI are both present, nothing
+    is re-downloaded and the installer is not re-run -- but the junctions
+    are still walked by the repair-only pass, so a junction a user (or an
+    Interceptor update) deleted or re-pointed is repaired rather than
+    silently left dangling: the second click repairs/reports, never
+    corrupts.
     """
     manifest = interceptor.read_pinned_manifest()
     if not manifest:
@@ -299,15 +296,29 @@ def install() -> dict:
             "interceptor manifest missing url or sha256; refusing to install"
         )
 
-    # Idempotency: a fully-successful prior install is reported, not
-    # repeated. The junctions and marker already exist; the CLI is present.
+    # Idempotency: a fully-successful prior install is not re-run -- no
+    # download, no installer -- but the junctions ARE walked by the
+    # repair-only pass: a slot a user deleted or re-pointed since the last
+    # install gets repaired here, so a second click repairs/reports rather
+    # than corrupting. When the packs root is gone (CLI resolves via PATH
+    # but the install dir was wiped) there is nothing to repair against:
+    # report the current state instead of failing the re-click.
     if _marker_done() and _cli_installed():
+        try:
+            junctions = _create_junctions()
+            # Re-record so remove_links() can vouch for repaired/recreated
+            # links even after the ownership manifest itself was lost.
+            _record_live_link_ownership(junctions)
+            note = "already installed; junctions verified/repaired, nothing re-run"
+        except RuntimeError as exc:
+            junctions = _junction_targets()
+            note = f"already installed; nothing re-run (junctions not repaired: {exc})"
         return {
             "installed": True,
             "did_install": False,
-            "junctions": _junction_targets(),
+            "junctions": junctions,
             "marker": True,
-            "note": "already installed; nothing re-run",
+            "note": note,
         }
 
     # 1-3: fetch and verify BEFORE running anything. A mismatch aborts with
@@ -351,8 +362,9 @@ def install() -> dict:
     # mis-pointed junction is removed and recreated.
     junctions = _create_junctions()
     # Record ownership so remove_links() can later distinguish these junctions
-    # from foreign entries that merely share a slot name.
-    _record_junction_ownership(junctions)
+    # from foreign entries that merely share a slot name. Only live links are
+    # claimed -- a slot preserved as the user's real directory stays unclaimed.
+    _record_live_link_ownership(junctions)
 
     # 6: only now, on full success, record the done-marker.
     _write_done_marker()
@@ -390,9 +402,25 @@ def _installed_packs_root() -> Path | None:
 
 
 def _link_slot_targets() -> dict:
-    """name -> absolute target pack dir for each of router/browser/research."""
-    base = interceptor._skills_dir()
-    return {name: base / name for name in interceptor.LINK_SLOTS}
+    """name -> absolute target pack dir for each of router/browser/research.
+
+    Delegates to interceptor._link_slot_paths() (the manager's own slot map)
+    so the two modules share one definition of where the slots live.
+    """
+    return interceptor._link_slot_paths()
+
+
+def _remove_dir_link(path: Path) -> None:
+    """Remove a junction or directory symlink reliably.
+
+    os.rmdir handles Windows directory links (junctions and directory
+    symlinks); os.unlink is the POSIX path, where os.rmdir refuses a
+    symlink. Raises OSError only when both fail (locked/in-use entry).
+    """
+    try:
+        os.rmdir(str(path))
+    except OSError:
+        os.unlink(str(path))
 
 
 def _create_junctions() -> dict:
@@ -401,10 +429,11 @@ def _create_junctions() -> dict:
     Link slot name (router/browser/research) is paired with its matching
     installed pack directory name (interceptor/interceptor-browser/
     interceptor-research) by shared order in interceptor.LINK_SLOTS and
-    interceptor._INTERCEPTOR_PACK_NAMES. A pre-existing junction/symlink/foreign
-    link at a slot is removed and recreated to point at the correct pack; a
-    pre-existing *real* directory is never replaced (it is reported as the
-    slot's current state).
+    interceptor._INTERCEPTOR_PACK_NAMES. A junction or directory symlink
+    already pointing at the correct pack is left untouched (no delete +
+    recreate churn on re-run); a mis-pointed or dangling one is replaced;
+    a pre-existing *real* directory is never replaced (it is reported as
+    the slot's current state).
     """
     root = _installed_packs_root()
     if root is None:
@@ -422,27 +451,55 @@ def _create_junctions() -> dict:
             raise RuntimeError(
                 f"expected Interceptor pack directory missing: {target_dir}"
             )
+        expected = str(target_dir.resolve())
         link_path = _link_slot_targets()[name]
-        if link_path.is_dir() and not _is_junction(link_path):
+        if link_path.is_dir() and not _is_junction(link_path) and not link_path.is_symlink():
             # A pre-existing real directory at the slot is never replaced.
+            # Directory symlinks are NOT this case: is_dir() follows them,
+            # and they are repairable links, so they fall through below.
             targets[name] = str(link_path.resolve())
             continue
-        # Remove only a recognized junction or symlink so we can recreate it
-        # pointing at the correct pack. A regular file (or any other entry) is
-        # left in place and reported as a conflict rather than deleted.
+        # Skip delete+recreate churn when the link already points at the
+        # expected pack (the common every-rerun case).
+        if (_is_junction(link_path) or link_path.is_symlink()) and _owns_entry(
+            link_path, expected
+        ):
+            targets[name] = expected
+            continue
+        # Remove a recognized junction or symlink so we can recreate it
+        # pointing at the correct pack. A regular file (or any other entry)
+        # is left in place and reported as a conflict rather than deleted.
+        old_target: str | None = None
         if _is_junction(link_path) or link_path.is_symlink():
             try:
-                link_path.unlink()
+                # The raw stored target (os.readlink works for junctions and
+                # directory symlinks) so a failed replacement can restore it.
+                old_target = os.readlink(str(link_path))
             except OSError:
-                shutil.rmtree(link_path, ignore_errors=True)
+                old_target = None
+            try:
+                _remove_dir_link(link_path)
+            except OSError:
+                raise RuntimeError(
+                    f"could not remove existing link at slot {link_path}; "
+                    "leaving it in place rather than replacing it"
+                ) from None
         elif os.path.lexists(str(link_path)):
             # A real entry that is neither junction nor symlink: preserve it.
             raise RuntimeError(f"conflict at skill slot {link_path}")
         # Ensure the parent dir exists so _create_junction never runs against
         # a missing parent, which would otherwise fail the whole install.
         link_path.parent.mkdir(parents=True, exist_ok=True)
-        _create_junction(str(target_dir.resolve()), link_path)
-        targets[name] = str(target_dir.resolve())
+        try:
+            _create_junction(expected, link_path)
+        except RuntimeError:
+            # A failed replacement must not leave a previously-working slot
+            # empty: restore the link exactly as it was (worst case still
+            # mis-pointed, never missing), then surface the original error.
+            if old_target and not os.path.lexists(str(link_path)):
+                _create_junction(old_target, link_path)
+            raise
+        targets[name] = expected
     return targets
 
 
@@ -459,9 +516,10 @@ def _link_exists(link_path: Path) -> bool:
 # consults it so it removes a configured entry only when that entry still
 # points at the same target: a junction that someone re-pointed, or a real
 # directory that merely sits at a slot, is never removed on the strength of
-# its type alone. A missing/corrupt manifest is treated as "no record" and
-# falls back to type-based removal so an uninstall with no manifest still
-# cleans up the junctions it would otherwise leave.
+# its type alone. A missing/corrupt manifest is treated as "no record":
+# YAAH cannot prove a link is its own, so nothing is removed -- the ticket
+# says "unlinks exactly what YAAH created -- nothing else", and a link of
+# unknown ownership is not provably YAAH's.
 def _ownership_manifest_path() -> Path:
     """Path of the ownership manifest, derived from the current
     ``_INSTALL_TMP`` so it tracks a monkeypatched temp dir in tests."""
@@ -485,12 +543,28 @@ def _record_junction_ownership(targets: dict) -> None:
     )
 
 
+def _record_live_link_ownership(junctions: dict) -> None:
+    """Record ownership for slots whose CURRENT entry is a live link.
+
+    junctions maps slot -> resolved target as reported by _create_junctions,
+    which also reports preserved user real-directories; those are not links
+    and stay unclaimed -- only what is actually a junction/symlink on disk
+    right now is recorded, so remove_links() vouches only for links.
+    """
+    slot_paths = _link_slot_targets()
+    live = {
+        name: target
+        for name, target in junctions.items()
+        if _is_junction(slot_paths[name]) or slot_paths[name].is_symlink()
+    }
+    _record_junction_ownership(live)
+
+
 def _read_junction_ownership() -> dict:
     """The name -> target recorded by the last successful install, or {}."""
     manifest = _ownership_manifest_path()
     if not manifest.is_file():
         return {}
-    import json
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -522,33 +596,42 @@ def _junction_targets() -> dict:
     return targets
 
 
-def remove_links() -> list:
-    """Delete only the junctions YAAH created, leaving foreign links and
-    real directories untouched. Returns the paths it removed.
+def remove_links() -> dict:
+    """Delete only the junctions YAAH created, leaving everything else.
 
-    Ownership is decided by the manifest install() wrote, not by the entry's
-    type alone: a junction/symlink is removed only when it still matches the
-    target YAAH recorded. A real directory (which passes is_dir()/is_symlink())
-    is never removed. When no ownership record exists, fall back to removing
-    a junction/symlink by type so an uninstall without a manifest still
-    cleans up.
+    Ownership is decided by the manifest install() wrote, never by the
+    entry's type alone: a link is removed only when the ownership record
+    exists AND the entry still points at the recorded target. With no
+    ownership record (or a corrupt one) nothing is removed: the ticket
+    says "unlinks exactly what YAAH created -- nothing else", and without
+    the record YAAH cannot prove a link is its own -- a foreign junction
+    that merely shares a slot name is not YAAH's to delete. A real
+    directory at a slot is never removed in any case.
+
+    Returns {"removed": [paths], "skipped": {slot: reason}} so a caller
+    can surface exactly what was left in place and why.
     """
-    removed = []
+    removed: list[str] = []
+    skipped: dict[str, str] = {}
     ownership = _read_junction_ownership()
     for name, link_path in _link_slot_targets().items():
-        # A real directory passes is_dir() and is_symlink(), so the type
-        # check keeps it safe. The ownership record adds a second check for
-        # links: do not remove one someone has re-pointed elsewhere.
-        target = ownership.get(name)
         is_link = _is_junction(link_path) or link_path.is_symlink()
         if not is_link:
+            # A real directory (or an absent entry): never YAAH's to delete,
+            # whatever the ownership record says.
+            skipped[name] = "not a link (real directory or absent)"
             continue
-        if target is not None and not _owns_entry(link_path, target):
+        target = ownership.get(name)
+        if target is None:
+            skipped[name] = "no ownership record for this slot"
+            continue
+        if not _owns_entry(link_path, target):
             # Re-pointed or otherwise no longer YAAH's: leave it alone.
+            skipped[name] = "link exists but points elsewhere than recorded"
             continue
         try:
-            link_path.unlink()
+            _remove_dir_link(link_path)
             removed.append(str(link_path))
         except OSError:
-            continue
-    return removed
+            skipped[name] = "delete failed (entry is locked or in use)"
+    return {"removed": removed, "skipped": skipped}
