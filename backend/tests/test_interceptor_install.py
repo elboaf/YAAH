@@ -322,3 +322,11 @@ def test_remove_links_deletes_junctions_only(monkeypatch, manifest, tmp_path, fa
     assert not router.exists(), "junction still exists"
     assert real_target.is_dir(), "junction target (a real dir) was removed"
     assert browser.is_dir(), "real directory slot was removed"
+
+
+def test_ownership_manifest_round_trip_windows_path():
+    """json.dumps escapes Windows backslashes so _read_junction_ownership()
+    restores the exact target the round trip wrote (the json finding)."""
+    win_target = r"C:\Program Files\Interceptor\packs"
+    inst._record_junction_ownership({"router": win_target})
+    assert inst._read_junction_ownership().get("router") == win_target

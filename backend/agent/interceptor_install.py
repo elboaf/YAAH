@@ -36,6 +36,7 @@ installer. Nothing here calls the network or runs a process directly.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -171,6 +172,11 @@ def _get_kernel32():
 # itself; a plain directory does not -- the only reliable way to tell the
 # two apart on Windows (is_dir()/is_symlink() agree for both).
 _JUNCTION_ATTRIBUTE = 0x400
+# The I/O system reparse tag for a directory junction (a mount point).
+# Other reparse points -- for example cloud-synchronized placeholders from
+# OneDrive/Files On-Demand -- share _JUNCTION_ATTRIBUTE but carry a different
+# tag, so the tag is required to avoid mistaking them for a junction.
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 
 
 def _is_junction(path: Path) -> bool:
@@ -196,7 +202,17 @@ def _is_junction(path: Path) -> bool:
         attr = get_attrs(str(path))
     except OSError:
         return False
-    return attr != 0xFFFFFFFF and bool(attr & _JUNCTION_ATTRIBUTE)
+    if not (attr != 0xFFFFFFFF and bool(attr & _JUNCTION_ATTRIBUTE)):
+        return False
+    # The attribute is shared by other reparse points (cloud placeholders,
+    # etc.), so require the mount-point reparse tag too. Only a junction has
+    # IO_REPARSE_TAG_MOUNT_POINT. lstat does not follow the entry, so a
+    # dangling junction still yields the tag; st_reparse_tag is Windows-only,
+    # and a non-Windows host never reaches here (kernel32 is absent).
+    try:
+        return os.lstat(str(path)).st_reparse_tag == _IO_REPARSE_TAG_MOUNT_POINT
+    except OSError:
+        return False
 
 
 def _create_junction(target_dir: str, link_path: Path) -> None:
@@ -461,7 +477,10 @@ def _record_junction_ownership(targets: dict) -> None:
         return
     _INSTALL_TMP.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
-        "{\n" + ",\n".join(f'  "{name}": "{target}"' for name, target in targets.items()) + "\n}\n",
+        json.dumps(
+            {name: target for name, target in targets.items()}, indent=2
+        )
+        + "\n",
         encoding="utf-8",
     )
 
