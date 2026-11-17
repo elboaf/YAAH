@@ -307,6 +307,28 @@ def extension_state() -> str:
     return "ready"
 
 
+def extension_dir() -> str | None:
+    """The unpacked browser-extension folder Chrome must load, or None.
+
+    Ticket t6-guided-panel (#636): the guided panel needs the exact folder
+    path for Chrome's "Load unpacked" step. The browser-only Inno Setup
+    install lays the extension down beside the CLI (``<install
+    dir>\\extension``, a manifest-keyed unpacked extension -- its ID
+    derives from the manifest key, so YAAH never copies or rewrites it).
+    The dir is reported when it holds a loadable manifest
+    (``extension\\manifest.json``); anything else (Interceptor absent,
+    external uninstall, a stray file) reads as None -- the panel shows no
+    path rather than a wrong one. Same documented candidates the CLI
+    lookup and path_prepend_dir() use; pure filesystem, never a
+    subprocess.
+    """
+    for candidate_dir in _INSTALL_DIR_CANDIDATES:
+        ext = Path(candidate_dir) / "extension" / "manifest.json"
+        if ext.is_file():
+            return str(Path(candidate_dir) / "extension")
+    return None
+
+
 def read_pinned_manifest() -> dict | None:
     """The committed pinned-installer manifest, or None when absent/invalid.
 

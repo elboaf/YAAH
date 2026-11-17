@@ -1798,12 +1798,18 @@ async def api_interceptor_status():
 
     Plus ``pinned``: the committed manifest (version, URL, SHA-256,
     license) so the UI can show what an install *would* pin to and the
-    agent can answer "what is pinned" without reading the file. Thin
-    wrapper: no reshaping, no business logic -- the rest is the exact
+    agent can answer "what is pinned" without reading the file. Plus
+    ``extension_path``: the unpacked-extension folder Chrome must load
+    (t6-guided-panel) -- derived from the same documented install-dir
+    candidates, None when there is no folder to point at. It rides on
+    the install POST's nested status too, so the guided panel has the
+    real folder immediately after install without a second round-trip.
+    Thin wrapper: no reshaping, no business logic -- the rest is the exact
     vocabulary interceptor.status() defined (t1).
     """
     status = await asyncio.to_thread(_interceptor.status)
     status["pinned"] = await asyncio.to_thread(_interceptor.read_pinned_manifest)
+    status["extension_path"] = await asyncio.to_thread(_interceptor.extension_dir)
     return status
 
 
@@ -1822,6 +1828,10 @@ async def api_interceptor_install():
     except RuntimeError as exc:
         raise _interceptor_http_error(exc) from exc
     status = await asyncio.to_thread(_interceptor.status)
+    # The guided panel (t6-guided-panel) needs the unpacked-extension
+    # folder right after install: without it the card has no path to
+    # offer until the next mount GET.
+    status["extension_path"] = await asyncio.to_thread(_interceptor.extension_dir)
     return {**result, "status": status}
 
 

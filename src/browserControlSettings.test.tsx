@@ -118,8 +118,9 @@ describe('Browser control settings card (#635)', () => {
     ).toBeTruthy()
     expect(screen.getByText(/skills linked 3\/3/)).toBeTruthy()
     expect(screen.getByText('Interceptor 2.1.6')).toBeTruthy()
-    // The remaining step is the user's: name it, never fake readiness.
-    expect(screen.getByText(/load the unpacked extension in Chrome/)).toBeTruthy()
+    // The remaining step is the user's: the guided panel's toggle names
+    // it, never faking readiness (t6 replaces the bare homework line).
+    expect(screen.getByRole('button', { name: /setup steps/ })).toBeTruthy()
   })
 
   it('renders the ready state with no extension homework line', async () => {
