@@ -219,6 +219,28 @@ describe('Browser control settings card (#635)', () => {
     expect(screen.getByText(/already installed; junctions verified\/repaired/)).toBeTruthy()
   })
 
+  it('refetches status after a failed install so the chip stays truthful', async () => {
+    // Mount GET: not installed. Install fails. The card must then fetch
+    // fresh status -- on an already-installed machine the chip comes
+    // back ready instead of staying at the stale pre-click state -- and
+    // the actionable error stays visible alongside it.
+    getInterceptorStatus.mockResolvedValueOnce(notInstalled).mockResolvedValue(ready)
+    installInterceptor.mockRejectedValue(
+      new Error(
+        '503: {"detail":{"code":"download_failed","message":"the pinned installer could not be downloaded. Check the network."}}',
+      ),
+    )
+    render(<BrowserControlSettingsCard />)
+    await screen.findByRole('status', { name: 'Browser control status: not installed' })
+    fireEvent.click(screen.getByRole('button', { name: 'Install' }))
+    await waitFor(() =>
+      expect(screen.getByRole('status', { name: 'Browser control status: ready' })).toBeTruthy(),
+    )
+    expect(getInterceptorStatus).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('alert')).toBeTruthy()
+    expect(screen.getByText(/could not be downloaded/)).toBeTruthy()
+  })
+
   it('survives a non-JSON error body by showing the raw text', async () => {
     installInterceptor.mockRejectedValue(new Error('500: <html>gateway timeout</html>'))
     render(<BrowserControlSettingsCard />)

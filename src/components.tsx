@@ -6845,6 +6845,13 @@ export function BrowserControlSettingsCard() {
     } catch (e) {
       // Failure keeps the actionable message and re-arms the button.
       setInstallError(interceptorInstallErrorMessage(e))
+      // The mount GET was fenced at click time, so without a refill the
+      // chip would stay empty (reading as "not installed") for the whole
+      // mount -- including on an already-installed machine. Fetch fresh
+      // status for THIS generation; a newer install click bumps the
+      // generation again, so a late answer here can never bury a newer
+      // outcome.
+      refresh()
     }
     setInstallState('idle')
   }
