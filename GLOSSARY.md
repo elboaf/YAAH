@@ -205,3 +205,21 @@ _Avoid_: "might be useful later"
 The short text the voice channel reads aloud for a completed model emission. The model authors it inside a `<say>` tag on its message; when the tag is missing or unusable, a heuristic (first/last sentence) fallback speaks instead. The briefing lives outside the conversation transcript — it is stripped from stored chat content, shipped on its own `say` wire event, and persisted on the row for reloads and export. The `spoken_line` normalization (numbers spelled out, markdown flattened, length cap) is a speak-time pass over the briefing; the raw model text is what persists.
 _Avoid_: conflating the spoken briefing with the chat transcript (it is never part of it); conflating the briefing with the `spoken_line` normalization output (one is authored content, the other a TTS rendering of it); "say message" (the briefing is not a message)
 The write-for-the-ear shaping (spoken numbers, letter-spelled acronyms, phonetic homographs) is Kokoro-family-only (#451): non-espeak voices get the engine-neutral pass and the written forms.
+
+### Browser control
+
+**Interceptor**:
+The third-party CLI (elboaf/Interceptor fork, browser-only build) that gives YAAH agents control of the user's real, signed-in Chrome/Brave/Edge session — open/read/act on background tabs, DOM and network reads, screenshots. Installed per-user by YAAH's pinned one-click flow (ADR-0024); shipped as a Settings → Automate section, never preinstalled. The agent drives it through the junctioned skill packs plus the baked `browser-control-setup` skill.
+_Avoid_: "browser automation tool" generically (the product name is load-bearing — skills and manifest reference it); treating it as part of YAAH (it is an independent app YAAH installs and leaves alone on uninstall)
+
+**Browser control**:
+The capability YAAH ships on demand: agent-driven control of the user's real browser session, delivered as the Settings → Automate section (status chip + Install button + guided panel). Windows-only; the Linux build omits the section. Has exactly three states: not installed / installed, extension missing / ready — partial setup (extension missing) is valid, not an error.
+_Avoid_: computer use (YAAH's separate, host-wide desktop-control surface — removed; browser control is scoped to the browser session only); assuming it works headless — it drives the user's real, signed-in session
+
+**Skill junction**:
+One of the three directory junctions YAAH creates post-install, linking `~/.yaah/skills` to Interceptor's installed skill packs (router / browser / research). Links, not copies — upstream updates flow through — idempotent, never overwriting a real directory, and never written into other agent runtimes' folders (`~/.claude`, `~/.agents`). Interceptor uninstalling externally dangles them; the skills loader then hides them naturally.
+_Avoid_: "adopted skills" (YAAH deliberately does not run `interceptor skills adopt` — that writes into other runtimes); copying pack files (junctions, so updates propagate)
+
+**Pinned installer manifest**:
+The committed `backend/agent/interceptor_manifest.json` recording the exact release asset URL + SHA-256 YAAH will download and silently run, plus the upstream version and the Elastic License 2.0 note. The only way what YAAH installs ever changes is a deliberate, reviewable one-line bump of this file — never a live refetch. Read fresh on every status call; a hash mismatch or 404 fails the install cleanly with no side effects.
+_Avoid_: "the pinned version" alone (the pin is URL + hash, not a version number); bumping the pin casually (it is the trust boundary — treat like a dependency-lock edit)
