@@ -1714,6 +1714,15 @@ async def api_refresh_skills():
 from backend.agent import interceptor as _interceptor
 from backend.agent import interceptor_install as _interceptor_install
 
+# Installs share one staging file (installer.exe): two concurrent POSTs
+# must not run the flow in parallel or one deletes/rewrites the file the
+# other is hashing -- and a verified-then-swapped file would run bytes
+# the hash never saw. Serialize at the route layer (the flow itself has
+# no concurrency control), like the model-server start route does; a
+# request that waited sees the done marker and takes the repair path.
+_interceptor_install_lock = asyncio.Lock()
+
+
 # A refused install maps to an HTTP status by its message prefix, the one
 # seam interceptor_install keeps stable (its own unit tests match these).
 # Orders: (substring, code, http_status, actionable text).
@@ -1794,7 +1803,7 @@ async def api_interceptor_status():
     vocabulary interceptor.status() defined (t1).
     """
     status = await asyncio.to_thread(_interceptor.status)
-    status["pinned"] = _interceptor.read_pinned_manifest()
+    status["pinned"] = await asyncio.to_thread(_interceptor.read_pinned_manifest)
     return status
 
 
@@ -1808,7 +1817,8 @@ async def api_interceptor_install():
     map to their own code and HTTP status.
     """
     try:
-        result = await asyncio.to_thread(_interceptor_install.install)
+        async with _interceptor_install_lock:
+            result = await asyncio.to_thread(_interceptor_install.install)
     except RuntimeError as exc:
         raise _interceptor_http_error(exc) from exc
     status = await asyncio.to_thread(_interceptor.status)

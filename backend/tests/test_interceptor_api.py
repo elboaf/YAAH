@@ -9,8 +9,12 @@ manager seams are faked exactly the way test_interceptor_install.py
 fakes them (patch the module attribute); all behavior behind the seam is
 owned by the manager modules' own unit tests.
 """
+import asyncio
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from backend.agent import config as cfgmod
 from backend.agent import interceptor
@@ -78,7 +82,11 @@ def _fake_manifest(monkeypatch) -> dict:
         "sha256": "cd" * 32,
         "license": "Elastic License 2.0",
     }
-    monkeypatch.setattr(interceptor, "read_pinned_manifest", lambda: dict(manifest))
+
+    def _read_pinned():
+        return dict(manifest)
+
+    monkeypatch.setattr(interceptor, "read_pinned_manifest", _read_pinned)
     return manifest
 
 
@@ -305,3 +313,82 @@ def test_delete_links_surfaces_skipped_entries_verbatim(client, monkeypatch):
     body = client.delete("/api/interceptor/links").json()
     # Verbatim: what was left in place and why, unreshaped.
     assert body == result
+
+
+# --- review fixes (#753 round one) ------------------------------------------
+
+# Two CodeRabbit findings: the manifest read rode the event loop, and
+# overlapping installs raced on the shared installer.exe staging file.
+
+
+async def test_status_manifest_read_offloads_to_a_thread(client, monkeypatch):
+    """The pinned-manifest read is sync filesystem work; the status route
+    polls fast, so it must not run on the event loop (same offload the
+    status call itself gets)."""
+    import asyncio as asyncio_mod
+
+    real_to_thread = asyncio_mod.to_thread
+    tracked: set[str] = set()
+
+    def _counting_to_thread(fn, *args, **kwargs):
+        tracked.add(getattr(fn, "__name__", str(fn)))
+        return real_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio_mod, "to_thread", _counting_to_thread)
+    _fake_status(monkeypatch)
+    _fake_manifest(monkeypatch)
+    r = client.get("/api/interceptor/status")
+    assert r.status_code == 200, r.text
+    # Both blocking reads went through to_thread: the status scan AND the
+    # manifest read, not just the first -- the set holds the exact
+    # callables the route dispatched. (Other app code may also appear in
+    # the set via the lifespan; that is outside this route's contract.)
+    assert {"_status", "_read_pinned"} <= tracked
+
+
+async def test_concurrent_installs_serialize_on_one_flow(client, monkeypatch):
+    """Two overlapping POSTs share the installer.exe staging path; the
+    route's lock must run install() one at a time. The first call blocks
+    on an Event the test controls, so the second request demonstrably
+    waits instead of interleaving."""
+    import backend.main as mainmod
+
+    gate = threading.Event()
+    started = threading.Event()
+    inside = {"now": False}
+    problems: list[str] = []
+
+    def _slow_install():
+        if inside["now"]:
+            problems.append("install() re-entered while another was still inside")
+        inside["now"] = True
+        started.set()
+        gate.wait(5)
+        inside["now"] = False
+        return {"installed": True, "did_install": True, "junctions": {}, "marker": True}
+
+    monkeypatch.setattr(inst, "install", _slow_install)
+    _fake_status(monkeypatch)
+    # A fresh lock: a lock left held by an earlier test must not wedge this.
+    fresh_lock = asyncio.Lock()
+    monkeypatch.setattr(mainmod, "_interceptor_install_lock", fresh_lock)
+
+    async def _post() -> int:
+        async with AsyncClient(
+            transport=ASGITransport(app=mainmod.app), base_url="http://test"
+        ) as c:
+            return (await c.post("/api/interceptor/install")).status_code
+
+    first = asyncio.ensure_future(_post())
+    await asyncio.to_thread(started.wait, 5)
+    second = asyncio.ensure_future(_post())
+    await asyncio.sleep(0.05)  # let the second request reach the route
+    # The second request is parked on the route's lock while the first
+    # flow is still inside install() -- waiting, not interleaving.
+    assert fresh_lock.locked()
+    assert inside["now"] is True
+    gate.set()
+    codes = await asyncio.gather(first, second)
+    assert codes == [200, 200]
+    assert inside["now"] is False
+    assert not problems, problems
