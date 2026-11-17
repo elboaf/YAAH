@@ -37,7 +37,7 @@ PowerShell 5.1 mangles large double-quoted native args (embedded `""` escaping e
 swallows the trailing `--tab/--any-tab` flags — the CLI then rejects with a confusing
 "group gate" error). Bash quotes argv honestly. 12/12 chunks landed via bash after 0/12 via PS.
 ```
-EXE="/c/Users/Administrator/AppData/Local/Programs/Interceptor/interceptor.exe"
+EXE="$LOCALAPPDATA/Programs/Interceptor/interceptor.exe"   # Git Bash expands %LOCALAPPDATA% as $LOCALAPPDATA; resolve to /c/Users/<you>/... if unset
 B64=$(cat payload.b64); CHUNK=28000; N=$(( (${#B64} + CHUNK - 1) / CHUNK ))
 "$EXE" eval --main "window.__upl='';'init'" --tab <id> --any-tab 2>/dev/null
 for ((i=0;i<N;i++)); do

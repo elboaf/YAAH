@@ -20,30 +20,34 @@ Ask YAAH's backend, not the CLI directly, so the answer reflects what YAAH
 knows (PATH augmentation, link ownership):
 
 ```
-GET http://127.0.0.1:8000/api/interceptor/status
+GET http://127.0.0.1:8765/api/interceptor/status
 ```
 
-The response is the whole picture:
+Desktop and dev runs bind 8765; a service deploy may override the port via
+`YAAH_API_PORT` — read it from the environment when set. The response is the
+whole picture:
 
 | Field | Reads as |
 |---|---|
-| `state` | `not installed` / `installed` / `installing` / `error` |
+| `installed` | `installed` / `not installed` (the CLI is found or not) |
 | `version` | dotted CLI version, or null |
-| `skills_linked` | `x/3` — junctions into `~/.yaah/skills` (router/browser/research) |
+| `skill_links_summary` | `x/3` — junctions into `~/.yaah/skills` (router/browser/research) |
 | `extension` | `ready` / `extension missing` |
 | `extension_path` | the folder Chrome must load (present when installed) |
 | `pinned` | the pinned-installer manifest: exact asset URL, SHA-256, license |
 
 Decision table:
 
-- `not installed` → the Install button (or POST install, step 2) does the whole
-  flow. Nothing exists yet — do not run `interceptor` commands.
-- `installed` + `extension missing` → the only remaining step is the user's
-  extension load (step 3). Do not reinstall.
-- `installed` + `ready` → done. Verify health (step 4) only if asked.
-- `skills_linked` under `3/3` after a successful install → the junctions are
-  broken or were removed; POST `/api/interceptor/links` relinks (idempotent,
-  YAAH-owned junctions only).
+- `installed` = `not installed` → the Install button (or POST install, step 2)
+  does the whole flow. Nothing exists yet — do not run `interceptor` commands.
+- `installed` + `extension` = `extension missing` → the only remaining step is
+  the user's extension load (step 3). Do not reinstall.
+- `installed` + `extension` = `ready` → done. Verify health (step 4) only if
+  asked.
+- `skill_links_summary` under `3/3` after a successful install → the junctions
+  are broken or were removed. There is no standalone relink route: POST the
+  install endpoint again (idempotent — it repairs the YAAH-owned junctions and
+  skips what is already correct), then check its returned status and `note`.
 
 Every status read is a fresh scan plus one CLI diagnosis subprocess — cheap,
 side-effect-free, and always current. Never cache a status answer across turns
@@ -56,7 +60,7 @@ control; the user asks (or clicks Settings → Automate → Browser control →
 Install) first. To run it for them, on request:
 
 ```
-POST http://127.0.0.1:8000/api/interceptor/install
+POST http://127.0.0.1:8765/api/interceptor/install
 ```
 
 One call does: fetch the pinned release asset → verify SHA-256 against the
