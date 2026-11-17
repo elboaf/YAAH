@@ -16,7 +16,7 @@ from backend.agent import skills as skill_registry
 # EXE line resolves the install dir from the current user's LOCALAPPDATA
 # (not the hard-coded Administrator profile), and the payload step carries
 # the Set-Content trailing-CRLF guidance.
-FILE_ATTACH_SHA256 = "3055422c830aa6b8890615621967f584df5601fbd3557bf6b725f87589092f0f"
+FILE_ATTACH_SHA256 = "d5bfce7d6f336503e952ecdb2823a80932ab3a4227f62d975fcbc5b25b22a1ad"
 
 
 def _bundled():

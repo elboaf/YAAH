@@ -29,7 +29,7 @@ No input? Some apps construct it lazily on paperclip-click — `act` the attach 
 
 ### 2. Prepare the payload (host side)
 - PowerShell GDI+ re-encode works fine for images: PNG → JPEG q90 took 2.5 MB → 234 KB.
-- Base64 it: `[Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) | Set-Content payload.b64`
+- Base64 it: `[Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) | Set-Content -NoNewline payload.b64`
 - Chunk it mentally at ~28,000 chars per command line (argv-safe).
 
 ### 3. Ferry the base64 into the page — **use Git Bash, NOT PowerShell 5.1**
@@ -46,12 +46,12 @@ for ((i=0;i<N;i++)); do
 done
 ```
 Verify the final reported length equals your base64 length before proceeding.
-If it is one or two over, PowerShell's `Set-Content` appended a trailing CRLF
-to payload.b64 (Git Bash's command substitution usually strips it; other bash
-environments keep the CR). Rebuild the payload with
-`[Convert]::ToBase64String(...) | Set-Content -NoNewline payload.b64`, or
-strip the trailing CR/LF in bash, before chunking — a literal CR inside the
-assembled JavaScript string breaks the attach.
+If the length is off (or a chunk errors), PowerShell's `Set-Content` without
+`-NoNewline` appended a trailing CRLF to payload.b64 — Git Bash's command
+substitution strips the LF but other bash environments keep the CR, and a
+literal CR inside the assembled JavaScript string breaks the attach. Rebuild
+the payload with the `-NoNewline` form above, or strip trailing CR/LF in
+bash, then re-chunk.
 
 ### 4. Assemble + attach via DataTransfer
 ```

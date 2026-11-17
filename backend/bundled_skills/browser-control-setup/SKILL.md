@@ -139,14 +139,18 @@ skills at all.
   directory there is preserved, not replaced — it may hold no Interceptor
   skills). Confirm all **three** packs are the real ones: refresh the index
   (`POST /api/skills/refresh`) and resolve `interceptor`, `interceptor-browser`,
-  AND `interceptor-research` through the load_skill tool (or read each pack's
-  SKILL.md under `~/.yaah/skills/`). Only then report healthy.
-- `interceptor status` — daemon mode, transport, link summary.
-- `interceptor diagnose extension --json` — `{"problems": [], "blocked": []}`
+  AND `interceptor-research` through the load_skill tool — successful
+  resolution, not a file check: a `SKILL.md` can sit in the folder yet carry
+  broken frontmatter the loader rejects. Only then report healthy.
+- `<cli from status> status` — daemon mode, transport, link summary (run by
+  the status response's absolute `cli` path, as in section 1: PATH lookup in
+  the agent shell needs YAAH's marker; the manager's lookup does not).
+- `<cli from status> diagnose extension --json` —
+  `{"problems": [], "blocked": []}`
   is the readiness contract (gaps name the exact gap: which profile is blocked,
   what permission is missing).
 
-For a real end-to-end check on request: `interceptor open <url>` →
+For a real end-to-end check on request: `<cli from status> open <url>` →
 `interceptor read` → `interceptor tab close` — one background tab, open/read/
 close, judged by parsed output.
 
