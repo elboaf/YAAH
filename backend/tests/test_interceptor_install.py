@@ -427,3 +427,170 @@ def test_ownership_manifest_round_trip_windows_path(monkeypatch, fake_install):
     win_target = r"C:\Program Files\Interceptor\packs"
     inst._record_junction_ownership({"router": win_target})
     assert inst._read_junction_ownership().get("router") == win_target
+
+
+# --- symlink-at-slot repair (CodeRabbit round 2) -------------------------
+
+
+def _can_create_dir_symlink(tmp_path) -> bool:
+    """True when this host allows creating a directory symlink (Windows
+    often denies it without admin/dev-mode, so tests skip, not fail)."""
+    try:
+        probe = tmp_path / "_probe_link"
+        os_symlink = __import__("os").symlink
+        probe_dir = tmp_path / "_probe_dir"
+        probe_dir.mkdir()
+        os_symlink(str(probe_dir), str(probe), target_is_directory=True)
+        probe.unlink()
+        return True
+    except (OSError, NotImplementedError, PermissionError):
+        return False
+
+
+def _make_symlink(link: Path, target: Path) -> None:
+    os_symlink = __import__("os").symlink
+    os_symlink(str(target), str(link), target_is_directory=True)
+
+
+def test_symlink_slot_gets_repaired(monkeypatch, manifest, tmp_path, fake_install):
+    """A directory SYMLINK at a slot is a repairable link, not a preserved
+    real directory: a mis-pointed one is replaced to point at the pack
+    (is_dir() follows symlinks, so the real-dir guard must exclude them)."""
+    if sys.platform != "win32":
+        pytest.skip("junctions require Windows")
+    if not _can_create_dir_symlink(tmp_path):
+        pytest.skip("no symlink privilege on this host")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+
+    packs = tmp_path / "Programs" / "Interceptor" / "skills"
+    for name in ("interceptor", "interceptor-browser", "interceptor-research"):
+        (packs / name).mkdir(parents=True)
+    monkeypatch.setattr(
+        interceptor, "_INSTALL_DIR_CANDIDATES", (str(packs.parent),)
+    )
+
+    # router: correct junction (untouched); browser: MIS-POINTED symlink
+    # (must be replaced); research: real dir (must be preserved).
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    router = skills / "router"
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         f'New-Item -ItemType Junction -Path {str(router)!r} -Target {str(packs / "interceptor")!r}'],
+        check=True, timeout=30,
+    )
+    _make_symlink(skills / "browser", elsewhere)
+    (skills / "research").mkdir()
+
+    junctions = inst._create_junctions()
+
+    assert inst._is_junction(router), "correct junction should be left alone"
+    browser_link = skills / "browser"
+    assert inst._is_junction(browser_link), "mis-pointed symlink not replaced"
+    assert browser_link.resolve() == (packs / "interceptor-browser").resolve()
+    assert (skills / "research").is_dir() and not inst._is_junction(skills / "research")
+    assert junctions["browser"] == str((packs / "interceptor-browser").resolve())
+
+
+def test_rerun_reclaims_ownership_after_manifest_wiped(
+    monkeypatch, manifest, tmp_path, fake_install
+):
+    """Rerun with marker + CLI present but the ownership manifest gone:
+    the repair pass re-records ownership so remove_links() can vouch for
+    the links again."""
+    if sys.platform != "win32":
+        pytest.skip("junctions require Windows")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+
+    packs = tmp_path / "Programs" / "Interceptor" / "skills"
+    for name in ("interceptor", "interceptor-browser", "interceptor-research"):
+        (packs / name).mkdir(parents=True)
+    monkeypatch.setattr(
+        interceptor, "_INSTALL_DIR_CANDIDATES", (str(packs.parent),)
+    )
+    _install_cli(monkeypatch, exists=True)
+    (fake_install / "interceptor_install_done.txt").write_text("done", encoding="utf-8")
+
+    # First pass creates the junctions; wipe the ownership manifest;
+    # rerun must re-record it (this host cannot create symlinks, so
+    # junctions cover all three slots -- the manifest-wipe case holds).
+    def _noop_download(_url):
+        raise AssertionError("download must not run on rerun")
+
+    monkeypatch.setattr(inst, "_download_asset", _noop_download)
+    first = inst.install()  # junctions created, ownership recorded
+    assert first["did_install"] is False
+    inst._record_junction_ownership({})  # simulate the manifest being lost
+
+    res = inst.install()
+
+    assert "repaired" in res["note"]
+    assert inst._read_junction_ownership(), "ownership manifest not restored"
+    for name in interceptor.LINK_SLOTS:
+        assert (skills / name).is_dir()
+
+
+def test_preserved_real_dir_stays_unclaimed(monkeypatch, manifest, tmp_path, fake_install):
+    """A slot preserved as the user's real directory is never recorded as
+    YAAH-owned, so remove_links() can never delete the user's folder."""
+    if sys.platform != "win32":
+        pytest.skip("junctions require Windows")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+
+    packs = tmp_path / "Programs" / "Interceptor" / "skills"
+    for name in ("interceptor", "interceptor-browser", "interceptor-research"):
+        (packs / name).mkdir(parents=True)
+    monkeypatch.setattr(
+        interceptor, "_INSTALL_DIR_CANDIDATES", (str(packs.parent),)
+    )
+    _install_cli(monkeypatch, exists=True)
+    (fake_install / "interceptor_install_done.txt").write_text("done", encoding="utf-8")
+    (skills / "research").mkdir()  # the user's own dir at the slot
+
+    inst.install()
+
+    ownership = inst._read_junction_ownership()
+    assert "research" not in ownership, "user's real dir was claimed as YAAH's"
+    assert "router" in ownership and "browser" in ownership
+
+
+def test_symlink_slot_repair_via_seam(monkeypatch, manifest, tmp_path, fake_install):
+    """Same repair path as test_symlink_slot_gets_repaired, but with the
+    powershell leaf faked so it runs wherever directory symlinks are
+    creatable (Linux CI included): a mis-pointed dir symlink at a slot must
+    be removed and the slot recreated, never preserved as a real dir."""
+    if sys.platform == "win32" and not _can_create_dir_symlink(tmp_path):
+        pytest.skip("no symlink privilege on this host")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+
+    packs = tmp_path / "Programs" / "Interceptor" / "skills"
+    for name in ("interceptor", "interceptor-browser", "interceptor-research"):
+        (packs / name).mkdir(parents=True)
+    monkeypatch.setattr(
+        interceptor, "_INSTALL_DIR_CANDIDATES", (str(packs.parent),)
+    )
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    browser = skills / "browser"
+    _make_symlink(browser, elsewhere)  # mis-pointed dir symlink at the slot
+
+    created = []
+    monkeypatch.setattr(
+        inst, "_create_junction",
+        lambda target, link: created.append(str(link)),
+    )
+
+    junctions = inst._create_junctions()
+
+    assert not os.path.lexists(str(browser)), "mis-pointed symlink survived"
+    assert str(browser) in created, "slot was not recreated via the leaf"
+    assert junctions["browser"] == str((packs / "interceptor-browser").resolve())
