@@ -137,11 +137,14 @@ skills at all.
   links + `ready` extension is *healthy-looking*; `3/3` alone is not proof
   (the summary counts any real directory in a slot, and a pre-existing user
   directory there is preserved, not replaced — it may hold no Interceptor
-  skills). Confirm all **three** packs are the real ones: refresh the index
-  (`POST /api/skills/refresh`) and resolve `interceptor`, `interceptor-browser`,
-  AND `interceptor-research` through the load_skill tool — successful
-  resolution, not a file check: a `SKILL.md` can sit in the folder yet carry
-  broken frontmatter the loader rejects. Only then report healthy.
+  skills). Confirm all **three** packs are the real ones, by origin not just
+  by name: refresh the index (`POST /api/skills/refresh`), resolve
+  `interceptor`, `interceptor-browser`, AND `interceptor-research` through
+  the load_skill tool, and check each resolved skill's **folder path** sits
+  in `~/.yaah/skills` as a junction into the installed packs — the loader
+  indexes any valid skill by frontmatter name and keeps the first
+  duplicate, so a same-named user skill elsewhere can shadow a missing pack.
+  Only then report healthy.
 - `<cli from status> status` — daemon mode, transport, link summary (run by
   the status response's absolute `cli` path, as in section 1: PATH lookup in
   the agent shell needs YAAH's marker; the manager's lookup does not).
@@ -151,8 +154,8 @@ skills at all.
   what permission is missing).
 
 For a real end-to-end check on request: `<cli from status> open <url>` →
-`interceptor read` → `interceptor tab close` — one background tab, open/read/
-close, judged by parsed output.
+`<cli from status> read` → `<cli from status> tab close` — one background tab,
+open/read/close, judged by parsed output.
 
 ## 5. Verified Windows gotchas
 

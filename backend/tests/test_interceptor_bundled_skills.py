@@ -9,14 +9,16 @@ import json
 
 from backend.agent import skills as skill_registry
 
-# The validated draft this ticket bakes (byte-identity is the point of the
-# "verbatim" acceptance criterion; the session-authored file never lands in
-# the repo, so the hash pins the exact baked content instead). Deviations
-# from the raw draft, each from a CodeRabbit round on #637: the recipe's
-# EXE line resolves the install dir from the current user's LOCALAPPDATA
-# (not the hard-coded Administrator profile), and the payload step carries
-# the Set-Content trailing-CRLF guidance.
-FILE_ATTACH_SHA256 = "d5bfce7d6f336503e952ecdb2823a80932ab3a4227f62d975fcbc5b25b22a1ad"
+# The validated draft ships verbatim: the SKILL.md's bytes up to the
+# "YAAH packaging addendum" heading are byte-identical to the
+# session-authored, live-validated draft (the session-authored file
+# never lands in the repo, so this prefix hash pins it). The addendum
+# after that marker carries environment adaptations CodeRabbit's
+# rounds on #637 asked for (portable CLI path, -NoNewline payload
+# build) WITHOUT touching the validated recipe itself.
+FILE_ATTACH_VERBATIM_SHA256 = (
+    "e6e40b4554435e69966a99525bcb6bc330e4583b5e6116b7ace6a445f2e5dc6f"
+)
 
 
 def _bundled():
@@ -25,13 +27,28 @@ def _bundled():
     return src
 
 
+ADDENDUM_MARKER = "## YAAH packaging addendum"
+
+
 def test_interceptor_file_attach_bundled_verbatim():
     """The session-authored, live-validated playbook ships byte-exact (its
-    CRLF line endings are part of the validated artifact)."""
-    raw = (_bundled() / "interceptor-file-attach" / "SKILL.md").read_bytes()
+    CRLF line endings are part of the validated artifact); environment
+    adaptations live in an addendum after the validated body, never
+    inside it."""
     import hashlib
 
-    assert hashlib.sha256(raw).hexdigest() == FILE_ATTACH_SHA256
+    raw = (_bundled() / "interceptor-file-attach" / "SKILL.md").read_bytes()
+    marker = ADDENDUM_MARKER.encode("utf-8")
+    cut = raw.index(marker)
+    verbatim_prefix = raw[:cut]
+    assert (
+        hashlib.sha256(verbatim_prefix).hexdigest()
+        == FILE_ATTACH_VERBATIM_SHA256
+    ), "validated draft body was modified -- adaptations belong in the addendum"
+    # The addendum itself is present and carries the portability notes.
+    addendum = raw[cut:].decode("utf-8")
+    assert "-NoNewline" in addendum
+    assert "$LOCALAPPDATA" in addendum
     skill = skill_registry.parse_skill_md(
         _bundled() / "interceptor-file-attach" / "SKILL.md"
     )

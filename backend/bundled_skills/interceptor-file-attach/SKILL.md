@@ -29,7 +29,7 @@ No input? Some apps construct it lazily on paperclip-click — `act` the attach 
 
 ### 2. Prepare the payload (host side)
 - PowerShell GDI+ re-encode works fine for images: PNG → JPEG q90 took 2.5 MB → 234 KB.
-- Base64 it: `[Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) | Set-Content -NoNewline payload.b64`
+- Base64 it: `[Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) | Set-Content payload.b64`
 - Chunk it mentally at ~28,000 chars per command line (argv-safe).
 
 ### 3. Ferry the base64 into the page — **use Git Bash, NOT PowerShell 5.1**
@@ -37,7 +37,7 @@ PowerShell 5.1 mangles large double-quoted native args (embedded `""` escaping e
 swallows the trailing `--tab/--any-tab` flags — the CLI then rejects with a confusing
 "group gate" error). Bash quotes argv honestly. 12/12 chunks landed via bash after 0/12 via PS.
 ```
-EXE="$LOCALAPPDATA/Programs/Interceptor/interceptor.exe"   # Git Bash expands %LOCALAPPDATA% as $LOCALAPPDATA; resolve to /c/Users/<you>/... if unset
+EXE="/c/Users/Administrator/AppData/Local/Programs/Interceptor/interceptor.exe"
 B64=$(cat payload.b64); CHUNK=28000; N=$(( (${#B64} + CHUNK - 1) / CHUNK ))
 "$EXE" eval --main "window.__upl='';'init'" --tab <id> --any-tab 2>/dev/null
 for ((i=0;i<N;i++)); do
@@ -46,12 +46,6 @@ for ((i=0;i<N;i++)); do
 done
 ```
 Verify the final reported length equals your base64 length before proceeding.
-If the length is off (or a chunk errors), PowerShell's `Set-Content` without
-`-NoNewline` appended a trailing CRLF to payload.b64 — Git Bash's command
-substitution strips the LF but other bash environments keep the CR, and a
-literal CR inside the assembled JavaScript string breaks the attach. Rebuild
-the payload with the `-NoNewline` form above, or strip trailing CR/LF in
-bash, then re-chunk.
 
 ### 4. Assemble + attach via DataTransfer
 ```
@@ -79,3 +73,20 @@ error usually means SUCCESS. Confirm visually (screenshot) or by the UI showing 
    everywhere after the CSP-strip reload.
 7. **Exit codes on Windows are unreliable** (stderr progress banners → PowerShell NativeCommandError);
    judge by parsed output, never by `$?`.
+## YAAH packaging addendum (not part of the validated draft)
+
+The recipe above ships exactly as validated. Three environment adaptations apply on
+other machines:
+
+1. **Resolve the CLI, don't copy the path.** Step 3's `EXE` shows the machine that
+   validated this recipe (`/c/Users/Administrator/...`). The install dir is normally
+   `%LOCALAPPDATA%\Programs\Interceptor` (`EXE="$LOCALAPPDATA/Programs/Interceptor/interceptor.exe"`
+   in Git Bash) -- but the manager can find a CLI installed elsewhere: prefer the
+   absolute `cli` path from YAAH's `GET /api/interceptor/status` when available.
+2. **Build payload.b64 with `-NoNewline`.** PowerShell 5.1's `Set-Content` otherwise
+   appends a trailing CRLF; Git Bash's `$(cat)` strips the LF but other bash environments
+   keep the CR, and a literal CR inside the assembled JavaScript string breaks the attach:
+   `[Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) | Set-Content -NoNewline payload.b64`.
+   The length check in step 3 is the tripwire: any mismatch means a stray newline --
+   rebuild before chunking.
+3. Setup, status, install, and coaching live in the `browser-control-setup` skill.
