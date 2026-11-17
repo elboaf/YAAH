@@ -149,18 +149,24 @@ def test_hash_mismatch_refuses_before_execution(
 
 
 def test_download_failure_leaves_no_state(monkeypatch, manifest, fake_install):
-    """A download that writes nothing aborts before execution; no marker."""
+    """A download that writes partial bytes then fails aborts before
+    execution and cleans up the partial: no marker, no installer run."""
+    def _run(cmd, *a, **k):
+        idx = cmd.index("--output")
+        Path(cmd[idx + 1]).write_bytes(b"partial")
+        return subprocess.CompletedProcess(cmd, 22, stdout="", stderr="404")
 
-    def _dl(url):
-        raise RuntimeError("installer download failed (curl exit 22)")
-
-    monkeypatch.setattr(inst, "_download_asset", _dl)
+    monkeypatch.setattr(inst.subprocess, "run", _run)
     _fake_hash(monkeypatch)
     _fake_installer(monkeypatch)
     _junctions(monkeypatch)
 
     with pytest.raises(RuntimeError, match="download failed"):
         inst.install()
+    # The partial file _download_asset() wrote must be cleaned up, so this
+    # exercises the real cleanup path instead of a fake that raises first.
+    assert not (fake_install / "installer.exe").exists(), \
+        "_download_asset did not delete the partial download"
     assert not _has_marker(fake_install)
 
 

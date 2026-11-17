@@ -129,7 +129,7 @@ def _run_installer(exe: Path, log: Path) -> subprocess.CompletedProcess:
     """
     log.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.run(
-        [str(exe), *_INSTALL_SILENT_FLAGS, "/LOG", str(log)],
+        [str(exe), *_INSTALL_SILENT_FLAGS, f"/LOG={log}"],
         capture_output=True,
         text=True,
         timeout=600,
@@ -179,9 +179,13 @@ def _is_junction(path: Path) -> bool:
     Windows reports a junction with the same flags as a plain directory --
     is_dir() and is_symlink() are both True and False respectively for
     both -- so os.path cannot tell them apart. The reparse-point attribute
-    is the only discriminator. A missing path reads as not-a-junction.
+    is the only discriminator. A missing path reads as not-a-junction. The
+    existence check uses ``os.path.lexists`` (non-following metadata) rather
+    than ``path.exists`` so a *dangling* junction -- an entry whose target is
+    gone -- still counts as a junction and is not rejected by the caller on
+    the strength of its missing target.
     """
-    if not path.exists():
+    if not os.path.lexists(str(path)):
         return False
     get_attrs = _get_kernel32()
     if not get_attrs:
@@ -202,10 +206,25 @@ def _create_junction(target_dir: str, link_path: Path) -> None:
     junction (a directory reparse point) and needs no administrator
     privilege -- unlike os.symlink, which on this host makes a symlink and
     refuses with WinError 1314 without SeCreateSymbolicLinkPrivilege.
+
+    The paths are embedded as PowerShell single-quoted literals (embedded
+    quotes doubled) so a path containing characters such as ``$`` or a
+    single quote cannot break out of the command string.
     """
+
+    def _ps_literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
     proc = subprocess.run(
-        ["powershell", "-NoProfile", "-Command",
-         f"New-Item -ItemType Junction -Path {str(link_path)!r} -Target {str(target_dir)!r}"],
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "New-Item -ItemType Junction -Path "
+            + _ps_literal(str(link_path))
+            + " -Target "
+            + _ps_literal(str(target_dir)),
+        ],
         capture_output=True,
         text=True,
         timeout=60,
@@ -246,6 +265,10 @@ def install() -> dict:
       4. run the installer silently per-user (skip if already installed),
       5. create the three skill junctions (idempotent, repair-only),
       6. write the done-marker (only on full success).
+
+    Idempotency: if the done-marker and the CLI are both present, install
+    is a no-op that reports current junction state and re-runs nothing --
+    the marker is not rewritten and the junctions are not repaired.
     """
     manifest = interceptor.read_pinned_manifest()
     if not manifest:
@@ -284,29 +307,36 @@ def install() -> dict:
 
     # 4: run silently. Skip if the CLI is already present (re-run safety: a
     # partial previous run that created the CLI but failed at junctions must
-    # not re-run the installer).
+    # not re-run the installer). The downloaded installer is always removed
+    # afterwards -- whether the run skipped or succeeded -- so a crash between
+    # here and the marker write leaves no installer behind to be reused.
     did_run = False
     log = _INSTALL_TMP / "installer.log"
     if log.exists():
         log.unlink()
-    if _cli_installed():
-        log.write_text("already installed; installer run skipped", encoding="utf-8")
-    else:
-        proc = _run_installer(exe, log)
-        exe.unlink()  # temp installer never survives a clean install
-        if proc.returncode not in _INSTALL_SUCCESS_RC:
-            # Keep the log for the human to inspect on failure.
-            raise RuntimeError(
-                f"installer exited {proc.returncode}: "
-                f"{proc.stderr.strip() or proc.stdout.strip()}"
-            )
-        did_run = True
+    try:
+        if _cli_installed():
+            log.write_text("already installed; installer run skipped", encoding="utf-8")
+        else:
+            proc = _run_installer(exe, log)
+            if proc.returncode not in _INSTALL_SUCCESS_RC:
+                # Keep the log for the human to inspect on failure.
+                raise RuntimeError(
+                    f"installer exited {proc.returncode}: "
+                    f"{proc.stderr.strip() or proc.stdout.strip()}"
+                )
+            did_run = True
+    finally:
+        exe.unlink()
 
     # 5: create the three junctions. Each points at the matching installed
     # pack under Interceptor's skills root. Repair-only: a pre-existing real
     # directory (a user's own folder) is never replaced; a dangling or
     # mis-pointed junction is removed and recreated.
     junctions = _create_junctions()
+    # Record ownership so remove_links() can later distinguish these junctions
+    # from foreign entries that merely share a slot name.
+    _record_junction_ownership(junctions)
 
     # 6: only now, on full success, record the done-marker.
     _write_done_marker()
@@ -381,13 +411,20 @@ def _create_junctions() -> dict:
             # A pre-existing real directory at the slot is never replaced.
             targets[name] = str(link_path.resolve())
             continue
-        # Remove any pre-existing junction/symlink/foreign link so we create
-        # a clean one pointing at the correct pack.
-        if _is_junction(link_path) or link_path.is_symlink() or _link_exists(link_path):
+        # Remove only a recognized junction or symlink so we can recreate it
+        # pointing at the correct pack. A regular file (or any other entry) is
+        # left in place and reported as a conflict rather than deleted.
+        if _is_junction(link_path) or link_path.is_symlink():
             try:
                 link_path.unlink()
             except OSError:
                 shutil.rmtree(link_path, ignore_errors=True)
+        elif os.path.lexists(str(link_path)):
+            # A real entry that is neither junction nor symlink: preserve it.
+            raise RuntimeError(f"conflict at skill slot {link_path}")
+        # Ensure the parent dir exists so _create_junction never runs against
+        # a missing parent, which would otherwise fail the whole install.
+        link_path.parent.mkdir(parents=True, exist_ok=True)
         _create_junction(str(target_dir.resolve()), link_path)
         targets[name] = str(target_dir.resolve())
     return targets
@@ -397,6 +434,59 @@ def _link_exists(link_path: Path) -> bool:
     """True when an entry exists at link_path even when it is a dangling
     junction/symlink (is_dir/exists both return False for a dangling link)."""
     return link_path.is_symlink() or os.path.lexists(str(link_path))
+
+
+# --- ownership tracking ---------------------------------------------------
+
+# A JSON manifest of the junctions YAAH created, keyed by slot name, each
+# recorded with the absolute pack target YAAH pointed it at. remove_links()
+# consults it so it removes a configured entry only when that entry still
+# points at the same target: a junction that someone re-pointed, or a real
+# directory that merely sits at a slot, is never removed on the strength of
+# its type alone. A missing/corrupt manifest is treated as "no record" and
+# falls back to type-based removal so an uninstall with no manifest still
+# cleans up the junctions it would otherwise leave.
+def _ownership_manifest_path() -> Path:
+    """Path of the ownership manifest, derived from the current
+    ``_INSTALL_TMP`` so it tracks a monkeypatched temp dir in tests."""
+    return _INSTALL_TMP / "interceptor_junctions.json"
+
+
+def _record_junction_ownership(targets: dict) -> None:
+    """Persist name -> target for the junctions this install just created."""
+    manifest = _ownership_manifest_path()
+    if not targets:
+        if manifest.exists():
+            manifest.unlink()
+        return
+    _INSTALL_TMP.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        "{\n" + ",\n".join(f'  "{name}": "{target}"' for name, target in targets.items()) + "\n}\n",
+        encoding="utf-8",
+    )
+
+
+def _read_junction_ownership() -> dict:
+    """The name -> target recorded by the last successful install, or {}."""
+    manifest = _ownership_manifest_path()
+    if not manifest.is_file():
+        return {}
+    import json
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _owns_entry(link_path: Path, target: str) -> bool:
+    """True when the current entry at link_path still matches the target
+    YAAH recorded as its owner. A mismatched (re-pointed) or missing target
+    means the entry is no longer YAAH's, so remove_links() must leave it."""
+    try:
+        return link_path.resolve() == Path(target).resolve()
+    except OSError:
+        return False
 
 
 def _junction_targets() -> dict:
@@ -415,16 +505,31 @@ def _junction_targets() -> dict:
 
 def remove_links() -> list:
     """Delete only the junctions YAAH created, leaving foreign links and
-    real directories untouched. Returns the paths it removed."""
+    real directories untouched. Returns the paths it removed.
+
+    Ownership is decided by the manifest install() wrote, not by the entry's
+    type alone: a junction/symlink is removed only when it still matches the
+    target YAAH recorded. A real directory (which passes is_dir()/is_symlink())
+    is never removed. When no ownership record exists, fall back to removing
+    a junction/symlink by type so an uninstall without a manifest still
+    cleans up.
+    """
     removed = []
-    for link_path in _link_slot_targets().values():
-        # Only remove a junction/symlink; never a real directory. A real
-        # directory passes is_dir() and is_symlink(), so the _is_junction
-        # guard is what keeps it safe.
-        if _is_junction(link_path) or (link_path.is_symlink() and not link_path.is_dir()):
-            try:
-                link_path.unlink()
-                removed.append(str(link_path))
-            except OSError:
-                continue
+    ownership = _read_junction_ownership()
+    for name, link_path in _link_slot_targets().items():
+        # A real directory passes is_dir() and is_symlink(), so the type
+        # check keeps it safe. The ownership record adds a second check for
+        # links: do not remove one someone has re-pointed elsewhere.
+        target = ownership.get(name)
+        is_link = _is_junction(link_path) or link_path.is_symlink()
+        if not is_link:
+            continue
+        if target is not None and not _owns_entry(link_path, target):
+            # Re-pointed or otherwise no longer YAAH's: leave it alone.
+            continue
+        try:
+            link_path.unlink()
+            removed.append(str(link_path))
+        except OSError:
+            continue
     return removed
