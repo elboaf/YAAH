@@ -147,6 +147,12 @@ def test_start_running_tenant_is_idempotent(client, monkeypatch):
     c, mainmod = client
     fake = _FakeManager(port=58916)
     _patch_tenant(monkeypatch, mainmod, fake)
+    # ensure_server_binary runs BEFORE the running check in the route:
+    # stub it so the test never touches the network or the real install
+    # location on hosts without a pinned llama-server (CodeRabbit #760).
+    monkeypatch.setattr(
+        mainmod.modelserver, "ensure_server_binary", lambda *a, **kw: "stubbed"
+    )
     body = c.post(
         "/api/server/start", json={"task": "reranking"}
     ).json()
@@ -221,3 +227,41 @@ def test_lifespan_stops_every_tenant_on_shutdown(client, monkeypatch):
     # TestClient shutdown ran the lifespan tail: both tenants stopped.
     assert fakes["embedding"].stop_calls >= 1
     assert fakes["reranking"].stop_calls >= 1
+
+def test_start_rejects_model_from_wrong_task(client, monkeypatch):
+    """The API twin of the dropdown misroute (#760 CodeRabbit Major):
+    task=reranking with an embedding-only model must be refused before
+    any spawn — it would run --embeddings flags under the reranking
+    tenant (and vice versa)."""
+    c, mainmod = client
+    fake = _FakeManager()
+    _patch_tenant(monkeypatch, mainmod, fake)
+    monkeypatch.setattr(
+        mainmod.modelserver, "ensure_server_binary", lambda *a, **kw: "stubbed"
+    )
+    monkeypatch.setattr(
+        mainmod.modelserver,
+        "get_server_config",
+        lambda task="embedding": ("stubbed", ""),
+    )
+    body = c.post(
+        "/api/server/start",
+        json={"task": "reranking", "model": "qwen3-embedding-0.6b"},
+    ).json()
+    assert body["ok"] is False, body
+    assert "does not support task" in body["error"]
+    assert fake.start_calls == []
+
+
+def test_stop_rejects_falsy_task_instead_of_defaulting(client, monkeypatch):
+    """Strict task validation (#760 CodeRabbit): {"task": false} / "" /
+    0 / [] must be rejected, never defaulted to the embedding tenant —
+    a default here would stop a running server the caller never named."""
+    c, mainmod = client
+    fakes = {"embedding": _FakeManager(port=1), "reranking": _FakeManager(port=2)}
+    monkeypatch.setattr(mainmod.modelserver, "get_tenant", lambda task: fakes[task])
+    for bad in (False, "", 0, []):
+        body = c.post("/api/server/stop", json={"task": bad}).json()
+        assert body["ok"] is False, (bad, body)
+        assert "unknown task" in body["error"]
+    assert all(f.stop_calls == 0 for f in fakes.values())

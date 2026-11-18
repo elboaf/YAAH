@@ -105,14 +105,16 @@ async def lifespan(app: FastAPI):
     yield
     # Managed local model servers are OUR child processes: a clean app
     # shutdown must not orphan them (they would hold their ports until
-    # killed). Every tenant, not just embeddings (#760).
-    try:
-        from backend.agent import modelserver as _modelserver
+    # killed). Every tenant, not just embeddings (#760). Each stop is
+    # isolated (#760 CodeRabbit): one tenant's failure must not skip the
+    # next tenant's stop and leave it holding its port.
+    from backend.agent import modelserver as _modelserver
 
-        for _task in _modelserver.VALID_TASKS:
+    for _task in _modelserver.VALID_TASKS:
+        try:
             await _modelserver.get_tenant(_task).stop()
-    except Exception:  # noqa: BLE001 - shutdown is best-effort
-        pass
+        except Exception:  # noqa: BLE001 - shutdown is best-effort
+            log.warning("model-server shutdown: task %s failed to stop", _task, exc_info=True)
     await mcp_client.manager.shutdown()
     wake_mod.stop_wake_watcher()
     scheduler.stop_scheduler()
@@ -1143,16 +1145,20 @@ _server_download_progress = {}
 def _resolve_task(body: dict | None) -> tuple[str | None, str | None]:
     """Extract and validate the tenant task from a request body.
 
-    Returns (task, error): task is the validated tenant id ("embedding"
-    default) or None with a non-None error string on a bad value. The
-    reranking tenant is the second server (ADR-0023 §9: --embeddings and
-    --reranking flags are mutually exclusive, so each task owns a
-    process); #760 opened the server routes to it.
+    Strict validation (#760 CodeRabbit): an omitted task defaults to
+    "embedding"; any *supplied* value that is not an exact valid task id
+    is an error — never silently defaulted. Otherwise {"task": false} or
+    {"task": ""} on /api/server/stop would stop the embedding tenant
+    instead of being rejected. The reranking tenant is the second server
+    (ADR-0023 §9: --embeddings and --reranking flags are mutually
+    exclusive, so each task owns a process).
     """
-    task = (body or {}).get("task") or "embedding"
-    if task not in modelserver.VALID_TASKS:
-        return None, f"unknown task: {task} (valid: {', '.join(modelserver.VALID_TASKS)})"
-    return task, None
+    raw = (body or {}).get("task")
+    if raw is None:
+        return "embedding", None
+    if raw not in modelserver.VALID_TASKS:
+        return None, f"unknown task: {raw} (valid: {', '.join(modelserver.VALID_TASKS)})"
+    return raw, None
 
 
 @app.get("/api/server/status")
@@ -1252,9 +1258,22 @@ async def api_server_start(body: dict = None):
         if not target_model:
             target_model = modelserver.default_model(task)["id"]
 
+        # #760 (CodeRabbit): the API twin of the dropdown fix. find_model
+        # accepts any manifest model; launching it would run the task's
+        # flags under the wrong tenant — an embedding model inside the
+        # reranking tenant runs --embeddings there and vice versa. The
+        # task must be listed in the model's manifest entry.
         entry = modelserver.find_model(target_model)
         if not entry:
             return {"ok": False, "error": f"unknown model: {target_model}"}
+        if task not in entry.get("tasks", []):
+            return {
+                "ok": False,
+                "error": (
+                    f"model {target_model} does not support task "
+                    f"'{task}' (tasks: {entry.get('tasks')})"
+                ),
+            }
 
         # Download if needed
         if not modelserver.is_model_downloaded(entry):
