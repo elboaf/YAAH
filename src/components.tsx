@@ -109,13 +109,13 @@ import {
   dismissEmbeddingsRebuildProgress,
   type EmbeddingsStatus,
   type RebuildProgress,
-  getModelServerStatus,
+  getModelServerTaskStatus,
   getModelServerModels,
-  startModelServer,
-  stopModelServer,
-  setServerGpuOffload,
-  setServerGpuIndex,
-  downloadModelServer,
+  startModelServerTask,
+  stopModelServerTask,
+  setServerTaskGpuOffload,
+  setServerTaskGpuIndex,
+  downloadModelServerTask,
   type ModelServerStatus,
   type ModelServerModel,
   getInterceptorStatus,
@@ -7064,7 +7064,8 @@ export function BrowserControlSettingsCard() {
  *  actions, model picker. The server is OFF out of the box (ADR-0022);
  *  this card makes the OFF state visible but never changes it implicitly.
  *  Status refreshes on tab mount and after each action (no polling). */
-export function ModelServerSettingsCard() {
+export function ModelServerSettingsCard({ task = 'embedding' }: { task?: string }) {
+  const isEmbedding = task === 'embedding'
   const [status, setStatus] = useState<ModelServerStatus | null>(null)
   const [statusFailed, setStatusFailed] = useState(false)
   const [models, setModels] = useState<ModelServerModel[]>([])
@@ -7081,9 +7082,10 @@ export function ModelServerSettingsCard() {
   // refresh(): pull status once per lifecycle action and await it so a
   // stop()'s refresh can never arrive after start()'s and overwrite the
   // running status with stopped (the card must reflect the latest op).
+  // #760: status is per-tenant (each task is its own llama-server process).
   const refresh = async () => {
     try {
-      const s = await getModelServerStatus()
+      const s = await getModelServerTaskStatus(task)
       setStatus(s)
       setStatusFailed(false)
       if (typeof s.gpu_offload === 'boolean') {
@@ -7105,21 +7107,25 @@ export function ModelServerSettingsCard() {
     getModelServerModels()
       .then((m) => {
         if (!dead) {
-          setModels(m.models)
-          // Preselect the default embedding model
-          const defaultModel = m.models.find((x) => x.id === 'qwen3-embedding-0.6b')
+          // Only this task's models are startable here: the embedding
+          // tenant launching the reranker (or vice versa) runs the wrong
+          // llama-server flags under the wrong endpoint (#760).
+          const forTask = m.models.filter((x) => x.tasks.includes(task))
+          setModels(forTask)
+          const defaultModel =
+            forTask.find((x) => x.id === 'qwen3-embedding-0.6b') ?? forTask[0]
           if (defaultModel) setSelectedModel(defaultModel.id)
         }
       })
       .catch(() => {})
     return () => { dead = true }
-  }, [])
+  }, [task])
 
   const start = async (model?: string) => {
     setStartState('busy')
     setMessage(null)
     try {
-      const r = await startModelServer(model ?? selectedModel)
+      const r = await startModelServerTask(model ?? selectedModel, task)
       if (r.ok) {
         setMessage(`Server started on port ${r.port}`)
         setMessageOk(true)
@@ -7140,7 +7146,7 @@ export function ModelServerSettingsCard() {
     setStopState('busy')
     setMessage(null)
     try {
-      const r = await stopModelServer()
+      const r = await stopModelServerTask(task)
       if (r.ok) {
         setMessage('Server stopped')
         setMessageOk(true)
@@ -7173,7 +7179,7 @@ export function ModelServerSettingsCard() {
     setToggleBusy(true)
     setMessage(null)
     try {
-      const r = await setServerGpuOffload(enabled)
+      const r = await setServerTaskGpuOffload(enabled, task)
       if (r.ok) {
         // Reflect the saved value, not a hard-coded true.
         setGpuOffload(enabled)
@@ -7214,7 +7220,7 @@ export function ModelServerSettingsCard() {
     const runningModel = status?.model ?? selectedModel
     const restart = status?.running
     try {
-      const r = await setServerGpuIndex(index)
+      const r = await setServerTaskGpuIndex(index, task)
       if (r.ok) {
         if (restart) {
           setMessage('Restarting the server with the selected GPU…')
@@ -7245,7 +7251,7 @@ export function ModelServerSettingsCard() {
     setDownloadState('busy')
     setMessage(null)
     try {
-      const r = await downloadModelServer(selectedModel)
+      const r = await downloadModelServerTask(selectedModel, task)
       if (r.ok) {
         setMessage(r.message ?? 'Download complete')
         setMessageOk(true)
@@ -7275,7 +7281,10 @@ export function ModelServerSettingsCard() {
   }
 
   return (
-    <SettingsCard title="Local model server" className="col-span-4">
+    <SettingsCard
+      title={isEmbedding ? 'Local model server' : 'Reranker server'}
+      className="col-span-4"
+    >
       <div className="space-y-1.5">
         <div className="flex items-center gap-2">
           <span className={`font-mono text-[10px] ${statusColor}`} role="status">
@@ -7302,7 +7311,7 @@ export function ModelServerSettingsCard() {
           <select
             className="rounded   bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none"
             value={selectedModel}
-            aria-label="Model server model"
+            aria-label={isEmbedding ? 'Model server model' : 'Reranker model'}
             onChange={(e) => setSelectedModel(e.target.value)}
             disabled={status?.running === true}
           >
@@ -7380,7 +7389,7 @@ export function ModelServerSettingsCard() {
             <select
               className="rounded bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-100 focus:border-zinc-500 focus:outline-none"
               value={gpuIndex ?? 0}
-              aria-label="GPU for embeddings server"
+              aria-label={isEmbedding ? 'GPU for embeddings server' : 'GPU for reranker server'}
               onChange={(e) => handleGpuChange(Number(e.target.value))}
               disabled={toggleBusy || !status || statusFailed || startState === 'busy' || stopState === 'busy'}
             >
@@ -7393,11 +7402,22 @@ export function ModelServerSettingsCard() {
           </div>
         ) : null}
         <p className="font-mono text-[10px] text-zinc-600">
-          Bundled llama.cpp server for embeddings. Out-of-the-box state is OFF; nothing downloads or starts until you click Start.
+          {isEmbedding
+            ? 'Bundled llama.cpp server for embeddings. Out-of-the-box state is OFF; nothing downloads or starts until you click Start.'
+            : 'Bundled llama.cpp reranker: reorders search results after fusion. Optional — search works without it, and it fails open when it is off.'}
         </p>
       </div>
     </SettingsCard>
   )
+}
+
+/** #760: the reranking tenant's card — same lifecycle UI as the embedding
+ *  server, its own process, port, and GPU prefs (ADR-0023 §9: one task per
+ *  llama-server process). Reranking is a quality boost on fused search
+ *  results, not a build step: embeddings must run for every search; the
+ *  reranker only improves their ordering and search fails open without it. */
+export function RerankerServerSettingsCard() {
+  return <ModelServerSettingsCard task="reranking" />
 }
 
 /** Shared field chrome: raised fill, hairline border, blue focus border.
@@ -8404,6 +8424,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             {activeTab === 'connect' && (
               <>
               <ModelServerSettingsCard />
+              <RerankerServerSettingsCard />
               <EmbeddingsSettingsCard draft={embeddingsDraft} onChange={setEmbeddingsDraft} />
               <ImageGenSettingsCard imageGen={imageGen} onChange={setImageGen} />
               <SettingsCard title="Providers" className="col-span-4">

@@ -499,28 +499,61 @@ export interface ModelServerModel {
   tasks: string[]
 }
 export const getModelServerStatus = () => api<ModelServerStatus>('/api/server/status')
+// #760: per-tenant status for the multi-tenant server registry
+// ("embedding" | "reranking"; the no-arg default keeps old callers).
+export const getModelServerTaskStatus = (task: string) =>
+  api<ModelServerStatus>(`/api/server/status?task=${encodeURIComponent(task)}`)
 export const getModelServerModels = () => api<{ models: ModelServerModel[] }>('/api/server/models')
 export const startModelServer = (model?: string) =>
   api<{ ok: boolean; port?: number; error?: string }>('/api/server/start', {
     method: 'POST',
     body: JSON.stringify({ model }),
   })
+// #760: start a specific tenant; task defaults to "embedding" server-side.
+export const startModelServerTask = (model: string | undefined, task: string) =>
+  api<{ ok: boolean; port?: number; error?: string }>('/api/server/start', {
+    method: 'POST',
+    body: JSON.stringify({ model, task }),
+  })
 export const stopModelServer = () =>
   api<{ ok: boolean }>('/api/server/stop', { method: 'POST' })
+export const stopModelServerTask = (task: string) =>
+  api<{ ok: boolean }>('/api/server/stop', {
+    method: 'POST',
+    body: JSON.stringify({ task }),
+  })
 export const setServerGpuOffload = (gpu_offload: boolean) =>
   api<{ ok: boolean; gpu_offload?: boolean; error?: string }>('/api/server/gpu-offload', {
     method: 'POST',
     body: JSON.stringify({ gpu_offload }),
+  })
+// #760: GPU prefs are per-tenant (reranking_gpu_offload / reranking_gpu_index).
+export const setServerTaskGpuOffload = (gpu_offload: boolean, task: string) =>
+  api<{ ok: boolean; gpu_offload?: boolean; error?: string }>('/api/server/gpu-offload', {
+    method: 'POST',
+    body: JSON.stringify({ gpu_offload, task }),
   })
 export const setServerGpuIndex = (gpu_index: number | null) =>
   api<{ ok: boolean; gpu_index?: number | null; error?: string }>('/api/server/gpu-index', {
     method: 'POST',
     body: JSON.stringify({ gpu_index }),
   })
+// #760: per-tenant GPU index selection.
+export const setServerTaskGpuIndex = (gpu_index: number | null, task: string) =>
+  api<{ ok: boolean; gpu_index?: number | null; error?: string }>('/api/server/gpu-index', {
+    method: 'POST',
+    body: JSON.stringify({ gpu_index, task }),
+  })
 export const downloadModelServer = (model?: string) =>
   api<{ ok: boolean; message?: string; error?: string }>('/api/server/download', {
     method: 'POST',
     body: JSON.stringify({ model }),
+  })
+// #760: download a tenant's model without starting its server.
+export const downloadModelServerTask = (model: string | undefined, task: string) =>
+  api<{ ok: boolean; message?: string; error?: string }>('/api/server/download', {
+    method: 'POST',
+    body: JSON.stringify({ model, task }),
   })
 
 export const getEmbeddingsStatus = () => api<EmbeddingsStatus>('/api/embeddings/status')
