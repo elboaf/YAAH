@@ -22,9 +22,15 @@ export function SidebarSearch({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const searchId = useRef(0)
+  // Aborts the previous in-flight request when a new keystroke-burst
+  // fires (#764): overlapping megascans once stacked into a multi-GB,
+  // minutes-long wedge. The backend scan is now bounded (#764), but a
+  // superseded query's answer is dropped anyway -- never render stale.
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
+    if (abortRef.current) abortRef.current.abort()
 
     const trimmed = query.trim()
     if (!trimmed) {
@@ -39,21 +45,25 @@ export function SidebarSearch({
     const myId = searchId.current
     setLoading(true)
     setError(null)
+    const controller = new AbortController()
+    abortRef.current = controller
 
     debounceRef.current = setTimeout(async () => {
       if (myId !== searchId.current) return
       try {
-        const result = await searchConversations(trimmed, 10)
+        const result = await searchConversations(trimmed, 10, controller.signal)
         if (myId !== searchId.current) return
         setMatches(result.matches)
         setSearched(true)
       } catch (e) {
+        // An aborted superseded query is normal typing, not an error.
+        if (controller.signal.aborted) return
         if (myId !== searchId.current) return
         setError(String((e as Error).message ?? e))
         setMatches([])
         setSearched(true)
       } finally {
-        if (myId === searchId.current) {
+        if (myId === searchId.current && !controller.signal.aborted) {
           setLoading(false)
         }
       }
@@ -61,6 +71,8 @@ export function SidebarSearch({
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
+      // Unmount (or query change): kill any in-flight request.
+      if (abortRef.current) abortRef.current.abort()
     }
   }, [query])
 
