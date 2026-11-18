@@ -353,7 +353,13 @@ def read_pinned_manifest() -> dict | None:
     candidates = gitproc.bundle_dirs("agent", "interceptor_manifest.json")
     candidates.append(MANIFEST_PATH)  # repo checkout: beside the module
     for candidate in candidates:
-        if candidate.is_file():
+        try:
+            is_file = candidate.is_file()
+        except OSError:
+            # A denied/unreadable parent dir must not escape as an
+            # exception -- fail closed, same as every probe here.
+            continue
+        if is_file:
             return _read_manifest_file(candidate)
     return None
 

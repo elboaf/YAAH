@@ -311,6 +311,44 @@ def test_manifest_found_in_packaged_layout(monkeypatch, tmp_path):
     assert manifest["sha256"] == "a" * 64
 
 
+def test_manifest_skips_unreadable_candidate(monkeypatch, tmp_path):
+    """#758 review round: a candidate whose parent dir denies traversal
+    raises PermissionError from is_file() on Python 3.12 (OSError is not
+    swallowed there). Discovery must skip it and fail closed, never
+    escape an exception."""
+    calls: list[Path] = []
+
+    class _Denied:
+        """Duck-typed path whose is_file() raises, like a guarded parent."""
+
+        def __init__(self, path):
+            self._path = path
+
+        def is_file(self):
+            calls.append(self._path)
+            raise PermissionError(13, "permission denied", str(self._path))
+
+    real_first = tmp_path / "agent" / "interceptor_manifest.json"
+    packaged_file = tmp_path / "_up_" / "backend" / "agent" / "interceptor_manifest.json"
+    monkeypatch.setattr(
+        gitproc, "bundle_dirs",
+        lambda *parts: [_Denied(real_first), packaged_file],
+    )
+    monkeypatch.setattr(interceptor, "MANIFEST_PATH", tmp_path / "none.json")
+
+    # The packaged copy behind the denied one is valid and must still win.
+    packaged_file.parent.mkdir(parents=True)
+    (packaged_file).write_text(
+        '{"url": "https://example.com/behind.exe", "sha256": "' + "b" * 64 + '"}',
+        encoding="utf-8",
+    )
+
+    manifest = interceptor.read_pinned_manifest()
+    assert manifest is not None, "denied candidate must be skipped, not fatal"
+    assert manifest["url"] == "https://example.com/behind.exe"
+    assert calls, "the denied probe must actually have been exercised"
+
+
 # --- status contract -----------------------------------------------------
 
 
