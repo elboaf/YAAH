@@ -3,6 +3,7 @@
   "bundle": {
     "resources": [
       "../backend/**/*.py",
+      "../backend/agent/interceptor_manifest.json",
       "../backend/whisper/**/*",
       "../backend/bundled_skills/**/*",
       "../backend/installers/**/*",
