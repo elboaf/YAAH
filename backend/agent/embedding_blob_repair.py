@@ -13,8 +13,10 @@ database, marker written only after work actually happened, and boot
 must never break over a repair failure.
 """
 
+import asyncio
 import json
 import logging
+import math
 import struct
 
 log = logging.getLogger("yaah.embedding_blob_repair")
@@ -44,11 +46,18 @@ async def repair_embedding_blobs() -> dict:
 
     # get_db hands out a fresh connection: close it on every path, or its
     # aiosqlite thread outlives the caller (a hung interpreter exit in
-    # tests; a leaked handle in production).
+    # tests; a leaked handle in production). Close failures are logged
+    # and never override the repair result -- an exception here would
+    # otherwise abort startup even after a successful, committed repair.
     try:
         return await _repair(db)
     finally:
-        await db.close()
+        try:
+            await db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - cleanup must not win
+            log.warning("embedding blob repair: close failed: %s", e)
 
 
 async def _repair(db) -> dict:
@@ -56,11 +65,15 @@ async def _repair(db) -> dict:
         if await _marker_set(db):
             return {"skipped": True}
 
-        # Legacy rows are JSON *bytes* in a BLOB column (the pre-#764
-        # writer encoded before insert), so typeof='text' would miss
-        # them. JSON payloads start with '[' (0x5B): match both storage
-        # classes (bytes-BLOB and any str-TEXT form).
-        legacy_pred = "(typeof(embedding) = 'text' OR hex(embedding) LIKE '5B%')"
+        # Legacy rows are JSON payloads in the embedding column (the
+        # pre-#764 writer encoded before insert): JSON text (str) or
+        # JSON bytes starting with '[' (0x5B). substr(...) = X'5B' tests
+        # one byte; hex() would render every full BLOB to hex on each
+        # boot even when nothing needs converting.
+        legacy_pred = (
+            "typeof(embedding) = 'text' "
+            "OR substr(embedding, 1, 1) = X'5B'"
+        )
 
         async with db.execute(
             f"SELECT COUNT(*) AS c FROM vector_index WHERE {legacy_pred}"
@@ -73,6 +86,7 @@ async def _repair(db) -> dict:
             return {"skipped": True, "nothing_to_convert": True}
 
         converted = 0
+        unrepresentable = 0
         last_rowid = 0
         while True:
             cur = await db.execute(
@@ -89,6 +103,15 @@ async def _repair(db) -> dict:
                 vec, ok = _decode_json_embedding(row["embedding"])
                 if not ok:
                     continue  # garbage row: leave it, the scan skips it too
+                # Pre-check float32 representability instead of catching
+                # struct.pack's OverflowError: explicit, and it keeps a
+                # value like 1e40 from aborting the pass before the
+                # marker (which would stall every later boot on the same
+                # row). NaN/inf rows stay unconverted; the scan skips
+                # them either way (its isfinite guard).
+                if not all(math.isfinite(v) and abs(v) <= 3.4028235e38 for v in vec):
+                    unrepresentable += 1
+                    continue
                 payloads.append(
                     (struct.pack(f"<{len(vec)}f", *vec), row["id"])
                 )
@@ -105,7 +128,11 @@ async def _repair(db) -> dict:
         )
         await db.commit()
         log.info("embedding blob repair: converted %d rows to float32", converted)
-        return {"converted": converted, "left_garbage": remaining - converted}
+        return {
+            "converted": converted,
+            "unrepresentable": unrepresentable,
+            "left_garbage": remaining - converted - unrepresentable,
+        }
 
     except Exception as e:  # noqa: BLE001 - boot must not break
         log.warning("embedding blob repair failed: %s", e)
@@ -113,11 +140,19 @@ async def _repair(db) -> dict:
 
 
 def _decode_json_embedding(raw) -> tuple[list[float], bool]:
-    """Decode a legacy JSON-text embedding. Returns ([], False) for
-    anything that is not a JSON list of numbers."""
+    """Decode a legacy JSON embedding: SQLite TEXT (str) directly, or
+    the historical JSON-bytes BLOB form via UTF-8. Returns ([], False)
+    for anything that is not a JSON list of numbers."""
+    if isinstance(raw, str):
+        text = raw
+    else:
+        try:
+            text = bytes(raw).decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            return [], False
     try:
-        vec = json.loads(bytes(raw).decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        vec = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
         return [], False
     if isinstance(vec, list) and all(isinstance(x, (int, float)) for x in vec):
         return vec, True

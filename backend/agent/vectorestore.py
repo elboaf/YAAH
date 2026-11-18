@@ -303,28 +303,38 @@ async def semantic_search(
             if len(vec) != len(query_embedding):
                 skipped += 1
                 continue
-            scored.append((
-                _cosine_similarity(query_embedding, vec, a_norm=query_norm),
-                row,
-            ))
+            similarity = _cosine_similarity(query_embedding, vec, a_norm=query_norm)
+            # A NaN vector (e.g. a corrupted packed row) would slip the
+            # similarity > min_similarity cutoff (NaN comparisons are
+            # False) and surface as a NaN-scored hit.
+            if not math.isfinite(similarity):
+                skipped += 1
+                continue
+            scored.append((similarity, row))
         return scored, skipped
 
     winners = []  # bounded: at most max_results entries survive a batch
     total_skipped = 0
-    last_rowid = 0
     async with open_db() as db:
+        # One ordered cursor for the whole scan: ORDER BY id makes the
+        # keyset-free pagination deterministic (a scoped query without it
+        # may drive the conversation index and return batches out of id
+        # order, silently skipping rows), and a single statement holds
+        # one read snapshot -- a concurrent rebuild's INSERT OR REPLACE
+        # can otherwise re-present a chunk under a new rowid in a later
+        # batch and get it scored twice.
         sql = (
             "SELECT id, message_id, conversation_id, role, chunk_text, embedding "
-            "FROM vector_index WHERE id > ?"
+            "FROM vector_index"
         )
         if where:
-            sql += f" AND conversation_id IN ({placeholders})"
+            sql += f" WHERE conversation_id IN ({placeholders})"
+        sql += " ORDER BY id"
+        cur = await db.execute(sql, params)
         while True:
-            cur = await db.execute(sql, [last_rowid, *params])
             batch = await cur.fetchmany(SEMANTIC_SCAN_BATCH)
             if not batch:
                 break
-            last_rowid = batch[-1]["id"]
             scored, skipped = await asyncio.to_thread(_score_rows, batch)
             total_skipped += skipped
             if skipped:

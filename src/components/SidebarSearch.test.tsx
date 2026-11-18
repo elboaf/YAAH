@@ -159,20 +159,33 @@ describe('SidebarSearch (#676)', () => {
     await waitFor(() => expect(screen.getByText('Chat A')).toBeInTheDocument(), { timeout: 1000 })
   })
 
-  it('never renders an error for an aborted superseded query (#764)', async () => {
+  it('never renders an error or stale state for an aborted superseded query (#764)', async () => {
+    // The superseded request rejects via its abort listener; the guard
+    // in the catch must discard it. Detection: the FIRST request is
+    // cleared away (searchId stays put), so without the abort guard the
+    // rejected catch would set searched/error on the FIRST query's
+    // state -- observable as 'Chat A' lingering after the clear.
+    let firstSignal: AbortSignal | undefined
     ;(searchConversations as ReturnType<typeof vi.fn>).mockImplementation(
-      (_q: string, _mr: number, signal?: AbortSignal) =>
-        new Promise((_resolve, reject) => {
-          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-        }),
+      (q: string, _mr: number, signal?: AbortSignal) => {
+        if (q === 'first') {
+          firstSignal = signal
+          return Promise.resolve({ count: 1, matches: [mockMatches[0]], truncated: false })
+        }
+        // Any later query: pending until explicitly released.
+        return new Promise<{ count: number; matches: typeof mockMatches; truncated: boolean }>(() => {})
+      },
     )
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
-    fireEvent.change(input, { target: { value: 'one' } })
-    await waitFor(() => expect(searchConversations).toHaveBeenCalledTimes(1), { timeout: 1000 })
+    fireEvent.change(input, { target: { value: 'first' } })
+    await waitFor(() => expect(screen.getByText('Chat A')).toBeInTheDocument(), { timeout: 1000 })
+    // Clear the input: aborts the request, searchId unchanged.
+    fireEvent.change(input, { target: { value: '' } })
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true), { timeout: 1000 })
+    expect(screen.queryByText('Chat A')).not.toBeInTheDocument()
+    // Type a new query while the aborted rejection settles.
     fireEvent.change(input, { target: { value: 'two' } })
-    // The aborted first request rejects, but no error UI may appear.
-    await new Promise((r) => setTimeout(r, 50))
-    expect(screen.queryByText(/aborted/i)).not.toBeInTheDocument()
+    expect(screen.getByText('Searching…')).toBeInTheDocument()
   })
 })

@@ -72,8 +72,10 @@ async def _insert_legacy_json_row(conv: int, message_id: int, vec):
 
 async def test_scan_decodes_one_batch_not_whole_table(monkeypatch):
     """The megascan probe (#764): with more rows than one batch holds,
-    the decode count stays bounded by the batch, not the row count.
-    The old code parsed every row's JSON on every query."""
+    the decode count stays bounded by the batch, not the row count, and
+    the scan never hauls the table -- fetchall is forbidden and every
+    fetch is batch-sized. The old code fetched and parsed every row on
+    every query."""
     conv = await _seed_conversation()
     for _ in range(22):
         await database.add_message(conv, "user", "more message bodies")
@@ -85,6 +87,8 @@ async def test_scan_decodes_one_batch_not_whole_table(monkeypatch):
     ]
     await vectorestore.store_chunk_embeddings(rows)
 
+    import aiosqlite
+
     loads_calls = {"n": 0}
     real_loads = vectorestore.json.loads
 
@@ -93,11 +97,28 @@ async def test_scan_decodes_one_batch_not_whole_table(monkeypatch):
         return real_loads(*a, **kw)
 
     monkeypatch.setattr(vectorestore.json, "loads", counting_loads)
+
+    fetch_sizes = []
+    real_fetchmany = aiosqlite.Cursor.fetchmany
+
+    async def guarded_fetchmany(self, size=1):
+        fetch_sizes.append(size)
+        return await real_fetchmany(self, size)
+
+    async def no_fetchall(self):
+        raise AssertionError("whole-table fetchall() is the #764 megascan")
+
+    monkeypatch.setattr(aiosqlite.Cursor, "fetchmany", guarded_fetchmany)
+    monkeypatch.setattr(aiosqlite.Cursor, "fetchall", no_fetchall)
+
     hits = await vectorestore.semantic_search([0.001, 0.2, 0.3], max_results=5)
     assert len(hits) == 5
     # Blob rows never hit json.loads at all (float32 unpack path); the
     # fatal shape is "loads called once per row" (the old megascan).
     assert loads_calls["n"] <= vectorestore.SEMANTIC_SCAN_BATCH
+    # Memory signature is the fetch: batches only, never one big pull.
+    assert fetch_sizes, "scan must fetch via fetchmany"
+    assert all(s <= vectorestore.SEMANTIC_SCAN_BATCH for s in fetch_sizes)
 
 
 async def test_topk_correct_across_batch_boundaries(monkeypatch):
@@ -153,11 +174,12 @@ async def test_corrupt_row_is_skipped_not_fatal():
     conv = await _seed_conversation()
     await _insert_legacy_json_row(conv, 1, (0.1, 0.2, 0.3))
     await database.add_message(conv, "user", "corrupt body")
+    # A real vector row for message 2, then corrupted in place: the test
+    # must exercise the decoder actually skipping a live row.
+    await vectorestore.store_chunk_embeddings([_row(conv, 2, (0.9, 0.9, 0.9))])
     async with database.open_db() as db:
-        await db.execute(
-            "UPDATE vector_index SET embedding = ? WHERE message_id = 2",
-            (b"\x01\x02\x03",),  # 3 bytes: neither JSON nor %4 float32
-        )
+        cur = await db.execute("UPDATE vector_index SET embedding = ? WHERE message_id = 2", (b"\x01\x02\x03",))
+        assert cur.rowcount == 1
         await db.commit()
     hits = await vectorestore.semantic_search([1.0, 0.0, 0.0], max_results=5)
     assert [h["message_id"] for h in hits] == [1]
@@ -169,10 +191,19 @@ async def test_repair_converts_json_rows_once():
     conv = await _seed_conversation()
     await _insert_legacy_json_row(conv, 1, (0.1, 0.2, 0.3))
     await _insert_legacy_json_row(conv, 2, (0.4, 0.5, 0.6))
-    await vectorestore.store_chunk_embeddings([_row(conv, 3, (0.7, 0.7, 0.7))])
+    # The TEXT storage form (str in the BLOB column) must convert too.
+    await database.add_message(conv, "user", "text-form body")
+    async with database.open_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO vector_index (message_id, conversation_id, "
+            "role, chunk_text, chunk_index, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+            (3, conv, "user", "text form", 0, "[0.7, 0.7, 0.7]"),
+        )
+        await db.commit()
+    await vectorestore.store_chunk_embeddings([_row(conv, 4, (0.7, 0.7, 0.7))])
 
     result = await embedding_blob_repair.repair_embedding_blobs()
-    assert result.get("converted") == 2
+    assert result.get("converted") == 3
     assert not result.get("error")
 
     async with database.open_db() as db:
@@ -213,18 +244,95 @@ async def test_repair_converts_in_batches(monkeypatch):
         assert (await cur.fetchone())["c"] == 0
 
 
-async def test_repair_never_raises_on_garbage_row():
-    """A row neither JSON nor float32 must not break the boot pass; it
-    is left in place (still dual-decodable by the scan's skip path)."""
-    conv = await _seed_conversation()
-    await _insert_legacy_json_row(conv, 1, (0.1, 0.2, 0.3))
-    await database.add_message(conv, "user", "garbage body")
-    async with database.open_db() as db:
-        await db.execute(
-            "UPDATE vector_index SET embedding = ? WHERE message_id = 2",
-            (b"not json at all and not %4",),
-        )
-        await db.commit()
-    result = await embedding_blob_repair.repair_embedding_blobs()
+class _FakeCursor:
+    """Minimal async cursor for the repair loop: serves its page once,
+    then empty -- mirroring LIMIT pagination."""
+
+    def __init__(self, rows, db=None):
+        self._rows = rows
+        self._db = db
+        self._served = False
+
+    async def fetchone(self):
+        return self._rows[0] if not self._served and self._rows else None
+
+    async def fetchall(self):
+        if self._served:
+            return []
+        self._served = True
+        if self._db is not None:
+            self._db.pages_left -= 1
+        return self._rows
+
+    def __await__(self):
+        # aiosqlite cursors are awaitable: `cur = await db.execute(...)`
+        # runs the query and yields the cursor.
+        async def _run():
+            return self
+        return _run().__await__()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeDb:
+    """In-memory db double for repair_embedding_blobs: records UPDATEs
+    and the marker, answers the marker/count/page queries. Pages deplete
+    like the real LIMIT pagination -- the repair loop must terminate."""
+
+    def __init__(self, legacy_rows):
+        self.legacy_rows = legacy_rows
+        self.updates = []
+        self.marker = None
+        self.pages_left = 1
+
+    def execute(self, sql, params=None):
+        # Mirrors aiosqlite: execute() returns a cursor-like object that
+        # doubles as the async context manager (awaited in __aenter__).
+        sql = " ".join(sql.split())
+        if sql.startswith("SELECT value FROM app_meta"):
+            return _FakeCursor([("done",)] if self.marker else [])
+        if sql.startswith("SELECT COUNT(*)"):
+            return _FakeCursor([{"c": len(self.legacy_rows)}])
+        if sql.startswith("SELECT id, embedding FROM vector_index"):
+            rows = list(self.legacy_rows) if self.pages_left > 0 else []
+            return _FakeCursor(rows, db=self)
+        if sql.startswith("UPDATE vector_index"):
+            self.updates.extend(params)
+            return _FakeCursor([])
+        if sql.startswith("INSERT OR REPLACE INTO app_meta"):
+            self.marker = params
+            return _FakeCursor([])
+        raise AssertionError(f"unexpected sql: {sql}")
+
+    async def executemany(self, sql, payloads):
+        self.updates.extend(payloads)
+
+    async def commit(self):
+        pass
+
+
+async def test_repair_skips_unrepresentable_row_without_aborting():
+    """CR #765 round: a row whose JSON values exceed float32 range must
+    be left unchanged and counted (unrepresentable), while the healthy
+    rows in the same batch still convert and the marker is written --
+    the old abort-on-pack shape stalled every later boot on the row."""
+    healthy = {"id": 1, "embedding": b"[0.1, 0.2, 0.3]"}
+    overflow = {"id": 2, "embedding": b"[1e40, 2.0, 3.0]"}
+    garbage = {"id": 3, "embedding": b"[not numbers]"}
+    db = _FakeDb([healthy, overflow, garbage])
+
+    result = await embedding_blob_repair.repair_embedding_blobs.__wrapped__(db) \
+        if hasattr(embedding_blob_repair.repair_embedding_blobs, "__wrapped__") \
+        else await embedding_blob_repair._repair(db)
+
     assert not result.get("error")
-    assert result.get("converted") == 1  # the good row still converted
+    assert result["converted"] == 1  # only the healthy row
+    assert result["unrepresentable"] == 1  # the 1e40 row, counted
+    assert result["left_garbage"] == 1  # the non-numeric row
+    assert db.marker is not None  # the pass still completed + marked
+    # Only the healthy row is in the UPDATE payloads, packed float32.
+    assert db.updates == [(struct.pack("<3f", 0.1, 0.2, 0.3), 1)]
