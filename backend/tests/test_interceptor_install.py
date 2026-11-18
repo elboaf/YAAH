@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.agent import interceptor, interceptor_install as inst
+from backend.agent import gitproc, interceptor, interceptor_install as inst
 
 
 # --- fixtures -----------------------------------------------------------
@@ -38,7 +38,12 @@ def fake_install(monkeypatch, tmp_path):
 @pytest.fixture
 def manifest(monkeypatch, tmp_path):
     """Point the manager's manifest at a tmp file with the pinned shape
-    (url + sha256 matching _fake_hash's default digest)."""
+    (url + sha256 matching _fake_hash's default digest).
+
+    Redirects the packaged-layout scan too (#758): read_pinned_manifest
+    walks gitproc.bundle_dirs candidates before the MANIFEST_PATH anchor,
+    and a repo checkout is itself a live cwd/backend candidate -- without
+    this, install tests would read the real committed manifest."""
     path = tmp_path / "interceptor_manifest.json"
     path.write_text(
         '{"url": "https://example/Interceptor.exe", '
@@ -47,6 +52,8 @@ def manifest(monkeypatch, tmp_path):
         '"version": "2.1.6"}',
         encoding="utf-8",
     )
+    monkeypatch.setattr(gitproc, "exe_dir", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(interceptor, "MANIFEST_PATH", path)
     return path
 
