@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.agent import interceptor
+from backend.agent import gitproc, interceptor
 
 
 @pytest.fixture
@@ -267,8 +267,13 @@ def test_manifest_reads_pinned_values(monkeypatch):
 
 
 def test_manifest_none_when_absent(monkeypatch, tmp_path):
-    """When MANIFEST_PATH is missing (or unreadable/invalid), read returns
-    None, never an exception."""
+    """When no discovery candidate holds the manifest (or a found file is
+    unreadable/invalid), read returns None, never an exception. The scan
+    roots are redirected too: a repo checkout IS a valid packaged-layout
+    candidate (cwd/backend), so isolation needs the whole scan pointed
+    away (#758)."""
+    monkeypatch.setattr(gitproc, "exe_dir", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(interceptor, "MANIFEST_PATH", tmp_path / "absent.json")
     assert interceptor.read_pinned_manifest() is None
 
@@ -276,8 +281,34 @@ def test_manifest_none_when_absent(monkeypatch, tmp_path):
 def test_manifest_none_when_invalid_json(monkeypatch, tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(gitproc, "exe_dir", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(interceptor, "MANIFEST_PATH", bad)
     assert interceptor.read_pinned_manifest() is None
+
+
+def test_manifest_found_in_packaged_layout(monkeypatch, tmp_path):
+    """#758: the installed app ships the manifest as a Tauri resource at
+    <exe>/_up_/backend/agent/ (the frozen one-file extraction dir carries
+    no data files). When the beside-module anchor is absent, discovery
+    must find the packaged copy via gitproc.bundle_dirs -- or the Install
+    button can never verify a download."""
+    packaged = tmp_path / "_up_" / "backend" / "agent"
+    packaged.mkdir(parents=True)
+    (packaged / "interceptor_manifest.json").write_text(
+        '{"url": "https://example.com/x.exe", "sha256": "' + "a" * 64 + '"}',
+        encoding="utf-8",
+    )
+    # The beside-module anchor must not exist in this scenario: point it
+    # at a path that is not a file so only the packaged copy can match.
+    monkeypatch.setattr(interceptor, "MANIFEST_PATH", tmp_path / "none.json")
+    # Patch the scan's exe dir at its source so the packaged candidate
+    # lands first (bundle_dirs reads gitproc.exe_dir() live).
+    monkeypatch.setattr(interceptor.gitproc, "exe_dir", lambda: tmp_path)
+    manifest = interceptor.read_pinned_manifest()
+    assert manifest is not None
+    assert manifest["url"] == "https://example.com/x.exe"
+    assert manifest["sha256"] == "a" * 64
 
 
 # --- status contract -----------------------------------------------------

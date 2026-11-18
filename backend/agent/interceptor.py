@@ -43,6 +43,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from backend.agent import gitproc
+
 # YAAH_INTERCEPTOR_CLI lets the test suite point at a fake CLI (a
 # throwaway script) the same way YAAH_SKILLS_PATH redirects the skills
 # dir and YAAH_DB_PATH redirects the database. Default resolves to the
@@ -88,8 +90,13 @@ _INSTALL_DIR_CANDIDATES: tuple[str, ...] = (
 
 # The pinned installer manifest this manager reads as its source of truth
 # for what it would install (asset URL + SHA-256 + upstream version +
-# license note). Committed beside the module; read fresh on every status
-# call so a manifest bump lands without a code change.
+# license note). Committed beside the module in the repo; shipped as a
+# Tauri resource so the installed layout finds it at <exe>/_up_/backend/
+# agent/ (tauri.conf.json turns the `../` glob prefix into a literal
+# `_up_` dir next to the exe). Resolved through the packaged-layout scan
+# at read time (see read_pinned_manifest); this beside-module anchor is
+# the repo-checkout default. Read fresh on every status call so a
+# manifest bump lands without a code change.
 MANIFEST_PATH = Path(__file__).resolve().parent / "interceptor_manifest.json"
 
 # The CLI's JSON extension-diagnosis command (post-failure snapshot). The
@@ -335,11 +342,27 @@ def read_pinned_manifest() -> dict | None:
     Carries asset URL + SHA-256 + upstream version + Elastic License 2.0
     note. Read fresh on every status call so a manifest change lands
     without a code change.
+
+    Discovery mirrors skills.bundled_source_dir: the repo checkout keeps
+    the beside-module anchor; the installed app ships the manifest as a
+    Tauri resource at <exe>/_up_/backend/agent/ (the frozen one-file
+    extraction dir carries no data files), so the packaged-layout scan
+    must run first or the Install button can never verify a download.
+    First existing candidate wins; none exist -> None (fail closed).
     """
-    if not MANIFEST_PATH.is_file():
+    candidates = gitproc.bundle_dirs("agent", "interceptor_manifest.json")
+    candidates.append(MANIFEST_PATH)  # repo checkout: beside the module
+    for candidate in candidates:
+        if candidate.is_file():
+            return _read_manifest_file(candidate)
+    return None
+
+
+def _read_manifest_file(path: Path) -> dict | None:
+    if not path.is_file():
         return None
     try:
-        raw = MANIFEST_PATH.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
     except (OSError, ValueError):
         return None
