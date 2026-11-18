@@ -69,10 +69,13 @@ async def _repair(db) -> dict:
         # pre-#764 writer encoded before insert): JSON text (str) or
         # JSON bytes starting with '[' (0x5B). substr(...) = X'5B' tests
         # one byte; hex() would render every full BLOB to hex on each
-        # boot even when nothing needs converting.
+        # boot even when nothing needs converting. Parens are load-
+        # bearing: interpolated after "WHERE id > ? AND", an ungrouped
+        # OR would bind the id bound to text rows only and resurface
+        # '['-headed BLOB rows on every page (infinite loop, no marker).
         legacy_pred = (
-            "typeof(embedding) = 'text' "
-            "OR substr(embedding, 1, 1) = X'5B'"
+            "(typeof(embedding) = 'text' "
+            "OR substr(embedding, 1, 1) = X'5B')"
         )
 
         async with db.execute(

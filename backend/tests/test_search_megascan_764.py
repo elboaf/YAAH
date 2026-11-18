@@ -13,6 +13,7 @@ queries) -- the wedge read as an app crash. The contract now:
 - The one-shot boot repair converts JSON rows to BLOB once per database
   (marker-row semantics), and never raises.
 """
+import asyncio
 import json
 import struct
 
@@ -313,6 +314,47 @@ class _FakeDb:
 
     async def commit(self):
         pass
+
+
+async def test_repair_terminates_on_unconvertible_rows_real_db():
+    """Termination proof on real SQLite (CR #765 round 2): garbage and
+    overflow '['-rows are selected by the query but never convert -- the
+    paged loop must still advance past them (id bound must apply to BLOB
+    rows too: AND-binds-tighter-than-OR would resurface them every page
+    and the marker would never be written). Bounded: a regression fails
+    on timeout instead of hanging the suite."""
+    conv = await _seed_conversation()
+    await _insert_legacy_json_row(conv, 1, (0.1, 0.2, 0.3))  # converts
+    await _insert_legacy_json_row(conv, 2, (1.0, 1.0, 1.0))
+    await database.add_message(conv, "user", "staging body")
+    await vectorestore.store_chunk_embeddings([_row(conv, 3, (1.0, 1.0, 1.0))])
+    async with database.open_db() as db:
+        # Both become '['-headed BLOB candidates the query selects but
+        # the converter must skip without looping on.
+        await db.execute(
+            "UPDATE vector_index SET embedding = ? WHERE message_id = 2",
+            (b"[1e40, 2.0, 3.0]",),
+        )
+        await db.execute(
+            "UPDATE vector_index SET embedding = ? WHERE message_id = 3",
+            (b"[not numbers]",),
+        )
+        await db.commit()
+
+    result = await asyncio.wait_for(
+        embedding_blob_repair.repair_embedding_blobs(), timeout=20
+    )
+
+    assert not result.get("error")
+    assert result["converted"] == 1
+    assert result["unrepresentable"] == 1
+    assert result["left_garbage"] == 1
+    async with database.open_db() as db:
+        cur = await db.execute(
+            "SELECT value FROM app_meta WHERE key = ?",
+            (embedding_blob_repair._MARKER_KEY,),
+        )
+        assert await cur.fetchone() is not None  # the pass completed
 
 
 async def test_repair_skips_unrepresentable_row_without_aborting():
