@@ -103,14 +103,18 @@ async def lifespan(app: FastAPI):
     if wake_mod.start_wake_watcher():
         log.info("wake bridge active")
     yield
-    # The managed local model server is OUR child process: a clean app
-    # shutdown must not orphan it (it would hold its port until killed).
-    try:
-        from backend.agent import modelserver as _modelserver
+    # Managed local model servers are OUR child processes: a clean app
+    # shutdown must not orphan them (they would hold their ports until
+    # killed). Every tenant, not just embeddings (#760). Each stop is
+    # isolated (#760 CodeRabbit): one tenant's failure must not skip the
+    # next tenant's stop and leave it holding its port.
+    from backend.agent import modelserver as _modelserver
 
-        await _modelserver.get_manager().stop()
-    except Exception:  # noqa: BLE001 - shutdown is best-effort
-        pass
+    for _task in _modelserver.VALID_TASKS:
+        try:
+            await _modelserver.get_tenant(_task).stop()
+        except Exception:  # noqa: BLE001 - shutdown is best-effort
+            log.warning("model-server shutdown: task %s failed to stop", _task, exc_info=True)
     await mcp_client.manager.shutdown()
     wake_mod.stop_wake_watcher()
     scheduler.stop_scheduler()
@@ -1138,24 +1142,51 @@ from backend.agent import modelserver
 _server_download_progress = {}
 
 
-@app.get("/api/server/status")
-async def api_server_status():
-    """Status of the local model server.
+def _resolve_task(body: dict | None) -> tuple[str | None, str | None]:
+    """Extract and validate the tenant task from a request body.
 
-    `binary_ready` is false only when nothing usable is on the system
-    AND the pinned auto-install would have to run (~25 MB one-time
-    fetch); the Start endpoint installs on demand either way.
+    Strict validation (#760 CodeRabbit): an omitted task defaults to
+    "embedding"; any *supplied* value that is not an exact valid task id
+    is an error — never silently defaulted. Otherwise {"task": false} or
+    {"task": ""} on /api/server/stop would stop the embedding tenant
+    instead of being rejected. The reranking tenant is the second server
+    (ADR-0023 §9: --embeddings and --reranking flags are mutually
+    exclusive, so each task owns a process).
     """
-    binary, model_id = modelserver.get_server_config()
-    gpu_offload = modelserver.get_server_gpu_offload()
-    saved_index = modelserver.get_server_gpu_index()
+    raw = (body or {}).get("task")
+    if raw is None:
+        return "embedding", None
+    if raw not in modelserver.VALID_TASKS:
+        return None, f"unknown task: {raw} (valid: {', '.join(modelserver.VALID_TASKS)})"
+    return raw, None
+
+
+@app.get("/api/server/status")
+async def api_server_status(task: str | None = None):
+    """Status of a local model server tenant (#760).
+
+    The `task` query selects the tenant ("embedding" default,
+    "reranking"); each is an independent llama-server process on its own
+    port (ADR-0022 one-model-per-process rule). `binary_ready` is false
+    only when nothing usable is on the system AND the pinned auto-install
+    would have to run (~25 MB one-time fetch); Start installs on demand
+    either way.
+    """
+    if task is None:
+        task = "embedding"
+    if task not in modelserver.VALID_TASKS:
+        return {"ok": False, "error": f"unknown task: {task} (valid: {', '.join(modelserver.VALID_TASKS)})"}
+    binary, model_id = modelserver.get_server_config(task)
+    gpu_offload = modelserver.get_server_gpu_offload(task)
+    saved_index = modelserver.get_server_gpu_index(task)
     # enumerate_gpus() runs a blocking subprocess; keep it off the event
     # loop so a stalled nvidia-smi cannot stall this status handler.
     gpus = await asyncio.to_thread(modelserver.enumerate_gpus)
     configured = bool(binary) or modelserver._find_server_binary() is not None
-    manager = modelserver.get_manager()
+    manager = modelserver.get_tenant(task)
 
     status = {
+        "task": task,
         "configured": configured,
         "running": False,
         "binary_ready": modelserver._find_server_binary() is not None,
@@ -1174,7 +1205,7 @@ async def api_server_status():
             "binary_ready": True,
             "port": manager.port,
             "model": model_id,
-            "endpoint": manager.get_embeddings_endpoint(),
+            "endpoint": f"http://localhost:{manager.port}/v1",
             "healthy": await modelserver.health_check(manager.port),
             "gpu_offload": gpu_offload,
             "gpu_index": saved_index,
@@ -1199,8 +1230,11 @@ async def api_server_start(body: dict = None):
     """
     body = body or {}
     model_id = body.get("model") or None
+    task, err = _resolve_task(body)
+    if err:
+        return {"ok": False, "error": err}
 
-    binary_saved, configured_model = modelserver.get_server_config()
+    binary_saved, configured_model = modelserver.get_server_config(task)
     # Always ensure the binary BEFORE the model download (which can be
     # a 600 MB pull): a saved path can point at a deleted exe, and the
     # cheap install must fail before the big fetch. Off the event loop.
@@ -1210,22 +1244,36 @@ async def api_server_start(body: dict = None):
         return {"ok": False, "error": str(e)}
     if binary_saved != binary:
         # First run (nothing saved) or a healed stale/moved path.
-        modelserver.set_server_config(binary, configured_model)
+        modelserver.set_server_config(binary, configured_model, task)
 
-    manager = modelserver.get_manager()
-    # Serialize concurrent start requests: the port pick + spawn must be
-    # one-at-a-time or two callers race two children onto one port.
-    async with modelserver.get_start_lock():
+    manager = modelserver.get_tenant(task)
+    # Serialize concurrent start requests per tenant: the port pick +
+    # spawn must be one-at-a-time or two callers race two children onto
+    # one port.
+    async with modelserver.get_tenant_lock(task):
         if manager.is_running():
             return {"ok": True, "port": manager.port}
 
         target_model = model_id or configured_model
         if not target_model:
-            target_model = modelserver.default_model("embedding")["id"]
+            target_model = modelserver.default_model(task)["id"]
 
+        # #760 (CodeRabbit): the API twin of the dropdown fix. find_model
+        # accepts any manifest model; launching it would run the task's
+        # flags under the wrong tenant — an embedding model inside the
+        # reranking tenant runs --embeddings there and vice versa. The
+        # task must be listed in the model's manifest entry.
         entry = modelserver.find_model(target_model)
         if not entry:
             return {"ok": False, "error": f"unknown model: {target_model}"}
+        if task not in entry.get("tasks", []):
+            return {
+                "ok": False,
+                "error": (
+                    f"model {target_model} does not support task "
+                    f"'{task}' (tasks: {entry.get('tasks')})"
+                ),
+            }
 
         # Download if needed
         if not modelserver.is_model_downloaded(entry):
@@ -1245,9 +1293,12 @@ async def api_server_start(body: dict = None):
 
 
 @app.post("/api/server/stop")
-async def api_server_stop():
-    """Stop the local model server."""
-    manager = modelserver.get_manager()
+async def api_server_stop(body: dict = None):
+    """Stop a local model server tenant (#760). "task" selects which."""
+    task, err = _resolve_task(body)
+    if err:
+        return {"ok": False, "error": err}
+    manager = modelserver.get_tenant(task)
     await manager.stop()
     return {"ok": True}
 
@@ -1259,12 +1310,16 @@ async def api_server_gpu_offload(body: dict = None):
     The toggle is opt-in: True = offload model layers to the GPU when VRAM
     has headroom at start; False = CPU only. start() re-probes VRAM on every
     launch, so this only records the preference, not a one-time decision.
+    "task" selects the tenant (embedding default, reranking per #760).
     """
     body = body or {}
     value = body.get("gpu_offload", False)
     if not isinstance(value, bool):
         return {"ok": False, "error": "gpu_offload must be a boolean"}
-    modelserver.set_server_gpu_offload(value)
+    task, err = _resolve_task(body)
+    if err:
+        return {"ok": False, "error": err}
+    modelserver.set_server_gpu_offload(value, task)
     return {"ok": True, "gpu_offload": value}
 
 
@@ -1274,25 +1329,32 @@ async def api_server_gpu_index(body: dict = None):
 
     value is an int (nvidia-smi GPU index) or null to clear the
     selection. A running server must restart to apply the new index.
+    "task" selects the tenant (embedding default, reranking per #760).
     """
     body = body or {}
     value = body.get("gpu_index")
+    task, err = _resolve_task(body)
+    if err:
+        return {"ok": False, "error": err}
     if value is not None:
         try:
             value = int(value)
         except (ValueError, TypeError):
             return {"ok": False, "error": "gpu_index must be an integer"}
-    modelserver.set_server_gpu_index(value)
+    modelserver.set_server_gpu_index(value, task)
     return {"ok": True, "gpu_index": value}
 
 
 @app.post("/api/server/download")
 async def api_server_download(body: dict = None):
-    """Download a model without starting the server."""
+    """Download a tenant's model without starting the server (#760)."""
     body = body or {}
+    task, err = _resolve_task(body)
+    if err:
+        return {"ok": False, "error": err}
     model_id = body.get("model")
     if not model_id:
-        model_id = modelserver.default_model("embedding")["id"]
+        model_id = modelserver.default_model(task)["id"]
 
     entry = modelserver.find_model(model_id)
     if not entry:

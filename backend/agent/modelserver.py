@@ -93,6 +93,12 @@ def find_model(model_id: str) -> Optional[dict[str, Any]]:
     return None
 
 
+# Tasks that map to a server tenant (ADR-0022 multi-tenant registry).
+# Route handlers validate against this so a bad task is a clean 4xx-style
+# {"ok": false} instead of a KeyError deep in the registry.
+VALID_TASKS = ("embedding", "reranking")
+
+
 def list_models(task: Optional[str] = None) -> list[dict[str, Any]]:
     """List models, optionally filtered by task."""
     if task is None:

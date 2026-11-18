@@ -5,18 +5,32 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 
 const {
   getModelServerStatus,
+  getModelServerTaskStatus,
   getModelServerModels,
   startModelServer,
+  startModelServerTask,
   stopModelServer,
+  stopModelServerTask,
   setServerGpuOffload,
+  setServerTaskGpuOffload,
+  setServerGpuIndex,
+  setServerTaskGpuIndex,
   downloadModelServer,
+  downloadModelServerTask,
 } = vi.hoisted(() => ({
   getModelServerStatus: vi.fn(),
+  getModelServerTaskStatus: vi.fn(),
   getModelServerModels: vi.fn(),
   startModelServer: vi.fn(),
+  startModelServerTask: vi.fn(),
   stopModelServer: vi.fn(),
+  stopModelServerTask: vi.fn(),
   setServerGpuOffload: vi.fn(),
+  setServerTaskGpuOffload: vi.fn(),
+  setServerGpuIndex: vi.fn(),
+  setServerTaskGpuIndex: vi.fn(),
   downloadModelServer: vi.fn(),
+  downloadModelServerTask: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
@@ -24,15 +38,22 @@ vi.mock('./api', async (importOriginal) => {
   return {
     ...actual,
     getModelServerStatus,
+    getModelServerTaskStatus,
     getModelServerModels,
     startModelServer,
+    startModelServerTask,
     stopModelServer,
+    stopModelServerTask,
     setServerGpuOffload,
+    setServerTaskGpuOffload,
+    setServerGpuIndex,
+    setServerTaskGpuIndex,
     downloadModelServer,
+    downloadModelServerTask,
   }
 })
 
-import { ModelServerSettingsCard } from './components'
+import { ModelServerSettingsCard, RerankerServerSettingsCard } from './components'
 
 const models = [
   { id: 'qwen3-embedding-0.6b', name: 'Qwen3-Embedding-0.6B (GGUF)', tasks: ['embedding'] },
@@ -41,11 +62,23 @@ const models = [
 
 beforeEach(() => {
   getModelServerStatus.mockReset()
+  getModelServerTaskStatus.mockReset()
   getModelServerModels.mockReset()
   startModelServer.mockReset()
+  startModelServerTask.mockReset()
   stopModelServer.mockReset()
+  stopModelServerTask.mockReset()
   setServerGpuOffload.mockReset()
+  setServerTaskGpuOffload.mockReset()
+  setServerGpuIndex.mockReset()
+  setServerTaskGpuIndex.mockReset()
   downloadModelServer.mockReset()
+  downloadModelServerTask.mockReset()
+  // #760: the card now reads per-tenant status; keep the no-task mock as
+  // the same resolved value so both shapes agree.
+  // The card reads per-tenant status: delegate to the same mock so the
+  // existing resolved values apply to task-scoped calls too.
+  getModelServerTaskStatus.mockImplementation(() => getModelServerStatus())
   getModelServerStatus.mockResolvedValue({
     configured: true,
     running: false,
@@ -92,7 +125,7 @@ describe('Model server settings card (#730)', () => {
   })
 
   it('starts the server and refreshes status', async () => {
-    startModelServer.mockResolvedValue({ ok: true, port: 8082 })
+    startModelServerTask.mockResolvedValue({ ok: true, port: 8082 })
     let statusCall = 0
     getModelServerStatus.mockImplementation(() => {
       statusCall++
@@ -112,11 +145,11 @@ describe('Model server settings card (#730)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start' }))
     await waitFor(() => expect(screen.getByText(/Server started on port 8082/)).toBeTruthy())
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('running on port 8082'))
-    expect(startModelServer).toHaveBeenCalledWith('qwen3-embedding-0.6b')
+    expect(startModelServerTask).toHaveBeenCalledWith('qwen3-embedding-0.6b', 'embedding')
   })
 
   it('surfaces a start error', async () => {
-    startModelServer.mockResolvedValue({ ok: false, error: 'download failed: timeout' })
+    startModelServerTask.mockResolvedValue({ ok: false, error: 'download failed: timeout' })
     render(<ModelServerSettingsCard />)
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
     fireEvent.click(screen.getByRole('button', { name: 'Start' }))
@@ -124,7 +157,7 @@ describe('Model server settings card (#730)', () => {
   })
 
   it('stops the server and refreshes status', async () => {
-    stopModelServer.mockResolvedValue({ ok: true })
+    stopModelServerTask.mockResolvedValue({ ok: true })
     let statusCall = 0
     getModelServerStatus.mockImplementation(() => {
       statusCall++
@@ -144,17 +177,17 @@ describe('Model server settings card (#730)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
     await waitFor(() => expect(screen.getByText(/Server stopped/)).toBeTruthy())
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
-    expect(stopModelServer).toHaveBeenCalledTimes(1)
+    expect(stopModelServerTask).toHaveBeenCalledTimes(1)
   })
 
   it('downloads a model without starting', async () => {
-    downloadModelServer.mockResolvedValue({ ok: true, message: 'downloaded' })
+    downloadModelServerTask.mockResolvedValue({ ok: true, message: 'downloaded' })
     render(<ModelServerSettingsCard />)
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(screen.getByText(/downloaded/)).toBeTruthy())
-    expect(downloadModelServer).toHaveBeenCalledWith('qwen3-embedding-0.6b')
-    expect(startModelServer).not.toHaveBeenCalled()
+    expect(downloadModelServerTask).toHaveBeenCalledWith('qwen3-embedding-0.6b', 'embedding')
+    expect(startModelServerTask).not.toHaveBeenCalled()
   })
 
   it('preselects the default embedding model', async () => {
@@ -188,13 +221,13 @@ describe('Model server settings card (#730)', () => {
       () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'true'),
     )
     fireEvent.click(screen.getByRole('switch', { name: 'GPU acceleration' }))
-    await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalledWith(false))
+    await waitFor(() => expect(setServerTaskGpuOffload).toHaveBeenCalledWith(false, 'embedding'))
   })
 
   it('restarts the running server when GPU acceleration is toggled on', async () => {
-    startModelServer.mockResolvedValue({ ok: true, port: 8084 })
-    stopModelServer.mockResolvedValue({ ok: true })
-    setServerGpuOffload.mockResolvedValue({ ok: true, gpu_offload: true })
+    startModelServerTask.mockResolvedValue({ ok: true, port: 8084 })
+    stopModelServerTask.mockResolvedValue({ ok: true })
+    setServerTaskGpuOffload.mockResolvedValue({ ok: true, gpu_offload: true })
     let statusCall = 0
     getModelServerStatus.mockImplementation(() => {
       statusCall++
@@ -217,11 +250,11 @@ describe('Model server settings card (#730)', () => {
       () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'false'),
     )
     fireEvent.click(screen.getByRole('switch', { name: 'GPU acceleration' }))
-    await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalledWith(true))
-    await waitFor(() => expect(stopModelServer).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(setServerTaskGpuOffload).toHaveBeenCalledWith(true, 'embedding'))
+    await waitFor(() => expect(stopModelServerTask).toHaveBeenCalledTimes(1))
     // A running server must restart (stop + start), not just stop, to apply
     // the new flag.
-    await waitFor(() => expect(startModelServer).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(startModelServerTask).toHaveBeenCalledTimes(1))
     await waitFor(
       () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'true'),
     )
@@ -254,7 +287,7 @@ describe('Model server settings card (#730)', () => {
     })
     // Never resolve the save, so toggleBusy stays true after the click.
     const pending = new Promise<{ ok: boolean; gpu_offload: boolean }>(() => undefined)
-    setServerGpuOffload.mockReturnValue(pending)
+    setServerTaskGpuOffload.mockReturnValue(pending)
     render(<ModelServerSettingsCard />)
     await waitFor(
       () => expect(screen.getByRole('switch', { name: 'GPU acceleration' })).toHaveAttribute('aria-checked', 'false'),
@@ -263,10 +296,47 @@ describe('Model server settings card (#730)', () => {
     // The toggle save is in flight, so toggleBusy is true and the Stop
     // button must be disabled to prevent a double-stop during the
     // restart cascade.
-    await waitFor(() => expect(setServerGpuOffload).toHaveBeenCalled())
+    await waitFor(() => expect(setServerTaskGpuOffload).toHaveBeenCalled())
     expect(screen.getByRole('button', { name: 'Stop' })).toHaveAttribute('disabled')
     // Clicking the (disabled) Stop must not fire a second stop.
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
-    expect(stopModelServer).not.toHaveBeenCalled()
+    expect(stopModelServerTask).not.toHaveBeenCalled()
+  })
+})
+
+describe('Reranker server settings card (#760)', () => {
+  it('renders its own card scoped to the reranking tenant', async () => {
+    render(<RerankerServerSettingsCard />)
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Reranker server' })).toBeTruthy(),
+    )
+    expect(screen.getByLabelText('Reranker model')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Start' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
+  })
+
+  it('lists only reranking models in its picker', async () => {
+    render(<RerankerServerSettingsCard />)
+    const select = (await screen.findByLabelText('Reranker model')) as HTMLSelectElement
+    await waitFor(() => expect(select.value).toBe('qwen3-reranker-0.6b'))
+    const options = Array.from(select.options).map((o) => o.value)
+    expect(options).toEqual(['qwen3-reranker-0.6b'])
+  })
+
+  it('starts the reranking tenant with the reranker model', async () => {
+    startModelServerTask.mockResolvedValue({ ok: true, port: 8085 })
+    render(<RerankerServerSettingsCard />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('off'))
+    fireEvent.click(screen.getByRole('button', { name: 'Start' }))
+    await waitFor(() => expect(screen.getByText(/Server started on port 8085/)).toBeTruthy())
+    expect(startModelServerTask).toHaveBeenCalledWith('qwen3-reranker-0.6b', 'reranking')
+  })
+
+  it('filters the embedding card to embedding models only (#760 misroute)', async () => {
+    render(<ModelServerSettingsCard />)
+    const select = (await screen.findByLabelText('Model server model')) as HTMLSelectElement
+    await waitFor(() => expect(select.value).toBe('qwen3-embedding-0.6b'))
+    const options = Array.from(select.options).map((o) => o.value)
+    expect(options).toEqual(['qwen3-embedding-0.6b'])
   })
 })
