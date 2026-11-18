@@ -62,6 +62,15 @@ async def lifespan(app: FastAPI):
     _label = await repair_index_label()
     if not _label.get("skipped"):
         log.info("index-label repair: %s", _label)
+    # #764 one-time pass: embeddings written before #764 are JSON text
+    # (~22 KB/row where packed float32 needs ~4 KB, and json.loads per
+    # row on every semantic query). Repacks in place, batch-by-batch;
+    # never re-embeds. AFTER the label repair, BEFORE the scheduler.
+    from backend.agent.embedding_blob_repair import repair_embedding_blobs
+
+    _blob = await repair_embedding_blobs()
+    if not _blob.get("skipped"):
+        log.info("embedding blob repair: %s", _blob)
     # Skills are scanned once at startup; the UI can force a rescan via
     # POST /api/skills/refresh. The directory is created on first run so
     # there is an obvious place to drop skills.

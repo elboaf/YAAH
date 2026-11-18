@@ -19,12 +19,21 @@ export function SidebarSearch({
   const [matches, setMatches] = useState<SearchMatch[]>([])
   const [loading, setLoading] = useState(false)
   const [searched, setSearched] = useState(false)
+  // The trimmed query the visible results/error belong to (#764): a
+  // result set renders only while its own query is still in the box.
+  const [resultQuery, setResultQuery] = useState('')
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const searchId = useRef(0)
+  // Aborts the previous in-flight request when a new keystroke-burst
+  // fires (#764): overlapping megascans once stacked into a multi-GB,
+  // minutes-long wedge. The backend scan is now bounded (#764), but a
+  // superseded query's answer is dropped anyway -- never render stale.
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
+    if (abortRef.current) abortRef.current.abort()
 
     const trimmed = query.trim()
     if (!trimmed) {
@@ -39,21 +48,32 @@ export function SidebarSearch({
     const myId = searchId.current
     setLoading(true)
     setError(null)
+    // A different query invalidates the previous result set (#764):
+    // show this query's own loading state until its results arrive.
+    if (trimmed !== resultQuery) {
+      setSearched(false)
+    }
+    const controller = new AbortController()
+    abortRef.current = controller
 
     debounceRef.current = setTimeout(async () => {
       if (myId !== searchId.current) return
       try {
-        const result = await searchConversations(trimmed, 10)
+        const result = await searchConversations(trimmed, 10, controller.signal)
         if (myId !== searchId.current) return
         setMatches(result.matches)
         setSearched(true)
+        setResultQuery(trimmed)
       } catch (e) {
+        // An aborted superseded query is normal typing, not an error.
+        if (controller.signal.aborted) return
         if (myId !== searchId.current) return
         setError(String((e as Error).message ?? e))
         setMatches([])
         setSearched(true)
+        setResultQuery(trimmed)
       } finally {
-        if (myId === searchId.current) {
+        if (myId === searchId.current && !controller.signal.aborted) {
           setLoading(false)
         }
       }
@@ -61,6 +81,8 @@ export function SidebarSearch({
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
+      // Unmount (or query change): kill any in-flight request.
+      if (abortRef.current) abortRef.current.abort()
     }
   }, [query])
 
@@ -102,10 +124,11 @@ export function SidebarSearch({
         )}
       </div>
 
-      {/* Results */}
+      {/* Results: only for the query currently in the box (#764) -- a
+          previous query's matches never linger while a new one loads. */}
       {query.trim() && (
         <div className="mt-1.5 max-h-72 overflow-y-auto">
-        {error && (
+        {error && resultQuery === query.trim() && (
           <p className="px-2 py-1.5 text-xs text-red-400 bg-red-950/30 rounded">
             {error}
           </p>
@@ -115,13 +138,13 @@ export function SidebarSearch({
           <p className="px-2 py-3 text-xs text-zinc-500">Searching…</p>
         )}
 
-        {searched && matches.length === 0 && !loading && (
+        {searched && resultQuery === query.trim() && matches.length === 0 && !loading && (
           <p className="px-2 py-3 text-xs text-zinc-500">
             No matches for "{query}"
           </p>
         )}
 
-        {chatMatches.length > 0 && (
+        {resultQuery === query.trim() && chatMatches.length > 0 && (
           <div className="mb-1">
             <div className="px-2 py-0.5 text-[10px] font-semibold uppercase text-zinc-500">
               Chats
@@ -148,7 +171,7 @@ export function SidebarSearch({
           </div>
         )}
 
-        {toolMatches.length > 0 && (
+        {resultQuery === query.trim() && toolMatches.length > 0 && (
           <div className="mb-1">
             <div className="px-2 py-0.5 text-[10px] font-semibold uppercase text-zinc-600">
               Tool output
@@ -175,7 +198,7 @@ export function SidebarSearch({
           </div>
         )}
 
-        {subagentMatches.length > 0 && (
+        {resultQuery === query.trim() && subagentMatches.length > 0 && (
           <div className="mb-1">
             <div className="px-2 py-0.5 text-[10px] font-semibold uppercase text-zinc-600">
               Sub-agents

@@ -49,7 +49,7 @@ describe('SidebarSearch (#676)', () => {
     render(<SidebarSearch onOpenConversation={vi.fn()} />)
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'schema' } })
-    await waitFor(() => expect(searchConversations).toHaveBeenCalledWith('schema', 10), { timeout: 1000 })
+    await waitFor(() => expect(searchConversations).toHaveBeenCalledWith('schema', 10, expect.any(AbortSignal)), { timeout: 1000 })
   })
 
   it('renders classified chat results with kind badge', async () => {
@@ -136,5 +136,56 @@ describe('SidebarSearch (#676)', () => {
     const input = screen.getByPlaceholderText('Search conversations…')
     fireEvent.change(input, { target: { value: 'error' } })
     await waitFor(() => expect(screen.getByText('Backend unreachable')).toBeInTheDocument(), { timeout: 1000 })
+  })
+
+  it('aborts the previous in-flight request when a new query fires (#764)', async () => {
+    // First query hangs forever; the superseding keystroke must abort it.
+    let firstSignal: AbortSignal | undefined
+    ;(searchConversations as ReturnType<typeof vi.fn>).mockImplementation(
+      (q: string, _mr: number, signal?: AbortSignal) => {
+        if (q === 'first') {
+          firstSignal = signal
+          return new Promise(() => {}) // never settles
+        }
+        return Promise.resolve({ count: 1, matches: [mockMatches[0]], truncated: false })
+      },
+    )
+    render(<SidebarSearch onOpenConversation={vi.fn()} />)
+    const input = screen.getByPlaceholderText('Search conversations…')
+    fireEvent.change(input, { target: { value: 'first' } })
+    await waitFor(() => expect(searchConversations).toHaveBeenCalledTimes(1), { timeout: 1000 })
+    fireEvent.change(input, { target: { value: 'second' } })
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true), { timeout: 1000 })
+    await waitFor(() => expect(screen.getByText('Chat A')).toBeInTheDocument(), { timeout: 1000 })
+  })
+
+  it('never renders an error or stale state for an aborted superseded query (#764)', async () => {
+    // The superseded request rejects via its abort listener; the guard
+    // in the catch must discard it. Detection: the FIRST request is
+    // cleared away (searchId stays put), so without the abort guard the
+    // rejected catch would set searched/error on the FIRST query's
+    // state -- observable as 'Chat A' lingering after the clear.
+    let firstSignal: AbortSignal | undefined
+    ;(searchConversations as ReturnType<typeof vi.fn>).mockImplementation(
+      (q: string, _mr: number, signal?: AbortSignal) => {
+        if (q === 'first') {
+          firstSignal = signal
+          return Promise.resolve({ count: 1, matches: [mockMatches[0]], truncated: false })
+        }
+        // Any later query: pending until explicitly released.
+        return new Promise<{ count: number; matches: typeof mockMatches; truncated: boolean }>(() => {})
+      },
+    )
+    render(<SidebarSearch onOpenConversation={vi.fn()} />)
+    const input = screen.getByPlaceholderText('Search conversations…')
+    fireEvent.change(input, { target: { value: 'first' } })
+    await waitFor(() => expect(screen.getByText('Chat A')).toBeInTheDocument(), { timeout: 1000 })
+    // Clear the input: aborts the request, searchId unchanged.
+    fireEvent.change(input, { target: { value: '' } })
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true), { timeout: 1000 })
+    expect(screen.queryByText('Chat A')).not.toBeInTheDocument()
+    // Type a new query while the aborted rejection settles.
+    fireEvent.change(input, { target: { value: 'two' } })
+    expect(screen.getByText('Searching…')).toBeInTheDocument()
   })
 })

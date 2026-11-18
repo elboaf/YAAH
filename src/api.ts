@@ -1206,8 +1206,9 @@ export const transcribeStatus = () => api<TranscribeStatus>('/api/transcribe/sta
 export async function searchConversations(
   query: string,
   max_results: number = 10,
+  signal?: AbortSignal,
 ): Promise<{ count: number; matches: SearchMatch[]; truncated: boolean }> {
-  return api(`/api/search?query=${encodeURIComponent(query)}&max_results=${max_results}`)
+  return api(`/api/search?query=${encodeURIComponent(query)}&max_results=${max_results}`, { signal })
 }
 
 export interface SearchMatch {

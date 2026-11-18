@@ -7,14 +7,20 @@ embeddings endpoint response and are recorded per build, so a model
 mismatch can be detected at query time and search degrades to
 keyword-only instead of comparing incommensurable vectors.
 
-Vector serialization is JSON (stdlib only, no numpy); similarity is
-cosine, computed in Python over the rows loaded into memory.
+Vector serialization is packed little-endian float32 (4 bytes/dim,
+#764); rows written before #764 hold JSON text and are decoded by the
+dual-form reader until the one-shot repair converts them. Similarity
+is cosine, computed in Python over batches -- the scan streams rows
+batch-by-batch and keeps a bounded top-K, never the whole table (#764:
+the old whole-table fetchall hauled >1 GB of JSON per query and
+wedged the app).
 """
 
 import asyncio
 import json
 import logging
 import math
+import struct
 from datetime import datetime, timezone
 
 from backend.db.database import open_db
@@ -22,6 +28,12 @@ from backend.db.database import open_db
 log = logging.getLogger("yaah.vectorestore")
 
 INDEX_METADATA_KEY = "search_index_metadata"
+
+# Rows decoded per scan batch (#764): the query fetches this many rows
+# at a time, scores them in the worker thread, and keeps only a
+# max_results-sized winner list -- RAM stays at one batch regardless of
+# index size. Keyed on rowid so pagination is a stable index seek.
+SEMANTIC_SCAN_BATCH = 512
 
 # Semantic readiness states (the degradation ladder):
 #   not_configured - no endpoint/model in config; keyword-only is normal.
@@ -123,7 +135,7 @@ async def store_chunk_embeddings(rows: list[dict]) -> int:
             r["role"],
             r["chunk_text"],
             r["chunk_index"],
-            json.dumps(r["embedding"]).encode("utf-8"),
+            struct.pack(f"<{len(r['embedding'])}f", *r["embedding"]),
         )
         for r in rows
     ]
@@ -232,9 +244,9 @@ async def conversation_ids_in_workspaces(workspaces: list[str]) -> list[int]:
         return [row["id"] for row in await cur.fetchall()]
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
+def _cosine_similarity(a: list[float], b: list[float], a_norm: float | None = None) -> float:
     dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_a = math.sqrt(sum(x * x for x in a)) if a_norm is None else a_norm
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0 or norm_b == 0:
         return 0.0
@@ -254,6 +266,11 @@ async def semantic_search(
     huge index does not get hauled into memory for a scoped search.
     Cosine similarity is computed in Python (stdlib only, no numpy).
 
+    The scan streams rows in SEMANTIC_SCAN_BATCH batches keyed on rowid
+    and keeps only a max_results-sized winner list (#764: the old
+    whole-table fetchall loaded ~1.15 GB of JSON per query on real
+    indexes and wedged the event loop ~7 s per query).
+
     Rows whose stored vector length disagrees with the query are skipped
     with a warning -- that combination would produce a silent garbage
     score from zip truncation, and it means the index and the query were
@@ -264,52 +281,75 @@ async def semantic_search(
     except (TypeError, ValueError):
         max_results = 10
 
-    async with open_db() as db:
-        if conversation_ids:
-            placeholders = ",".join("?" * len(conversation_ids))
-            cur = await db.execute(
-                "SELECT id, message_id, conversation_id, role, chunk_text, embedding "
-                f"FROM vector_index WHERE conversation_id IN ({placeholders})",
-                conversation_ids,
-            )
-        else:
-            cur = await db.execute(
-                "SELECT id, message_id, conversation_id, role, chunk_text, embedding "
-                "FROM vector_index"
-            )
-        rows = await cur.fetchall()
+    where = ""
+    params: list = []
+    if conversation_ids:
+        placeholders = ",".join("?" * len(conversation_ids))
+        where = f" WHERE conversation_id IN ({placeholders})"
+        params = list(conversation_ids)
 
-    def _score_rows():
-        """Parse and score all rows. Runs in a worker thread: a big index
-        must not block the event loop (agent streams stall otherwise)."""
+    def _score_rows(batch):
+        """Decode + score one batch. Runs in a worker thread (a big
+        index must not block the event loop; agent streams stall).
+        The query norm is computed once, not once per row."""
+        query_norm = math.sqrt(sum(x * x for x in query_embedding))
         scored = []
         skipped = 0
-        for row in rows:
-            try:
-                embedding = json.loads(bytes(row["embedding"]).decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        for row in batch:
+            vec, ok = _decode_embedding(row["embedding"])
+            if not ok:
                 skipped += 1
                 continue
-            # FK cascades remove vectors with their messages; rows written
-            # before the FKs existed were dropped by the migration, and a
-            # message deleted mid-build is refused at store time -- so
-            # every row here has a live message behind it.
-            if not isinstance(embedding, list) or len(embedding) != len(query_embedding):
+            if len(vec) != len(query_embedding):
                 skipped += 1
                 continue
-            scored.append((
-                _cosine_similarity(query_embedding, embedding),
-                row,
-            ))
+            similarity = _cosine_similarity(query_embedding, vec, a_norm=query_norm)
+            # A NaN vector (e.g. a corrupted packed row) would slip the
+            # similarity > min_similarity cutoff (NaN comparisons are
+            # False) and surface as a NaN-scored hit.
+            if not math.isfinite(similarity):
+                skipped += 1
+                continue
+            scored.append((similarity, row))
         return scored, skipped
 
-    scored, skipped = await asyncio.to_thread(_score_rows)
-    if skipped:
-        log.warning("semantic_search skipped %d unusable vectors", skipped)
+    winners = []  # bounded: at most max_results entries survive a batch
+    total_skipped = 0
+    async with open_db() as db:
+        # One ordered cursor for the whole scan: ORDER BY id makes the
+        # keyset-free pagination deterministic (a scoped query without it
+        # may drive the conversation index and return batches out of id
+        # order, silently skipping rows), and a single statement holds
+        # one read snapshot -- a concurrent rebuild's INSERT OR REPLACE
+        # can otherwise re-present a chunk under a new rowid in a later
+        # batch and get it scored twice.
+        sql = (
+            "SELECT id, message_id, conversation_id, role, chunk_text, embedding "
+            "FROM vector_index"
+        )
+        if where:
+            sql += f" WHERE conversation_id IN ({placeholders})"
+        sql += " ORDER BY id"
+        cur = await db.execute(sql, params)
+        while True:
+            batch = await cur.fetchmany(SEMANTIC_SCAN_BATCH)
+            if not batch:
+                break
+            scored, skipped = await asyncio.to_thread(_score_rows, batch)
+            total_skipped += skipped
+            if skipped:
+                log.warning(
+                    "semantic_search skipped %d unusable vectors in batch",
+                    skipped,
+                )
+            scored.sort(key=lambda pair: (-pair[0], pair[1]["message_id"]))
+            winners = sorted(
+                winners + scored[:max_results],
+                key=lambda pair: (-pair[0], pair[1]["message_id"]),
+            )[:max_results]
 
-    scored.sort(key=lambda pair: pair[0], reverse=True)
     results = []
-    for similarity, row in scored[:max_results]:
+    for similarity, row in winners:
         if similarity <= min_similarity:
             break
         results.append({
@@ -321,3 +361,42 @@ async def semantic_search(
             "similarity": round(similarity, 4),
         })
     return results
+
+
+def _decode_embedding(raw) -> tuple[list[float], bool]:
+    """Dual-form decode (#764): packed little-endian float32 BLOB (the
+    #764 write format and post-repair form) or JSON text (every row
+    written before #764 -- the repair pass converts those over time).
+    Returns ([], False) for anything undecodable."""
+    if isinstance(raw, str):
+        # Legacy JSON-text form (SQLite stores it as TEXT).
+        try:
+            vec = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return [], False
+        if isinstance(vec, list) and all(
+            isinstance(x, (int, float)) for x in vec
+        ):
+            return vec, True
+        return [], False
+    data = bytes(raw)
+    if data[:1] == b"[":
+        # JSON text stored as a BLOB (pre-#764 writes) always starts
+        # with '['; try JSON first, but fall through to float32 in the
+        # astronomically rare case of a packed vector whose first byte
+        # happens to be 0x5B.
+        try:
+            vec = json.loads(data.decode("utf-8"))
+            if isinstance(vec, list) and all(
+                isinstance(x, (int, float)) for x in vec
+            ):
+                return vec, True
+            return [], False
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            pass
+    if len(data) % 4 == 0:
+        try:
+            return list(struct.unpack(f"<{len(data) // 4}f", data)), True
+        except struct.error:
+            return [], False
+    return [], False
