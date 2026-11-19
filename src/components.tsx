@@ -100,6 +100,9 @@ import {
   cancelRemoteDeviceTurn,
   getSandboxStatus,
   type SandboxStatus,
+  listProcesses,
+  stopProcess,
+  type DetachedProcess,
   probeImageProvider,
   getLoraCatalog,
   getEmbeddingsStatus,
@@ -9595,6 +9598,121 @@ function tokenCountColor(tokens: number): string {
  *  dial knew — the 120k dumb-zone guidance and the billed cost. Nothing
  *  renders until the first turn completes (the count comes from the API's
  *  usage report). */
+export function DetachedProcessesChip() {
+  const [open, setOpen] = useState(false)
+  const [rows, setRows] = useState<DetachedProcess[]>([])
+  const [busyPid, setBusyPid] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const wrapRef = useRef<HTMLSpanElement>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await listProcesses()
+      setRows(r.processes)
+    } catch {
+      /* transient backend hiccup - the poll retries */
+    }
+  }, [])
+
+  // One poll, faster while the popover is open. The chip needs a count even
+  // when closed (so the user can see something is running), but a 2s tick
+  // running forever would be noise against the backend; 10s while closed,
+  // 2s while the list is on screen.
+  useEffect(() => {
+    void refresh()
+    const t = window.setInterval(() => void refresh(), open ? 2000 : 10000)
+    return () => window.clearInterval(t)
+  }, [open, refresh])
+
+  // Click-outside closes the popover (GitChipCluster precedent).
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const stop = async (pid: number) => {
+    setBusyPid(pid)
+    setError(null)
+    try {
+      await stopProcess(pid)
+    } catch (e) {
+      // The route refuses an unrecorded PID with a 400; surface why rather
+      // than silently leaving the row on screen.
+      setError((e as Error).message.replace(/^\d+:\s*/, ''))
+    } finally {
+      setBusyPid(null)
+      void refresh()
+    }
+  }
+
+  // The chip is invisible when nothing is running: a permanent "0 processes"
+  // badge would be decoration, not information.
+  if (rows.length === 0) return null
+
+  return (
+    <span ref={wrapRef} className="relative flex items-center">
+      <button
+        className="flex shrink-0 items-center gap-1 rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:border-zinc-500"
+        title={`${rows.length} detached process${rows.length === 1 ? '' : 'es'} started by YAAH - click for the list`}
+        aria-label="Detached processes; open the list"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        <span>{rows.length}</span>
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full right-0 z-30 mb-1 w-80 rounded border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+          <div className="px-3 pb-1 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-600">
+            detached processes
+          </div>
+          {error && (
+            <div className="px-3 py-1 text-[10px] leading-relaxed text-red-400">{error}</div>
+          )}
+          <div className="overflow-auto" style={{ maxHeight: '16rem' }}>
+            {rows.map((p) => (
+              <div key={p.pid} className="px-3 py-1.5">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
+                      p.alive ? 'bg-emerald-500' : 'bg-zinc-600'
+                    }`}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-300" title={p.command}>
+                    {p.command}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-zinc-600">{p.pid}</span>
+                  <button
+                    className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-red-700 hover:text-red-300 disabled:opacity-40"
+                    disabled={busyPid === p.pid}
+                    onClick={() => void stop(p.pid)}
+                    title="Stop this process and its whole tree"
+                  >
+                    {busyPid === p.pid ? 'stopping' : 'stop'}
+                  </button>
+                </div>
+                <div className="truncate pl-3.5 font-mono text-[10px] text-zinc-600" title={p.log_path}>
+                  log: {p.log_path}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="px-3 pb-1 pt-1 text-[10px] leading-relaxed text-zinc-600">
+            Only processes this YAAH backend started are listed. A detached
+            process outlives a restart, so it can keep running without
+            appearing here.
+          </div>
+        </div>
+      )}
+    </span>
+  )
+}
+
 export function ContextChip({ info }: { info: { tokens: number; window: number | null; model: string | null; cost: number | null } | undefined }) {
   if (!info) return null
   // Cost display: authoritative billed amount from OpenRouter. Shows
@@ -10878,6 +10996,9 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           />
           {streaming ? 'working' : status}
         </span>
+        {/* #770 stage 2: the detached-processes chip renders nothing unless a
+            process is running, so the strip keeps its one job when idle. */}
+        <DetachedProcessesChip />
       </div>
     </main>
   )
