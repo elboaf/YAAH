@@ -366,6 +366,48 @@ async def spawn_detached(
     }
 
 
+def _kill_tree(pid, *, getpgid=None, killpg=None, kill=None) -> bool:
+    """Kill a detached process (its tree on Windows, its group on POSIX).
+
+    Returns True when the kill command reported success. Never raises.
+
+    POSIX guard: a detached child gets its own session (``start_new_session``
+    in spawn_detached), so its process group normally differs from the
+    backend's. When the recorded PID's group MATCHES our own group, the PID is
+    not a detached child -- the registry is advisory, so a stale row can name
+    anything -- and ``killpg`` would kill the backend itself. This is not
+    hypothetical: a test that recorded a child spawned without its own session
+    took the whole CI runner down, the "Run tests" step never concluding. In
+    that case kill the single PID, never the group.
+
+    The three os functions are injectable so the branch is testable on any
+    host, including Windows CI, where the POSIX path never executes natively.
+    """
+    getpgid = getpgid or getattr(os, "getpgid", None)
+    killpg = killpg or getattr(os, "killpg", None)
+    kill = kill or getattr(os, "kill", None)
+    if os.name == "nt":
+        try:
+            res = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(int(pid))],
+                capture_output=True, text=True, timeout=15,
+            )
+            return res.returncode == 0
+        except Exception:  # noqa: BLE001
+            return False
+    if getpgid is None or killpg is None or kill is None:
+        return False
+    try:
+        pgid = getpgid(int(pid))
+        if pgid != getpgid(0):
+            killpg(pgid, 9)
+        else:
+            kill(int(pid), 9)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def stop_process(workspace, pid, conversation_id=None) -> dict:
     """Kill a process the backend recorded as agent-spawned (tree, not root).
 
@@ -385,22 +427,7 @@ async def stop_process(workspace, pid, conversation_id=None) -> dict:
             _REGISTRY.pop(pid, None)
         return {"stopped": False, "error": f"pid {pid} no longer belongs to the spawned process"}
 
-    killed = False
-    if os.name == "nt":
-        try:
-            res = subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(int(pid))],
-                capture_output=True, text=True, timeout=15,
-            )
-            killed = res.returncode == 0
-        except Exception:  # noqa: BLE001
-            killed = False
-    else:
-        try:
-            os.killpg(os.getpgid(int(pid)), 9)
-            killed = True
-        except Exception:  # noqa: BLE001
-            killed = False
+    killed = _kill_tree(pid)
 
     # Keep the row and refuse to report success when the kill failed and the
     # PID is still alive: the process keeps running, so the row must survive
