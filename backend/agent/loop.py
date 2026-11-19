@@ -829,6 +829,11 @@ def _default_system_prompt(workspace: str = "") -> str:
     core_tools: list[str] = ["bash (shell commands)"]
     if windows:
         core_tools.append("powershell (Windows PowerShell)")
+        # #770: get_schemas() offers the detached-process tools on any Windows
+        # target, so the prose line must name them (the #181 drift guard below
+        # requires every schema to be mentioned). Conditional on the same
+        # `windows` flag, so a Linux host stays consistent in both places.
+        core_tools += ["spawn_detached", "stop_process"]
     # #181: the prose line must cover the whole schema set. The tail tools
     # below previously existed only as schemas (search_conversation_history
     # was never mentioned anywhere); annotations keep the useful pointers.
