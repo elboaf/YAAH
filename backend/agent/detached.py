@@ -142,6 +142,29 @@ def _split(command: str) -> list[str]:
     return parts
 
 
+def _split_launcher(command: str) -> tuple[str, str]:
+    """Split a Windows command line into its launcher token and the argument
+    suffix, preserving the suffix byte-for-byte.
+
+    The launcher may be quoted (``"C:\\Program Files\\node\\npm.cmd" run
+    build``); then the token is what is inside the quotes. Otherwise the token
+    ends at the first whitespace. Returns ``(argv0, rest)`` where ``rest``
+    keeps its original separator, so the line can be rebuilt as
+    ``exe + rest``. ``argv0`` has no surrounding quotes, so it is what
+    ``shutil.which`` can resolve.
+    """
+    s = command.lstrip()
+    lead = command[: len(command) - len(s)]
+    if s.startswith('"'):
+        end = s.find('"', 1)
+        if end != -1:
+            return s[1:end], lead + s[end + 1:]
+    idx = s.find(" ")
+    if idx == -1:
+        return s, ""
+    return s[:idx], lead + s[idx:]
+
+
 def _resolve_log_path(workspace: str, log_path: str | None) -> str:
     """Absolute path, or a workspace-relative one; parent dir is created.
 
@@ -250,7 +273,7 @@ async def spawn_detached(
     if not command or not str(command).strip():
         return {"error": "command is required: the command line to launch detached"}
 
-    cwd = (cwd or "").strip() or workspace or "."
+    cwd = _display_cwd((cwd or "").strip() or workspace or ".")
     timeout = max(0.1, min(float(timeout_seconds or 10), 120))
 
     pid = _find_duplicate(str(command), str(cwd))
@@ -285,10 +308,16 @@ async def spawn_detached(
     # unchanged when which finds nothing, so the missing-program error still
     # reports. On POSIX, argv is already resolved, so this is a no-op.
     if os.name == "nt":
-        argv0 = argv.split(" ", 1)[0].strip()
-        resolved = shutil.which(argv0, path=env.get("PATH"))
+        argv0, rest = _split_launcher(argv)
+        resolved = shutil.which(argv0, path=env.get("PATH")) if argv0 else None
         if resolved and os.path.isfile(resolved):
-            argv = resolved + (argv[len(argv0):] if len(argv) > len(argv0) else "")
+            # Quote the resolved executable as its own token whenever it
+            # contains a space: CreateProcess splits an unquoted command line
+            # at whitespace, so C:\Program Files\...\npm.cmd would otherwise
+            # resolve to the first existing prefix (C:\Program.exe) or fail.
+            # The argument suffix is preserved byte-for-byte.
+            exe = f'"{resolved}"' if " " in resolved else resolved
+            argv = exe + rest
     try:
         proc = subprocess.Popen(
             argv,
@@ -409,13 +438,40 @@ def list_processes() -> list[dict]:
     return rows
 
 
+def _norm_cwd(cwd: str) -> str:
+    """Comparison key for a working directory: normcase(normpath(cwd)).
+
+    ``C:\\work\\app``, ``C:\\work\\app\\.`` and ``C:\\work\\app\\`` name the
+    same directory, so a second spawn of the same command must be refused as a
+    duplicate; normpath folds the redundant ``.``/separator components and
+    normcase folds the case (Windows paths are case-insensitive; it is a no-op
+    on POSIX). Used for comparison only -- the recorded/returned cwd keeps its
+    caller-visible casing via ``_display_cwd``.
+    """
+    cwd = (cwd or "").strip()
+    return os.path.normcase(os.path.normpath(cwd)) if cwd else ""
+
+
+def _display_cwd(cwd: str) -> str:
+    """The cwd as stored and returned: normpath form (fold ``.`` and trailing
+    separators) with the caller's casing kept, so the value the model sees
+    still reads like the path it passed."""
+    cwd = (cwd or "").strip()
+    return os.path.normpath(cwd) if cwd else ""
+
+
 def _find_duplicate(command: str, cwd: str):
     """PID of an already-running registry entry launched with the same
     command *and* cwd, or None. Used to refuse stacking a duplicate on a live
-    one; cwd-scoped so the same command in another project is not blocked."""
+    one; cwd-scoped so the same command in another project is not blocked.
+
+    Both sides are compared as ``_norm_cwd`` keys, so equivalent spellings of
+    one directory match.
+    """
+    key = _norm_cwd(cwd)
     with _lock:
         matches = [e for e in _REGISTRY.values()
-                   if e["command"] == command and e["cwd"] == cwd]
+                   if e["command"] == command and _norm_cwd(e.get("cwd") or "") == key]
     for entry in matches:
         if _alive(entry["pid"]) and _same_process(entry["pid"], entry.get("create_time")):
             return entry["pid"]

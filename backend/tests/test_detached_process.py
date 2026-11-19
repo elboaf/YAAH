@@ -9,6 +9,7 @@ there (the same skip style as the platform-conditional schema tests).
 import asyncio
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -333,5 +334,90 @@ async def test_spawn_detached_refuses_duplicate_running(tmp_path):
         r = await execute_tool("spawn_detached", {"command": "echo dup"}, str(tmp_path))
         assert r.get("started") is not True
         assert "already running" in (r.get("error") or "")
+    finally:
+        proc.kill()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="spawn_detached is Windows-only")
+def test_resolved_launcher_with_spaces_is_quoted(tmp_path, monkeypatch):
+    """A launcher resolved to a path with a space must be quoted as its own
+    executable token, or CreateProcess splits the line at the space and picks
+    the first existing prefix (a different program) instead.
+
+    This drives the real spawn path end to end: the resolved launcher is a
+    copy of the interpreter sitting in a spaced directory, with a decoy at the
+    whitespace-truncation point. Pre-fix, the child that runs is the decoy (or
+    the launch fails); post-fix it is the intended launcher.
+    """
+    spaced = tmp_path / "sp ace"
+    spaced.mkdir()
+    launcher = spaced / "launcher.exe"
+    shutil.copy(sys.executable, launcher)
+    decoy = tmp_path / "sp.exe"
+    shutil.copy(sys.executable, decoy)
+
+    script = tmp_path / "who.py"
+    out = tmp_path / "ran.txt"
+    script.write_text(
+        "import sys\n"
+        "open(sys.argv[1], 'w').write(sys.executable)\n"
+    )
+    monkeypatch.setenv("PATH", f"{spaced}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    r = asyncio.run(execute_tool(
+        "spawn_detached",
+        {"command": f"launcher.exe {script} {out}", "cwd": str(tmp_path)},
+        str(tmp_path),
+    ))
+    assert r.get("started") is True, r
+
+    deadline = time.time() + 20
+    while time.time() < deadline and not out.exists():
+        time.sleep(0.1)
+    assert out.exists(), f"child never ran; result={r}"
+    ran = out.read_text().strip()
+    assert os.path.normcase(ran) == os.path.normcase(str(launcher)), (
+        f"wrong executable ran: {ran!r} (intended {launcher}, decoy {decoy})"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="spawn_detached is Windows-only")
+def test_split_launcher_handles_quoted_and_bare_launchers():
+    """The launcher token is split out of a Windows command line without
+    losing the argument suffix, quoted or bare."""
+    import backend.agent.detached as detached
+
+    assert detached._split_launcher('npm run build') == ('npm', ' run build')
+    assert detached._split_launcher('npm') == ('npm', '')
+    assert detached._split_launcher(r'"C:\Program Files\node\npm.cmd" run build') == (
+        r'C:\Program Files\node\npm.cmd', ' run build',
+    )
+    # Leading whitespace is preserved byte-for-byte (it rides in front of the
+    # argument suffix, which is reattached unchanged after the executable).
+    assert detached._split_launcher(r'  npm   run build') == ('npm', '     run build')
+
+
+@pytest.mark.skipif(os.name != "nt", reason="spawn_detached is Windows-only")
+def test_duplicate_refusal_normalizes_equivalent_cwd(tmp_path):
+    """C:\\work\\app and C:\\work\\app\\. are one directory: a second spawn of
+    the same command from an equivalent spelling is refused as a duplicate."""
+    import backend.agent.detached as detached
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        detached._record(
+            proc.pid, command="echo dup2", cwd=str(tmp_path),
+            log_path="/tmp/detached-dup2.log", conversation_id=None,
+        )
+        # Same directory, spelled with a literal trailing "\." component
+        # (pathlib would fold it away, so build the string directly).
+        equivalent = str(tmp_path) + os.sep + "."
+        assert equivalent != str(tmp_path), "test setup did not spell a variant"
+        found = detached._find_duplicate("echo dup2", equivalent)
+        assert found == proc.pid, (
+            f"equivalent cwd not matched: {equivalent!r} vs {str(tmp_path)!r}"
+        )
+        # A different directory must still be allowed (not a duplicate).
+        assert detached._find_duplicate("echo dup2", str(tmp_path / "other")) is None
     finally:
         proc.kill()
