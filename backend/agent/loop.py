@@ -2293,11 +2293,11 @@ async def _run_agent_claimed(
             # chat() call: with stream=True the HTTP request only fires when
             # iteration starts, so a ModelError surfaces at the first chunk.
             state: dict = {"content": "", "tool_calls": None, "finish": None}
-            # Turn-level cost accumulators: additive across model calls
-            # in this turn (#627). Unlike prompt_tokens (last-call-wins),
-            # cost and completion tokens sum across calls.
+            # Turn-level cost accumulator, additive across model calls in
+            # this turn (#627): the wire event's per-turn figure, kept for
+            # backward compatibility with old frontend builds. The DB and
+            # the chip's session total are fed per call (#1245).
             turn_cost = 0.0
-            turn_completion_tokens = 0
 
             async def _model_step() -> AsyncIterator[str]:
                 """One chat call, consumed to completion, yielding UI event
@@ -2420,6 +2420,33 @@ async def _run_agent_claimed(
                         state["finish"] = ev.get("reason")
                     elif ev["type"] == "usage":
                         state["usage"] = ev.get("usage")
+                        # #1245: persist the billed spend at the POINT OF
+                        # BILLING. The provider charges the call when the
+                        # usage chunk arrives, not when the turn finishes —
+                        # a stream that dies after the usage chunk
+                        # (cancelled, errored, budget-exhausted) keeps its
+                        # cost in the DB. add_conversation_cost is an
+                        # atomic increment, so per-call writes sum correctly.
+                        _u = ev.get("usage") or {}
+                        _call_cost = _u.get("cost")
+                        if _call_cost is not None:
+                            try:
+                                _call_cost = float(_call_cost)
+                            except (TypeError, ValueError):
+                                _call_cost = None
+                        if _call_cost is not None or (
+                            _u.get("completion_tokens", 0) or 0
+                        ):
+                            try:
+                                await add_conversation_cost(
+                                    conversation_id,
+                                    _call_cost,
+                                    int(_u.get("completion_tokens", 0) or 0),
+                                )
+                            except Exception:  # noqa: BLE001
+                                # Best-effort: cost tracking must not fail
+                                # the call.
+                                pass
                 # Flush ordinary text at EOF, but never expose a possible
                 # partial opener or an unterminated briefing.
                 if tail and not say_open:
@@ -2566,25 +2593,34 @@ async def _run_agent_claimed(
 
                 # Accumulate billed cost and completion tokens for this turn
                 # (#627). cost is per-call authoritative from OpenRouter;
-                # other providers leave it None.
+                # other providers leave it None. The persist happens at the
+                # point of billing (#1245), inside the usage handler above.
                 _call_cost = usage.get("cost")
                 if _call_cost is not None:
-                    turn_cost += float(_call_cost)
-                _call_completion = usage.get("completion_tokens", 0)
-                if _call_completion is not None:
-                    turn_completion_tokens += int(_call_completion)
+                    try:
+                        _call_cost = float(_call_cost)
+                    except (TypeError, ValueError):
+                        _call_cost = None
+                if _call_cost is not None:
+                    turn_cost += _call_cost
 
                 # Live context-strip tick: emit after EVERY model call, not
                 # only the turn's last one — the status strip's bar must
                 # climb while the run is still in progress. The frontend
                 # treats this as authoritative for the running conversation.
-                # Include the turn's accumulated cost so far (#627).
+                # cost_spent is the SESSION cumulative (#1245): the
+                # pre-turn stored total plus this turn's spend so far, so
+                # the chip's live value equals what the context endpoint
+                # reports after the turn — not a per-turn number that
+                # resets every turn.
+                _row_after = await get_conversation(conversation_id) or {}
                 yield _ndjson(
                     {
                         "type": "usage",
                         "usage_tokens": int(usage["prompt_tokens"]),
                         "model": _model_id,
                         "turn_cost": turn_cost,
+                        "cost_spent": (_row_after.get("cost_spent") if _row_after else None),
                     }
                 )
 
@@ -2703,18 +2739,12 @@ async def _run_agent_claimed(
                     yield _fev
                 # #388: bump updated_at once per run (not per message) so the
                 # sidebar re-sorts to the top when the turn completes.
-                # Issue #627: persist the turn's accumulated billed cost and
-                # completion tokens. cost may be None (non-OpenRouter provider).
-                # Only persist if something actually accumulated — don't write
-                # zeros for providers that don't report.
-                if turn_cost > 0 or turn_completion_tokens > 0:
-                    try:
-                        await add_conversation_cost(
-                            conversation_id, turn_cost if turn_cost > 0 else None, turn_completion_tokens
-                        )
-                    except Exception:  # noqa: BLE001
-                        # Best-effort: cost tracking shouldn't fail the turn
-                        pass
+                # #1245: cost and completion tokens were persisted PER CALL
+                # above — the persist-only-at-natural-completion write is
+                # gone, so a cancelled or failed turn no longer loses the
+                # spend of the calls it already made. turn_cost survives as
+                # the per-turn value only because the wire event carried it;
+                # the chip now reads the session cumulative instead.
                 try:
                     await touch_updated_at(conversation_id)
                 except Exception:  # noqa: BLE001

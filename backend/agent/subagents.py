@@ -32,6 +32,7 @@ from pathlib import Path
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
+from backend.db.database import add_conversation_cost
 import yaml
 from backend.agent.tools import (
     MEMORY_TOOLS,
@@ -540,6 +541,9 @@ async def run_sub_agent(
     tools = _resolve_tools(defn, workspace=run_workspace)
     loaded_skills: list[str] = []
     transcript: list[dict] = []
+    # #1245: the sub's own billed spend — OpenRouter reports per-call
+    # usage.cost; other providers leave it None (stays None throughout).
+    sub_cost: float | None = None
 
     def _record(role: str, content, **extra):
         entry = {"role": role, "content": content, **extra}
@@ -550,6 +554,7 @@ async def run_sub_agent(
 
     async def _consume_stream(stream) -> None:
         # Consume one model stream into the per-turn acc/state closures.
+        nonlocal sub_cost
         async for ev in stream:
             if cancel_ev.is_set():
                 return
@@ -565,6 +570,53 @@ async def run_sub_agent(
                 state["tool_calls"] = ev["tool_calls"]
             elif ev["type"] == "finish":
                 state["finish"] = ev.get("reason")
+            elif ev["type"] == "usage":
+                # #1245: persist the sub's billed spend at the POINT OF
+                # BILLING, exactly as the parent loop does. A sub-agent's
+                # calls are billed too, and a cancelled or errored sub
+                # keeps the spend of the calls it already made.
+                # add_conversation_cost is an atomic increment, so the
+                # per-call writes sum correctly alongside the parent's.
+                _u = ev.get("usage") or {}
+                call_cost = _u.get("cost")
+                if call_cost is not None:
+                    try:
+                        call_cost = float(call_cost)
+                    except (TypeError, ValueError):
+                        call_cost = None
+                if call_cost is not None:
+                    sub_cost = (sub_cost or 0.0) + call_cost
+                if conversation_id is not None and (
+                    call_cost is not None
+                    or (_u.get("completion_tokens", 0) or 0)
+                ):
+                    # Cancellation-safe (#1245): this consumer runs as a
+                    # task the parent Stop cancels (see the consume/cancel
+                    # race below), and CancelledError is a BaseException --
+                    # so a cancel landing inside the write would skip
+                    # commit() and silently DISCARD the increment while the
+                    # provider had already billed the call. Shield the
+                    # write, then drain it before re-raising, so the spend
+                    # of a cancelled sub-agent turn is durably recorded.
+                    _cost_task = asyncio.ensure_future(
+                        add_conversation_cost(
+                            conversation_id,
+                            call_cost,
+                            int(_u.get("completion_tokens", 0) or 0),
+                        )
+                    )
+                    try:
+                        await asyncio.shield(_cost_task)
+                    except asyncio.CancelledError:
+                        # Let the shielded write finish, then propagate.
+                        try:
+                            await _cost_task
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise
+                    except Exception:  # noqa: BLE001
+                        # Best-effort: cost tracking must not fail the sub.
+                        pass
 
     async def _exec_tool_calls(tool_calls, *, interruptible: bool) -> bool:
         """Execute a turn's tool calls, appending tool results to messages.
@@ -887,6 +939,10 @@ async def run_sub_agent(
         "output": final_text or (f"error: {error}" if error else ""),
         **({"error": error} if error else {}),
         **({"note": grace_note} if grace_note else {}),
+        # #1245: the sub's own billed spend (OpenRouter per-call usage.cost
+        # summed over the sub's model calls; None = provider without cost
+        # reporting). The sub's calls never pass the parent loop's persist.
+        **({"cost_spent": sub_cost} if sub_cost is not None else {}),
         "transcript": transcript,
     }
     return result
@@ -1011,6 +1067,14 @@ async def spawn_batch(
                         "agent_type": defn.name,
                         "status": result["status"],
                         "turns": result["turns"],
+                        # #1245: the sub's billed spend, so the chip can
+                        # raise the session total mid-run (sub-agent calls
+                        # never went through the parent loop's persist).
+                        **(
+                            {"cost_spent": result["cost_spent"]}
+                            if result.get("cost_spent") is not None
+                            else {}
+                        ),
                         "duration_ms": int(
                             (time.monotonic() - _sub_t0) * 1000
                         ),
