@@ -9368,7 +9368,7 @@ export function GitChipCluster({
         // (~32px: py-1 = 8px, heading ~24px). getBoundingClientRect values
         // are in zoomed CSS pixels (UiScale), so multiply the estimate by
         // zoom to compare against window.innerHeight (unzoomed).
-        const zoom = parseFloat(document.getElementById('root')?.style.zoom) || 1
+        const zoom = parseFloat(document.getElementById('root')?.style.zoom ?? '') || 1
         const estimatedHeight = (224 + 32) * zoom
         const below = window.innerHeight - rect.bottom
         const above = rect.top
