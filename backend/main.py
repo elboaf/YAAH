@@ -3131,6 +3131,50 @@ async def api_sandbox_status():
     return status
 
 
+# ---- Detached processes panel (issue #770, stage 2) ----
+
+class StopProcessBody(BaseModel):
+    pid: int
+
+
+@app.get("/api/processes")
+async def api_processes():
+    """Detached processes this backend started (issue #770, stage 2).
+
+    Returns the in-process registry with live liveness applied: a row is
+    reported alive only if the OS still shows the PID, and dead rows are
+    pruned on read.
+
+    The registry is ADVISORY, not exhaustive -- a detached child outlives the
+    backend by design, so after a backend restart this list is empty while
+    real processes are still running. `known` is therefore the count the
+    backend can vouch for, never a claim about every process on the machine.
+    """
+    from backend.agent import detached as detached_mod
+
+    rows = detached_mod.list_processes()
+    return {"processes": rows, "known": len(rows)}
+
+
+@app.post("/api/processes/stop")
+async def api_processes_stop(body: StopProcessBody):
+    """Stop one detached process by PID, killing its whole tree.
+
+    Stopping by PID kills an arbitrary process, so the registry is the gate:
+    stop_process refuses any PID the backend did not record as agent-spawned.
+    A refusal is a 400, not a silent ok=false, so the UI cannot read it as a
+    successful stop.
+    """
+    from backend.agent import detached as detached_mod
+
+    result = await detached_mod.stop_process("", body.pid)
+    if not result.get("stopped"):
+        raise HTTPException(
+            status_code=400, detail=result.get("error") or "stop failed"
+        )
+    return result
+
+
 class ModelPick(BaseModel):
     provider: str
     model: str

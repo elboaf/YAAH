@@ -648,6 +648,39 @@ export interface SandboxStatus {
 }
 export const getSandboxStatus = () => api<SandboxStatus>('/api/sandbox/status')
 
+// ---- Detached processes (issue #770, stage 2) ----
+
+/** One detached process this backend started. The registry is advisory: a
+ *  child outlives the backend by design, so after a restart this list is
+ *  empty while real processes still run. */
+export interface DetachedProcess {
+  pid: number
+  command: string
+  cwd: string
+  log_path: string
+  started: number
+  conversation_id: number | null
+  alive: boolean
+}
+
+export interface DetachedProcessList {
+  processes: DetachedProcess[]
+  /** How many rows the backend can vouch for -- never a claim about every
+   *  process on the machine. */
+  known: number
+}
+
+export const listProcesses = () =>
+  api<DetachedProcessList>('/api/processes')
+
+/** Stop one detached process (whole tree). Refused (400) for any PID the
+ *  backend did not record as agent-spawned. */
+export const stopProcess = (pid: number) =>
+  api<{ stopped: boolean; pid: number; killed: boolean; command?: string }>(
+    '/api/processes/stop',
+    { method: 'POST', body: JSON.stringify({ pid }) },
+  )
+
 // ---- Interceptor browser control (issue #635, spec #630) ----
 
 /** One skill slot's link state, from the manager's status contract (t1). */
