@@ -159,21 +159,32 @@ def resolve_path(workspace: str, rel_path: str, for_write: bool = False) -> Path
 # gone -- a backgrounded child dies when the CALL returns (the kill-on-close
 # Job Object is torn down the instant the call closes), not on a timeout,
 # and that difference is exactly what misdirected the agent into nohup.
-if os.name == "nt":
-    _BG_WARN = (
-        "Never shell-background a long-running process (trailing &, start /b): "
-        "each call puts the child in a Job Object that is torn down the "
-        "instant the call returns, so a backgrounded server dies with the "
-        "call that started it. Start long-running servers with the "
-        "spawn_detached tool instead of nohup or Start-Process."
-    )
-else:
-    _BG_WARN = (
-        "Never shell-background a long-running process (trailing &, start /b): "
-        "the timeout kills the whole process tree and a child that inherited "
-        "the output pipe can leak a wedging orphan. Use nohup or setsid for a "
-        "server that must outlive the call."
-    )
+_BG_WARN_LEAD = (
+    "Never shell-background a long-running process (trailing &, start /b): "
+)
+_BG_WARN_WINDOWS = (
+    _BG_WARN_LEAD
+    + "each call puts the child in a Job Object that is torn down the "
+    "instant the call returns, so a backgrounded server dies with the "
+    "call that started it. Start long-running servers with the "
+    "spawn_detached tool instead of nohup or Start-Process."
+)
+_BG_WARN_POSIX = (
+    _BG_WARN_LEAD
+    + "the timeout kills the whole process tree and a child that inherited "
+    "the output pipe can leak a wedging orphan. Use nohup or setsid for a "
+    "server that must outlive the call."
+)
+# Whichever host imports this module (the CLIENT) picks its own variant, so
+# the module-level constant stays valid as-is for callers that read it
+# directly. get_schemas() below re-picks from the RESOLVED TARGET host.
+_BG_WARN = _BG_WARN_WINDOWS if os.name == "nt" else _BG_WARN_POSIX
+
+
+def _bg_warn_for(windows: bool) -> str:
+    """The background guidance for the RESOLVED target host (get_schemas),
+    keyed by target OS, not the importing client's OS."""
+    return _BG_WARN_WINDOWS if windows else _BG_WARN_POSIX
 
 # Issue #187 (SYN-13): the git-editor rule has exactly one rendered home —
 # the bash schema description. Other tool schemas carry only a short
@@ -3786,6 +3797,21 @@ def get_schemas(workspace: str | None = None) -> list:
     )
     windows = host.windows if host is not None else (os.name == "nt" and not remote_target)
     schemas = TOOLS_SCHEMA + [POWERSHELL_SCHEMA] if windows else TOOLS_SCHEMA
+    # Issue #770: the shell guidance must match the TARGET host, not the client
+    # that imported this module. The bash/powershell descriptions embed the
+    # client-OS _BG_WARN; swap it for the target-host variant so a Windows
+    # client on a Linux remote host still gets nohup/setsid (and never points at
+    # spawn_detached, which get_schemas() only offers for a Windows target).
+    client_bg_warn = _BG_WARN
+    target_bg_warn = _bg_warn_for(windows)
+    if target_bg_warn != client_bg_warn:
+        schemas = [
+            {**s, "function": {**s["function"],
+                               "description": s["function"]["description"].replace(client_bg_warn, target_bg_warn)}}
+            if s["function"]["name"] in ("bash", "powershell") and client_bg_warn in s["function"]["description"]
+            else s
+            for s in schemas
+        ]
     # Issue #770: spawn_detached / stop_process are Windows-only (they replace
     # a Windows Job Object with CREATE flags); offer them to any Windows target
     # — local, or a remote host — but never to a Windows-less model. Not gated

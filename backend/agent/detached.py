@@ -11,9 +11,10 @@ stays the source of truth for "what the agent started" (the shape the UI
 panel reads at stage 2).
 
 Windows-only in effect: only Windows has the Job Object this replaces and
-the spawn flags are Windows-only. The module imports cleanly on POSIX (the
-flags resolve to 0 there), so the two tools simply never reach a model off
-Windows because the schema is gated to ``os.name == "nt"``.
+the spawn flags are Windows-only. On POSIX the flags resolve to 0, the module
+imports cleanly, and ``start_new_session`` lets ``stop_process`` signal the
+child -- but the two tools never reach a model off Windows because the schema
+is gated to ``os.name == "nt"``.
 """
 from __future__ import annotations
 
@@ -22,19 +23,24 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 import time
+import uuid
 
 log = logging.getLogger("yaah.detached")
 
-# Windows creation flags. ``DETACHED_PROCESS`` and ``CREATE_NEW_PROCESS_GROUP``
-# share the 0x200 bit; OR-ing them is harmless and keeps the intent explicit.
-# POSIX accepts ``creationflags`` but ignores it -- the tool never reaches
-# POSIX in practice because get_schemas() only offers it on Windows.
-DETACHED_PROCESS = 0x00000200
-CREATE_NEW_PROCESS_GROUP = 0x00000200
-CREATE_NO_WINDOW = 0x08000000
+# Windows creation flags, taken from the subprocess module so the value is
+# exactly what the platform's CreateProcess honors, with 0 as the non-Windows
+# fallback (POSIX has no such flags). ``DETACHED_PROCESS`` (0x8) and
+# ``CREATE_NEW_PROCESS_GROUP`` (0x200) are distinct bits; OR-ing them is
+# harmless. ``CREATE_NO_WINDOW`` is ignored by CreateProcess when
+# ``DETACHED_PROCESS`` is set, so keep it only while the process is truly
+# detached -- drop it if a console grandchild opens a visible window.
+DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0)
+CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _DETACH_FLAGS = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 
 # In-process registry keyed by PID: {command, cwd, log_path, started,
@@ -92,13 +98,40 @@ def _alive(pid) -> bool:
     return False
 
 
+def _create_time(pid) -> float | None:
+    """Process creation time, or None if it cannot be read (e.g. psutil
+    missing). Used to prove a live PID is still the process we spawned: a
+    reused PID has a different start time. A None result is treated as
+    unknown and never refuses on its own."""
+    try:
+        import psutil
+
+        return float(psutil.Process(int(pid)).create_time())
+    except Exception:  # noqa: BLE001 - not found or psutil missing: unknown
+        return None
+
+
+def _same_process(pid, create_time) -> bool:
+    """True when the live process's creation time matches what we recorded,
+    i.e. this PID is still the process we spawned. A None recorded time is
+    unknown -- we cannot prove reuse, so we do not refuse. A None live time
+    means we cannot prove it is the same process either."""
+    live = _create_time(pid)
+    if live is None or create_time is None:
+        return True
+    return abs(live - create_time) < 1.0
+
+
 def _split(command: str) -> list[str]:
     """Split the caller's command string into argv.
 
     posix=False (win32 mode): backslash is NOT an escape char, so Windows
     paths (``C:\\Users\\...``) split intact rather than collapsing to
     ``C:Users...``. On POSIX it still honours standard quoting; the shell
-    tools remain the surface for Unix shell syntax.
+    tools remain the surface for Unix shell syntax. The returned argv keeps
+    quote characters around a token, which would double-quote it on Windows --
+    see ``spawn_detached`` for how the caller's command reaches Popen on that
+    platform.
     """
     try:
         parts = shlex.split(command, posix=False)
@@ -124,7 +157,8 @@ def _resolve_log_path(workspace: str, log_path: str | None) -> str:
     else:
         stem = re.sub(r"\W", "_", (workspace or "").strip().replace(os.sep, "_"))[:40]
         stem = stem or "detached"
-        p = os.path.join(workspace or ".", _DEFAULT_LOG_DIR, f"{stem}.log")
+        p = os.path.join(workspace or ".", _DEFAULT_LOG_DIR,
+                         f"{stem}-{uuid.uuid4().hex[:8]}.log")
 
     parent = os.path.dirname(p) or "."
     try:
@@ -141,6 +175,7 @@ def _record(pid, *, command, cwd, log_path, conversation_id) -> dict:
         "cwd": cwd,
         "log_path": log_path,
         "started": time.time(),
+        "create_time": _create_time(pid),
         "conversation_id": conversation_id,
     }
     with _lock:
@@ -163,16 +198,20 @@ def _prune_dead() -> None:
                 _REGISTRY.pop(pid, None)
 
 
-async def _wait_for_port(port: int, timeout: float) -> bool:
+async def _wait_for_port(port: int, timeout: float, proc=None) -> bool:
     """Report ready only after 127.0.0.1:port accepts a connection.
 
     Uses ``asyncio.open_connection`` (which works on every platform, including
     Windows' ProactorEventLoop where ``loop.connect_ex`` does not exist) with
     an ``asyncio.wait_for`` guard so a dead port can never hang the tool past
-    its timeout.
+    its timeout. When ``proc`` is passed, stop polling the moment it exits
+    (the port may belong to a stale server): the caller then reports not-ready
+    with the real exit code, not a false ready.
     """
     deadline = time.monotonic() + timeout
     while True:
+        if proc is not None and proc.poll() is not None:
+            return False
         try:
             await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port),
                                    timeout=min(0.5, max(0.1, timeout)))
@@ -214,7 +253,7 @@ async def spawn_detached(
     cwd = (cwd or "").strip() or workspace or "."
     timeout = max(0.1, min(float(timeout_seconds or 10), 120))
 
-    pid = _find_duplicate(str(command))
+    pid = _find_duplicate(str(command), str(cwd))
     if pid is not None:
         return {
             "error": (
@@ -226,13 +265,30 @@ async def spawn_detached(
         }
 
     log_file = _resolve_log_path(workspace, log_path)
-    argv = _split(str(command))
+    # Validate non-empty via the split, but on Windows pass the caller's
+    # command string straight to Popen: CreateProcess parses the caller's own
+    # quoting, so quoted paths and args land intact (a posix=False shlex split
+    # would leave the quote characters in, which list2cmdline would then
+    # double-escape). On POSIX, argv (already split and quoted-honoured) is
+    # passed to Popen as a list.
+    _split(str(command))  # still validates non-empty
+    argv = str(command) if os.name == "nt" else _split(str(command))
     try:
         fh = open(log_file, "ab", buffering=0)
     except OSError as e:
         return {"error": f"cannot open log file {log_file!r}: {e}", "started": False}
 
     env = dict(os.environ)
+    # Resolve a bare launcher name (npm, npx, vite) that CreateProcess would
+    # not find: it appends only .exe, never PATHEXT, so npm.cmd / npx.cmd shims
+    # raise FileNotFoundError. Apply PATHEXT resolution here and keep the name
+    # unchanged when which finds nothing, so the missing-program error still
+    # reports. On POSIX, argv is already resolved, so this is a no-op.
+    if os.name == "nt":
+        argv0 = argv.split(" ", 1)[0].strip()
+        resolved = shutil.which(argv0, path=env.get("PATH"))
+        if resolved and os.path.isfile(resolved):
+            argv = resolved + (argv[len(argv0):] if len(argv) > len(argv0) else "")
     try:
         proc = subprocess.Popen(
             argv,
@@ -243,6 +299,7 @@ async def spawn_detached(
             env=env,
             creationflags=_DETACH_FLAGS,
             close_fds=True,
+            start_new_session=(os.name != "nt"),
         )
     except Exception as e:  # noqa: BLE001
         fh.close()
@@ -256,13 +313,14 @@ async def spawn_detached(
     log.info("spawn_detached pid=%s cmd=%s log=%s", proc.pid, str(command), log_file)
 
     if ready_port is not None:
-        ready = await _wait_for_port(int(ready_port), timeout)
+        ready = await _wait_for_port(int(ready_port), timeout, proc)
         if not ready:
             return {
                 "pid": proc.pid,
                 "started": True,
                 "log_path": log_file,
                 "ready": False,
+                "exit_code": proc.poll(),
                 "error": (
                     f"port {int(ready_port)} did not accept a connection within "
                     f"{timeout:g}s; tail of {log_file}:"
@@ -289,6 +347,15 @@ async def stop_process(workspace, pid, conversation_id=None) -> dict:
     if entry is None:
         return {"stopped": False, "error": f"no agent-spawned process with pid {pid}"}
 
+    # The registry trusts the PID alone, but Windows reuses PIDs. A detached
+    # server that exited can be replaced by another program, so stop by PID
+    # would kill an unrelated process. Prove the live PID is still the one we
+    # spawned (matching creation time); a mismatch means the row is stale.
+    if not _same_process(pid, entry.get("create_time")):
+        with _lock:
+            _REGISTRY.pop(pid, None)
+        return {"stopped": False, "error": f"pid {pid} no longer belongs to the spawned process"}
+
     killed = False
     if os.name == "nt":
         try:
@@ -305,6 +372,17 @@ async def stop_process(workspace, pid, conversation_id=None) -> dict:
             killed = True
         except Exception:  # noqa: BLE001
             killed = False
+
+    # Keep the row and refuse to report success when the kill failed and the
+    # PID is still alive: the process keeps running, so the row must survive
+    # (a retry can still stop it, and the duplicate check still sees it).
+    if not killed and _alive(pid):
+        return {
+            "stopped": False,
+            "pid": int(pid),
+            "killed": False,
+            "error": "kill failed; the process is still running",
+        }
 
     with _lock:
         _REGISTRY.pop(pid, None)
@@ -331,13 +409,15 @@ def list_processes() -> list[dict]:
     return rows
 
 
-def _find_duplicate(command: str):
-    """PID of an already-running registry entry launched with the same command
-    string, or None. Used to refuse stacking a duplicate on a live one."""
+def _find_duplicate(command: str, cwd: str):
+    """PID of an already-running registry entry launched with the same
+    command *and* cwd, or None. Used to refuse stacking a duplicate on a live
+    one; cwd-scoped so the same command in another project is not blocked."""
     with _lock:
-        matches = [e for e in _REGISTRY.values() if e["command"] == command]
+        matches = [e for e in _REGISTRY.values()
+                   if e["command"] == command and e["cwd"] == cwd]
     for entry in matches:
-        if _alive(entry["pid"]):
+        if _alive(entry["pid"]) and _same_process(entry["pid"], entry.get("create_time")):
             return entry["pid"]
     return None
 
