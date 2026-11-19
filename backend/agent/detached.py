@@ -444,7 +444,12 @@ async def stop_process(workspace, pid, conversation_id=None) -> dict:
             _REGISTRY.pop(pid, None)
         return {"stopped": False, "error": f"pid {pid} no longer belongs to the spawned process"}
 
-    killed = _kill_tree(pid)
+    # _kill_tree runs taskkill (Windows) or killpg (POSIX) with a timeout, so
+    # it blocks. Run it in a worker thread; keep the registry lookup, the
+    # process-identity check, and the failure handling in the coroutine. This
+    # route is awaited by POST /api/processes/stop, so a long kill must not
+    # stall the event loop and other in-flight requests.
+    killed = await asyncio.to_thread(_kill_tree, pid)
 
     # Keep the row and refuse to report success when the kill failed and the
     # PID is still alive: the process keeps running, so the row must survive

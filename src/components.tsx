@@ -9601,13 +9601,24 @@ function tokenCountColor(tokens: number): string {
 export function DetachedProcessesChip() {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<DetachedProcess[]>([])
-  const [busyPid, setBusyPid] = useState<number | null>(null)
+  // Each stop tracks its own PID so stops stay independent: clicking stop on
+  // B while A runs disables only B, and when A finishes it clears only A.
+  // A single "busy" flag would clear whichever stop last started.
+  const [busyPids, setBusyPids] = useState<Set<number>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
+  // The chip polls every 2-10s AND refreshes after a stop. A stop's refresh
+  // can return before the still-running poll, so an older response must never
+  // overwrite the newer one and restore a process the user just stopped. The
+  // latest request id stamps each poll; a response is dropped when its stamp
+  // no longer matches (a ref, so refresh stays stable across render updates).
+  const reqIdRef = useRef(0)
 
   const refresh = useCallback(async () => {
+    const me = ++reqIdRef.current
     try {
       const r = await listProcesses()
+      if (me !== reqIdRef.current) return // stale poll, drop it
       setRows(r.processes)
     } catch {
       /* transient backend hiccup - the poll retries */
@@ -9635,7 +9646,7 @@ export function DetachedProcessesChip() {
   }, [open])
 
   const stop = async (pid: number) => {
-    setBusyPid(pid)
+    setBusyPids((p) => new Set(p).add(pid))
     setError(null)
     try {
       await stopProcess(pid)
@@ -9644,7 +9655,14 @@ export function DetachedProcessesChip() {
       // than silently leaving the row on screen.
       setError((e as Error).message.replace(/^\d+:\s*/, ''))
     } finally {
-      setBusyPid(null)
+      setBusyPids((p) => {
+        const next = new Set(p)
+        next.delete(pid)
+        return next
+      })
+      // Invalidate any in-flight poll so this post-stop refresh wins, and a
+      // stale poll cannot restore a just-stopped row.
+      reqIdRef.current += 1
       void refresh()
     }
   }
@@ -9689,11 +9707,11 @@ export function DetachedProcessesChip() {
                   <span className="shrink-0 font-mono text-[10px] text-zinc-600">{p.pid}</span>
                   <button
                     className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-red-700 hover:text-red-300 disabled:opacity-40"
-                    disabled={busyPid === p.pid}
+                    disabled={busyPids.has(p.pid)}
                     onClick={() => void stop(p.pid)}
                     title="Stop this process and its whole tree"
                   >
-                    {busyPid === p.pid ? 'stopping' : 'stop'}
+                    {busyPids.has(p.pid) ? 'stopping' : 'stop'}
                   </button>
                 </div>
                 <div className="truncate pl-3.5 font-mono text-[10px] text-zinc-600" title={p.log_path}>
