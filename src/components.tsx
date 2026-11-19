@@ -600,17 +600,24 @@ function PlanApprovalCard({ pending }: { pending: PendingPlanApproval }) {
 function AskUserTrace({ tc }: { tc: ToolCall }) {
   const args = (tc.args ?? {}) as {
     question?: string
-    options?: Array<{ label: string; description?: string }>
+    options?: unknown
   }
   const result = (tc.result ?? {}) as { answer?: string | null; note?: string }
   const answer = typeof result.answer === 'string' && result.answer ? result.answer : null
+  // #564 follow-up: the SAVED path. #564 normalized the live pending-question
+  // and tape ingestion points, but this renderer reads a call's args straight
+  // from the transcript, where `?? []` only catches null/undefined. A model
+  // that double-encodes the options as a JSON string sails into `.map` and
+  // throws mid-render — and because the row is persisted, every reload threw
+  // again: the ErrorBoundary's Reload button looped. Normalize here too.
+  const options = normalizeAskOptions(args.options)
   return (
     <div>
       <div className="lg-row">
         <span aria-hidden="true" className="lg-key">Q</span>
         <p className="lg-val lg-val--q">{args.question ?? ''}</p>
       </div>
-      {(args.options ?? []).map((o, i) => (
+      {options.map((o, i) => (
         <AskOptionRow
           key={i}
           label={o.label}
@@ -619,7 +626,7 @@ function AskUserTrace({ tc }: { tc: ToolCall }) {
           disabled
         />
       ))}
-      {answer !== null && !(args.options ?? []).some((o) => o.label === answer) && (
+      {answer !== null && !options.some((o) => o.label === answer) && (
         <AskOptionRow label={answer} chosen disabled />
       )}
       {answer === null && (
