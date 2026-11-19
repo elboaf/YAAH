@@ -163,10 +163,24 @@ def test_stop_never_kills_the_callers_own_process_group(client):
         # We are still alive to assert -- that is the point.
         assert r.status_code == 200, r.text
         assert r.json()["stopped"] is True
+        # SIGKILL delivery is asynchronous, so poll rather than asserting once
+        # (a single immediate assert would race the signal).
+        deadline = time.time() + 10
+        while time.time() < deadline and detached._alive(proc.pid):
+            time.sleep(0.05)
         assert not detached._alive(proc.pid), "the target process should be dead"
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        # REAP the child. This test kills it with SIGKILL, and a killed child
+        # its parent never wait()s stays a ZOMBIE on Linux: the PID lives on,
+        # so _alive would report it as alive and this test would fail on the
+        # assertion above for the wrong reason (that is exactly how it failed
+        # on CI the first time).
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 def test_kill_tree_kills_pid_not_own_group(monkeypatch):
@@ -218,3 +232,107 @@ def test_kill_tree_uses_killpg_for_a_foreign_group(monkeypatch):
     assert ok is True
     assert ("killpg", 9999) in calls, f"foreign group should be killed as a tree; {calls}"
     assert ("kill", 777) not in calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX zombies do not exist on Windows")
+def test_alive_reports_a_zombie_as_dead():
+    """A killed child its parent has not reaped is a ZOMBIE on Linux: the PID
+    still exists and psutil's is_running() is True for it. The backend never
+    wait()s a detached child (that is what detaching means), so without this
+    a crashed server would read as "alive" in the panel forever.
+
+    This is the honesty property, not a test artifact: it failed on CI the
+    first time for exactly this reason.
+    """
+    import backend.agent.detached as detached
+
+    # A child that exits immediately, never reaped by us -> zombie.
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        # Wait for it to become a zombie: it must be gone but not reaped.
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                import psutil
+                if psutil.Process(proc.pid).status() == psutil.STATUS_ZOMBIE:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.05)
+        import psutil
+        assert psutil.Process(proc.pid).status() == psutil.STATUS_ZOMBIE, (
+            "test setup: child did not become a zombie"
+        )
+        # The PID exists and psutil says it is running...
+        assert psutil.Process(proc.pid).is_running() is True, "setup: zombie not 'running'"
+        # ...but the backend must report it dead, or the panel lies.
+        assert detached._alive(proc.pid) is False, "a zombie must read as dead"
+    finally:
+        proc.wait(timeout=5)  # reap it, so the PID does not linger
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX zombies do not exist on Windows")
+def test_alive_still_reports_a_live_process_as_alive():
+    """The other direction: the zombie fix must not make every process read
+    as dead (a guard that always returns False would pass the test above).
+    """
+    import backend.agent.detached as detached
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert detached._alive(proc.pid) is True, "a live process must read as alive"
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_alive_treats_a_zombie_as_dead_cross_platform(monkeypatch):
+    """The zombie rule, pinned on every host (the POSIX tests above only run
+    on Linux CI). psutil is faked so the branch is exercised on Windows too.
+
+    Without this, the zombie fix would be verified only where a POSIX runner
+    exists, and a regression would slip through on Windows.
+    """
+    import sys
+    import types
+
+    import backend.agent.detached as detached
+
+    class _FakeProc:
+        def __init__(self, status, running=True):
+            self._status = status
+            self._running = running
+
+        def is_running(self):
+            return self._running
+
+        def status(self):
+            return self._status
+
+    fake = types.ModuleType("psutil")
+    fake.STATUS_ZOMBIE = "zombie"
+    fake.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+
+    def install(status, running=True):
+        fake.Process = lambda _pid: _FakeProc(status, running)
+        monkeypatch.setitem(sys.modules, "psutil", fake)
+
+    install("zombie")
+    assert detached._alive(4242) is False, "a zombie must read as dead"
+
+    install("running")
+    assert detached._alive(4242) is True, "a running process must read as alive"
+
+    install("running", running=False)
+    assert detached._alive(4242) is False, "a non-running process must read as dead"
+
+    # status() unreadable (permission, race): fall back to is_running(), so a
+    # genuinely live process is never flipped to dead by an unreadable status.
+    def boom(_pid):
+        class P(_FakeProc):
+            def status(self):
+                raise RuntimeError("cannot read status")
+        return P("running")
+    fake.Process = boom
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    assert detached._alive(4242) is True, "unreadable status must not flip a live process to dead"

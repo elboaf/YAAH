@@ -61,13 +61,30 @@ def _alive(pid) -> bool:
     psutil first (an optional dependency), a tasklist CSV parse on Windows,
     then os.kill on POSIX. A stale registry row must report dead -- never
     trust the row itself as proof of life.
+
+    A ZOMBIE counts as dead. It has finished executing; only its
+    process-table entry remains until the parent reaps it, and psutil's
+    is_running() is True for one. The backend never wait()s a detached child
+    (that is the whole point of detaching it), so on POSIX a crashed server
+    would otherwise read as alive in the panel forever.
     """
     if not pid:
         return False
     try:
         import psutil
 
-        return bool(psutil.Process(pid).is_running())
+        proc = psutil.Process(pid)
+        if not proc.is_running():
+            return False
+        # A zombie has finished executing; only its process-table entry
+        # remains. psutil reports it either as STATUS_ZOMBIE or by raising
+        # ZombieProcess (a NoSuchProcess subclass) from status().
+        try:
+            return proc.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+        except Exception:  # noqa: BLE001 - status unreadable; trust is_running()
+            return True
     except ImportError:
         pass
     except Exception:  # noqa: BLE001 - vanished or inaccessible: treat as dead
