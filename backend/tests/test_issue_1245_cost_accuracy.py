@@ -227,3 +227,58 @@ async def test_sub_agent_cost_rides_sub_agent_done(monkeypatch, tmp_path):
 
     result = await run_sub()
     assert result["cost_spent"] == pytest.approx(0.07)
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_cost_persists_through_the_parent_loop(fake_model, tmp_path):
+    """The sub's billed spend reaches the DB when spawned by the PARENT
+    LOOP (#1245), not just the wire event.
+
+    The parent-loop path is the one that matters: the chip raises the
+    session total on sub_agent_done and then the parent's next usage tick
+    overwrites it with the DB total. If the sub's spend never lands in the
+    DB, the chip bumps and then drops back -- so this asserts the DB, and
+    drives the real producer (run_agent -> spawn_batch -> sub-agent) rather
+    than calling run_sub_agent directly.
+    """
+    from backend.db.database import create_conversation, get_conversation
+
+    cid = await create_conversation("sub-cost-parent-loop")
+    # Parent: one spawn_agent call.
+    fake_model.append([
+        {
+            "type": "tool_calls",
+            "tool_calls": [{
+                "id": "s1",
+                "type": "function",
+                "function": {
+                    "name": "spawn_agent",
+                    "arguments": json.dumps({
+                        "agent_type": "general-purpose",
+                        "prompt": "say hi",
+                    }),
+                },
+            }],
+        },
+    ])
+    # The sub-agent's single billed model call (same client, same queue).
+    fake_model.append([
+        {"type": "content", "text": "sub hi"},
+        _usage(10, 0.07, 5),
+        {"type": "finish"},
+    ])
+    # Parent: wrap up.
+    fake_model.append([{"type": "content", "text": "done"}, {"type": "finish"}])
+
+    events = await collect(loop.run_agent(cid, "delegate", str(tmp_path)))
+
+    sub_done = [e for e in events if e.get("type") == "sub_agent_done"]
+    assert sub_done, "no sub_agent_done event"
+    assert sub_done[0]["cost_spent"] == pytest.approx(0.07)
+
+    # The wire event alone is not enough: the parent's next usage tick
+    # replaces the chip's value with the DB total, so the spend must be
+    # IN the DB or the chip visibly drops back.
+    conv = await get_conversation(cid)
+    assert conv["cost_spent"] == pytest.approx(0.07)
+    assert conv["completion_tokens_total"] == 5

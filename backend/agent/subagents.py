@@ -32,6 +32,7 @@ from pathlib import Path
 from backend.agent import model_client
 from backend.agent.config import load_config
 from backend.agent import skills as skill_registry
+from backend.db.database import add_conversation_cost
 import yaml
 from backend.agent.tools import (
     MEMORY_TOOLS,
@@ -570,10 +571,34 @@ async def run_sub_agent(
             elif ev["type"] == "finish":
                 state["finish"] = ev.get("reason")
             elif ev["type"] == "usage":
-                # #1245: sum the sub's per-call billed cost.
-                call_cost = (ev.get("usage") or {}).get("cost")
+                # #1245: persist the sub's billed spend at the POINT OF
+                # BILLING, exactly as the parent loop does. A sub-agent's
+                # calls are billed too, and a cancelled or errored sub
+                # keeps the spend of the calls it already made.
+                # add_conversation_cost is an atomic increment, so the
+                # per-call writes sum correctly alongside the parent's.
+                _u = ev.get("usage") or {}
+                call_cost = _u.get("cost")
                 if call_cost is not None:
-                    sub_cost = (sub_cost or 0.0) + float(call_cost)
+                    try:
+                        call_cost = float(call_cost)
+                    except (TypeError, ValueError):
+                        call_cost = None
+                if call_cost is not None:
+                    sub_cost = (sub_cost or 0.0) + call_cost
+                if conversation_id is not None and (
+                    call_cost is not None
+                    or (_u.get("completion_tokens", 0) or 0)
+                ):
+                    try:
+                        await add_conversation_cost(
+                            conversation_id,
+                            call_cost,
+                            int(_u.get("completion_tokens", 0) or 0),
+                        )
+                    except Exception:  # noqa: BLE001
+                        # Best-effort: cost tracking must not fail the sub.
+                        pass
 
     async def _exec_tool_calls(tool_calls, *, interruptible: bool) -> bool:
         """Execute a turn's tool calls, appending tool results to messages.
