@@ -10940,6 +10940,43 @@ export function Composer({
   const steering = useAgent((s) => s.steerByConv[bufKeyForQueue] ?? false)
   const setSteerFlag = useAgent((s) => s.setSteer)
   const pendingQueueAutosendRef = useRef<Record<string, Array<{ id: number; text: string; skills?: string[]; images?: string[] }>>>({})
+  // #1245: context-refresh generation, per conversation. The completion /
+  // error / stopped handlers re-read the context endpoint (so the chip
+  // settles on the authoritative session total), and the usage tick's
+  // window-resolution fallback does too -- all three are async and can
+  // resolve AFTER a newer update. Each store write to this conversation's
+  // context bumps the generation, and a refresh only applies when the
+  // generation it captured is still current, so a late answer can never
+  // undo a newer cost or token count (CodeRabbit #768).
+  const contextGenRef = useRef<Record<string, number>>({})
+  const bumpContextGen = (convId: number) => {
+    const key = String(convId)
+    contextGenRef.current[key] = (contextGenRef.current[key] ?? 0) + 1
+    return contextGenRef.current[key]
+  }
+  // Apply a context update, bumping the generation it belongs to.
+  const applyContext = (
+    convId: number,
+    tokens: number,
+    window: number | null,
+    model: string | null,
+    cost: number | null,
+    completionTokens?: number | null,
+  ) => {
+    bumpContextGen(convId)
+    setContext(convId, tokens, window, model, cost, completionTokens)
+  }
+  // Re-read the context endpoint and apply it only if no newer update
+  // landed while the request was in flight.
+  const refreshContext = (convId: number) => {
+    const gen = bumpContextGen(convId)
+    getContext(convId)
+      .then((c) => {
+        if (contextGenRef.current[String(convId)] !== gen) return
+        setContext(convId, c.context_tokens ?? 0, c.context_window, c.context_model, c.cost_spent ?? null, c.completion_tokens_total)
+      })
+      .catch(() => {})
+  }
   // Buffer key of the conversation with a send closure in flight (issue #10:
   // several chats can run at once — gates and the Stop button are scoped to
   // the conversation they belong to, not to the whole app).
@@ -11882,7 +11919,7 @@ export function Composer({
         const subDoneConvId = Number(bufKey)
         const knownDone = useAgent.getState().contextByConv[String(subDoneConvId)]
         if (Number.isInteger(subDoneConvId) && subDoneConvId > 0 && knownDone?.cost != null) {
-          setContext(subDoneConvId, knownDone.tokens, knownDone.window, knownDone.model, knownDone.cost + ev.cost_spent, knownDone.completionTokens)
+          applyContext(subDoneConvId, knownDone.tokens, knownDone.window, knownDone.model, knownDone.cost + ev.cost_spent, knownDone.completionTokens)
         }
       }
       appendSubAgentTelemetry(
@@ -11901,6 +11938,11 @@ export function Composer({
       setPendingQuestion((q) => (q && q.convKey === bufKey ? null : q))
       setPendingApproval((a) => (a && a.convKey === bufKey ? null : a))
       setPendingPlanApproval((p) => (p && p.convKey === bufKey ? null : p))
+      // #1245: a turn that ends on error still persisted every model call's
+      // cost at its usage chunk, and the last tick can lag that write --
+      // re-read so the chip ends at the settled total (CodeRabbit #768).
+      const errConvId = Number(bufKey)
+      if (Number.isInteger(errConvId) && errConvId > 0) refreshContext(errConvId)
     } else if (ev.type === 'stopped') {
       textDeltas.flush()
       setStatus(bufKey, 'idle')
@@ -11913,6 +11955,10 @@ export function Composer({
       // Hard Stop holds the queue (#7): the queued echoes stay in the
       // transcript marked queued until the user sends or discards them.
       // No count state - the pill renders from queueEchoByConv.
+      // #1245: same settle as error/done -- a Stop after a usage chunk can
+      // leave the stored cost ahead of the last tick (CodeRabbit #768).
+      const stopConvId = Number(bufKey)
+      if (Number.isInteger(stopConvId) && stopConvId > 0) refreshContext(stopConvId)
     } else if (ev.type === 'done') {
       textDeltas.flush()
       setStatus(bufKey, 'idle')
@@ -11920,14 +11966,12 @@ export function Composer({
       // #1245: the last usage tick is one model call behind the final DB
       // total — completion tokens land with the reply, the cost row writes
       // after it. Re-read the endpoint so the chip ends the turn at the
-      // authoritative session total.
+      // authoritative session total. Generation-fenced: a queued autosend
+      // can start the next turn before this resolves, and its usage ticks
+      // must not be overwritten by this turn's older snapshot.
       const doneConvId = Number(bufKey)
       if (Number.isInteger(doneConvId) && doneConvId > 0) {
-        getContext(doneConvId)
-          .then((c) => {
-            setContext(doneConvId, c.context_tokens ?? 0, c.context_window, c.context_model, c.cost_spent ?? null, c.completion_tokens_total)
-          })
-          .catch(() => {})
+        refreshContext(doneConvId)
       }
       // A completed turn must leave no block pulsing: settle anything the
       // stream ended without a sub_agent_done for (defensive; the backend
@@ -11983,12 +12027,19 @@ export function Composer({
         // value instead of re-fetching per tick.
         const known = useAgent.getState().contextByConv[String(convId)]
         if (known?.window) {
-          setContext(convId, ev.usage_tokens ?? 0, known.window, ev.model ?? known.model ?? null, cost)
+          applyContext(convId, ev.usage_tokens ?? 0, known.window, ev.model ?? known.model ?? null, cost)
         } else {
-          setContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null, cost)
+          // The tick's own values land first (generation-bumped, so any
+          // in-flight refresh is superseded); the window is filled in by a
+          // generation-fenced re-read. The tick's cost stays authoritative
+          // over an older captured value, but a NEWER endpoint total wins
+          // because this refresh only applies while its generation holds.
+          applyContext(convId, ev.usage_tokens ?? 0, null, ev.model ?? null, cost)
+          const gen = bumpContextGen(convId)
           getContext(convId)
             .then((c) => {
-              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model, ev.cost_spent ?? c.cost_spent ?? null)
+              if (contextGenRef.current[String(convId)] !== gen) return
+              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model, c.cost_spent ?? cost)
             })
             .catch(() => {})
         }

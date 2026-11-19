@@ -590,12 +590,30 @@ async def run_sub_agent(
                     call_cost is not None
                     or (_u.get("completion_tokens", 0) or 0)
                 ):
-                    try:
-                        await add_conversation_cost(
+                    # Cancellation-safe (#1245): this consumer runs as a
+                    # task the parent Stop cancels (see the consume/cancel
+                    # race below), and CancelledError is a BaseException --
+                    # so a cancel landing inside the write would skip
+                    # commit() and silently DISCARD the increment while the
+                    # provider had already billed the call. Shield the
+                    # write, then drain it before re-raising, so the spend
+                    # of a cancelled sub-agent turn is durably recorded.
+                    _cost_task = asyncio.ensure_future(
+                        add_conversation_cost(
                             conversation_id,
                             call_cost,
                             int(_u.get("completion_tokens", 0) or 0),
                         )
+                    )
+                    try:
+                        await asyncio.shield(_cost_task)
+                    except asyncio.CancelledError:
+                        # Let the shielded write finish, then propagate.
+                        try:
+                            await _cost_task
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise
                     except Exception:  # noqa: BLE001
                         # Best-effort: cost tracking must not fail the sub.
                         pass

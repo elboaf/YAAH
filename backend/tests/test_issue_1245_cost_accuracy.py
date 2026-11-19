@@ -201,6 +201,67 @@ async def test_no_usage_event_no_persist(fake_model, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_sub_agent_still_persists_its_billed_cost(monkeypatch, tmp_path):
+    """A parent Stop landing INSIDE the cost write must not discard it.
+
+    The sub-agent's stream is consumed by a task the parent cancels on Stop
+    (subagents.py consume/cancel race), and CancelledError is a BaseException
+    — so an unguarded write would be interrupted before its commit() and
+    the increment silently lost, even though the provider had already billed
+    the call. This cancels during the write window and asserts the increment
+    survived.
+    """
+    import asyncio
+
+    from backend.agent import subagents
+    from backend.db import database as dbmod
+    from backend.db.database import create_conversation, get_conversation
+
+    cid = await create_conversation("sub-cost-cancel")
+    real_add_cost = dbmod.add_conversation_cost
+    entered = asyncio.Event()
+
+    async def delayed_cost(conversation_id, cost, completion_tokens):
+        # Signal, then stall BEFORE the real (committing) write so the
+        # cancel lands squarely inside the write window.
+        entered.set()
+        await asyncio.sleep(0.3)
+        await real_add_cost(conversation_id, cost, completion_tokens)
+
+    monkeypatch.setattr(subagents, "add_conversation_cost", delayed_cost)
+
+    async def sub_events():
+        yield {"type": "content", "text": "sub findings"}
+        yield {"type": "usage", "usage": {"cost": 0.07, "completion_tokens": 5}}
+        yield {"type": "finish"}
+
+    async def fake_chat(messages, tools=None, stream=True):
+        # NB: the `stream` kwarg must not shadow a generator named `stream`
+        # (a shadowed call reads as "'bool' object is not callable").
+        return sub_events()
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+
+    cancel_ev = asyncio.Event()
+    task = asyncio.create_task(
+        subagents.run_sub_agent(
+            subagents.get_agent_def("explore"),
+            "look",
+            str(tmp_path),
+            cancel_ev=cancel_ev,
+            conversation_id=cid,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    cancel_ev.set()  # parent Stop, mid-write
+    await asyncio.wait_for(task, timeout=5)
+
+    conv = await get_conversation(cid)
+    assert conv["cost_spent"] == pytest.approx(0.07)
+    assert conv["completion_tokens_total"] == 5
+
+
+@pytest.mark.asyncio
 async def test_sub_agent_cost_rides_sub_agent_done(monkeypatch, tmp_path):
     """A sub-agent's billed calls persist to the parent conversation's
     total (#1245): OpenRouter bills the sub's calls too, and the old code
