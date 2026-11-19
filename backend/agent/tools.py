@@ -3525,13 +3525,15 @@ EXECUTORS = {
     "memory_delete": _memory_executor("delete"),
 }
 
-# Issue #770: spawn_detached / stop_process. Windows-only for the same reason
-# the Job Object is (DETACHED_PROCESS etc.); the schema is offered on Windows
-# by get_schemas(). Registered at import on Windows hosts so a remote host's
-# api_remote_exec finds the executor when routing the tool.
-if os.name == "nt":
-    from backend.agent import detached as detached_mod
-    EXECUTORS.update(detached_mod.EXECUTORS)
+# Issue #770: spawn_detached / stop_process. The spawn flags (DETACHED_PROCESS
+# etc.) are Windows-only and the schema is offered only on Windows by
+# get_schemas(), but the executors import and run cleanly on POSIX too, so
+# register them unconditionally here. REMOTE_TOOLS lists them on every host,
+# and test_remote_tools_all_have_executors asserts every REMOTE_TOOLS entry
+# must have an executor, so the registration cannot stay Windows-gated. On a
+# remote host the executor still runs the detached spawn on the owner machine.
+from backend.agent import detached as detached_mod
+EXECUTORS.update(detached_mod.EXECUTORS)
 
 # Windows Sandbox tools (disposable test VMs + persistent dev toolkit,
 # see backend/agent/sandbox.py): Windows-only for the same reason, and
