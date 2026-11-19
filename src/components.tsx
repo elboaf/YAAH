@@ -9321,6 +9321,10 @@ export function GitChipCluster({
   // Flip downward-opening menu upward when there isn't enough room below the
   // trigger (many branches, window too short). Re-measured fresh each open.
   const [flipUp, setFlipUp] = useState(false)
+  // Scrollport max-height override (CSS px, null = use default max-h-56).
+  // When the full menu doesn't fit on either side, cap the list height to
+  // the available space so entries don't lie outside the viewport.
+  const [listCapPx, setListCapPx] = useState<number | null>(null)
 
   // Fresh branch list per conversation; never reuse across sessions.
   useEffect(() => {
@@ -9328,6 +9332,10 @@ export function GitChipCluster({
     setBranchesLoaded(false)
     setMenuOpen(false)
   }, [conversationId])
+  // Close resets the list cap so next open re-measures.
+  useEffect(() => {
+    if (!menuOpen) setListCapPx(null)
+  }, [menuOpen])
   // Click-outside closes the checkout dropdown.
   useEffect(() => {
     if (!menuOpen) return
@@ -9372,15 +9380,21 @@ export function GitChipCluster({
         const estimatedHeight = (224 + 32) * zoom
         const below = window.innerHeight - rect.bottom
         const above = rect.top
+        const HEADING_PX = 32 // heading + outer py-1, in CSS px (unzoomed)
         // When the full menu fits on one side, go that way. When neither
-        // fits, pick the side with more room — this correctly handles
-        // short menus near the window edge (no false upward flip).
+        // fits, pick the side with more room — cap the scrollport to the
+        // available space so entries don't lie outside the viewport.
         if (below >= estimatedHeight) {
           setFlipUp(false)
+          setListCapPx(null)
         } else if (above >= estimatedHeight) {
           setFlipUp(true)
+          setListCapPx(null)
         } else {
-          setFlipUp(above > below)
+          const chosenUp = above > below
+          setFlipUp(chosenUp)
+          const available = (chosenUp ? above : below) - HEADING_PX * zoom
+          setListCapPx(Math.max(50, Math.round(available / zoom)))
         }
       }
       return !o
@@ -9484,7 +9498,10 @@ export function GitChipCluster({
           <div className="px-3 pb-1 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-600">
             branches
           </div>
-          <div className="max-h-56 overflow-auto">
+          <div
+            className="overflow-auto"
+            style={listCapPx !== null ? { maxHeight: `${listCapPx}px` } : { maxHeight: '14rem' }}
+          >
             {branches.length === 0 && (
               <div className="px-3 py-1.5 font-mono text-[11px] text-zinc-600">
                 {branchesLoaded ? 'no local branches' : 'loading…'}
