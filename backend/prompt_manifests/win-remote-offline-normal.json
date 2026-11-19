@@ -69,8 +69,8 @@
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1076,
-      "sha256": "95c2c6e65cdab82ccb33ea14189fd4327b050f15bfc02cc217560b3b71838bb2"
+      "bytes": 1047,
+      "sha256": "fe24b1145cf551e0345601d44bc2d150ecd82251c6eadd8a756510d473454ddb"
     },
     {
       "name": "get_help",

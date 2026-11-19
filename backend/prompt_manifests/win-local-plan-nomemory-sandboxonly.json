@@ -81,8 +81,8 @@
   "tool_schemas": [
     {
       "name": "bash",
-      "bytes": 1076,
-      "sha256": "95c2c6e65cdab82ccb33ea14189fd4327b050f15bfc02cc217560b3b71838bb2"
+      "bytes": 1116,
+      "sha256": "d02de860012604f1114bf93f1b94214ae7f21ae610645af2279b0eb6a5e001e8"
     },
     {
       "name": "get_help",
@@ -186,8 +186,18 @@
     },
     {
       "name": "powershell",
-      "bytes": 879,
-      "sha256": "504ede17f08a90e99600f42e1d8e04a35e375c450d45b53ead1a18a88bc5e811"
+      "bytes": 1064,
+      "sha256": "eeb2c8a2416034c8a8b62040ea5217259ab31184d0d394758a8e1ac48da42b91"
+    },
+    {
+      "name": "spawn_detached",
+      "bytes": 1373,
+      "sha256": "34cbde6d6445d95768a302873f8782ee551795d63677bfe6e0f4d63ccf762f9c"
+    },
+    {
+      "name": "stop_process",
+      "bytes": 423,
+      "sha256": "6315ce90f46a3710428b7d43d3b01e34c2720df08e26dd03e285dee54d3a5ff8"
     },
     {
       "name": "exit_plan",
