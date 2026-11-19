@@ -9363,10 +9363,25 @@ export function GitChipCluster({
   const openMenu = () => {
     setMenuOpen((o) => {
       if (!o && wrapRef.current) {
-        // When opening, measure room below the trigger. If the dropdown's
-        // max-h (14rem = 224px) doesn't fit, flip upward.
         const rect = wrapRef.current.getBoundingClientRect()
-        setFlipUp(rect.bottom + 224 > window.innerHeight)
+        // Full menu estimate: max-h-56 (224px) + heading + outer padding
+        // (~32px: py-1 = 8px, heading ~24px). getBoundingClientRect values
+        // are in zoomed CSS pixels (UiScale), so multiply the estimate by
+        // zoom to compare against window.innerHeight (unzoomed).
+        const zoom = parseFloat(document.getElementById('root')?.style.zoom) || 1
+        const estimatedHeight = (224 + 32) * zoom
+        const below = window.innerHeight - rect.bottom
+        const above = rect.top
+        // When the full menu fits on one side, go that way. When neither
+        // fits, pick the side with more room — this correctly handles
+        // short menus near the window edge (no false upward flip).
+        if (below >= estimatedHeight) {
+          setFlipUp(false)
+        } else if (above >= estimatedHeight) {
+          setFlipUp(true)
+        } else {
+          setFlipUp(above > below)
+        }
       }
       return !o
     })
