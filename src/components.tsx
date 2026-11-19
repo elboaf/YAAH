@@ -9318,6 +9318,9 @@ export function GitChipCluster({
   const [copied, setCopied] = useState<'local' | 'remote' | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
   const appendRawMessage = useAgent((s) => s.appendRawMessage)
+  // Flip downward-opening menu upward when there isn't enough room below the
+  // trigger (many branches, window too short). Re-measured fresh each open.
+  const [flipUp, setFlipUp] = useState(false)
 
   // Fresh branch list per conversation; never reuse across sessions.
   useEffect(() => {
@@ -9358,7 +9361,15 @@ export function GitChipCluster({
   // (info.branch); the dropdown's checkout moves that tree.
 
   const openMenu = () => {
-    setMenuOpen((o) => !o)
+    setMenuOpen((o) => {
+      if (!o && wrapRef.current) {
+        // When opening, measure room below the trigger. If the dropdown's
+        // max-h (14rem = 224px) doesn't fit, flip upward.
+        const rect = wrapRef.current.getBoundingClientRect()
+        setFlipUp(rect.bottom + 224 > window.innerHeight)
+      }
+      return !o
+    })
     if (!branchesLoaded && conversationId !== null) {
       getGitBranches(conversationId)
         .then((r) => {
@@ -9453,7 +9464,7 @@ export function GitChipCluster({
           downward from the composer's top edge (openUp=false) */}
       {menuOpen && (
         <div
-          className={`absolute z-30 w-56 rounded   bg-zinc-900 py-1 shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_8px_10px_-6px_rgba(0,0,0,0.1)] ${openUp ? 'bottom-full left-0 mb-1' : 'left-0 top-full mt-1'}`}
+          className={`absolute z-30 w-56 rounded   bg-zinc-900 py-1 shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_8px_10px_-6px_rgba(0,0,0,0.1)] ${openUp || flipUp ? 'bottom-full left-0 mb-1' : 'left-0 top-full mt-1'}`}
         >
           <div className="px-3 pb-1 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-zinc-600">
             branches
