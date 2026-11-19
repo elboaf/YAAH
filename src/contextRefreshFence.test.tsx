@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, fireEvent, waitFor } from '@testing-library/react'
 import { useAgent } from './store'
-import { Composer } from './components'
+import { Composer, ChatPanel } from './components'
 
 const { getConfig, createConversation, listConversations, getMessages, getAgentTape } =
   vi.hoisted(() => ({
@@ -161,6 +161,51 @@ describe('#1245 context refresh is generation-fenced', () => {
 
     const ctx = useAgent.getState().contextByConv['42']
     expect(ctx?.cost).toBeCloseTo(0.6) // newer value survives
+    expect(ctx?.tokens).toBe(2000)
+  })
+
+  it('the mount-time context load cannot overwrite a newer usage tick', async () => {
+    // Open an EXISTING conversation whose window is already known: the
+    // sticky-window path makes the turn's usage tick write through the
+    // store without a second context read, so the only held read is the
+    // mount effect's own.
+    useAgent.setState({
+      conversationId: 42,
+      contextByConv: {
+        '42': { tokens: 100, window: 200000, model: 'm', cost: 0.1, completionTokens: 0 },
+      },
+    })
+    render(<ChatPanel />)
+    await waitFor(() => expect(pendingContext.length).toBeGreaterThan(0))
+    const staleMountReads = pendingContext.splice(0)
+
+    // A turn lands while the mount read is still in flight: its usage tick
+    // raises the session total to 0.60 in the store.
+    currentScript =
+      '{"type":"usage","usage_tokens":2000,"model":"m","cost_spent":0.60}\n' +
+      '{"type":"done"}\n'
+    const box = screen_textarea()
+    fireEvent.change(box, { target: { value: 'hello' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    await waitFor(() => {
+      expect(useAgent.getState().contextByConv['42']?.cost).toBeCloseTo(0.6)
+    })
+
+    // The mount read finally answers with the OLDER total. It must be
+    // discarded: the tick that landed while it was in flight is newer.
+    for (const p of staleMountReads) {
+      p.resolve({
+        context_tokens: 100,
+        context_window: 200000,
+        context_model: 'm',
+        cost_spent: 0.1,
+        completion_tokens_total: 0,
+      })
+    }
+    await new Promise((r) => setTimeout(r, 50))
+
+    const ctx = useAgent.getState().contextByConv['42']
+    expect(ctx?.cost).toBeCloseTo(0.6) // newer tick survives
     expect(ctx?.tokens).toBe(2000)
   })
 })

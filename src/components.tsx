@@ -10314,6 +10314,42 @@ export function _resetNarrationDedupeForTests(): void {
   lastSpokenSayByMsg.clear()
 }
 
+// #1245 / CodeRabbit #768: the context fence. Four async readers of the
+// context endpoint can answer LATE -- ChatPanel's mount-time load, the
+// done/error/stopped settle, and the usage tick's window-resolution
+// fallback -- and any of them could otherwise overwrite a NEWER cost or
+// token count (a queued autosend starts the next turn before the previous
+// read resolves). Every store write through applyContext bumps the
+// conversation's generation; a reader captures it when it starts and
+// applies its answer only while that generation still holds. The registry
+// is module scope because the readers live in TWO components (ChatPanel and
+// Composer) -- a per-component ref would fence only its own writes and let
+// the other component's late answer through.
+const contextGen = new Map<string, number>()
+/** Bump a conversation's context generation, invalidating in-flight reads. */
+function bumpContextGen(convId: number): number {
+  const key = String(convId)
+  const next = (contextGen.get(key) ?? 0) + 1
+  contextGen.set(key, next)
+  return next
+}
+/** Current context generation for a conversation (0 when never written). */
+function currentContextGen(convId: number): number {
+  return contextGen.get(String(convId)) ?? 0
+}
+/** Apply a context update, bumping the generation it belongs to. */
+function applyContext(
+  convId: number,
+  tokens: number,
+  window: number | null,
+  model: string | null,
+  cost: number | null,
+  completionTokens?: number | null,
+): void {
+  bumpContextGen(convId)
+  useAgent.getState().setContext(convId, tokens, window, model, cost, completionTokens)
+}
+
 export function ChatPanel() {  const conversationId = useAgent((s) => s.conversationId)
   // #564: the old inline selector ended in `?? []` — a fresh array identity
   // on every store check once no messages were cached for the key, which
@@ -10401,7 +10437,6 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   })()
 
   // ---- session metadata: context size + git branch (status strip) ----
-  const setContext = useAgent((s) => s.setContext)
   const contextInfo = useAgent((s) =>
     s.conversationId === null ? undefined : s.contextByConv[String(s.conversationId)],
   )
@@ -10411,10 +10446,15 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     if (conversationId === null) return
     let cancelled = false
     // Exact context readout: persisted by the backend at every model call.
+    // Fenced: this read can resolve after a turn's usage tick (or another
+    // settle) already wrote a newer cost/token count, and must not clobber
+    // it (CodeRabbit #768).
+    const gen = bumpContextGen(conversationId)
     getContext(conversationId)
       .then((c) => {
-        if (cancelled || c.context_tokens === null || c.context_tokens <= 0) return
-        setContext(conversationId, c.context_tokens, c.context_window, c.context_model, c.cost_spent ?? null)
+        if (cancelled || gen !== currentContextGen(conversationId)) return
+        if (c.context_tokens === null || c.context_tokens <= 0) return
+        applyContext(conversationId, c.context_tokens, c.context_window, c.context_model, c.cost_spent ?? null)
       })
       .catch(() => {})
     // Git cluster readout: TTL-cached backend read (branch, dirty, counts,
@@ -10433,7 +10473,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       cancelled = true
       window.clearInterval(poll)
     }
-  }, [conversationId, setContext])
+  }, [conversationId])
   // After a UI-driven git command, refresh the readout immediately (the
   // backend already invalidated its caches) instead of waiting for the poll.
   const refreshGitInfo = useCallback(() => {
@@ -10894,7 +10934,6 @@ export function Composer({
     setPendingQuestion,
     setPendingApproval,
     setPendingPlanApproval,
-    setContext,
 
     appendRawMessage,
     setAbortController,
@@ -10940,40 +10979,14 @@ export function Composer({
   const steering = useAgent((s) => s.steerByConv[bufKeyForQueue] ?? false)
   const setSteerFlag = useAgent((s) => s.setSteer)
   const pendingQueueAutosendRef = useRef<Record<string, Array<{ id: number; text: string; skills?: string[]; images?: string[] }>>>({})
-  // #1245: context-refresh generation, per conversation. The completion /
-  // error / stopped handlers re-read the context endpoint (so the chip
-  // settles on the authoritative session total), and the usage tick's
-  // window-resolution fallback does too -- all three are async and can
-  // resolve AFTER a newer update. Each store write to this conversation's
-  // context bumps the generation, and a refresh only applies when the
-  // generation it captured is still current, so a late answer can never
-  // undo a newer cost or token count (CodeRabbit #768).
-  const contextGenRef = useRef<Record<string, number>>({})
-  const bumpContextGen = (convId: number) => {
-    const key = String(convId)
-    contextGenRef.current[key] = (contextGenRef.current[key] ?? 0) + 1
-    return contextGenRef.current[key]
-  }
-  // Apply a context update, bumping the generation it belongs to.
-  const applyContext = (
-    convId: number,
-    tokens: number,
-    window: number | null,
-    model: string | null,
-    cost: number | null,
-    completionTokens?: number | null,
-  ) => {
-    bumpContextGen(convId)
-    setContext(convId, tokens, window, model, cost, completionTokens)
-  }
   // Re-read the context endpoint and apply it only if no newer update
   // landed while the request was in flight.
   const refreshContext = (convId: number) => {
     const gen = bumpContextGen(convId)
     getContext(convId)
       .then((c) => {
-        if (contextGenRef.current[String(convId)] !== gen) return
-        setContext(convId, c.context_tokens ?? 0, c.context_window, c.context_model, c.cost_spent ?? null, c.completion_tokens_total)
+        if (gen !== currentContextGen(convId)) return
+        applyContext(convId, c.context_tokens ?? 0, c.context_window, c.context_model, c.cost_spent ?? null, c.completion_tokens_total)
       })
       .catch(() => {})
   }
@@ -12038,8 +12051,8 @@ export function Composer({
           const gen = bumpContextGen(convId)
           getContext(convId)
             .then((c) => {
-              if (contextGenRef.current[String(convId)] !== gen) return
-              setContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model, c.cost_spent ?? cost)
+              if (gen !== currentContextGen(convId)) return
+              applyContext(convId, ev.usage_tokens ?? 0, c.context_window, ev.model ?? c.context_model, c.cost_spent ?? cost)
             })
             .catch(() => {})
         }
