@@ -237,13 +237,31 @@ def _recorded(pid) -> dict | None:
         return _REGISTRY.get(pid)
 
 
+def _still_ours(pid, create_time) -> bool:
+    """Is this PID alive AND still the process we spawned?
+
+    ``_alive`` alone is not enough: Windows reuses PIDs, so a spawned server
+    that exited can be replaced by an unrelated program, and the registry row
+    would then report that stranger as a live detached process -- showing a
+    stale command and log path. The PID must also still have the creation time
+    recorded at spawn (the same identity check stop_process uses before it
+    kills). A row whose PID is alive but is no longer ours is dead.
+    """
+    return bool(_alive(pid)) and _same_process(pid, create_time)
+
+
 def _prune_dead() -> None:
     """Drop registry rows whose process is gone, so the list never accumulates
-    dead entries (used by list_processes; keeps the registry honest)."""
-    dead = [pid for pid in list(_REGISTRY) if not _alive(pid)]
-    if dead:
+    dead entries (used by list_processes; keeps the registry honest). A row
+    whose PID was reused by a different process is dropped too -- it is not
+    alive as *our* process."""
+    stale = [
+        pid for pid, entry in list(_REGISTRY.items())
+        if not _still_ours(pid, entry.get("create_time"))
+    ]
+    if stale:
         with _lock:
-            for pid in dead:
+            for pid in stale:
                 _REGISTRY.pop(pid, None)
 
 
@@ -492,8 +510,33 @@ def list_processes() -> list[dict]:
     rows = []
     with _lock:
         for pid, entry in _REGISTRY.items():
-            rows.append({**entry, "alive": _alive(pid)})
+            # `alive` means "alive AND still our process" -- the same
+            # identity check the prune used, so a PID reused between the
+            # two passes cannot be reported as a live detached process.
+            rows.append({**entry, "alive": _still_ours(pid, entry.get("create_time"))})
     return rows
+
+
+def processes_payload() -> dict:
+    """The list shape shared by the agent-facing tool and GET /api/processes.
+
+    One home for the contract, so the tool and the panel route can never
+    disagree about what a listing looks like. ``known`` is the count the
+    backend can vouch for, never a claim about every process on the machine.
+    """
+    rows = list_processes()
+    return {"processes": rows, "known": len(rows)}
+
+
+async def list_processes_tool(workspace: str = "") -> dict:
+    """Agent-facing listing of the processes this backend started (#770).
+
+    Takes no arguments: the registry is machine-wide, not chat-scoped, so a
+    listing is the same answer whichever chat asks. Liveness is applied on
+    read (dead rows are pruned), so a process that has since exited does not
+    come back as alive.
+    """
+    return processes_payload()
 
 
 def _norm_cwd(cwd: str) -> str:
@@ -531,7 +574,7 @@ def _find_duplicate(command: str, cwd: str):
         matches = [e for e in _REGISTRY.values()
                    if e["command"] == command and _norm_cwd(e.get("cwd") or "") == key]
     for entry in matches:
-        if _alive(entry["pid"]) and _same_process(entry["pid"], entry.get("create_time")):
+        if _still_ours(entry["pid"], entry.get("create_time")):
             return entry["pid"]
     return None
 
@@ -603,9 +646,27 @@ SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": (
+                "List the detached processes this backend started with "
+                "spawn_detached, with their PID, command, working dir, log "
+                "path and whether each is still alive. Use it before "
+                "starting a server to see what is already running, or to "
+                "recover the PID of a process an earlier turn (or another "
+                "chat) started. The list is advisory: a detached process "
+                "outlives a backend restart, so a process can keep running "
+                "without appearing here."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 EXECUTORS = {
     "spawn_detached": spawn_detached,
     "stop_process": stop_process,
+    "list_processes": list_processes_tool,
 }

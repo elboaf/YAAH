@@ -525,3 +525,187 @@ async def test_spawn_detached_runs_a_console_program(tmp_path):
     finally:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                        capture_output=True)
+
+
+# ---------------------------------------------------------------- list tool
+# #770 story 7: the agent-facing listing. The panel route reads the same
+# registry, but the agent had no way to ask "what did I start?" - after a
+# backend restart, or from another chat, a running process was invisible.
+
+@pytest.mark.skipif(os.name != "nt", reason="list_processes schema is Windows-only")
+def test_list_processes_schema_and_help():
+    """The schema reaches the model and get_help agrees (doc/schema parity)."""
+    names = {s["function"]["name"] for s in get_schemas()}
+    assert "list_processes" in names
+    from backend.agent import tools
+
+    res = asyncio.run(tools.execute_tool("get_help", {}, workspace=""))
+    help_names = {line.split(":")[0][2:] for line in res["tools"].splitlines()}
+    assert "list_processes" in help_names
+    # No arguments: the registry is machine-wide, so a listing cannot be
+    # scoped by the caller.
+    schema = next(s for s in get_schemas()
+                  if s["function"]["name"] == "list_processes")
+    assert schema["function"]["parameters"]["properties"] == {}
+
+
+def test_list_processes_is_read_classified():
+    """Listing is observation, so it is free in every access mode."""
+    from backend.agent.tools import tool_risk
+
+    assert tool_risk("list_processes") == "read"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.asyncio
+async def test_executor_is_registered_and_remote_capable():
+    """The name must resolve to an executor, and be advertised to a remote
+    chat so a remote host lists ITS OWN registry (issue #770 stage 1 rule:
+    the spawn happens on the host, so the list must read the host)."""
+    from backend.agent import remote as remote_mod
+    from backend.agent import tools as tools_mod
+
+    assert "list_processes" in tools_mod.EXECUTORS
+    assert "list_processes" in remote_mod.REMOTE_TOOLS
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_list_tool_reports_a_live_spawned_process(tmp_path):
+    """The real producer path: spawn through the tool, then LIST through the
+    tool and find that exact process - with its command, not just a count.
+    A swallowed result or an echoed-empty list fails this."""
+    hb = _heartbeat_path(tmp_path)
+    argv = [sys.executable, str(tmp_path / "_heartbeat.py"), str(hb), "0.1", "60"]
+    cmd = " ".join(argv)
+
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    pid = r["pid"]
+
+    listing = await execute_tool("list_processes", {}, str(tmp_path))
+    rows = {row["pid"]: row for row in listing["processes"]}
+    assert pid in rows, f"spawned pid {pid} missing from {listing}"
+    assert rows[pid]["alive"] is True
+    assert "_heartbeat.py" in rows[pid]["command"]
+    assert listing["known"] == len(listing["processes"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_list_tool_drops_a_stopped_process(tmp_path):
+    """After stop_process, the listing no longer shows the row: the list is
+    live state, not a replay of everything ever spawned."""
+    cmd = f'"{sys.executable}" -c "import time; time.sleep(60)"'
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    pid = r["pid"]
+
+    before = await execute_tool("list_processes", {}, str(tmp_path))
+    assert pid in {row["pid"] for row in before["processes"]}
+
+    stopped = await execute_tool("stop_process", {"pid": pid}, str(tmp_path))
+    assert stopped.get("stopped") is True, stopped
+
+    after = await execute_tool("list_processes", {}, str(tmp_path))
+    assert pid not in {row["pid"] for row in after["processes"]}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_list_tool_does_not_report_an_exited_process(tmp_path):
+    """Negative control for liveness: a process that exited on its own is
+    gone from the listing. Proves the list re-checks the OS instead of
+    echoing registry rows back as alive."""
+    # Exits immediately, so the row is recorded and then goes stale.
+    cmd = f'"{sys.executable}" -c "pass"'
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    pid = r["pid"]
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and _alive(pid):
+        await asyncio.sleep(0.1)
+    assert not _alive(pid), "control process never exited"
+
+    listing = await execute_tool("list_processes", {}, str(tmp_path))
+    assert pid not in {row["pid"] for row in listing["processes"]}, (
+        "an exited process was still listed as a row"
+    )
+
+
+def test_panel_route_and_tool_share_one_payload():
+    """The tool and GET /api/processes must not drift: both render
+    processes_payload(), so the agent and the GUI see the same shape."""
+    import inspect
+
+    import backend.agent.detached as detached
+    import backend.main as mainmod
+
+    src = inspect.getsource(mainmod.api_processes)
+    assert "processes_payload" in src
+    payload = detached.processes_payload()
+    assert set(payload) == {"processes", "known"}
+    assert payload["known"] == len(payload["processes"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+def test_listing_does_not_report_a_reused_pid_as_ours():
+    """PID reuse (CodeRabbit finding): a row whose PID now belongs to a
+    DIFFERENT process must not read as a live detached process.
+
+    Windows reuses PIDs, so a spawned server that exited can be replaced by
+    an unrelated program. Reporting that stranger as alive would show a stale
+    command and log path as if the server were still running. The listing
+    must apply the same identity check stop_process uses before killing.
+    """
+    import backend.agent.detached as detached
+
+    # A REAL live process, but recorded with a different creation time --
+    # exactly what a reused PID looks like: alive, not ours.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        recorded_elsewhere = (detached._create_time(proc.pid) or 0.0) - 3600.0
+        detached._record(
+            proc.pid, command="node server.js", cwd=str(Path(".")),
+            log_path="/tmp/detached-reuse.log", conversation_id=None,
+        )
+        detached._REGISTRY[proc.pid]["create_time"] = recorded_elsewhere
+
+        assert detached._alive(proc.pid), "control: the PID really is alive"
+        rows = {row["pid"]: row for row in detached.list_processes()}
+        assert proc.pid not in rows, (
+            "a reused PID was listed as a live detached process"
+        )
+
+        listing = asyncio.run(
+            detached.list_processes_tool("")
+        )
+        assert proc.pid not in {row["pid"] for row in listing["processes"]}
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_listing_still_reports_our_own_live_process():
+    """Negative control for the reuse fix: the identity check must not
+    over-refuse. A genuinely live, genuinely ours row still lists -- with
+    its own command. Without this, 'fix' the reuse case by refusing
+    everything would pass the test above."""
+    cmd = f'"{sys.executable}" -c "import time; time.sleep(60)"'
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(Path.cwd()))
+    pid = r["pid"]
+    assert _alive(pid)
+
+    listing = await execute_tool("list_processes", {}, str(Path.cwd()))
+    rows = {row["pid"]: row for row in listing["processes"]}
+    assert pid in rows, "our own live process went missing from the listing"
+    assert rows[pid]["alive"] is True
+    assert "time.sleep(60)" in rows[pid]["command"]

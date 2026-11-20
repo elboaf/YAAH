@@ -820,7 +820,13 @@ def _default_system_prompt(workspace: str = "") -> str:
         env = host.env_line(workspace)
         windows = host.windows
     else:
-        windows = os.name == "nt"
+        # #770: mirror get_schemas() exactly. A namespaced workspace whose
+        # owning host is offline (or not connected) resolves to a NON-Windows
+        # target there, so the prose must not claim the Windows-only tools
+        # either -- otherwise the model is told it has spawn_detached /
+        # stop_process / list_processes while the schema set omits them.
+        remote_target = remote_mod.parse_ns(workspace) is not None
+        windows = os.name == "nt" and not remote_target
         env = _local_env_line(workspace)
 
     # Build the core tool list (stable regardless of sandbox.enabled).
@@ -829,6 +835,11 @@ def _default_system_prompt(workspace: str = "") -> str:
     core_tools: list[str] = ["bash (shell commands)"]
     if windows:
         core_tools.append("powershell (Windows PowerShell)")
+        # #770: get_schemas() offers the detached-process tools on any Windows
+        # target, so the prose line must name them (the #181 drift guard below
+        # requires every schema to be mentioned). Conditional on the same
+        # `windows` flag, so a Linux host stays consistent in both places.
+        core_tools += ["spawn_detached", "stop_process", "list_processes"]
     # #181: the prose line must cover the whole schema set. The tail tools
     # below previously existed only as schemas (search_conversation_history
     # was never mentioned anywhere); annotations keep the useful pointers.

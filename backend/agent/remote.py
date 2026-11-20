@@ -80,10 +80,12 @@ REMOTE_TOOLS = {
     "delete_file",
     "move_file",
     "search_files",
-    # Detached spawn/stop are host-side process control (issue #770): a
-    # remote chat must spawn on its owner, never on the client.
+    # Detached spawn/stop/list are host-side process control (issue #770): a
+    # remote chat must spawn on its owner, never on the client, and the list
+    # must read the same host's registry the spawn wrote to.
     "spawn_detached",
     "stop_process",
+    "list_processes",
 }
 
 # Host shell tools may legitimately run up to 300s; leave headroom.
