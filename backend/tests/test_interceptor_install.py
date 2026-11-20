@@ -109,11 +109,15 @@ def _install_cli(monkeypatch, exists: bool = True):
 
 
 def _junctions(monkeypatch):
-    """Fake _create_junctions to return the three link names -> pack paths."""
+    """Fake _create_junctions to return the three link names -> pack paths
+    in the {"junctions": {...}, "occupied": {}} shape the caller reads."""
     monkeypatch.setattr(
         inst,
         "_create_junctions",
-        lambda: {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS},
+        lambda: {
+            "junctions": {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS},
+            "occupied": {},
+        },
     )
 
 
@@ -238,7 +242,10 @@ def test_idempotent_rerun_repairs_missing_junction(
 
     def _fake_repair():
         calls["junctions"] += 1
-        return {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS}
+        return {
+            "junctions": {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS},
+            "occupied": {},
+        }
 
     monkeypatch.setattr(inst, "_create_junctions", _fake_repair)
 
@@ -490,7 +497,8 @@ def test_symlink_slot_gets_repaired(monkeypatch, manifest, tmp_path, fake_instal
     _make_symlink(skills / "browser", elsewhere)
     (skills / "research").mkdir()
 
-    junctions = inst._create_junctions()
+    junction_result = inst._create_junctions()
+    junctions = junction_result["junctions"]
 
     assert inst._is_junction(router), "correct junction should be left alone"
     browser_link = skills / "browser"
@@ -595,7 +603,8 @@ def test_symlink_slot_repair_via_seam(monkeypatch, manifest, tmp_path, fake_inst
         lambda target, link: created.append(str(link)),
     )
 
-    junctions = inst._create_junctions()
+    junction_result = inst._create_junctions()
+    junctions = junction_result["junctions"]
 
     assert not os.path.lexists(str(browser)), "mis-pointed symlink survived"
     assert str(browser) in created, "slot was not recreated via the leaf"

@@ -209,6 +209,21 @@ def _is_junction(path: Path) -> bool:
         return False
 
 
+def _is_link_entry(path: Path) -> bool:
+    """True when path is a junction OR a (directory) symlink -- i.e. any
+    entry YAAH can legitimately create as a link to an Interceptor pack.
+
+    A junction is the Windows-only link type the install flow lays down; a
+    directory symlink is an equivalent repairable link (is_dir() follows it).
+    A plain real directory is NOT a link: it may be the user's own folder or
+    (as in #775) YAAH's own bundled skill, and it is never treated as a
+    healthy Interceptor pack link. This mirrors the manager's
+    ``_link_is_link`` in interceptor.py so both surfaces agree on what counts
+    as "linked" vs "occupied" for the same slot.
+    """
+    return _is_junction(path) or path.is_symlink()
+
+
 def _create_junction(target_dir: str, link_path: Path) -> None:
     """Create a directory junction at link_path pointing at target_dir.
 
@@ -305,18 +320,19 @@ def install() -> dict:
     # report the current state instead of failing the re-click.
     if _marker_done() and _cli_installed():
         try:
-            junctions = _create_junctions()
+            junction_result = _create_junctions()
             # Re-record so remove_links() can vouch for repaired/recreated
             # links even after the ownership manifest itself was lost.
-            _record_live_link_ownership(junctions)
+            _record_live_link_ownership(junction_result)
             note = "already installed; junctions verified/repaired, nothing re-run"
         except RuntimeError as exc:
-            junctions = _junction_targets()
+            junction_result = _junctions_result()
             note = f"already installed; nothing re-run (junctions not repaired: {exc})"
         return {
             "installed": True,
             "did_install": False,
-            "junctions": junctions,
+            "junctions": junction_result["junctions"],
+            "occupied": junction_result.get("occupied", {}),
             "marker": True,
             "note": note,
         }
@@ -358,13 +374,18 @@ def install() -> dict:
 
     # 5: create the three junctions. Each points at the matching installed
     # pack under Interceptor's skills root. Repair-only: a pre-existing real
-    # directory (a user's own folder) is never replaced; a dangling or
-    # mis-pointed junction is removed and recreated.
-    junctions = _create_junctions()
+    # directory (a user's own folder, or YAAH's own bundled 'research' skill
+    # in #775) is never replaced; a dangling or mis-pointed junction is
+    # removed and recreated. The result is {"junctions": {...},
+    # "occupied": {...}}: only actual junctions/symlinks go in `junctions`
+    # (so `install()` never advertises a junction target that doesn't
+    # exist); preserved real directories go in `occupied` instead.
+    junction_result = _create_junctions()
+    junctions = junction_result["junctions"]
     # Record ownership so remove_links() can later distinguish these junctions
     # from foreign entries that merely share a slot name. Only live links are
     # claimed -- a slot preserved as the user's real directory stays unclaimed.
-    _record_live_link_ownership(junctions)
+    _record_live_link_ownership(junction_result)
 
     # 6: only now, on full success, record the done-marker.
     _write_done_marker()
@@ -424,7 +445,11 @@ def _remove_dir_link(path: Path) -> None:
 
 
 def _create_junctions() -> dict:
-    """Create/repair the three skill junctions. Returns name -> resolved target.
+    """Create/repair the three skill junctions. Returns a dict with two
+    keys: ``junctions`` (name -> resolved target for each junction/symlink
+    YAAH verified or created) and ``occupied`` (name -> resolved path for
+    each slot holding a *real* directory that is not a link -- the user's
+    own folder, or YAAH's own bundled 'research' skill in #775).
 
     Link slot name (router/browser/research) is paired with its matching
     installed pack directory name (interceptor/interceptor-browser/
@@ -433,14 +458,16 @@ def _create_junctions() -> dict:
     already pointing at the correct pack is left untouched (no delete +
     recreate churn on re-run); a mis-pointed or dangling one is replaced;
     a pre-existing *real* directory is never replaced (it is reported as
-    the slot's current state).
+    an occupied slot, NOT as a junction target and never counted as
+    linked).
     """
     root = _installed_packs_root()
     if root is None:
         raise RuntimeError(
             "interceptor skills root not found; nothing to junction to"
         )
-    targets = {}
+    targets: dict[str, str] = {}
+    occupied: dict[str, str] = {}
     for name, pack_name in zip(
         list(interceptor.LINK_SLOTS), list(interceptor._INTERCEPTOR_PACK_NAMES)
     ):
@@ -453,24 +480,27 @@ def _create_junctions() -> dict:
             )
         expected = str(target_dir.resolve())
         link_path = _link_slot_targets()[name]
-        if link_path.is_dir() and not _is_junction(link_path) and not link_path.is_symlink():
-            # A pre-existing real directory at the slot is never replaced.
-            # Directory symlinks are NOT this case: is_dir() follows them,
-            # and they are repairable links, so they fall through below.
-            targets[name] = str(link_path.resolve())
+        if link_path.is_dir() and not _is_link_entry(link_path):
+            # A pre-existing *real* directory at the slot (the user's own
+            # folder, or YAAH's own bundled 'research' skill in #775) is never
+            # replaced. It is NOT a junction, so it must NOT be advertised in
+            # the junctions output (that would claim a junction target that
+            # does not exist) nor counted as linked. Record it separately as
+            # an occupied slot so callers can surface it honestly. Directory
+            # symlinks are NOT this case: is_dir() follows them, they are
+            # repairable links, so they fall through below.
+            occupied[name] = str(link_path.resolve())
             continue
         # Skip delete+recreate churn when the link already points at the
         # expected pack (the common every-rerun case).
-        if (_is_junction(link_path) or link_path.is_symlink()) and _owns_entry(
-            link_path, expected
-        ):
+        if _is_link_entry(link_path) and _owns_entry(link_path, expected):
             targets[name] = expected
             continue
         # Remove a recognized junction or symlink so we can recreate it
         # pointing at the correct pack. A regular file (or any other entry)
         # is left in place and reported as a conflict rather than deleted.
         old_target: str | None = None
-        if _is_junction(link_path) or link_path.is_symlink():
+        if _is_link_entry(link_path):
             try:
                 # The raw stored target (os.readlink works for junctions and
                 # directory symlinks) so a failed replacement can restore it.
@@ -500,7 +530,7 @@ def _create_junctions() -> dict:
                 _create_junction(old_target, link_path)
             raise
         targets[name] = expected
-    return targets
+    return {"junctions": targets, "occupied": occupied}
 
 
 def _link_exists(link_path: Path) -> bool:
@@ -543,18 +573,19 @@ def _record_junction_ownership(targets: dict) -> None:
     )
 
 
-def _record_live_link_ownership(junctions: dict) -> None:
+def _record_live_link_ownership(junction_result: dict) -> None:
     """Record ownership for slots whose CURRENT entry is a live link.
 
-    junctions maps slot -> resolved target as reported by _create_junctions,
-    which also reports preserved user real-directories; those are not links
-    and stay unclaimed -- only what is actually a junction/symlink on disk
-    right now is recorded, so remove_links() vouches only for links.
+    junction_result is the dict from _create_junctions: its `junctions`
+    maps slot -> resolved target for actual junction/symlink links (only
+    those are links), and `occupied` lists preserved real directories that
+    are NOT links and stay unclaimed -- so remove_links() vouches only for
+    links and can never delete the user's real directory.
     """
     slot_paths = _link_slot_targets()
     live = {
         name: target
-        for name, target in junctions.items()
+        for name, target in junction_result.get("junctions", {}).items()
         if _is_junction(slot_paths[name]) or slot_paths[name].is_symlink()
     }
     _record_junction_ownership(live)
@@ -582,18 +613,27 @@ def _owns_entry(link_path: Path, target: str) -> bool:
         return False
 
 
-def _junction_targets() -> dict:
-    """name -> resolved target for each live junction (status view)."""
-    targets = {}
+def _junctions_result() -> dict:
+    """The {"junctions": {...}, "occupied": {}} view of the current on-disk
+    junctions. Used as the fallback when the repair-only pass raises (e.g.
+    a pack dir is gone mid-re-run): advertise only the junctions that are
+    actually live, and report every preserved real directory as occupied so
+    the returned dict never claims a junction target that does not exist.
+    """
+    junctions: dict[str, str] = {}
+    occupied: dict[str, str] = {}
     for name, link_path in _link_slot_targets().items():
         if _is_junction(link_path):
             try:
-                targets[name] = str(link_path.resolve())
+                junctions[name] = str(link_path.resolve())
             except OSError:
-                targets[name] = None
-        else:
-            targets[name] = None
-    return targets
+                junctions[name] = None
+        elif link_path.is_symlink():
+            junctions[name] = None
+        elif link_path.is_dir():
+            # A real directory that is not a link: preserved, never a junction.
+            occupied[name] = str(link_path.resolve())
+    return {"junctions": junctions, "occupied": occupied}
 
 
 def remove_links() -> dict:

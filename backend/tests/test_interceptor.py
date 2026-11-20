@@ -10,6 +10,7 @@ Per the ticket: tests fake the subprocess and filesystem boundaries and
 assert status shapes/transitions -- not subprocess argument strings.
 """
 import subprocess
+import os
 from pathlib import Path
 
 import pytest
@@ -210,11 +211,26 @@ def test_extension_ready_requires_empty_lists(monkeypatch, fake_skills_root):
 # --- skill links ---------------------------------------------------------
 
 
+def _make_dir_symlink(skills_root, link_name: str, target_name: str) -> None:
+    """Create a directory symlink at ``skills_root/<link_name>`` pointing at
+    ``skills_root/<target_name>`` (a real dir), so the slot holds a live link
+    that reads 'linked'. Skip on hosts without symlink support."""
+    (skills_root / target_name).mkdir()
+    link = skills_root / link_name
+    try:
+        os.symlink(skills_root / target_name, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlink support on this host")
+
+
 def test_all_links_linked(monkeypatch, fake_skills_root):
-    """When all three slots resolve to real directories, each is 'linked'
-    and the summary is 3/3."""
-    for slot in interceptor.LINK_SLOTS:
-        (fake_skills_root / slot).mkdir()
+    """When all three slots hold live links (directory symlinks resolving
+    to real directories), each is 'linked' and the summary is 3/3. A plain
+    real directory is NOT a link, so it reads 'occupied', never 'linked'
+    (#775)."""
+    _make_dir_symlink(fake_skills_root, "router", "router_target")
+    _make_dir_symlink(fake_skills_root, "browser", "browser_target")
+    _make_dir_symlink(fake_skills_root, "research", "research_target")
     states = interceptor.skill_links_state()
     assert all(v == "linked" for v in states.values())
     assert interceptor.skill_links_summary() == "3/3"
@@ -222,7 +238,7 @@ def test_all_links_linked(monkeypatch, fake_skills_root):
 
 def test_partial_links(monkeypatch, fake_skills_root):
     """Only 'research' linked -> 1/3."""
-    (fake_skills_root / "research").mkdir()
+    _make_dir_symlink(fake_skills_root, "research", "research_target")
     states = interceptor.skill_links_state()
     assert states == {"router": "not linked", "browser": "not linked", "research": "linked"}
     assert interceptor.skill_links_summary() == "1/3"
@@ -245,11 +261,57 @@ def test_dangling_link_reads_not_linked(monkeypatch, fake_skills_root, tmp_path)
     link = fake_skills_root / "router"
     target = tmp_path / "does-not-exist"
     try:
-        import os
         os.symlink(target, link)
     except (OSError, NotImplementedError):
         pytest.skip("no symlink support on this host")
     assert interceptor.skill_links_state()["router"] == "not linked"
+
+
+def test_real_dir_at_slot_reads_occupied_not_linked(monkeypatch, fake_skills_root):
+    """A real directory at a slot is NOT a healthy link -- it reads
+    'occupied', never 'linked'. This is the #775 discriminator: the old
+    check ('is a real directory') counted a pre-existing folder (or YAAH's
+    own bundled skill) as linked and inflated the summary. The summary now
+    counts only 'linked' slots."""
+    (fake_skills_root / "research").mkdir()  # a real, non-link directory
+    states = interceptor.skill_links_state()
+    assert states == {"router": "not linked", "browser": "not linked", "research": "occupied"}
+    # Only 'linked' counts; router/browser are not linked and occupied never
+    # counts, so this is 0/3 -- and occupied must not inflate the total:
+    assert interceptor.skill_links_summary() == "0/3"
+    assert interceptor.skill_links_summary(states) == "0/3"
+
+
+def test_status_summary_honest_when_slot_occupied_by_bundled_skill(monkeypatch, fake_skills_root):
+    """The exact #775 state: all three slots hold real directories, but
+    only two are genuine Interceptor links. 'research' holds a real dir
+    (YAAH's own bundled skill) so it is 'occupied', and the summary is
+    honest (2/3), never a false '3/3'.
+
+    Links are represented as live junctions/symlinks (a real dir + a
+    dangling link, both following is_dir()); the real-dir slot must read
+    'occupied'."""
+    # router: a symlinked real dir -> a live link -> 'linked'
+    # browser: a dangling symlink -> 'not linked'
+    # research: a real directory that is not a link -> 'occupied'
+
+    for slot, target in [("router", "router_target"), ("browser", "browser_target")]:
+        p = fake_skills_root / target
+        p.mkdir()
+        link = fake_skills_root / slot
+        try:
+            os.symlink(p, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no symlink support on this host")
+
+    (fake_skills_root / "research").mkdir()
+
+    states = interceptor.skill_links_state()
+    assert states["router"] == "linked"
+    assert states["browser"] == "not linked"
+    assert states["research"] == "occupied"
+    # Only 'linked' counts: 1/3, not 3/3.
+    assert interceptor.skill_links_summary() == "1/3"
 
 
 # --- manifest ------------------------------------------------------------
@@ -358,7 +420,7 @@ def test_status_has_all_contract_keys(monkeypatch, fake_skills_root):
     _fake_run(monkeypatch, version_stdout="interceptor 2.1.6 (e14ad6a-dirty, 2026-10-31)",
               diagnose_output='{"problems": [], "blocked": []}')
     for slot in interceptor.LINK_SLOTS:
-        (fake_skills_root / slot).mkdir()
+        _make_dir_symlink(fake_skills_root, slot, f"{slot}_target")
 
     status = interceptor.status()
     assert set(status) == {
