@@ -300,6 +300,43 @@ def test_is_junction_distinguishes_from_real_dir(tmp_path):
     assert inst._is_junction(tmp_path / "missing") is False
 
 
+def test_create_junctions_reports_bundled_skill_dir_as_occupied(monkeypatch, manifest, tmp_path):
+    """#775 acceptance: a slot held by a real directory that is NOT a link
+    (YAAH's own bundled 'research' skill colliding with the 'research'
+    slot) is reported as 'occupied', never advertised as a junction target.
+
+    `_create_junctions` is pure-stdlib path logic (only `_create_junction`
+    itself shells out), so this runs everywhere and needs no real junctions.
+    """
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+
+    packs = tmp_path / "Programs" / "Interceptor" / "skills"
+    for name in ("interceptor", "interceptor-browser", "interceptor-research"):
+        (packs / name).mkdir(parents=True)
+    monkeypatch.setattr(
+        interceptor, "_INSTALL_DIR_CANDIDATES", (str(packs.parent),)
+    )
+
+    # 'research' is a real directory (the colliding bundled skill), not a
+    # link. router/browser resolve to real packs and become junctions.
+    (skills / "research").mkdir()
+
+    result = inst._create_junctions()
+
+    # The bundled-skill slot is NOT a junction target...
+    assert "research" not in result["junctions"]
+    assert "research" in result["occupied"]
+    assert result["occupied"]["research"] == str((skills / "research").resolve())
+    # ...and the two genuine slots still get junction targets.
+    assert result["junctions"].get("router") == str((packs / "interceptor").resolve())
+    assert result["junctions"].get("browser") == str((packs / "interceptor-browser").resolve())
+    # On a non-Windows host the junctions are not actually created, but the
+    # report shape is still correct.
+
+
+
 def test_real_junctions_created_on_install(monkeypatch, manifest, tmp_path, fake_install):
     """A real install creates three junctions under the skills dir pointing
     at the installed packs, and writes the done-marker."""
