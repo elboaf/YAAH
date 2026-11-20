@@ -4,11 +4,10 @@ Every ``bash``/``powershell`` call wraps the child in a Job Object with
 kill-on-job-close and tears that job down the instant the call returns, so
 any deliberately backgrounded server dies with the call that started it
 (the issue's root cause). The two executors here spawn a child WITHOUT that
-Job Object -- ``DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
-CREATE_NO_WINDOW`` -- so it outlives both the tool call and the backend
-process, and they keep an in-process registry keyed by PID so the backend
-stays the source of truth for "what the agent started" (the shape the UI
-panel reads at stage 2).
+Job Object -- ``CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`` -- so it
+outlives the tool call and keeps running, and they keep an in-process
+registry keyed by PID so the backend stays the source of truth for "what the
+agent started" (the shape the UI panel reads at stage 2).
 
 Windows-only in effect: only Windows has the Job Object this replaces and
 the spawn flags are Windows-only. On POSIX the flags resolve to 0, the module
@@ -33,15 +32,25 @@ log = logging.getLogger("yaah.detached")
 
 # Windows creation flags, taken from the subprocess module so the value is
 # exactly what the platform's CreateProcess honors, with 0 as the non-Windows
-# fallback (POSIX has no such flags). ``DETACHED_PROCESS`` (0x8) and
-# ``CREATE_NEW_PROCESS_GROUP`` (0x200) are distinct bits; OR-ing them is
-# harmless. ``CREATE_NO_WINDOW`` is ignored by CreateProcess when
-# ``DETACHED_PROCESS`` is set, so keep it only while the process is truly
-# detached -- drop it if a console grandchild opens a visible window.
-DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0)
+# fallback (POSIX has no such flags).
+#
+# DETACHED_PROCESS (0x8) is deliberately NOT used. It gives the child no
+# console at all, and a console-subsystem program then quits immediately:
+# exit code 0, no output, no log line, no error. powershell.exe, cmd.exe and
+# every .cmd shim (npm, npx, vite) are console programs, so the flag killed
+# exactly the dev-server case this tool exists for -- while python.exe and
+# node.exe, which are not console-subsystem, survived and made it look like
+# the spawn worked. Upstream: PowerShell/PowerShell#28383 (pwsh.exe aborts
+# quietly with no console). CREATE_NO_WINDOW gives the same "no visible
+# window" outcome without the missing-console failure.
+#
+# CREATE_NEW_PROCESS_GROUP detaches the child from the caller's CTRL+C
+# group, so a console event aimed at the harness never reaches the server.
+# CREATE_NO_WINDOW suppresses the console window; without it a spawned
+# console program flashes a window on the user's desktop.
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-_DETACH_FLAGS = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+_DETACH_FLAGS = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 
 # In-process registry keyed by PID: {command, cwd, log_path, started,
 # conversation_id}. Advisory only -- liveness is always re-checked against

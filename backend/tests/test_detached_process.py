@@ -32,6 +32,24 @@ HEARTBEAT_PY = (
 )
 
 
+# A console program that writes a heartbeat file, so "did it actually run"
+# is observable without reading its stdout (a console program's output to a
+# file is block-buffered, so an empty log is not evidence of anything).
+CONSOLE_BEAT_PY = (
+    "import sys, time\n"
+    "hb = sys.argv[1]\n"
+    "with open(hb, 'a') as fh:\n"
+    "    for _ in range(300):\n"
+    "        fh.write('1'); fh.flush(); time.sleep(0.1)\n"
+)
+
+
+def _console_program():
+    """A console-subsystem program -- the class DETACHED_PROCESS kills.
+    powershell.exe ships with Windows; cmd.exe is the fallback."""
+    return shutil.which("powershell") or shutil.which("cmd")
+
+
 def _heartbeat_path(tmp_path) -> Path:
     hb = tmp_path / "heartbeat.txt"
     script = tmp_path / "_heartbeat.py"
@@ -62,6 +80,25 @@ async def _growth(hb: Path, gap: float = 0.6) -> bool:
     await asyncio.sleep(gap)
     s2 = _size(hb)
     return s2 > s1
+
+
+async def _wait_for_size(path: Path, *, min_bytes: int, timeout: float) -> bool:
+    """Wait until `path` holds at least `min_bytes`, or `timeout` expires.
+
+    Used to separate "the launcher started" from "the launcher initialized":
+    `spawn_detached` returning started=True means the process was created,
+    not that a shell launcher has finished starting its own child. Polling
+    for the first output under a bounded deadline keeps a slow start from
+    reading as a spawn-flags failure, while a launcher that exits without
+    ever writing still fails when the deadline expires.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if _size(path) >= min_bytes:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
 
 
 def _cleanup():
@@ -421,3 +458,70 @@ def test_duplicate_refusal_normalizes_equivalent_cwd(tmp_path):
         assert detached._find_duplicate("echo dup2", str(tmp_path / "other")) is None
     finally:
         proc.kill()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_spawn_detached_runs_a_console_program(tmp_path):
+    """A CONSOLE program must run and keep running (regression, #770).
+
+    The first round of these tests spawned only ``sys.executable``. Python is
+    not a console-subsystem program, so it survived the DETACHED_PROCESS flag
+    that killed powershell.exe and every .cmd shim (npm, npx, vite) -- exactly
+    the dev-server case this tool exists for. The suite stayed green while the
+    feature was broken for its main use case.
+
+    This test spawns a console program, so it FAILS against the old flags:
+    the child exits at once with code 0 and never writes a heartbeat. The
+    heartbeat file is the assertion, never the child's log -- a console
+    program's stdout redirected to a file is block-buffered, and that empty
+    log is what made the original failure read as "the spawn worked".
+    """
+    exe = _console_program()
+    if not exe:
+        pytest.skip("no console program available on PATH")
+
+    hb = tmp_path / "console_hb.txt"
+    script = tmp_path / "_console_beat.py"
+    script.write_text(CONSOLE_BEAT_PY)
+
+    # PowerShell's -File accepts only .ps1, so launch python with -Command.
+    # Paths are single-quoted for PowerShell, and an embedded apostrophe is
+    # doubled (PowerShell's own escape inside a single-quoted string), so a
+    # tmp_path like C:\Users\O'Brien\... still forms a valid argument.
+    def ps_quote(value) -> str:
+        return chr(39) + str(value).replace(chr(39), chr(39) * 2) + chr(39)
+
+    if os.path.basename(exe).lower().startswith("powershell"):
+        cmd = (
+            f'"{exe}" -NoProfile -Command "& {ps_quote(sys.executable)} '
+            f'{ps_quote(script)} {ps_quote(hb)}"'
+        )
+    else:
+        cmd = f'"{exe}" /c ""{sys.executable}" "{script}" "{hb}""'
+
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    assert r.get("started") is True, r
+    pid = r["pid"]
+    assert isinstance(pid, int) and pid > 0
+
+    try:
+        # Wait for the FIRST heartbeat under a bounded deadline before
+        # measuring growth: started=True confirms process creation, not that
+        # the launcher has finished initializing. Measuring growth straight
+        # away would read zero twice on a cold or loaded machine and report a
+        # slow start as a spawn-flags failure. A launcher that exits without
+        # ever writing still fails, when the deadline expires.
+        wrote = await _wait_for_size(hb, min_bytes=1, timeout=15.0)
+        assert wrote, (
+            "console program wrote no heartbeat: it never ran. The spawn flags "
+            "left it without a console (PowerShell/PowerShell#28383), and the "
+            "tool still reported started=true"
+        )
+        # Then confirm it KEEPS running, not just that it started.
+        assert await _growth(hb), "console program stopped after a first heartbeat"
+    finally:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True)
