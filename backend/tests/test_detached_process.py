@@ -599,7 +599,7 @@ async def test_list_tool_reports_a_live_spawned_process(tmp_path):
 async def test_list_tool_drops_a_stopped_process(tmp_path):
     """After stop_process, the listing no longer shows the row: the list is
     live state, not a replay of everything ever spawned."""
-    cmd = " ".join([sys.executable, "-c", "import time; time.sleep(60)"])
+    cmd = f'"{sys.executable}" -c "import time; time.sleep(60)"'
     r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
     pid = r["pid"]
 
@@ -622,7 +622,7 @@ async def test_list_tool_does_not_report_an_exited_process(tmp_path):
     gone from the listing. Proves the list re-checks the OS instead of
     echoing registry rows back as alive."""
     # Exits immediately, so the row is recorded and then goes stale.
-    cmd = " ".join([sys.executable, "-c", "pass"])
+    cmd = f'"{sys.executable}" -c "pass"'
     r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
     pid = r["pid"]
 
@@ -650,3 +650,62 @@ def test_panel_route_and_tool_share_one_payload():
     payload = detached.processes_payload()
     assert set(payload) == {"processes", "known"}
     assert payload["known"] == len(payload["processes"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+def test_listing_does_not_report_a_reused_pid_as_ours():
+    """PID reuse (CodeRabbit finding): a row whose PID now belongs to a
+    DIFFERENT process must not read as a live detached process.
+
+    Windows reuses PIDs, so a spawned server that exited can be replaced by
+    an unrelated program. Reporting that stranger as alive would show a stale
+    command and log path as if the server were still running. The listing
+    must apply the same identity check stop_process uses before killing.
+    """
+    import backend.agent.detached as detached
+
+    # A REAL live process, but recorded with a different creation time --
+    # exactly what a reused PID looks like: alive, not ours.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        recorded_elsewhere = (detached._create_time(proc.pid) or 0.0) - 3600.0
+        detached._record(
+            proc.pid, command="node server.js", cwd=str(Path(".")),
+            log_path="/tmp/detached-reuse.log", conversation_id=None,
+        )
+        detached._REGISTRY[proc.pid]["create_time"] = recorded_elsewhere
+
+        assert detached._alive(proc.pid), "control: the PID really is alive"
+        rows = {row["pid"]: row for row in detached.list_processes()}
+        assert proc.pid not in rows, (
+            "a reused PID was listed as a live detached process"
+        )
+
+        listing = asyncio.run(
+            detached.list_processes_tool("")
+        )
+        assert proc.pid not in {row["pid"] for row in listing["processes"]}
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_listing_still_reports_our_own_live_process():
+    """Negative control for the reuse fix: the identity check must not
+    over-refuse. A genuinely live, genuinely ours row still lists -- with
+    its own command. Without this, 'fix' the reuse case by refusing
+    everything would pass the test above."""
+    cmd = f'"{sys.executable}" -c "import time; time.sleep(60)"'
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(Path.cwd()))
+    pid = r["pid"]
+    assert _alive(pid)
+
+    listing = await execute_tool("list_processes", {}, str(Path.cwd()))
+    rows = {row["pid"]: row for row in listing["processes"]}
+    assert pid in rows, "our own live process went missing from the listing"
+    assert rows[pid]["alive"] is True
+    assert "time.sleep(60)" in rows[pid]["command"]

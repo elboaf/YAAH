@@ -820,7 +820,13 @@ def _default_system_prompt(workspace: str = "") -> str:
         env = host.env_line(workspace)
         windows = host.windows
     else:
-        windows = os.name == "nt"
+        # #770: mirror get_schemas() exactly. A namespaced workspace whose
+        # owning host is offline (or not connected) resolves to a NON-Windows
+        # target there, so the prose must not claim the Windows-only tools
+        # either -- otherwise the model is told it has spawn_detached /
+        # stop_process / list_processes while the schema set omits them.
+        remote_target = remote_mod.parse_ns(workspace) is not None
+        windows = os.name == "nt" and not remote_target
         env = _local_env_line(workspace)
 
     # Build the core tool list (stable regardless of sandbox.enabled).
