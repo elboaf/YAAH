@@ -525,3 +525,128 @@ async def test_spawn_detached_runs_a_console_program(tmp_path):
     finally:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                        capture_output=True)
+
+
+# ---------------------------------------------------------------- list tool
+# #770 story 7: the agent-facing listing. The panel route reads the same
+# registry, but the agent had no way to ask "what did I start?" - after a
+# backend restart, or from another chat, a running process was invisible.
+
+@pytest.mark.skipif(os.name != "nt", reason="list_processes schema is Windows-only")
+def test_list_processes_schema_and_help():
+    """The schema reaches the model and get_help agrees (doc/schema parity)."""
+    names = {s["function"]["name"] for s in get_schemas()}
+    assert "list_processes" in names
+    from backend.agent import tools
+
+    res = asyncio.run(tools.execute_tool("get_help", {}, workspace=""))
+    help_names = {line.split(":")[0][2:] for line in res["tools"].splitlines()}
+    assert "list_processes" in help_names
+    # No arguments: the registry is machine-wide, so a listing cannot be
+    # scoped by the caller.
+    schema = next(s for s in get_schemas()
+                  if s["function"]["name"] == "list_processes")
+    assert schema["function"]["parameters"]["properties"] == {}
+
+
+def test_list_processes_is_read_classified():
+    """Listing is observation, so it is free in every access mode."""
+    from backend.agent.tools import tool_risk
+
+    assert tool_risk("list_processes") == "read"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.asyncio
+async def test_executor_is_registered_and_remote_capable():
+    """The name must resolve to an executor, and be advertised to a remote
+    chat so a remote host lists ITS OWN registry (issue #770 stage 1 rule:
+    the spawn happens on the host, so the list must read the host)."""
+    from backend.agent import remote as remote_mod
+    from backend.agent import tools as tools_mod
+
+    assert "list_processes" in tools_mod.EXECUTORS
+    assert "list_processes" in remote_mod.REMOTE_TOOLS
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_list_tool_reports_a_live_spawned_process(tmp_path):
+    """The real producer path: spawn through the tool, then LIST through the
+    tool and find that exact process - with its command, not just a count.
+    A swallowed result or an echoed-empty list fails this."""
+    hb = _heartbeat_path(tmp_path)
+    argv = [sys.executable, str(tmp_path / "_heartbeat.py"), str(hb), "0.1", "60"]
+    cmd = " ".join(argv)
+
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    pid = r["pid"]
+
+    listing = await execute_tool("list_processes", {}, str(tmp_path))
+    rows = {row["pid"]: row for row in listing["processes"]}
+    assert pid in rows, f"spawned pid {pid} missing from {listing}"
+    assert rows[pid]["alive"] is True
+    assert "_heartbeat.py" in rows[pid]["command"]
+    assert listing["known"] == len(listing["processes"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_list_tool_drops_a_stopped_process(tmp_path):
+    """After stop_process, the listing no longer shows the row: the list is
+    live state, not a replay of everything ever spawned."""
+    cmd = " ".join([sys.executable, "-c", "import time; time.sleep(60)"])
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    pid = r["pid"]
+
+    before = await execute_tool("list_processes", {}, str(tmp_path))
+    assert pid in {row["pid"] for row in before["processes"]}
+
+    stopped = await execute_tool("stop_process", {"pid": pid}, str(tmp_path))
+    assert stopped.get("stopped") is True, stopped
+
+    after = await execute_tool("list_processes", {}, str(tmp_path))
+    assert pid not in {row["pid"] for row in after["processes"]}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_list_tool_does_not_report_an_exited_process(tmp_path):
+    """Negative control for liveness: a process that exited on its own is
+    gone from the listing. Proves the list re-checks the OS instead of
+    echoing registry rows back as alive."""
+    # Exits immediately, so the row is recorded and then goes stale.
+    cmd = " ".join([sys.executable, "-c", "pass"])
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    pid = r["pid"]
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and _alive(pid):
+        await asyncio.sleep(0.1)
+    assert not _alive(pid), "control process never exited"
+
+    listing = await execute_tool("list_processes", {}, str(tmp_path))
+    assert pid not in {row["pid"] for row in listing["processes"]}, (
+        "an exited process was still listed as a row"
+    )
+
+
+def test_panel_route_and_tool_share_one_payload():
+    """The tool and GET /api/processes must not drift: both render
+    processes_payload(), so the agent and the GUI see the same shape."""
+    import inspect
+
+    import backend.agent.detached as detached
+    import backend.main as mainmod
+
+    src = inspect.getsource(mainmod.api_processes)
+    assert "processes_payload" in src
+    payload = detached.processes_payload()
+    assert set(payload) == {"processes", "known"}
+    assert payload["known"] == len(payload["processes"])

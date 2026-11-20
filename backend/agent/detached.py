@@ -496,6 +496,28 @@ def list_processes() -> list[dict]:
     return rows
 
 
+def processes_payload() -> dict:
+    """The list shape shared by the agent-facing tool and GET /api/processes.
+
+    One home for the contract, so the tool and the panel route can never
+    disagree about what a listing looks like. ``known`` is the count the
+    backend can vouch for, never a claim about every process on the machine.
+    """
+    rows = list_processes()
+    return {"processes": rows, "known": len(rows)}
+
+
+async def list_processes_tool(workspace: str = "") -> dict:
+    """Agent-facing listing of the processes this backend started (#770).
+
+    Takes no arguments: the registry is machine-wide, not chat-scoped, so a
+    listing is the same answer whichever chat asks. Liveness is applied on
+    read (dead rows are pruned), so a process that has since exited does not
+    come back as alive.
+    """
+    return processes_payload()
+
+
 def _norm_cwd(cwd: str) -> str:
     """Comparison key for a working directory: normcase(normpath(cwd)).
 
@@ -603,9 +625,27 @@ SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": (
+                "List the detached processes this backend started with "
+                "spawn_detached, with their PID, command, working dir, log "
+                "path and whether each is still alive. Use it before "
+                "starting a server to see what is already running, or to "
+                "recover the PID of a process an earlier turn (or another "
+                "chat) started. The list is advisory: a detached process "
+                "outlives a backend restart, so a process can keep running "
+                "without appearing here."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 EXECUTORS = {
     "spawn_detached": spawn_detached,
     "stop_process": stop_process,
+    "list_processes": list_processes_tool,
 }

@@ -359,6 +359,15 @@ HELP_DOCS: dict = {
         "its whole tree. Only PIDs the backend recorded can be stopped; "
         "any other PID is refused. Use the pid returned by spawn_detached."
     ),
+    "list_processes": (
+        "List the detached processes this backend started with "
+        "spawn_detached (issue #770): PID, command, working dir, log path, "
+        "and whether each is still alive. Takes no arguments. Use it before "
+        "starting a server to see what is already up, or to recover a PID "
+        "from an earlier turn. The list is advisory, not exhaustive: a "
+        "detached process outlives a backend restart, so it can keep "
+        "running without appearing here."
+    ),
     "web_search": (
         "DuckDuckGo HTML endpoint - no API key, no JS. Snippets are "
         "short; treat them as pointers, not answers. For a specific "
@@ -3573,6 +3582,9 @@ _READ_TOOLS = {
     "web_search", "web_fetch", "view_image", "load_skill",
     # pure observation: availability, enabled, session state
     "sandbox_status",
+    # pure observation: the backend's own registry of detached processes
+    # (issue #770) -- reads state, changes nothing
+    "list_processes",
     # documentation lookup — reads only the schema set
     "get_help",
     # delegation is free in all modes: the sub-agent's own tool calls hit

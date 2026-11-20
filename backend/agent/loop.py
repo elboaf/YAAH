@@ -833,7 +833,7 @@ def _default_system_prompt(workspace: str = "") -> str:
         # target, so the prose line must name them (the #181 drift guard below
         # requires every schema to be mentioned). Conditional on the same
         # `windows` flag, so a Linux host stays consistent in both places.
-        core_tools += ["spawn_detached", "stop_process"]
+        core_tools += ["spawn_detached", "stop_process", "list_processes"]
     # #181: the prose line must cover the whole schema set. The tail tools
     # below previously existed only as schemas (search_conversation_history
     # was never mentioned anywhere); annotations keep the useful pointers.

@@ -152,6 +152,11 @@
       "sha256": "6315ce90f46a3710428b7d43d3b01e34c2720df08e26dd03e285dee54d3a5ff8"
     },
     {
+      "name": "list_processes",
+      "bytes": 545,
+      "sha256": "833a615da9cf0bc766f105ba5b841d3a5275567c8f016710f962307566fc0f02"
+    },
+    {
       "name": "exit_plan",
       "bytes": 332,
       "sha256": "ca9d3c5350d5bfa0bd4f7e610a135d48753a366607c0d26284b954f865b43b8c"

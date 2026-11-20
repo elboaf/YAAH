@@ -3152,8 +3152,7 @@ async def api_processes():
     """
     from backend.agent import detached as detached_mod
 
-    rows = detached_mod.list_processes()
-    return {"processes": rows, "known": len(rows)}
+    return detached_mod.processes_payload()
 
 
 @app.post("/api/processes/stop")
