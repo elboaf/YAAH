@@ -32,6 +32,24 @@ HEARTBEAT_PY = (
 )
 
 
+# A console program that writes a heartbeat file, so "did it actually run"
+# is observable without reading its stdout (a console program's output to a
+# file is block-buffered, so an empty log is not evidence of anything).
+CONSOLE_BEAT_PY = (
+    "import sys, time\n"
+    "hb = sys.argv[1]\n"
+    "with open(hb, 'a') as fh:\n"
+    "    for _ in range(300):\n"
+    "        fh.write('1'); fh.flush(); time.sleep(0.1)\n"
+)
+
+
+def _console_program():
+    """A console-subsystem program -- the class DETACHED_PROCESS kills.
+    powershell.exe ships with Windows; cmd.exe is the fallback."""
+    return shutil.which("powershell") or shutil.which("cmd")
+
+
 def _heartbeat_path(tmp_path) -> Path:
     hb = tmp_path / "heartbeat.txt"
     script = tmp_path / "_heartbeat.py"
@@ -421,3 +439,56 @@ def test_duplicate_refusal_normalizes_equivalent_cwd(tmp_path):
         assert detached._find_duplicate("echo dup2", str(tmp_path / "other")) is None
     finally:
         proc.kill()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="detached spawn is Windows-only")
+@pytest.mark.skipif(platform.system() != "Windows",
+                    reason="spawn_detached replaces a Windows Job Object")
+@pytest.mark.asyncio
+async def test_spawn_detached_runs_a_console_program(tmp_path):
+    """A CONSOLE program must run and keep running (regression, #770).
+
+    The first round of these tests spawned only ``sys.executable``. Python is
+    not a console-subsystem program, so it survived the DETACHED_PROCESS flag
+    that killed powershell.exe and every .cmd shim (npm, npx, vite) -- exactly
+    the dev-server case this tool exists for. The suite stayed green while the
+    feature was broken for its main use case.
+
+    This test spawns a console program, so it FAILS against the old flags:
+    the child exits at once with code 0 and never writes a heartbeat. The
+    heartbeat file is the assertion, never the child's log -- a console
+    program's stdout redirected to a file is block-buffered, and that empty
+    log is what made the original failure read as "the spawn worked".
+    """
+    exe = _console_program()
+    if not exe:
+        pytest.skip("no console program available on PATH")
+
+    hb = tmp_path / "console_hb.txt"
+    script = tmp_path / "_console_beat.py"
+    script.write_text(CONSOLE_BEAT_PY)
+
+    # powershell's -File accepts only .ps1, so launch python with -Command.
+    q = chr(39)
+    if os.path.basename(exe).lower().startswith("powershell"):
+        cmd = (
+            f'"{exe}" -NoProfile -Command "& {q}{sys.executable}{q} '
+            f'{q}{script}{q} {q}{hb}{q}"'
+        )
+    else:
+        cmd = f'"{exe}" /c ""{sys.executable}" "{script}" "{hb}""'
+
+    r = await execute_tool("spawn_detached", {"command": cmd}, str(tmp_path))
+    assert r.get("started") is True, r
+    pid = r["pid"]
+    assert isinstance(pid, int) and pid > 0
+
+    try:
+        assert await _growth(hb), (
+            "console program wrote no heartbeat: it never ran. The spawn flags "
+            "left it without a console (PowerShell/PowerShell#28383), and the "
+            "tool still reported started=true"
+        )
+    finally:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True)

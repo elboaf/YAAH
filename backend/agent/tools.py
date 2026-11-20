@@ -3536,7 +3536,7 @@ EXECUTORS = {
     "memory_delete": _memory_executor("delete"),
 }
 
-# Issue #770: spawn_detached / stop_process. The spawn flags (DETACHED_PROCESS
+# Issue #770: spawn_detached / stop_process. The spawn flags (CREATE_NO_WINDOW
 # etc.) are Windows-only and the schema is offered only on Windows by
 # get_schemas(), but the executors import and run cleanly on POSIX too, so
 # register them unconditionally here. REMOTE_TOOLS lists them on every host,
