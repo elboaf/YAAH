@@ -67,8 +67,44 @@ of someone else's payload?
    since the skills loader hides dangling entries. Wiring it in is tracked
    for the uninstaller side.)
 
+5. **Host-owner only (#776).** The install and unlink routes are reachable
+   by this machine's owner and by nobody else — in two independent ways,
+   because they fail differently:
+
+   - **No remote peer.** The network gate refuses `/api/interceptor/*` for
+     any authenticated remote peer (409
+     `remote_interceptor_not_enabled`), the same fail-closed namespace
+     treatment `/api/agent` already gets. No remote surface consumes these
+     routes: a paired device drives the host through `/api/remote/...`,
+     so nothing is lost by refusing them. Without this, a paired device
+     holding the passphrase could make the host download ~55 MB and run a
+     silent third-party installer — less gating than the deliberately
+     fail-closed agent routes, on the most privileged action in the app.
+   - **No cross-origin page.** The install POST takes no body, so a
+     cross-origin page can issue it as a CORS *simple* request — no
+     preflight — and an opaque reply does not stop the side effect (CORS
+     governs reading, not acting). The route therefore refuses any Origin
+     that is not the YAAH UI (403 `cross_origin_refused`). Callers that
+     send no Origin at all — curl, the remote client's httpx, the test
+     client — are unaffected; the discrimination is "did a browser page
+     ask", not "is this a browser".
+     The allowlist is an **exact origin set** (`_UI_ORIGINS`), shared with
+     `CORSMiddleware`: `http://localhost:1420` and `http://127.0.0.1:1420`
+     (Vite dev — `strictPort` pins 1420), `http(s)://tauri.localhost`
+     (Windows/Linux webview) and `tauri://localhost` (macOS webview). It is
+     deliberately *not* a loopback pattern: a different port is a different
+     origin, so a page served by any other local server — the second hole
+     #776 names — is refused. One value, two consumers, so the CORS policy
+     and the CSRF check cannot drift apart and reopen either the hole or a
+     real UI.
+
+   `remove_links()` was never CSRF-able (DELETE needs a preflight), but it
+   is covered by the same namespace gate.
+
 Consequences: fresh installs fail cleanly when the pinned release is yanked
 (hash mismatch or 404) and the fix is the one-line manifest bump; the feature
 is Windows-only (the Linux build omits the section); fetched at setup time on
 the user's machine, so YAAH's repo, build, and CI/release pipeline carry
-nothing and change nothing.
+nothing and change nothing. The install button remains a local,
+owner-initiated action on the owner's own machine — the two refusals above
+enforce decision 2 against every caller that is not that owner.

@@ -215,6 +215,71 @@ async def test_authenticated_remote_peer_cannot_touch_local_agent_run_controls(m
 
 
 @pytest.mark.asyncio
+async def test_authenticated_remote_peer_cannot_reach_browser_control(monkeypatch):
+    """#776: /api/interceptor/* owns the most privileged host action in the
+    app (download + silently run a third-party installer) plus the unlink
+    of the host's own skill junctions. No remote surface consumes it, so an
+    authenticated paired device must be refused on every method/path --
+    and the denial must land BEFORE the manager seam, or the gate is
+    decoration.
+    """
+    _set_host("hunter2")
+    headers = {"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "hunter2"}
+    calls = []
+
+    from backend.agent import interceptor, interceptor_install
+
+    monkeypatch.setattr(
+        interceptor_install, "install",
+        lambda: calls.append("install") or {"installed": True},
+    )
+    monkeypatch.setattr(
+        interceptor_install, "remove_links",
+        lambda: calls.append("remove_links") or {"removed": []},
+    )
+    monkeypatch.setattr(
+        interceptor, "status", lambda: calls.append("status") or {}
+    )
+
+    requests = [
+        ("POST", "/api/interceptor/install", None),
+        ("DELETE", "/api/interceptor/links", None),
+        ("GET", "/api/interceptor/status", None),
+    ]
+    async with await _client() as c:
+        for method, path, body in requests:
+            response = await c.request(method, path, json=body, headers=headers)
+            assert response.status_code == 409, (method, path, response.text)
+            assert (
+                response.json()["detail"]["code"] == "remote_interceptor_not_enabled"
+            ), (method, path, response.text)
+
+        # A wrong passphrase still stops at the auth guard (401), never at
+        # the namespace gate: the gate must not widen remote reach.
+        denied = await c.post(
+            "/api/interceptor/install",
+            headers={"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "wrong"},
+        )
+        assert denied.status_code == 401
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_local_browser_control_stays_reachable_without_remote_marker(monkeypatch):
+    """The local UI reaches its own install state: the #776 gate is on
+    remote peers only, so an unmarked loopback request still passes the
+    middleware to the route (whose manager seam is faked here)."""
+    from backend.agent import interceptor
+
+    monkeypatch.setattr(interceptor, "status", lambda: {"installed": "installed"})
+    async with await _client() as c:
+        response = await c.get("/api/interceptor/status")
+    assert response.status_code == 200
+    assert response.json()["installed"] == "installed"
+
+
+@pytest.mark.asyncio
 async def test_local_agent_routes_still_work_without_remote_marker(monkeypatch):
     calls = []
     from backend.agent import loop
