@@ -300,6 +300,7 @@ def test_status_summary_honest_when_slot_occupied_by_bundled_skill(monkeypatch, 
     # (an honest 1/3, not a false '3/3') depends on browser being dangling.
 
     try:
+        (fake_skills_root / "router_target").mkdir()
         os.symlink(
             fake_skills_root / "router_target",
             fake_skills_root / "router",
