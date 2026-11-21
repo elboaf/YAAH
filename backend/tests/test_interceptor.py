@@ -292,17 +292,26 @@ def test_status_summary_honest_when_slot_occupied_by_bundled_skill(monkeypatch, 
     dangling link, both following is_dir()); the real-dir slot must read
     'occupied'."""
     # router: a symlinked real dir -> a live link -> 'linked'
-    # browser: a dangling symlink -> 'not linked'
+    # browser: a dangling symlink (target absent) -> 'not linked'
     # research: a real directory that is not a link -> 'occupied'
+    #
+    # The browser symlink must dangle: a LIVE symlink to an existing dir
+    # would read 'linked' just like router, so this test's whole point
+    # (an honest 1/3, not a false '3/3') depends on browser being dangling.
 
-    for slot, target in [("router", "router_target"), ("browser", "browser_target")]:
-        p = fake_skills_root / target
-        p.mkdir()
-        link = fake_skills_root / slot
-        try:
-            os.symlink(p, link, target_is_directory=True)
-        except (OSError, NotImplementedError):
-            pytest.skip("no symlink support on this host")
+    try:
+        os.symlink(
+            fake_skills_root / "router_target",
+            fake_skills_root / "router",
+            target_is_directory=True,
+        )
+        os.symlink(
+            fake_skills_root / "browser_missing_target",
+            fake_skills_root / "browser",
+            target_is_directory=True,
+        )
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlink support on this host")
 
     (fake_skills_root / "research").mkdir()
 
