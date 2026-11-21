@@ -330,9 +330,15 @@ def test_worker_shells_get_no_gh(monkeypatch):
 # ---- contribution flow ----------------------------------------------------------
 
 
-async def _make_worker(ws_repo: str, parent_id: int = 1) -> tuple[int, dict]:
+async def _make_worker(ws_repo: str, parent_id: int | None = None) -> tuple[int, dict]:
     """Create a worker chat row, seat it at a desk, stamp desk_dir — the
-    same sequence spawn_worker runs."""
+    same sequence spawn_worker runs.
+
+    parent_id=None by default: the worker is parentless (its submit skips
+    the wake). Never pass a fabricated numeric parent — submit wakes the
+    parent conversation, and a fabricated id can collide with a REAL
+    conversation in the shard's DB, firing a live background model turn
+    from a test (the CI teardown unraisable)."""
     from backend.db.database import create_conversation, update_conversation
 
     cid = await create_conversation(
@@ -348,7 +354,7 @@ def test_submit_requires_clean_desk_and_single_pending(ws_repo, inbox_mem_reset)
     async def run():
         from backend.agent import tools as tools_mod
 
-        cid, seat = await _make_worker(str(ws_repo), parent_id=1)
+        cid, seat = await _make_worker(str(ws_repo))
         # Dirty desk refuses.
         Path(seat["dir"], "scratch.txt").write_text("wip", encoding="utf-8")
         result = await tools_mod.execute_tool(
@@ -475,12 +481,72 @@ def test_review_merge_reject_and_wake(ws_repo, inbox_mem_reset, monkeypatch):
     asyncio.run(run())
 
 
-def test_worker_cannot_review_or_merge(ws_repo, inbox_mem_reset):
+def test_merge_survives_missing_committer_identity(ws_repo, tmp_path, inbox_mem_reset, monkeypatch):
+    """A machine with no git identity at all (a CI runner) must still be
+    able to merge: the retry attributes the merge commit to the harness
+    (YAAH Supervisor) instead of failing the whole review."""
+    async def run():
+        from backend.agent import tools as tools_mod
+        from backend.db.database import create_conversation
+        import backend.main as main_mod
+
+        # The merge-success path wakes the worker; a real wake would fire a
+        # live background model turn from this test (the CI unraisable).
+        async def fake_wake(cid, prompt, source=""):
+            return "started"
+        monkeypatch.setattr(main_mod, "wake_conversation", fake_wake)
+
+        # No identity anywhere: system config devnull, global config empty.
+        # The config file lives OUTSIDE the workspace — an untracked file
+        # there would trip the clean-checkout gate.
+        empty = tmp_path / "empty-git-config.cfg"
+        empty.write_text("", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+        for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            monkeypatch.delenv(var, raising=False)
+
+        parent = await create_conversation("parent", workspace=str(ws_repo))
+        cid, seat = await _make_worker(str(ws_repo), parent_id=parent)
+        _git(Path(seat["dir"]), "checkout", "-q", "-b", "feat")
+        Path(seat["dir"], "feat.txt").write_text("x", encoding="utf-8")
+        _git(Path(seat["dir"]), "add", ".")
+        _git(Path(seat["dir"]), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "feat")
+        result = await tools_mod.execute_tool(
+            "submit_contribution",
+            {"summary": "feat", "branch": "feat"},
+            str(ws_repo), conversation_id=cid,
+        )
+        assert result.get("submitted")
+        contrib_id = result["contribution_id"]
+        result = await tools_mod.execute_tool(
+            "review_contribution",
+            {"contribution_id": contrib_id, "decision": "merge"},
+            str(ws_repo), conversation_id=parent,
+        )
+        assert result.get("merged") is True, result
+        rc, out = _git(ws_repo, "log", "-1", "--format=%an <%ae>")
+        assert "YAAH Supervisor" in out, out
+
+    import asyncio
+    asyncio.run(run())
+
+
+def test_worker_cannot_review_or_merge(ws_repo, inbox_mem_reset, monkeypatch):
     """A worker can never act on the inbox — not even its own pending row
     (ADR-0022: the supervisor path is ordinary-chat-only)."""
     async def run():
         from backend.agent import tools as tools_mod
         from backend.db.database import create_conversation
+        import backend.main as main_mod
+
+        # The submit below wakes the parent chat; a real wake fires a live
+        # background model turn from this test (the CI teardown unraisable).
+        async def fake_wake(cid, prompt, source=""):
+            return "started"
+        monkeypatch.setattr(main_mod, "wake_conversation", fake_wake)
 
         parent = await create_conversation("p", workspace=str(ws_repo))
         cid, seat = await _make_worker(str(ws_repo), parent_id=parent)
