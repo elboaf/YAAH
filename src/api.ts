@@ -142,14 +142,39 @@ export interface ConversationRow {
   workspace: string | null
   created_at: string
   updated_at: string
-  /** 'agent' = a scheduled agent's pinned chat (issue #41). */
-  chat_type?: 'chat' | 'agent'
+  /** 'agent' = a scheduled agent's pinned chat (issue #41).
+   *  'worker' = a desk-bound worker chat (ADR-0022 developer world). */
+  chat_type?: 'chat' | 'agent' | 'worker'
+  /** ADR-0022: a worker chat's parent ordinary chat; NULL = not a worker. */
+  worker_parent_id?: number | null
+  /** ADR-0022: the worker chat's desk directory (its private clone). */
+  desk_dir?: string | null
   /** #51/#76: the chat's pinned scope. model: bare id or "provider::model";
    *  effort: '' = Default (reasoning_effort param not sent). */
   model?: string
   effort?: string
   /** #383: the chat's pinned sub-agent scope; '' = sub-agent: auto. */
   subagent_model?: string
+}
+
+/** ADR-0022: one pending inbox row — a worker's contribution. */
+export interface InboxRow {
+  id: number
+  worker_conversation_id: number
+  branch: string
+  base_commit: string
+  summary: string
+  desk_dir: string
+  title: string
+  status: 'pending' | 'merged' | 'rejected' | 'abandoned' | 'stale'
+  created_at: string
+  review: string
+}
+
+export interface DeskPoolStatus {
+  pool: string
+  cap: number
+  seats: Array<{ seat: number; worker_conversation_id: number | null }>
 }
 
 export interface ContextInfo {
@@ -244,8 +269,24 @@ export const createConversation = (
     }),
   })
 
-export interface StoredMessage {
-  id: number
+/** ADR-0022: the worker chats parented by an ordinary chat. */
+export const listWorkers = (id: number) =>
+  api<ConversationRow[]>(`/api/conversations/${id}/workers`)
+
+/** ADR-0022: the workspace's inbox (pending contributions + desk pool). */
+export const getWorkspaceInbox = (workspace: string | null) =>
+  api<{ workspace: string; pool: DeskPoolStatus; pending: InboxRow[]; recent: InboxRow[] }>(
+    `/api/workspaces/inbox?workspace=${encodeURIComponent(workspace ?? '')}`,
+  )
+
+/** ADR-0022: start or queue a turn on a chat from another chat's behalf. */
+export const wakeConversation = (id: number, message: string) =>
+  api<{ delivery: 'started' | 'queued' }>(`/api/conversations/${id}/wake`, {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+  })
+
+export interface StoredMessage {  id: number
   role: string
   content: string
   /** #226: the spoken briefing that accompanied an assistant emission. */

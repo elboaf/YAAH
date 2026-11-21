@@ -46,10 +46,16 @@ from backend.agent.tools import (
     sandbox_enabled,
     tool_risk,
     workspace_root,
+    WORKER_EXCLUDED_TOOLS,
 )
 from backend.agent import remote as remote_mod
 from backend.agent.remote import CMD_TOOLS_NOTE
 from backend.agent.shell import resolve_git_bash, windows_bash_note
+# Worker chats (ADR-0022 developer world): WORKER_EXCLUDED_TOOLS lists the
+# schemas a worker chat never gets (spawn_agent and spawn_worker — workers
+# cannot spawn workers). Sub-agents inherit the desk through the re-rooted
+# workspace string every delegated execute_tool call funnels through.
+
 from backend.db.database import (
     RemoteProtocolError,
     add_conversation_cost,
@@ -194,6 +200,10 @@ async def _generate_conversation_title(
     """
     conv = await get_conversation(conversation_id)
     if (conv or {}).get("chat_type") == "agent":
+        return None
+    # Worker chats get a mechanical title too: they are never called by
+    # name, and their spawns must not pay an auxiliary completion.
+    if (conv or {}).get("chat_type") == "worker":
         return None
     current = _strip_provider_markup((conv or {}).get("title") or "")
     history = await get_messages(conversation_id)
@@ -473,6 +483,31 @@ def _shell_phrase(windows: bool) -> str:
         return phrase
     shell = Path(os.environ.get("SHELL") or "bash").name
     return f"the system shell ({shell})"
+
+
+def _worker_turn_note(desk_dir: str) -> str:
+    """Worker chat variance fragment (ADR-0022 developer world).
+
+    Names the desk, the restriction, and the contribution path. A worker
+    has no origin remote, no gh, and no path outside the desk; the only
+    way work leaves is submit_contribution into the workspace's inbox,
+    which wakes the supervising chat to review and merge."""
+    return f"""Worker chat — you run at a desk, a private clone of the workspace repo:
+{desk_dir}
+
+- Every file tool, shell command, and git operation resolves inside the desk.
+  The workspace checkout itself is off-limits — you reach it only by
+  submitting work, never by writing to it directly.
+- The desk has no origin remote and no gh: pushing to a remote or touching
+  GitHub from this chat is impossible by design. Commit on a branch in the
+  desk and let the supervisor publish.
+- The branch_select tool switches the desk's branch.
+- To hand work over, commit it on a branch in the desk (the desk must be
+  clean), then call submit_contribution with a summary, the branch name, and
+  the base commit you branched from. One pending contribution at a time;
+  it closes on merge or abandon.
+- The user or the supervising chat may message you while you work — their
+  words arrive as messages in this chat."""
 
 
 def _local_env_line(workspace: str = "") -> str:
@@ -854,6 +889,16 @@ def _default_system_prompt(workspace: str = "") -> str:
         "load_skill",
         "branch_select (switch the workspace to a branch, on the user's "
         "request; creates it when missing)",
+        "spawn_worker (spawn a worker chat: it works at its own desk — a "
+        "private clone of the repo outside the checkout — and hands work "
+        "over by submitting a contribution you review and merge)",
+        "message_worker (send a message to one of your worker chats; the "
+        "worker is woken — started, or queued behind an active turn)",
+        "review_contribution (act on one pending inbox contribution: merge "
+        "it into the checkout, reject it with feedback that bounces to the "
+        "authoring worker, or abandon it)",
+        "submit_contribution (worker chats only: hand work over from the "
+        "desk into the workspace's inbox)",
         "memory_save", "memory_read", "memory_search", "memory_delete",
         "search_conversation_history",
     ]
@@ -1907,16 +1952,36 @@ async def _run_agent_claimed(
     # IS the workspace checkout, and every tool call and spawn_batch
     # resolves from it.
     turn_workspace = str(workspace)
+    # ADR-0022 developer world: a worker chat is re-rooted at its desk.
+    # ONE string swap re-roots every tool call, shell, git endpoint,
+    # spawn_batch delegation, and file accounting — the harness's whole
+    # path-resolution surface threads through this value. The prompt
+    # surface (env line, AGENTS.md, memory, freeze validity) stays keyed
+    # to the WORKSPACE string so the worker reads the project's real
+    # instructions and shares the workspace's memory store (one store per
+    # workspace, keyed off the authoritative path). The desk is
+    # authoritative for paths only.
+    conv_row = await get_conversation(conversation_id) or {}
+    desk_dir = conv_row.get("desk_dir") or None
+    is_worker_turn = (
+        (conv_row.get("chat_type") or "chat") == "worker" and bool(desk_dir)
+    )
+    if is_worker_turn:
+        turn_workspace = desk_dir
     # #346: the canonical memory key resolves ONCE per turn, from this
     # workspace string - the same string the prompt's injected index
     # reads below - so a memory tool call and the prompt block can never
     # disagree about the store. Remote namespacing rides along (the
     # remote:<host>:<path> string IS the key; memories stay client-local).
+    # Worker turns keep the WORKSPACE key, not the desk — desks share the
+    # parent workspace's one memory store.
     memory_workspace = memory_workspace_for(str(workspace))
     file_summary_emitted = False
     # Remote runs snapshot nothing: file accounting is a local-tree concept,
     # the namespace string is not a client path, and master's baseline guard
     # must survive the direct world or every remote turn pays dead spawns.
+    # Worker turns snapshot the DESK: the re-root makes the desk the file
+    # tree this turn is accountable for.
     change_baseline = (
         None
         if remote_mod.parse_ns(turn_workspace) is not None
@@ -1960,8 +2025,7 @@ async def _run_agent_claimed(
 
     # Per-conversation system prompt override (Q17) wins over the global
     # one.
-    conv = await get_conversation(conversation_id)
-    conv = conv or {}
+    conv = conv_row
     system_prompt = conv.get("system_prompt_override") or _default_system_prompt(workspace)
 
     # Static system prompt is now unconditional for all providers
@@ -1977,6 +2041,12 @@ async def _run_agent_claimed(
     # replay stale bytes. A missing/stale freeze means THIS turn builds the
     # head and freezes it.
     frozen_ws = conv.get("frozen_system_prompt_ws")
+    # ADR-0022: a worker turn's head embeds the DESK path (the env line
+    # names it), so the freeze is valid only for the same desk — a re-seat
+    # (new desk dir) must refreeze, not replay stale bytes. The freeze key
+    # stays the plain workspace string for ordinary chats, byte-identical
+    # to pre-developer-world behavior.
+    freeze_ws_key = turn_workspace if is_worker_turn else workspace
     # #451 (review): the head embeds the ear-writing rules, which are
     # Kokoro-family-only - a freeze is valid only for the voice gate it was
     # made under, so a voice change refreezes instead of replaying stale
@@ -1985,7 +2055,7 @@ async def _run_agent_claimed(
     frozen_prompt = (
         conv.get("frozen_system_prompt")
         if static_mode
-        and frozen_ws == (workspace or "")
+        and frozen_ws == (freeze_ws_key or "")
         and frozen_gate == ("1" if _kokoro_ear() else "0")
         else None
     )
@@ -2088,6 +2158,16 @@ async def _run_agent_claimed(
         if memory_notes:
             system_prompt = f"{system_prompt}\n\n---\n\n{memory_notes}"
 
+        # Worker chat (ADR-0022): a short variance fragment naming the
+        # desk and the contribution path. Appended per-turn with the
+        # standard separator, after every always-present block — the
+        # conditional⇒later layout rule (#375). Ordinary chats never see
+        # it, so their prompts stay byte-identical.
+        if is_worker_turn:
+            system_prompt = (
+                f"{system_prompt}\n\n---\n\n{_worker_turn_note(turn_workspace)}"
+            )
+
         # Plan mode tells the model what it cannot do, so it plans instead of
         # hitting blocked-tool errors all turn.
         if current_access_mode() == "plan":
@@ -2169,7 +2249,7 @@ async def _run_agent_claimed(
                 conversation_id,
                 touch_updated_at=False,
                 frozen_system_prompt=system_prompt,
-                frozen_system_prompt_ws=workspace or "",
+                frozen_system_prompt_ws=freeze_ws_key or "",
                 frozen_voice_gate="1" if _kokoro_ear() else "0",
             )
         except Exception as e:  # noqa: BLE001 — freezing must not break the turn
@@ -2187,6 +2267,15 @@ async def _run_agent_claimed(
         })
 
     tools = get_schemas(workspace=workspace)
+    if is_worker_turn:
+        # ADR-0022: workers cannot spawn workers, and the supervisor-side
+        # worker management tools belong to ordinary chats only. The desk
+        # restriction itself is the re-rooted turn_workspace above — every
+        # remaining tool resolves paths through it.
+        tools = [
+            s for s in tools
+            if s["function"]["name"] not in WORKER_EXCLUDED_TOOLS
+        ]
     if not include_history:
         tools = [
             schema for schema in tools
