@@ -885,15 +885,17 @@ def test_worker_env_hides_system_gh(tmp_path, monkeypatch):
     (gh_dir / ("gh.exe" if os.name == "nt" else "gh")).write_text("", encoding="utf-8")
     clean_dir = tmp_path / "clean-tools"
     clean_dir.mkdir()
+    other_dir = tmp_path / "other-tools"
+    other_dir.mkdir()
     monkeypatch.setenv(
         "PATH",
-        os.pathsep.join([str(gh_dir), str(clean_dir), "C:\\elsewhere"]),
+        os.pathsep.join([str(gh_dir), str(clean_dir), str(other_dir)]),
     )
     env = tools_mod._worker_env()
     parts = env["PATH"].split(os.pathsep)
     assert str(gh_dir) not in parts
     assert str(clean_dir) in parts
-    assert "C:\\elsewhere" in parts
+    assert str(other_dir) in parts
 
 
 def test_git_helpers_scrub_repo_selection_vars(ws_repo, monkeypatch):
