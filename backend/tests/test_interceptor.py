@@ -499,3 +499,45 @@ def test_extension_dir_never_spawns_a_subprocess(monkeypatch, tmp_path):
     monkeypatch.setattr(interceptor.subprocess, "run", _boom)
     monkeypatch.setenv(interceptor.INTERCEPTOR_CLI_ENV, str(tmp_path / "nowhere"))
     assert interceptor.extension_dir() is None
+# --- spawn hygiene: no console window (#777) ------------------------------
+
+
+def test_run_cli_passes_create_no_window(monkeypatch, tmp_path):
+    """Every _run_cli spawn carries creationflags=CREATE_NO_WINDOW.
+
+    interceptor.exe is a console-subsystem binary and YAAH's packaged app
+    is windowed, so a bare spawn pops a console window on the desktop on
+    every call -- and status() spawns on every call, polled every 3s while
+    the extension panel is open. The same suppression every other YAAH
+    spawn site uses (gitproc) must apply here too.
+    """
+    seen = {}
+
+    def fake_run(cmd, *a, **k):
+        seen.update(k)
+        return subprocess.CompletedProcess(cmd, 0, stdout="2.1.6", stderr="")
+
+    monkeypatch.setattr(interceptor.subprocess, "run", fake_run)
+    cli = tmp_path / "cli"
+    cli.write_text("# fake", encoding="utf-8")  # must exist: the finder checks
+    monkeypatch.setenv(interceptor.INTERCEPTOR_CLI_ENV, str(cli))
+
+    interceptor._run_cli(["--version"])
+
+    assert seen.get("creationflags") == gitproc.CREATE_NO_WINDOW
+
+
+def test_run_cli_missing_cli_returns_before_spawning(monkeypatch, tmp_path):
+    """The not-found short-circuit reads as rc 127 without any spawn
+    attempt -- the flag only governs real spawns."""
+
+    def _boom(cmd, *a, **k):
+        raise AssertionError("a missing CLI must not reach subprocess.run")
+
+    monkeypatch.setattr(interceptor.subprocess, "run", _boom)
+    monkeypatch.setenv(interceptor.INTERCEPTOR_CLI_ENV, str(tmp_path / "nowhere"))
+
+    proc = interceptor._run_cli(["--version"])
+
+    assert proc.returncode == 127
+

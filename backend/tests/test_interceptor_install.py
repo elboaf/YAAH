@@ -658,3 +658,58 @@ def test_symlink_slot_repair_via_seam(monkeypatch, manifest, tmp_path, fake_inst
     assert not os.path.lexists(str(browser)), "mis-pointed symlink survived"
     assert str(browser) in created, "slot was not recreated via the leaf"
     assert junctions["browser"] == str((packs / "interceptor-browser").resolve())
+# --- spawn hygiene: no console window (#777) ------------------------------
+
+
+def _capture_run(monkeypatch, rc: int = 0):
+    """Patch inst.subprocess.run to record kwargs and return a canned run.
+
+    The fake also plays the process's file side effects -- curl writing the
+    downloaded body -- because the real functions check them (a rc-0 run
+    that writes nothing reads as a failed download)."""
+    seen = {}
+
+    def _run(cmd, *a, **k):
+        seen.update(k)
+        seen["cmd"] = cmd
+        if "--output" in cmd:
+            Path(cmd[cmd.index("--output") + 1]).write_bytes(b"installer-bytes")
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+    monkeypatch.setattr(inst.subprocess, "run", _run)
+    return seen
+
+
+def test_download_asset_passes_create_no_window(monkeypatch, tmp_path):
+    """The curl download spawn carries CREATE_NO_WINDOW -- a console child
+    of a windowed app would flash otherwise (#777)."""
+    seen = _capture_run(monkeypatch)
+    monkeypatch.setattr(inst, "_INSTALL_TMP", tmp_path)
+
+    inst._download_asset("https://example/Interceptor.exe")
+
+    assert seen.get("creationflags") == gitproc.CREATE_NO_WINDOW
+    assert seen["cmd"][0] == "curl"
+
+
+def test_run_installer_passes_create_no_window(monkeypatch, tmp_path):
+    """The silent installer spawn carries CREATE_NO_WINDOW (#777)."""
+    seen = _capture_run(monkeypatch)
+    exe = tmp_path / "Installer.exe"
+    log = tmp_path / "installer.log"
+
+    inst._run_installer(exe, log)
+
+    assert seen.get("creationflags") == gitproc.CREATE_NO_WINDOW
+    assert seen["cmd"][0] == str(exe)
+
+
+def test_create_junction_passes_create_no_window(monkeypatch, tmp_path):
+    """The powershell junction spawn carries CREATE_NO_WINDOW (#777)."""
+    seen = _capture_run(monkeypatch)
+
+    inst._create_junction(str(tmp_path / "pack"), tmp_path / "link")
+
+    assert seen.get("creationflags") == gitproc.CREATE_NO_WINDOW
+    assert seen["cmd"][0] == "powershell"
+
